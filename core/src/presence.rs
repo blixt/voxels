@@ -297,16 +297,16 @@ impl PlayerTrack {
     }
 
     fn push(&mut self, pose: RemotePoseSample) {
-        if pose.flags & REMOTE_POSE_DISCONTINUITY != 0 {
-            self.samples.clear();
-            self.body_yaw_radians = Some(pose.look_yaw_radians);
-            self.body_following_look = false;
-        }
         if self.samples.back().is_some_and(|prior| {
             pose.sequence <= prior.pose.sequence
                 || pose.sample_server_time_ms <= prior.pose.sample_server_time_ms
         }) {
             return;
+        }
+        if pose.flags & REMOTE_POSE_DISCONTINUITY != 0 {
+            self.samples.clear();
+            self.body_yaw_radians = Some(pose.look_yaw_radians);
+            self.body_following_look = false;
         }
         let distance = self.samples.back().map_or(0.0, |prior| {
             let delta = pose.eye_position_metres - prior.pose.eye_position_metres;
@@ -641,6 +641,19 @@ mod tests {
             1_150.0,
         );
         assert!(timeline.sample(1_200.0, 1.0 / 60.0).is_empty());
+    }
+
+    #[test]
+    fn stale_discontinuity_does_not_clear_the_accepted_pose() {
+        let mut timeline = fixed_timeline();
+        timeline.ingest_delta(enter_delta(1, 1_100, sample(2, 1_100, 1.0)), 1_100.0);
+        let mut stale = sample(1, 1_050, 100.0);
+        stale.flags = REMOTE_POSE_DISCONTINUITY;
+
+        assert!(timeline.ingest_delta(update_delta(2, 1_200, stale), 1_200.0));
+        let avatars = timeline.sample(1_200.0, 1.0 / 60.0);
+        assert_eq!(avatars.len(), 1);
+        assert_eq!(avatars[0].eye_position_metres.x, 1.0);
     }
 
     #[test]
