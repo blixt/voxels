@@ -148,9 +148,9 @@ Copy it to both `config/client.toml` as `[world].auth_subprotocol_token` and
 
 ```toml
 [world]
-endpoint = "ws://127.0.0.1:9777/v13/world"
-presence_endpoint = "ws://127.0.0.1:9777/v13/presence"
-subprotocol = "voxels.world.v13"
+endpoint = "ws://127.0.0.1:9777/v14/world"
+presence_endpoint = "ws://127.0.0.1:9777/v14/presence"
+subprotocol = "voxels.world.v14"
 auth_subprotocol_token = "the-same-random-local-token"
 ```
 

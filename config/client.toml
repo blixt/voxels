@@ -4,9 +4,9 @@ schema_version = 15
 # The client knows only where canonical world products come from. The service chooses the
 # procedural or Terrain Diffusion provider in config/world-service.toml.
 [world]
-endpoint = "ws://127.0.0.1:9777/v13/world"
-presence_endpoint = "ws://127.0.0.1:9777/v13/presence"
-subprotocol = "voxels.world.v13"
+endpoint = "ws://127.0.0.1:9777/v14/world"
+presence_endpoint = "ws://127.0.0.1:9777/v14/presence"
+subprotocol = "voxels.world.v14"
 auth_subprotocol_token = "replace-with-a-random-local-token"
 max_in_flight_batches = 8
 buffered_amount_high_water_bytes = 8388608
