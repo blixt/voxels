@@ -603,15 +603,19 @@ impl OutdoorEnvironment {
         let sun_radiance = daylight_color * direct_sun;
         let moon_radiance =
             Vec3::new(0.10, 0.14, 0.24) * moon_visibility * celestial.moon_illuminated_fraction;
-        let (key_light_direction, key_light_radiance, shadow_strength) = if direct_sun > 0.025 {
-            (
-                sun_direction,
-                sun_radiance,
-                smoothstep(0.035, 0.14, solar_elevation),
-            )
-        } else {
-            (moon_direction, moon_radiance, 0.0)
-        };
+        // A single key-light slot approximates two celestial lights. Cross-fade its direction
+        // through twilight instead of switching from moon to sun at a radiance threshold: cloud
+        // light probes use this direction for ambient visibility too, so a hard switch changed the
+        // apparent density of the entire volume in one frame.
+        let sun_direction_weight = smoothstep(0.0, 0.25, direct_sun);
+        let key_light_direction = slerp_direction(
+            moon_direction,
+            sun_direction,
+            sun_direction_weight,
+            Vec3::from_array(celestial.equatorial_north),
+        );
+        let key_light_radiance = sun_radiance + moon_radiance;
+        let shadow_strength = smoothstep(0.035, 0.14, solar_elevation);
         let warm_horizon = Vec3::new(0.78, 0.31, 0.14).lerp(Vec3::new(0.86, 0.48, 0.24), sunset);
         let night_horizon = Vec3::new(0.010, 0.016, 0.036);
         let night_zenith = Vec3::new(0.0015, 0.004, 0.018);
@@ -790,6 +794,42 @@ fn normalized_or(value: Vec3, fallback: Vec3) -> Vec3 {
     } else {
         fallback
     }
+}
+
+fn slerp_direction(from: Vec3, to: Vec3, amount: f32, reference: Vec3) -> Vec3 {
+    let from = normalized_or(from, Vec3::Y);
+    let to = normalized_or(to, from);
+    let amount = amount.clamp(0.0, 1.0);
+    let cosine = from.dot(to).clamp(-1.0, 1.0);
+    if cosine < -0.95 {
+        let projected = reference - from * reference.dot(from);
+        let midpoint = if projected.length_squared() > 0.0001 {
+            projected.normalize()
+        } else {
+            let fallback = if from.x.abs() < 0.8 { Vec3::X } else { Vec3::Y };
+            normalized_or(from.cross(fallback), Vec3::Z)
+        };
+        return if amount < 0.5 {
+            slerp_short_arc(from, midpoint, amount * 2.0)
+        } else {
+            slerp_short_arc(midpoint, to, amount * 2.0 - 1.0)
+        };
+    }
+    slerp_short_arc(from, to, amount)
+}
+
+fn slerp_short_arc(from: Vec3, to: Vec3, amount: f32) -> Vec3 {
+    let cosine = from.dot(to).clamp(-1.0, 1.0);
+    if cosine > 0.9995 {
+        return normalized_or(from.lerp(to, amount), to);
+    }
+    let angle = cosine.acos();
+    let inverse_sine = angle.sin().recip();
+    normalized_or(
+        from * ((1.0 - amount) * angle).sin() * inverse_sine
+            + to * (amount * angle).sin() * inverse_sine,
+        to,
+    )
 }
 
 fn scalar_lerp(from: f32, to: f32, amount: f32) -> f32 {
@@ -1036,6 +1076,50 @@ mod tests {
             assert!(environment.key_light_radiance.min_element() >= 0.0);
             assert!((0.0..=1.0).contains(&environment.shadow_strength));
         }
+    }
+
+    #[test]
+    fn twilight_key_light_has_no_direction_or_radiance_step() {
+        let sample = AtmosphereSample::default();
+        let weather = WeatherState::for_cycle(0.08, 0.24, 0.0, 7, sample.coldness);
+        let mut previous = equatorial_environment(sample, 0.0, weather);
+        // One full default 20-minute day sampled at the renderer's 120 Hz target.
+        const DAY_SAMPLES: u32 = 1_200 * 120;
+        for sample_index in 1..=DAY_SAMPLES {
+            let current =
+                equatorial_environment(sample, sample_index as f32 / DAY_SAMPLES as f32, weather);
+            assert!(
+                previous
+                    .key_light_direction
+                    .dot(current.key_light_direction)
+                    > 0.9999,
+                "key direction stepped between day samples {} and {}",
+                sample_index - 1,
+                sample_index,
+            );
+            assert!(
+                (current.key_light_radiance - previous.key_light_radiance).length() < 0.02,
+                "key radiance stepped between day samples {} and {}",
+                sample_index - 1,
+                sample_index,
+            );
+            previous = current;
+        }
+    }
+
+    #[test]
+    fn direction_slerp_is_finite_through_antipodal_inputs() {
+        let from = Vec3::X;
+        let to = -Vec3::X;
+        let mut previous = from;
+        for index in 0..=100 {
+            let direction = slerp_direction(from, to, index as f32 / 100.0, Vec3::Y);
+            assert!(direction.is_finite());
+            assert!((direction.length() - 1.0).abs() < 1.0e-5);
+            assert!(previous.dot(direction) > 0.999);
+            previous = direction;
+        }
+        assert!(previous.dot(to) > 0.999_999);
     }
 
     #[test]

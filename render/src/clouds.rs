@@ -77,7 +77,6 @@ const _: () = assert!(size_of::<CloudUniform>() == 64);
 pub(crate) struct VolumetricCloudGpu {
     target: Texture,
     target_view: TextureView,
-    target_sampler: Sampler,
     noise: Texture,
     uniform: Buffer,
     trace_bind_group: BindGroup,
@@ -109,16 +108,6 @@ impl VolumetricCloudGpu {
         let config = config.sanitized();
         let (target, target_view, width, height) =
             cloud_target(device, width, height, config.resolution_scale);
-        let target_sampler = device.create_sampler(&SamplerDescriptor {
-            label: Some("volumetric cloud target sampler"),
-            address_mode_u: AddressMode::ClampToEdge,
-            address_mode_v: AddressMode::ClampToEdge,
-            address_mode_w: AddressMode::ClampToEdge,
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            mipmap_filter: MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
         let noise = noise_texture(device);
         let noise_view = noise.create_view(&TextureViewDescriptor {
             label: Some("volumetric cloud noise view"),
@@ -160,8 +149,7 @@ impl VolumetricCloudGpu {
         let trace_bind_group =
             trace_bind_group(device, &trace_layout, &uniform, &noise_view, &noise_sampler);
         let composite_layout = composite_layout(device);
-        let composite_bind_group =
-            composite_bind_group(device, &composite_layout, &target_view, &target_sampler);
+        let composite_bind_group = composite_bind_group(device, &composite_layout, &target_view);
         let shader = crate::shader::frame_shader(
             device,
             "volumetric cloud shader",
@@ -219,7 +207,6 @@ impl VolumetricCloudGpu {
         Self {
             target,
             target_view,
-            target_sampler,
             noise,
             uniform,
             trace_bind_group,
@@ -241,12 +228,8 @@ impl VolumetricCloudGpu {
         self.target_view = target_view;
         self.width = width;
         self.height = height;
-        self.composite_bind_group = composite_bind_group(
-            device,
-            &self.composite_layout,
-            &self.target_view,
-            &self.target_sampler,
-        );
+        self.composite_bind_group =
+            composite_bind_group(device, &self.composite_layout, &self.target_view);
     }
 
     pub(crate) fn update(
@@ -268,16 +251,8 @@ impl VolumetricCloudGpu {
                 self.config.extinction,
             ],
             quality: [
-                view_step_count(
-                    self.config.view_steps,
-                    environment.cloud_density,
-                    environment.storminess,
-                ),
-                light_step_count(
-                    self.config.light_steps,
-                    environment.cloud_density,
-                    environment.storminess,
-                ),
+                self.config.view_steps,
+                self.config.light_steps,
                 u32::from(self.config.enabled),
                 0,
             ],
@@ -380,26 +355,6 @@ impl VolumetricCloudGpu {
 
 fn finite_or(value: f32, fallback: f32) -> f32 {
     if value.is_finite() { value } else { fallback }
-}
-
-fn view_step_count(configured_steps: u32, cloud_density: f32, storminess: f32) -> u32 {
-    let density_steps = ((10.0
-        + (configured_steps.saturating_sub(10)) as f32 * cloud_density.clamp(0.0, 1.0))
-    .round() as u32)
-        .clamp(8, configured_steps);
-    if storminess > 0.75 {
-        density_steps.min(configured_steps.saturating_sub(5).max(8))
-    } else {
-        density_steps
-    }
-}
-
-fn light_step_count(configured_steps: u32, cloud_density: f32, storminess: f32) -> u32 {
-    if cloud_density <= 0.54 || storminess > 0.75 {
-        1
-    } else {
-        configured_steps
-    }
 }
 
 fn scaled_extent(value: u32, scale: f32) -> u32 {
@@ -630,24 +585,16 @@ fn trace_bind_group(
 fn composite_layout(device: &Device) -> BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("volumetric cloud composite layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: TextureSampleType::Float { filterable: true },
-                    view_dimension: TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: TextureSampleType::Float { filterable: false },
+                view_dimension: TextureViewDimension::D2,
+                multisampled: false,
             },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
+            count: None,
+        }],
     })
 }
 
@@ -655,21 +602,14 @@ fn composite_bind_group(
     device: &Device,
     layout: &BindGroupLayout,
     target_view: &TextureView,
-    target_sampler: &Sampler,
 ) -> BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("volumetric cloud composite bind group"),
         layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(target_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(target_sampler),
-            },
-        ],
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(target_view),
+        }],
     })
 }
 
@@ -775,17 +715,17 @@ mod tests {
     }
 
     #[test]
-    fn opaque_storms_use_five_fewer_view_steps() {
-        assert_eq!(view_step_count(14, 0.98, 0.0), 14);
-        assert_eq!(view_step_count(14, 0.98, 1.0), 9);
-        assert_eq!(view_step_count(8, 1.0, 1.0), 8);
-    }
+    fn configured_cloud_quality_is_preserved() {
+        let default = VolumetricCloudConfig::default().sanitized();
+        assert_eq!([default.view_steps, default.light_steps], [14, 2]);
 
-    #[test]
-    fn opaque_storms_skip_redundant_sun_shadow_probe() {
-        assert_eq!(light_step_count(2, 0.76, 0.0), 2);
-        assert_eq!(light_step_count(2, 0.98, 1.0), 1);
-        assert_eq!(light_step_count(2, 0.28, 0.0), 1);
+        let reduced = VolumetricCloudConfig {
+            view_steps: 4,
+            light_steps: 1,
+            ..VolumetricCloudConfig::default()
+        }
+        .sanitized();
+        assert_eq!([reduced.view_steps, reduced.light_steps], [4, 1]);
     }
 
     #[test]

@@ -130,6 +130,26 @@ mod tests {
         assert!(clouds.contains("cloud_noise_lod("));
         assert!(!clouds.contains("trace_start += jitter"));
         assert!(clouds.contains("transmittance < 0.02"));
+        assert!(clouds.contains("textureLoad(cloud_target"));
+        assert!(!clouds.contains("textureSampleLevel(cloud_target"));
+        let ordered = clouds
+            .split_once("const ORDERED_4X4")
+            .expect("ordered reconstruction table")
+            .1
+            .split_once(");")
+            .expect("ordered reconstruction table terminator")
+            .0
+            .split_once('(')
+            .expect("ordered reconstruction values")
+            .1;
+        let mut ranks = ordered
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.parse::<f32>().expect("ordered rank is numeric") as u32)
+            .collect::<Vec<_>>();
+        ranks.sort_unstable();
+        assert_eq!(ranks, (0..16).collect::<Vec<_>>());
         assert!(!include_str!("shaders/sky.wgsl").contains("cloud_height = 480.0"));
 
         let base_cells = 1_280_000.0_f32 * 0.0008;
@@ -243,7 +263,8 @@ mod tests {
         assert!(clouds.contains("fract(stable_sample_phase + f32(index) * 0.61803398875)"));
         assert!(clouds.contains("f32(index) + stratified_sample_phase"));
         assert!(clouds.contains("index < 24u"));
-        assert!(clouds.contains("let extra_capacity = min(6u"));
+        assert!(clouds.contains("let view_steps = clouds.quality.x"));
+        assert!(!clouds.contains("grazing_quality"));
         assert!(clouds.contains("index >= view_steps"));
         assert!(clouds.contains("mix(sampled_density, previous_density, 0.32)"));
         assert!(clouds.contains("cloud_height_profile(shaped_height, local_growth)"));

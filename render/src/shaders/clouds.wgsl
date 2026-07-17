@@ -10,7 +10,18 @@ struct CloudUniform {
 @group(1) @binding(1) var cloud_noise: texture_3d<f32>;
 @group(1) @binding(2) var cloud_noise_sampler: sampler;
 @group(2) @binding(0) var cloud_target: texture_2d<f32>;
-@group(2) @binding(1) var cloud_target_sampler: sampler;
+
+const ORDERED_4X4 = array<f32, 16>(
+  0.0, 8.0, 2.0, 10.0,
+  12.0, 4.0, 14.0, 6.0,
+  3.0, 11.0, 1.0, 9.0,
+  15.0, 7.0, 13.0, 5.0,
+);
+
+fn ordered_threshold(pixel: vec2<u32>) -> f32 {
+  let index = (pixel.y & 3u) * 4u + (pixel.x & 3u);
+  return (ORDERED_4X4[index] + 0.5) / 16.0;
+}
 
 fn screen_triangle(index: u32, depth: f32) -> vec4<f32> {
   let x = f32((index << 1u) & 2u);
@@ -156,11 +167,9 @@ fn fs_trace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     return vec4<f32>(0.0);
   }
   let trace_length = trace_end - trace_start;
-  // Long grazing rays expose the individual integration strata most strongly. Spend a bounded
-  // six extra samples only there; overhead rays retain the configured cost.
-  let grazing_quality = 1.0 - smoothstep(0.10, 0.38, abs(ray.y));
-  let extra_capacity = min(6u, 24u - min(clouds.quality.x, 24u));
-  let view_steps = clouds.quality.x + u32(round(grazing_quality * f32(extra_capacity)));
+  // The integration lattice must not change with view pitch or weather. Moving every ray sample
+  // at an integer quality threshold creates a coherent brightness pop across the whole cloud.
+  let view_steps = clouds.quality.x;
   let step_length = trace_length / f32(max(view_steps, 1u));
   let entry_world = camera + ray * trace_start;
   let stable_sample_phase = mix(
@@ -234,10 +243,33 @@ fn fs_trace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_composite(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-  let uv = position.xy / frame.viewport_voxel.xy;
-  let cloud = textureSampleLevel(cloud_target, cloud_target_sampler, uv, 0.0);
-  // Preserve premultiplied radiance while tightening only the softest part of half-resolution
-  // coverage. This removes the oversized blurred base cells without inventing screen-space noise.
+  let pixel = vec2<u32>(position.xy);
+  let source_dimensions = textureDimensions(cloud_target);
+  let source_position = position.xy * vec2<f32>(source_dimensions) / frame.viewport_voxel.xy
+    - vec2<f32>(0.5);
+  let source_base = vec2<i32>(floor(source_position));
+  let source_fraction = fract(source_position);
+  let weights = vec4<f32>(
+    (1.0 - source_fraction.x) * (1.0 - source_fraction.y),
+    source_fraction.x * (1.0 - source_fraction.y),
+    (1.0 - source_fraction.x) * source_fraction.y,
+    source_fraction.x * source_fraction.y,
+  );
+  let threshold = ordered_threshold(pixel);
+  var offset = vec2<i32>(0, 0);
+  if threshold >= weights.x {
+    offset = vec2<i32>(1, 0);
+  }
+  if threshold >= weights.x + weights.y {
+    offset = vec2<i32>(0, 1);
+  }
+  if threshold >= weights.x + weights.y + weights.z {
+    offset = vec2<i32>(1, 1);
+  }
+  let maximum = vec2<i32>(source_dimensions) - vec2<i32>(1);
+  let cloud = textureLoad(cloud_target, clamp(source_base + offset, vec2<i32>(0), maximum), 0);
+  // Ordered reconstruction preserves the expected half-resolution coverage across neighboring
+  // pixels while never inventing a blurred source value or changing with time.
   let reconstructed_alpha = smoothstep(0.035, 0.965, cloud.a);
   let radiance_scale = reconstructed_alpha / max(cloud.a, 0.0001);
   return vec4<f32>(cloud.rgb * radiance_scale, reconstructed_alpha) * (1.0 - frame.medium.x);
