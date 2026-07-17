@@ -233,8 +233,9 @@ mod web {
     use voxels_render::shadow::DirectionalShadowConfig;
     use voxels_render::ui::{LiveStats, NavigationTelemetry};
     use voxels_runtime::{
-        AuthoritativeEditRevisions, ChunkState, CompletionStatus, FrameBudget, StreamConfig,
-        StreamScheduler, SurfaceFocusAction, SurfaceRevisionCache, revision_satisfies,
+        AuthoritativeEditRevisions, ChunkState, CompletionStatus, DirectionalStreamPriority,
+        FrameBudget, StreamConfig, StreamScheduler, SurfaceFocusAction, SurfaceRevisionCache,
+        revision_satisfies,
     };
     use voxels_world::protocol::{
         BrowserUserId, DigVolume, EditAction, MaterialInventory, PlayerId, PlayerIdentity,
@@ -262,6 +263,8 @@ mod web {
         max_edit_trackers: usize,
         stream_frame_budget: FrameBudget,
         startup_ready_radius_chunks: i32,
+        stream_velocity_lookahead_seconds: f32,
+        stream_view_cone_half_angle_degrees: f32,
         surface_load_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
         surface_retain_margin_tiles: i32,
         enclosure_probe_interval_ms: f64,
@@ -923,12 +926,19 @@ mod web {
             self.drain_remote_generation();
             let focus = world_to_chunk(camera.position);
             let interest = crate::interaction_stream_interest(camera);
+            let priority_hint = directional_stream_priority(
+                camera,
+                CHUNK_EDGE as f32 * VOXEL_SIZE_METRES,
+                self.config.stream_velocity_lookahead_seconds,
+                self.config.stream_view_cone_half_angle_degrees,
+            );
             let (focus_changed, work) = {
                 let mut scheduler = self.scheduler.borrow_mut();
                 let changed = scheduler.update_focus_with_interest(focus, &interest);
                 (
                     changed,
-                    scheduler.schedule_frame(self.config.stream_frame_budget),
+                    scheduler
+                        .schedule_frame_prioritized(self.config.stream_frame_budget, priority_hint),
                 )
             };
             let mut uploaded = false;
@@ -1028,7 +1038,7 @@ mod web {
             if focus_changed || uploaded || evicted {
                 self.reconcile_chunk_activation(focus, &interest);
             }
-            self.stream_surface_lods(camera.position);
+            self.stream_surface_lods(camera);
         }
 
         fn submit_generation_batch(
@@ -1334,9 +1344,9 @@ mod web {
             counts
         }
 
-        fn stream_surface_lods(&self, position: glam::Vec3) {
+        fn stream_surface_lods(&self, camera: &CameraState) {
             let focus = std::array::from_fn(|index| {
-                world_to_surface_tile(position, SurfaceLodLevel::ALL[index])
+                world_to_surface_tile(camera.position, SurfaceLodLevel::ALL[index])
             });
             if self.surface_focus.get() != Some(focus) {
                 self.surface_focus.set(Some(focus));
@@ -1427,22 +1437,39 @@ mod web {
                 drop(dirty);
                 drop(revisions);
                 drop(resident);
-                candidates.sort_by_key(|coord| {
-                    let index = coord.level.index() as usize;
-                    let dx = coord.x - focus[index].x;
-                    let dz = coord.z - focus[index].z;
-                    (
-                        index >= INTERACTIVE_SURFACE_LOD_LEVELS,
-                        u8::MAX - coord.level.index(),
-                        dx * dx + dz * dz,
-                        coord.z,
-                        coord.x,
-                    )
-                });
                 let mut queue = self.surface_queue.borrow_mut();
                 queue.clear();
                 queue.extend(candidates);
             }
+
+            let priorities = SurfaceLodLevel::ALL.map(|level| {
+                directional_stream_priority(
+                    camera,
+                    level.tile_span_voxels() as f32 * VOXEL_SIZE_METRES,
+                    self.config.stream_velocity_lookahead_seconds,
+                    self.config.stream_view_cone_half_angle_degrees,
+                )
+            });
+            self.surface_queue
+                .borrow_mut()
+                .make_contiguous()
+                .sort_by_key(|coord| {
+                    let index = coord.level.index() as usize;
+                    let dx = i64::from(coord.x) - i64::from(focus[index].x);
+                    let dz = i64::from(coord.z) - i64::from(focus[index].z);
+                    let (vicinity, view, predicted_distance) =
+                        priorities[index].rank_offset(dx, dz);
+                    (
+                        index >= INTERACTIVE_SURFACE_LOD_LEVELS,
+                        u8::MAX - coord.level.index(),
+                        vicinity,
+                        view,
+                        predicted_distance,
+                        i128::from(dx) * i128::from(dx) + i128::from(dz) * i128::from(dz),
+                        coord.z,
+                        coord.x,
+                    )
+                });
 
             const INTERACTIVE_SURFACE_BATCH: usize = 4;
             const BACKGROUND_SURFACE_BATCH: usize = 2;
@@ -2564,6 +2591,8 @@ mod web {
                 upload: streaming.frame_budget.upload as usize,
             },
             startup_ready_radius_chunks: streaming.startup_ready_radius_chunks as i32,
+            stream_velocity_lookahead_seconds: streaming.priority.velocity_lookahead_seconds,
+            stream_view_cone_half_angle_degrees: streaming.priority.view_cone_half_angle_degrees,
             surface_load_radius_tiles: streaming
                 .surface
                 .load_radius_tiles
@@ -2776,6 +2805,24 @@ mod web {
             (position.x / edge_metres).floor() as i32,
             (position.y / edge_metres).floor() as i32,
             (position.z / edge_metres).floor() as i32,
+        )
+    }
+
+    fn directional_stream_priority(
+        camera: &CameraState,
+        cell_size_metres: f32,
+        lookahead_seconds: f32,
+        cone_half_angle_degrees: f32,
+    ) -> DirectionalStreamPriority {
+        let forward = camera.forward();
+        DirectionalStreamPriority::from_motion(
+            [forward.x, forward.z],
+            [
+                camera.velocity.x / cell_size_metres,
+                camera.velocity.z / cell_size_metres,
+            ],
+            lookahead_seconds,
+            cone_half_angle_degrees,
         )
     }
 

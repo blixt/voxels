@@ -148,6 +148,96 @@ pub struct FrameBudget {
     pub upload: usize,
 }
 
+/// Deterministic view and motion cue for ordering bounded streaming work.
+///
+/// Coordinates remain the canonical cache and protocol identity. This hint only changes which
+/// already-desired item starts first: the immediate vicinity stays first, then the current view
+/// cone, then the velocity-predicted focus.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectionalStreamPriority {
+    forward: [i32; 2],
+    predicted_offset: [i32; 2],
+    cone_cosine: i32,
+}
+
+impl DirectionalStreamPriority {
+    const FIXED_SCALE: f32 = 4_096.0;
+    const MAX_PREDICTED_OFFSET: f32 = MAX_LOAD_RADIUS_CHUNKS as f32;
+
+    pub const fn neutral() -> Self {
+        Self {
+            forward: [0, 0],
+            predicted_offset: [0, 0],
+            cone_cosine: 0,
+        }
+    }
+
+    /// Builds a grid-independent priority cue. Velocity is expressed in cells per second so the
+    /// same definition can rank canonical chunks and every surface-LOD tile size.
+    pub fn from_motion(
+        forward_xz: [f32; 2],
+        velocity_cells_per_second: [f32; 2],
+        lookahead_seconds: f32,
+        cone_half_angle_degrees: f32,
+    ) -> Self {
+        if !forward_xz
+            .into_iter()
+            .chain(velocity_cells_per_second)
+            .chain([lookahead_seconds, cone_half_angle_degrees])
+            .all(f32::is_finite)
+        {
+            return Self::neutral();
+        }
+        let length = forward_xz[0].hypot(forward_xz[1]);
+        let forward = if length > f32::EPSILON {
+            [
+                (forward_xz[0] / length * Self::FIXED_SCALE).round() as i32,
+                (forward_xz[1] / length * Self::FIXED_SCALE).round() as i32,
+            ]
+        } else {
+            [0, 0]
+        };
+        let predicted_offset = velocity_cells_per_second.map(|velocity| {
+            (velocity * lookahead_seconds)
+                .round()
+                .clamp(-Self::MAX_PREDICTED_OFFSET, Self::MAX_PREDICTED_OFFSET) as i32
+        });
+        let cone_cosine = (cone_half_angle_degrees.clamp(0.0, 90.0).to_radians().cos()
+            * Self::FIXED_SCALE)
+            .round() as i32;
+        Self {
+            forward,
+            predicted_offset,
+            cone_cosine,
+        }
+    }
+
+    /// `(vicinity band, view class, predicted distance squared)`, ordered best-first.
+    pub fn rank_offset(self, dx: i64, dz: i64) -> (u8, u8, i128) {
+        let dx = i128::from(dx);
+        let dz = i128::from(dz);
+        let radius = dx.abs().max(dz.abs());
+        let vicinity_band = radius.min(2) as u8;
+        let predicted_dx = dx - i128::from(self.predicted_offset[0]);
+        let predicted_dz = dz - i128::from(self.predicted_offset[1]);
+        let predicted_distance = predicted_dx * predicted_dx + predicted_dz * predicted_dz;
+        let distance_squared = dx * dx + dz * dz;
+        let dot = dx * i128::from(self.forward[0]) + dz * i128::from(self.forward[1]);
+        let view_class = if self.forward == [0, 0] || distance_squared == 0 {
+            1
+        } else if dot <= 0 {
+            2
+        } else if dot * dot
+            >= distance_squared * i128::from(self.cone_cosine) * i128::from(self.cone_cosine)
+        {
+            0
+        } else {
+            1
+        };
+        (vicinity_band, view_class, predicted_distance)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkStage {
     Generation,
@@ -548,6 +638,17 @@ impl StreamScheduler {
     /// the current focus and then by coordinate, so identical input histories issue identical
     /// tickets.
     pub fn schedule_frame(&mut self, budget: FrameBudget) -> FrameWork {
+        self.schedule_frame_prioritized(budget, DirectionalStreamPriority::neutral())
+    }
+
+    /// Starts bounded work using a deterministic view/velocity hint. The hint is deliberately not
+    /// retained: the latest camera state can reorder queued work each frame without invalidating
+    /// tickets that are already in flight.
+    pub fn schedule_frame_prioritized(
+        &mut self,
+        budget: FrameBudget,
+        priority_hint: DirectionalStreamPriority,
+    ) -> FrameWork {
         self.frame = increment_nonzero(self.frame);
         self.started_this_frame = FrameBudget::default();
 
@@ -555,9 +656,20 @@ impl StreamScheduler {
             WorkStage::Generation,
             State::QueuedGeneration,
             budget.generation,
+            priority_hint,
         );
-        let meshing = self.start_stage(WorkStage::Meshing, State::QueuedMeshing, budget.meshing);
-        let upload = self.start_stage(WorkStage::Upload, State::QueuedUpload, budget.upload);
+        let meshing = self.start_stage(
+            WorkStage::Meshing,
+            State::QueuedMeshing,
+            budget.meshing,
+            priority_hint,
+        );
+        let upload = self.start_stage(
+            WorkStage::Upload,
+            State::QueuedUpload,
+            budget.upload,
+            priority_hint,
+        );
         self.started_this_frame = FrameBudget {
             generation: generation.len(),
             meshing: meshing.len(),
@@ -857,14 +969,22 @@ impl StreamScheduler {
             .any(|entry| entry.coord.x == x && entry.coord.z == z && entry.ever_resident)
     }
 
-    fn start_stage(&mut self, stage: WorkStage, queued: State, budget: usize) -> Vec<WorkTicket> {
+    fn start_stage(
+        &mut self,
+        stage: WorkStage,
+        queued: State,
+        budget: usize,
+        priority_hint: DirectionalStreamPriority,
+    ) -> Vec<WorkTicket> {
         let mut keys: Vec<_> = self
             .entries
             .iter()
             .filter(|(_, entry)| entry.state == queued && (entry.desired || entry.ever_resident))
             .map(|(key, _)| *key)
             .collect();
-        keys.sort_by_key(|key| priority(self.focus, coord_from_key(*key)));
+        keys.sort_by_key(|key| {
+            directional_priority(self.focus, coord_from_key(*key), priority_hint)
+        });
         keys.truncate(budget);
 
         let mut tickets = Vec::with_capacity(keys.len());
@@ -973,6 +1093,30 @@ fn priority(focus: ChunkCoord, coord: ChunkCoord) -> (i128, i128, i128, i32, i32
         // Complete nearby vertical columns before spreading across a horizontal slice. The
         // renderer exposes columns atomically, so this produces useful collision/render coverage
         // sooner without changing the final desired set.
+        dx * dx + dz * dz,
+        dy.abs(),
+        dx.abs() + dz.abs(),
+        coord.y,
+        coord.z,
+        coord.x,
+    )
+}
+
+fn directional_priority(
+    focus: ChunkCoord,
+    coord: ChunkCoord,
+    hint: DirectionalStreamPriority,
+) -> (u8, u8, i128, i128, i128, i128, i32, i32, i32) {
+    let dx_i64 = i64::from(coord.x) - i64::from(focus.x);
+    let dz_i64 = i64::from(coord.z) - i64::from(focus.z);
+    let dx = i128::from(coord.x) - i128::from(focus.x);
+    let dy = i128::from(coord.y) - i128::from(focus.y);
+    let dz = i128::from(coord.z) - i128::from(focus.z);
+    let (vicinity_band, view_class, predicted_distance) = hint.rank_offset(dx_i64, dz_i64);
+    (
+        vicinity_band,
+        view_class,
+        predicted_distance,
         dx * dx + dz * dz,
         dy.abs(),
         dx.abs() + dz.abs(),
@@ -1210,6 +1354,59 @@ mod tests {
         assert!(first_work.upload.is_empty());
         assert_eq!(first.diagnostics().generation.queued, 3);
         assert_eq!(first.diagnostics().generation.in_flight, 2);
+    }
+
+    #[test]
+    fn directional_priority_keeps_the_vicinity_then_leads_view_and_velocity() {
+        let config = StreamConfig {
+            load_radius_chunks: 3,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 1,
+            max_tracked_chunks: 64,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
+        };
+        let focus = ChunkCoord::new(0, 0, 0);
+        let mut east = scheduler(config);
+        let mut west = scheduler(config);
+        east.update_focus(focus);
+        west.update_focus(focus);
+        let budget = FrameBudget {
+            generation: 10,
+            ..FrameBudget::default()
+        };
+        let east = east.schedule_frame_prioritized(
+            budget,
+            DirectionalStreamPriority::from_motion([1.0, 0.0], [2.0, 0.0], 1.0, 45.0),
+        );
+        let west = west.schedule_frame_prioritized(
+            budget,
+            DirectionalStreamPriority::from_motion([-1.0, 0.0], [-2.0, 0.0], 1.0, 45.0),
+        );
+        for work in [&east, &west] {
+            assert_eq!(work.generation[0].coord, focus);
+            assert!(
+                work.generation[..9].iter().all(|ticket| {
+                    let dx = i64::from(ticket.coord.x) - i64::from(focus.x);
+                    let dz = i64::from(ticket.coord.z) - i64::from(focus.z);
+                    dx.abs().max(dz.abs()) <= 1
+                }),
+                "the complete immediate vicinity must remain ahead of prediction"
+            );
+        }
+        assert_eq!(east.generation[9].coord, ChunkCoord::new(2, 0, 0));
+        assert_eq!(west.generation[9].coord, ChunkCoord::new(-2, 0, 0));
+    }
+
+    #[test]
+    fn directional_priority_has_distinct_cone_and_prediction_terms() {
+        let priority = DirectionalStreamPriority::from_motion([1.0, 0.0], [2.0, 0.0], 1.0, 45.0);
+        assert_eq!(priority.rank_offset(2, 0), (2, 0, 0));
+        assert_eq!(priority.rank_offset(-2, 0).1, 2);
+        assert_eq!(priority.rank_offset(1, 2).1, 1);
+        assert!(
+            priority.rank_offset(3, 0).2 < priority.rank_offset(5, 0).2,
+            "velocity look-ahead must lead work toward the predicted focus"
+        );
     }
 
     #[test]

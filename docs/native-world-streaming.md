@@ -51,12 +51,16 @@ Rust enum layout and Serde output are not wire formats.
    capabilities, negotiated request window, echoed player claim, spawn sample, authoritative resume
    pose, per-material inventory, and a random edit-session ID. The client
    rejects an identity mismatch and does not inspect the provider type to choose generation behavior.
-3. The browser first submits priority-tagged interactive surface-tile batches in stride-16,
-   stride-8, stride-4, then stride-2 order. Once that complete set and exact near chunks are ready,
-   stride-64 and stride-32 horizon batches run as one-at-a-time `Prefetch` work. The server caps
-   global prefetch workers, so kilometre silhouettes cannot consume all generation capacity.
-4. The browser concurrently submits exact chunk-coordinate batches. Results retain the request ID
-   and coordinate keys, and every decoded product is checked against the negotiated source identity.
+3. The browser preserves the complete immediate 3x3 chunk vicinity, then reorders queued canonical
+   chunks and surface tiles every frame by the configured camera cone and velocity-predicted focus.
+   Surface work still starts with stride-16, stride-8, stride-4, then stride-2 coverage. Once that
+   complete set and exact near chunks are ready, stride-64 and stride-32 horizon batches run as
+   `Prefetch` work. The server caps global prefetch workers, so kilometre silhouettes cannot consume
+   all generation capacity.
+4. The browser concurrently submits exact chunk-coordinate batches in that priority order. VXWP
+   preserves the ordered coordinates, request ID, and coordinate keys; every decoded product is
+   checked against the negotiated source identity. Directional priority changes no cache key,
+   residency bound, quality level, or bandwidth ceiling.
 5. Each successful near item carries the existing palette/bit-packed VXCH chunk plus an exact,
    palette/bit-packed meshing halo. Both are integrity checked before meshing.
 6. Surface meshes use a separate `VXST` v5 payload containing bounded terrain, water, patch
@@ -163,6 +167,19 @@ presence_endpoint = "ws://127.0.0.1:9777/v21/presence"
 subprotocol = "voxels.world.v21"
 auth_subprotocol_token = "the-same-random-local-token"
 ```
+
+Streaming direction is deployment-tunable without changing the wire format:
+
+```toml
+[streaming.priority]
+velocity_lookahead_seconds = 1.5
+view_cone_half_angle_degrees = 55.0
+```
+
+The current 3x3 chunk vicinity always wins. Beyond it, queued work inside the cone wins over side
+and rear work, while velocity look-ahead orders that cone toward where the player will be. Rotation
+or motion can reprioritize work that has not started, but never cancels or duplicates an in-flight
+request.
 
 Ensure the Vite origin is in the server's `allowed_origins`. Terrain Diffusion is the checked-in
 default. Fetch the pinned model once, then start the Metal-capable daemon:

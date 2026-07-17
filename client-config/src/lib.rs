@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 22;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 23;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -99,8 +99,16 @@ pub struct StreamingConfig {
     pub retention_margin_chunks: u32,
     pub max_tracked_chunks: u32,
     pub max_secondary_interest_chunks: u32,
+    pub priority: StreamingPriorityConfig,
     pub frame_budget: FrameBudgetConfig,
     pub surface: SurfaceStreamingConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamingPriorityConfig {
+    pub velocity_lookahead_seconds: f32,
+    pub view_cone_half_angle_degrees: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -267,6 +275,20 @@ impl ClientConfig {
             "streaming.max_secondary_interest_chunks",
             0,
             self.streaming.max_tracked_chunks,
+        )?;
+        ensure_finite_range(
+            self.streaming.priority.velocity_lookahead_seconds,
+            "streaming.priority.velocity_lookahead_seconds",
+            0.0,
+            10.0,
+            true,
+        )?;
+        ensure_finite_range(
+            self.streaming.priority.view_cone_half_angle_degrees,
+            "streaming.priority.view_cone_half_angle_degrees",
+            0.0,
+            90.0,
+            true,
         )?;
         for (field, value) in [
             (
@@ -688,6 +710,10 @@ mod tests {
                 retention_margin_chunks: 1,
                 max_tracked_chunks: 320,
                 max_secondary_interest_chunks: 192,
+                priority: StreamingPriorityConfig {
+                    velocity_lookahead_seconds: 1.5,
+                    view_cone_half_angle_degrees: 55.0,
+                },
                 frame_budget: FrameBudgetConfig {
                     generation: 2,
                     meshing: 1,
@@ -775,18 +801,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 22", "schema_version = 21");
+        let wrong_schema = fixture.replace("schema_version = 23", "schema_version = 22");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 21,
+                found: 22,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 22",
-            "schema_version = 22\nunknown_root = true",
+            "schema_version = 23",
+            "schema_version = 23\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),
@@ -826,6 +852,14 @@ mod tests {
         config.streaming.max_tracked_chunks = 1;
         config.streaming.max_secondary_interest_chunks = 2;
         assert_invalid_field(&config, "streaming.max_secondary_interest_chunks");
+
+        let mut config = valid_config();
+        config.streaming.priority.velocity_lookahead_seconds = f32::NAN;
+        assert_invalid_field(&config, "streaming.priority.velocity_lookahead_seconds");
+
+        let mut config = valid_config();
+        config.streaming.priority.view_cone_half_angle_degrees = 91.0;
+        assert_invalid_field(&config, "streaming.priority.view_cone_half_angle_degrees");
 
         let mut config = valid_config();
         config.streaming.frame_budget.meshing = 0;

@@ -1,5 +1,5 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 22
+schema_version = 23
 
 [developer]
 # Enables local-only time/weather visualization overrides and server-authorized creative flight.
@@ -48,6 +48,12 @@ startup_ready_radius_chunks = 1
 retention_margin_chunks = 1
 max_tracked_chunks = 320
 max_secondary_interest_chunks = 192
+
+[streaming.priority]
+# Keep the immediate 3x3 chunk vicinity first, then favor this forward cone and the predicted
+# position. These values change request order only; they do not increase residency or bandwidth.
+velocity_lookahead_seconds = 1.5
+view_cone_half_angle_degrees = 55.0
 
 [streaming.frame_budget]
 generation = 2

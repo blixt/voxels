@@ -27,7 +27,8 @@ The file controls:
 - the authoritative world and presence endpoints, authorization token, and backpressure windows;
 - pose cadence, clock synchronization, adaptive interpolation bounds, and extrapolation horizon;
 - fixed-step timing, catch-up limit, and edit-tracker capacity;
-- chunk and surface-LOD load/retention radii, pipeline budgets, and interest capacity;
+- chunk and surface-LOD load/retention radii, pipeline budgets, interest capacity, and deterministic
+  view-cone/velocity look-ahead priority;
 - view/shadow settings;
 - the fixed rendering feature baseline and the World Lab's initial open state;
 - whether local developer controls expose time/weather visualization overrides and the
