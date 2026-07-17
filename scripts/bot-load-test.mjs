@@ -1,0 +1,544 @@
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { mkdir, readFile, stat } from "node:fs/promises";
+import path from "node:path";
+import { promisify } from "node:util";
+import { chromium } from "playwright";
+import { build, preview } from "vite-plus";
+import { prepareBrowserWorldFixture, startBrowserWorldService } from "./browser-world-fixture.mjs";
+import {
+  assertSnapshotSchema,
+  chromeWebGpuLaunchOptions,
+  FRAME_SAMPLE_START,
+  FRAME_SAMPLE_WIDTH,
+  isBrowserConsoleFailure,
+  reserveEphemeralPort,
+  SNAPSHOT,
+} from "./browser-harness.mjs";
+import { rustTool } from "./build-wasm.ts";
+import {
+  numericSummary,
+  sampleProcess,
+  summarizeProcess,
+  writeHarnessReport,
+} from "./harness-metrics.mjs";
+import { createShapedLink } from "./network-benchmark-link.mjs";
+import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./vxwp-contract.mjs";
+import { worldServiceBuildCargoArgs } from "./world-service-command.ts";
+
+const execFileAsync = promisify(execFile);
+const RESULT_SCHEMA_VERSION = 1;
+const OUTPUT_DIRECTORY = path.resolve("target/harness/bots");
+const SAMPLE_INTERVAL_MS = 250;
+const OBSERVER_SAMPLE_INTERVAL_MS = 500;
+const VIEWPORT = { width: 960, height: 540 };
+const BROWSER_FAILURE =
+  /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|websocket|presence|protocol|world service/iu;
+const NETWORK_PROFILE = Object.freeze({
+  name: "unshaped-accounting-link",
+  oneWayLatencyMs: 0,
+  upstreamMegabitsPerSecond: 100_000,
+  downstreamMegabitsPerSecond: 100_000,
+  quantumBytes: 64 * 1_024,
+});
+
+function parseArguments(values) {
+  const options = {
+    counts: [4, 8, 16, 32, 64],
+    durationSeconds: 10,
+    layout: "mixed",
+    source: "procedural-v16",
+    mode: "scale",
+    serviceProfile: "worldgen",
+    botProfile: "worldgen-dev",
+    browser: true,
+  };
+  for (const argument of values) {
+    if (argument === "--growth") {
+      options.mode = "growth";
+      continue;
+    }
+    if (argument === "--no-browser") {
+      options.browser = false;
+      continue;
+    }
+    if (argument === "--browser") {
+      options.browser = true;
+      continue;
+    }
+    const [name, value] = argument.split("=", 2);
+    if (value === undefined) throw new Error(`expected --name=value, received ${argument}`);
+    if (name === "--counts" || name === "--populations") {
+      options.counts = value.split(",").map(Number);
+    } else if (name === "--duration" || name === "--duration-seconds") {
+      options.durationSeconds = Number(value);
+    } else if (name === "--layout") {
+      options.layout = value;
+    } else if (name === "--source") {
+      options.source = value;
+    } else if (name === "--service-profile") {
+      options.serviceProfile = value;
+    } else if (name === "--bot-profile") {
+      options.botProfile = value;
+    } else {
+      throw new Error(`unknown bot load option ${name}`);
+    }
+  }
+  if (
+    options.counts.length === 0 ||
+    options.counts.some((count) => !Number.isInteger(count) || count < 1 || count > 512)
+  ) {
+    throw new Error("--counts must contain integers in 1..=512");
+  }
+  if (
+    !Number.isFinite(options.durationSeconds) ||
+    options.durationSeconds < 1 ||
+    options.durationSeconds > 86_400
+  ) {
+    throw new Error("--duration must be in 1..=86400 seconds");
+  }
+  if (!["dense", "mixed"].includes(options.layout)) {
+    throw new Error("--layout must be dense or mixed");
+  }
+  if (!["scale", "growth"].includes(options.mode)) throw new Error("invalid mode");
+  if (!["worldgen", "worldgen-dev"].includes(options.serviceProfile)) {
+    throw new Error("--service-profile must be worldgen or worldgen-dev");
+  }
+  if (!["worldgen", "worldgen-dev"].includes(options.botProfile)) {
+    throw new Error("--bot-profile must be worldgen or worldgen-dev");
+  }
+  return options;
+}
+
+function executablePath(profile, binary) {
+  return path.resolve(
+    process.env.CARGO_TARGET_DIR ?? "target",
+    profile,
+    process.platform === "win32" ? `${binary}.exe` : binary,
+  );
+}
+
+function waitForChild(child, label, logs) {
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) resolve();
+      else {
+        reject(
+          new Error(
+            `${label} exited with ${signal ? `signal ${signal}` : `status ${code}`}\n${logs.join("")}`,
+          ),
+        );
+      }
+    });
+  });
+}
+
+async function fileBytes(file) {
+  try {
+    return (await stat(file)).size;
+  } catch (error) {
+    if (error.code === "ENOENT") return 0;
+    throw error;
+  }
+}
+
+async function databaseFiles(databasePath) {
+  const [mainBytes, walBytes, shmBytes] = await Promise.all([
+    fileBytes(databasePath),
+    fileBytes(`${databasePath}-wal`),
+    fileBytes(`${databasePath}-shm`),
+  ]);
+  return {
+    mainBytes,
+    walBytes,
+    shmBytes,
+    totalBytes: mainBytes + walBytes + shmBytes,
+  };
+}
+
+async function databaseContents(databasePath) {
+  if ((await fileBytes(databasePath)) === 0) return null;
+  const query = `
+    SELECT
+      (SELECT page_count FROM pragma_page_count()) AS pageCount,
+      (SELECT page_size FROM pragma_page_size()) AS pageSize,
+      (SELECT freelist_count FROM pragma_freelist_count()) AS freePages,
+      (SELECT revision FROM metadata WHERE singleton = 1) AS revision,
+      (SELECT COUNT(*) FROM players) AS players,
+      (SELECT COUNT(*) FROM player_inventory) AS inventoryRows,
+      (SELECT COUNT(*) FROM voxel_edits) AS voxelEdits,
+      (SELECT COUNT(*) FROM edit_operations) AS editOperations,
+      (SELECT COUNT(*) FROM edit_operation_mutations) AS operationMutations,
+      (SELECT COUNT(*) FROM edit_operation_chunks) AS operationChunks,
+      (SELECT COUNT(*) FROM edit_operation_surfaces) AS operationSurfaces;
+  `;
+  const { stdout } = await execFileAsync("sqlite3", ["-json", databasePath, query]);
+  return JSON.parse(stdout)[0] ?? null;
+}
+
+async function collectSamples({ servicePid, botPid, databasePath, done }) {
+  const service = [];
+  const bots = [];
+  const database = [];
+  while (!done.value) {
+    const [serviceSample, botSample, files] = await Promise.all([
+      sampleProcess(servicePid),
+      sampleProcess(botPid),
+      databaseFiles(databasePath),
+    ]);
+    if (serviceSample) service.push(serviceSample);
+    if (botSample) bots.push(botSample);
+    database.push({ atUnixMs: Date.now(), ...files });
+    await new Promise((resolve) => setTimeout(resolve, SAMPLE_INTERVAL_MS));
+  }
+  return { service, bots, database };
+}
+
+async function collectObserverSamples(observer, expectedBots, started, done) {
+  if (observer === null) return null;
+  const samples = [];
+  const frameMilliseconds = [];
+  let settledMs = null;
+  while (!done.value) {
+    const values = assertSnapshotSchema(
+      await observer.page.evaluate(() => globalThis.__VOXELS__.snapshot()),
+    );
+    const remoteAvatars = values[SNAPSHOT.remoteAvatars];
+    if (settledMs === null && remoteAvatars === expectedBots) {
+      settledMs = performance.now() - started;
+    }
+    for (let index = 0; index < values[SNAPSHOT.sampleCount]; index += 1) {
+      frameMilliseconds.push(values[FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH]);
+    }
+    samples.push({
+      atUnixMs: Date.now(),
+      remoteAvatars,
+      avatarParts: values[SNAPSHOT.avatarParts],
+      avatarDrawCalls: values[SNAPSHOT.avatarDrawCalls],
+      frameMs: values[SNAPSHOT.frameMs],
+      cpuMs: values[SNAPSHOT.cpuMs],
+      gpuTotalMs: values[SNAPSHOT.gpuTotalMs],
+      wasmCommittedMiB: values[SNAPSHOT.wasmCommittedMiB],
+      coreGpuMiB: values[SNAPSHOT.coreGpuMiB],
+      visibleChunks: values[SNAPSHOT.visibleChunks],
+      drawCalls: values[SNAPSHOT.drawCalls],
+    });
+    await observer.page.waitForTimeout(OBSERVER_SAMPLE_INTERVAL_MS);
+  }
+  return {
+    settledMs,
+    maxRemoteAvatars: Math.max(0, ...samples.map((sample) => sample.remoteAvatars)),
+    frameMs: numericSummary(frameMilliseconds),
+    cpuMs: numericSummary(samples.map((sample) => sample.cpuMs)),
+    gpuTotalMs: numericSummary(
+      samples.map((sample) => sample.gpuTotalMs).filter((value) => value > 0),
+    ),
+    wasmCommittedMiB: numericSummary(samples.map((sample) => sample.wasmCommittedMiB)),
+    coreGpuMiB: numericSummary(samples.map((sample) => sample.coreGpuMiB)),
+    samples,
+    errors: [...observer.errors],
+  };
+}
+
+function summarizeDatabase(samples, before, after, contents) {
+  return {
+    before,
+    after,
+    deltaBytes: after.totalBytes - before.totalBytes,
+    peakTotalBytes: Math.max(
+      before.totalBytes,
+      after.totalBytes,
+      ...samples.map((value) => value.totalBytes),
+    ),
+    samples,
+    contents,
+  };
+}
+
+async function runPopulation({
+  count,
+  options,
+  fixture,
+  service,
+  link,
+  botBinary,
+  runIndex,
+  observer,
+}) {
+  const reportPath = path.join(fixture.directory, `bots-${count}-${runIndex}.json`);
+  const before = await databaseFiles(fixture.databasePath);
+  if (observer !== null) {
+    await observer.page.evaluate(() => globalThis.__VOXELS__.snapshot());
+  }
+  link.reset();
+  const logs = [];
+  const bot = spawn(
+    botBinary,
+    [
+      `--world-url=ws://127.0.0.1:${link.port}${WORLD_PATH}`,
+      `--presence-url=ws://127.0.0.1:${link.port}${PRESENCE_PATH}`,
+      `--origin=http://127.0.0.1:${fixture.browserPort}`,
+      `--subprotocol=${WORLD_SUBPROTOCOL}`,
+      `--auth-token=${fixture.authToken}`,
+      `--bots=${count}`,
+      `--duration-seconds=${options.durationSeconds}`,
+      `--seed=${0x5eedcafe}`,
+      `--layout=${options.layout}`,
+      `--report=${reportPath}`,
+    ],
+    {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    },
+  );
+  for (const stream of [bot.stdout, bot.stderr]) {
+    stream.on("data", (bytes) => {
+      logs.push(bytes.toString());
+      if (logs.length > 200) logs.shift();
+    });
+  }
+  const done = { value: false };
+  const samplesPromise = collectSamples({
+    servicePid: service.child.pid,
+    botPid: bot.pid,
+    databasePath: fixture.databasePath,
+    done,
+  });
+  const started = performance.now();
+  const observerPromise = collectObserverSamples(observer, count, started, done);
+  try {
+    await waitForChild(bot, `bots (${count})`, logs);
+  } finally {
+    done.value = true;
+  }
+  const wallTimeMs = performance.now() - started;
+  const samples = await samplesPromise;
+  const observerReport = await observerPromise;
+  const report = JSON.parse(await readFile(reportPath, "utf8"));
+  const after = await databaseFiles(fixture.databasePath);
+  const contents = await databaseContents(fixture.databasePath);
+  return {
+    count,
+    wallTimeMs,
+    botReport: report,
+    process: {
+      service: summarizeProcess(samples.service),
+      bots: summarizeProcess(samples.bots),
+    },
+    network: link.snapshot(),
+    database: summarizeDatabase(samples.database, before, after, contents),
+    observer: observerReport,
+  };
+}
+
+function markdownReport(result) {
+  const lines = [
+    "# Voxels bot population benchmark",
+    "",
+    `Mode: **${result.options.mode}** · layout: **${result.options.layout}** · duration: **${result.options.durationSeconds}s per population** · source: **${result.options.source}**`,
+    "",
+    "| Bots | Server CPU p95 | Server RSS peak | Bot CPU p95 | TCP down/up | VXWP down/up | DB growth | Edits accepted | Mutations | Chunk p95 | Edit p95 | Visible | Observer frame p95 |",
+    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  ];
+  for (const stage of result.stages) {
+    const bot = stage.botReport;
+    const chunkP95 = numericSummary(
+      bot.reports.flatMap((report) =>
+        report.chunkLatency.samples > 0 ? [report.chunkLatency.p95Ms] : [],
+      ),
+    ).p95;
+    const editP95 = numericSummary(
+      bot.reports.flatMap((report) =>
+        report.editLatency.samples > 0 ? [report.editLatency.p95Ms] : [],
+      ),
+    ).p95;
+    const observerFrame =
+      stage.observer === null ? "off" : `${stage.observer.frameMs.p95.toFixed(1)} ms`;
+    lines.push(
+      `| ${stage.count} | ${stage.process.service.cpuPercent.p95.toFixed(1)}% | ${stage.process.service.rssMiB.max.toFixed(1)} MiB | ${stage.process.bots.cpuPercent.p95.toFixed(1)}% | ${(stage.network.downstream.streamBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.streamBytes / 1_048_576).toFixed(2)} MiB | ${(stage.network.downstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} MiB | ${(stage.database.deltaBytes / 1_024).toFixed(1)} KiB | ${bot.editsAccepted} | ${bot.mutationsCommitted} | ${chunkP95.toFixed(1)} ms | ${editP95.toFixed(1)} ms | ${bot.maxVisiblePlayers} | ${observerFrame} |`,
+    );
+  }
+  lines.push(
+    "",
+    "Generated terrain is deterministic and RAM-cached, not persisted. Explorer traffic therefore increases CPU and bandwidth; durable disk growth comes from player resumes, inventories, idempotent operation history, and sparse voxel edits.",
+    "",
+    "CPU percentages use `ps` semantics (100% is one fully occupied logical core). Stream bytes include HTTP upgrades and WebSocket framing; VXWP bytes are binary protocol payloads.",
+  );
+  return `${lines.join("\n")}\n`;
+}
+
+async function startObserver(browser, previewPort, fixture, proxyPort) {
+  const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1 });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
+  page.on("console", (message) => {
+    if (isBrowserConsoleFailure(message.type(), message.text(), BROWSER_FAILURE)) {
+      errors.push(`${message.type()}: ${message.text()}`);
+    }
+  });
+  const clientConfig = (await readFile(fixture.clientConfigPath, "utf8"))
+    .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${proxyPort}${WORLD_PATH}"`)
+    .replace(
+      /^presence_endpoint = .*$/m,
+      `presence_endpoint = "ws://127.0.0.1:${proxyPort}${PRESENCE_PATH}"`,
+    );
+  await page.route("**/config/client.toml", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/plain; charset=utf-8",
+      body: clientConfig,
+    }),
+  );
+  await page.goto(`http://127.0.0.1:${previewPort}`, { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => typeof globalThis.__VOXELS__?.snapshot === "function", null, {
+    timeout: 30_000,
+  });
+  const deadline = performance.now() + 30_000;
+  let latest = [];
+  while (performance.now() < deadline) {
+    latest = assertSnapshotSchema(await page.evaluate(() => globalThis.__VOXELS__.snapshot()));
+    if (latest[SNAPSHOT.quads] > 0 && latest[SNAPSHOT.residentChunks] > 0) {
+      return { context, page, errors };
+    }
+    await page.waitForTimeout(100);
+  }
+  throw new Error(
+    `browser observer did not load terrain: ${JSON.stringify({
+      quads: latest[SNAPSHOT.quads],
+      residentChunks: latest[SNAPSHOT.residentChunks],
+      trackedChunks: latest[SNAPSHOT.trackedChunks],
+      pendingJobs: latest[SNAPSHOT.pendingJobs],
+      allLodsReady: latest[SNAPSHOT.allLodsReady],
+      interactiveLodsReady: latest[SNAPSHOT.interactiveLodsReady],
+      errors,
+    })}`,
+  );
+}
+
+async function main() {
+  const options = parseArguments(process.argv.slice(2));
+  execFileSync(
+    rustTool("cargo"),
+    worldServiceBuildCargoArgs({ metal: false, profile: options.serviceProfile }),
+    { cwd: process.cwd(), env: process.env, stdio: "inherit" },
+  );
+  execFileSync(rustTool("cargo"), ["build", "--profile", options.botProfile, "-p", "voxels-bots"], {
+    cwd: process.cwd(),
+    env: process.env,
+    stdio: "inherit",
+  });
+  const botBinary = executablePath(options.botProfile, "voxels-bots");
+  const result = {
+    schemaVersion: RESULT_SCHEMA_VERSION,
+    generatedAt: new Date().toISOString(),
+    host: {
+      platform: process.platform,
+      architecture: process.arch,
+      node: process.version,
+    },
+    options,
+    stages: [],
+  };
+  let growthFixture;
+  let growthService;
+  let growthLink;
+  let browser;
+  let previewServer;
+  let previewPort;
+  try {
+    if (options.browser) {
+      previewPort = await reserveEphemeralPort();
+      const buildFixture = await prepareBrowserWorldFixture({
+        browserPort: previewPort,
+        prefix: "voxels-bots-browser-build-",
+        source: options.source,
+      });
+      try {
+        await build({ logLevel: "warn" });
+      } finally {
+        await buildFixture.cleanup();
+      }
+      previewServer = await preview({
+        logLevel: "warn",
+        preview: { host: "127.0.0.1", port: previewPort, strictPort: true },
+      });
+      browser = await chromium.launch(chromeWebGpuLaunchOptions());
+    }
+    for (const [runIndex, count] of options.counts.entries()) {
+      const fixture =
+        growthFixture ??
+        (await prepareBrowserWorldFixture({
+          browserPort: previewPort ?? (await reserveEphemeralPort()),
+          prefix: `voxels-bots-${count}-`,
+          source: options.source,
+        }));
+      const service =
+        growthService ??
+        (await startBrowserWorldService(fixture, {
+          build: false,
+          metal: false,
+          profile: options.serviceProfile,
+        }));
+      let proxy = growthLink;
+      if (proxy === undefined) {
+        const proxyPort = await reserveEphemeralPort();
+        proxy = await createShapedLink({
+          listenPort: proxyPort,
+          targetPort: fixture.backendPort,
+          profile: NETWORK_PROFILE,
+        });
+        proxy.port = proxyPort;
+      }
+      if (options.mode === "growth" && growthFixture === undefined) {
+        growthFixture = fixture;
+        growthService = service;
+        growthLink = proxy;
+      }
+      let observer = null;
+      try {
+        observer =
+          browser === undefined || previewPort === undefined
+            ? null
+            : await startObserver(browser, previewPort, fixture, proxy.port);
+        const stage = await runPopulation({
+          count,
+          options,
+          fixture,
+          service,
+          link: proxy,
+          botBinary,
+          runIndex,
+          observer,
+        });
+        result.stages.push(stage);
+        if (observer !== null && runIndex === options.counts.length - 1) {
+          await mkdir(OUTPUT_DIRECTORY, { recursive: true });
+          await observer.page.screenshot({
+            path: path.join(OUTPUT_DIRECTORY, "latest-observer.png"),
+          });
+        }
+      } finally {
+        if (observer !== null) await observer.context.close();
+        if (options.mode === "scale") {
+          await proxy.close();
+          await service.close();
+          await fixture.cleanup();
+        }
+      }
+    }
+  } finally {
+    if (growthLink) await growthLink.close();
+    if (growthService) await growthService.close();
+    if (growthFixture) await growthFixture.cleanup();
+    if (browser) await browser.close();
+    if (previewServer) await previewServer.close();
+  }
+  const markdown = markdownReport(result);
+  await writeHarnessReport(OUTPUT_DIRECTORY, result, markdown);
+  process.stdout.write(`${markdown}\nJSON: ${path.join(OUTPUT_DIRECTORY, "latest.json")}\n`);
+}
+
+await main();

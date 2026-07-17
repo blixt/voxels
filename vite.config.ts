@@ -524,6 +524,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/network-benchmark-compare.mjs",
         cache: false,
       },
+      "bench:bots": {
+        command: "node scripts/bot-load-test.mjs",
+        cache: false,
+      },
       "terrain:fetch": {
         command: "node scripts/terrain-diffusion.ts fetch",
         cache: false,
@@ -602,6 +606,11 @@ export default defineConfig(({ command, mode }) => ({
       },
       "test:multiplayer-browser": {
         command: "node scripts/browser-multiplayer.mjs",
+        cache: false,
+      },
+      "test:bots": {
+        command:
+          "node scripts/bot-load-test.mjs --counts=4 --duration=3 --service-profile=worldgen-dev --no-browser",
         cache: false,
       },
       "check:rust": { command: "node scripts/check-rust.ts", cache: false },

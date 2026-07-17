@@ -1,13 +1,13 @@
 import { randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { connect } from "node:net";
 import { reserveEphemeralPort } from "./browser-harness.mjs";
 import { rustTool } from "./build-wasm.ts";
 import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./vxwp-contract.mjs";
-import { worldServiceCargoArgs } from "./world-service-command.ts";
+import { worldServiceBuildCargoArgs, worldServiceExecutablePath } from "./world-service-command.ts";
 
 function replaceEnvironment(name, value) {
   const previous = process.env[name];
@@ -367,15 +367,23 @@ async function stopProcessTree(child) {
   }
 }
 
-export async function startBrowserWorldService(fixture, { metal = false } = {}) {
-  const child = spawn(
-    rustTool("cargo"),
-    worldServiceCargoArgs({ metal, configPath: fixture.serviceConfigPath }),
-    {
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: process.platform !== "win32",
-    },
-  );
+export async function startBrowserWorldService(
+  fixture,
+  { build = true, metal = false, profile = "worldgen" } = {},
+) {
+  if (build) {
+    execFileSync(rustTool("cargo"), worldServiceBuildCargoArgs({ metal, profile }), {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: "inherit",
+    });
+  }
+  const child = spawn(worldServiceExecutablePath(profile), [fixture.serviceConfigPath], {
+    cwd: process.cwd(),
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: process.platform !== "win32",
+  });
   const logs = [];
   for (const stream of [child.stdout, child.stderr]) {
     stream.on("data", (bytes) => {
