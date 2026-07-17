@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 19
+schema_version = 20
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -67,6 +67,7 @@ prediction_error_centimetres = 25
 look_error_milliradians = 175
 
 [gameplay]
+allow_gliding = true
 allow_creative_flight = true
 interaction_reach_centimetres = 500
 interaction_latency_slack_centimetres = 100

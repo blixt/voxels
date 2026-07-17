@@ -2,7 +2,9 @@
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Quat, Vec3};
-use voxels_core::{PLAYER_EYE_HEIGHT_METRES, REMOTE_POSE_FLYING, RemoteAvatarPose};
+use voxels_core::{
+    PLAYER_EYE_HEIGHT_METRES, REMOTE_POSE_FLYING, REMOTE_POSE_GLIDING, RemoteAvatarPose,
+};
 
 const PARTS_PER_AVATAR: usize = 13;
 const MAX_AVATARS: usize = 1_024;
@@ -278,7 +280,7 @@ fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
 fn append_avatar_parts(instances: &mut Vec<GpuAvatarPart>, avatar: &RemoteAvatarPose, time: f32) {
     let color = saturated_player_color(avatar.color_index);
     let body_rotation = Quat::from_rotation_y(avatar.body_yaw_radians);
-    let speed_blend = if avatar.flags & REMOTE_POSE_FLYING != 0 {
+    let speed_blend = if avatar.flags & (REMOTE_POSE_FLYING | REMOTE_POSE_GLIDING) != 0 {
         0.0
     } else {
         ((avatar.locomotion_speed_metres_per_second - 0.08) / 2.35).clamp(0.0, 1.0)

@@ -583,7 +583,9 @@ mod web {
                 .set(smoothed_ms(self.frame_milliseconds.get(), frame_ms));
             let simulation_start = performance_now(performance.as_ref());
             let creative_flight_available = self.creative_flight_available();
+            let gliding_available = self.gliding_available();
             let mut camera = self.camera.borrow_mut();
+            camera.set_gliding_available(gliding_available);
             if !creative_flight_available && camera.locomotion() == LocomotionMode::CreativeFlight {
                 camera.set_locomotion(LocomotionMode::Walking);
                 self.input.borrow_mut().clear();
@@ -1563,6 +1565,12 @@ mod web {
                         .capabilities
                         .contains(WorldCapabilities::CREATIVE_FLIGHT)
                 })
+        }
+
+        fn gliding_available(&self) -> bool {
+            self.remote
+                .world_opened()
+                .is_some_and(|opened| opened.capabilities.contains(WorldCapabilities::GLIDING))
         }
 
         fn apply_renderer_host_ui_action(&self) {

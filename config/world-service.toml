@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 19
+schema_version = 20
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -55,6 +55,8 @@ prediction_error_centimetres = 25
 look_error_milliradians = 175
 
 [gameplay]
+# Normal players can deploy the deterministic glider with a fresh Space press while airborne.
+allow_gliding = true
 # Local development explicitly permits collision-aware creative flight. Production worlds can
 # disable this without changing the client; the capability then disappears from WorldOpened.
 allow_creative_flight = true

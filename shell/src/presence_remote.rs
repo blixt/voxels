@@ -10,8 +10,9 @@ use voxels_core::{
     RemotePoseSample, RemotePoseUpdate, RemotePresenceDelta, RemotePresenceTimeline,
 };
 use voxels_world::protocol::{
-    self, OpenPresence, PLAYER_POSE_FLYING, PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING, PlayerId,
-    PlayerPoseUpdate, PresencePing, PresencePong, PresenceSessionId, WorldOpened,
+    self, OpenPresence, PLAYER_POSE_FLYING, PLAYER_POSE_GLIDING, PLAYER_POSE_GROUNDED,
+    PLAYER_POSE_SWIMMING, PlayerId, PlayerPoseUpdate, PresencePing, PresencePong,
+    PresenceSessionId, WorldOpened,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -477,6 +478,9 @@ impl PresenceInner {
         }
         if camera.locomotion() == LocomotionMode::CreativeFlight {
             flags |= PLAYER_POSE_FLYING;
+        }
+        if camera.locomotion() == LocomotionMode::Gliding {
+            flags |= PLAYER_POSE_GLIDING;
         }
         let sequence = self.next_pose_sequence.get().max(1);
         let clock = self.clock.get();

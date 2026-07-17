@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 19;
+pub const PROTOCOL_VERSION: u16 = 20;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -79,6 +79,8 @@ impl WorldCapabilities {
     pub const PLAYER_PRESENCE: Self = Self(1 << 8);
     /// The server permits bounded, collision-aware creative flight for this world connection.
     pub const CREATIVE_FLIGHT: Self = Self(1 << 9);
+    /// The server permits ordinary players to deploy the deterministic airborne glider.
+    pub const GLIDING: Self = Self(1 << 10);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -270,8 +272,12 @@ pub const PLAYER_POSE_GROUNDED: u16 = 1 << 0;
 pub const PLAYER_POSE_SWIMMING: u16 = 1 << 1;
 pub const PLAYER_POSE_DISCONTINUITY: u16 = 1 << 2;
 pub const PLAYER_POSE_FLYING: u16 = 1 << 3;
-const PLAYER_POSE_FLAGS: u16 =
-    PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING | PLAYER_POSE_DISCONTINUITY | PLAYER_POSE_FLYING;
+pub const PLAYER_POSE_GLIDING: u16 = 1 << 4;
+const PLAYER_POSE_FLAGS: u16 = PLAYER_POSE_GROUNDED
+    | PLAYER_POSE_SWIMMING
+    | PLAYER_POSE_DISCONTINUITY
+    | PLAYER_POSE_FLYING
+    | PLAYER_POSE_GLIDING;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpenPresence {
@@ -2305,6 +2311,13 @@ fn validate_player_pose(
             "player pose has unknown flags",
         ));
     }
+    if pose.flags & PLAYER_POSE_GLIDING != 0
+        && pose.flags & (PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING | PLAYER_POSE_FLYING) != 0
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "gliding conflicts with another locomotion flag",
+        ));
+    }
     Ok(())
 }
 
@@ -3744,6 +3757,7 @@ mod tests {
             manifest: WorldManifest::procedural_v16(WorldId::from_bytes([7; 16]), 42),
             capabilities: WorldCapabilities::CANONICAL_CHUNKS
                 .union(WorldCapabilities::AUTHORED_ROUTES)
+                .union(WorldCapabilities::GLIDING)
                 .union(WorldCapabilities::CREATIVE_FLIGHT),
             environment: WorldEnvironmentSnapshot {
                 sample_server_time_ms: 12_345,
@@ -3924,6 +3938,14 @@ mod tests {
             encode_player_pose(invalid_pose),
             Err(ProtocolError::InvalidPayload(_))
         ));
+        let mut conflicting_pose = pose;
+        conflicting_pose.flags = PLAYER_POSE_GLIDING | PLAYER_POSE_GROUNDED;
+        assert_eq!(
+            encode_player_pose(conflicting_pose),
+            Err(ProtocolError::InvalidPayload(
+                "gliding conflicts with another locomotion flag"
+            ))
+        );
 
         let mut duplicate_color = delta;
         duplicate_color.enters[1].color_index = duplicate_color.enters[0].color_index;
@@ -3933,10 +3955,10 @@ mod tests {
         ));
 
         let mut prior_version = encode_player_pose(pose).expect("encode pose version fixture");
-        prior_version[4..6].copy_from_slice(&6_u16.to_le_bytes());
+        prior_version[4..6].copy_from_slice(&19_u16.to_le_bytes());
         assert_eq!(
             decode_player_pose(&prior_version),
-            Err(ProtocolError::UnsupportedVersion(6))
+            Err(ProtocolError::UnsupportedVersion(19))
         );
     }
 

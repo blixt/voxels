@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const REMOTE_POSE_DISCONTINUITY: u16 = 1 << 2;
 pub const REMOTE_POSE_FLYING: u16 = 1 << 3;
+pub const REMOTE_POSE_GLIDING: u16 = 1 << 4;
 const MAX_SAMPLES_PER_PLAYER: usize = 32;
 const MOVING_SPEED_METRES_PER_SECOND: f32 = 0.18;
 const GAIT_STRIDE_METRES: f32 = 1.30;

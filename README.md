@@ -123,7 +123,8 @@ See [docs/architecture.md](docs/architecture.md) for format, authority, and rese
 
 - Click the world to capture the pointer.
 - Move with <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>.
-- Jump with <kbd>Space</kbd>; hold <kbd>Shift</kbd> to sprint.
+- Jump with <kbd>Space</kbd>; after releasing it, tap <kbd>Space</kbd> again while airborne to
+  deploy or retract the glider. Hold <kbd>Shift</kbd> to sprint on foot.
 - In deep water, use <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to swim along the view direction,
   <kbd>Space</kbd> to ascend, and <kbd>Shift</kbd> to dive.
 - Look with the mouse; <kbd>Esc</kbd> releases pointer lock.

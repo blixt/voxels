@@ -31,7 +31,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 19;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 20;
 pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 6;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
@@ -163,6 +163,8 @@ impl Default for PresenceConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GameplayConfig {
+    /// Advertise and accept the normal airborne glider pose flag.
+    pub allow_gliding: bool,
     /// Advertise and accept the bounded creative-flight pose flag. This is intended for authored
     /// development worlds; movement credit and velocity limits remain authoritative.
     pub allow_creative_flight: bool,
@@ -185,6 +187,7 @@ pub struct GameplayConfig {
 impl Default for GameplayConfig {
     fn default() -> Self {
         Self {
+            allow_gliding: true,
             allow_creative_flight: false,
             interaction_reach_centimetres: 500,
             interaction_latency_slack_centimetres: 100,
@@ -1020,7 +1023,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 19
+schema_version = 20
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -1061,6 +1064,7 @@ prediction_error_centimetres = 25
 look_error_milliradians = 175
 
 [gameplay]
+allow_gliding = true
 allow_creative_flight = false
 interaction_reach_centimetres = 500
 interaction_latency_slack_centimetres = 100
@@ -1159,12 +1163,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 19", "schema_version = 18");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 20", "schema_version = 19");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 19,
-                found: 18,
+                expected: 20,
+                found: 19,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");

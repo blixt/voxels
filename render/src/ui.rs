@@ -1395,9 +1395,9 @@ impl MissionControlUi {
             } else if self.stats.navigation.creative_flight {
                 "WASD FLY  ·  SPACE RISE  ·  SHIFT DESCEND  ·  F3 WORLD LAB"
             } else if layout.toast.width < 500.0 {
-                "WASD MOVE  ·  SPACE JUMP  ·  F3 WORLD LAB"
+                "WASD MOVE  ·  SPACE JUMP / GLIDE  ·  F3 WORLD LAB"
             } else {
-                "CLICK TO LOOK  ·  WASD MOVE  ·  SPACE JUMP  ·  LMB DIG  ·  RMB PLACE  ·  F3 WORLD LAB"
+                "CLICK TO LOOK  ·  WASD MOVE  ·  SPACE JUMP / GLIDE  ·  LMB DIG  ·  RMB PLACE  ·  F3 WORLD LAB"
             };
             let toast = self.gameplay_toast.as_deref().unwrap_or(default_toast);
             push_text(

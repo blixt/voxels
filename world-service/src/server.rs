@@ -45,9 +45,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v19/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v19/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v19";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v20/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v20/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v20";
 const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
@@ -354,6 +354,11 @@ fn prepare_world(
         .union(WorldCapabilities::SERVER_EDITS)
         .union(WorldCapabilities::ENVIRONMENT)
         .union(WorldCapabilities::PLAYER_PRESENCE);
+    let capabilities = if config.gameplay.allow_gliding {
+        capabilities.union(WorldCapabilities::GLIDING)
+    } else {
+        capabilities
+    };
     let capabilities = if config.gameplay.allow_creative_flight {
         capabilities.union(WorldCapabilities::CREATIVE_FLIGHT)
     } else {
@@ -2824,7 +2829,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v19, test-local-token"),
+            HeaderValue::from_static("voxels.world.v20, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -2848,6 +2853,7 @@ mod tests {
         assert_eq!(opened.recommended_in_flight_batches, 2);
         assert_eq!(opened.identity, identity);
         assert!(opened.capabilities.contains(WorldCapabilities::SURFACE_LOD));
+        assert!(opened.capabilities.contains(WorldCapabilities::GLIDING));
         let spawn_top = VoxelCoord::new(opened.spawn.x, opened.spawn.height, opened.spawn.z);
         let expected_eye_y = (opened.spawn.height + 1) as f32 * voxels_world::VOXEL_SIZE_METRES
             + DEFAULT_PLAYER_EYE_HEIGHT_METRES
@@ -3792,7 +3798,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v19, test-local-token"),
+            HeaderValue::from_static("voxels.world.v20, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -3827,7 +3833,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v19, test-local-token"),
+            HeaderValue::from_static("voxels.world.v20, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket

@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 20;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 21;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -655,9 +655,9 @@ mod tests {
                 controls_enabled: true,
             },
             world: WorldTransportConfig {
-                endpoint: "ws://127.0.0.1:9777/v19/world".to_owned(),
-                presence_endpoint: "ws://127.0.0.1:9777/v19/presence".to_owned(),
-                subprotocol: "voxels.world.v19".to_owned(),
+                endpoint: "ws://127.0.0.1:9777/v20/world".to_owned(),
+                presence_endpoint: "ws://127.0.0.1:9777/v20/presence".to_owned(),
+                subprotocol: "voxels.world.v20".to_owned(),
                 auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
                 max_in_flight_batches: 8,
                 buffered_amount_high_water_bytes: 8 * 1024 * 1024,
@@ -775,18 +775,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 20", "schema_version = 19");
+        let wrong_schema = fixture.replace("schema_version = 21", "schema_version = 20");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 19,
+                found: 20,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 20",
-            "schema_version = 20\nunknown_root = true",
+            "schema_version = 21",
+            "schema_version = 21\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),

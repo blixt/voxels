@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 use uuid::Uuid;
 use voxels_world::protocol::{
-    PLAYER_POSE_DISCONTINUITY, PLAYER_POSE_FLYING, PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING,
-    PlayerId, PlayerIdentity, PlayerPoseUpdate, PlayerPresenceState, PlayerPresenceUpdate,
-    PlayerResume, PresenceDelta, PresenceSessionId, encode_presence_delta,
+    PLAYER_POSE_DISCONTINUITY, PLAYER_POSE_FLYING, PLAYER_POSE_GLIDING, PLAYER_POSE_GROUNDED,
+    PLAYER_POSE_SWIMMING, PlayerId, PlayerIdentity, PlayerPoseUpdate, PlayerPresenceState,
+    PlayerPresenceUpdate, PlayerResume, PresenceDelta, PresenceSessionId, encode_presence_delta,
 };
 use voxels_world::{VOXEL_SIZE_METRES, VoxelCoord};
 
@@ -377,6 +377,9 @@ impl PresenceHub {
         }
         if pose.flags & PLAYER_POSE_FLYING != 0 && !self.gameplay.allow_creative_flight {
             return PoseAdmission::Invalid("creative flight is not enabled for this world");
+        }
+        if pose.flags & PLAYER_POSE_GLIDING != 0 && !self.gameplay.allow_gliding {
+            return PoseAdmission::Invalid("gliding is not enabled for this world");
         }
         let horizontal_velocity_squared = pose.linear_velocity_metres_per_second[0].mul_add(
             pose.linear_velocity_metres_per_second[0],
@@ -849,7 +852,8 @@ fn valid_pose(pose: PlayerPoseUpdate) -> bool {
     const CLIENT_FLAGS: u16 = PLAYER_POSE_GROUNDED
         | PLAYER_POSE_SWIMMING
         | PLAYER_POSE_DISCONTINUITY
-        | PLAYER_POSE_FLYING;
+        | PLAYER_POSE_FLYING
+        | PLAYER_POSE_GLIDING;
     pose.sequence != 0
         && valid_position(pose.eye_position_metres)
         && pose
@@ -858,6 +862,8 @@ fn valid_pose(pose: PlayerPoseUpdate) -> bool {
             .all(f32::is_finite)
         && valid_look(pose.look_yaw_radians, pose.look_pitch_radians)
         && pose.flags & !CLIENT_FLAGS == 0
+        && (pose.flags & PLAYER_POSE_GLIDING == 0
+            || pose.flags & (PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING | PLAYER_POSE_FLYING) == 0)
 }
 
 fn valid_position(position: [f32; 3]) -> bool {
@@ -1212,6 +1218,41 @@ mod tests {
         assert_eq!(
             enabled.accept_pose(&enabled_attachment, too_fast),
             PoseAdmission::Invalid("player velocity exceeds the authoritative limit")
+        );
+    }
+
+    #[test]
+    fn gliding_requires_world_authority_and_an_exclusive_airborne_pose() {
+        let disabled = security_hub(GameplayConfig {
+            allow_gliding: false,
+            ..GameplayConfig::default()
+        });
+        let disabled_claim = disabled
+            .join(&identity(23), resume(0.0, 1.62, 0.0))
+            .expect("join");
+        let disabled_attachment = disabled.attach(disabled_claim.session_id).expect("attach");
+        let mut gliding = pose(1, 0.0, 0.0);
+        gliding.flags = PLAYER_POSE_GLIDING;
+        assert_eq!(
+            disabled.accept_pose(&disabled_attachment, gliding),
+            PoseAdmission::Invalid("gliding is not enabled for this world")
+        );
+
+        let enabled = security_hub(GameplayConfig::default());
+        let enabled_claim = enabled
+            .join(&identity(24), resume(0.0, 1.62, 0.0))
+            .expect("join");
+        let enabled_attachment = enabled.attach(enabled_claim.session_id).expect("attach");
+        assert_eq!(
+            enabled.accept_pose(&enabled_attachment, gliding),
+            PoseAdmission::Accepted
+        );
+        let mut conflicting = gliding;
+        conflicting.sequence = 2;
+        conflicting.flags |= PLAYER_POSE_GROUNDED;
+        assert_eq!(
+            enabled.accept_pose(&enabled_attachment, conflicting),
+            PoseAdmission::Invalid("player pose fields are invalid")
         );
     }
 

@@ -1,6 +1,6 @@
 # Multiplayer scaling envelope
 
-VXWP v19 supports one unsharded authoritative world with up to 1,024 admitted player sessions. Spatial
+VXWP v20 supports one unsharded authoritative world with up to 1,024 admitted player sessions. Spatial
 interest management is an internal replication index, not a gameplay shard: every player inside the
 same location's 256 m interest radius can discover every other player there. Players beyond that
 radius contribute no entity records or bytes to one another's presence streams.
@@ -94,7 +94,7 @@ and six independent ephemeral BrowserContexts. Each context has separate local s
 receives an independently shaped 40 ms RTT, 50/10 Mbit/s link, and must negotiate a distinct browser
 user and player identity. Five builders and one observer start together. The observer then travels at
 least 120 m from the builders, beyond the configured 96 m mid-presence tier, and all six clients must
-still render the other five articulated avatars. Per-player `/v19/world` and `/v19/presence` stream and
+still render the other five articulated avatars. Per-player `/v20/world` and `/v20/presence` stream and
 VXWP byte counts are written to `target/multiplayer-browser/latest.json`; the far observer screenshot
 is `target/multiplayer-browser/observer-far-five.png`.
 
@@ -170,7 +170,7 @@ horizontal/vertical movement credit; a client discontinuity bit cannot authorize
 require a fresh same-connection pose and bounded reach. A WAN game still needs server-owned input and
 collision simulation plus authenticated identity.
 
-Voxel edits and per-material inventories are native server authority: strict SQLite schema 5 is bound
+Voxel edits and per-material inventories are native server authority: strict SQLite schema 6 is bound
 to the world/source manifest, operations are idempotent per player/edit-session, and commits carry
 connection identity and global order, while local chunk/surface revisions prevent unrelated cache
 invalidation. The presence spatial index
