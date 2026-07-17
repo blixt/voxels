@@ -1,6 +1,14 @@
 :root {
   color-scheme: dark;
-  background: #09172a;
+  background: #0b0b0f;
+  font-family:
+    ui-rounded,
+    "SF Pro Rounded",
+    "SF Pro Display",
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
 }
 
 * {
@@ -29,8 +37,9 @@ body::before {
   content: "";
   inset: 0;
   background:
-    radial-gradient(circle at 50% 42%, rgb(40 112 154 / 28%), transparent 36%),
-    linear-gradient(150deg, #071321, #0b2139 58%, #081522);
+    radial-gradient(circle at 50% 40%, rgb(246 207 90 / 10%), transparent 31%),
+    radial-gradient(circle at 18% 82%, rgb(104 112 148 / 12%), transparent 26%),
+    linear-gradient(145deg, #0b0b0f, #13131a 58%, #0d0d12);
 }
 
 body::after {
@@ -38,24 +47,26 @@ body::after {
   white-space: pre-wrap;
   left: 50%;
   top: 48%;
-  width: min(34rem, calc(100% - 3rem));
-  padding: 1.2rem 1.4rem 1.35rem;
-  border: 1px solid rgb(151 220 255 / 22%);
-  border-radius: 0.8rem;
-  color: #e8f7ff;
+  width: min(32rem, calc(100% - 2rem));
+  padding: 1.35rem 1.5rem 1.55rem;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 1.35rem;
+  color: #f1f1ec;
   background:
-    linear-gradient(90deg, #55d6ff var(--loading-progress, 8%), transparent 0) bottom / 100% 3px
-      no-repeat,
-    rgb(5 18 31 / 76%);
-  box-shadow: 0 1.25rem 4rem rgb(0 0 0 / 30%);
+    linear-gradient(90deg, #f6cf5a var(--loading-progress, 8%), rgb(255 255 255 / 8%) 0) bottom
+      0.75rem left 1.5rem / calc(100% - 3rem) 3px no-repeat,
+    linear-gradient(145deg, rgb(36 36 45 / 91%), rgb(19 19 25 / 91%));
+  box-shadow:
+    0 1.5rem 5rem rgb(0 0 0 / 46%),
+    inset 0 1px rgb(255 255 255 / 7%);
   font:
-    500 0.92rem/1.7 ui-monospace,
-    "SFMono-Regular",
-    Menlo,
-    monospace;
-  letter-spacing: 0.015em;
+    650 0.93rem/1.75 ui-rounded,
+    "SF Pro Rounded",
+    system-ui,
+    sans-serif;
+  letter-spacing: 0.01em;
   transform: translate(-50%, -50%);
-  backdrop-filter: blur(12px);
+  backdrop-filter: blur(22px) saturate(115%);
 }
 
 body.loading::before,
@@ -64,10 +75,11 @@ body.loading::after {
 }
 
 body.load-failed::after {
-  border-color: rgb(255 126 126 / 45%);
+  border-color: rgb(255 138 138 / 42%);
   background:
-    linear-gradient(90deg, #ff7b7b 100%, transparent 0) bottom / 100% 3px no-repeat,
-    rgb(35 10 15 / 88%);
+    linear-gradient(90deg, #ff8a8a 100%, transparent 0) bottom 0.75rem left 1.5rem /
+      calc(100% - 3rem) 3px no-repeat,
+    linear-gradient(145deg, rgb(56 25 30 / 94%), rgb(24 17 22 / 94%));
 }
 
 @media (prefers-reduced-motion: reduce) {
