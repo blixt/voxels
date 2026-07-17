@@ -1,6 +1,7 @@
 # Virtual workspace: portable game/world logic, a web-free WGPU renderer, and the browser WASM leaf.
 [workspace]
 members = [
+  "bots",
   "client-config",
   "core",
   "world",
