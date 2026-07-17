@@ -3626,45 +3626,6 @@ fn pack_surface_macro_normals(normal: glam::Vec3, parent: glam::Vec3) -> u32 {
         | SURFACE_MACRO_NORMAL_FLAG
 }
 
-fn quantized_horizon_angle(center: i32, blocker: i32, distance_voxels: i32) -> u16 {
-    let rise = blocker.saturating_sub(center).max(0) as f32;
-    let slope = rise / distance_voxels.max(1) as f32;
-    if slope < 0.07 {
-        0
-    } else if slope < 0.25 {
-        1
-    } else if slope < 0.58 {
-        2
-    } else {
-        3
-    }
-}
-
-fn cardinal_horizon_profile(
-    heights: &[i32],
-    edge: usize,
-    x: usize,
-    z: usize,
-    distance_voxels: i32,
-) -> u8 {
-    debug_assert!(x > 0 && x + 1 < edge && z > 0 && z + 1 < edge);
-    let center = heights[x + z * edge];
-    let blockers = [
-        heights[x + 1 + z * edge],
-        heights[x - 1 + z * edge],
-        heights[x + (z - 1) * edge],
-        heights[x + (z + 1) * edge],
-    ];
-    blockers
-        .into_iter()
-        .enumerate()
-        .fold(0_u8, |profile, (direction, blocker)| {
-            profile
-                | ((quantized_horizon_angle(center, blocker, distance_voxels) as u8)
-                    << (direction * 2))
-        })
-}
-
 fn surface_horizon_profiles(tile: &SurfaceTileMesh) -> Vec<u16> {
     let stride = tile.coord.stride_voxels();
     let span = tile.coord.voxel_span();
@@ -3699,23 +3660,12 @@ fn surface_horizon_profiles(tile: &SurfaceTileMesh) -> Vec<u16> {
             let Some((_, quad_index)) = heights[x + z * edge] else {
                 continue;
             };
-            let own = cardinal_horizon_profile(
-                &tile.shading.heights,
-                voxels_world::SURFACE_SHADING_EDGE_SAMPLES,
-                x + 1,
-                z + 1,
-                stride,
-            );
-            let parent = if tile.shading.parent_heights.is_empty() {
+            let own = tile.shading.horizons[x + z * edge];
+            let parent = if tile.shading.parent_horizons.is_empty() {
                 own
             } else {
-                cardinal_horizon_profile(
-                    &tile.shading.parent_heights,
-                    voxels_world::SURFACE_PARENT_SHADING_EDGE_SAMPLES,
-                    x / 2 + 1,
-                    z / 2 + 1,
-                    stride * 2,
-                )
+                let parent_edge = edge / 2;
+                tile.shading.parent_horizons[x / 2 + z / 2 * parent_edge]
             };
             let profile = u16::from(own) | (u16::from(parent) << 8);
             packed[quad_index] = profile;

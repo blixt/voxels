@@ -1,6 +1,6 @@
 # Multiplayer scaling envelope
 
-VXWP v13 supports one unsharded authoritative world with up to 512 admitted player sessions. Spatial
+VXWP v14 supports one unsharded authoritative world with up to 512 admitted player sessions. Spatial
 interest management is an internal replication index, not a gameplay shard: every player inside the
 same location's 256 m interest radius can discover every other player there. Players beyond that
 radius contribute no entity records or bytes to one another's presence streams.

@@ -7,7 +7,7 @@ provider therefore adds no provider branch, model dependency, or Metal API to th
 
 ## Why binary WebSocket first
 
-VXWP v13 uses the standard `WebSocket` API over loopback. This is the best first transport for
+VXWP v14 uses the standard `WebSocket` API over loopback. This is the best first transport for
 reliable chunk assets: it is mature, works in a dedicated worker, and requires neither an HTTP/3
 certificate setup nor WebRTC signaling. Axum's native Rust server disables Nagle delay, and the
 application bounds outstanding work so classic WebSocket's missing receive-side backpressure cannot
@@ -39,13 +39,13 @@ The [W3C WebTransport specification][webtransport-spec] supports carrying the sa
 envelopes on a future reliable stream. Transport choice is deliberately below world identity,
 request correlation, and chunk codecs.
 
-## VXWP v13 contract
+## VXWP v14 contract
 
 Each WebSocket message contains exactly one little-endian VXWP envelope with `VXWP` magic, protocol
 version, message kind, request ID, payload length, and reserved fields. The format is code-versioned;
 Rust enum layout and Serde output are not wire formats.
 
-1. The browser upgrades `/v13/world`, offering `voxels.world.v13` and the configured local auth token,
+1. The browser upgrades `/v14/world`, offering `voxels.world.v14` and the configured local auth token,
    then sends `OpenWorld` with its maximum in-flight batch count and browser-local player claim.
 2. The daemon replies with `WorldOpened`: immutable world manifest, source identity/hash,
    capabilities, negotiated request window, echoed player claim, spawn sample, authoritative resume
@@ -59,19 +59,19 @@ Rust enum layout and Serde output are not wire formats.
    and coordinate keys, and every decoded product is checked against the negotiated source identity.
 5. Each successful near item carries the existing palette/bit-packed VXCH chunk plus an exact,
    palette/bit-packed meshing halo. Both are integrity checked before meshing.
-6. Surface meshes use a separate `VXST` v4 payload containing bounded terrain, water, patch
-   boundary-face ranges, and child/parent shading-height grids. Interactive and horizon ownership
-   activate at their own complete-level boundaries; the coarse parent remains resident until its
-   replacement is complete, and the renderer derives exact height-matched connectors from the two
-   resident profiles.
+6. Surface meshes use a separate `VXST` v5 payload containing bounded terrain, water, patch
+   boundary-face ranges, child/parent shading-height grids, and compact cardinal landscape-horizon
+   profiles. Interactive and horizon ownership activate at their own complete-level boundaries; the
+   coarse parent remains resident until its replacement is complete, and the renderer derives exact
+   height-matched connectors and lighting morphs from the two resident profiles.
 7. Every chunk or surface result body is independently Brotli-compressed at quality 2 with a 20-bit
-   window. Its mandatory v13 envelope declares the exact uncompressed length; the decoder rejects
+   window. Its mandatory v14 envelope declares the exact uncompressed length; the decoder rejects
    unknown codecs, nonzero reserved bytes, outputs above the 16 MiB frame bound, truncated streams,
    and streams producing even one byte beyond the declaration before semantic validation.
 8. `Cancel` is best effort. Late, canceled, mismatched, or stale-revision responses are discarded;
    they cannot resurrect an evicted scheduler ticket.
 9. `WorldOpened` also returns a connection-scoped, random presence session token. The browser uses
-   it to open `/v13/presence` on a dedicated socket; a token cannot be reused by another world
+   it to open `/v14/presence` on a dedicated socket; a token cannot be reused by another world
    connection.
 10. Browsers send bounded `PlayerPose` latest-state frames. The server validates monotonic sequence,
     finite coordinates, update rate, reported velocity, and receipt-time horizontal/vertical movement

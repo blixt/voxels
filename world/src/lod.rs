@@ -3,7 +3,7 @@ use crate::{
     EditMap, FEATURE_MAX_RADIUS_VOXELS, Generator, Material, SEA_LEVEL_VOXELS, SkylineFeature,
     SkylineFeatureKind, TreeSpecies, VoxelCoord,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 /// Every surface LOD tile contains the same number of cells. Increasing the level therefore
@@ -18,6 +18,11 @@ pub const SURFACE_PATCHES_PER_TILE_EDGE: i32 = SURFACE_TILE_EDGE_CELLS / SURFACE
 pub const SURFACE_LOD_LEVEL_COUNT: usize = 6;
 pub const SURFACE_SHADING_EDGE_SAMPLES: usize = 34;
 pub const SURFACE_PARENT_SHADING_EDGE_SAMPLES: usize = 18;
+pub const SURFACE_HORIZON_CELL_COUNT: usize =
+    (SURFACE_TILE_EDGE_CELLS * SURFACE_TILE_EDGE_CELLS) as usize;
+pub const SURFACE_PARENT_HORIZON_CELL_COUNT: usize =
+    (SURFACE_TILE_EDGE_CELLS * SURFACE_TILE_EDGE_CELLS / 4) as usize;
+const SURFACE_HORIZON_SAMPLE_RADII: [i32; 6] = [1, 2, 4, 8, 16, 32];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
@@ -328,6 +333,14 @@ pub struct SurfaceTileMesh {
 pub struct SurfaceShading {
     pub heights: Vec<i32>,
     pub parent_heights: Vec<i32>,
+    /// Four cardinal two-bit horizon angles per terrain cell. Horizons sample logarithmically
+    /// through one tile span, so the renderer can evaluate broad self-shadowing for a moving sun
+    /// without a shadow texture or a per-frame terrain traversal.
+    pub horizons: Vec<u8>,
+    /// The exact profile the same world positions receive at the next-coarser level. Retaining it
+    /// alongside parent heights lets lighting use the geometry morph instead of switching at an
+    /// LOD boundary.
+    pub parent_horizons: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -720,6 +733,68 @@ pub fn generate_surface_tile_mesh_with_features_and_shading(
     )
 }
 
+fn quantized_surface_horizon(center: i32, blocker: i32, distance_voxels: i32) -> u8 {
+    let rise = i64::from(blocker).saturating_sub(i64::from(center)).max(0);
+    let distance = i64::from(distance_voxels.max(1));
+    if rise * 100 < distance * 7 {
+        0
+    } else if rise * 4 < distance {
+        1
+    } else if rise * 100 < distance * 58 {
+        2
+    } else {
+        3
+    }
+}
+
+fn cached_surface_height(
+    surface: &dyn Fn(i32, i32) -> (i32, Material),
+    cache: &mut HashMap<(i32, i32), i32>,
+    x: i32,
+    z: i32,
+) -> i32 {
+    if let Some(height) = cache.get(&(x, z)) {
+        return *height;
+    }
+    let height = surface(x, z).0;
+    cache.insert((x, z), height);
+    height
+}
+
+fn generate_surface_horizons(
+    origin: [i32; 2],
+    edge: i32,
+    stride: i32,
+    surface: &dyn Fn(i32, i32) -> (i32, Material),
+) -> Vec<u8> {
+    let mut cache = HashMap::with_capacity((edge * edge * 3) as usize);
+    let mut horizons = Vec::with_capacity((edge * edge) as usize);
+    let directions = [(1_i32, 0_i32), (-1, 0), (0, -1), (0, 1)];
+    for cell_z in 0..edge {
+        for cell_x in 0..edge {
+            let x = offset_clamped(origin[0], cell_x * stride + stride / 2);
+            let z = offset_clamped(origin[1], cell_z * stride + stride / 2);
+            let center = cached_surface_height(surface, &mut cache, x, z);
+            let mut packed = 0_u8;
+            for (direction_index, [direction_x, direction_z]) in
+                directions.map(|(x, z)| [x, z]).into_iter().enumerate()
+            {
+                let mut horizon = 0_u8;
+                for radius in SURFACE_HORIZON_SAMPLE_RADII {
+                    let distance = radius * stride;
+                    let blocker_x = offset_clamped(x, direction_x * distance);
+                    let blocker_z = offset_clamped(z, direction_z * distance);
+                    let blocker = cached_surface_height(surface, &mut cache, blocker_x, blocker_z);
+                    horizon = horizon.max(quantized_surface_horizon(center, blocker, distance));
+                }
+                packed |= horizon << (direction_index * 2);
+            }
+            horizons.push(packed);
+        }
+    }
+    horizons
+}
+
 fn generate_surface_tile_mesh_with_options(
     coord: SurfaceTileCoord,
     surface: &dyn Fn(i32, i32) -> (i32, Material),
@@ -886,9 +961,9 @@ fn generate_surface_tile_mesh_with_options(
             })
             .collect()
     };
+    let parent_surface = parent_shading_surface.unwrap_or(shading_surface);
     let parent_heights = coord.level.next_coarser().map_or_else(Vec::new, |_| {
         let parent_stride = stride * 2;
-        let parent_surface = parent_shading_surface.unwrap_or(shading_surface);
         (-1..=(SURFACE_TILE_EDGE_CELLS / 2))
             .flat_map(|sample_z| {
                 (-1..=(SURFACE_TILE_EDGE_CELLS / 2)).map(move |sample_x| {
@@ -901,6 +976,20 @@ fn generate_surface_tile_mesh_with_options(
             })
             .collect()
     });
+    let horizons = generate_surface_horizons(
+        [origin_x, origin_z],
+        SURFACE_TILE_EDGE_CELLS,
+        stride,
+        shading_surface,
+    );
+    let parent_horizons = coord.level.next_coarser().map_or_else(Vec::new, |_| {
+        generate_surface_horizons(
+            [origin_x, origin_z],
+            SURFACE_TILE_EDGE_CELLS / 2,
+            stride * 2,
+            parent_surface,
+        )
+    });
     SurfaceTileMesh {
         coord,
         quads,
@@ -908,6 +997,8 @@ fn generate_surface_tile_mesh_with_options(
         shading: SurfaceShading {
             heights,
             parent_heights,
+            horizons,
+            parent_horizons,
         },
     }
 }
@@ -2521,6 +2612,51 @@ mod tests {
                 assert_eq!(back_quad.origin[1], surface(x, span - stride / 2).0);
                 assert_eq!(forward_quad.origin[1], surface(x, span + stride / 2).0);
                 assert_eq!(back_quad.origin[2] + stride, forward_quad.origin[2]);
+            }
+        }
+    }
+
+    #[test]
+    fn horizon_profile_detects_a_ridge_beyond_the_local_slope_samples() {
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0);
+        let surface = |x: i32, _z: i32| {
+            if x >= 49 {
+                (16, Material::Grass)
+            } else {
+                (0, Material::Grass)
+            }
+        };
+        let mesh = generate_surface_tile_mesh_with(coord, surface);
+        let cell_x = 8_usize;
+        let cell_z = 8_usize;
+        let center_x = cell_x as i32 * coord.stride_voxels() + coord.stride_voxels() / 2;
+        assert_eq!(surface(center_x, 0).0, surface(center_x + 2, 0).0);
+        assert_eq!(mesh.shading.horizons[cell_x + cell_z * 32] & 3, 2);
+    }
+
+    #[test]
+    fn child_parent_horizons_are_the_parent_tiles_exact_profiles() {
+        let surface = |x: i32, z: i32| {
+            (
+                x.div_euclid(11) - z.div_euclid(19) + (x + z).div_euclid(37),
+                Material::Grass,
+            )
+        };
+        let child = generate_surface_tile_mesh_with(
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
+            surface,
+        );
+        let parent = generate_surface_tile_mesh_with(
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride4, 0, 0),
+            surface,
+        );
+        for z in 0..16_usize {
+            for x in 0..16_usize {
+                assert_eq!(
+                    child.shading.parent_horizons[x + z * 16],
+                    parent.shading.horizons[x + z * 32],
+                    "parent horizon differs at ({x}, {z})",
+                );
             }
         }
     }
