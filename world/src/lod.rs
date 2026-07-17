@@ -1419,11 +1419,13 @@ fn append_ecology_tree_proxy(
     // second hand-authored silhouette. Vertical leaf slices are grouped into progressively larger
     // bands; the union bounds preserve aggregate foliage area as detail is removed. This is the
     // voxel-world equivalent of Nanite foliage's area-preserving aggregate representation.
-    let crown_band_count = match level {
-        SurfaceLodLevel::Stride2 => 7,
-        SurfaceLodLevel::Stride4 => 6,
-        SurfaceLodLevel::Stride8 => 5,
-        SurfaceLodLevel::Stride16 => 4,
+    let maximum_crown_bands = match level {
+        // At the 9.6 m canonical handoff a 10 cm slice is still several pixels tall. Preserve far
+        // more of the canonical crown profile here, while bounding server bytes and GPU quads.
+        SurfaceLodLevel::Stride2 => 24,
+        SurfaceLodLevel::Stride4 => 14,
+        SurfaceLodLevel::Stride8 => 9,
+        SurfaceLodLevel::Stride16 => 5,
         SurfaceLodLevel::Stride32 => 3,
         SurfaceLodLevel::Stride64 => 2,
     };
@@ -1477,6 +1479,7 @@ fn append_ecology_tree_proxy(
     let crown_min_y = bounds[0][1] + first_leaf as i32;
     let crown_max_y = bounds[0][1] + last_leaf as i32 + 1;
     let crown_height = crown_max_y - crown_min_y;
+    let crown_band_count = (crown_height as usize).min(maximum_crown_bands).max(1) as i32;
     for band in 0..crown_band_count {
         let min_y = crown_min_y + crown_height * band / crown_band_count;
         let max_y = crown_min_y + crown_height * (band + 1) / crown_band_count;
@@ -1616,7 +1619,10 @@ mod tests {
             let mut near = Vec::new();
             append_skyline_proxy(&mut near, SurfaceLodLevel::Stride2, feature);
             assert!(!near.is_empty(), "{species:?} lacked a near proxy");
-            assert!(near.len() <= 60, "{species:?} exceeded ten proxy boxes");
+            assert!(
+                near.len() <= 150,
+                "{species:?} exceeded twenty-five near proxy boxes"
+            );
             assert!(near.iter().any(|quad| quad.material == Material::Wood));
             assert!(near.iter().any(|quad| quad.material == Material::Leaves));
 
@@ -1750,20 +1756,20 @@ mod tests {
             }
         }
         assert!(
-            worst_near_iou >= 0.82,
+            worst_near_iou >= 0.90,
             "canonical-to-stride-2 silhouette IoU regressed to {worst_near_iou:.3}"
         );
         assert!(
-            worst_adjacent_iou >= 0.80,
+            worst_adjacent_iou >= 0.81,
             "adjacent tree LOD silhouette IoU regressed to {worst_adjacent_iou:.3}"
         );
         assert!(
-            worst_near_area_ratio[0] >= 0.98 && worst_near_area_ratio[1] <= 1.25,
+            worst_near_area_ratio[0] >= 0.99 && worst_near_area_ratio[1] <= 1.12,
             "near proxy area ratio escaped {:?}",
             worst_near_area_ratio
         );
         assert!(
-            worst_centroid_shift <= 2.75,
+            worst_centroid_shift <= 2.5,
             "adjacent tree LOD centroid shifted {worst_centroid_shift:.2} voxels"
         );
     }
