@@ -1,5 +1,9 @@
 # Performance baselines
 
+This file keeps chronological renderer and runtime decision baselines. The canonical command index,
+including native multiplayer load, browser correctness, shaped-network, and portable benchmark
+surfaces, is [Testing and performance](testing.md).
+
 Performance changes must keep a reproducible before/after number beside the architectural reason for
 the change. Native Criterion results are stable microbenchmarks for portable Rust algorithms; browser
 Mission Control and `window.__VOXELS__.snapshot()` cover integrated frame pacing and residency.

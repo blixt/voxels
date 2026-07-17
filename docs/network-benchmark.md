@@ -1,5 +1,9 @@
 # Remote world streaming benchmarks
 
+This is the shaped-link streaming suite. See the canonical
+[testing and performance map](testing.md) to choose between it, native bot capacity, the six-browser
+collaboration gate, renderer profiles, and portable microbenchmarks.
+
 `vp run bench:network` is the repeatable end-to-end regression suite for native-server world
 streaming. It builds release WASM, writes temporary client/server configs, starts its own
 `voxels-worldd`, inserts a deterministic full-duplex TCP shaper, runs isolated real-Chrome contexts,

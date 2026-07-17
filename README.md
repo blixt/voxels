@@ -27,6 +27,12 @@ shaper, release preview, and isolated Chrome contexts; it reports viewport/full-
 stream bytes, message attribution, and offline compression headroom. Compare two JSON artifacts with
 `vp run bench:network:compare -- <baseline.json> <candidate.json>`; see
 [Remote world streaming benchmarks](docs/network-benchmark.md).
+`vp run test:bots` is a fast four-client native multiplayer smoke. `vp run bench:bots` drives
+4/8/16/32/64 protocol-faithful explorers, diggers, builders, and followers while measuring server and
+driver CPU/RAM, exact wire traffic, SQLite growth, edit latency, and one real Chromium observer.
+All verification and profiling entry points are indexed in the canonical
+[testing and performance map](docs/testing.md); the initial bot capacity results are in the
+[2026-07-17 load report](docs/20260717-bot-load-report.md).
 `vp run terrain:fetch`, `vp run terrain:counterproof`, `vp run terrain:smoke`,
 `vp run terrain:base`, `vp run terrain:detail`, and `vp run terrain:survey` exercise the optional
 native Rust/Metal Terrain Diffusion provider on Apple silicon; see

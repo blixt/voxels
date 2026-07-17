@@ -57,6 +57,12 @@ Valve likewise documents snapshot rate limits, interpolation, and bounded extrap
 
 ## Deterministic scale checks
 
+The canonical command map, including native bot populations and browser gates, is
+[Testing and performance](testing.md). `vp run bench:bots` adds real VXWP movement, terrain
+streaming, digging, building, following, process sampling, exact wire accounting, SQLite growth, and
+one Chromium observer at 4/8/16/32/64 clients. See the
+[2026-07-17 bot load baseline](20260717-bot-load-report.md) for measured results.
+
 Run the focused optimized probe with:
 
 ```sh
@@ -90,10 +96,10 @@ VXWP byte counts are written to `target/multiplayer-browser/latest.json`; the fa
 is `target/multiplayer-browser/observer-far-five.png`.
 
 The harness also samples a steady-state frame-history window for every context. Because all six
-unthrottled WebGPU renderers contend on one local GPU and worker pool, this is a bounded-stall gate
-(67 ms p95 and 100 ms maximum), not a claim about each remote player's independent device. Exact
-p95, maximum, over-33.33 ms count, and dropped-history count remain in the JSON so local contention
-regressions are visible rather than hidden behind one final-frame sample.
+unthrottled WebGPU renderers contend on one local GPU and worker pool, this is a bounded-stall gate,
+not a claim about each remote player's independent device. The current limits are versioned into the
+result JSON from the runner; exact p95, maximum, over-33.33 ms count, and dropped-history count remain
+there so local contention regressions are visible rather than hidden behind one final-frame sample.
 
 This deliberately does not reuse the persistence browser test's same-profile BroadcastChannel. The
 strict scenario uses five distinct world sockets to submit 40 reachable voxels through the production
