@@ -16,6 +16,8 @@ pub const PLAYER_HEIGHT_METRES: f32 = 1.78;
 pub const PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 const WALK_SPEED: f32 = 4.6;
 const SPRINT_MULTIPLIER: f32 = 1.55;
+const CREATIVE_FLIGHT_SPEED: f32 = 8.0;
+const CREATIVE_FLIGHT_RESPONSE: f32 = 10.0;
 const JUMP_SPEED: f32 = 5.6;
 const GRAVITY: f32 = 19.5;
 const STEP_HEIGHT: f32 = 0.35;
@@ -275,6 +277,16 @@ pub struct InputState {
     sprint: bool,
 }
 
+/// Player locomotion is explicit so developer flight cannot silently leak into normal collision
+/// semantics. Creative flight still collides with canonical voxels; it is a movement tool, not a
+/// spectator/noclip mode.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LocomotionMode {
+    #[default]
+    Walking,
+    CreativeFlight,
+}
+
 impl InputState {
     pub fn set_key(&mut self, code: u8, pressed: bool) {
         match code {
@@ -303,6 +315,7 @@ pub struct CameraState {
     pub pitch: f32,
     pub velocity: Vec3,
     pub grounded: bool,
+    locomotion: LocomotionMode,
     jump_was_down: bool,
     fluid: FluidState,
 }
@@ -321,6 +334,7 @@ impl CameraState {
             pitch: -0.18,
             velocity: Vec3::ZERO,
             grounded: false,
+            locomotion: LocomotionMode::Walking,
             jump_was_down: false,
             fluid: FluidState::default(),
         }
@@ -342,6 +356,7 @@ impl CameraState {
             },
             velocity: Vec3::ZERO,
             grounded: false,
+            locomotion: LocomotionMode::Walking,
             jump_was_down: false,
             fluid: FluidState::default(),
         }
@@ -370,6 +385,20 @@ impl CameraState {
         self.fluid
     }
 
+    pub const fn locomotion(self) -> LocomotionMode {
+        self.locomotion
+    }
+
+    pub fn set_locomotion(&mut self, locomotion: LocomotionMode) {
+        if self.locomotion == locomotion {
+            return;
+        }
+        self.locomotion = locomotion;
+        self.grounded = false;
+        self.jump_was_down = false;
+        self.velocity.y = 0.0;
+    }
+
     pub fn intersects_voxel(self, voxel: [i32; 3], voxel_size: f32) -> bool {
         voxel_size.is_finite()
             && voxel_size > 0.0
@@ -387,6 +416,43 @@ impl CameraState {
             return;
         }
         let dt = dt.clamp(0.0, 0.05);
+        if self.locomotion == LocomotionMode::CreativeFlight {
+            let forward = Vec3::new(self.yaw.sin(), 0.0, -self.yaw.cos());
+            let right = Vec3::new(-forward.z, 0.0, forward.x);
+            let mut wish = Vec3::ZERO;
+            if input.forward {
+                wish += forward;
+            }
+            if input.backward {
+                wish -= forward;
+            }
+            if input.right {
+                wish += right;
+            }
+            if input.left {
+                wish -= right;
+            }
+            if input.jump {
+                wish += Vec3::Y;
+            }
+            if input.sprint {
+                wish -= Vec3::Y;
+            }
+            let target = wish.normalize_or_zero() * CREATIVE_FLIGHT_SPEED;
+            let response = 1.0 - (-CREATIVE_FLIGHT_RESPONSE * dt).exp();
+            self.velocity += (target - self.velocity) * response;
+            self.grounded = false;
+            self.jump_was_down = input.jump;
+            self.move_horizontal(
+                Vec2::new(self.velocity.x, self.velocity.z) * dt,
+                voxel_size,
+                false,
+                &mut sample_voxel,
+            );
+            self.move_axis(1, self.velocity.y * dt, voxel_size, &mut sample_voxel);
+            self.refresh_fluid_state(voxel_size, &mut sample_voxel);
+            return;
+        }
         let was_swimming = self.fluid.swimming;
         let horizontal_grounded;
         if was_swimming {
@@ -988,6 +1054,48 @@ mod tests {
             camera.update(&input, 1.0 / 60.0, 0.1, |x, y, _| solid_if(y < 0 || x >= 5));
         }
         assert!(camera.position.x <= 0.5 - PLAYER_RADIUS_METRES + 0.001);
+    }
+
+    #[test]
+    fn creative_flight_uses_space_and_shift_without_gravity() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, 8.0, 0.0));
+        camera.set_locomotion(LocomotionMode::CreativeFlight);
+        let mut input = InputState::default();
+        input.set_key(5, true);
+        for _ in 0..120 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+        }
+        let raised_y = camera.position.y;
+        assert!(raised_y > 14.0);
+        assert_eq!(camera.locomotion(), LocomotionMode::CreativeFlight);
+        assert!(!camera.grounded);
+
+        input.set_key(5, false);
+        input.set_key(6, true);
+        for _ in 0..120 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+        }
+        assert!(camera.position.y < raised_y - 5.0);
+    }
+
+    #[test]
+    fn creative_flight_remains_collision_bounded_and_walking_restores_gravity() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
+        camera.set_locomotion(LocomotionMode::CreativeFlight);
+        let mut input = InputState::default();
+        input.set_key(4, true);
+        for _ in 0..120 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |x, _, _| solid_if(x >= 5));
+        }
+        assert!(camera.position.x <= 0.5 - PLAYER_RADIUS_METRES + 0.001);
+
+        input.clear();
+        camera.set_locomotion(LocomotionMode::Walking);
+        let before = camera.position.y;
+        for _ in 0..12 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+        }
+        assert!(camera.position.y < before);
     }
 
     #[test]
