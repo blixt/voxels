@@ -76,8 +76,10 @@ Rust enum layout and Serde output are not wire formats.
 10. Browsers send bounded `PlayerPose` latest-state frames. The server validates monotonic sequence,
     finite coordinates, update rate, reported velocity, and receipt-time horizontal/vertical movement
     budgets. A client discontinuity bit never grants movement; discontinuities are server-authored
-    interpolation hints. The last accepted pose becomes the player's reconnect resume point. The
-    server assigns a unique color and indexes the pose in a 2D spatial cell.
+    interpolation hints. Under inbound pressure, validated poses coalesce to the newest sample before
+    authority admission; control and malformed frames remain lossless. The last accepted pose becomes
+    the player's reconnect resume point. The server assigns a unique color and indexes the pose in a
+    2D spatial cell.
 11. Presence ping/pong frames estimate the server clock with an NTP-style four-timestamp offset.
     Each subsequent ping also returns the previous observed RTT to the server. The shared world and
     presence traffic shaper learns the session's minimum RTT, raises its application pacing rate

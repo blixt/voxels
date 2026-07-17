@@ -362,7 +362,6 @@ impl PresenceHub {
         attachment: &PresenceAttachment,
         mut pose: PlayerPoseUpdate,
     ) -> PoseAdmission {
-        let now = self.now_ms();
         let min_interval_ms =
             1_000_u64.div_ceil(u64::from(self.config.max_pose_updates_per_second));
         let horizontal_speed =
@@ -391,6 +390,9 @@ impl PresenceHub {
         // Discontinuities are a server-authored presentation hint, never movement permission.
         pose.flags &= !PLAYER_POSE_DISCONTINUITY;
         let mut inner = self.lock();
+        // Admission is serialized by the hub lock. Timestamp it here so lock contention cannot
+        // make ordinary queued motion look faster than the configured receipt-time budget.
+        let now = self.now_ms();
         let (old_cell, new_cell) = {
             let Some(player) = inner.players.get_mut(&attachment.player_id) else {
                 return PoseAdmission::SessionClosed;

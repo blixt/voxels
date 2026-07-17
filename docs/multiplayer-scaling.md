@@ -143,7 +143,11 @@ cuts the rate quickly and missing feedback returns it to the floor. Rate-aware V
 turns large world products into bounded scheduling units so critical traffic can preempt bulk
 terrain before a whole WebSocket message enters transport buffers. Presence has no per-socket
 outbound queue: a socket builds the newest delta at its next tick and awaits that single send, so a
-slow client cannot accumulate stale movement frames.
+slow client cannot accumulate stale movement frames. Inbound valid poses are likewise replaceable:
+the socket reader validates them and retains one latest-state sample for authority admission, while
+pings, lifecycle, malformed, and other control frames remain lossless. Admission time is captured
+inside the serialized presence hub so lock contention cannot make valid queued motion appear faster
+than the unchanged receipt-time movement budget.
 
 Individual chunks and surface tiles use process-wide single-flight generation. Overlapping batches
 join the first computation per product, and later requesters reuse validated encoded items from a

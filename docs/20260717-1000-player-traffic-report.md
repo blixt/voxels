@@ -100,3 +100,37 @@ candidate ranking. Individual action fan-out cannot remain the long-term represe
 hundreds of players edit the same chunks continuously. The current bounded queue correctly falls
 back to canonical resynchronization under overload, but this final run proves the weighted policy
 keeps it out of that fallback for the measured workload.
+
+## VXWP v19 adaptive follow-up
+
+The same sustained command was rerun after adaptive backpressure and rate-aware fragmentation:
+
+| Metric                                  |                    VXWP v19 |
+| --------------------------------------- | --------------------------: |
+| Connected clients / visible peers       |                 1,000 / 999 |
+| Server CPU p95 / RSS peak               |           508.2% / 1.55 GiB |
+| Bot-driver CPU p95                      |                      908.1% |
+| Aggregate downstream VXWP               |                  814.19 MiB |
+| Per-client downstream p95 / max         |        0.678 / 0.726 Mbit/s |
+| Selected-rate p95 / max                 |        0.904 / 1.375 Mbit/s |
+| Presence / edits / visible world        | 467.75 / 319.14 / 25.22 MiB |
+| Accepted edits / occupied conflicts     |                 4,443 / 203 |
+| Mutations                               |                      45,543 |
+| Collision/startup chunk p95             |                  2,775.9 ms |
+| Edit p95                                |                    783.2 ms |
+| Resyncs / protocol errors / disconnects |                   0 / 0 / 0 |
+| Bandwidth-ceiling violations            |                           0 |
+| Database growth                         |                 9,291.7 KiB |
+
+The strict artifact is `target/harness/bots/latest.json`. Compared with the preceding fixed-rate
+result, server CPU rose about 5%, RSS rose about 22%, and bot-driver CPU rose substantially, while
+aggregate downstream payload fell about 17%. The client-side cost is partly the deliberately smaller
+fragment/message granularity and remains the clearest dense-load regression to optimize.
+
+The first v19 sustained probe also exposed an inbound backpressure error: reliable 30 Hz pose frames
+could accumulate and then be admitted back-to-back, making ordinary movement look like a teleport.
+The presence reader now validates and coalesces replaceable poses into one latest-state slot before
+movement admission. Ping, lifecycle, malformed, and other control frames remain lossless. Admission
+is timestamped after acquiring the serialized hub lock, so contention time cannot under-replenish
+the unchanged 500 ms movement-credit cap. The successful run above is the regression gate for both
+properties; no movement limit or interaction freshness limit was relaxed.

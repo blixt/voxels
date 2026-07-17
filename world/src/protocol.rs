@@ -1940,12 +1940,7 @@ pub fn encode_frame_fragment(
         u32::try_from(total_bytes).map_err(|_| ProtocolError::LimitExceeded("fragmented frame"))?;
     let offset =
         u32::try_from(offset).map_err(|_| ProtocolError::LimitExceeded("fragment offset"))?;
-    validate_frame_fragment_fields(
-        transfer_id,
-        total_bytes,
-        offset,
-        bytes.len(),
-    )?;
+    validate_frame_fragment_fields(transfer_id, total_bytes, offset, bytes.len())?;
     let mut payload = Vec::with_capacity(8 + bytes.len());
     push_u32(&mut payload, total_bytes);
     push_u32(&mut payload, offset);

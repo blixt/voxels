@@ -1397,8 +1397,14 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
     let (sink, source) = socket.split();
     let (outbound, outbound_rx) = mpsc::channel(8);
     let (inbound_tx, mut inbound) = mpsc::channel(128);
+    let (pose_tx, mut latest_pose) = watch::channel(None);
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let reader = tokio::spawn(read_frames(source, inbound_tx, state.max_frame_bytes));
+    let reader = tokio::spawn(read_presence_frames(
+        source,
+        inbound_tx,
+        pose_tx,
+        state.max_frame_bytes,
+    ));
     let writer = tokio::spawn(write_presence_frames(
         sink,
         outbound_rx,
@@ -1413,6 +1419,7 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
     replication_tick.tick().await;
 
     let mut peer_closed = false;
+    let mut pose_open = true;
     loop {
         tokio::select! {
             message = inbound.recv() => {
@@ -1454,26 +1461,15 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
                             break;
                         }
                     };
-                    match state.presence.accept_pose(&attachment, pose) {
-                        PoseAdmission::Accepted
-                        | PoseAdmission::IgnoredStale
-                        | PoseAdmission::IgnoredRateLimit => {}
-                        PoseAdmission::SessionClosed => {
-                            let _ = queue_presence_frame(
-                                &outbound,
-                                TrafficPriority::Critical,
-                                encode_error(0, "presence session closed"),
-                            ).await;
-                            break;
-                        }
-                        PoseAdmission::Invalid(message) => {
-                            let _ = queue_presence_frame(
-                                &outbound,
-                                TrafficPriority::Critical,
-                                encode_error(0, message),
-                            ).await;
-                            break;
-                        }
+                    if let Some(message) = pose_admission_error(
+                        state.presence.accept_pose(&attachment, pose),
+                    ) {
+                        let _ = queue_presence_frame(
+                            &outbound,
+                            TrafficPriority::Critical,
+                            encode_error(0, message),
+                        ).await;
+                        break;
                     }
                 } else if kind == presence_ping_kind() {
                     let ping = match decode_presence_ping(&bytes) {
@@ -1527,6 +1523,26 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     break;
                 }
             }
+            changed = latest_pose.changed(), if pose_open => {
+                if changed.is_err() {
+                    pose_open = false;
+                    continue;
+                }
+                let pose = *latest_pose.borrow_and_update();
+                let Some(pose) = pose else {
+                    continue;
+                };
+                if let Some(message) = pose_admission_error(
+                    state.presence.accept_pose(&attachment, pose),
+                ) {
+                    let _ = queue_presence_frame(
+                        &outbound,
+                        TrafficPriority::Critical,
+                        encode_error(0, message),
+                    ).await;
+                    break;
+                }
+            }
             _ = replication_tick.tick() => {
                 let Ok(delta_permit) = Arc::clone(&delta_slot).try_acquire_owned() else {
                     continue;
@@ -1563,9 +1579,49 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
     let _ = writer.await;
 }
 
+fn pose_admission_error(admission: PoseAdmission) -> Option<&'static str> {
+    match admission {
+        PoseAdmission::Accepted | PoseAdmission::IgnoredStale | PoseAdmission::IgnoredRateLimit => {
+            None
+        }
+        PoseAdmission::SessionClosed => Some("presence session closed"),
+        PoseAdmission::Invalid(message) => Some(message),
+    }
+}
+
 enum InboundFrame {
     Binary(Vec<u8>),
     Rejected(&'static str),
+}
+
+async fn read_presence_frames(
+    mut stream: SplitStream<WebSocket>,
+    inbound: mpsc::Sender<InboundFrame>,
+    latest_pose: watch::Sender<Option<voxels_world::protocol::PlayerPoseUpdate>>,
+    max_frame_bytes: usize,
+) {
+    while let Some(message) = stream.next().await {
+        let frame = match message {
+            Ok(Message::Binary(bytes)) if bytes.len() <= max_frame_bytes => {
+                let bytes = bytes.to_vec();
+                if message_kind(&bytes).ok() == Some(player_pose_kind())
+                    && let Ok(pose) = decode_player_pose(&bytes)
+                {
+                    latest_pose.send_replace(Some(pose));
+                    continue;
+                }
+                InboundFrame::Binary(bytes)
+            }
+            Ok(Message::Binary(_)) => InboundFrame::Rejected("VXWP frame exceeds configured limit"),
+            Ok(Message::Ping(_) | Message::Pong(_)) => continue,
+            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(Message::Text(_)) => InboundFrame::Rejected("VXWP accepts binary messages only"),
+        };
+        let rejected = matches!(frame, InboundFrame::Rejected(_));
+        if inbound.send(frame).await.is_err() || rejected {
+            break;
+        }
+    }
 }
 
 async fn read_frames(
