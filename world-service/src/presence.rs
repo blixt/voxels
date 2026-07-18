@@ -1178,7 +1178,7 @@ mod tests {
             PoseAdmission::Invalid("player velocity exceeds the authoritative limit")
         );
         let mut vertical = pose(1, 0.0, 0.0);
-        vertical.linear_velocity_metres_per_second = [0.0, -12.01, 0.0];
+        vertical.linear_velocity_metres_per_second = [0.0, -20.01, 0.0];
         assert_eq!(
             hub.accept_pose(&attachment, vertical),
             PoseAdmission::Invalid("player velocity exceeds the authoritative limit")

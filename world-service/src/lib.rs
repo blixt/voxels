@@ -193,7 +193,7 @@ impl Default for GameplayConfig {
             interaction_latency_slack_centimetres: 100,
             interaction_pose_max_age_ms: 1_000,
             max_horizontal_speed_centimetres_per_second: 900,
-            max_vertical_speed_centimetres_per_second: 1_200,
+            max_vertical_speed_centimetres_per_second: 2_000,
             movement_slack_centimetres: 100,
             movement_credit_window_ms: 500,
         }
@@ -1070,7 +1070,7 @@ interaction_reach_centimetres = 500
 interaction_latency_slack_centimetres = 100
 interaction_pose_max_age_ms = 1000
 max_horizontal_speed_centimetres_per_second = 900
-max_vertical_speed_centimetres_per_second = 1200
+max_vertical_speed_centimetres_per_second = 2000
 movement_slack_centimetres = 100
 movement_credit_window_ms = 500
 

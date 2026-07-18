@@ -24,6 +24,7 @@ const GLIDER_ACCELERATION: f32 = 12.0;
 const GLIDER_TERMINAL_DESCENT_SPEED: f32 = 2.2;
 const JUMP_SPEED: f32 = 5.6;
 const GRAVITY: f32 = 19.5;
+const WALK_TERMINAL_FALL_SPEED: f32 = 18.0;
 const STEP_HEIGHT: f32 = 0.35;
 const GROUND_FOLLOW_DISTANCE: f32 = 0.15;
 const COLLISION_EPSILON: f32 = 0.0001;
@@ -567,7 +568,7 @@ impl CameraState {
                 let response = 1.0 - (-(if self.grounded { 18.0 } else { 5.0 }) * dt).exp();
                 self.velocity.x += (target.x - self.velocity.x) * response;
                 self.velocity.z += (target.z - self.velocity.z) * response;
-                self.velocity.y -= GRAVITY * dt;
+                self.velocity.y = (self.velocity.y - GRAVITY * dt).max(-WALK_TERMINAL_FALL_SPEED);
             }
             horizontal_grounded = self.grounded;
         }
@@ -1101,6 +1102,18 @@ mod tests {
         }
         assert!(camera.grounded);
         assert!((camera.position.y - PLAYER_EYE_HEIGHT_METRES).abs() < 0.011);
+    }
+
+    #[test]
+    fn long_falls_converge_on_a_finite_authorizable_terminal_speed() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, 1_000.0, 0.0));
+        for _ in 0..2_000 {
+            camera.update(&InputState::default(), 1.0 / 120.0, 0.1, |_, _, _| {
+                VoxelPhysics::EMPTY
+            });
+        }
+        assert_eq!(camera.velocity.y, -WALK_TERMINAL_FALL_SPEED);
+        assert!(!camera.grounded);
     }
 
     #[test]

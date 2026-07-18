@@ -68,7 +68,8 @@ interaction_pose_max_age_ms = 1000
 # The native controller sprints at about 7.1m/s. Bounded token buckets permit modest packet gaps
 # while preventing a client from reusing the fixed slack on every pose.
 max_horizontal_speed_centimetres_per_second = 900
-max_vertical_speed_centimetres_per_second = 1200
+# Walking falls terminate at 18m/s; the remaining allowance absorbs pose sampling and rounding.
+max_vertical_speed_centimetres_per_second = 2000
 movement_slack_centimetres = 100
 movement_credit_window_ms = 500
 
