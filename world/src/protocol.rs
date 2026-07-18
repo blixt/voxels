@@ -1013,6 +1013,9 @@ fn validate_world_environment(environment: &WorldEnvironmentSnapshot) -> Result<
 }
 
 pub fn encode_chunk_batch(request: &ChunkBatchRequest) -> Result<Vec<u8>, ProtocolError> {
+    if request.request_id == 0 {
+        return Err(ProtocolError::InvalidPayload("request id must be nonzero"));
+    }
     if request.coords.is_empty() || request.coords.len() > MAX_CHUNKS_PER_BATCH {
         return Err(ProtocolError::LimitExceeded("chunk batch"));
     }
@@ -4474,6 +4477,14 @@ mod tests {
             }),
             Err(ProtocolError::LimitExceeded("chunk batch"))
         ));
+        assert_eq!(
+            encode_chunk_batch(&ChunkBatchRequest {
+                request_id: 0,
+                priority: WorldProductPriority::VisibleChunk,
+                coords: vec![ChunkCoord::new(0, 0, 0)],
+            }),
+            Err(ProtocolError::InvalidPayload("request id must be nonzero"))
+        );
 
         let duplicate = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 0, 0);
         assert!(matches!(
