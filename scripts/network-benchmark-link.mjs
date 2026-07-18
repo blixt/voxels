@@ -285,6 +285,7 @@ function shapeDirection(source, destination, inspector, direction, settings) {
   const queue = [];
   let queuedBytes = 0;
   let draining = false;
+  let sourceEnded = false;
 
   const drain = async () => {
     if (draining) return;
@@ -302,6 +303,7 @@ function shapeDirection(source, destination, inspector, direction, settings) {
       }
     }
     draining = false;
+    if (sourceEnded && !destination.destroyed) destination.end();
   };
 
   source.on("data", (chunk) => {
@@ -332,7 +334,12 @@ function shapeDirection(source, destination, inspector, direction, settings) {
     }
     void drain();
   });
-  source.on("end", () => destination.end());
+  // TCP EOF is ordered after every byte already read from the source. Preserve that ordering
+  // across artificial latency instead of truncating the delayed queue as soon as `end` fires.
+  source.on("end", () => {
+    sourceEnded = true;
+    void drain();
+  });
   source.on("error", () => destination.destroy());
 }
 
@@ -425,4 +432,8 @@ export async function createShapedLink({ listenPort, targetPort, profile }) {
   };
 }
 
-export const testInternals = Object.freeze({ SerializationClock, WebSocketFrameParser });
+export const testInternals = Object.freeze({
+  SerializationClock,
+  WebSocketFrameParser,
+  shapeDirection,
+});

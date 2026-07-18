@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
+import { PassThrough } from "node:stream";
 import { serializationMilliseconds, testInternals } from "./network-benchmark-link.mjs";
 
 function maskedFrame(
@@ -67,5 +68,30 @@ describe("network benchmark link", () => {
         frameCount: 2,
       },
     ]);
+  });
+
+  it("delivers artificially delayed bytes before forwarding TCP EOF", async () => {
+    const source = new PassThrough();
+    const destination = new PassThrough();
+    const received = [];
+    destination.on("data", (bytes) => received.push(Buffer.from(bytes)));
+    const ended = new Promise((resolve) => destination.once("end", resolve));
+    const inspector = {
+      observe: () => {},
+      observeQueue: () => {},
+      observeBackpressure: () => {},
+    };
+    testInternals.shapeDirection(source, destination, inspector, "downstream", {
+      oneWayLatencyMs: 10,
+      megabitsPerSecond: 1_000,
+      quantumBytes: 3,
+      maxQueuedBytes: 1_024,
+      clock: new testInternals.SerializationClock(),
+    });
+
+    source.end(Buffer.from("final VXWP error"));
+    await ended;
+
+    expect(Buffer.concat(received).toString("utf8")).toBe("final VXWP error");
   });
 });

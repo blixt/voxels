@@ -719,6 +719,13 @@ async function main() {
       writeFile(path.join(OUTPUT_DIRECTORY, "latest.md"), report),
     ]);
     process.stdout.write(`${report}\nJSON: ${jsonPath}\nMarkdown: ${markdownPath}\n`);
+  } catch (error) {
+    const reason = error instanceof Error ? error.stack : String(error);
+    const serviceLog = worldLogs.join("").trim();
+    throw new Error(
+      `${reason}\n\nNative world-service output:\n${serviceLog || "(no output captured)"}`,
+      { cause: error },
+    );
   } finally {
     await browser?.close();
     await previewServer?.close();
