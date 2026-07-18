@@ -62,8 +62,8 @@ impl RemotePresenceClient {
         };
         let timeline = RemotePresenceTimeline::new(interpolation)
             .map_err(|error| format!("presence interpolation: {error}"))?;
-        let mut clock = ClockSync::default();
-        clock.observe_opened(local_now_ms(), opened.environment.sample_server_time_ms);
+        let clock =
+            ClockSync::from_server_sample(local_now_ms(), opened.environment.sample_server_time_ms);
         let inner = Rc::new(PresenceInner {
             transport,
             config,
@@ -93,7 +93,7 @@ impl RemotePresenceClient {
         if opened.connection_id != self.inner.connection_id.get()
             || self.inner.session_id.get() != Some(opened.presence_session_id)
         {
-            self.inner.replace_session(opened);
+            self.inner.replace_session(opened, local_time_ms);
         }
         if self.inner.state.get() == PresenceConnectionState::WaitingToReconnect
             && local_time_ms >= self.inner.reconnect_after_ms.get()
@@ -203,6 +203,12 @@ impl Default for ClockSync {
 }
 
 impl ClockSync {
+    fn from_server_sample(local_receive_ms: f64, server_time_ms: u64) -> Self {
+        let mut clock = Self::default();
+        clock.observe_opened(local_receive_ms, server_time_ms);
+        clock
+    }
+
     fn server_time(self, local_time_ms: f64) -> f64 {
         local_time_ms + self.offset_ms
     }
@@ -544,13 +550,16 @@ impl PresenceInner {
         self.last_ping_send_ms.set(local_time_ms);
     }
 
-    fn replace_session(&self, opened: &WorldOpened) {
+    fn replace_session(&self, opened: &WorldOpened, local_time_ms: f64) {
         self.detach_socket(1001, "world session replaced");
         self.connection_id.set(opened.connection_id);
         self.session_id.set(Some(opened.presence_session_id));
         self.next_pose_sequence.set(1);
         self.next_ping_sequence.set(1);
-        self.clock.set(ClockSync::default());
+        self.clock.set(ClockSync::from_server_sample(
+            local_time_ms,
+            opened.environment.sample_server_time_ms,
+        ));
         self.timeline.borrow_mut().clear();
         self.state.set(PresenceConnectionState::WaitingToReconnect);
         self.reconnect_after_ms.set(0.0);
@@ -696,12 +705,20 @@ fn js_reason(value: wasm_bindgen::JsValue) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::final_pose_delay_ms;
+    use super::{ClockSync, final_pose_delay_ms};
 
     #[test]
     fn final_pose_waits_only_for_the_unsatisfied_send_interval() {
         assert_eq!(final_pose_delay_ms(100.0, 90.0, 33), 23);
         assert_eq!(final_pose_delay_ms(123.0, 90.0, 33), 0);
         assert_eq!(final_pose_delay_ms(150.0, f64::NEG_INFINITY, 33), 0);
+    }
+
+    #[test]
+    fn world_open_sample_seeds_server_time_before_the_first_pong() {
+        let clock = ClockSync::from_server_sample(250.0, 10_000);
+
+        assert_eq!(clock.server_time(275.0), 10_025.0);
+        assert!(clock.synchronized);
     }
 }
