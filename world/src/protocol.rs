@@ -602,65 +602,6 @@ impl EditAction {
     }
 }
 
-/// Axis-aligned outward normal of the voxel face selected by an authoritative dig command.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum VoxelFace {
-    NegativeX,
-    PositiveX,
-    NegativeY,
-    PositiveY,
-    NegativeZ,
-    PositiveZ,
-}
-
-impl VoxelFace {
-    pub const fn normal(self) -> [i8; 3] {
-        match self {
-            Self::NegativeX => [-1, 0, 0],
-            Self::PositiveX => [1, 0, 0],
-            Self::NegativeY => [0, -1, 0],
-            Self::PositiveY => [0, 1, 0],
-            Self::NegativeZ => [0, 0, -1],
-            Self::PositiveZ => [0, 0, 1],
-        }
-    }
-
-    pub const fn id(self) -> u8 {
-        match self {
-            Self::NegativeX => 1,
-            Self::PositiveX => 2,
-            Self::NegativeY => 3,
-            Self::PositiveY => 4,
-            Self::NegativeZ => 5,
-            Self::PositiveZ => 6,
-        }
-    }
-
-    pub const fn from_id(id: u8) -> Option<Self> {
-        match id {
-            1 => Some(Self::NegativeX),
-            2 => Some(Self::PositiveX),
-            3 => Some(Self::NegativeY),
-            4 => Some(Self::PositiveY),
-            5 => Some(Self::NegativeZ),
-            6 => Some(Self::PositiveZ),
-            _ => None,
-        }
-    }
-
-    pub const fn from_normal(normal: [i32; 3]) -> Option<Self> {
-        match normal {
-            [-1, 0, 0] => Some(Self::NegativeX),
-            [1, 0, 0] => Some(Self::PositiveX),
-            [0, -1, 0] => Some(Self::NegativeY),
-            [0, 1, 0] => Some(Self::PositiveY),
-            [0, 0, -1] => Some(Self::NegativeZ),
-            [0, 0, 1] => Some(Self::PositiveZ),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VoxelMutation {
     pub coord: VoxelCoord,
