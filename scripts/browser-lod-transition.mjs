@@ -36,6 +36,10 @@ const SPAWN_PILLAR_HEIGHT = Number.parseInt(
   process.env.VOXELS_LOD_TEST_PILLAR_HEIGHT ?? (BOUNDARY_COVERAGE ? "1" : "40"),
   10,
 );
+const SPAWN_PILLAR_RADIUS = Number.parseInt(
+  process.env.VOXELS_LOD_TEST_PILLAR_RADIUS ?? (BOUNDARY_COVERAGE ? "1" : WATERTIGHT ? "3" : "6"),
+  10,
+);
 const OPEN_WORLD_LAB =
   process.env.VOXELS_LOD_TEST_WORLD_LAB === "1" ||
   (BOUNDARY_COVERAGE && process.env.VOXELS_LOD_TEST_WORLD_LAB !== "0");
@@ -68,6 +72,9 @@ if (LOOK.length !== 2 || !LOOK.every(Number.isFinite)) {
 }
 if (!Number.isInteger(SPAWN_PILLAR_HEIGHT) || SPAWN_PILLAR_HEIGHT < 1) {
   throw new Error("VOXELS_LOD_TEST_PILLAR_HEIGHT must be a positive integer");
+}
+if (!Number.isInteger(SPAWN_PILLAR_RADIUS) || SPAWN_PILLAR_RADIUS < 1 || SPAWN_PILLAR_RADIUS > 32) {
+  throw new Error("VOXELS_LOD_TEST_PILLAR_RADIUS must be in 1..=32");
 }
 if (
   VIEWPORT_VALUES.length !== 2 ||
@@ -576,7 +583,7 @@ try {
     source: SOURCE,
     spawnVoxels: SPAWN,
     spawnPillarHeightVoxels: SPAWN_PILLAR_HEIGHT,
-    spawnPillarRadiusVoxels: STEP_OFF_PILLAR ? 1 : undefined,
+    spawnPillarRadiusVoxels: SPAWN_PILLAR_RADIUS,
     cascadedShadows: true,
     screenSpaceAmbientOcclusion: true,
     dayLengthSeconds: 0,
