@@ -18,6 +18,12 @@ function replaceEnvironment(name, value) {
   };
 }
 
+function requiredTomlBoolean(contents, key) {
+  const value = new RegExp(`^${key}\\s*=\\s*(true|false)\\s*(?:#.*)?$`, "mu").exec(contents)?.[1];
+  if (value === undefined) throw new Error(`missing boolean ${key} in client config`);
+  return value === "true";
+}
+
 export async function prepareBrowserWorldFixture({
   browserPort,
   prefix = "voxels-browser-world-",
@@ -193,6 +199,31 @@ export async function prepareBrowserWorldFixture({
       readFile("config/world-service.toml", "utf8"),
       readFile("config/client.toml", "utf8"),
     ]);
+    const resolvedCascadedShadows =
+      cascadedShadows ?? requiredTomlBoolean(clientSource, "cascaded_sun_shadows");
+    const resolvedScreenSpaceAmbientOcclusion =
+      screenSpaceAmbientOcclusion ??
+      requiredTomlBoolean(clientSource, "screen_space_ambient_occlusion");
+    let clientFixtureSource = clientSource
+      .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${backendPort}${WORLD_PATH}"`)
+      .replace(
+        /^presence_endpoint = .*$/m,
+        `presence_endpoint = "ws://127.0.0.1:${backendPort}${PRESENCE_PATH}"`,
+      )
+      .replace(/^subprotocol = .*$/m, `subprotocol = "${WORLD_SUBPROTOCOL}"`)
+      .replace(/^auth_subprotocol_token = .*$/m, `auth_subprotocol_token = "${authToken}"`);
+    if (cascadedShadows !== undefined) {
+      clientFixtureSource = clientFixtureSource.replace(
+        /^cascaded_sun_shadows = .*$/m,
+        `cascaded_sun_shadows = ${cascadedShadows}`,
+      );
+    }
+    if (screenSpaceAmbientOcclusion !== undefined) {
+      clientFixtureSource = clientFixtureSource.replace(
+        /^screen_space_ambient_occlusion = .*$/m,
+        `screen_space_ambient_occlusion = ${screenSpaceAmbientOcclusion}`,
+      );
+    }
     await Promise.all([
       writeFile(
         serviceConfigPath,
@@ -260,25 +291,7 @@ export async function prepareBrowserWorldFixture({
             `xz_voxels = [${spawnVoxels?.[0] ?? 0}, ${spawnVoxels?.[1] ?? 0}]`,
           ),
       ),
-      writeFile(
-        clientConfigPath,
-        clientSource
-          .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${backendPort}${WORLD_PATH}"`)
-          .replace(
-            /^presence_endpoint = .*$/m,
-            `presence_endpoint = "ws://127.0.0.1:${backendPort}${PRESENCE_PATH}"`,
-          )
-          .replace(/^subprotocol = .*$/m, `subprotocol = "${WORLD_SUBPROTOCOL}"`)
-          .replace(/^auth_subprotocol_token = .*$/m, `auth_subprotocol_token = "${authToken}"`)
-          .replace(
-            /^cascaded_sun_shadows = .*$/m,
-            `cascaded_sun_shadows = ${cascadedShadows ?? true}`,
-          )
-          .replace(
-            /^screen_space_ambient_occlusion = .*$/m,
-            `screen_space_ambient_occlusion = ${screenSpaceAmbientOcclusion ?? true}`,
-          ),
-      ),
+      writeFile(clientConfigPath, clientFixtureSource),
     ]);
 
     const restoreClientConfig = replaceEnvironment("VOXELS_CLIENT_CONFIG_PATH", clientConfigPath);
@@ -297,8 +310,8 @@ export async function prepareBrowserWorldFixture({
       serviceConfigPath,
       databasePath: path.join(directory, "world-state.sqlite3"),
       spawnVoxels: spawnVoxels ?? [0, 0],
-      cascadedShadows: cascadedShadows ?? true,
-      screenSpaceAmbientOcclusion: screenSpaceAmbientOcclusion ?? true,
+      cascadedShadows: resolvedCascadedShadows,
+      screenSpaceAmbientOcclusion: resolvedScreenSpaceAmbientOcclusion,
       dayLengthSeconds: dayLengthSeconds ?? 1_200,
       worldDayNumberAtUnixEpoch: worldDayNumberAtUnixEpoch ?? 0,
       dayFractionAtUnixEpoch: dayFractionAtUnixEpoch ?? 0.72,

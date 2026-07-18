@@ -4,7 +4,7 @@ import { prepareBrowserWorldFixture } from "./browser-world-fixture.mjs";
 import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./vxwp-contract.mjs";
 
 describe("isolated browser world fixture", () => {
-  it("binds matching temporary client and procedural server configuration", async () => {
+  it("binds matching temporary configuration and preserves omitted renderer defaults", async () => {
     const previousClient = process.env.VOXELS_CLIENT_CONFIG_PATH;
     const previousService = process.env.VOXELS_WORLD_SERVICE_CONFIG_PATH;
     const previousExternalService = process.env.VOXELS_EXTERNAL_WORLD_SERVICE;
@@ -59,5 +59,16 @@ describe("isolated browser world fixture", () => {
     expect(process.env.VOXELS_CLIENT_CONFIG_PATH).toBe(previousClient);
     expect(process.env.VOXELS_WORLD_SERVICE_CONFIG_PATH).toBe(previousService);
     expect(process.env.VOXELS_EXTERNAL_WORLD_SERVICE).toBe(previousExternalService);
+
+    const defaults = await prepareBrowserWorldFixture({ browserPort: 41_235 });
+    try {
+      const client = await readFile(defaults.clientConfigPath, "utf8");
+      expect(client).toContain("cascaded_sun_shadows = true");
+      expect(client).toContain("screen_space_ambient_occlusion = false");
+      expect(defaults.cascadedShadows).toBe(true);
+      expect(defaults.screenSpaceAmbientOcclusion).toBe(false);
+    } finally {
+      await defaults.cleanup();
+    }
   });
 });
