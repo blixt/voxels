@@ -28,30 +28,31 @@ behavioral, visual, resource, or transport evidence that the general gate cannot
 
 ## Test surfaces
 
-| Area                 | Command                                                  | What it proves                                                                               | Output                        |
-| -------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------- |
-| TypeScript           | `vp check`, `vp test`                                    | Formatting, lint, types, and script/unit contracts                                           | Terminal                      |
-| Rust and WASM        | `vp run check:rust`                                      | Workspace tests plus host and WASM Clippy                                                    | Terminal                      |
-| Production build     | `vp build`                                               | Optimized WASM, shaders, and web assets compile                                              | `dist/`                       |
-| Complete static gate | `vp run verify`                                          | All three rows above                                                                         | Terminal                      |
-| Native bot smoke     | `vp run test:bots`                                       | Four real VXWP clients connect, move, stream, edit, and replicate                            | `target/harness/bots/`        |
-| Bot population/load  | `vp run bench:bots`                                      | 4/8/16/32/64 mixed bots, process resources, disk, wire bytes, and one real browser           | `target/harness/bots/`        |
-| Six browser users    | `vp run test:multiplayer-browser -- --require-tower`     | Isolated identities, shaped WAN links, avatars, collaborative edits, and far-LOD convergence | `target/multiplayer-browser/` |
-| Remote streaming     | `vp run bench:network`                                   | Cold spawn, walk, turn, viewport readiness, full coverage, and exact link bytes              | `target/network-benchmark/`   |
-| Network comparison   | `vp run bench:network:compare -- before.json after.json` | Compatible before/after timing and byte deltas                                               | Terminal                      |
-| LOD transition       | `vp run test:lod-browser`                                | Real-browser handoff and image evidence while crossing LOD boundaries                        | `target/lod-transition/`      |
-| Watertight LOD       | `vp run test:lod-watertight-browser`                     | Strict seam/coverage regression path                                                         | `target/lod-transition/`      |
-| World Lab/UI         | `vp run test:world-lab-browser`                          | Rust UI interaction and synchronized world diagnostics                                       | `target/world-lab/`           |
-| Weather motion       | `vp run test:weather-motion-browser`                     | World-anchored clouds and downward precipitation                                             | `target/weather-motion/`      |
-| Renderer profile     | `vp run profile:browser`                                 | Release frame/CPU/GPU distributions in system Chrome                                         | `target/render-profile/`      |
-| Chromium trace       | `vp run profile:chromium`                                | The renderer profile plus a standalone CDP trace                                             | `target/render-profile/`      |
-| Sustained traversal  | `vp run profile:sustained`                               | Warmed fixed rail, allocation plateau, streaming, and frame pacing                           | `target/render-profile/`      |
-| Material cost        | `vp run profile:materials`                               | Geometry-invariant material-detail A/B                                                       | `target/render-profile/`      |
-| Day/night cost       | `vp run profile:atmosphere`                              | Synchronized celestial anchors and lighting budgets                                          | `target/render-profile/`      |
-| Weather cost         | `vp run profile:weather`                                 | Six weather anchors, geometry invariants, clouds, rain, and GPU budgets                      | `target/render-profile/`      |
-| Portable world       | `vp run bench:world`                                     | Generation, VXCH codecs, and meshing Criterion baselines                                     | `target/criterion/`           |
-| Portable simulation  | `vp run bench:core`                                      | Dry/submerged fixed-step simulation baselines                                                | `target/criterion/`           |
-| Streaming runtime    | `vp run bench:runtime`                                   | Portable runtime scheduling baselines                                                        | `target/criterion/`           |
+| Area                 | Command                                                  | What it proves                                                                               | Output                              |
+| -------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------- |
+| TypeScript           | `vp check`, `vp test`                                    | Formatting, lint, types, and script/unit contracts                                           | Terminal                            |
+| Rust and WASM        | `vp run check:rust`                                      | Workspace tests plus host and WASM Clippy                                                    | Terminal                            |
+| Production build     | `vp build`                                               | Optimized WASM, shaders, and web assets compile                                              | `dist/`                             |
+| Complete static gate | `vp run verify`                                          | All three rows above                                                                         | Terminal                            |
+| Native bot smoke     | `vp run test:bots`                                       | Four real VXWP clients connect, move, stream, edit, and replicate                            | `target/harness/bots/`              |
+| Bot population/load  | `vp run bench:bots`                                      | 4/8/16/32/64 mixed bots, process resources, disk, wire bytes, and one real browser           | `target/harness/bots/`              |
+| Six browser users    | `vp run test:multiplayer-browser -- --require-tower`     | Isolated identities, shaped WAN links, avatars, collaborative edits, and far-LOD convergence | `target/multiplayer-browser/`       |
+| Remote streaming     | `vp run bench:network`                                   | Cold spawn, walk, turn, viewport readiness, full coverage, and exact link bytes              | `target/network-benchmark/`         |
+| Network comparison   | `vp run bench:network:compare -- before.json after.json` | Compatible before/after timing and byte deltas                                               | Terminal                            |
+| LOD transition       | `vp run test:lod-browser`                                | Real-browser handoff and image evidence while crossing LOD boundaries                        | `target/lod-transition/`            |
+| Watertight LOD       | `vp run test:lod-watertight-browser`                     | Strict seam/coverage regression path                                                         | `target/lod-transition/`            |
+| Terrain boundary     | `vp run test:terrain-boundary-browser`                   | Reported vertical chunk-boundary camera, cool sky exposure, and exact browser scale          | `target/terrain-boundary-coverage/` |
+| World Lab/UI         | `vp run test:world-lab-browser`                          | Rust UI interaction and synchronized world diagnostics                                       | `target/world-lab/`                 |
+| Weather motion       | `vp run test:weather-motion-browser`                     | World-anchored clouds and downward precipitation                                             | `target/weather-motion/`            |
+| Renderer profile     | `vp run profile:browser`                                 | Release frame/CPU/GPU distributions in system Chrome                                         | `target/render-profile/`            |
+| Chromium trace       | `vp run profile:chromium`                                | The renderer profile plus a standalone CDP trace                                             | `target/render-profile/`            |
+| Sustained traversal  | `vp run profile:sustained`                               | Warmed fixed rail, allocation plateau, streaming, and frame pacing                           | `target/render-profile/`            |
+| Material cost        | `vp run profile:materials`                               | Geometry-invariant material-detail A/B                                                       | `target/render-profile/`            |
+| Day/night cost       | `vp run profile:atmosphere`                              | Synchronized celestial anchors and lighting budgets                                          | `target/render-profile/`            |
+| Weather cost         | `vp run profile:weather`                                 | Six weather anchors, geometry invariants, clouds, rain, and GPU budgets                      | `target/render-profile/`            |
+| Portable world       | `vp run bench:world`                                     | Generation, VXCH codecs, and meshing Criterion baselines                                     | `target/criterion/`                 |
+| Portable simulation  | `vp run bench:core`                                      | Dry/submerged fixed-step simulation baselines                                                | `target/criterion/`                 |
+| Streaming runtime    | `vp run bench:runtime`                                   | Portable runtime scheduling baselines                                                        | `target/criterion/`                 |
 
 [Remote world streaming benchmarks](network-benchmark.md), [multiplayer scaling](multiplayer-scaling.md),
 and [recorded renderer baselines](performance.md) explain the corresponding metrics and historical

@@ -35,6 +35,8 @@ export async function prepareBrowserWorldFixture({
   prefix = "voxels-browser-world-",
   source = "procedural-v16",
   spawnVoxels,
+  spawnPillarHeightVoxels,
+  spawnPillarRadiusVoxels,
   spawnProtectionRadiusVoxels,
   cascadedShadows,
   screenSpaceAmbientOcclusion,
@@ -68,6 +70,22 @@ export async function prepareBrowserWorldFixture({
       ))
   ) {
     throw new Error("browser fixture spawnVoxels must contain two signed 32-bit integers");
+  }
+  if (
+    spawnPillarHeightVoxels !== undefined &&
+    (!Number.isInteger(spawnPillarHeightVoxels) ||
+      spawnPillarHeightVoxels < 1 ||
+      spawnPillarHeightVoxels > 1_000)
+  ) {
+    throw new Error("browser fixture spawnPillarHeightVoxels must be in 1..=1000");
+  }
+  if (
+    spawnPillarRadiusVoxels !== undefined &&
+    (!Number.isInteger(spawnPillarRadiusVoxels) ||
+      spawnPillarRadiusVoxels < 1 ||
+      spawnPillarRadiusVoxels > 32)
+  ) {
+    throw new Error("browser fixture spawnPillarRadiusVoxels must be in 1..=32");
   }
   if (
     spawnProtectionRadiusVoxels !== undefined &&
@@ -221,6 +239,10 @@ export async function prepareBrowserWorldFixture({
       requiredTomlBoolean(clientSource, "screen_space_ambient_occlusion");
     const resolvedSpawnProtectionRadiusVoxels =
       spawnProtectionRadiusVoxels ?? requiredTomlInteger(serviceSource, "protection_radius_voxels");
+    const resolvedSpawnPillarHeightVoxels =
+      spawnPillarHeightVoxels ?? requiredTomlInteger(serviceSource, "pillar_height_voxels");
+    const resolvedSpawnPillarRadiusVoxels =
+      spawnPillarRadiusVoxels ?? requiredTomlInteger(serviceSource, "pillar_radius_voxels");
     let clientFixtureSource = clientSource
       .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${backendPort}${WORLD_PATH}"`)
       .replace(
@@ -308,6 +330,14 @@ export async function prepareBrowserWorldFixture({
             `xz_voxels = [${spawnVoxels?.[0] ?? 0}, ${spawnVoxels?.[1] ?? 0}]`,
           )
           .replace(
+            /^pillar_height_voxels = .*$/m,
+            `pillar_height_voxels = ${resolvedSpawnPillarHeightVoxels}`,
+          )
+          .replace(
+            /^pillar_radius_voxels = .*$/m,
+            `pillar_radius_voxels = ${resolvedSpawnPillarRadiusVoxels}`,
+          )
+          .replace(
             /^protection_radius_voxels = .*$/m,
             `protection_radius_voxels = ${resolvedSpawnProtectionRadiusVoxels}`,
           ),
@@ -331,6 +361,8 @@ export async function prepareBrowserWorldFixture({
       serviceConfigPath,
       databasePath: path.join(directory, "world-state.sqlite3"),
       spawnVoxels: spawnVoxels ?? [0, 0],
+      spawnPillarHeightVoxels: resolvedSpawnPillarHeightVoxels,
+      spawnPillarRadiusVoxels: resolvedSpawnPillarRadiusVoxels,
       spawnProtectionRadiusVoxels: resolvedSpawnProtectionRadiusVoxels,
       cascadedShadows: resolvedCascadedShadows,
       screenSpaceAmbientOcclusion: resolvedScreenSpaceAmbientOcclusion,

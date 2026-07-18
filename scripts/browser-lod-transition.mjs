@@ -17,18 +17,47 @@ import { prepareBrowserWorldFixture, startBrowserWorldService } from "./browser-
 
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed/i;
-const WATERTIGHT = process.argv.includes("--watertight");
+const BOUNDARY_COVERAGE = process.argv.includes("--boundary-coverage");
+const WATERTIGHT = process.argv.includes("--watertight") || BOUNDARY_COVERAGE;
 const SOURCE = process.env.VOXELS_LOD_TEST_SOURCE ?? "terrain-diffusion-30m";
-const SPAWN = (process.env.VOXELS_LOD_TEST_SPAWN ?? (WATERTIGHT ? "4194,6034" : "4208,6082"))
+const SPAWN = (
+  process.env.VOXELS_LOD_TEST_SPAWN ??
+  (BOUNDARY_COVERAGE ? "1614,294" : WATERTIGHT ? "4194,6034" : "4208,6082")
+)
   .split(",")
   .map((value) => Number.parseInt(value.trim(), 10));
-const LOOK = (process.env.VOXELS_LOD_TEST_LOOK ?? "2.074606,-0.371797")
+const LOOK = (
+  process.env.VOXELS_LOD_TEST_LOOK ??
+  (BOUNDARY_COVERAGE ? "3.326412741337916,-0.312000215053558" : "2.074606,-0.371797")
+)
   .split(",")
   .map((value) => Number.parseFloat(value.trim()));
-const VIEWPORT = { width: 1280, height: 720 };
+const SPAWN_PILLAR_HEIGHT = Number.parseInt(
+  process.env.VOXELS_LOD_TEST_PILLAR_HEIGHT ?? (BOUNDARY_COVERAGE ? "1" : "40"),
+  10,
+);
+const OPEN_WORLD_LAB =
+  process.env.VOXELS_LOD_TEST_WORLD_LAB === "1" ||
+  (BOUNDARY_COVERAGE && process.env.VOXELS_LOD_TEST_WORLD_LAB !== "0");
+const STEP_OFF_PILLAR =
+  process.env.VOXELS_LOD_TEST_STEP_OFF_PILLAR === "1" ||
+  (BOUNDARY_COVERAGE && process.env.VOXELS_LOD_TEST_STEP_OFF_PILLAR !== "0");
+const VIEWPORT_VALUES = (
+  process.env.VOXELS_LOD_TEST_VIEWPORT ?? (BOUNDARY_COVERAGE ? "1848,1345" : "1280,720")
+)
+  .split(",")
+  .map((value) => Number.parseInt(value.trim(), 10));
+const VIEWPORT = { width: VIEWPORT_VALUES[0], height: VIEWPORT_VALUES[1] };
+const DEVICE_SCALE_FACTOR = Number.parseFloat(
+  process.env.VOXELS_LOD_TEST_DPR ?? (BOUNDARY_COVERAGE ? "1.360930735930736" : "1"),
+);
 const OUTPUT_DIRECTORY = path.resolve(
   process.env.VOXELS_LOD_TEST_OUTPUT ??
-    (WATERTIGHT ? "target/lod-watertight" : "target/lod-transition"),
+    (BOUNDARY_COVERAGE
+      ? "target/terrain-boundary-coverage"
+      : WATERTIGHT
+        ? "target/lod-watertight"
+        : "target/lod-transition"),
 );
 
 if (SPAWN.length !== 2 || !SPAWN.every(Number.isInteger)) {
@@ -36,6 +65,18 @@ if (SPAWN.length !== 2 || !SPAWN.every(Number.isInteger)) {
 }
 if (LOOK.length !== 2 || !LOOK.every(Number.isFinite)) {
   throw new Error("VOXELS_LOD_TEST_LOOK must be comma-separated yaw,pitch radians");
+}
+if (!Number.isInteger(SPAWN_PILLAR_HEIGHT) || SPAWN_PILLAR_HEIGHT < 1) {
+  throw new Error("VOXELS_LOD_TEST_PILLAR_HEIGHT must be a positive integer");
+}
+if (
+  VIEWPORT_VALUES.length !== 2 ||
+  !VIEWPORT_VALUES.every((value) => Number.isInteger(value) && value > 0)
+) {
+  throw new Error("VOXELS_LOD_TEST_VIEWPORT must be two positive comma-separated integers");
+}
+if (!Number.isFinite(DEVICE_SCALE_FACTOR) || DEVICE_SCALE_FACTOR <= 0) {
+  throw new Error("VOXELS_LOD_TEST_DPR must be positive");
 }
 
 function percentile(values, fraction) {
@@ -425,45 +466,62 @@ async function analyzeWatertightTerrain(page, screenshot) {
     const width = roi.x1 - roi.x0;
     const height = roi.y1 - roi.y0;
     const skyLike = new Uint8Array(width * height);
+    const coolExposure = new Uint8Array(width * height);
     let skyLikePixels = 0;
+    let coolExposurePixels = 0;
     for (let y = roi.y0; y < roi.y1; y += 1) {
       for (let x = roi.x0; x < roi.x1; x += 1) {
         const source = (x + y * bitmap.width) * 4;
         const red = pixels[source];
         const green = pixels[source + 1];
         const blue = pixels[source + 2];
+        const target = x - roi.x0 + (y - roi.y0) * width;
         const exposedSky = red > 25 && red > green * 1.35 && red > blue * 1.08;
-        if (!exposedSky) continue;
-        skyLike[x - roi.x0 + (y - roi.y0) * width] = 1;
-        skyLikePixels += 1;
-      }
-    }
-    const visited = new Uint8Array(skyLike.length);
-    let largestSkyLikeComponent = 0;
-    for (let start = 0; start < skyLike.length; start += 1) {
-      if (skyLike[start] === 0 || visited[start] !== 0) continue;
-      const stack = [start];
-      visited[start] = 1;
-      let component = 0;
-      while (stack.length > 0) {
-        const current = stack.pop();
-        component += 1;
-        const x = current % width;
-        const y = Math.floor(current / width);
-        const neighbors = [
-          x > 0 ? current - 1 : -1,
-          x + 1 < width ? current + 1 : -1,
-          y > 0 ? current - width : -1,
-          y + 1 < height ? current + width : -1,
-        ];
-        for (const neighbor of neighbors) {
-          if (neighbor < 0 || skyLike[neighbor] === 0 || visited[neighbor] !== 0) continue;
-          visited[neighbor] = 1;
-          stack.push(neighbor);
+        if (exposedSky) {
+          skyLike[target] = 1;
+          skyLikePixels += 1;
+        }
+        // The reported boundary crack exposed a cool, bright cloud/sky layer rather than the
+        // reddish horizon covered by the original gate. Grass is green-dominant in this fixed
+        // fixture, so this also remains insensitive to normal terrain lighting changes.
+        const exposedCoolSky = (red + green + blue) / 3 > 61 && green < Math.max(red, blue) * 1.18;
+        if (exposedCoolSky) {
+          coolExposure[target] = 1;
+          coolExposurePixels += 1;
         }
       }
-      largestSkyLikeComponent = Math.max(largestSkyLikeComponent, component);
     }
+    const largestConnectedComponent = (mask) => {
+      const visited = new Uint8Array(mask.length);
+      let largest = 0;
+      for (let start = 0; start < mask.length; start += 1) {
+        if (mask[start] === 0 || visited[start] !== 0) continue;
+        const stack = [start];
+        visited[start] = 1;
+        let component = 0;
+        while (stack.length > 0) {
+          const current = stack.pop();
+          component += 1;
+          const x = current % width;
+          const y = Math.floor(current / width);
+          const neighbors = [
+            x > 0 ? current - 1 : -1,
+            x + 1 < width ? current + 1 : -1,
+            y > 0 ? current - width : -1,
+            y + 1 < height ? current + width : -1,
+          ];
+          for (const neighbor of neighbors) {
+            if (neighbor < 0 || mask[neighbor] === 0 || visited[neighbor] !== 0) continue;
+            visited[neighbor] = 1;
+            stack.push(neighbor);
+          }
+        }
+        largest = Math.max(largest, component);
+      }
+      return largest;
+    };
+    const largestSkyLikeComponent = largestConnectedComponent(skyLike);
+    const largestCoolExposureComponent = largestConnectedComponent(coolExposure);
     const sampledPixels = skyLike.length;
     return {
       roi,
@@ -472,6 +530,10 @@ async function analyzeWatertightTerrain(page, screenshot) {
       skyLikeFraction: skyLikePixels / sampledPixels,
       largestSkyLikeComponent,
       largestSkyLikeFraction: largestSkyLikeComponent / sampledPixels,
+      coolExposurePixels,
+      coolExposureFraction: coolExposurePixels / sampledPixels,
+      largestCoolExposureComponent,
+      largestCoolExposureFraction: largestCoolExposureComponent / sampledPixels,
     };
   }, screenshot.toString("base64"));
 }
@@ -513,6 +575,8 @@ try {
     prefix: "voxels-lod-transition-",
     source: SOURCE,
     spawnVoxels: SPAWN,
+    spawnPillarHeightVoxels: SPAWN_PILLAR_HEIGHT,
+    spawnPillarRadiusVoxels: STEP_OFF_PILLAR ? 1 : undefined,
     cascadedShadows: true,
     screenSpaceAmbientOcclusion: true,
     dayLengthSeconds: 0,
@@ -532,7 +596,10 @@ try {
     preview: { host: "127.0.0.1", port, strictPort: true },
   });
   browser = await chromium.launch(chromeWebGpuLaunchOptions());
-  const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1 });
+  const context = await browser.newContext({
+    viewport: VIEWPORT,
+    deviceScaleFactor: DEVICE_SCALE_FACTOR,
+  });
   const page = await context.newPage();
   page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
   page.on("console", (message) => {
@@ -543,8 +610,17 @@ try {
   await page.goto(`http://127.0.0.1:${port}`, { waitUntil: "domcontentloaded" });
   let beforeSnapshot = await waitForEngine(page, timings);
   beforeSnapshot = await setCameraLook(page, LOOK[0], LOOK[1], timings);
+  if (STEP_OFF_PILLAR) {
+    await page.keyboard.down("KeyD");
+    await page.waitForTimeout(160);
+    await page.keyboard.up("KeyD");
+  }
   const initialCentres = boundaryCentres(beforeSnapshot);
   beforeSnapshot = await waitForStableFrame(page, initialCentres, timings);
+  if (OPEN_WORLD_LAB) {
+    await page.keyboard.press("F3");
+    beforeSnapshot = await waitForStableFrame(page, initialCentres, timings);
+  }
   const beforePose = cameraPosition(beforeSnapshot);
   const before = await page.screenshot({ path: path.join(OUTPUT_DIRECTORY, "before.png") });
 
@@ -557,6 +633,8 @@ try {
       violations.push("terrain-only ROI exposed more than 0.1% sky-colored pixels");
     if (image.largestSkyLikeComponent > 32)
       violations.push("terrain-only ROI contains a connected sky-colored crack");
+    if (image.largestCoolExposureComponent > 256)
+      violations.push("terrain-only ROI contains a connected cool sky/cloud exposure");
     if (performance.frameP95Ms > 12) violations.push("frame p95 exceeded 12ms");
     if (performance.fractionAbove16_67Ms > 0.01)
       violations.push("over 1% of measured frames exceeded 16.67ms");
@@ -566,7 +644,7 @@ try {
     if (errors.length > 0) violations.push(...errors);
     const result = {
       ok: violations.length === 0,
-      mode: "watertight",
+      mode: BOUNDARY_COVERAGE ? "boundary-coverage" : "watertight",
       commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
       dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "",
       source: SOURCE,

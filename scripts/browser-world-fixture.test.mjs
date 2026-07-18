@@ -11,6 +11,8 @@ describe("isolated browser world fixture", () => {
     const fixture = await prepareBrowserWorldFixture({
       browserPort: 41_234,
       spawnVoxels: [-12_800, 25_600],
+      spawnPillarHeightVoxels: 7,
+      spawnPillarRadiusVoxels: 2,
       spawnProtectionRadiusVoxels: 3,
       cascadedShadows: false,
       screenSpaceAmbientOcclusion: false,
@@ -39,6 +41,8 @@ describe("isolated browser world fixture", () => {
       expect(service).toContain(`auth_subprotocol_token = "${fixture.authToken}"`);
       expect(service).toContain('database = "world-state.sqlite3"');
       expect(service).toContain("xz_voxels = [-12800, 25600]");
+      expect(service).toContain("pillar_height_voxels = 7");
+      expect(service).toContain("pillar_radius_voxels = 2");
       expect(service).toContain("protection_radius_voxels = 3");
       expect(service).toContain("weather_cycle_seconds = 36");
       expect(service).toContain("weather_fraction_at_unix_epoch = 0.62");
@@ -46,6 +50,8 @@ describe("isolated browser world fixture", () => {
       expect(service).toContain("cloud_base_metres = 600");
       expect(service).toContain("cloud_top_metres = 1400");
       expect(fixture.spawnVoxels).toEqual([-12_800, 25_600]);
+      expect(fixture.spawnPillarHeightVoxels).toBe(7);
+      expect(fixture.spawnPillarRadiusVoxels).toBe(2);
       expect(fixture.spawnProtectionRadiusVoxels).toBe(3);
       expect(fixture.cascadedShadows).toBe(false);
       expect(fixture.screenSpaceAmbientOcclusion).toBe(false);

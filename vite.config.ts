@@ -604,6 +604,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-lod-transition.mjs --watertight",
         cache: false,
       },
+      "test:terrain-boundary-browser": {
+        command: "node scripts/browser-lod-transition.mjs --boundary-coverage",
+        cache: false,
+      },
       "test:multiplayer-browser": {
         command: "node scripts/browser-multiplayer.mjs",
         cache: false,
