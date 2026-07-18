@@ -235,6 +235,11 @@ struct PendingChunkBatch {
     coords: Vec<ChunkCoord>,
 }
 
+struct PendingSurfaceTile {
+    submitted: Instant,
+    coord: SurfaceTileCoord,
+}
+
 #[derive(Default)]
 struct ChunkRequests {
     requested: HashSet<ChunkCoord>,
@@ -267,6 +272,41 @@ impl ChunkRequests {
     }
 }
 
+#[derive(Default)]
+struct SurfaceRequests {
+    requested: HashSet<SurfaceTileCoord>,
+    completed: HashSet<SurfaceTileCoord>,
+    in_flight: HashSet<SurfaceTileCoord>,
+    pending: HashMap<u64, PendingSurfaceTile>,
+}
+
+impl SurfaceRequests {
+    fn needs(&self, coord: SurfaceTileCoord) -> bool {
+        !self.completed.contains(&coord) && !self.in_flight.contains(&coord)
+    }
+
+    fn begin(&mut self, request_id: u64, coord: SurfaceTileCoord, submitted: Instant) {
+        self.requested.insert(coord);
+        self.in_flight.insert(coord);
+        self.pending
+            .insert(request_id, PendingSurfaceTile { submitted, coord });
+    }
+
+    fn finish(&mut self, request_id: u64) -> Option<PendingSurfaceTile> {
+        let pending = self.pending.remove(&request_id)?;
+        self.in_flight.remove(&pending.coord);
+        Some(pending)
+    }
+
+    fn complete(&mut self, coord: SurfaceTileCoord) {
+        self.completed.insert(coord);
+    }
+
+    fn unique_count(&self) -> usize {
+        self.requested.len()
+    }
+}
+
 struct BotRuntime {
     index: usize,
     name: String,
@@ -282,8 +322,7 @@ struct BotRuntime {
     cache: ChunkCache,
     frame_reassembler: FrameReassembler,
     chunk_requests: ChunkRequests,
-    requested_surfaces: HashSet<SurfaceTileCoord>,
-    pending_surfaces: HashMap<u64, Instant>,
+    surface_requests: SurfaceRequests,
     pending_edits: HashMap<u64, PendingEdit>,
     pending_pings: HashMap<u32, Instant>,
     leader_connection_id: Option<u64>,
@@ -435,8 +474,7 @@ impl BotRuntime {
             cache: ChunkCache::new(CHUNK_CACHE_CAPACITY),
             frame_reassembler: FrameReassembler::default(),
             chunk_requests: ChunkRequests::default(),
-            requested_surfaces: HashSet::new(),
-            pending_surfaces: HashMap::new(),
+            surface_requests: SurfaceRequests::default(),
             pending_edits: HashMap::new(),
             pending_pings: HashMap::new(),
             leader_connection_id: None,
@@ -623,7 +661,7 @@ impl BotRuntime {
     async fn request_surface(&mut self) -> Result<()> {
         let voxel = position_voxel(self.camera.position);
         let coord = SurfaceTileCoord::containing(SurfaceLodLevel::Stride16, voxel.x, voxel.z);
-        if !self.requested_surfaces.insert(coord) {
+        if !self.surface_requests.needs(coord) {
             return Ok(());
         }
         let request_id = self.allocate_request_id();
@@ -634,7 +672,8 @@ impl BotRuntime {
         })?;
         self.traffic.sent(&bytes)?;
         self.world.send(Message::Binary(bytes.into())).await?;
-        self.pending_surfaces.insert(request_id, Instant::now());
+        self.surface_requests
+            .begin(request_id, coord, Instant::now());
         self.report.surface_batches_sent = self.report.surface_batches_sent.saturating_add(1);
         Ok(())
     }
@@ -706,15 +745,16 @@ impl BotRuntime {
             }
         } else if kind == surface_tile_batch_result_kind() {
             let result = decode_surface_tile_batch_result(bytes)?;
-            if let Some(started) = self.pending_surfaces.remove(&result.request_id) {
+            if let Some(pending) = self.surface_requests.finish(result.request_id) {
                 self.report
                     .surface_latency_ms
-                    .push(started.elapsed().as_secs_f64() * 1_000.0);
+                    .push(pending.submitted.elapsed().as_secs_f64() * 1_000.0);
             }
             for item in result.items {
                 self.report.surface_results = self.report.surface_results.saturating_add(1);
-                if let Err(error) = item.result {
-                    self.record_error(format!("surface {:?}: {error}", item.coord));
+                match item.result {
+                    Ok(_) => self.surface_requests.complete(item.coord),
+                    Err(error) => self.record_error(format!("surface {:?}: {error}", item.coord)),
                 }
             }
         } else if kind == edit_commit_kind() {
@@ -765,7 +805,7 @@ impl BotRuntime {
                     .push(pending.submitted.elapsed().as_secs_f64() * 1_000.0);
             }
             self.chunk_requests.finish(request_id);
-            self.pending_surfaces.remove(&request_id);
+            self.surface_requests.finish(request_id);
             if !expected_edit_conflict {
                 self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
                 self.record_error(format!("request {request_id}: {message}"));
@@ -903,7 +943,7 @@ impl BotRuntime {
             chunk_latency: summarize_latencies(&self.report.chunk_latency_ms),
             surface_batches_sent: self.report.surface_batches_sent,
             surface_results: self.report.surface_results,
-            unique_surface_tiles_requested: self.requested_surfaces.len(),
+            unique_surface_tiles_requested: self.surface_requests.unique_count(),
             surface_latency: summarize_latencies(&self.report.surface_latency_ms),
             edits_submitted: self.report.edits_submitted,
             edits_accepted: self.report.edits_accepted,
@@ -1212,6 +1252,26 @@ mod tests {
 
         cache.insert(Chunk::filled(second, Material::Stone));
         assert!(requests.needs(&cache, first));
+        assert_eq!(requests.unique_count(), 1);
+    }
+
+    #[test]
+    fn surface_requests_retry_failures_but_not_successes() {
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 2, -3);
+        let mut requests = SurfaceRequests::default();
+
+        assert!(requests.needs(coord));
+        requests.begin(1, coord, Instant::now());
+        assert!(!requests.needs(coord));
+
+        let failed = requests.finish(1).expect("pending request");
+        assert_eq!(failed.coord, coord);
+        assert!(requests.needs(coord));
+
+        requests.begin(2, coord, Instant::now());
+        requests.finish(2);
+        requests.complete(coord);
+        assert!(!requests.needs(coord));
         assert_eq!(requests.unique_count(), 1);
     }
 }
