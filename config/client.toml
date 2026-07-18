@@ -50,8 +50,9 @@ max_tracked_chunks = 320
 max_secondary_interest_chunks = 192
 
 [streaming.priority]
-# Keep the immediate 3x3 chunk vicinity first, then favor this forward cone and the predicted
-# position. These values change request order only; they do not increase residency or bandwidth.
+# Keep the immediate 3x3 canonical-chunk vicinity first, then favor this forward cone and the
+# predicted position. These values change request order only; they do not increase residency or
+# bandwidth. Complete surface-LOD levels stay spatially ordered because they activate atomically.
 velocity_lookahead_seconds = 1.5
 view_cone_half_angle_degrees = 55.0
 

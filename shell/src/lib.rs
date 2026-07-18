@@ -1038,7 +1038,7 @@ mod web {
             if focus_changed || uploaded || evicted {
                 self.reconcile_chunk_activation(focus, &interest);
             }
-            self.stream_surface_lods(camera);
+            self.stream_surface_lods(camera.position);
         }
 
         fn submit_generation_batch(
@@ -1344,9 +1344,9 @@ mod web {
             counts
         }
 
-        fn stream_surface_lods(&self, camera: &CameraState) {
+        fn stream_surface_lods(&self, position: glam::Vec3) {
             let focus = std::array::from_fn(|index| {
-                world_to_surface_tile(camera.position, SurfaceLodLevel::ALL[index])
+                world_to_surface_tile(position, SurfaceLodLevel::ALL[index])
             });
             if self.surface_focus.get() != Some(focus) {
                 self.surface_focus.set(Some(focus));
@@ -1437,39 +1437,22 @@ mod web {
                 drop(dirty);
                 drop(revisions);
                 drop(resident);
-                let mut queue = self.surface_queue.borrow_mut();
-                queue.clear();
-                queue.extend(candidates);
-            }
-
-            let priorities = SurfaceLodLevel::ALL.map(|level| {
-                directional_stream_priority(
-                    camera,
-                    level.tile_span_voxels() as f32 * VOXEL_SIZE_METRES,
-                    self.config.stream_velocity_lookahead_seconds,
-                    self.config.stream_view_cone_half_angle_degrees,
-                )
-            });
-            self.surface_queue
-                .borrow_mut()
-                .make_contiguous()
-                .sort_by_key(|coord| {
+                candidates.sort_by_key(|coord| {
                     let index = coord.level.index() as usize;
-                    let dx = i64::from(coord.x) - i64::from(focus[index].x);
-                    let dz = i64::from(coord.z) - i64::from(focus[index].z);
-                    let (vicinity, view, predicted_distance) =
-                        priorities[index].rank_offset(dx, dz);
+                    let dx = i128::from(coord.x) - i128::from(focus[index].x);
+                    let dz = i128::from(coord.z) - i128::from(focus[index].z);
                     (
                         index >= INTERACTIVE_SURFACE_LOD_LEVELS,
                         u8::MAX - coord.level.index(),
-                        vicinity,
-                        view,
-                        predicted_distance,
-                        i128::from(dx) * i128::from(dx) + i128::from(dz) * i128::from(dz),
+                        dx * dx + dz * dz,
                         coord.z,
                         coord.x,
                     )
                 });
+                let mut queue = self.surface_queue.borrow_mut();
+                queue.clear();
+                queue.extend(candidates);
+            }
 
             const INTERACTIVE_SURFACE_BATCH: usize = 4;
             const BACKGROUND_SURFACE_BATCH: usize = 2;
