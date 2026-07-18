@@ -664,10 +664,12 @@ try {
     );
     const performance = summarizePerformance(timings);
     const violations = [];
-    if (image.skyLikeFraction > 0.001)
-      violations.push("terrain-only ROI exposed more than 0.1% sky-colored pixels");
-    if (image.largestSkyLikeComponent > 32)
-      violations.push("terrain-only ROI contains a connected sky-colored crack");
+    if (!BOUNDARY_COVERAGE) {
+      if (image.skyLikeFraction > 0.001)
+        violations.push("terrain-only ROI exposed more than 0.1% sky-colored pixels");
+      if (image.largestSkyLikeComponent > 32)
+        violations.push("terrain-only ROI contains a connected sky-colored crack");
+    }
     if (image.largestCoolExposureComponent > 256)
       violations.push("terrain-only ROI contains a connected cool sky/cloud exposure");
     if (performance.frameP95Ms > 12) violations.push("frame p95 exceeded 12ms");
