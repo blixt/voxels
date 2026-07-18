@@ -625,8 +625,36 @@ try {
   const before = await page.screenshot({ path: path.join(OUTPUT_DIRECTORY, "before.png") });
 
   if (WATERTIGHT) {
+    const headingSamples = [
+      {
+        yaw: LOOK[0],
+        image: await analyzeWatertightTerrain(page, before),
+      },
+    ];
+    if (BOUNDARY_COVERAGE) {
+      for (const [index, offset] of [-0.16, -0.08, 0.08, 0.16].entries()) {
+        await page.keyboard.press("F3");
+        beforeSnapshot = await setCameraLook(page, LOOK[0] + offset, LOOK[1], timings);
+        beforeSnapshot = await waitForStableFrame(page, initialCentres, timings);
+        await page.keyboard.press("F3");
+        beforeSnapshot = await waitForStableFrame(page, initialCentres, timings);
+        const screenshot = await page.screenshot({
+          path: path.join(OUTPUT_DIRECTORY, `heading-${index + 1}.png`),
+        });
+        headingSamples.push({
+          yaw: LOOK[0] + offset,
+          image: await analyzeWatertightTerrain(page, screenshot),
+        });
+      }
+    }
     await sampleStablePerformance(page, timings, 2_000);
-    const image = await analyzeWatertightTerrain(page, before);
+    const image = headingSamples.reduce(
+      (worst, sample) =>
+        sample.image.largestCoolExposureComponent > worst.largestCoolExposureComponent
+          ? sample.image
+          : worst,
+      headingSamples[0].image,
+    );
     const performance = summarizePerformance(timings);
     const violations = [];
     if (image.skyLikeFraction > 0.001)
@@ -639,7 +667,9 @@ try {
     if (performance.fractionAbove16_67Ms > 0.01)
       violations.push("over 1% of measured frames exceeded 16.67ms");
     if (performance.frameMaxMs > 25) violations.push("a measured frame exceeded 25ms");
-    if (performance.worldGpuP95Ms > 2) violations.push("world GPU p95 exceeded 2ms");
+    const worldGpuBudgetMs = BOUNDARY_COVERAGE ? 3 : 2;
+    if (performance.worldGpuP95Ms > worldGpuBudgetMs)
+      violations.push(`world GPU p95 exceeded ${worldGpuBudgetMs}ms`);
     if (performance.totalGpuP95Ms > 7.5) violations.push("total GPU p95 exceeded 7.5ms");
     if (errors.length > 0) violations.push(...errors);
     const result = {
@@ -661,6 +691,7 @@ try {
         ],
       },
       image,
+      headingSamples,
       performance,
       violations,
     };

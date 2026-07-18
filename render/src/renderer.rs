@@ -986,7 +986,7 @@ pub struct Renderer {
     surface_patch_profiles: HashMap<SurfacePatchId, SurfacePatchProfile>,
     canonical_surface_profiles: CanonicalColumnProfiles,
     surface_patch_residency: HashSet<SurfacePatchId>,
-    canonical_ready_columns: HashSet<(i32, i32)>,
+    canonical_ready_chunks: HashSet<(i32, i32, i32)>,
     surface_patch_residency_revision: u64,
     lod_draw_plan: LodDrawPlan,
     lod_draw_plan_focus: Option<GeometricLodFocus>,
@@ -1769,7 +1769,7 @@ impl Renderer {
             surface_patch_profiles: HashMap::new(),
             canonical_surface_profiles: HashMap::new(),
             surface_patch_residency: HashSet::new(),
-            canonical_ready_columns: HashSet::new(),
+            canonical_ready_chunks: HashSet::new(),
             surface_patch_residency_revision: 0,
             lod_draw_plan: LodDrawPlan::default(),
             lod_draw_plan_focus: None,
@@ -1986,15 +1986,20 @@ impl Renderer {
         }
     }
 
-    /// Replaces the canonical X/Z columns whose complete vertical chunk set is resident and
-    /// active. Incomplete columns keep their stride-two surface parent until the shell atomically
-    /// marks the column ready.
-    pub fn set_canonical_ready_columns(&mut self, columns: impl IntoIterator<Item = (i32, i32)>) {
-        let replacement = columns.into_iter().collect::<HashSet<_>>();
-        if replacement == self.canonical_ready_columns {
+    /// Replaces the exact canonical chunks in complete current vertical bands.
+    ///
+    /// Incomplete columns keep their stride-two surface parent. Keeping Y here is essential:
+    /// retained profiles outside the current band may no longer have an active mesh and therefore
+    /// cannot prove that canonical geometry owns the corresponding surface cells.
+    pub fn set_canonical_ready_chunks(
+        &mut self,
+        chunks: impl IntoIterator<Item = (i32, i32, i32)>,
+    ) {
+        let replacement = chunks.into_iter().collect::<HashSet<_>>();
+        if replacement == self.canonical_ready_chunks {
             return;
         }
-        self.canonical_ready_columns = replacement;
+        self.canonical_ready_chunks = replacement;
         self.surface_patch_residency_revision =
             self.surface_patch_residency_revision.wrapping_add(1);
     }
@@ -2493,7 +2498,7 @@ impl Renderer {
             return;
         }
         let canonical_columns = complete_canonical_surface_columns(
-            &self.canonical_ready_columns,
+            &self.canonical_ready_chunks,
             &self.canonical_surface_profiles,
         );
         let mut patches = SurfacePatchSelection::default();
@@ -3884,21 +3889,26 @@ const fn material_belongs_to_surface_heightfield(material: Material) -> bool {
 }
 
 fn complete_canonical_surface_columns(
-    ready_columns: &HashSet<(i32, i32)>,
+    ready_chunks: &HashSet<(i32, i32, i32)>,
     profiles: &CanonicalColumnProfiles,
 ) -> HashSet<(i32, i32)> {
-    ready_columns
-        .iter()
-        .copied()
-        .filter(|column| {
-            let Some(column_profiles) = profiles.get(column) else {
-                return false;
-            };
-            (0..CHUNK_EDGE * CHUNK_EDGE).all(|cell| {
-                column_profiles
-                    .values()
-                    .any(|profile| profile.cells[cell].is_some())
-            })
+    let mut ready_profiles = HashMap::<(i32, i32), Vec<&CanonicalChunkProfile>>::new();
+    for &(x, y, z) in ready_chunks {
+        let column = (x, z);
+        let Some(profile) = profiles
+            .get(&column)
+            .and_then(|column_profiles| column_profiles.get(&y))
+        else {
+            continue;
+        };
+        ready_profiles.entry(column).or_default().push(profile);
+    }
+    ready_profiles
+        .into_iter()
+        .filter_map(|(column, profiles)| {
+            (0..CHUNK_EDGE * CHUNK_EDGE)
+                .all(|cell| profiles.iter().any(|profile| profile.cells[cell].is_some()))
+                .then_some(column)
         })
         .collect()
 }
@@ -5056,6 +5066,50 @@ mod tests {
             incomplete_transition_edges: complete.incomplete_edges,
         };
         assert!(!complete_plan.owns_source_edge(coarse, edge));
+    }
+
+    #[test]
+    fn canonical_surface_ownership_ignores_profiles_outside_the_exact_ready_band() {
+        let column = (50, 9);
+        let surface = SurfaceCell {
+            height: 1_333,
+            material: Material::Grass,
+            macro_normal: 0xff,
+            horizon_profile: 0,
+        };
+        let cell_count = CHUNK_EDGE * CHUNK_EDGE;
+        let mut lower_cells = vec![None; cell_count];
+        let mut upper_cells = vec![None; cell_count];
+        lower_cells[..cell_count / 2].fill(Some(surface));
+        upper_cells[cell_count / 2..].fill(Some(surface));
+        let profiles = HashMap::from([(
+            column,
+            BTreeMap::from([
+                (
+                    40,
+                    CanonicalChunkProfile {
+                        cells: vec![Some(surface); cell_count],
+                    },
+                ),
+                (41, CanonicalChunkProfile { cells: lower_cells }),
+                (42, CanonicalChunkProfile { cells: upper_cells }),
+            ]),
+        )]);
+
+        let incomplete = complete_canonical_surface_columns(
+            &HashSet::from([(column.0, 41, column.1)]),
+            &profiles,
+        );
+        assert!(
+            !incomplete.contains(&column),
+            "an inactive retained profile must not suppress the surface fallback"
+        );
+
+        let complete = complete_canonical_surface_columns(
+            &HashSet::from([(column.0, 41, column.1), (column.0, 42, column.1)]),
+            &profiles,
+        );
+        assert!(complete.contains(&column));
     }
 
     #[test]

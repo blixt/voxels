@@ -1,8 +1,6 @@
 //! Browser/WASM leaf for Voxels. The worker owns the renderer, clock, and input semantics.
 
 #[cfg(any(target_arch = "wasm32", test))]
-use std::collections::BTreeSet;
-#[cfg(any(target_arch = "wasm32", test))]
 use voxels_core::CameraState;
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -82,11 +80,6 @@ fn advance_surface_focus(
     let mut next = active.unwrap_or(target);
     next[..ready_level_count].copy_from_slice(&target[..ready_level_count]);
     Some(next)
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn complete_canonical_columns(complete_chunks: &BTreeSet<(i32, i32, i32)>) -> BTreeSet<(i32, i32)> {
-    complete_chunks.iter().map(|&(x, _, z)| (x, z)).collect()
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -214,7 +207,7 @@ mod web {
         RemoteChunkCompletion, RemoteEditEvent, RemoteSurfaceCompletion, RemoteSurfaceTicket,
         RemoteWorldClient, RemoteWorldError,
     };
-    use crate::{advance_surface_focus, complete_canonical_columns, world_environment_at};
+    use crate::{advance_surface_focus, world_environment_at};
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
     use std::cell::{Cell, RefCell};
@@ -1258,10 +1251,9 @@ mod web {
                     }
                 }
             }
-            // Only the complete current columns above may replace their stride-two surface
-            // parents. Retained chunks below preserve draw coverage during hysteresis, but an
-            // arbitrary surviving Y slice is not an atomically complete canonical column.
-            let radial_ready_columns = complete_canonical_columns(&radial);
+            // Preserve the exact complete current 3D set. The renderer must not use an inactive
+            // retained Y profile to suppress a surface parent for a different vertical band.
+            let radial_ready_chunks = radial.clone();
             // Preserve the old radial reason for retained resident meshes until the scheduler
             // actually evicts them. This carries visible coverage across small focus moves while
             // new columns become atomically ready, matching the retention hysteresis contract.
@@ -1309,7 +1301,7 @@ mod web {
             );
             self.renderer
                 .borrow_mut()
-                .set_canonical_ready_columns(radial_ready_columns);
+                .set_canonical_ready_chunks(radial_ready_chunks);
         }
 
         fn reconcile_activation_reason(
@@ -2837,6 +2829,7 @@ pub use web::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn server_resume_values_are_sanitized_before_use() {
@@ -2915,12 +2908,12 @@ mod tests {
     #[test]
     fn retained_partial_columns_do_not_replace_surface_cover() {
         let complete_current = BTreeSet::from([(13, 4, -9), (13, 5, -9), (13, 6, -9)]);
-        let ready = complete_canonical_columns(&complete_current);
+        let ready = complete_current.clone();
         let mut active_with_retention = complete_current;
         active_with_retention.extend([(14, 4, -9), (14, 5, -9)]);
 
-        assert!(ready.contains(&(13, -9)));
-        assert!(!ready.contains(&(14, -9)));
+        assert!(ready.contains(&(13, 4, -9)));
+        assert!(!ready.contains(&(14, 4, -9)));
         assert!(active_with_retention.contains(&(14, 4, -9)));
         assert!(active_with_retention.contains(&(14, 5, -9)));
     }
