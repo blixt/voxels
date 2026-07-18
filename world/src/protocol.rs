@@ -2076,7 +2076,9 @@ impl FrameReassembler {
         let completed = self
             .transfers
             .remove(&transfer_id)
-            .expect("completed fragmented frame must remain registered")
+            .ok_or(ProtocolError::InvalidPayload(
+                "frame fragment has no registered transfer",
+            ))?
             .bytes;
         let frame = decode_frame(&completed)?;
         if frame.kind == KIND_FRAME_FRAGMENT || frame.request_id != transfer_id {

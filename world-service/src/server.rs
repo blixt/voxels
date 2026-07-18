@@ -1820,9 +1820,9 @@ async fn write_frames(
             tokio::select! {
                 Some(permit) = permits.next() => {
                     let priority = permit.priority;
-                    let mut frame = queues[priority.index()]
-                        .pop_front()
-                        .expect("traffic permit must correspond to one queued frame");
+                    let Some(mut frame) = queues[priority.index()].pop_front() else {
+                        break 'writer;
+                    };
                     drop(permits);
                     if frame
                         .tracked
@@ -1864,16 +1864,14 @@ async fn write_frames(
                             let priority = incoming.priority;
                             let queue = &mut queues[priority.index()];
                             let was_empty = queue.is_empty();
+                            let fragment_bytes = incoming.fragment_bytes(&traffic);
+                            let next_wire_bytes = incoming.next_wire_bytes(fragment_bytes);
                             queue.push_back(incoming);
                             if was_empty {
-                                let frame = queue
-                                    .front()
-                                    .expect("newly nonempty traffic queue must have a frame");
-                                let fragment_bytes = frame.fragment_bytes(&traffic);
                                 permits.push(acquire_world_traffic(
                                     Arc::clone(&traffic),
                                     priority,
-                                    frame.next_wire_bytes(fragment_bytes),
+                                    next_wire_bytes,
                                     fragment_bytes,
                                     true,
                                 ));
@@ -2011,9 +2009,9 @@ async fn write_presence_frames(
                     }
                 }
                 Some(priority) = permits.next() => {
-                    let frame = queues[priority.index()]
-                        .pop_front()
-                        .expect("traffic permit must correspond to one queued presence frame");
+                    let Some(frame) = queues[priority.index()].pop_front() else {
+                        break 'writer;
+                    };
                     drop(permits);
                     if sink.send(Message::Binary(frame.bytes.into())).await.is_err() {
                         break 'writer;
