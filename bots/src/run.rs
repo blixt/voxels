@@ -230,6 +230,43 @@ struct PendingEdit {
     action: EditAction,
 }
 
+struct PendingChunkBatch {
+    submitted: Instant,
+    coords: Vec<ChunkCoord>,
+}
+
+#[derive(Default)]
+struct ChunkRequests {
+    requested: HashSet<ChunkCoord>,
+    in_flight: HashSet<ChunkCoord>,
+    pending: HashMap<u64, PendingChunkBatch>,
+}
+
+impl ChunkRequests {
+    fn needs(&self, cache: &ChunkCache, coord: ChunkCoord) -> bool {
+        !cache.contains(coord) && !self.in_flight.contains(&coord)
+    }
+
+    fn begin(&mut self, request_id: u64, coords: Vec<ChunkCoord>, submitted: Instant) {
+        self.requested.extend(coords.iter().copied());
+        self.in_flight.extend(coords.iter().copied());
+        self.pending
+            .insert(request_id, PendingChunkBatch { submitted, coords });
+    }
+
+    fn finish(&mut self, request_id: u64) -> Option<PendingChunkBatch> {
+        let pending = self.pending.remove(&request_id)?;
+        for coord in &pending.coords {
+            self.in_flight.remove(coord);
+        }
+        Some(pending)
+    }
+
+    fn unique_count(&self) -> usize {
+        self.requested.len()
+    }
+}
+
 struct BotRuntime {
     index: usize,
     name: String,
@@ -244,9 +281,8 @@ struct BotRuntime {
     traffic: TrafficCounters,
     cache: ChunkCache,
     frame_reassembler: FrameReassembler,
-    requested_chunks: HashSet<ChunkCoord>,
+    chunk_requests: ChunkRequests,
     requested_surfaces: HashSet<SurfaceTileCoord>,
-    pending_chunks: HashMap<u64, Instant>,
     pending_surfaces: HashMap<u64, Instant>,
     pending_edits: HashMap<u64, PendingEdit>,
     pending_pings: HashMap<u32, Instant>,
@@ -398,9 +434,8 @@ impl BotRuntime {
             traffic: connection.traffic,
             cache: ChunkCache::new(CHUNK_CACHE_CAPACITY),
             frame_reassembler: FrameReassembler::default(),
-            requested_chunks: HashSet::new(),
+            chunk_requests: ChunkRequests::default(),
             requested_surfaces: HashSet::new(),
-            pending_chunks: HashMap::new(),
             pending_surfaces: HashMap::new(),
             pending_edits: HashMap::new(),
             pending_pings: HashMap::new(),
@@ -557,7 +592,9 @@ impl BotRuntime {
             for z in (center.z - 1)..=(center.z + 1) {
                 for x in (center.x - 1)..=(center.x + 1) {
                     let coord = ChunkCoord::new(x, y, z);
-                    if coord.is_world_representable() && self.requested_chunks.insert(coord) {
+                    if coord.is_world_representable()
+                        && self.chunk_requests.needs(&self.cache, coord)
+                    {
                         coords.push(coord);
                     }
                 }
@@ -567,16 +604,18 @@ impl BotRuntime {
             return Ok(());
         }
         let request_id = self.allocate_request_id();
-        let bytes = encode_chunk_batch(&ChunkBatchRequest {
+        let request = ChunkBatchRequest {
             request_id,
             // This 3x3x3 neighborhood is the bot's collision and startup-ready set, matching the
             // browser scheduler rather than treating immediately walkable terrain as background.
             priority: WorldProductPriority::CollisionCritical,
             coords,
-        })?;
+        };
+        let bytes = encode_chunk_batch(&request)?;
         self.traffic.sent(&bytes)?;
         self.world.send(Message::Binary(bytes.into())).await?;
-        self.pending_chunks.insert(request_id, Instant::now());
+        self.chunk_requests
+            .begin(request_id, request.coords, Instant::now());
         self.report.chunk_batches_sent = self.report.chunk_batches_sent.saturating_add(1);
         Ok(())
     }
@@ -653,10 +692,10 @@ impl BotRuntime {
         let kind = message_kind(bytes)?;
         if kind == chunk_batch_result_kind() {
             let result = decode_chunk_batch_result(bytes)?;
-            if let Some(started) = self.pending_chunks.remove(&result.request_id) {
+            if let Some(pending) = self.chunk_requests.finish(result.request_id) {
                 self.report
                     .chunk_latency_ms
-                    .push(started.elapsed().as_secs_f64() * 1_000.0);
+                    .push(pending.submitted.elapsed().as_secs_f64() * 1_000.0);
             }
             for item in result.items {
                 self.report.chunk_results = self.report.chunk_results.saturating_add(1);
@@ -725,7 +764,7 @@ impl BotRuntime {
                     .edit_latency_ms
                     .push(pending.submitted.elapsed().as_secs_f64() * 1_000.0);
             }
-            self.pending_chunks.remove(&request_id);
+            self.chunk_requests.finish(request_id);
             self.pending_surfaces.remove(&request_id);
             if !expected_edit_conflict {
                 self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
@@ -860,7 +899,7 @@ impl BotRuntime {
             max_outbound_rate_bytes_per_second: self.max_outbound_rate_bytes_per_second,
             chunk_batches_sent: self.report.chunk_batches_sent,
             chunk_results: self.report.chunk_results,
-            unique_chunks_requested: self.requested_chunks.len(),
+            unique_chunks_requested: self.chunk_requests.unique_count(),
             chunk_latency: summarize_latencies(&self.report.chunk_latency_ms),
             surface_batches_sent: self.report.surface_batches_sent,
             surface_results: self.report.surface_results,
@@ -1149,5 +1188,30 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn chunk_requests_retry_failures_and_cache_evictions() {
+        let first = ChunkCoord::new(0, 0, 0);
+        let second = ChunkCoord::new(1, 0, 0);
+        let mut cache = ChunkCache::new(1);
+        let mut requests = ChunkRequests::default();
+
+        assert!(requests.needs(&cache, first));
+        requests.begin(1, vec![first], Instant::now());
+        assert!(!requests.needs(&cache, first));
+
+        let failed = requests.finish(1).expect("pending request");
+        assert_eq!(failed.coords, vec![first]);
+        assert!(requests.needs(&cache, first));
+
+        requests.begin(2, vec![first], Instant::now());
+        requests.finish(2);
+        cache.insert(Chunk::filled(first, Material::Dirt));
+        assert!(!requests.needs(&cache, first));
+
+        cache.insert(Chunk::filled(second, Material::Stone));
+        assert!(requests.needs(&cache, first));
+        assert_eq!(requests.unique_count(), 1);
     }
 }

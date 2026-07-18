@@ -37,6 +37,10 @@ impl ChunkCache {
         }
     }
 
+    pub fn contains(&self, coord: ChunkCoord) -> bool {
+        self.chunks.contains_key(&coord)
+    }
+
     pub fn material(&self, coord: VoxelCoord) -> Option<Material> {
         self.chunks.get(&coord.chunk()).map(|chunk| {
             let [x, y, z] = coord.local();
