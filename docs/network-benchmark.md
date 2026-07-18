@@ -72,11 +72,12 @@ The runner also records peak user-space queue delay after removing propagation a
 quantum's own serialization, peak queued bytes, and every time its bounded queue pauses the TCP
 source. These distinguish useful throughput from a faster sender that merely creates bufferbloat.
 The comparison command refuses different result schemas, browser snapshot schemas, fixtures,
-protocols, or link profiles. It reports signed median, max, full-coverage, viewport-byte, and
-full-coverage-byte deltas; negative is an improvement and positive is a degradation. Five samples
-are too few to call the maximum a statistically useful p95, though the versioned JSON retains the
-order statistic. Keep millisecond comparisons machine-local. World bytes are deterministic;
-presence bytes vary slightly with scenario duration.
+protocols, link profiles, world sources, repetition counts, or execution environments. It reports
+signed median, max, full-coverage, viewport-byte, and full-coverage-byte deltas; negative is an
+improvement and positive is a degradation. Five samples are too few to call the maximum a
+statistically useful p95, though the versioned JSON retains the order statistic. Millisecond
+comparisons are machine-local, so even CPU, OS, Chrome, Node, or logical-core changes make artifacts
+incomparable. World bytes are deterministic; presence bytes vary slightly with scenario duration.
 
 ## 2026-07-14 VXWP v4 compressed baseline
 

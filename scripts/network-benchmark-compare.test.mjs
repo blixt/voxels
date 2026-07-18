@@ -3,7 +3,15 @@ import { compareNetworkBenchmarks } from "./network-benchmark-compare.mjs";
 
 function result(viewport, coverage, bytes, down = 50) {
   return {
-    schemaVersion: 2,
+    schemaVersion: 4,
+    environment: {
+      platform: "darwin 25.0.0",
+      cpu: "Apple M3 Max",
+      logicalCpus: 16,
+      chrome: "150.0.7871.115",
+      node: "v24.18.0",
+    },
+    world: { source: "terrain-diffusion-30m" },
     browserSnapshotSchema: 18,
     fixture: { version: 2, streamingWalkMetres: 35 },
     protocol: { name: "VXWP", version: 4, resultCompression: { codec: "brotli" } },
@@ -15,6 +23,7 @@ function result(viewport, coverage, bytes, down = 50) {
       upstreamMaxQueuedBytes: 100_000,
       downstreamMaxQueuedBytes: 500_000,
     },
+    repetitions: 5,
     summary: {
       cold_spawn: {
         viewportFullyInformedMs: { median: viewport, max: viewport * 1.1 },
@@ -46,7 +55,7 @@ describe("network benchmark comparison", () => {
   it("rejects incomparable link profiles", () => {
     expect(() =>
       compareNetworkBenchmarks(result(1_000, 1_500, 10_000), result(800, 1_600, 8_000, 25)),
-    ).toThrow("link profile mismatch for downstreamMegabitsPerSecond");
+    ).toThrow("link mismatch");
   });
 
   it("rejects incomparable fixtures", () => {
@@ -70,5 +79,23 @@ describe("network benchmark comparison", () => {
     expect(() => compareNetworkBenchmarks(baseline, expanded)).toThrow(
       "scenario set mismatch: cold_spawn versus cold_spawn, streaming_walk",
     );
+  });
+
+  it("rejects different run counts, world sources, and environments", () => {
+    const baseline = result(1_000, 1_500, 10_000);
+
+    const fewerRuns = result(800, 1_600, 8_000);
+    fewerRuns.repetitions = 1;
+    expect(() => compareNetworkBenchmarks(baseline, fewerRuns)).toThrow(
+      "repetitions mismatch: 5 versus 1",
+    );
+
+    const procedural = result(800, 1_600, 8_000);
+    procedural.world.source = "procedural-v16";
+    expect(() => compareNetworkBenchmarks(baseline, procedural)).toThrow("world mismatch");
+
+    const otherCpu = result(800, 1_600, 8_000);
+    otherCpu.environment.cpu = "Other CPU";
+    expect(() => compareNetworkBenchmarks(baseline, otherCpu)).toThrow("environment mismatch");
   });
 });

@@ -25,17 +25,13 @@ export function compareNetworkBenchmarks(baseline, candidate) {
   requireSameFixture(baseline, candidate, "browserSnapshotSchema");
   requireSameFixture(baseline, candidate, "fixture");
   requireSameFixture(baseline, candidate, "protocol");
-  for (const field of [
-    "roundTripLatencyMs",
-    "downstreamMegabitsPerSecond",
-    "upstreamMegabitsPerSecond",
-    "quantumBytes",
-    "upstreamMaxQueuedBytes",
-    "downstreamMaxQueuedBytes",
-  ]) {
-    if (baseline.link[field] !== candidate.link[field]) {
-      throw new Error(`link profile mismatch for ${field}`);
-    }
+  requireSameFixture(baseline, candidate, "link");
+  requireSameFixture(baseline, candidate, "world");
+  requireSameFixture(baseline, candidate, "environment");
+  if (baseline.repetitions !== candidate.repetitions) {
+    throw new Error(
+      `repetitions mismatch: ${baseline.repetitions} versus ${candidate.repetitions}`,
+    );
   }
   const baselineScenarios = Object.keys(baseline.summary).toSorted();
   const candidateScenarios = Object.keys(candidate.summary).toSorted();
