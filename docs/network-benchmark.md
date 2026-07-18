@@ -34,8 +34,8 @@ sample in that streak, not the third. A turn is timed from look-input issuance r
 80 ms fixture validation; walking convergence begins after the fixed target distance is reached.
 
 `viewportFullyInformedMs` is retrospective: it is the first post-action sample whose presented
-geometry fingerprint equals the final fully settled viewport and never changes again. This lets a
-future view-priority scheduler improve visible completion even if background rings are still loading.
+geometry fingerprint equals the final fully settled viewport and never changes again. This lets
+view-priority changes improve visible completion even if background rings are still loading.
 `fullCoverageSettledMs` is the stricter all-rings measurement. The split is analogous to Cesium's
 view-complete contract, where all tiles needed for the current screen-space target must be loaded,
 processed, and rendered before the view is complete.
@@ -154,6 +154,35 @@ decode jank on this machine.
 - Raising surface batches from four to eight saved about 4.7 KiB in one cold run but regressed cold
   convergence from 2.35 s to 2.85 s and produced a 275.1 ms main-thread frame, so the four-tile batch
   remains.
+
+## 2026-07-18 canonical view-and-velocity priority
+
+VXWP v21 now preserves the complete immediate 3x3 canonical-chunk vicinity, then reorders unstarted
+generation, meshing, and upload tickets every frame by a 55-degree camera cone and a 1.5-second
+velocity prediction. This changes request order only: residency, cache identity, product fidelity,
+and every traffic bound remain unchanged. The values are typed client configuration.
+
+A controlled three-run comparison used the same 40 ms RTT, 50/10 Mbit link and fresh Terrain
+Diffusion worlds. Baseline `fc79314611e8` is pre-priority commit `28ec0cf` with the identical
+terminal-fall fix cherry-picked; candidate `0af25fb71c7f` is the canonical-only policy:
+
+| Scenario | Viewport median delta | Max delta | World bytes at viewport |
+| --- | ---: | ---: | ---: |
+| Streaming walk | -107.4 ms (-7.5%) | -128.8 ms (-8.7%) | +225 B |
+| Turn during spawn | -266.9 ms (-2.9%) | -159.7 ms (-1.7%) | +516 B |
+| Cached 180-degree turn | -0.5 ms (-2.9%) | -0.9 ms (-4.8%) | unchanged |
+| Cold spawn | +259.6 ms (+2.7%) | -125.9 ms (-1.2%) | +269 B |
+| Resident pillar walk | +18.0 ms (+1.3%) | +18.3 ms (+1.3%) | -692 B |
+
+The candidate recorded zero frames above 33.33 ms. Dynamic scenarios improved with effectively zero
+bandwidth change; the mixed cold median/max result is treated as neutral three-run variance rather
+than a claimed win.
+
+Applying the same directional policy to surface tiles did not land. A three-run candidate reached
+the streaming-walk viewport 128 ms sooner than radial order, but made turn-during-spawn 1.69 seconds
+slower and produced a 20.9-second outlier. Surface levels activate atomically, so partial directional
+progress cannot be presented; reordering only disrupted spatial generation locality. Surface tiles
+therefore retain their proven coarsest-first radial order.
 
 The next credible gains are not constant changes: they require priority-aware server admission,
 best-effort cancellation of genuinely obsolete focus work, or a bespoke progressive `VXST` surface
