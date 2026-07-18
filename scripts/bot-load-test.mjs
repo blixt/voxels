@@ -31,6 +31,7 @@ const OUTPUT_DIRECTORY = path.resolve("target/harness/bots");
 const SAMPLE_INTERVAL_MS = 250;
 const OBSERVER_SAMPLE_INTERVAL_MS = 500;
 const VIEWPORT = { width: 960, height: 540 };
+const BOT_SPAWN_PROTECTION_RADIUS_VOXELS = 3;
 const BROWSER_FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|websocket|presence|protocol|world service/iu;
 const NETWORK_PROFILE = Object.freeze({
@@ -677,6 +678,8 @@ async function main() {
           browserPort: previewPort ?? (await reserveEphemeralPort()),
           prefix: `voxels-bots-${count}-`,
           source: options.source,
+          // Exercise edits immediately while retaining protection for the authored spawn pillar.
+          spawnProtectionRadiusVoxels: BOT_SPAWN_PROTECTION_RADIUS_VOXELS,
         }));
       const service =
         growthService ??

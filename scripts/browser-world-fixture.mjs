@@ -24,11 +24,18 @@ function requiredTomlBoolean(contents, key) {
   return value === "true";
 }
 
+function requiredTomlInteger(contents, key) {
+  const value = new RegExp(`^${key}\\s*=\\s*([0-9]+)\\s*(?:#.*)?$`, "mu").exec(contents)?.[1];
+  if (value === undefined) throw new Error(`missing integer ${key} in service config`);
+  return Number(value);
+}
+
 export async function prepareBrowserWorldFixture({
   browserPort,
   prefix = "voxels-browser-world-",
   source = "procedural-v16",
   spawnVoxels,
+  spawnProtectionRadiusVoxels,
   cascadedShadows,
   screenSpaceAmbientOcclusion,
   dayLengthSeconds,
@@ -61,6 +68,14 @@ export async function prepareBrowserWorldFixture({
       ))
   ) {
     throw new Error("browser fixture spawnVoxels must contain two signed 32-bit integers");
+  }
+  if (
+    spawnProtectionRadiusVoxels !== undefined &&
+    (!Number.isInteger(spawnProtectionRadiusVoxels) ||
+      spawnProtectionRadiusVoxels < 3 ||
+      spawnProtectionRadiusVoxels > 10_000)
+  ) {
+    throw new Error("browser fixture spawnProtectionRadiusVoxels must be in 3..=10000");
   }
   if (cascadedShadows !== undefined && typeof cascadedShadows !== "boolean") {
     throw new Error("browser fixture cascadedShadows must be boolean when provided");
@@ -204,6 +219,8 @@ export async function prepareBrowserWorldFixture({
     const resolvedScreenSpaceAmbientOcclusion =
       screenSpaceAmbientOcclusion ??
       requiredTomlBoolean(clientSource, "screen_space_ambient_occlusion");
+    const resolvedSpawnProtectionRadiusVoxels =
+      spawnProtectionRadiusVoxels ?? requiredTomlInteger(serviceSource, "protection_radius_voxels");
     let clientFixtureSource = clientSource
       .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${backendPort}${WORLD_PATH}"`)
       .replace(
@@ -289,6 +306,10 @@ export async function prepareBrowserWorldFixture({
           .replace(
             /^xz_voxels = .*$/m,
             `xz_voxels = [${spawnVoxels?.[0] ?? 0}, ${spawnVoxels?.[1] ?? 0}]`,
+          )
+          .replace(
+            /^protection_radius_voxels = .*$/m,
+            `protection_radius_voxels = ${resolvedSpawnProtectionRadiusVoxels}`,
           ),
       ),
       writeFile(clientConfigPath, clientFixtureSource),
@@ -310,6 +331,7 @@ export async function prepareBrowserWorldFixture({
       serviceConfigPath,
       databasePath: path.join(directory, "world-state.sqlite3"),
       spawnVoxels: spawnVoxels ?? [0, 0],
+      spawnProtectionRadiusVoxels: resolvedSpawnProtectionRadiusVoxels,
       cascadedShadows: resolvedCascadedShadows,
       screenSpaceAmbientOcclusion: resolvedScreenSpaceAmbientOcclusion,
       dayLengthSeconds: dayLengthSeconds ?? 1_200,

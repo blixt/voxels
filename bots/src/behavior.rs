@@ -309,10 +309,15 @@ fn worksite_offset(index: usize) -> [i32; 2] {
     const SPACING_VOXELS: i32 = 6;
     let x = index as i32 % GRID_EDGE;
     let z = index as i32 / GRID_EDGE % GRID_EDGE;
-    [
-        (x * 2 - (GRID_EDGE - 1)) * SPACING_VOXELS / 2,
-        (z * 2 - (GRID_EDGE - 1)) * SPACING_VOXELS / 2,
-    ]
+    let centre_skipping_axis = |coordinate: i32| {
+        let centred = coordinate - GRID_EDGE / 2;
+        if centred >= 0 {
+            (centred + 1) * SPACING_VOXELS
+        } else {
+            centred * SPACING_VOXELS
+        }
+    };
+    [centre_skipping_axis(x), centre_skipping_axis(z)]
 }
 
 const fn splitmix64(mut value: u64) -> u64 {
@@ -343,6 +348,19 @@ mod tests {
         assert_eq!(BehaviorKind::for_index(2), BehaviorKind::Builder);
         assert_eq!(BehaviorKind::for_index(3), BehaviorKind::Follower);
         assert_eq!(BehaviorKind::for_index(4), BehaviorKind::Explorer);
+    }
+
+    #[test]
+    fn worksite_grid_stays_clear_of_the_benchmark_spawn_pillar() {
+        let worksites = (0..64)
+            .map(worksite_offset)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(worksites.len(), 64);
+        assert!(worksites.iter().all(|[x, z]| {
+            // The benchmark protects a 3-voxel-radius pillar and digs a 5-voxel-radius sphere.
+            // Keeping every hit more than 8 voxels from the origin prevents overlap.
+            x * x + z * z > 8 * 8
+        }));
     }
 
     #[test]
