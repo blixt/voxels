@@ -12,9 +12,9 @@ pub use profile::{ProfileAutomation, ProfileConfig, ProfilePhase, ProfilePose};
 
 use glam::{Vec2, Vec3};
 
-pub const PLAYER_RADIUS_METRES: f32 = 0.28;
-pub const PLAYER_HEIGHT_METRES: f32 = 1.78;
-pub const PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
+pub const PLAYER_RADIUS_METRES: f32 = 0.20;
+pub const PLAYER_HEIGHT_METRES: f32 = 1.70;
+pub const PLAYER_EYE_HEIGHT_METRES: f32 = 1.54;
 const WALK_SPEED: f32 = 4.6;
 const SPRINT_MULTIPLIER: f32 = 1.55;
 const SPECTATOR_SPEED: f32 = 8.0;
@@ -31,6 +31,7 @@ const ASSISTED_STEP_SPEED_SCALE: f32 = 0.72;
 const ASSISTED_STEP_RECOVERY_SECONDS: f32 = 0.18;
 const AIRBORNE_MANTLE_LIFT: f32 = 0.22;
 const GROUND_FOLLOW_DISTANCE: f32 = 0.22;
+const GROUND_FOLLOW_SPEED: f32 = 4.0;
 const GROUND_GRACE_SECONDS: f32 = 0.1;
 const COLLISION_EPSILON: f32 = 0.0001;
 const SWIM_SPEED: f32 = 3.2;
@@ -516,9 +517,7 @@ impl CameraState {
     }
 
     pub fn intersects_voxel(self, voxel: [i32; 3], voxel_size: f32) -> bool {
-        voxel_size.is_finite()
-            && voxel_size > 0.0
-            && capsule_intersects_voxel(self.position, voxel, voxel_size)
+        player_intersects_voxel(self.position.to_array(), voxel, voxel_size)
     }
 
     pub fn update(
@@ -705,7 +704,8 @@ impl CameraState {
                 &mut sample_voxel,
             )
         {
-            let snapped = self.position.with_y(snapped_y);
+            let followed_y = snapped_y.max(self.position.y - GROUND_FOLLOW_SPEED * dt);
+            let snapped = self.position.with_y(followed_y);
             if !collides(snapped, voxel_size, &mut sample_voxel) {
                 self.position = snapped;
                 self.grounded = true;
@@ -1013,6 +1013,20 @@ fn collides(
     false
 }
 
+/// Tests the canonical standing-player capsule without requiring a client camera object. Native
+/// servers use the same dimensions to reject placements that would enclose the player's body.
+pub fn player_intersects_voxel(
+    eye_position_metres: [f32; 3],
+    voxel: [i32; 3],
+    voxel_size: f32,
+) -> bool {
+    let eye_position = Vec3::from_array(eye_position_metres);
+    eye_position.is_finite()
+        && voxel_size.is_finite()
+        && voxel_size > 0.0
+        && capsule_intersects_voxel(eye_position, voxel, voxel_size)
+}
+
 fn capsule_intersects_voxel(eye_position: Vec3, voxel: [i32; 3], voxel_size: f32) -> bool {
     let radius = PLAYER_RADIUS_METRES - COLLISION_EPSILON;
     let feet_y = eye_position.y - PLAYER_EYE_HEIGHT_METRES;
@@ -1185,6 +1199,19 @@ mod tests {
         } else {
             VoxelPhysics::EMPTY
         }
+    }
+
+    #[test]
+    fn player_capsule_is_one_point_seven_metres_tall_and_point_four_wide() {
+        assert_eq!(PLAYER_HEIGHT_METRES, 1.70);
+        assert_eq!(PLAYER_RADIUS_METRES * 2.0, 0.40);
+        assert!((PLAYER_HEIGHT_METRES - PLAYER_EYE_HEIGHT_METRES - 0.16).abs() < 1.0e-6);
+
+        let centred = CameraState::spawn(Vec3::new(0.2, PLAYER_EYE_HEIGHT_METRES, 0.05));
+        assert!(!centred.intersects_voxel([-1, 2, 0], 0.1));
+        assert!(!centred.intersects_voxel([4, 2, 0], 0.1));
+        let shifted = CameraState::spawn(Vec3::new(0.19, PLAYER_EYE_HEIGHT_METRES, 0.05));
+        assert!(shifted.intersects_voxel([-1, 2, 0], 0.1));
     }
 
     #[test]
@@ -1487,7 +1514,7 @@ mod tests {
         input.set_key(4, true);
         for _ in 0..120 {
             camera.update(&input, 1.0 / 120.0, 0.1, |x, y, _| {
-                solid_if(y < 0 || (x >= 5 && y == 0) || y == 18)
+                solid_if(y < 0 || (x >= 5 && y == 0) || y == 17)
             });
         }
 
@@ -1815,7 +1842,10 @@ mod tests {
         assert!((fluid.immersion - 1.0).abs() < 0.0001);
         assert!(fluid.eyes_submerged);
         assert!((fluid.surface_y_metres - 1.8).abs() < 0.0001);
-        assert!((fluid.eye_depth_metres - 0.18).abs() < 0.0001);
+        assert!(
+            (fluid.eye_depth_metres - (fluid.surface_y_metres - PLAYER_EYE_HEIGHT_METRES)).abs()
+                < 0.0001
+        );
         assert!(fluid.swimming);
     }
 
