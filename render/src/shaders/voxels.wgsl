@@ -459,8 +459,7 @@ fn cloud_sun_visibility(world: vec3<f32>) -> f32 {
     frame.environment_time.yz,
     frame.environment_time.w,
   );
-  let threshold = mix(0.84, 0.45, coverage_control);
-  let cloud = smoothstep(threshold - 0.08, threshold + 0.08, field);
+  let cloud = atmosphere_cloud_envelope(field, coverage_control);
   return mix(1.0, mix(0.62, 0.40, frame.weather.y), cloud * coverage_control);
 }
 

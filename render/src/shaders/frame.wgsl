@@ -104,3 +104,18 @@ fn atmosphere_cloud_field_world(
   ) * 0.13;
   return broad + billows + detail;
 }
+
+fn atmosphere_cloud_envelope(field: f32, coverage_control: f32) -> f32 {
+  let coverage = clamp(coverage_control, 0.0, 1.0);
+  let threshold = mix(0.84, 0.45, coverage);
+  return smoothstep(threshold - 0.08, threshold + 0.08, field);
+}
+
+fn atmosphere_cloud_envelope_world(world_xz: vec2<f32>) -> f32 {
+  let field = atmosphere_cloud_field_world(
+    world_xz,
+    frame.environment_time.yz,
+    frame.environment_time.w,
+  );
+  return atmosphere_cloud_envelope(field, frame.fog_exposure.z);
+}

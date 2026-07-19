@@ -82,7 +82,7 @@ fn cloud_density_world(world: vec3<f32>, filter_width_metres: f32) -> f32 {
   );
   let coverage = clamp(frame.fog_exposure.z, 0.0, 1.0);
   let macro_threshold = mix(0.84, 0.45, coverage);
-  let envelope = smoothstep(macro_threshold - 0.08, macro_threshold + 0.08, macro_field);
+  let envelope = atmosphere_cloud_envelope(macro_field, coverage);
   if envelope <= 0.002 {
     return 0.0;
   }

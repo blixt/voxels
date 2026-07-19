@@ -82,7 +82,12 @@ fn vs_main(
   let random_shape = hash_cell(absolute_cell, f32(column_variant), 4.0);
   let snow = u32(hash_cell(absolute_cell, f32(column_variant), 5.0) < frame.weather.w);
   let wind = frame.cloud_layer.zw;
-  let fall_speed = select(mix(9.0, 14.0, random_speed), mix(1.1, 3.0, random_speed), snow == 1u);
+  // Quantizing to 1/128 m/s makes every lattice lane exactly periodic across the 4,096-second
+  // synchronized animation clock. Rain is deliberately brisk at this scale while snow retains
+  // its much slower terminal motion.
+  let fall_speed = round(
+    select(mix(16.0, 24.0, random_speed), mix(1.25, 3.25, random_speed), snow == 1u) * 128.0,
+  ) / 128.0;
   let fall_duration = PRECIPITATION_HEIGHT_METRES / fall_speed;
   let server_time = frame.atmosphere_motion.x;
   let initial_phase = hash_cell(absolute_cell, f32(column_variant), 6.0);
@@ -101,6 +106,13 @@ fn vs_main(
     vertical_phase + vertical_cell * PRECIPITATION_HEIGHT_METRES,
     (absolute_cell.y + 0.10 + random_z * 0.80) * cell_size,
   );
+  // The visible cloud volume and precipitation use the same server-seeded footprint. Keeping this
+  // test after the cheap random activation avoids evaluating the three-octave field for inactive
+  // lanes, while guaranteeing that clear gaps never contain local rain.
+  let rain_cloud = atmosphere_cloud_envelope_world(world.xz);
+  if rain_cloud <= 0.08 {
+    return hidden_vertex();
+  }
   if snow == 1u {
     let flutter_phase = random_shape * 6.2831853 + server_time * mix(1.1, 2.4, random_x);
     let horizontal_offset = wind * age_seconds * 0.34
@@ -116,7 +128,7 @@ fn vs_main(
   let view_depth = dot(world - frame.camera_time.xyz, frame.camera_forward.xyz);
   let depth_fade = smoothstep(1.5, 4.0, view_depth)
     * (1.0 - smoothstep(PRECIPITATION_RADIUS_METRES * 0.72, PRECIPITATION_RADIUS_METRES, view_depth));
-  let alpha = precipitation * radial_fade * depth_fade;
+  let alpha = precipitation * smoothstep(0.08, 0.72, rain_cloud) * radial_fade * depth_fade;
   if alpha <= 0.001 {
     return hidden_vertex();
   }

@@ -140,6 +140,8 @@ fn advance_surface_focus(
 
 #[cfg(any(target_arch = "wasm32", test))]
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
+#[cfg(any(target_arch = "wasm32", test))]
+const ATMOSPHERE_MOTION_PERIOD_SECONDS: f64 = 4_096.0;
 
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -229,7 +231,12 @@ fn world_environment_at(
             .rem_euclid(CLOUD_PERIOD_METRES) as f32
     });
     DerivedWorldEnvironment {
-        server_time_seconds: (server_time_ms * 0.001).max(0.0) as f32,
+        // Absolute Unix seconds no longer have sub-frame precision when narrowed to f32. A shared
+        // 4,096-second phase retains millisecond-scale precision and is an exact period of every
+        // quantized precipitation lane, so wrapping cannot pop or desynchronize the lattice.
+        server_time_seconds: (server_time_ms * 0.001)
+            .max(0.0)
+            .rem_euclid(ATMOSPHERE_MOTION_PERIOD_SECONDS) as f32,
         world_days,
         day_fraction,
         year_fraction,
@@ -3150,6 +3157,37 @@ mod tests {
         assert_eq!(first.celestial_revision, 2);
         assert!((first.weather_fraction - 0.225).abs() < 1.0e-6);
         assert_eq!(first.cloud_offset_metres, [110.0, 1_279_970.0]);
+    }
+
+    #[test]
+    fn atmosphere_motion_clock_retains_subframe_precision_at_unix_scale() {
+        let snapshot = voxels_world::protocol::WorldEnvironmentSnapshot {
+            sample_server_time_ms: 1_784_500_000_000,
+            world_day_number: 0,
+            day_fraction: 0.5,
+            day_length_seconds: 0.0,
+            days_per_year: 365.242_2,
+            moon_sidereal_orbit_days: 27.321_661,
+            moon_orbit_phase_at_world_epoch: 0.17,
+            planet_circumference_metres: 40_075_016.0,
+            axial_tilt_radians: 23.439_3_f32.to_radians(),
+            moon_orbit_inclination_radians: 5.145_f32.to_radians(),
+            celestial_seed: 1,
+            celestial_revision: 1,
+            weather_fraction: 0.5,
+            weather_cycle_seconds: 0.0,
+            cloud_offset_metres: [0.0; 2],
+            cloud_velocity_metres_per_second: [0.0; 2],
+            cloud_coverage: 0.5,
+            cloud_base_metres: 550.0,
+            cloud_top_metres: 1_800.0,
+            weather_seed: 1,
+            weather_revision: 1,
+        };
+        let first = world_environment_at(snapshot, 1_784_500_000_000.0);
+        let next = world_environment_at(snapshot, 1_784_500_000_008.0);
+        let elapsed = next.server_time_seconds - first.server_time_seconds;
+        assert!((elapsed - 0.008).abs() < 0.0002, "{elapsed}");
     }
 
     #[test]

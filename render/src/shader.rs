@@ -112,6 +112,7 @@ mod tests {
     #[test]
     fn volumetric_clouds_and_terrain_share_one_seeded_world_space_weather_field() {
         let clouds = include_str!("shaders/clouds.wgsl");
+        let weather = include_str!("shaders/weather.wgsl");
         let voxels = include_str!("shaders/voxels.wgsl");
         assert!(FRAME_SOURCE.contains("environment_time: vec4<f32>"));
         assert!(FRAME_SOURCE.contains("weather: vec4<f32>"));
@@ -128,11 +129,18 @@ mod tests {
             assert_eq!(source.matches("atmosphere_cloud_field_world(").count(), 1);
             assert!(source.contains("frame.environment_time.yz"));
             assert!(source.contains("frame.environment_time.w"));
-            assert!(source.contains("mix(0.84, 0.45, coverage"));
             assert!(!source.contains("camera_time.w * 0.55"));
         }
-        assert!(clouds.contains("macro_threshold - 0.08, macro_threshold + 0.08"));
-        assert!(voxels.contains("threshold - 0.08, threshold + 0.08"));
+        assert!(FRAME_SOURCE.contains("mix(0.84, 0.45, coverage)"));
+        assert!(FRAME_SOURCE.contains("fn atmosphere_cloud_envelope("));
+        assert!(FRAME_SOURCE.contains("fn atmosphere_cloud_envelope_world("));
+        assert!(
+            clouds.contains("let envelope = atmosphere_cloud_envelope(macro_field, coverage);")
+        );
+        assert!(weather.contains("let rain_cloud = atmosphere_cloud_envelope_world(world.xz);"));
+        assert!(weather.contains("if rain_cloud <= 0.08"));
+        assert!(FRAME_SOURCE.contains("threshold - 0.08, threshold + 0.08"));
+        assert!(voxels.contains("atmosphere_cloud_envelope(field, coverage_control)"));
         assert!(
             clouds.contains("fn cloud_density_world(world: vec3<f32>, filter_width_metres: f32)")
         );
@@ -302,6 +310,8 @@ mod tests {
         let weather = include_str!("shaders/weather.wgsl");
         assert!(weather.contains("@builtin(instance_index) instance_index: u32"));
         assert!(weather.contains("let server_time = frame.atmosphere_motion.x"));
+        assert!(weather.contains("mix(16.0, 24.0, random_speed)"));
+        assert!(weather.contains("* 128.0"));
         assert!(weather.contains("let vertical_phase = fract("));
         assert!(
             weather.contains("let vertical_cell = round((frame.camera_time.y - vertical_phase)")
