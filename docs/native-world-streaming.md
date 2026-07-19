@@ -183,12 +183,14 @@ view_cone_half_angle_degrees = 55.0
 
 The current body and support, its intended two-second swept path, and the independent view/edit
 corridor are collision-critical. They preempt ordinary generation, meshing, upload, and world-service
-traffic, including after conservative unloaded-space collision has stopped actual velocity. This
-urgent set is bounded secondary interest: it neither increases residency limits nor cancels or
-duplicates in-flight work. Beyond it, queued work inside the cone wins over side and rear work, while
-velocity look-ahead orders that cone toward where the player will be. Surface tiles retain spatial
-order: browser measurements showed that directional surface ordering only disrupted generation
-locality because a partial level cannot be presented.
+traffic, including after conservative unloaded-space collision has stopped actual velocity. The
+server gives each connection one bounded collision-generation lane and wakes collision work before
+queued ordinary generation without increasing the process-wide worker cap. This urgent set is
+bounded secondary interest: it neither increases residency limits nor cancels in-flight work. Beyond
+it, queued work inside the cone wins over side and rear work, while velocity look-ahead orders that
+cone toward where the player will be. Surface tiles retain spatial order: browser measurements
+showed that directional surface ordering only disrupted generation locality because a partial level
+cannot be presented.
 
 Ensure the Vite origin is in the server's `allowed_origins`. Terrain Diffusion is the checked-in
 default. Fetch the pinned model once, then start the Metal-capable daemon:

@@ -4,6 +4,7 @@ use crate::{
     EnvironmentConfig, LoadedWorldServiceConfig, WorldServiceConfig, WorldServiceConfigError,
     WorldServiceSourceError,
     edits::{ChunkEditSnapshot, EditAuthority, LoadedPlayer, ProtectedSpawn, SurfaceEditSnapshot},
+    generation_limiter::PriorityGenerationLimiter,
     presence::{PoseAdmission, PresenceHub, PresenceStreamState},
     traffic::{ClientTrafficRegistry, ClientTrafficShaper, TrafficPriority},
 };
@@ -98,16 +99,15 @@ impl WorldServer {
         edits.install_protected_spawn(world.protected_spawn.clone());
         let capacity = usize::from(config.transport.global_queue_capacity);
         let (generation_tx, generation_rx) = mpsc::channel(capacity);
-        let semaphore = Arc::new(Semaphore::new(usize::from(
-            config.transport.generation_workers,
-        )));
+        let generation_limiter =
+            PriorityGenerationLimiter::new(usize::from(config.transport.generation_workers));
         let prefetch_workers =
             (usize::from(config.transport.generation_workers) / PREFETCH_WORKER_DIVISOR).max(1);
         let prefetch_semaphore = Arc::new(Semaphore::new(prefetch_workers));
         tokio::spawn(run_generation_dispatcher(
             generation_rx,
             Arc::clone(&source),
-            semaphore,
+            generation_limiter,
             prefetch_semaphore,
             config.transport.max_frame_bytes,
             config.transport.product_cache_bytes,
@@ -125,6 +125,9 @@ impl WorldServer {
                 .max_queued_outbound_bytes_per_client,
             max_in_flight_batches: config.transport.max_in_flight_batches,
             generation_workers_per_client: config.transport.generation_workers_per_client,
+            collision_generation_workers_per_client: config
+                .transport
+                .collision_generation_workers_per_client,
             connections: Arc::new(Semaphore::new(usize::from(
                 config.transport.max_connections,
             ))),
@@ -574,6 +577,7 @@ struct ServerState {
     max_queued_outbound_bytes_per_client: usize,
     max_in_flight_batches: u16,
     generation_workers_per_client: u16,
+    collision_generation_workers_per_client: u16,
     connections: Arc<Semaphore>,
     presence_connections: Arc<Semaphore>,
     traffic: Arc<ClientTrafficRegistry>,
@@ -693,18 +697,39 @@ struct SessionRequests {
     closed: AtomicBool,
     in_flight: Mutex<HashMap<u64, Arc<AtomicBool>>>,
     generation_permits: Arc<Semaphore>,
+    collision_generation_permits: Arc<Semaphore>,
     outbound_bytes: Arc<Semaphore>,
 }
 
 impl SessionRequests {
-    fn new(max_in_flight: u16, generation_workers: u16, max_outbound_bytes: usize) -> Self {
+    fn new(
+        max_in_flight: u16,
+        generation_workers: u16,
+        collision_generation_workers: u16,
+        max_outbound_bytes: usize,
+    ) -> Self {
         Self {
             max_in_flight: usize::from(max_in_flight),
             closed: AtomicBool::new(false),
             in_flight: Mutex::new(HashMap::new()),
             generation_permits: Arc::new(Semaphore::new(usize::from(generation_workers))),
+            collision_generation_permits: Arc::new(Semaphore::new(usize::from(
+                collision_generation_workers,
+            ))),
             outbound_bytes: Arc::new(Semaphore::new(max_outbound_bytes)),
         }
+    }
+
+    async fn acquire_generation(
+        self: &Arc<Self>,
+        priority: WorldProductPriority,
+    ) -> Result<OwnedSemaphorePermit, tokio::sync::AcquireError> {
+        let permits = if priority == WorldProductPriority::CollisionCritical {
+            &self.collision_generation_permits
+        } else {
+            &self.generation_permits
+        };
+        Arc::clone(permits).acquire_owned().await
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<u64, Arc<AtomicBool>>> {
@@ -1154,6 +1179,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
     let session = Arc::new(SessionRequests::new(
         negotiated_window,
         state.generation_workers_per_client,
+        state.collision_generation_workers_per_client,
         state.max_queued_outbound_bytes_per_client,
     ));
     let (sink, stream) = socket.split();
@@ -2077,7 +2103,7 @@ async fn write_presence_frames(
 async fn run_generation_dispatcher(
     mut jobs: mpsc::Receiver<GenerationJob>,
     source: Arc<dyn WorldSourceEngine>,
-    semaphore: Arc<Semaphore>,
+    generation_limiter: Arc<PriorityGenerationLimiter>,
     prefetch_semaphore: Arc<Semaphore>,
     max_frame_bytes: usize,
     product_cache_bytes: usize,
@@ -2101,7 +2127,7 @@ async fn run_generation_dispatcher(
                 };
                 let product_keys = job.request.product_keys();
                 let priority = job.request.priority();
-                let session_semaphore = Arc::clone(&job.tracked.session.generation_permits);
+                let session = Arc::clone(&job.tracked.session);
                 let batch_id = next_batch_id;
                 next_batch_id = next_batch_id.wrapping_add(1).max(1);
                 let mut batch = PendingGenerationBatch::new(job, product_keys.len());
@@ -2126,7 +2152,7 @@ async fn run_generation_dispatcher(
                     spawn_generation_assembly(
                         batch,
                         source_identity_hash,
-                        Arc::clone(&semaphore),
+                        Arc::clone(&generation_limiter),
                         max_frame_bytes,
                     );
                     continue;
@@ -2135,15 +2161,15 @@ async fn run_generation_dispatcher(
                 pending.insert(batch_id, batch);
                 if !miss_indices.is_empty() {
                     let source = Arc::clone(&source);
-                    let semaphore = Arc::clone(&semaphore);
+                    let generation_limiter = Arc::clone(&generation_limiter);
                     let prefetch_semaphore = Arc::clone(&prefetch_semaphore);
                     let completion_tx = completion_tx.clone();
                     tokio::spawn(async move {
                         let result = generate_single_flight_products(
                             miss_request,
                             source,
-                            session_semaphore,
-                            semaphore,
+                            session,
+                            generation_limiter,
                             prefetch_semaphore,
                         )
                         .await;
@@ -2201,7 +2227,7 @@ async fn run_generation_dispatcher(
                     spawn_generation_assembly(
                         batch,
                         source_identity_hash,
-                        Arc::clone(&semaphore),
+                        Arc::clone(&generation_limiter),
                         max_frame_bytes,
                     );
                 }
@@ -2213,11 +2239,12 @@ async fn run_generation_dispatcher(
 async fn generate_single_flight_products(
     request: GenerationRequest,
     source: Arc<dyn WorldSourceEngine>,
-    session_semaphore: Arc<Semaphore>,
-    global_semaphore: Arc<Semaphore>,
+    session: Arc<SessionRequests>,
+    generation_limiter: Arc<PriorityGenerationLimiter>,
     prefetch_semaphore: Arc<Semaphore>,
 ) -> Result<Vec<EncodedProduct>, String> {
-    let _prefetch_permit = if request.priority() == WorldProductPriority::Prefetch {
+    let priority = request.priority();
+    let _prefetch_permit = if priority == WorldProductPriority::Prefetch {
         Some(
             prefetch_semaphore
                 .acquire_owned()
@@ -2227,14 +2254,11 @@ async fn generate_single_flight_products(
     } else {
         None
     };
-    let _session_permit = session_semaphore
-        .acquire_owned()
+    let _session_permit = session
+        .acquire_generation(priority)
         .await
         .map_err(|_| "world session generation limiter stopped".to_owned())?;
-    let _global_permit = global_semaphore
-        .acquire_owned()
-        .await
-        .map_err(|_| "world generation limiter stopped".to_owned())?;
+    let _global_permit = generation_limiter.acquire(priority).await;
     tokio::task::spawn_blocking(move || match request {
         GenerationRequest::Chunks { request, snapshot } => {
             generate_chunk_products(source.as_ref(), request, snapshot)
@@ -2250,14 +2274,14 @@ async fn generate_single_flight_products(
 fn spawn_generation_assembly(
     batch: PendingGenerationBatch,
     source_identity_hash: voxels_world::WorldSourceIdentityHash,
-    global_semaphore: Arc<Semaphore>,
+    generation_limiter: Arc<PriorityGenerationLimiter>,
     max_frame_bytes: usize,
 ) {
     tokio::spawn(async move {
         assemble_and_deliver_generation_batch(
             batch,
             source_identity_hash,
-            global_semaphore,
+            generation_limiter,
             max_frame_bytes,
         )
         .await;
@@ -2267,28 +2291,23 @@ fn spawn_generation_assembly(
 async fn assemble_and_deliver_generation_batch(
     batch: PendingGenerationBatch,
     source_identity_hash: voxels_world::WorldSourceIdentityHash,
-    global_semaphore: Arc<Semaphore>,
+    generation_limiter: Arc<PriorityGenerationLimiter>,
     max_frame_bytes: usize,
 ) {
     if batch.job.tracked.is_cancelled() {
         batch.job.tracked.finish();
         return;
     }
-    let session_semaphore = Arc::clone(&batch.job.tracked.session.generation_permits);
-    let session_permit = match session_semaphore.acquire_owned().await {
+    let priority = batch.job.request.priority();
+    let session = Arc::clone(&batch.job.tracked.session);
+    let session_permit = match session.acquire_generation(priority).await {
         Ok(permit) => permit,
         Err(_) => {
             batch.job.tracked.finish();
             return;
         }
     };
-    let global_permit = match global_semaphore.acquire_owned().await {
-        Ok(permit) => permit,
-        Err(_) => {
-            batch.job.tracked.finish();
-            return;
-        }
-    };
+    let global_permit = generation_limiter.acquire(priority).await;
     if batch.job.tracked.is_cancelled() {
         batch.job.tracked.finish();
         return;
@@ -2657,6 +2676,42 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn each_session_has_one_bounded_collision_generation_lane() {
+        let session = Arc::new(SessionRequests::new(16, 2, 1, 1_024));
+        let _ordinary_a = session
+            .acquire_generation(WorldProductPriority::VisibleSurface)
+            .await
+            .expect("first ordinary permit");
+        let _ordinary_b = session
+            .acquire_generation(WorldProductPriority::VisibleChunk)
+            .await
+            .expect("second ordinary permit");
+        let collision = session
+            .acquire_generation(WorldProductPriority::CollisionCritical)
+            .await
+            .expect("collision lane must not wait behind ordinary work");
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                session.acquire_generation(WorldProductPriority::CollisionCritical),
+            )
+            .await
+            .is_err(),
+            "one session must not occupy unbounded critical generation workers"
+        );
+
+        drop(collision);
+        let _reopened = tokio::time::timeout(
+            Duration::from_secs(1),
+            session.acquire_generation(WorldProductPriority::CollisionCritical),
+        )
+        .await
+        .expect("collision lane must reopen")
+        .expect("session limiter must remain open");
+    }
+
     fn test_config() -> WorldServiceConfig {
         WorldServiceConfig {
             schema_version: WORLD_SERVICE_CONFIG_SCHEMA_VERSION,
@@ -2682,6 +2737,7 @@ mod tests {
                 product_cache_bytes: 4 * 1024 * 1024,
                 generation_workers: 4,
                 generation_workers_per_client: 2,
+                collision_generation_workers_per_client: 1,
             },
             presence: PresenceConfig {
                 max_players: 4,
@@ -2763,7 +2819,7 @@ mod tests {
 
     #[test]
     fn cancellation_keeps_request_id_stale_until_the_worker_finishes() {
-        let session = SessionRequests::new(1, 1, 1024);
+        let session = SessionRequests::new(1, 1, 1, 1024);
         let cancelled = session.insert(7).ok();
         assert!(cancelled.is_some());
         assert!(session.cancel(7));

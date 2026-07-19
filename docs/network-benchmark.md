@@ -200,10 +200,12 @@ boundary beyond this low-hanging optimization pass.
 ## 2026-07-19 swept collision urgency
 
 Canonical work under the player and across the configured intended-movement sweep now preempts
-ordinary generation, meshing, upload, and world-service traffic. The direction comes from current
-input and locomotion rather than post-collision velocity, so conservative missing-chunk collision
-cannot erase the request pressure needed to remove its own temporary boundary. The independent
-view/edit corridor remains urgent.
+ordinary generation, meshing, upload, and world-service traffic. Server generation admission wakes
+collision work before queued ordinary work, with one bounded collision lane per connection and no
+increase to the process-wide worker cap. The direction comes from current input and locomotion rather
+than post-collision velocity, so conservative missing-chunk collision cannot erase the request
+pressure needed to remove its own temporary boundary. The independent view/edit corridor remains
+urgent.
 
 A one-run Chrome 150 check on the same 40 ms RTT, 50/10 Mbit link and procedural fixture covered
 35.045 m in 4,984.1 ms. Its longest interval without at least 2.5 cm of progress was 27.3 ms, the

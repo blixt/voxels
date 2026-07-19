@@ -24,6 +24,7 @@ use voxels_world_terrain_diffusion::{TerrainDiffusionConfig, TerrainPrecision};
 #[cfg(feature = "automation-fixture")]
 pub mod automation_fixture;
 mod edits;
+mod generation_limiter;
 mod presence;
 pub mod server;
 mod traffic;
@@ -33,7 +34,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 21;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 22;
 pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 7;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
@@ -78,6 +79,8 @@ pub struct LoopbackTransportConfig {
     pub generation_workers: u16,
     /// Fairness guard: one connection cannot occupy the whole worker pool.
     pub generation_workers_per_client: u16,
+    /// Dedicated urgent lane per connection, still bounded by the process-wide worker pool.
+    pub collision_generation_workers_per_client: u16,
 }
 
 impl Default for LoopbackTransportConfig {
@@ -103,6 +106,7 @@ impl Default for LoopbackTransportConfig {
             product_cache_bytes: 256 * 1024 * 1024,
             generation_workers: 8,
             generation_workers_per_client: 2,
+            collision_generation_workers_per_client: 1,
         }
     }
 }
@@ -522,10 +526,15 @@ impl WorldServiceConfig {
         }
         if self.transport.generation_workers == 0
             || self.transport.generation_workers_per_client == 0
-            || self.transport.generation_workers_per_client > self.transport.generation_workers
+            || self.transport.collision_generation_workers_per_client == 0
+            || self
+                .transport
+                .generation_workers_per_client
+                .checked_add(self.transport.collision_generation_workers_per_client)
+                .is_none_or(|per_client| per_client > self.transport.generation_workers)
         {
             return Err(WorldServiceConfigError::InvalidConcurrency(
-                "generation worker limits must be nonzero and per-client must not exceed global",
+                "generation worker lanes must be nonzero and their per-client sum must not exceed global",
             ));
         }
         if !self.environment.day_length_seconds.is_finite()
@@ -1025,7 +1034,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 21
+schema_version = 22
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -1048,6 +1057,7 @@ global_queue_capacity = 128
 product_cache_bytes = 268435456
 generation_workers = 8
 generation_workers_per_client = 2
+collision_generation_workers_per_client = 1
 
 [presence]
 broadcast_interval_ms = 33
@@ -1165,12 +1175,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 21", "schema_version = 20");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 22", "schema_version = 21");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 21,
-                found: 20,
+                expected: 22,
+                found: 21,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");
@@ -1237,6 +1247,13 @@ sea_level_voxels = 52
         ));
 
         config.transport.generation_workers_per_client = 1;
+        config.transport.collision_generation_workers_per_client = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(WorldServiceConfigError::InvalidConcurrency(_))
+        ));
+
+        config.transport.collision_generation_workers_per_client = 1;
         config.transport.auth_subprotocol_token = "invalid token".to_owned();
         assert_eq!(
             config.validate(),

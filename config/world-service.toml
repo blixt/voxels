@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 21
+schema_version = 22
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -33,6 +33,8 @@ global_queue_capacity = 16384
 product_cache_bytes = 268435456
 generation_workers = 8
 generation_workers_per_client = 2
+# One urgent batch per client can jump queued ordinary generation; the global cap still applies.
+collision_generation_workers_per_client = 1
 
 [presence]
 # Per-client spatial deltas tick at about 30 Hz; unchanged poses are omitted.

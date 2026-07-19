@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 21
+schema_version = 22
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -49,6 +49,7 @@ global_queue_capacity = 16384
 product_cache_bytes = 268435456
 generation_workers = 8
 generation_workers_per_client = 2
+collision_generation_workers_per_client = 1
 
 [presence]
 broadcast_interval_ms = 33
