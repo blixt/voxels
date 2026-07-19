@@ -22,11 +22,16 @@ const SPECTATOR_RESPONSE: f32 = 10.0;
 const GLIDER_FORWARD_SPEED: f32 = 8.4;
 const GLIDER_ACCELERATION: f32 = 12.0;
 const GLIDER_TERMINAL_DESCENT_SPEED: f32 = 2.2;
-const JUMP_SPEED: f32 = 5.6;
+const JUMP_SPEED: f32 = 5.9;
 const GRAVITY: f32 = 19.5;
 const WALK_TERMINAL_FALL_SPEED: f32 = 18.0;
-const STEP_HEIGHT: f32 = 0.35;
-const GROUND_FOLLOW_DISTANCE: f32 = 0.15;
+const EFFORTLESS_STEP_HEIGHT: f32 = 0.2;
+const ASSISTED_STEP_HEIGHT: f32 = 0.52;
+const ASSISTED_STEP_SPEED_SCALE: f32 = 0.72;
+const ASSISTED_STEP_RECOVERY_SECONDS: f32 = 0.18;
+const AIRBORNE_MANTLE_LIFT: f32 = 0.22;
+const GROUND_FOLLOW_DISTANCE: f32 = 0.22;
+const GROUND_GRACE_SECONDS: f32 = 0.1;
 const COLLISION_EPSILON: f32 = 0.0001;
 const SWIM_SPEED: f32 = 3.2;
 const SWIM_RESPONSE: f32 = 5.5;
@@ -323,6 +328,8 @@ pub struct CameraState {
     locomotion: LocomotionMode,
     gliding_available: bool,
     jump_was_down: bool,
+    ground_grace_seconds: f32,
+    assisted_step_seconds: f32,
     fluid: FluidState,
 }
 
@@ -343,6 +350,8 @@ impl CameraState {
             locomotion: LocomotionMode::Walking,
             gliding_available: false,
             jump_was_down: false,
+            ground_grace_seconds: 0.0,
+            assisted_step_seconds: 0.0,
             fluid: FluidState::default(),
         }
     }
@@ -366,6 +375,8 @@ impl CameraState {
             locomotion: LocomotionMode::Walking,
             gliding_available: false,
             jump_was_down: false,
+            ground_grace_seconds: 0.0,
+            assisted_step_seconds: 0.0,
             fluid: FluidState::default(),
         }
     }
@@ -497,6 +508,8 @@ impl CameraState {
         self.locomotion = locomotion;
         self.grounded = false;
         self.jump_was_down = false;
+        self.ground_grace_seconds = 0.0;
+        self.assisted_step_seconds = 0.0;
         if spectator_transition {
             self.velocity = Vec3::ZERO;
         }
@@ -546,6 +559,8 @@ impl CameraState {
             self.velocity += (target - self.velocity) * response;
             self.grounded = false;
             self.jump_was_down = input.jump;
+            self.ground_grace_seconds = 0.0;
+            self.assisted_step_seconds = 0.0;
             let next = self.position + self.velocity * dt;
             if next.is_finite() {
                 self.position = next;
@@ -589,6 +604,8 @@ impl CameraState {
             self.velocity.y = self.velocity.y.clamp(-4.0, 3.0);
             self.grounded = false;
             self.jump_was_down = input.jump;
+            self.ground_grace_seconds = 0.0;
+            self.assisted_step_seconds = 0.0;
             horizontal_grounded = input.jump;
         } else {
             let forward = Vec3::new(self.yaw.sin(), 0.0, -self.yaw.cos());
@@ -607,11 +624,17 @@ impl CameraState {
                 wish -= right;
             }
 
+            if self.grounded {
+                self.ground_grace_seconds = GROUND_GRACE_SECONDS;
+            } else {
+                self.ground_grace_seconds = (self.ground_grace_seconds - dt).max(0.0);
+            }
             let jump_pressed = input.jump && !self.jump_was_down;
             self.jump_was_down = input.jump;
-            if self.grounded && jump_pressed {
+            if (self.grounded || self.ground_grace_seconds > 0.0) && jump_pressed {
                 self.velocity.y = JUMP_SPEED;
                 self.grounded = false;
+                self.ground_grace_seconds = 0.0;
                 self.locomotion = LocomotionMode::Walking;
             } else if !self.grounded && jump_pressed && self.gliding_available {
                 self.locomotion = if self.locomotion == LocomotionMode::Gliding {
@@ -634,20 +657,39 @@ impl CameraState {
                 let target_y = -GLIDER_TERMINAL_DESCENT_SPEED;
                 self.velocity.y += (target_y - self.velocity.y).clamp(-acceleration, acceleration);
             } else {
-                let speed = WALK_SPEED * if input.sprint { SPRINT_MULTIPLIER } else { 1.0 };
+                let assisted_scale = if self.assisted_step_seconds > 0.0 {
+                    ASSISTED_STEP_SPEED_SCALE
+                } else {
+                    1.0
+                };
+                self.assisted_step_seconds = (self.assisted_step_seconds - dt).max(0.0);
+                let speed = WALK_SPEED
+                    * if input.sprint { SPRINT_MULTIPLIER } else { 1.0 }
+                    * assisted_scale;
                 let target = wish.normalize_or_zero() * speed;
                 let response = 1.0 - (-(if self.grounded { 18.0 } else { 5.0 }) * dt).exp();
                 self.velocity.x += (target.x - self.velocity.x) * response;
                 self.velocity.z += (target.z - self.velocity.z) * response;
                 self.velocity.y = (self.velocity.y - GRAVITY * dt).max(-WALK_TERMINAL_FALL_SPEED);
             }
-            horizontal_grounded = self.grounded;
+            horizontal_grounded = self.grounded || self.ground_grace_seconds > 0.0;
         }
 
+        let maximum_step_height = if horizontal_grounded {
+            ASSISTED_STEP_HEIGHT
+        } else if input.jump && self.locomotion == LocomotionMode::Walking && self.velocity.y > -2.0
+        {
+            // A held jump may finish mounting a ledge only after the body has already risen close
+            // enough to its top. This supports 60–100 cm ledges without teleporting a standing
+            // player up them or turning ordinary air movement into wall climbing.
+            AIRBORNE_MANTLE_LIFT
+        } else {
+            0.0
+        };
         self.move_horizontal(
             Vec2::new(self.velocity.x, self.velocity.z) * dt,
             voxel_size,
-            horizontal_grounded,
+            maximum_step_height,
             &mut sample_voxel,
         );
         self.grounded = false;
@@ -667,6 +709,7 @@ impl CameraState {
             if !collides(snapped, voxel_size, &mut sample_voxel) {
                 self.position = snapped;
                 self.grounded = true;
+                self.ground_grace_seconds = GROUND_GRACE_SECONDS;
                 self.velocity.y = 0.0;
             }
         }
@@ -679,6 +722,7 @@ impl CameraState {
             )
         {
             self.grounded = true;
+            self.ground_grace_seconds = GROUND_GRACE_SECONDS;
             self.velocity.y = self.velocity.y.max(0.0);
         }
         if self.grounded && self.locomotion == LocomotionMode::Gliding {
@@ -782,7 +826,7 @@ impl CameraState {
         &mut self,
         distance: Vec2,
         voxel_size: f32,
-        allow_step: bool,
+        maximum_step_height: f32,
         sample_voxel: &mut impl FnMut(i32, i32, i32) -> VoxelPhysics,
     ) {
         if distance.length_squared() <= f32::EPSILON {
@@ -795,38 +839,61 @@ impl CameraState {
         for _ in 0..step_count {
             let origin = self.position;
             let full = origin + Vec3::new(delta.x, 0.0, delta.y);
-            if let Some(resolved) =
-                resolve_horizontal_candidate(full, voxel_size, allow_step, sample_voxel)
+            if let Some((resolved, lift)) =
+                resolve_horizontal_candidate(full, voxel_size, maximum_step_height, sample_voxel)
             {
-                self.position = resolved;
+                if lift > EFFORTLESS_STEP_HEIGHT {
+                    self.assisted_step_seconds = ASSISTED_STEP_RECOVERY_SECONDS;
+                    let scale = assisted_step_speed_scale(lift);
+                    let slowed = origin + Vec3::new(delta.x * scale, 0.0, delta.y * scale);
+                    self.position = resolve_horizontal_candidate(
+                        slowed,
+                        voxel_size,
+                        maximum_step_height,
+                        sample_voxel,
+                    )
+                    .map_or(resolved, |(position, _)| position);
+                } else {
+                    self.position = resolved;
+                }
                 continue;
             }
 
             let x = (delta.x.abs() > f32::EPSILON)
                 .then(|| origin + Vec3::X * delta.x)
                 .and_then(|candidate| {
-                    resolve_horizontal_candidate(candidate, voxel_size, allow_step, sample_voxel)
+                    resolve_horizontal_candidate(
+                        candidate,
+                        voxel_size,
+                        maximum_step_height,
+                        sample_voxel,
+                    )
                 });
             let z = (delta.y.abs() > f32::EPSILON)
                 .then(|| origin + Vec3::Z * delta.y)
                 .and_then(|candidate| {
-                    resolve_horizontal_candidate(candidate, voxel_size, allow_step, sample_voxel)
+                    resolve_horizontal_candidate(
+                        candidate,
+                        voxel_size,
+                        maximum_step_height,
+                        sample_voxel,
+                    )
                 });
             match (x, z) {
                 (Some(x), Some(_)) if delta.x.abs() >= delta.y.abs() => {
-                    self.position = x;
+                    self.position = x.0;
                     blocked_z = true;
                 }
                 (Some(_), Some(z)) => {
-                    self.position = z;
+                    self.position = z.0;
                     blocked_x = true;
                 }
                 (Some(x), None) => {
-                    self.position = x;
+                    self.position = x.0;
                     blocked_z = true;
                 }
                 (None, Some(z)) => {
-                    self.position = z;
+                    self.position = z.0;
                     blocked_x = true;
                 }
                 (None, None) => {
@@ -875,21 +942,28 @@ impl CameraState {
 fn resolve_horizontal_candidate(
     candidate: Vec3,
     voxel_size: f32,
-    allow_step: bool,
+    maximum_step_height: f32,
     sample_voxel: &mut impl FnMut(i32, i32, i32) -> VoxelPhysics,
-) -> Option<Vec3> {
+) -> Option<(Vec3, f32)> {
     if !collides(candidate, voxel_size, sample_voxel) {
-        return Some(candidate);
+        return Some((candidate, 0.0));
     }
-    if !allow_step {
+    if maximum_step_height <= 0.0 {
         return None;
     }
     let lift = required_step_lift(candidate, voxel_size, sample_voxel)?;
-    if !(0.0..=STEP_HEIGHT + COLLISION_EPSILON).contains(&lift) {
+    if !(0.0..=maximum_step_height + COLLISION_EPSILON).contains(&lift) {
         return None;
     }
     let raised = candidate + Vec3::Y * lift;
-    (!collides(raised, voxel_size, sample_voxel)).then_some(raised)
+    (!collides(raised, voxel_size, sample_voxel)).then_some((raised, lift))
+}
+
+fn assisted_step_speed_scale(lift: f32) -> f32 {
+    let assisted = ((lift - EFFORTLESS_STEP_HEIGHT)
+        / (ASSISTED_STEP_HEIGHT - EFFORTLESS_STEP_HEIGHT))
+        .clamp(0.0, 1.0);
+    1.0 - assisted * 0.38
 }
 
 fn normalized_yaw(yaw: f32) -> f32 {
@@ -1274,6 +1348,90 @@ mod tests {
     }
 
     #[test]
+    fn grounded_player_walks_over_two_voxel_steps_without_jumping() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
+        camera.grounded = true;
+        let mut input = InputState::default();
+        input.set_key(4, true);
+        for _ in 0..120 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |x, y, _| {
+                solid_if(y < 0 || (x >= 5 && y < 2))
+            });
+        }
+
+        assert!(camera.position.x > 1.0, "position: {:?}", camera.position);
+        assert!(camera.grounded);
+        assert!(
+            (camera.position.y - PLAYER_EYE_HEIGHT_METRES - 0.2).abs() < 0.011,
+            "feet should settle on the two-voxel step: {:?}",
+            camera.position
+        );
+    }
+
+    #[test]
+    fn five_voxel_step_is_climbable_but_slower_than_planar_ground() {
+        fn travel(step_height: i32) -> f32 {
+            let mut camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
+            camera.grounded = true;
+            let mut input = InputState::default();
+            input.set_key(4, true);
+            for _ in 0..90 {
+                camera.update(&input, 1.0 / 120.0, 0.1, |x, y, _| {
+                    solid_if(y < 0 || (x >= 5 && y < step_height))
+                });
+            }
+            camera.position.x
+        }
+
+        let planar = travel(0);
+        let assisted = travel(5);
+        assert!(assisted > 0.8, "five-voxel climb stalled at {assisted}m");
+        assert!(
+            assisted < planar - 0.04,
+            "assisted climb {assisted}m was not slower than planar travel {planar}m"
+        );
+    }
+
+    #[test]
+    fn held_jump_can_finish_mounting_a_one_metre_ledge() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
+        camera.grounded = true;
+        let mut input = InputState::default();
+        input.set_key(4, true);
+        input.set_key(5, true);
+        for _ in 0..180 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |x, y, _| {
+                solid_if(y < 0 || (x >= 9 && y < 10))
+            });
+        }
+
+        assert!(camera.position.x > 1.2, "ledge climb stalled: {camera:?}");
+        assert!(
+            camera.position.y - PLAYER_EYE_HEIGHT_METRES > 0.98,
+            "player did not mount the one-metre ledge: {camera:?}"
+        );
+    }
+
+    #[test]
+    fn jump_remains_available_through_a_short_ground_contact_gap() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
+        camera.grounded = true;
+        camera.update(&InputState::default(), 1.0 / 120.0, 0.1, |_, _, _| {
+            VoxelPhysics::EMPTY
+        });
+        assert!(!camera.grounded);
+
+        let mut input = InputState::default();
+        input.set_key(5, true);
+        camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+
+        assert!(
+            camera.velocity.y > JUMP_SPEED - GRAVITY / 120.0 - 0.001,
+            "contact grace did not produce a jump: {camera:?}"
+        );
+    }
+
+    #[test]
     fn capsule_follows_a_ten_centimetre_dip_then_climbs_without_stalling() {
         let mut camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES + 0.1, 0.0));
         camera.grounded = true;
@@ -1468,6 +1626,8 @@ mod tests {
             assert_eq!(camera.locomotion, before.locomotion);
             assert_eq!(camera.gliding_available, before.gliding_available);
             assert_eq!(camera.jump_was_down, before.jump_was_down);
+            assert_eq!(camera.ground_grace_seconds, before.ground_grace_seconds);
+            assert_eq!(camera.assisted_step_seconds, before.assisted_step_seconds);
             assert_eq!(camera.fluid, before.fluid);
             assert!(!sampled);
         }
