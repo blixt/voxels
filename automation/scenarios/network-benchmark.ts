@@ -11,6 +11,7 @@ import {
   isBrowserConsoleFailure,
   reserveEphemeralPort,
 } from "../lib/browser.ts";
+import { ScenarioArguments } from "../lib/arguments.ts";
 import {
   assertSnapshotSchema,
   FRAME_SAMPLE_WIDTH,
@@ -90,24 +91,6 @@ interface FrameState {
 interface BenchmarkActionContext {
   readonly capture: () => Promise<readonly number[]>;
   readonly markMeasurementStart: () => number;
-}
-
-function argumentValue(arguments_: readonly string[], name: string, fallback: string): string {
-  const prefix = `--${name}=`;
-  const value = arguments_.find((argument) => argument.startsWith(prefix))?.slice(prefix.length);
-  return value ?? fallback;
-}
-
-function positiveInteger(value: string, name: string): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be positive`);
-  return parsed;
-}
-
-function positiveNumber(value: string, name: string): number {
-  const parsed = Number.parseFloat(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`${name} must be positive`);
-  return parsed;
 }
 
 function requiredTomlString(contents: string, key: string): string {
@@ -635,27 +618,44 @@ function markdownReport(result: NetworkMarkdownReport): string {
 }
 
 async function main(context: ScenarioContext, arguments_: readonly string[]) {
-  const value = (name: string, fallback: string): string =>
-    argumentValue(arguments_, name, fallback);
-  const repetitions = positiveInteger(value("runs", "5"), "runs");
-  const roundTripLatencyMs = positiveNumber(
-    value("rtt-ms", String(DEFAULT_PROFILE.roundTripLatencyMs)),
-    "rtt-ms",
-  );
+  const options = new ScenarioArguments(arguments_);
+  const repetitions =
+    options.number("runs", { fallback: 5, integer: true, minimum: 1, maximum: 100 }) ?? 5;
+  const roundTripLatencyMs =
+    options.number("rtt-ms", {
+      fallback: DEFAULT_PROFILE.roundTripLatencyMs,
+      minimum: 0,
+      maximum: 10_000,
+    }) ?? DEFAULT_PROFILE.roundTripLatencyMs;
   const profile = {
     ...DEFAULT_PROFILE,
-    name: value("profile", DEFAULT_PROFILE.name),
+    name: options.string("profile", DEFAULT_PROFILE.name) ?? DEFAULT_PROFILE.name,
     roundTripLatencyMs,
     oneWayLatencyMs: roundTripLatencyMs / 2,
-    downstreamMegabitsPerSecond: positiveNumber(
-      value("downstream-mbps", String(DEFAULT_PROFILE.downstreamMegabitsPerSecond)),
-      "downstream-mbps",
-    ),
-    upstreamMegabitsPerSecond: positiveNumber(
-      value("upstream-mbps", String(DEFAULT_PROFILE.upstreamMegabitsPerSecond)),
-      "upstream-mbps",
-    ),
+    downstreamMegabitsPerSecond:
+      options.number("downstream-mbps", {
+        fallback: DEFAULT_PROFILE.downstreamMegabitsPerSecond,
+        minimum: 0.001,
+      }) ?? DEFAULT_PROFILE.downstreamMegabitsPerSecond,
+    upstreamMegabitsPerSecond:
+      options.number("upstream-mbps", {
+        fallback: DEFAULT_PROFILE.upstreamMegabitsPerSecond,
+        minimum: 0.001,
+      }) ?? DEFAULT_PROFILE.upstreamMegabitsPerSecond,
+    jitterMs:
+      options.number("jitter-ms", {
+        fallback: DEFAULT_PROFILE.jitterMs,
+        minimum: 0,
+        maximum: 10_000,
+      }) ?? DEFAULT_PROFILE.jitterMs,
+    packetLossPercent:
+      options.number("loss-percent", {
+        fallback: DEFAULT_PROFILE.packetLossPercent,
+        minimum: 0,
+        maximum: 100,
+      }) ?? DEFAULT_PROFILE.packetLossPercent,
   };
+  options.assertEmpty();
   const temporary = await mkdtemp(path.join(tmpdir(), "voxels-network-benchmark-"));
   const backendPort = await reserveEphemeralPort();
   const proxyPort = await reserveEphemeralPort();

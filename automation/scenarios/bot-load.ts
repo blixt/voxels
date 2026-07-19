@@ -12,6 +12,7 @@ import {
   isBrowserConsoleFailure,
   reserveEphemeralPort,
 } from "../lib/browser.ts";
+import { ScenarioArguments } from "../lib/arguments.ts";
 import {
   assertSnapshotSchema,
   FRAME_SAMPLE_WIDTH,
@@ -131,72 +132,32 @@ interface ObserverSample {
 }
 
 function parseArguments(values: readonly string[]): BotLoadOptions {
-  const options = {
-    counts: [4, 8, 16, 32, 64],
-    durationSeconds: 10,
-    layout: "mixed",
-    source: "procedural-v16",
-    mode: "scale",
-    serviceProfile: "worldgen",
-    botProfile: "worldgen-dev",
-    browser: true,
-  };
-  for (const argument of values) {
-    if (argument === "--") continue;
-    if (argument === "--growth") {
-      options.mode = "growth";
-      continue;
-    }
-    if (argument === "--no-browser") {
-      options.browser = false;
-      continue;
-    }
-    if (argument === "--browser") {
-      options.browser = true;
-      continue;
-    }
-    const [name, value] = argument.split("=", 2);
-    if (value === undefined) throw new Error(`expected --name=value, received ${argument}`);
-    if (name === "--counts" || name === "--populations") {
-      options.counts = value.split(",").map(Number);
-    } else if (name === "--duration" || name === "--duration-seconds") {
-      options.durationSeconds = Number(value);
-    } else if (name === "--layout") {
-      options.layout = value;
-    } else if (name === "--source") {
-      options.source = value;
-    } else if (name === "--service-profile") {
-      options.serviceProfile = value;
-    } else if (name === "--bot-profile") {
-      options.botProfile = value;
-    } else {
-      throw new Error(`unknown bot load option ${name}`);
-    }
-  }
+  const arguments_ = new ScenarioArguments(values);
+  const countsSource = arguments_.string("counts", "4,8,16,32,64") ?? "";
+  const counts = countsSource.split(",").map((value) => Number(value.trim()));
   if (
-    options.counts.length === 0 ||
-    options.counts.some((count) => !Number.isInteger(count) || count < 1 || count > 1_024)
+    counts.length === 0 ||
+    counts.some((count) => !Number.isInteger(count) || count < 1 || count > 1_024)
   ) {
     throw new Error("--counts must contain integers in 1..=1024");
   }
-  if (
-    !Number.isFinite(options.durationSeconds) ||
-    options.durationSeconds < 1 ||
-    options.durationSeconds > 86_400
-  ) {
-    throw new Error("--duration must be in 1..=86400 seconds");
-  }
-  if (!["dense", "mixed"].includes(options.layout)) {
-    throw new Error("--layout must be dense or mixed");
-  }
-  if (!["scale", "growth"].includes(options.mode)) throw new Error("invalid mode");
-  if (!["worldgen", "worldgen-dev"].includes(options.serviceProfile)) {
-    throw new Error("--service-profile must be worldgen or worldgen-dev");
-  }
-  if (!["worldgen", "worldgen-dev"].includes(options.botProfile)) {
-    throw new Error("--bot-profile must be worldgen or worldgen-dev");
-  }
-  return options as BotLoadOptions;
+  const options: BotLoadOptions = {
+    counts,
+    durationSeconds:
+      arguments_.number("duration", {
+        fallback: 10,
+        minimum: 1,
+        maximum: 86_400,
+      }) ?? 10,
+    layout: arguments_.choice("layout", ["dense", "mixed"], "mixed"),
+    source: arguments_.string("source", "procedural-v16") ?? "procedural-v16",
+    mode: arguments_.flag("growth") ? "growth" : "scale",
+    serviceProfile: arguments_.choice("service-profile", ["worldgen", "worldgen-dev"], "worldgen"),
+    botProfile: arguments_.choice("bot-profile", ["worldgen", "worldgen-dev"], "worldgen-dev"),
+    browser: !arguments_.flag("no-browser"),
+  };
+  arguments_.assertEmpty();
+  return options;
 }
 
 function executablePath(profile: WorldServiceCargoProfile, binary: string): string {
