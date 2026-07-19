@@ -80,6 +80,10 @@ listen = "127.0.0.1:9777"
       host: "::1",
       port: 4123,
     });
+    expect(worldServiceListenAddress('listen = "127.0.0.1:4123" # local development')).toEqual({
+      host: "127.0.0.1",
+      port: 4123,
+    });
     expect(() => worldServiceListenAddress('listen = "127.0.0.1:0"')).toThrow(
       "invalid world-service transport.listen port",
     );

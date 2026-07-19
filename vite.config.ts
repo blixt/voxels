@@ -83,7 +83,7 @@ export function isNativeWorldServiceInput(file: string): boolean {
 }
 
 export function worldServiceListenAddress(contents: string): { host: string; port: number } {
-  const value = /^listen\s*=\s*"([^"]+)"\s*$/mu.exec(contents)?.[1];
+  const value = /^listen\s*=\s*"([^"]+)"\s*(?:#.*)?$/mu.exec(contents)?.[1];
   if (!value) throw new Error("world-service config is missing transport.listen");
   const separator = value.lastIndexOf(":");
   if (separator <= 0) throw new Error(`invalid world-service transport.listen: ${value}`);
