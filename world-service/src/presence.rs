@@ -7,7 +7,7 @@
 
 use crate::{GameplayConfig, PresenceConfig};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 use uuid::Uuid;
@@ -77,7 +77,7 @@ struct SentState {
 pub(crate) struct PresenceStreamState {
     stream_sequence: u64,
     sent_initial: bool,
-    known: BTreeMap<PlayerId, SentState>,
+    known: HashMap<PlayerId, SentState>,
 }
 
 #[derive(Clone, Copy)]
@@ -527,14 +527,14 @@ impl PresenceHub {
         let visible_player_count = u16::try_from(candidates.len()).unwrap_or(u16::MAX);
         let relevant = candidates
             .iter()
-            .map(|candidate| (candidate.state.player_id, *candidate))
-            .collect::<BTreeMap<_, _>>();
+            .map(|candidate| (candidate.state.player_id, candidate.state.connection_id))
+            .collect::<HashMap<_, _>>();
 
         let mut leaves = Vec::new();
         stream.known.retain(|player_id, sent| {
             let keep = relevant
                 .get(player_id)
-                .is_some_and(|candidate| candidate.state.connection_id == sent.connection_id);
+                .is_some_and(|connection_id| *connection_id == sent.connection_id);
             if !keep {
                 leaves.push(sent.connection_id);
             }
@@ -571,8 +571,11 @@ impl PresenceHub {
                 });
             }
         }
-        pending.sort_unstable_by(compare_pending);
-        pending.truncate(usize::from(self.config.max_records_per_delta));
+        let record_limit = usize::from(self.config.max_records_per_delta);
+        if pending.len() > record_limit {
+            pending.select_nth_unstable_by(record_limit, compare_pending);
+            pending.truncate(record_limit);
+        }
 
         let mut enters = Vec::new();
         let mut updates = Vec::new();
