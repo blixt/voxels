@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { numericSummary, percentile } from "./metrics.ts";
+import { numericSummary, percentile, percentileOrNull, rounded } from "./metrics.ts";
 
 describe("shared harness metrics", () => {
   it("uses nearest-rank percentiles consistently", () => {
@@ -10,6 +10,7 @@ describe("shared harness metrics", () => {
   });
 
   it("reports an explicit empty distribution", () => {
+    expect(percentileOrNull([], 0.95)).toBeNull();
     expect(numericSummary([])).toEqual({
       samples: 0,
       min: 0,
@@ -19,5 +20,12 @@ describe("shared harness metrics", () => {
       max: 0,
       mean: 0,
     });
+  });
+
+  it("rejects invalid distribution and rounding parameters", () => {
+    expect(() => percentile([1], -0.1)).toThrow("between zero and one");
+    expect(() => percentile([1], 1.1)).toThrow("between zero and one");
+    expect(() => rounded(Number.NaN)).toThrow("must be finite");
+    expect(() => rounded(1, 13)).toThrow("between zero and twelve");
   });
 });

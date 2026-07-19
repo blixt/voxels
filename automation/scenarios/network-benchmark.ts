@@ -11,6 +11,7 @@ import {
   snapshotValue,
 } from "../lib/engine.ts";
 import { createShapedLink, type LinkStats, type ShapedLink } from "../lib/network.ts";
+import { percentileOrNull as percentile, rounded } from "../lib/metrics.ts";
 import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "../lib/protocol.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import {
@@ -86,17 +87,6 @@ interface BenchmarkActionContext {
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function percentile(values: readonly number[], fraction: number): number | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((left, right) => left - right);
-  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)] ?? null;
-}
-
-function rounded(value: number, digits = 1): number {
-  const scale = 10 ** digits;
-  return Math.round(value * scale) / scale;
 }
 
 function numericSummary(values: readonly number[]): NumberSummary {

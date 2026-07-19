@@ -22,28 +22,40 @@ export interface ProcessSample {
 }
 
 export function percentile(values: readonly number[], fraction: number): number {
+  if (!Number.isFinite(fraction) || fraction < 0 || fraction > 1) {
+    throw new Error("percentile fraction must be between zero and one");
+  }
   if (values.length === 0) return 0;
   const sorted = [...values].sort((left, right) => left - right);
   const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1));
   return sorted[index] ?? 0;
 }
 
+export function percentileOrNull(values: readonly number[], fraction: number): number | null {
+  return values.length === 0 ? null : percentile(values, fraction);
+}
+
+export function rounded(value: number, digits = 1): number {
+  if (!Number.isFinite(value)) throw new Error("rounded value must be finite");
+  if (!Number.isSafeInteger(digits) || digits < 0 || digits > 12) {
+    throw new Error("rounding digits must be an integer between zero and twelve");
+  }
+  const scale = 10 ** digits;
+  return Math.round(value * scale) / scale;
+}
+
 export function numericSummary(values: readonly number[], digits = 3): NumericSummary {
   if (values.length === 0) {
     return { samples: 0, min: 0, p50: 0, p95: 0, p99: 0, max: 0, mean: 0 };
   }
-  const round = (value: number): number => {
-    const scale = 10 ** digits;
-    return Math.round(value * scale) / scale;
-  };
   return {
     samples: values.length,
-    min: round(Math.min(...values)),
-    p50: round(percentile(values, 0.5)),
-    p95: round(percentile(values, 0.95)),
-    p99: round(percentile(values, 0.99)),
-    max: round(Math.max(...values)),
-    mean: round(values.reduce((sum, value) => sum + value, 0) / values.length),
+    min: rounded(Math.min(...values), digits),
+    p50: rounded(percentile(values, 0.5), digits),
+    p95: rounded(percentile(values, 0.95), digits),
+    p99: rounded(percentile(values, 0.99), digits),
+    max: rounded(Math.max(...values), digits),
+    mean: rounded(values.reduce((sum, value) => sum + value, 0) / values.length, digits),
   };
 }
 
