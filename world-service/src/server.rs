@@ -49,9 +49,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v24/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v24/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v24";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v25/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v25/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v25";
 const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const RESPONSE_CACHE_BUDGET_DIVISOR: usize = 4;
@@ -3192,7 +3192,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v24, test-local-token"),
+            HeaderValue::from_static("voxels.world.v25, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -4148,7 +4148,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v24, test-local-token"),
+            HeaderValue::from_static("voxels.world.v25, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -4183,7 +4183,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v24, test-local-token"),
+            HeaderValue::from_static("voxels.world.v25, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket

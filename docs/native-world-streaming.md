@@ -7,7 +7,7 @@ provider therefore adds no provider branch, model dependency, or Metal API to th
 
 ## Why binary WebSocket first
 
-VXWP v24 uses the standard `WebSocket` API over loopback. This is the best first transport for
+VXWP v25 uses the standard `WebSocket` API over loopback. This is the best first transport for
 reliable chunk assets: it is mature, works in a dedicated worker, and requires neither an HTTP/3
 certificate setup nor WebRTC signaling. Axum's native Rust server disables Nagle delay, and the
 application bounds outstanding work so classic WebSocket's missing receive-side backpressure cannot
@@ -39,13 +39,13 @@ The [W3C WebTransport specification][webtransport-spec] supports carrying the sa
 envelopes on a future reliable stream. Transport choice is deliberately below world identity,
 request correlation, and chunk codecs.
 
-## VXWP v24 contract
+## VXWP v25 contract
 
 Each WebSocket message contains exactly one little-endian VXWP envelope with `VXWP` magic, protocol
 version, message kind, request ID, payload length, and reserved fields. The format is code-versioned;
 Rust enum layout and Serde output are not wire formats.
 
-1. The browser upgrades `/v24/world`, offering `voxels.world.v24` and the configured local auth token,
+1. The browser upgrades `/v25/world`, offering `voxels.world.v25` and the configured local auth token,
    then sends `OpenWorld` with its maximum in-flight batch count and browser-local player claim.
 2. The daemon replies with `WorldOpened`: immutable world manifest, source identity/hash,
    capabilities, negotiated request window, echoed player claim, spawn sample, authoritative resume
@@ -71,13 +71,13 @@ Rust enum layout and Serde output are not wire formats.
    coarse parent remains resident until its replacement is complete, and the renderer derives exact
    height-matched connectors and lighting morphs from the two resident profiles.
 7. Every chunk or surface result body is independently Brotli-compressed at quality 2 with a 20-bit
-   window. Its mandatory v24 envelope declares the exact uncompressed length; the decoder rejects
+   window. Its mandatory v25 envelope declares the exact uncompressed length; the decoder rejects
    unknown codecs, nonzero reserved bytes, outputs above the 16 MiB frame bound, truncated streams,
    and streams producing even one byte beyond the declaration before semantic validation.
 8. `Cancel` is best effort. Late, canceled, mismatched, or stale-revision responses are discarded;
    they cannot resurrect an evicted scheduler ticket.
 9. `WorldOpened` also returns a connection-scoped, random presence session token. The browser uses
-   it to open `/v24/presence` on a dedicated socket; a token cannot be reused by another world
+   it to open `/v25/presence` on a dedicated socket; a token cannot be reused by another world
    connection.
 10. Browsers send bounded `PlayerPose` latest-state frames. The server validates monotonic sequence,
     finite coordinates, update rate, reported velocity, and receipt-time horizontal/vertical movement
@@ -166,9 +166,9 @@ Copy it to both `config/client.toml` as `[world].auth_subprotocol_token` and
 
 ```toml
 [world]
-endpoint = "ws://127.0.0.1:9777/v24/world"
-presence_endpoint = "ws://127.0.0.1:9777/v24/presence"
-subprotocol = "voxels.world.v24"
+endpoint = "ws://127.0.0.1:9777/v25/world"
+presence_endpoint = "ws://127.0.0.1:9777/v25/presence"
+subprotocol = "voxels.world.v25"
 auth_subprotocol_token = "the-same-random-local-token"
 ```
 

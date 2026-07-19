@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 24;
+pub const PROTOCOL_VERSION: u16 = 25;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -1508,16 +1508,27 @@ pub fn encode_edit_commit(commit: &EditCommit) -> Result<Vec<u8>, ProtocolError>
     push_u16(&mut payload, commit.affected_chunks.len() as u16);
     push_u16(&mut payload, commit.affected_surface_tiles.len() as u16);
     push_u16(&mut payload, u16::from(commit.editor_inventory.is_some()));
+    let mut previous_voxel = [0_i64; 3];
     for mutation in &commit.mutations {
-        encode_voxel_coord(&mut payload, mutation.coord);
-        push_u16(&mut payload, mutation.material.id());
-        push_u16(&mut payload, 0);
+        encode_delta_coord(
+            &mut payload,
+            [mutation.coord.x, mutation.coord.y, mutation.coord.z],
+            &mut previous_voxel,
+        );
+        push_var_u64(&mut payload, u64::from(mutation.material.id()));
     }
+    let mut previous_chunk = [0_i64; 3];
     for coord in &commit.affected_chunks {
-        push_chunk_coord(&mut payload, *coord);
+        encode_delta_coord(
+            &mut payload,
+            [coord.x, coord.y, coord.z],
+            &mut previous_chunk,
+        );
     }
+    let mut previous_surface = [0_i64; 2];
     for coord in &commit.affected_surface_tiles {
-        encode_surface_coord(&mut payload, *coord);
+        payload.push(coord.level.index());
+        encode_delta_coord(&mut payload, [coord.x, coord.z], &mut previous_surface);
     }
     if let Some(inventory) = commit.editor_inventory {
         encode_inventory(&mut payload, inventory);
@@ -1563,27 +1574,42 @@ pub fn decode_edit_commit(bytes: &[u8]) -> Result<EditCommit, ProtocolError> {
         ));
     }
     let mut mutations = Vec::with_capacity(mutation_count);
+    let mut previous_voxel = [0_i64; 3];
     for _ in 0..mutation_count {
-        let coord = decode_voxel_coord(&mut cursor)?;
-        let material_id = cursor.u16()?;
+        let [x, y, z] = decode_delta_coord(&mut cursor, &mut previous_voxel)?;
+        let coord = VoxelCoord::new(x, y, z);
+        validate_voxel_coord(coord)?;
+        let material_value = decode_var_u64(&mut cursor, 3)?;
+        let material_id = u16::try_from(material_value)
+            .map_err(|_| ProtocolError::UnknownEnum("material", material_value))?;
         let material = Material::from_id(material_id).ok_or(ProtocolError::UnknownEnum(
             "material",
             u64::from(material_id),
         ))?;
-        if cursor.u16()? != 0 {
-            return Err(ProtocolError::InvalidPayload(
-                "reserved voxel mutation field is nonzero",
-            ));
-        }
         mutations.push(VoxelMutation { coord, material });
     }
     let mut affected_chunks = Vec::with_capacity(chunk_count);
+    let mut previous_chunk = [0_i64; 3];
     for _ in 0..chunk_count {
-        affected_chunks.push(decode_chunk_coord(&mut cursor)?);
+        let [x, y, z] = decode_delta_coord(&mut cursor, &mut previous_chunk)?;
+        let coord = ChunkCoord::new(x, y, z);
+        if !coord.is_world_representable() {
+            return Err(ProtocolError::InvalidPayload("invalid chunk coordinate"));
+        }
+        affected_chunks.push(coord);
     }
     let mut affected_surface_tiles = Vec::with_capacity(surface_count);
+    let mut previous_surface = [0_i64; 2];
     for _ in 0..surface_count {
-        affected_surface_tiles.push(decode_surface_coord(&mut cursor)?);
+        let level = decode_surface_lod(cursor.u8()?)?;
+        let [x, z] = decode_delta_coord(&mut cursor, &mut previous_surface)?;
+        let coord = SurfaceTileCoord::new(level, x, z);
+        if !coord.is_world_representable() {
+            return Err(ProtocolError::InvalidPayload(
+                "invalid surface tile coordinate",
+            ));
+        }
+        affected_surface_tiles.push(coord);
     }
     let editor_inventory = (inventory_present == 1)
         .then(|| decode_inventory(&mut cursor))
@@ -2810,20 +2836,6 @@ fn encode_surface_coord(output: &mut Vec<u8>, coord: SurfaceTileCoord) {
     push_i32(output, coord.z);
 }
 
-fn push_chunk_coord(output: &mut Vec<u8>, coord: ChunkCoord) {
-    push_i32(output, coord.x);
-    push_i32(output, coord.y);
-    push_i32(output, coord.z);
-}
-
-fn decode_chunk_coord(cursor: &mut Cursor<'_>) -> Result<ChunkCoord, ProtocolError> {
-    let coord = ChunkCoord::new(cursor.i32()?, cursor.i32()?, cursor.i32()?);
-    if !coord.is_world_representable() {
-        return Err(ProtocolError::InvalidPayload("invalid chunk coordinate"));
-    }
-    Ok(coord)
-}
-
 fn encode_voxel_coord(output: &mut Vec<u8>, coord: VoxelCoord) {
     push_i32(output, coord.x);
     push_i32(output, coord.y);
@@ -3046,11 +3058,7 @@ fn encode_surface_quads(output: &mut Vec<u8>, coord: SurfaceTileCoord, quads: &[
     let tile_origin = coord.voxel_origin();
     let mut previous = [i64::from(tile_origin[0]), 0, i64::from(tile_origin[1])];
     for quad in quads {
-        for (axis, &origin) in quad.origin.iter().enumerate() {
-            let origin = i64::from(origin);
-            push_var_u64(output, zigzag_i64(origin - previous[axis]));
-            previous[axis] = origin;
-        }
+        encode_delta_coord(output, quad.origin, &mut previous);
         let metadata = u64::from(quad.face) | (u64::from(quad.material.id()) << 3);
         push_var_u64(output, metadata);
         push_var_u64(output, u64::from(quad.extent[0]));
@@ -3067,18 +3075,7 @@ fn decode_surface_quads(
     let mut previous = [i64::from(tile_origin[0]), 0, i64::from(tile_origin[1])];
     let mut quads = Vec::with_capacity(quad_count);
     for _ in 0..quad_count {
-        let mut origin = [0; 3];
-        for axis in 0..3 {
-            let delta = unzigzag_i64(decode_var_u64(cursor, 5)?);
-            let value = previous[axis]
-                .checked_add(delta)
-                .and_then(|value| i32::try_from(value).ok())
-                .ok_or(ProtocolError::InvalidPayload(
-                    "surface quad origin delta overflows",
-                ))?;
-            origin[axis] = value;
-            previous[axis] = i64::from(value);
-        }
+        let origin = decode_delta_coord(cursor, &mut previous)?;
         let metadata = decode_var_u64(cursor, 3)?;
         let face = (metadata & 0b111) as u8;
         if face > 5 {
@@ -3109,6 +3106,37 @@ fn decode_surface_quads(
     Ok(quads)
 }
 
+fn encode_delta_coord<const N: usize>(
+    output: &mut Vec<u8>,
+    coord: [i32; N],
+    previous: &mut [i64; N],
+) {
+    for axis in 0..N {
+        let value = i64::from(coord[axis]);
+        push_var_u64(output, zigzag_i64(value - previous[axis]));
+        previous[axis] = value;
+    }
+}
+
+fn decode_delta_coord<const N: usize>(
+    cursor: &mut Cursor<'_>,
+    previous: &mut [i64; N],
+) -> Result<[i32; N], ProtocolError> {
+    let mut coord = [0; N];
+    for axis in 0..N {
+        let delta = unzigzag_i64(decode_var_u64(cursor, 5)?);
+        let value = previous[axis]
+            .checked_add(delta)
+            .and_then(|value| i32::try_from(value).ok())
+            .ok_or(ProtocolError::InvalidPayload(
+                "delta-encoded coordinate overflows",
+            ))?;
+        coord[axis] = value;
+        previous[axis] = i64::from(value);
+    }
+    Ok(coord)
+}
+
 fn zigzag_i64(value: i64) -> u64 {
     ((value as u64) << 1) ^ ((value >> 63) as u64)
 }
@@ -3134,14 +3162,14 @@ fn decode_var_u64(cursor: &mut Cursor<'_>, max_bytes: usize) -> Result<u64, Prot
         if byte & 0x80 == 0 {
             if index > 0 && payload == 0 {
                 return Err(ProtocolError::InvalidPayload(
-                    "non-canonical surface varint",
+                    "non-canonical protocol varint",
                 ));
             }
             return Ok(value);
         }
     }
     Err(ProtocolError::InvalidPayload(
-        "surface varint exceeds its field width",
+        "protocol varint exceeds its field width",
     ))
 }
 
@@ -4238,14 +4266,14 @@ mod tests {
         assert_eq!(
             decode_surface_quads(&mut overlong, coord, 1),
             Err(ProtocolError::InvalidPayload(
-                "surface varint exceeds its field width"
+                "protocol varint exceeds its field width"
             ))
         );
         let mut non_canonical = Cursor::new(&[0x80, 0]);
         assert_eq!(
             decode_surface_quads(&mut non_canonical, coord, 1),
             Err(ProtocolError::InvalidPayload(
-                "non-canonical surface varint"
+                "non-canonical protocol varint"
             ))
         );
         let mut invalid_face = Cursor::new(&[0, 0, 0, 6, 1, 1]);
@@ -4390,6 +4418,24 @@ mod tests {
         let encoded_commit = encode_edit_commit(&commit).expect("encode edit commit");
         assert_eq!(message_kind(&encoded_commit), Ok(edit_commit_kind()));
         assert_eq!(decode_edit_commit(&encoded_commit), Ok(commit.clone()));
+        let mutation_offset = FRAME_HEADER_BYTES + 40;
+        let mut overlong_delta = encoded_commit.clone();
+        overlong_delta[mutation_offset..mutation_offset + 5].fill(0x80);
+        assert_eq!(
+            decode_edit_commit(&overlong_delta),
+            Err(ProtocolError::InvalidPayload(
+                "protocol varint exceeds its field width"
+            ))
+        );
+        let mut non_canonical_delta = encoded_commit;
+        non_canonical_delta[mutation_offset] = 0x80;
+        non_canonical_delta[mutation_offset + 1] = 0;
+        assert_eq!(
+            decode_edit_commit(&non_canonical_delta),
+            Err(ProtocolError::InvalidPayload(
+                "non-canonical protocol varint"
+            ))
+        );
 
         let resync = ResyncRequired { revision: 12 };
         let encoded_resync = encode_resync_required(resync).expect("encode resync");
@@ -4552,6 +4598,10 @@ mod tests {
             editor_inventory: None,
         };
         let encoded = encode_edit_commit(&commit).expect("encode maximum commit");
+        assert!(
+            encoded.len() < 1_000,
+            "maximum edit commit should stay compact"
+        );
         assert_eq!(decode_edit_commit(&encoded), Ok(commit.clone()));
 
         let mut oversized = commit;
