@@ -9,9 +9,9 @@ controls_enabled = true
 # The client knows only where canonical world products come from. The service chooses the
 # procedural or Terrain Diffusion provider in config/world-service.toml.
 [world]
-endpoint = "ws://127.0.0.1:9777/v25/world"
-presence_endpoint = "ws://127.0.0.1:9777/v25/presence"
-subprotocol = "voxels.world.v25"
+endpoint = "ws://127.0.0.1:9777/v26/world"
+presence_endpoint = "ws://127.0.0.1:9777/v26/presence"
+subprotocol = "voxels.world.v26"
 auth_subprotocol_token = "replace-with-a-random-local-token"
 max_in_flight_batches = 8
 buffered_amount_high_water_bytes = 8388608

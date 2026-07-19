@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 #[cfg(test)]
-use voxels_world::protocol::DIG_DIAMETER_VOXELS;
+use voxels_world::protocol::{EDIT_CUBE_VOLUME_VOXELS, EDIT_MAX_VOLUME_VOXELS};
 use voxels_world::protocol::{
-    DIG_VOLUME_VOXELS, DigVolume, EDIT_SESSION_NOT_CURRENT, EditAction, EditCommand, EditCommit,
-    EditSessionId, MATERIAL_INVENTORY_SLOTS, MAX_EDIT_AFFECTED_CHUNKS,
+    EDIT_SESSION_NOT_CURRENT, EditAction, EditCommand, EditCommit, EditSessionId, EditShape,
+    EditVolume, MATERIAL_INVENTORY_SLOTS, MAX_EDIT_AFFECTED_CHUNKS,
     MAX_EDIT_AFFECTED_SURFACE_TILES, MAX_EDIT_MUTATIONS, MaterialInventory, PlayerId, PlayerResume,
     ProtocolError, VoxelMutation, encode_edit_commit,
 };
@@ -29,9 +29,7 @@ const OPERATION_OUTCOME_MAGIC: &[u8; 4] = b"VXEO";
 const OPERATION_OUTCOME_VERSION: u8 = 1;
 const OPERATION_OUTCOME_HEADER_BYTES: usize = 12;
 #[cfg(test)]
-const DIG_SAMPLE_SHAPE: [u32; 3] = [DIG_DIAMETER_VOXELS as u32; 3];
-#[cfg(test)]
-const DIG_MAX_MUTATIONS: usize = DIG_VOLUME_VOXELS;
+const DIG_MAX_MUTATIONS: usize = EDIT_MAX_VOLUME_VOXELS;
 
 pub(crate) struct EditAuthority {
     inner: Mutex<EditState>,
@@ -70,11 +68,11 @@ impl ProtectedSpawn {
     }
 
     fn intersects(&self, action: EditAction) -> bool {
-        match action {
-            EditAction::Place { coord, .. } => self.contains(coord),
-            EditAction::Dig { hit } => DigVolume::for_hit(hit)
-                .is_some_and(|volume| volume.coordinates().any(|coord| self.contains(coord))),
-        }
+        let volume = match action {
+            EditAction::Place { coord, shape, .. } => EditVolume::for_hit(coord, shape),
+            EditAction::Dig { hit, shape } => EditVolume::for_hit(hit, shape),
+        };
+        volume.is_some_and(|volume| volume.coordinates().any(|coord| self.contains(coord)))
     }
 }
 
@@ -1009,13 +1007,13 @@ fn plan_action(
     action: EditAction,
 ) -> Result<PlannedAction, EditAuthorityError> {
     match action {
-        EditAction::Dig { hit } => {
-            let volume = DigVolume::for_hit(hit).ok_or_else(|| {
+        EditAction::Dig { hit, shape } => {
+            let volume = EditVolume::for_hit(hit, shape).ok_or_else(|| {
                 EditAuthorityError("dig volume exceeds world coordinates".to_owned())
             })?;
             let snapshot = source_voxel_block(source, volume.min, volume.sample_shape())?;
-            let mut mutations = Vec::with_capacity(DIG_VOLUME_VOXELS);
-            let mut durable_overrides = Vec::with_capacity(DIG_VOLUME_VOXELS);
+            let mut mutations = Vec::with_capacity(shape.voxel_count());
+            let mut durable_overrides = Vec::with_capacity(shape.voxel_count());
             for x in volume.min.x..=volume.max.x {
                 for y in volume.min.y..=volume.max.y {
                     for z in volume.min.z..=volume.max.z {
@@ -1049,30 +1047,46 @@ fn plan_action(
                 inventory,
             })
         }
-        EditAction::Place { coord, material } => {
+        EditAction::Place {
+            coord,
+            material,
+            shape,
+        } => {
             if material == Material::Air {
                 return Err(EditAuthorityError("Air cannot be placed".to_owned()));
             }
-            let snapshot = source_voxel_block(source, coord, [1, 1, 1])?;
-            let generated = snapshot.sample(coord).ok_or_else(|| {
-                EditAuthorityError("source omitted the placement voxel".to_owned())
+            let volume = EditVolume::for_hit(coord, shape).ok_or_else(|| {
+                EditAuthorityError("placement volume exceeds world coordinates".to_owned())
             })?;
-            if edits.resolve_generated(coord, generated) != Material::Air {
-                return Err(EditAuthorityError(
-                    "placement target is occupied".to_owned(),
-                ));
-            }
+            let snapshot = source_voxel_block(source, volume.min, volume.sample_shape())?;
             let slot = &mut inventory.counts[usize::from(material.id())];
-            if *slot == 0 {
+            let mut mutations = Vec::with_capacity(shape.voxel_count());
+            let mut durable_overrides = Vec::with_capacity(shape.voxel_count());
+            for target in volume.coordinates() {
+                let generated = snapshot.sample(target).ok_or_else(|| {
+                    EditAuthorityError("source omitted a requested placement voxel".to_owned())
+                })?;
+                if edits.resolve_generated(target, generated) != Material::Air {
+                    return Err(EditAuthorityError(
+                        "placement volume is occupied or obstructed".to_owned(),
+                    ));
+                }
+                mutations.push(VoxelMutation {
+                    coord: target,
+                    material,
+                });
+                durable_overrides.push((material != generated).then_some(material));
+            }
+            let required = mutations.len() as u64;
+            if *slot < required {
                 return Err(EditAuthorityError(format!(
-                    "no {} inventory remains",
-                    material.id()
+                    "placement requires {required} units but only {slot} remain"
                 )));
             }
-            *slot -= 1;
+            *slot -= required;
             Ok(PlannedAction {
-                mutations: vec![VoxelMutation { coord, material }],
-                durable_overrides: vec![(material != generated).then_some(material)],
+                mutations,
+                durable_overrides,
                 inventory,
             })
         }
@@ -1643,8 +1657,24 @@ fn validate_resume(resume: PlayerResume) -> Result<(), EditAuthorityError> {
 
 fn encode_action(action: EditAction) -> (u8, VoxelCoord, u16) {
     match action {
-        EditAction::Dig { hit } => (1, hit, 0),
-        EditAction::Place { coord, material } => (2, coord, material.id()),
+        EditAction::Dig {
+            hit,
+            shape: EditShape::Sphere,
+        } => (1, hit, 0),
+        EditAction::Place {
+            coord,
+            material,
+            shape: EditShape::Sphere,
+        } => (2, coord, material.id()),
+        EditAction::Dig {
+            hit,
+            shape: EditShape::Cube,
+        } => (3, hit, 0),
+        EditAction::Place {
+            coord,
+            material,
+            shape: EditShape::Cube,
+        } => (4, coord, material.id()),
     }
 }
 
@@ -1654,18 +1684,33 @@ fn decode_action(
     argument: u16,
 ) -> Result<EditAction, EditAuthorityError> {
     match action {
-        1 if argument == 0 => Ok(EditAction::Dig { hit: coord }),
-        1 => Err(EditAuthorityError(
-            "durable dig operation has a nonzero argument".to_owned(),
+        1 | 3 if argument == 0 => Ok(EditAction::Dig {
+            hit: coord,
+            shape: if action == 1 {
+                EditShape::Sphere
+            } else {
+                EditShape::Cube
+            },
+        }),
+        1 | 3 => Err(EditAuthorityError(
+            "durable dig operation has a nonzero material".to_owned(),
         )),
-        2 => {
+        2 | 4 => {
             let material = decode_material(argument, "operation")?;
             if material == Material::Air {
                 return Err(EditAuthorityError(
                     "durable placement operation contains Air".to_owned(),
                 ));
             }
-            Ok(EditAction::Place { coord, material })
+            Ok(EditAction::Place {
+                coord,
+                material,
+                shape: if action == 2 {
+                    EditShape::Sphere
+                } else {
+                    EditShape::Cube
+                },
+            })
         }
         _ => Err(EditAuthorityError(
             "durable edit operation has an invalid action".to_owned(),
@@ -1763,7 +1808,11 @@ mod tests {
         EditCommand {
             operation_id,
             edit_session_id: session,
-            action: EditAction::Place { coord, material },
+            action: EditAction::Place {
+                coord,
+                material,
+                shape: EditShape::Cube,
+            },
         }
     }
 
@@ -1771,7 +1820,10 @@ mod tests {
         EditCommand {
             operation_id,
             edit_session_id: session,
-            action: EditAction::Dig { hit },
+            action: EditAction::Dig {
+                hit,
+                shape: EditShape::Cube,
+            },
         }
     }
 
@@ -1865,7 +1917,7 @@ mod tests {
         let (_, session) = admit_player(&authority, player, resume(1));
         for command in [
             place(1, session, VoxelCoord::new(0, 900, 0), Material::Stone),
-            dig(2, session, VoxelCoord::new(6, -100, 0)),
+            dig(2, session, VoxelCoord::new(7, -100, 0)),
         ] {
             assert_eq!(
                 authority
@@ -1881,7 +1933,7 @@ mod tests {
                     &source,
                     player,
                     29,
-                    dig(3, session, VoxelCoord::new(7, -100, 0)),
+                    dig(3, session, VoxelCoord::new(9, -100, 0)),
                 )
                 .expect("a dig volume wholly outside the protected radius")
                 .changed
@@ -1905,7 +1957,7 @@ mod tests {
                 place(1, session, placement, Material::Stone),
             )
             .unwrap_err();
-        assert!(rejected.to_string().contains("no 3 inventory"));
+        assert!(rejected.to_string().contains("placement requires"));
 
         let dug = authority
             .apply(
@@ -1927,7 +1979,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             placed.commit.editor_inventory.unwrap().count(material),
-            before_place - 1
+            before_place - EDIT_CUBE_VOLUME_VOXELS as u64
         );
         let never_earned = Material::ALL.into_iter().find(|candidate| {
             *candidate != Material::Air && *candidate != material && earned.count(*candidate) == 0
@@ -1938,27 +1990,37 @@ mod tests {
                     &source,
                     player,
                     300,
-                    place(4, session, VoxelCoord::new(1, 300, 0), never_earned),
+                    place(4, session, VoxelCoord::new(20, 300, 0), never_earned),
                 )
                 .unwrap_err();
-            assert!(error.to_string().contains("inventory remains"));
+            assert!(error.to_string().contains("only 0 remain"));
         }
     }
 
     #[test]
     fn solid_and_mixed_digs_yield_exact_material_histograms() {
         let source = ProceduralWorldSource::new(42);
-        let authority =
-            EditAuthority::in_memory_with_inventory(world_id(1), &source, 8, 8).unwrap();
+        let authority = EditAuthority::in_memory_with_inventory(
+            world_id(1),
+            &source,
+            8,
+            EDIT_CUBE_VOLUME_VOXELS as u32,
+        )
+        .unwrap();
         let (opened, edit_session_id) = admit_player(&authority, player_id(2), resume(1));
         for material in Material::ALL {
-            let expected = if material == Material::Air { 0 } else { 8 };
+            let expected = if material == Material::Air {
+                0
+            } else {
+                EDIT_CUBE_VOLUME_VOXELS as u64
+            };
             assert_eq!(opened.inventory.count(material), expected);
         }
 
         let solid_hit = VoxelCoord::new(0, -100, 0);
-        let solid_volume = DigVolume::for_hit(solid_hit).unwrap();
-        let solid_source = source_voxel_block(&source, solid_volume.min, DIG_SAMPLE_SHAPE).unwrap();
+        let solid_volume = EditVolume::for_hit(solid_hit, EditShape::Cube).unwrap();
+        let solid_source =
+            source_voxel_block(&source, solid_volume.min, solid_volume.sample_shape()).unwrap();
         let mut expected_histogram = [0_u64; MATERIAL_INVENTORY_SLOTS];
         for coord in solid_volume.coordinates() {
             let material = solid_source.sample(coord).unwrap();
@@ -1980,7 +2042,7 @@ mod tests {
             solid.commit.editor_inventory.unwrap().revision,
             opened.inventory.revision + 1
         );
-        assert_eq!(solid.commit.mutations.len(), DIG_VOLUME_VOXELS);
+        assert_eq!(solid.commit.mutations.len(), EDIT_CUBE_VOLUME_VOXELS);
         assert!(solid.commit.mutations.len() <= MAX_EDIT_MUTATIONS);
         assert!(
             solid
@@ -2004,44 +2066,45 @@ mod tests {
         let sky = VoxelCoord::new(50, 300, 50);
         let materials = [Material::Stone, Material::Wood, Material::Water];
         for (index, material) in materials.into_iter().enumerate() {
+            let coord = VoxelCoord::new(sky.x + index as i32 * 20, sky.y, sky.z);
             authority
                 .apply(
                     &source,
                     player_id(2),
                     22,
-                    place(
-                        10 + index as u64,
-                        edit_session_id,
-                        VoxelCoord::new(sky.x + index as i32, sky.y, sky.z),
-                        material,
-                    ),
+                    place(10 + index as u64, edit_session_id, coord, material),
                 )
                 .unwrap();
-        }
-        let before = load_durable_player(&authority.lock().connection, player_id(2))
-            .unwrap()
-            .unwrap()
-            .inventory;
-        let mixed = authority
-            .apply(
-                &source,
-                player_id(2),
-                22,
-                dig(20, edit_session_id, VoxelCoord::new(52, 300, 50)),
-            )
-            .unwrap();
-        assert_eq!(mixed.commit.mutations.len(), 3);
-        let after = mixed.commit.editor_inventory.unwrap();
-        for material in materials {
-            assert_eq!(after.count(material), before.count(material) + 1);
+            let before = load_durable_player(&authority.lock().connection, player_id(2))
+                .unwrap()
+                .unwrap()
+                .inventory;
+            let removed = authority
+                .apply(
+                    &source,
+                    player_id(2),
+                    22,
+                    dig(20 + index as u64, edit_session_id, coord),
+                )
+                .unwrap();
+            assert_eq!(removed.commit.mutations.len(), EDIT_CUBE_VOLUME_VOXELS);
+            assert_eq!(
+                removed.commit.editor_inventory.unwrap().count(material),
+                before.count(material) + EDIT_CUBE_VOLUME_VOXELS as u64
+            );
         }
     }
 
     #[test]
     fn digging_a_placed_block_restores_pristine_air_without_a_tombstone() {
         let source = ProceduralWorldSource::new(43);
-        let authority =
-            EditAuthority::in_memory_with_inventory(world_id(31), &source, 8, 1).unwrap();
+        let authority = EditAuthority::in_memory_with_inventory(
+            world_id(31),
+            &source,
+            8,
+            EDIT_CUBE_VOLUME_VOXELS as u32,
+        )
+        .unwrap();
         let player = player_id(31);
         let (_opened, session) = admit_player(&authority, player, resume(1));
         let coord = VoxelCoord::new(0, 300, 0);
@@ -2061,20 +2124,15 @@ mod tests {
             )
             .unwrap();
         let dug = authority
-            .apply(
-                &source,
-                player,
-                31,
-                dig(2, session, VoxelCoord::new(2, 300, 0)),
-            )
+            .apply(&source, player, 31, dig(2, session, coord))
             .unwrap();
 
-        assert_eq!(
-            dug.commit.mutations,
-            vec![VoxelMutation {
-                coord,
-                material: Material::Air,
-            }]
+        assert_eq!(dug.commit.mutations.len(), EDIT_CUBE_VOLUME_VOXELS);
+        assert!(
+            dug.commit
+                .mutations
+                .iter()
+                .all(|mutation| mutation.material == Material::Air)
         );
         let state = authority.lock();
         assert_eq!(state.edits.override_at(coord), None);
@@ -2092,8 +2150,13 @@ mod tests {
     #[test]
     fn placement_debits_inventory_and_rejects_air_occupied_and_out_of_stock() {
         let source = ProceduralWorldSource::new(7);
-        let authority =
-            EditAuthority::in_memory_with_inventory(world_id(2), &source, 8, 1).unwrap();
+        let authority = EditAuthority::in_memory_with_inventory(
+            world_id(2),
+            &source,
+            8,
+            EDIT_CUBE_VOLUME_VOXELS as u32,
+        )
+        .unwrap();
         let (_opened, edit_session_id) = admit_player(&authority, player_id(3), resume(1));
         let first = VoxelCoord::new(0, 300, 0);
         let applied = authority
@@ -2133,13 +2196,13 @@ mod tests {
                     place(
                         3,
                         edit_session_id,
-                        VoxelCoord::new(1, 300, 0),
+                        VoxelCoord::new(20, 300, 0),
                         Material::Wood,
                     ),
                 )
                 .unwrap_err()
                 .to_string()
-                .contains("no 8 inventory")
+                .contains("only 0 remain")
         );
         assert!(
             authority
@@ -2185,7 +2248,10 @@ mod tests {
                         &source,
                         &EditMap::default(),
                         inventory,
-                        EditAction::Dig { hit },
+                        EditAction::Dig {
+                            hit,
+                            shape: EditShape::Sphere,
+                        },
                     )
                     .unwrap();
                     assert_eq!(mutations.len(), DIG_MAX_MUTATIONS, "hit {hit:?}");
@@ -2195,7 +2261,7 @@ mod tests {
                             .all(|pair| pair[0].coord < pair[1].coord),
                         "dig mutations must be strictly sorted and unique for {hit:?}"
                     );
-                    let volume = DigVolume::for_hit(hit).unwrap();
+                    let volume = EditVolume::for_hit(hit, EditShape::Sphere).unwrap();
                     let actual = mutations
                         .iter()
                         .map(|mutation| mutation.coord)
@@ -2235,21 +2301,24 @@ mod tests {
             &source,
             &EditMap::default(),
             starting_inventory(1),
-            EditAction::Dig { hit },
+            EditAction::Dig {
+                hit,
+                shape: EditShape::Sphere,
+            },
         )
         .unwrap();
         let actual = mutations
             .iter()
             .map(|mutation| mutation.coord)
             .collect::<BTreeSet<_>>();
-        let expected = DigVolume::for_hit(hit)
+        let expected = EditVolume::for_hit(hit, EditShape::Sphere)
             .unwrap()
             .coordinates()
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected);
         assert!(actual.contains(&hit));
-        assert!(actual.contains(&VoxelCoord::new(hit.x + 2, hit.y + 1, hit.z + 1)));
-        assert!(!actual.contains(&VoxelCoord::new(hit.x + 2, hit.y + 2, hit.z)));
+        assert!(actual.contains(&VoxelCoord::new(hit.x + 6, hit.y + 1, hit.z + 1)));
+        assert!(!actual.contains(&VoxelCoord::new(hit.x + 6, hit.y + 2, hit.z)));
     }
 
     #[test]
@@ -2267,7 +2336,10 @@ mod tests {
                 &source,
                 &EditMap::default(),
                 starting_inventory(1),
-                EditAction::Dig { hit },
+                EditAction::Dig {
+                    hit,
+                    shape: EditShape::Sphere,
+                },
             )
             .unwrap_err();
             assert!(error.to_string().contains("exceeds world coordinates"));
@@ -2277,8 +2349,13 @@ mod tests {
     #[test]
     fn place_occupied_dig_noop_and_replace_preserve_every_revision_invariant() {
         let source = ProceduralWorldSource::new(0x1234);
-        let authority =
-            EditAuthority::in_memory_with_inventory(world_id(20), &source, 8, 2).unwrap();
+        let authority = EditAuthority::in_memory_with_inventory(
+            world_id(20),
+            &source,
+            8,
+            (EDIT_CUBE_VOLUME_VOXELS * 2) as u32,
+        )
+        .unwrap();
         let (opened, session) = admit_player(&authority, player_id(20), resume(1));
         let target = VoxelCoord::new(-65, 300, 31);
 
@@ -2292,7 +2369,7 @@ mod tests {
             .unwrap();
         assert_eq!(placed.commit.revision, 2);
         assert_eq!(placed.commit.editor_inventory.unwrap().revision, 2);
-        assert_eq!(placed.commit.mutations.len(), 1);
+        assert_eq!(placed.commit.mutations.len(), EDIT_CUBE_VOLUME_VOXELS);
 
         let occupied = authority
             .apply(
@@ -2310,7 +2387,7 @@ mod tests {
             .unwrap();
         assert!(dug.changed);
         assert_eq!(dug.commit.revision, 3);
-        assert_eq!(dug.commit.mutations.len(), 1);
+        assert_eq!(dug.commit.mutations.len(), EDIT_CUBE_VOLUME_VOXELS);
         let after_dig = dug.commit.editor_inventory.unwrap();
         assert_eq!(after_dig.revision, 3);
         assert_eq!(
@@ -2370,9 +2447,9 @@ mod tests {
                 dig(2, session, VoxelCoord::new(3, -100, 0)),
             )
             .unwrap();
-        assert_eq!(first.commit.mutations.len(), DIG_VOLUME_VOXELS);
+        assert_eq!(first.commit.mutations.len(), EDIT_CUBE_VOLUME_VOXELS);
         assert!(
-            second.commit.mutations.len() < DIG_VOLUME_VOXELS,
+            second.commit.mutations.len() < EDIT_CUBE_VOLUME_VOXELS,
             "the overlapping part must already be air"
         );
         let first_coords = first
@@ -2399,8 +2476,13 @@ mod tests {
     #[test]
     fn concurrent_players_contend_atomically_for_placement_and_overlapping_digs() {
         let source = Arc::new(ProceduralWorldSource::new(0x9abc));
-        let authority =
-            EditAuthority::in_memory_with_inventory(world_id(22), source.as_ref(), 8, 2).unwrap();
+        let authority = EditAuthority::in_memory_with_inventory(
+            world_id(22),
+            source.as_ref(),
+            8,
+            (EDIT_CUBE_VOLUME_VOXELS * 2) as u32,
+        )
+        .unwrap();
         let players = [player_id(22), player_id(23)];
         let sessions = players.map(|player| admit_player(&authority, player, resume(1)).1);
         let target = VoxelCoord::new(10, 300, -10);
@@ -2446,8 +2528,9 @@ mod tests {
             })
             .sum::<u64>();
         assert_eq!(
-            total_wood, 3,
-            "exactly one of four starting units was spent"
+            total_wood,
+            (EDIT_CUBE_VOLUME_VOXELS * 3) as u64,
+            "exactly one of four cubic-metre inventories was spent"
         );
 
         let dig_source = Arc::new(ProceduralWorldSource::new(0xdef0));
@@ -2498,7 +2581,11 @@ mod tests {
         assert!(sets[0].is_disjoint(&sets[1]));
         let expected_union = [VoxelCoord::new(0, -100, 0), VoxelCoord::new(3, -100, 0)]
             .into_iter()
-            .flat_map(|hit| DigVolume::for_hit(hit).unwrap().coordinates())
+            .flat_map(|hit| {
+                EditVolume::for_hit(hit, EditShape::Cube)
+                    .unwrap()
+                    .coordinates()
+            })
             .collect::<BTreeSet<_>>();
         assert_eq!(
             sets.iter().map(BTreeSet::len).sum::<usize>(),
@@ -2509,8 +2596,13 @@ mod tests {
     #[test]
     fn edit_sessions_allow_exact_old_retries_but_not_new_operations() {
         let source = ProceduralWorldSource::new(8);
-        let authority =
-            EditAuthority::in_memory_with_inventory(world_id(3), &source, 8, 4).unwrap();
+        let authority = EditAuthority::in_memory_with_inventory(
+            world_id(3),
+            &source,
+            8,
+            (EDIT_CUBE_VOLUME_VOXELS * 4) as u32,
+        )
+        .unwrap();
         let (_first, first_session) = admit_player(&authority, player_id(4), resume(1));
         let command = place(
             1,
@@ -2520,7 +2612,10 @@ mod tests {
         );
         let applied = authority.apply(&source, player_id(4), 40, command).unwrap();
         let loaded_again = authority.load_player(player_id(4), resume(1)).unwrap();
-        assert_eq!(loaded_again.inventory.count(Material::Stone), 3);
+        assert_eq!(
+            loaded_again.inventory.count(Material::Stone),
+            (EDIT_CUBE_VOLUME_VOXELS * 3) as u64
+        );
         authority
             .apply(
                 &source,
@@ -2529,7 +2624,7 @@ mod tests {
                 place(
                     2,
                     first_session,
-                    VoxelCoord::new(1, 300, 0),
+                    VoxelCoord::new(20, 300, 0),
                     Material::Stone,
                 ),
             )
@@ -2542,7 +2637,7 @@ mod tests {
         let lost_before_commit = place(
             3,
             first_session,
-            VoxelCoord::new(2, 300, 0),
+            VoxelCoord::new(40, 300, 0),
             Material::Stone,
         );
         assert_eq!(
@@ -2570,7 +2665,7 @@ mod tests {
                     place(
                         1,
                         first_session,
-                        VoxelCoord::new(2, 300, 0),
+                        VoxelCoord::new(40, 300, 0),
                         Material::Stone,
                     ),
                 )
@@ -2594,8 +2689,14 @@ mod tests {
         let player = player_id(5);
         let coord = VoxelCoord::new(-57, 300, 89);
         let (affected_chunks, affected_surfaces, edit_revision) = {
-            let authority =
-                EditAuthority::open_with_inventory(&path, world_id(4), &source, 4, 2).unwrap();
+            let authority = EditAuthority::open_with_inventory(
+                &path,
+                world_id(4),
+                &source,
+                4,
+                (EDIT_CUBE_VOLUME_VOXELS * 2) as u32,
+            )
+            .unwrap();
             let (_opened, edit_session_id) = admit_player(&authority, player, resume(1));
             let applied = authority
                 .apply(
@@ -2622,7 +2723,10 @@ mod tests {
             let reopened =
                 EditAuthority::open_with_inventory(&path, world_id(4), &source, 4, 99).unwrap();
             let player = reopened.load_player(player, resume(1)).unwrap();
-            assert_eq!(player.inventory.count(Material::GlowCrystal), 1);
+            assert_eq!(
+                player.inventory.count(Material::GlowCrystal),
+                EDIT_CUBE_VOLUME_VOXELS as u64
+            );
             assert_eq!(player.resume.revision, 7);
             assert_eq!(player.resume.eye_position_metres, [4.0, 22.0, -3.0]);
             assert_eq!(
@@ -2659,7 +2763,7 @@ mod tests {
         let error = EditAuthority::from_connection(connection, world_id(6), &source, 4, None)
             .err()
             .unwrap();
-        assert!(error.to_string().contains("schema 6; expected 10"));
+        assert!(error.to_string().contains("schema 6; expected 11"));
         assert!(
             error
                 .to_string()
@@ -2686,8 +2790,13 @@ mod tests {
     #[tokio::test]
     async fn observer_publication_omits_private_inventory() {
         let source = ProceduralWorldSource::new(23);
-        let authority =
-            EditAuthority::in_memory_with_inventory(world_id(7), &source, 4, 2).unwrap();
+        let authority = EditAuthority::in_memory_with_inventory(
+            world_id(7),
+            &source,
+            4,
+            (EDIT_CUBE_VOLUME_VOXELS * 2) as u32,
+        )
+        .unwrap();
         let (_opened, edit_session_id) = admit_player(&authority, player_id(8), resume(1));
         let applied = authority
             .apply(
@@ -2720,8 +2829,13 @@ mod tests {
     #[tokio::test]
     async fn overflow_discards_every_stale_commit_before_the_resync_boundary() {
         let source = ProceduralWorldSource::new(24);
-        let authority =
-            EditAuthority::in_memory_with_inventory(world_id(8), &source, 1, 3).unwrap();
+        let authority = EditAuthority::in_memory_with_inventory(
+            world_id(8),
+            &source,
+            1,
+            (EDIT_CUBE_VOLUME_VOXELS * 3) as u32,
+        )
+        .unwrap();
         let (_opened, session) = admit_player(&authority, player_id(9), resume(1));
         let mut subscription = authority.subscribe(90);
 
@@ -2738,7 +2852,7 @@ mod tests {
                 &source,
                 player_id(9),
                 90,
-                place(2, session, VoxelCoord::new(1, 300, 0), Material::Stone),
+                place(2, session, VoxelCoord::new(20, 300, 0), Material::Stone),
             )
             .unwrap();
         authority
@@ -2766,7 +2880,7 @@ mod tests {
                 &source,
                 player_id(9),
                 90,
-                place(3, session, VoxelCoord::new(2, 300, 0), Material::Stone),
+                place(3, session, VoxelCoord::new(40, 300, 0), Material::Stone),
             )
             .unwrap();
         authority

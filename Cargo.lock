@@ -3672,6 +3672,7 @@ dependencies = [
  "toml",
  "uuid",
  "voxels-client-config",
+ "voxels-core",
  "voxels-world",
  "voxels-world-terrain-diffusion",
 ]

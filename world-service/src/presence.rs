@@ -11,10 +11,12 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 use uuid::Uuid;
+use voxels_core::player_intersects_voxel;
 use voxels_world::protocol::{
-    PLAYER_POSE_DISCONTINUITY, PLAYER_POSE_GLIDING, PLAYER_POSE_GROUNDED, PLAYER_POSE_SPECTATOR,
-    PLAYER_POSE_SWIMMING, PlayerId, PlayerIdentity, PlayerPoseUpdate, PlayerPresenceState,
-    PlayerPresenceUpdate, PlayerResume, PresenceDelta, PresenceSessionId, encode_presence_delta,
+    EditVolume, PLAYER_POSE_DISCONTINUITY, PLAYER_POSE_GLIDING, PLAYER_POSE_GROUNDED,
+    PLAYER_POSE_SPECTATOR, PLAYER_POSE_SWIMMING, PlayerId, PlayerIdentity, PlayerPoseUpdate,
+    PlayerPresenceState, PlayerPresenceUpdate, PlayerResume, PresenceDelta, PresenceSessionId,
+    encode_presence_delta,
 };
 use voxels_world::{VOXEL_SIZE_METRES, VoxelCoord};
 
@@ -197,6 +199,36 @@ impl PresenceHub {
         }
         if distance_squared > reach_metres * reach_metres {
             return Err("interaction target is out of reach");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn authorize_placement_volume(
+        &self,
+        connection_id: u64,
+        volume: EditVolume,
+    ) -> Result<(), &'static str> {
+        let inner = self.lock();
+        let player_id = inner
+            .connections
+            .get(&connection_id)
+            .ok_or("player connection is not active")?;
+        let player = inner
+            .players
+            .get(player_id)
+            .ok_or("player connection is not active")?;
+        if player.connection_id != connection_id {
+            return Err("player connection is not active");
+        }
+        let pose = player.pose.ok_or("player pose is unavailable")?;
+        if volume.coordinates().any(|coord| {
+            player_intersects_voxel(
+                pose.eye_position_metres,
+                [coord.x, coord.y, coord.z],
+                VOXEL_SIZE_METRES,
+            )
+        }) {
+            return Err("placement volume intersects the player");
         }
         Ok(())
     }
@@ -939,7 +971,9 @@ fn angle_delta(from: f32, to: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use voxels_world::protocol::{BrowserUserId, PLAYER_POSE_GROUNDED, decode_presence_delta};
+    use voxels_world::protocol::{
+        BrowserUserId, EditShape, PLAYER_POSE_GROUNDED, decode_presence_delta,
+    };
 
     fn identity(seed: u16) -> PlayerIdentity {
         let mut bytes = [0_u8; 16];
@@ -1485,6 +1519,30 @@ mod tests {
         assert_eq!(
             hub.authorize_interaction(claim.connection_id, near),
             Err("player pose is stale")
+        );
+    }
+
+    #[test]
+    fn placement_volume_cannot_intersect_the_authoritative_player_capsule() {
+        let hub = security_hub(GameplayConfig::default());
+        let claim = hub
+            .join(&identity(16), resume(0.05, 1.62, 0.05))
+            .expect("join");
+        let attachment = hub.attach(claim.session_id).expect("attach");
+        assert_eq!(
+            hub.accept_pose(&attachment, pose(1, 0.05, 0.05)),
+            PoseAdmission::Accepted
+        );
+
+        let intersecting = EditVolume::for_hit(VoxelCoord::new(0, 10, 0), EditShape::Cube).unwrap();
+        assert_eq!(
+            hub.authorize_placement_volume(claim.connection_id, intersecting),
+            Err("placement volume intersects the player")
+        );
+        let clear = EditVolume::for_hit(VoxelCoord::new(20, 10, 0), EditShape::Cube).unwrap();
+        assert_eq!(
+            hub.authorize_placement_volume(claim.connection_id, clear),
+            Ok(())
         );
     }
 

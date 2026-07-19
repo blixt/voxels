@@ -26,10 +26,11 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, mpsc, watch};
+use voxels_core::PLAYER_EYE_HEIGHT_METRES;
 #[cfg(test)]
-use voxels_world::protocol::DigVolume;
+use voxels_world::protocol::EditShape;
 use voxels_world::protocol::{
-    ChunkBatchItem, ChunkBatchRequest, EditSessionId, EncodedChunkBatchItem,
+    ChunkBatchItem, ChunkBatchRequest, EditSessionId, EditVolume, EncodedChunkBatchItem,
     EncodedSurfaceTileBatchItem, FRAME_FRAGMENT_OVERHEAD_BYTES, PlayerIdentity, PlayerResume,
     PresenceOpened, PresencePong, ResyncRequired, SpawnPoint, SurfaceTileBatchItem,
     SurfaceTileBatchRequest, VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
@@ -49,10 +50,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v25/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v25/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v25";
-const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
+pub const WORLD_WEBSOCKET_PATH: &str = "/v26/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v26/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v26";
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 
@@ -437,7 +437,7 @@ impl WorldBootstrap {
             eye_position_metres: [
                 (self.spawn.x as f32 + 0.5) * voxels_world::VOXEL_SIZE_METRES,
                 (top + 1) as f32 * voxels_world::VOXEL_SIZE_METRES
-                    + DEFAULT_PLAYER_EYE_HEIGHT_METRES
+                    + PLAYER_EYE_HEIGHT_METRES
                     + 0.02,
                 (self.spawn.z as f32 + 0.5) * voxels_world::VOXEL_SIZE_METRES,
             ],
@@ -1513,6 +1513,24 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
             {
                 let _ = send_control_error(&outbound, command.operation_id, message).await;
                 continue;
+            }
+            if let voxels_world::protocol::EditAction::Place { coord, shape, .. } = command.action {
+                let Some(volume) = EditVolume::for_hit(coord, shape) else {
+                    let _ = send_control_error(
+                        &outbound,
+                        command.operation_id,
+                        "placement volume exceeds world coordinates",
+                    )
+                    .await;
+                    continue;
+                };
+                if let Err(message) = state
+                    .presence
+                    .authorize_placement_volume(player_claim.connection_id, volume)
+                {
+                    let _ = send_control_error(&outbound, command.operation_id, message).await;
+                    continue;
+                }
             }
             let authority = Arc::clone(&state.edits);
             let source = Arc::clone(&state.source);
@@ -2841,7 +2859,8 @@ mod tests {
         decode_edit_commit, decode_error, decode_presence_delta, decode_presence_opened,
         decode_surface_tile_batch_result, decode_world_opened, edit_commit_kind,
         encode_chunk_batch, encode_edit_command, encode_open_presence, encode_open_world,
-        encode_player_pose, encode_surface_tile_batch, frame_fragment_kind, presence_delta_kind,
+        encode_player_pose, encode_surface_tile_batch, error_kind, frame_fragment_kind,
+        presence_delta_kind,
     };
     use voxels_world::{
         ChunkCoord, ProceduralWorldSource, SurfaceLodLevel, SurfaceTileCoord, VoxelCoord,
@@ -3300,7 +3319,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v25, test-local-token"),
+            HeaderValue::from_static("voxels.world.v26, test-local-token"),
         );
         let (socket, response) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -3328,7 +3347,7 @@ mod tests {
         assert!(opened.capabilities.contains(WorldCapabilities::GLIDING));
         let spawn_top = VoxelCoord::new(opened.spawn.x, opened.spawn.height, opened.spawn.z);
         let expected_eye_y = (opened.spawn.height + 1) as f32 * voxels_world::VOXEL_SIZE_METRES
-            + DEFAULT_PLAYER_EYE_HEIGHT_METRES
+            + PLAYER_EYE_HEIGHT_METRES
             + 0.02;
         assert!((opened.player_resume.eye_position_metres[1] - expected_eye_y).abs() < 0.000_1);
 
@@ -3682,6 +3701,8 @@ mod tests {
     async fn five_builders_stream_a_far_lod_tower_only_to_interested_players()
     -> Result<(), Box<dyn std::error::Error>> {
         const BUILDER_COUNT: usize = 5;
+        const DIGS_PER_BUILDER: usize = 3;
+        const DIG_COMMIT_COUNT: usize = BUILDER_COUNT * DIGS_PER_BUILDER;
         const OBSERVER_INDEX: usize = BUILDER_COUNT;
         const FAR_INDEX: usize = BUILDER_COUNT + 1;
 
@@ -3773,16 +3794,31 @@ mod tests {
             "the far-tier observer should see all builders but not the out-of-interest bystander"
         );
 
-        let dig_hits = (0..BUILDER_COUNT)
-            .map(|index| VoxelCoord::new(spawn.x + 4 + index as i32 * 6, spawn.height - 1, spawn.z))
+        let digs = (0..BUILDER_COUNT)
+            .flat_map(|builder_index| {
+                (0..DIGS_PER_BUILDER).map(move |dig_index| {
+                    (
+                        builder_index,
+                        50 + (builder_index * DIGS_PER_BUILDER + dig_index) as u64,
+                        VoxelCoord::new(
+                            spawn.x - 33 + builder_index as i32 * 13,
+                            spawn.height - 30,
+                            spawn.z + (dig_index as i32 - 1) * 13,
+                        ),
+                    )
+                })
+            })
             .collect::<Vec<_>>();
-        for (index, hit) in dig_hits.iter().copied().enumerate() {
-            worlds[index]
+        for &(builder_index, operation_id, hit) in &digs {
+            worlds[builder_index]
                 .send(ClientMessage::Binary(
                     encode_edit_command(EditCommand {
-                        operation_id: 50 + index as u64,
-                        edit_session_id: opened[index].edit_session_id,
-                        action: voxels_world::protocol::EditAction::Dig { hit },
+                        operation_id,
+                        edit_session_id: opened[builder_index].edit_session_id,
+                        action: voxels_world::protocol::EditAction::Dig {
+                            hit,
+                            shape: EditShape::Cube,
+                        },
                     })?
                     .into(),
                 ))
@@ -3791,19 +3827,27 @@ mod tests {
 
         let mut builder_materials = vec![Material::Air; BUILDER_COUNT];
         for (client_index, world) in worlds.iter_mut().take(OBSERVER_INDEX + 1).enumerate() {
-            for _ in 0..BUILDER_COUNT {
-                let (commit, _) = next_edit_commit(world).await?;
-                if client_index < BUILDER_COUNT && commit.operation_id == 50 + client_index as u64 {
+            let own_operation_range = 50 + (client_index * DIGS_PER_BUILDER) as u64
+                ..50 + ((client_index + 1) * DIGS_PER_BUILDER) as u64;
+            for commit_index in 0..DIG_COMMIT_COUNT {
+                let (commit, _) = next_edit_commit(world).await.map_err(|error| {
+                    std::io::Error::other(format!(
+                        "dig fanout client {client_index} commit {commit_index}: {error}"
+                    ))
+                })?;
+                if client_index < BUILDER_COUNT
+                    && own_operation_range.contains(&commit.operation_id)
+                {
                     let inventory = commit
                         .editor_inventory
                         .ok_or("builder dig omitted private inventory")?;
-                    builder_materials[client_index] = Material::ALL
-                        .into_iter()
-                        .find(|material| {
-                            !matches!(material, Material::Air | Material::Water)
-                                && inventory.count(*material) > 0
-                        })
-                        .ok_or("builder dig earned no placeable solid material")?;
+                    if let Some(material) = Material::ALL.into_iter().find(|material| {
+                        !matches!(material, Material::Air | Material::Water)
+                            && inventory.count(*material)
+                                >= voxels_world::protocol::EDIT_CUBE_VOLUME_VOXELS as u64
+                    }) {
+                        builder_materials[client_index] = material;
+                    }
                 }
             }
         }
@@ -3813,9 +3857,29 @@ mod tests {
                 .all(|material| *material != Material::Air)
         );
 
-        let tower_base = spawn.water_level.unwrap_or(spawn.height).max(spawn.height) + 1;
+        for (index, presence) in presences.iter_mut().take(BUILDER_COUNT).enumerate() {
+            let mut eye = opened[index].player_resume.eye_position_metres;
+            eye[0] += index as f32 * 0.4;
+            presence
+                .send(ClientMessage::Binary(
+                    encode_player_pose(PlayerPoseUpdate {
+                        sequence: 2,
+                        sample_server_time_ms: 0,
+                        eye_position_metres: eye,
+                        linear_velocity_metres_per_second: [0.0, 0.0, 0.0],
+                        look_yaw_radians: 0.0,
+                        look_pitch_radians: 0.0,
+                        flags: PLAYER_POSE_GROUNDED,
+                    })?
+                    .into(),
+                ))
+                .await?;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let tower_base = spawn.water_level.unwrap_or(spawn.height).max(spawn.height) + 15;
         let tower = (0..BUILDER_COUNT)
-            .map(|index| VoxelCoord::new(spawn.x + 4, tower_base + index as i32, spawn.z))
+            .map(|index| VoxelCoord::new(spawn.x + 30, tower_base + index as i32 * 10, spawn.z))
             .collect::<Vec<_>>();
         for (index, coord) in tower.iter().copied().enumerate() {
             worlds[index]
@@ -3826,6 +3890,7 @@ mod tests {
                         action: voxels_world::protocol::EditAction::Place {
                             coord,
                             material: builder_materials[index],
+                            shape: EditShape::Cube,
                         },
                     })?
                     .into(),
@@ -3838,8 +3903,12 @@ mod tests {
         let mut first_edit_revision = None;
         for (index, world) in worlds.iter_mut().take(OBSERVER_INDEX + 1).enumerate() {
             let mut commits = Vec::new();
-            for _ in 0..BUILDER_COUNT {
-                let (commit, encoded_bytes) = next_edit_commit(world).await?;
+            for commit_index in 0..BUILDER_COUNT {
+                let (commit, encoded_bytes) = next_edit_commit(world).await.map_err(|error| {
+                    std::io::Error::other(format!(
+                        "placement fanout client {index} commit {commit_index}: {error}"
+                    ))
+                })?;
                 if index == OBSERVER_INDEX {
                     observer_edit_bytes += encoded_bytes;
                     observer_commits.push(commit.clone());
@@ -3858,18 +3927,27 @@ mod tests {
                     .iter()
                     .map(|commit| commit.revision)
                     .collect::<Vec<_>>(),
-                vec![7, 8, 9, 10, 11]
+                vec![17, 18, 19, 20, 21]
             );
             let mut committed_coords = commits
                 .iter()
                 .flat_map(|commit| commit.mutations.iter().map(|mutation| mutation.coord))
                 .collect::<Vec<_>>();
             committed_coords.sort_unstable();
-            assert_eq!(committed_coords, tower);
+            let mut expected_coords = tower
+                .iter()
+                .flat_map(|coord| {
+                    EditVolume::for_hit(*coord, EditShape::Cube)
+                        .unwrap()
+                        .coordinates()
+                })
+                .collect::<Vec<_>>();
+            expected_coords.sort_unstable();
+            assert_eq!(committed_coords, expected_coords);
         }
         assert!(
-            observer_edit_bytes < 16 * 1024,
-            "five sparse commits used {observer_edit_bytes} bytes"
+            observer_edit_bytes < 32 * 1024,
+            "five metre-scale commits used {observer_edit_bytes} bytes"
         );
         assert!(
             tokio::time::timeout(
@@ -3887,6 +3965,7 @@ mod tests {
             action: voxels_world::protocol::EditAction::Place {
                 coord: tower[0],
                 material: builder_materials[0],
+                shape: EditShape::Cube,
             },
         };
         worlds[0]
@@ -3927,7 +4006,20 @@ mod tests {
             .await??,
         )?;
         assert_eq!(chunks.request_id, 900);
-        assert!(chunks.items.iter().all(|item| item.edit_revision == 11));
+        for item in &chunks.items {
+            let expected_revision = observer_commits
+                .iter()
+                .filter(|commit| {
+                    commit
+                        .mutations
+                        .iter()
+                        .any(|mutation| mutation.coord.chunk() == item.coord)
+                })
+                .map(|commit| commit.revision)
+                .max()
+                .ok_or("tower chunk was not covered by a placement commit")?;
+            assert_eq!(item.edit_revision, expected_revision);
+        }
         for (coord, material) in tower.iter().zip(&builder_materials) {
             let snapshot = chunks
                 .items
@@ -3968,7 +4060,11 @@ mod tests {
             .ok_or("tower commits did not invalidate their coarse surface tile")?;
         assert_eq!(item.edit_revision, expected_surface_revision);
         let snapshot = item.result.as_ref().map_err(|error| error.to_string())?;
-        let tower_top = *tower.last().unwrap();
+        let tower_top = VoxelCoord::new(
+            tower.last().unwrap().x,
+            tower.last().unwrap().y + 5,
+            tower.last().unwrap().z,
+        );
         assert!(
             snapshot.terrain.quads.iter().any(|quad| {
                 quad.material == builder_materials[BUILDER_COUNT - 1]
@@ -4036,11 +4132,11 @@ mod tests {
         }
 
         let hit = VoxelCoord::new(
-            editor_opened.spawn.x + 4,
+            editor_opened.spawn.x + 8,
             editor_opened.spawn.height - 1,
             editor_opened.spawn.z,
         );
-        let dig_coords = DigVolume::for_hit(hit)
+        let dig_coords = EditVolume::for_hit(hit, EditShape::Sphere)
             .expect("bounded server test dig")
             .coordinates()
             .collect::<Vec<_>>();
@@ -4086,13 +4182,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!expected_mutations.is_empty());
         assert!(expected_mutations.len() < dig_coords.len());
-        let unrelated = VoxelCoord::new(hit.x + 3, hit.y, hit.z);
+        let unrelated = VoxelCoord::new(hit.x + 7, hit.y, hit.z);
         let unrelated_before = before_material(unrelated);
 
         let command = EditCommand {
             operation_id: 1,
             edit_session_id: editor_opened.edit_session_id,
-            action: voxels_world::protocol::EditAction::Dig { hit },
+            action: voxels_world::protocol::EditAction::Dig {
+                hit,
+                shape: EditShape::Sphere,
+            },
         };
         editor_world
             .send(ClientMessage::Binary(encode_edit_command(command)?.into()))
@@ -4253,7 +4352,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v25, test-local-token"),
+            HeaderValue::from_static("voxels.world.v26, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -4287,7 +4386,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v25, test-local-token"),
+            HeaderValue::from_static("voxels.world.v26, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -4358,9 +4457,14 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 let bytes = next_client_binary(socket).await?;
-                if message_kind(&bytes)? == edit_commit_kind() {
+                let kind = message_kind(&bytes)?;
+                if kind == edit_commit_kind() {
                     let encoded_bytes = bytes.len();
                     return Ok((decode_edit_commit(&bytes)?, encoded_bytes));
+                }
+                if kind == error_kind() {
+                    let (_, message) = decode_error(&bytes)?;
+                    return Err(std::io::Error::other(message).into());
                 }
             }
         })

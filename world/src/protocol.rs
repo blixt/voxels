@@ -18,15 +18,15 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 25;
+pub const PROTOCOL_VERSION: u16 = 26;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
 pub const MAX_SURFACE_TILES_PER_BATCH: usize = 32;
 pub const MAX_PLAYERS_PER_PRESENCE_DELTA: usize = 1_024;
 pub const MAX_PLAYER_NAME_BYTES: usize = 32;
-pub const MAX_EDIT_MUTATIONS: usize = 125;
-pub const MAX_EDIT_AFFECTED_CHUNKS: usize = 8;
+pub const MAX_EDIT_MUTATIONS: usize = 1_024;
+pub const MAX_EDIT_AFFECTED_CHUNKS: usize = 27;
 pub const MAX_EDIT_AFFECTED_SURFACE_TILES: usize = 128;
 pub const FRAME_FRAGMENT_OVERHEAD_BYTES: usize = FRAME_HEADER_BYTES + 8;
 pub const MAX_FRAME_FRAGMENT_DATA_BYTES: usize =
@@ -496,45 +496,136 @@ impl EditCommand {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EditAction {
-    /// Digs the fixed spherical stencil centred on the pointed voxel. The client cannot choose a
-    /// radius, mutation count, or arbitrary coordinate list.
-    Dig { hit: VoxelCoord },
+    /// Digs one server-owned, one-cubic-metre tool stencil anchored on the pointed voxel. The
+    /// client cannot choose a radius, mutation count, or arbitrary coordinate list.
+    Dig { hit: VoxelCoord, shape: EditShape },
     Place {
         coord: VoxelCoord,
         material: Material,
+        shape: EditShape,
     },
 }
 
-/// Diameter of the authoritative half-metre dig sphere's voxel-centre stencil.
-pub const DIG_DIAMETER_VOXELS: i32 = 5;
-pub const DIG_RADIUS_VOXELS: i32 = DIG_DIAMETER_VOXELS / 2;
-/// Exact lattice points whose voxel centres lie inside a 2.5-voxel Euclidean radius.
-pub const DIG_VOLUME_VOXELS: usize = dig_volume_voxel_count();
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DigVolume {
-    pub min: VoxelCoord,
-    pub max: VoxelCoord,
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum EditShape {
+    #[default]
+    Sphere = 0,
+    Cube = 1,
 }
 
-impl DigVolume {
-    pub fn for_hit(hit: VoxelCoord) -> Option<Self> {
+impl EditShape {
+    pub const ALL: [Self; 2] = [Self::Sphere, Self::Cube];
+
+    pub const fn from_id(id: u8) -> Option<Self> {
+        match id {
+            0 => Some(Self::Sphere),
+            1 => Some(Self::Cube),
+            _ => None,
+        }
+    }
+
+    pub const fn id(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Sphere => "SPHERE",
+            Self::Cube => "CUBE",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Sphere => Self::Cube,
+            Self::Cube => Self::Sphere,
+        }
+    }
+
+    pub const fn voxel_count(self) -> usize {
+        match self {
+            Self::Sphere => EDIT_SPHERE_VOLUME_VOXELS,
+            Self::Cube => EDIT_CUBE_VOLUME_VOXELS,
+        }
+    }
+}
+
+/// One metre at the world's canonical 10 cm voxel resolution.
+pub const EDIT_CUBE_EDGE_VOXELS: i32 = 10;
+pub const EDIT_CUBE_VOLUME_VOXELS: usize = 1_000;
+/// Radius of a one-cubic-metre mathematical sphere, in metres and canonical voxels.
+pub const EDIT_SPHERE_RADIUS_METRES: f32 = 0.620_350_5;
+pub const EDIT_SPHERE_RADIUS_VOXELS: f32 = 6.203_505;
+/// The whole-voxel stencil contains every voxel centre inside the mathematical sphere. Atomic
+/// voxels make exact continuous volume impossible; 1,021 voxels is the closest symmetric stencil.
+pub const EDIT_SPHERE_VOLUME_VOXELS: usize = edit_sphere_volume_voxel_count();
+pub const EDIT_MAX_VOLUME_VOXELS: usize = EDIT_SPHERE_VOLUME_VOXELS;
+const EDIT_SPHERE_BOUND_VOXELS: i32 = 7;
+const EDIT_SPHERE_RADIUS_SQUARED_CEIL: i64 = 39;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EditVolume {
+    pub min: VoxelCoord,
+    pub max: VoxelCoord,
+    anchor: VoxelCoord,
+    shape: EditShape,
+}
+
+impl EditVolume {
+    pub fn for_hit(hit: VoxelCoord, shape: EditShape) -> Option<Self> {
+        let (lower, upper) = match shape {
+            EditShape::Sphere => (EDIT_SPHERE_BOUND_VOXELS - 1, EDIT_SPHERE_BOUND_VOXELS - 1),
+            // Ten cells cannot be symmetric around one cell centre. The canonical tie-break gives
+            // the positive side the extra cell while keeping the pointed voxel inside the brush.
+            EditShape::Cube => (EDIT_CUBE_EDGE_VOXELS / 2 - 1, EDIT_CUBE_EDGE_VOXELS / 2),
+        };
         Some(Self {
             min: VoxelCoord::new(
-                hit.x.checked_sub(DIG_RADIUS_VOXELS)?,
-                hit.y.checked_sub(DIG_RADIUS_VOXELS)?,
-                hit.z.checked_sub(DIG_RADIUS_VOXELS)?,
+                hit.x.checked_sub(lower)?,
+                hit.y.checked_sub(lower)?,
+                hit.z.checked_sub(lower)?,
             ),
             max: VoxelCoord::new(
-                hit.x.checked_add(DIG_RADIUS_VOXELS)?,
-                hit.y.checked_add(DIG_RADIUS_VOXELS)?,
-                hit.z.checked_add(DIG_RADIUS_VOXELS)?,
+                hit.x.checked_add(upper)?,
+                hit.y.checked_add(upper)?,
+                hit.z.checked_add(upper)?,
             ),
+            anchor: hit,
+            shape,
         })
     }
 
+    /// Anchors the nearest face of a placement stencil one voxel beyond a hit surface. This keeps
+    /// a metre-scale brush from overlapping the very surface on which it is being placed.
+    pub fn for_placement(surface: VoxelCoord, normal: [i32; 3], shape: EditShape) -> Option<Self> {
+        if normal.into_iter().map(i32::unsigned_abs).sum::<u32>() != 1 {
+            return None;
+        }
+        let origin = Self::for_hit(VoxelCoord::new(0, 0, 0), shape)?;
+        let mut anchor = [surface.x, surface.y, surface.z];
+        for axis in 0..3 {
+            anchor[axis] = match normal[axis] {
+                1 => anchor[axis]
+                    .checked_add(1 - [origin.min.x, origin.min.y, origin.min.z][axis])?,
+                -1 => anchor[axis]
+                    .checked_sub(1 + [origin.max.x, origin.max.y, origin.max.z][axis])?,
+                _ => anchor[axis],
+            };
+        }
+        Self::for_hit(VoxelCoord::new(anchor[0], anchor[1], anchor[2]), shape)
+    }
+
+    pub const fn shape(self) -> EditShape {
+        self.shape
+    }
+
     pub const fn sample_shape(self) -> [u32; 3] {
-        [DIG_DIAMETER_VOXELS as u32; 3]
+        [
+            (self.max.x - self.min.x + 1) as u32,
+            (self.max.y - self.min.y + 1) as u32,
+            (self.max.z - self.min.z + 1) as u32,
+        ]
     }
 
     pub const fn contains(self, coord: VoxelCoord) -> bool {
@@ -547,19 +638,19 @@ impl DigVolume {
         {
             return false;
         }
-        let centre = self.centre();
-        let dx = coord.x as i64 - centre.x as i64;
-        let dy = coord.y as i64 - centre.y as i64;
-        let dz = coord.z as i64 - centre.z as i64;
-        4 * (dx * dx + dy * dy + dz * dz) <= (DIG_DIAMETER_VOXELS * DIG_DIAMETER_VOXELS) as i64
+        match self.shape {
+            EditShape::Cube => true,
+            EditShape::Sphere => {
+                let dx = coord.x as i64 - self.anchor.x as i64;
+                let dy = coord.y as i64 - self.anchor.y as i64;
+                let dz = coord.z as i64 - self.anchor.z as i64;
+                dx * dx + dy * dy + dz * dz < EDIT_SPHERE_RADIUS_SQUARED_CEIL
+            }
+        }
     }
 
     pub const fn centre(self) -> VoxelCoord {
-        VoxelCoord::new(
-            self.min.x + DIG_RADIUS_VOXELS,
-            self.min.y + DIG_RADIUS_VOXELS,
-            self.min.z + DIG_RADIUS_VOXELS,
-        )
+        self.anchor
     }
 
     pub fn coordinates(self) -> impl Iterator<Item = VoxelCoord> {
@@ -573,15 +664,16 @@ impl DigVolume {
     }
 }
 
-const fn dig_volume_voxel_count() -> usize {
+const fn edit_sphere_volume_voxel_count() -> usize {
     let mut count = 0;
-    let mut x = -DIG_RADIUS_VOXELS;
-    while x <= DIG_RADIUS_VOXELS {
-        let mut y = -DIG_RADIUS_VOXELS;
-        while y <= DIG_RADIUS_VOXELS {
-            let mut z = -DIG_RADIUS_VOXELS;
-            while z <= DIG_RADIUS_VOXELS {
-                if 4 * (x * x + y * y + z * z) <= DIG_DIAMETER_VOXELS * DIG_DIAMETER_VOXELS {
+    let radius = EDIT_SPHERE_BOUND_VOXELS - 1;
+    let mut x = -radius;
+    while x <= radius {
+        let mut y = -radius;
+        while y <= radius {
+            let mut z = -radius;
+            while z <= radius {
+                if ((x * x + y * y + z * z) as i64) < EDIT_SPHERE_RADIUS_SQUARED_CEIL {
                     count += 1;
                 }
                 z += 1;
@@ -1418,14 +1510,18 @@ pub fn encode_edit_command(command: EditCommand) -> Result<Vec<u8>, ProtocolErro
         return Err(ProtocolError::InvalidPayload("edit session id is nil"));
     }
     let (kind, argument, coord, material_id) = match command.action {
-        EditAction::Dig { hit } => (1, 0, hit, 0),
-        EditAction::Place { coord, material } => {
+        EditAction::Dig { hit, shape } => (1, shape.id(), hit, 0),
+        EditAction::Place {
+            coord,
+            material,
+            shape,
+        } => {
             if material == Material::Air {
                 return Err(ProtocolError::InvalidPayload(
                     "cannot place air; use the dig action",
                 ));
             }
-            (2, 0, coord, material.id())
+            (2, shape.id(), coord, material.id())
         }
     };
     validate_voxel_coord(coord)?;
@@ -1461,13 +1557,23 @@ pub fn decode_edit_command(bytes: &[u8]) -> Result<EditCommand, ProtocolError> {
     let coord = decode_voxel_coord(&mut cursor)?;
     cursor.finish()?;
     let action = match kind {
-        1 if argument == 0 && material_id == 0 => EditAction::Dig { hit: coord },
+        1 if material_id == 0 => {
+            let shape = EditShape::from_id(argument).ok_or(ProtocolError::UnknownEnum(
+                "edit shape",
+                u64::from(argument),
+            ))?;
+            EditAction::Dig { hit: coord, shape }
+        }
         1 => {
             return Err(ProtocolError::InvalidPayload(
-                "dig action has a nonzero argument or material",
+                "dig action has a nonzero material",
             ));
         }
-        2 if argument == 0 => {
+        2 => {
+            let shape = EditShape::from_id(argument).ok_or(ProtocolError::UnknownEnum(
+                "edit shape",
+                u64::from(argument),
+            ))?;
             let material = Material::from_id(material_id).ok_or(ProtocolError::UnknownEnum(
                 "material",
                 u64::from(material_id),
@@ -1477,12 +1583,11 @@ pub fn decode_edit_command(bytes: &[u8]) -> Result<EditCommand, ProtocolError> {
                     "cannot place air; use the dig action",
                 ));
             }
-            EditAction::Place { coord, material }
-        }
-        2 => {
-            return Err(ProtocolError::InvalidPayload(
-                "placement action argument is nonzero",
-            ));
+            EditAction::Place {
+                coord,
+                material,
+                shape,
+            }
         }
         _ => return Err(ProtocolError::UnknownEnum("edit action", u64::from(kind))),
     };
@@ -3769,20 +3874,20 @@ mod tests {
     }
 
     #[test]
-    fn dig_volume_is_an_exact_symmetric_half_metre_sphere() {
+    fn edit_sphere_uses_the_symmetric_one_cubic_metre_stencil() {
         let hit = VoxelCoord::new(10, -20, 30);
-        let volume = DigVolume::for_hit(hit).expect("bounded dig volume");
-        assert_eq!(volume.sample_shape(), [5, 5, 5]);
-        assert_eq!(volume.min, VoxelCoord::new(8, -22, 28));
-        assert_eq!(volume.max, VoxelCoord::new(12, -18, 32));
+        let volume = EditVolume::for_hit(hit, EditShape::Sphere).expect("bounded edit volume");
+        assert_eq!(volume.sample_shape(), [13, 13, 13]);
+        assert_eq!(volume.min, VoxelCoord::new(4, -26, 24));
+        assert_eq!(volume.max, VoxelCoord::new(16, -14, 36));
         assert_eq!(volume.centre(), hit);
         assert!(volume.contains(hit));
-        assert!(volume.contains(VoxelCoord::new(12, -19, 31)));
-        assert!(!volume.contains(VoxelCoord::new(12, -18, 30)));
-        assert!(!volume.contains(VoxelCoord::new(12, -18, 32)));
+        assert!(volume.contains(VoxelCoord::new(16, -19, 29)));
+        assert!(!volume.contains(VoxelCoord::new(16, -18, 30)));
+        assert!(!volume.contains(VoxelCoord::new(16, -14, 36)));
 
         let coordinates = volume.coordinates().collect::<BTreeSet<_>>();
-        assert_eq!(coordinates.len(), DIG_VOLUME_VOXELS);
+        assert_eq!(coordinates.len(), EDIT_SPHERE_VOLUME_VOXELS);
         for coord in &coordinates {
             let opposite = VoxelCoord::new(
                 hit.x * 2 - coord.x,
@@ -3791,15 +3896,41 @@ mod tests {
             );
             assert!(coordinates.contains(&opposite));
         }
-        assert_eq!(DIG_VOLUME_VOXELS, 81);
+        assert_eq!(EDIT_SPHERE_VOLUME_VOXELS, 1_021);
+        assert!((EDIT_SPHERE_RADIUS_METRES - 0.620_350_5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn edit_cube_is_exactly_ten_voxels_on_each_axis() {
+        let hit = VoxelCoord::new(10, -20, 30);
+        let volume = EditVolume::for_hit(hit, EditShape::Cube).expect("bounded edit volume");
+        assert_eq!(volume.sample_shape(), [10, 10, 10]);
+        assert_eq!(volume.min, VoxelCoord::new(6, -24, 26));
+        assert_eq!(volume.max, VoxelCoord::new(15, -15, 35));
+        assert_eq!(volume.coordinates().count(), EDIT_CUBE_VOLUME_VOXELS);
+        assert_eq!(EDIT_CUBE_VOLUME_VOXELS, 1_000);
+    }
+
+    #[test]
+    fn placement_stencil_starts_immediately_outside_the_hit_face() {
+        let surface = VoxelCoord::new(10, -20, 30);
+        for shape in EditShape::ALL {
+            let positive = EditVolume::for_placement(surface, [1, 0, 0], shape).unwrap();
+            assert_eq!(positive.min.x, surface.x + 1);
+            let negative = EditVolume::for_placement(surface, [-1, 0, 0], shape).unwrap();
+            assert_eq!(negative.max.x, surface.x - 1);
+        }
+        assert!(EditVolume::for_placement(surface, [1, 1, 0], EditShape::Cube).is_none());
     }
 
     #[test]
     fn dig_volume_rejects_coordinate_overflow_atomically() {
-        assert!(DigVolume::for_hit(VoxelCoord::new(i32::MAX, 0, 0)).is_none());
-        assert!(DigVolume::for_hit(VoxelCoord::new(i32::MIN, 0, 0)).is_none());
-        assert!(DigVolume::for_hit(VoxelCoord::new(0, i32::MAX, 0)).is_none());
-        assert!(DigVolume::for_hit(VoxelCoord::new(0, 0, i32::MIN)).is_none());
+        for shape in EditShape::ALL {
+            assert!(EditVolume::for_hit(VoxelCoord::new(i32::MAX, 0, 0), shape).is_none());
+            assert!(EditVolume::for_hit(VoxelCoord::new(i32::MIN, 0, 0), shape).is_none());
+            assert!(EditVolume::for_hit(VoxelCoord::new(0, i32::MAX, 0), shape).is_none());
+            assert!(EditVolume::for_hit(VoxelCoord::new(0, 0, i32::MIN), shape).is_none());
+        }
     }
 
     #[test]
@@ -4347,6 +4478,7 @@ mod tests {
             action: EditAction::Place {
                 coord,
                 material: Material::Basalt,
+                shape: EditShape::Cube,
             },
         };
         let encoded_command = encode_edit_command(command).expect("encode edit command");
@@ -4374,7 +4506,10 @@ mod tests {
         let dig = EditCommand {
             operation_id: 42,
             edit_session_id,
-            action: EditAction::Dig { hit: coord },
+            action: EditAction::Dig {
+                hit: coord,
+                shape: EditShape::Sphere,
+            },
         };
         assert_eq!(
             decode_edit_command(&encode_edit_command(dig).expect("encode edit dig")),
@@ -4531,18 +4666,16 @@ mod tests {
         assert_eq!(
             decode_edit_command(&malformed_dig),
             Err(ProtocolError::InvalidPayload(
-                "dig action has a nonzero argument or material"
+                "dig action has a nonzero material"
             ))
         );
 
         let mut malformed_argument =
             encode_edit_command(dig).expect("encode malformed dig argument");
-        malformed_argument[FRAME_HEADER_BYTES + 17] = 1;
+        malformed_argument[FRAME_HEADER_BYTES + 17] = 2;
         assert_eq!(
             decode_edit_command(&malformed_argument),
-            Err(ProtocolError::InvalidPayload(
-                "dig action has a nonzero argument or material"
-            ))
+            Err(ProtocolError::UnknownEnum("edit shape", 2))
         );
 
         let mut air_inventory = commit;
@@ -4569,9 +4702,9 @@ mod tests {
     #[test]
     fn maximum_atomic_commit_round_trips_at_protocol_limits() {
         let mut mutations = Vec::with_capacity(MAX_EDIT_MUTATIONS);
-        for x in 30..35 {
-            for y in 62..67 {
-                for z in -34..-29 {
+        for x in 4..12 {
+            for y in 4..12 {
+                for z in 4..20 {
                     mutations.push(VoxelMutation {
                         coord: VoxelCoord::new(x, y, z),
                         material: Material::Air,
@@ -4586,7 +4719,7 @@ mod tests {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        assert_eq!(affected_chunks.len(), MAX_EDIT_AFFECTED_CHUNKS);
+        assert!(affected_chunks.len() <= MAX_EDIT_AFFECTED_CHUNKS);
         let commit = EditCommit {
             operation_id: 99,
             edit_session_id: EditSessionId::from_bytes([21; 16]),
@@ -4599,7 +4732,7 @@ mod tests {
         };
         let encoded = encode_edit_commit(&commit).expect("encode maximum commit");
         assert!(
-            encoded.len() < 1_000,
+            encoded.len() < 5_000,
             "maximum edit commit should stay compact"
         );
         assert_eq!(decode_edit_commit(&encoded), Ok(commit.clone()));

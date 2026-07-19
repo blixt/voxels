@@ -112,7 +112,7 @@ describe("network benchmark link", () => {
     let now = 100;
     const stats = testInternals.blankStats();
     const inspector = new testInternals.ConnectionInspector({ current: stats }, () => now);
-    inspector.path = "/v25/presence";
+    inspector.path = "/v26/presence";
     inspector.onMessage("upstream", 0x2, vxwpFrame(13, 40, 7), 40, 1);
     now = 112.25;
     inspector.onMessage("downstream", 0x2, vxwpFrame(14, 56, 7), 56, 1);

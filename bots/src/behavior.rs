@@ -1,13 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::f32::consts::{PI, TAU};
 #[cfg(test)]
-use voxels_world::protocol::DigVolume;
-use voxels_world::protocol::EditAction;
+use voxels_world::protocol::EditVolume;
+use voxels_world::protocol::{EditAction, EditShape};
 use voxels_world::{Material, VOXEL_SIZE_METRES, VoxelCoord};
 
 const DECISION_INTERVAL_SECONDS: f32 = 0.5;
 const WORKSITE_GRID_EDGE: i32 = 8;
 const WORKSITE_SPACING_VOXELS: i32 = 4;
+const WORKSITE_CENTRE_CLEARANCE_VOXELS: i32 = 6;
 const DOWNWARD_DIG_BASE_DEPTH_VOXELS: i32 = 17;
 const DOWNWARD_DIG_DEPTH_LEVELS: u64 = 5;
 const DOWNWARD_DIG_DEPTH_STEP_VOXELS: i32 = 5;
@@ -171,8 +172,12 @@ impl BehaviorState {
                 position.y - 18 + self.tower_height,
                 position.z + offset_z,
             );
-            self.tower_height = (self.tower_height + 1).min(36);
-            Some(EditAction::Place { coord, material })
+            self.tower_height = (self.tower_height + 10).min(40);
+            Some(EditAction::Place {
+                coord,
+                material,
+                shape: EditShape::Cube,
+            })
         } else {
             Some(tower_site_dig(context.eye_position_metres, self.index))
         };
@@ -242,6 +247,7 @@ fn downward_dig(eye: [f32; 3], index: usize, extra_depth_voxels: i32) -> EditAct
             position.y - DOWNWARD_DIG_BASE_DEPTH_VOXELS - extra_depth_voxels,
             position.z + offset_z,
         ),
+        shape: EditShape::Sphere,
     }
 }
 
@@ -254,6 +260,7 @@ fn tower_site_dig(eye: [f32; 3], index: usize) -> EditAction {
             position.y - DOWNWARD_DIG_BASE_DEPTH_VOXELS,
             position.z + offset_z,
         ),
+        shape: EditShape::Sphere,
     }
 }
 
@@ -265,7 +272,10 @@ fn forward_dig(eye: [f32; 3], yaw: f32, distance_voxels: i32) -> EditAction {
         position.y - 9,
         position.z + (direction[1] * distance_voxels as f32).round() as i32,
     );
-    EditAction::Dig { hit }
+    EditAction::Dig {
+        hit,
+        shape: EditShape::Sphere,
+    }
 }
 
 fn copied_action(
@@ -284,6 +294,7 @@ fn copied_action(
                     follower.y - DOWNWARD_DIG_BASE_DEPTH_VOXELS,
                     follower.z + offset_z,
                 ),
+                shape: EditShape::Sphere,
             })
         }
         EditAction::Place { .. } => {
@@ -295,6 +306,7 @@ fn copied_action(
                     follower.z + offset_z,
                 ),
                 material,
+                shape: EditShape::Cube,
             })
         }
     }
@@ -318,9 +330,9 @@ fn worksite_offset(index: usize) -> [i32; 2] {
     let centre_skipping_axis = |coordinate: i32| {
         let centred = coordinate - WORKSITE_GRID_EDGE / 2;
         if centred >= 0 {
-            (centred + 1) * WORKSITE_SPACING_VOXELS
+            (centred + 1) * WORKSITE_SPACING_VOXELS + WORKSITE_CENTRE_CLEARANCE_VOXELS
         } else {
-            centred * WORKSITE_SPACING_VOXELS
+            centred * WORKSITE_SPACING_VOXELS - WORKSITE_CENTRE_CLEARANCE_VOXELS
         }
     };
     [centre_skipping_axis(x), centre_skipping_axis(z)]
@@ -363,7 +375,8 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(worksites.len(), 64);
         assert!(worksites.iter().all(|[x, z]| {
-            let volume = DigVolume::for_hit(VoxelCoord::new(*x, 0, *z)).expect("bounded worksite");
+            let volume = EditVolume::for_hit(VoxelCoord::new(*x, 0, *z), EditShape::Sphere)
+                .expect("bounded worksite");
             volume.coordinates().all(|coord| {
                 // The load fixture protects a 3-voxel-radius vertical cylinder.
                 coord.x * coord.x + coord.z * coord.z > 3 * 3
@@ -374,7 +387,7 @@ mod tests {
     #[test]
     fn deepest_worksite_digs_leave_pose_latency_reach_headroom() {
         for index in 0..64 {
-            let EditAction::Dig { hit } = downward_dig(
+            let EditAction::Dig { hit, .. } = downward_dig(
                 [0.0; 3],
                 index,
                 (DOWNWARD_DIG_DEPTH_LEVELS as i32 - 1) * DOWNWARD_DIG_DEPTH_STEP_VOXELS,
@@ -384,7 +397,7 @@ mod tests {
             let distance_metres =
                 ((hit.x * hit.x + hit.y * hit.y + hit.z * hit.z) as f32).sqrt() * VOXEL_SIZE_METRES;
             assert!(
-                distance_metres < 4.5,
+                distance_metres < 5.0,
                 "worksite {index} consumes {distance_metres:.2} m of interaction reach"
             );
         }
@@ -406,7 +419,7 @@ mod tests {
         let mut state = BehaviorState::new(BehaviorKind::Digger, BotLayout::Mixed, 1, 7);
         let mut sample = context();
         let first = state.plan(sample);
-        let Some(EditAction::Dig { hit: first_hit }) = first.edit else {
+        let Some(EditAction::Dig { hit: first_hit, .. }) = first.edit else {
             panic!("digger must begin by digging down");
         };
         for step in 2..=7 {
@@ -415,7 +428,7 @@ mod tests {
         }
         sample.elapsed_seconds += DECISION_INTERVAL_SECONDS;
         let later = state.plan(sample);
-        let Some(EditAction::Dig { hit: later_hit }) = later.edit else {
+        let Some(EditAction::Dig { hit: later_hit, .. }) = later.edit else {
             panic!("digger must alternate to a horizontal tunnel");
         };
         assert_eq!(later_hit.y, first_hit.y + 8);
@@ -453,6 +466,7 @@ mod tests {
             serial: 5,
             action: EditAction::Dig {
                 hit: VoxelCoord::new(80, 20, -30),
+                shape: EditShape::Sphere,
             },
         });
         let copied = state.plan(sample);

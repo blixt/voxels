@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use voxels_core::{CameraState, InputState};
+#[cfg(test)]
+use voxels_world::protocol::EditShape;
 use voxels_world::protocol::{
     BrowserUserId, ChunkBatchRequest, EditAction, EditCommand, FrameReassembler, MaterialInventory,
     PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING, PlayerId, PlayerIdentity, PlayerPoseUpdate,
@@ -1021,11 +1023,11 @@ fn first_placeable(inventory: MaterialInventory) -> Option<Material> {
 
 fn prepare_edit(cache: &ChunkCache, action: EditAction) -> Option<EditAction> {
     match action {
-        EditAction::Dig { mut hit } => {
+        EditAction::Dig { mut hit, shape } => {
             for _ in 0..=MAX_DIG_SURFACE_SCAN_VOXELS {
                 match cache.material(hit) {
                     Some(material) if material.is_collidable() => {
-                        return Some(EditAction::Dig { hit });
+                        return Some(EditAction::Dig { hit, shape });
                     }
                     Some(_) => hit.y = hit.y.saturating_sub(1),
                     None => return None,
@@ -1035,10 +1037,17 @@ fn prepare_edit(cache: &ChunkCache, action: EditAction) -> Option<EditAction> {
         EditAction::Place {
             mut coord,
             material,
+            shape,
         } => {
             for _ in 0..=MAX_TOWER_COLUMN_SCAN_VOXELS {
                 match cache.material(coord) {
-                    Some(Material::Air) => return Some(EditAction::Place { coord, material }),
+                    Some(Material::Air) => {
+                        return Some(EditAction::Place {
+                            coord,
+                            material,
+                            shape,
+                        });
+                    }
                     Some(_) => coord.y = coord.y.saturating_add(1),
                     None => return None,
                 }
@@ -1272,6 +1281,7 @@ mod tests {
             EditAction::Place {
                 coord: VoxelCoord::new(2, 0, 3),
                 material: Material::Dirt,
+                shape: EditShape::Cube,
             },
         );
         assert_eq!(
@@ -1279,6 +1289,7 @@ mod tests {
             Some(EditAction::Place {
                 coord: VoxelCoord::new(2, 4, 3),
                 material: Material::Dirt,
+                shape: EditShape::Cube,
             })
         );
 
@@ -1289,6 +1300,7 @@ mod tests {
                 EditAction::Place {
                     coord: missing,
                     material: Material::Dirt,
+                    shape: EditShape::Cube,
                 }
             ),
             None
@@ -1307,10 +1319,12 @@ mod tests {
                 &cache,
                 EditAction::Dig {
                     hit: VoxelCoord::new(2, 10, 3),
+                    shape: EditShape::Sphere,
                 }
             ),
             Some(EditAction::Dig {
                 hit: VoxelCoord::new(2, 3, 3),
+                shape: EditShape::Sphere,
             })
         );
         assert_eq!(
@@ -1318,6 +1332,7 @@ mod tests {
                 &cache,
                 EditAction::Dig {
                     hit: VoxelCoord::new(CHUNK_EDGE as i32, 10, 3),
+                    shape: EditShape::Sphere,
                 }
             ),
             None

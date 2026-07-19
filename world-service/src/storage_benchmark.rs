@@ -12,7 +12,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use voxels_world::protocol::{EditAction, EditCommand, EditSessionId, PlayerId, PlayerResume};
+use voxels_world::protocol::{
+    EditAction, EditCommand, EditSessionId, EditShape, PlayerId, PlayerResume,
+};
 use voxels_world::{
     ProceduralWorldSource, SurfaceSampleBlockRequest, VoxelCoord, WorldId, WorldProduct,
     WorldProductBatch, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
@@ -140,6 +142,7 @@ pub fn run_storage_benchmark(
             edit_session_id: player.session,
             action: EditAction::Dig {
                 hit: hits[operation_index as usize],
+                shape: EditShape::Sphere,
             },
         };
         if first_commands[player_index].is_none() {

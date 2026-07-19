@@ -17,6 +17,7 @@ terrain-metal = ["voxels-world-terrain-diffusion/metal"]
 axum = { version = "0.8", features = ["ws"] }
 futures-util = { version = "0.3", features = ["sink"] }
 voxels-client-config = { path = "../client-config", optional = true }
+voxels-core = { path = "../core" }
 voxels-world = { path = "../world" }
 voxels-world-terrain-diffusion = { path = "../world-terrain-diffusion", default-features = false }
 serde = { version = "1", features = ["derive"] }
