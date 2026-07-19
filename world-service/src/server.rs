@@ -1907,11 +1907,14 @@ async fn read_presence_frames(
                             let Ok(pong) = encode_presence_pong(pong) else {
                                 break;
                             };
-                            if queue_presence_frame(&outbound, TrafficPriority::Critical, pong)
-                                .await
-                                .is_err()
-                            {
-                                break;
+                            let frame = PresenceOutboundFrame {
+                                bytes: pong,
+                                priority: TrafficPriority::Critical,
+                                _delta_permit: None,
+                            };
+                            match outbound.try_send(frame) {
+                                Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+                                Err(mpsc::error::TrySendError::Closed(_)) => break,
                             }
                             continue;
                         }
