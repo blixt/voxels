@@ -354,9 +354,6 @@ fn inspect_database(path: &Path) -> Result<DatabaseInspection, Box<dyn std::erro
         "players",
         "player_inventory",
         "edit_operations",
-        "edit_operation_mutations",
-        "edit_operation_chunks",
-        "edit_operation_surfaces",
     ] {
         let rows = connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
             row.get::<_, i64>(0)

@@ -208,9 +208,7 @@ async function databaseContents(databasePath: string): Promise<Record<string, un
       (SELECT COUNT(*) FROM player_inventory) AS inventoryRows,
       (SELECT COUNT(*) FROM voxel_edits) AS voxelEdits,
       (SELECT COUNT(*) FROM edit_operations) AS editOperations,
-      (SELECT COUNT(*) FROM edit_operation_mutations) AS operationMutations,
-      (SELECT COUNT(*) FROM edit_operation_chunks) AS operationChunks,
-      (SELECT COUNT(*) FROM edit_operation_surfaces) AS operationSurfaces;
+      (SELECT COALESCE(SUM(length(outcome)), 0) FROM edit_operations) AS operationOutcomeBytes;
   `;
   const { stdout } = await execFileAsync("sqlite3", ["-json", databasePath, query]);
   const parsed = JSON.parse(stdout) as unknown;
