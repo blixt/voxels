@@ -15,6 +15,7 @@ import {
 import { setScenarioEnvironment } from "../lib/process.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { startWorldPreview } from "../lib/world.ts";
+import type { WorldSource } from "../lib/world.ts";
 import type { WasmBuildProfile } from "../../scripts/build-wasm.ts";
 
 const FAILURE =
@@ -488,7 +489,7 @@ interface ProfileOptions {
   readonly mode: ProfileMode;
   readonly trace: boolean;
   readonly screenshot: boolean;
-  readonly worldSource: string;
+  readonly worldSource: WorldSource;
   readonly spawnVoxels?: readonly [number, number];
   readonly cameraLook?: readonly [number, number];
   readonly viewport: { readonly width: number; readonly height: number };
@@ -540,7 +541,11 @@ function parseOptions(arguments_: readonly string[]): ProfileOptions {
     mode,
     trace: argumentsReader.flag("trace"),
     screenshot: argumentsReader.flag("screenshot"),
-    worldSource: argumentsReader.string("source", "procedural-v16") ?? "procedural-v16",
+    worldSource: argumentsReader.choice(
+      "source",
+      ["procedural-v16", "terrain-diffusion-30m"] as const,
+      "procedural-v16",
+    ),
     ...(spawnVoxels === undefined ? {} : { spawnVoxels }),
     ...(cameraLook === undefined ? {} : { cameraLook }),
     viewport: { width: viewportValues[0], height: viewportValues[1] },

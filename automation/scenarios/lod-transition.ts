@@ -14,6 +14,7 @@ import { percentile } from "../lib/metrics.ts";
 import { setScenarioEnvironment } from "../lib/process.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { startWorldPreview } from "../lib/world.ts";
+import type { WorldSource } from "../lib/world.ts";
 
 const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 const FAILURE =
@@ -649,7 +650,7 @@ type LodMode = "transition" | "watertight" | "boundary-coverage";
 
 interface LodOptions {
   readonly mode: LodMode;
-  readonly source: string;
+  readonly source: WorldSource;
   readonly spawn: readonly [number, number];
   readonly look: readonly [number, number];
   readonly pillarHeight: number;
@@ -705,7 +706,11 @@ function parseOptions(arguments_: readonly string[]): LodOptions {
   const ambientOcclusion = argumentsReader.choice("ssao", ["on", "off"] as const, "off");
   const options: LodOptions = {
     mode,
-    source: argumentsReader.string("source", "terrain-diffusion-30m") ?? "terrain-diffusion-30m",
+    source: argumentsReader.choice(
+      "source",
+      ["procedural-v16", "terrain-diffusion-30m"] as const,
+      "terrain-diffusion-30m",
+    ),
     spawn,
     look,
     pillarHeight:

@@ -3666,10 +3666,12 @@ dependencies = [
  "futures-util",
  "rusqlite",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-tungstenite",
  "toml",
  "uuid",
+ "voxels-client-config",
  "voxels-world",
  "voxels-world-terrain-diffusion",
 ]

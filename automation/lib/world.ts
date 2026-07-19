@@ -1,26 +1,31 @@
 import { randomBytes } from "node:crypto";
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { connect } from "node:net";
+import { promisify } from "node:util";
 import { build, preview } from "vite-plus";
 import type { PreviewServer } from "vite-plus";
 import { reserveEphemeralPort } from "./browser.ts";
 import type { ScenarioContext } from "./scenario.ts";
 import { rustTool } from "../../scripts/build-wasm.ts";
-import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./protocol.ts";
 import {
   worldServiceBuildCargoArgs,
   worldServiceExecutablePath,
 } from "../../scripts/world-service-command.ts";
 import type { WorldServiceCargoProfile } from "../../scripts/world-service-command.ts";
 
+const execFileAsync = promisify(execFile);
+const AUTOMATION_FIXTURE_SCHEMA_VERSION = 1;
+
+export type WorldSource = "procedural-v16" | "terrain-diffusion-30m";
+
 export interface BrowserWorldFixtureOptions {
   readonly browserPort: number;
   readonly prefix?: string;
-  readonly source?: string;
+  readonly source?: WorldSource;
   readonly spawnVoxels?: readonly [number, number];
   readonly spawnPillarHeightVoxels?: number;
   readonly spawnPillarRadiusVoxels?: number;
@@ -115,16 +120,133 @@ function replaceEnvironment(name: string, value: string): () => void {
   };
 }
 
-function requiredTomlBoolean(contents: string, key: string): boolean {
-  const value = new RegExp(`^${key}\\s*=\\s*(true|false)\\s*(?:#.*)?$`, "mu").exec(contents)?.[1];
-  if (value === undefined) throw new Error(`missing boolean ${key} in client config`);
-  return value === "true";
+type FixtureResolved = Omit<
+  BrowserWorldFixture,
+  | "directory"
+  | "backendPort"
+  | "browserPort"
+  | "authToken"
+  | "clientConfigPath"
+  | "serviceConfigPath"
+  | "databasePath"
+  | "cleanup"
+>;
+
+const FIXTURE_NUMBER_FIELDS = [
+  "spawnPillarHeightVoxels",
+  "spawnPillarRadiusVoxels",
+  "spawnProtectionRadiusVoxels",
+  "dayLengthSeconds",
+  "worldDayNumberAtUnixEpoch",
+  "dayFractionAtUnixEpoch",
+  "daysPerYear",
+  "moonSiderealOrbitDays",
+  "moonOrbitPhaseAtWorldEpoch",
+  "planetCircumferenceMetres",
+  "axialTiltDegrees",
+  "moonOrbitInclinationDegrees",
+  "celestialSeed",
+  "celestialRevision",
+  "weatherCycleSeconds",
+  "weatherFractionAtUnixEpoch",
+  "cloudCoverage",
+  "cloudBaseMetres",
+  "cloudTopMetres",
+] as const satisfies readonly (keyof FixtureResolved)[];
+
+const FIXTURE_BOOLEAN_FIELDS = [
+  "cascadedShadows",
+  "screenSpaceAmbientOcclusion",
+] as const satisfies readonly (keyof FixtureResolved)[];
+
+function record(value: unknown, label: string): Readonly<Record<string, unknown>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Readonly<Record<string, unknown>>;
 }
 
-function requiredTomlInteger(contents: string, key: string): number {
-  const value = new RegExp(`^${key}\\s*=\\s*([0-9]+)\\s*(?:#.*)?$`, "mu").exec(contents)?.[1];
-  if (value === undefined) throw new Error(`missing integer ${key} in service config`);
-  return Number(value);
+function numberPair(value: unknown, label: string): readonly [number, number] {
+  if (
+    !Array.isArray(value) ||
+    value.length !== 2 ||
+    value.some((entry) => typeof entry !== "number" || !Number.isFinite(entry))
+  ) {
+    throw new Error(`${label} must contain two finite numbers`);
+  }
+  return [value[0] as number, value[1] as number];
+}
+
+function parseFixtureResponse(value: unknown): FixtureResolved {
+  const response = record(value, "automation fixture response");
+  if (response.schemaVersion !== AUTOMATION_FIXTURE_SCHEMA_VERSION) {
+    throw new Error(
+      `automation fixture schema ${String(response.schemaVersion)} does not match ${AUTOMATION_FIXTURE_SCHEMA_VERSION}`,
+    );
+  }
+  const resolved = record(response.resolved, "automation fixture resolved values");
+  for (const field of FIXTURE_NUMBER_FIELDS) {
+    if (typeof resolved[field] !== "number" || !Number.isFinite(resolved[field])) {
+      throw new Error(`automation fixture omitted numeric ${field}`);
+    }
+  }
+  for (const field of FIXTURE_BOOLEAN_FIELDS) {
+    if (typeof resolved[field] !== "boolean") {
+      throw new Error(`automation fixture omitted boolean ${field}`);
+    }
+  }
+  return Object.freeze({
+    ...resolved,
+    spawnVoxels: numberPair(resolved.spawnVoxels, "automation fixture spawnVoxels"),
+    cloudVelocityMetresPerSecond: numberPair(
+      resolved.cloudVelocityMetresPerSecond,
+      "automation fixture cloudVelocityMetresPerSecond",
+    ),
+  }) as FixtureResolved;
+}
+
+async function writeTypedFixture(
+  directory: string,
+  overlay: Readonly<Record<string, unknown>>,
+): Promise<FixtureResolved> {
+  const requestPath = path.join(directory, "fixture-request.json");
+  const responsePath = path.join(directory, "fixture-response.json");
+  const serviceConfigPath = path.join(directory, "world-service.toml");
+  const clientConfigPath = path.join(directory, "client.toml");
+  await writeFile(
+    requestPath,
+    `${JSON.stringify(
+      {
+        serviceSourcePath: path.resolve("config/world-service.toml"),
+        clientSourcePath: path.resolve("config/client.toml"),
+        serviceOutputPath: serviceConfigPath,
+        clientOutputPath: clientConfigPath,
+        overlay,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  await execFileAsync(
+    rustTool("cargo"),
+    [
+      "run",
+      "--quiet",
+      "--profile",
+      "worldgen-dev",
+      "-p",
+      "voxels-world-service",
+      "--features",
+      "automation-fixture",
+      "--bin",
+      "voxels-automation-fixture",
+      "--",
+      requestPath,
+      responsePath,
+    ],
+    { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 },
+  );
+  return parseFixtureResponse(JSON.parse(await readFile(responsePath, "utf8")));
 }
 
 export async function prepareBrowserWorldFixture({
@@ -155,292 +277,42 @@ export async function prepareBrowserWorldFixture({
   cloudBaseMetres,
   cloudTopMetres,
 }: BrowserWorldFixtureOptions): Promise<BrowserWorldFixture> {
-  if (!Number.isInteger(browserPort) || browserPort <= 0 || browserPort > 65_535) {
-    throw new Error("browser fixture port must be in 1..=65535");
-  }
-  if (
-    spawnVoxels !== undefined &&
-    (!Array.isArray(spawnVoxels) ||
-      spawnVoxels.length !== 2 ||
-      !spawnVoxels.every(
-        (value) => Number.isInteger(value) && value >= -2_147_483_648 && value <= 2_147_483_647,
-      ))
-  ) {
-    throw new Error("browser fixture spawnVoxels must contain two signed 32-bit integers");
-  }
-  if (
-    spawnPillarHeightVoxels !== undefined &&
-    (!Number.isInteger(spawnPillarHeightVoxels) ||
-      spawnPillarHeightVoxels < 1 ||
-      spawnPillarHeightVoxels > 1_000)
-  ) {
-    throw new Error("browser fixture spawnPillarHeightVoxels must be in 1..=1000");
-  }
-  if (
-    spawnPillarRadiusVoxels !== undefined &&
-    (!Number.isInteger(spawnPillarRadiusVoxels) ||
-      spawnPillarRadiusVoxels < 1 ||
-      spawnPillarRadiusVoxels > 32)
-  ) {
-    throw new Error("browser fixture spawnPillarRadiusVoxels must be in 1..=32");
-  }
-  if (
-    spawnProtectionRadiusVoxels !== undefined &&
-    (!Number.isInteger(spawnProtectionRadiusVoxels) ||
-      spawnProtectionRadiusVoxels < 3 ||
-      spawnProtectionRadiusVoxels > 10_000)
-  ) {
-    throw new Error("browser fixture spawnProtectionRadiusVoxels must be in 3..=10000");
-  }
-  if (cascadedShadows !== undefined && typeof cascadedShadows !== "boolean") {
-    throw new Error("browser fixture cascadedShadows must be boolean when provided");
-  }
-  if (
-    screenSpaceAmbientOcclusion !== undefined &&
-    typeof screenSpaceAmbientOcclusion !== "boolean"
-  ) {
-    throw new Error("browser fixture screenSpaceAmbientOcclusion must be boolean when provided");
-  }
-  if (
-    dayLengthSeconds !== undefined &&
-    (!Number.isFinite(dayLengthSeconds) || dayLengthSeconds < 0 || dayLengthSeconds > 86_400)
-  ) {
-    throw new Error("browser fixture dayLengthSeconds must be finite and in 0..=86400");
-  }
-  if (
-    worldDayNumberAtUnixEpoch !== undefined &&
-    (!Number.isSafeInteger(worldDayNumberAtUnixEpoch) ||
-      Math.abs(worldDayNumberAtUnixEpoch) > 1_000_000_000)
-  ) {
-    throw new Error("browser fixture world day number must be a safe integer in +/-1e9");
-  }
-  if (
-    dayFractionAtUnixEpoch !== undefined &&
-    (!Number.isFinite(dayFractionAtUnixEpoch) ||
-      dayFractionAtUnixEpoch < 0 ||
-      dayFractionAtUnixEpoch >= 1)
-  ) {
-    throw new Error("browser fixture dayFractionAtUnixEpoch must be finite and in 0..<1");
-  }
-  if (
-    daysPerYear !== undefined &&
-    (!Number.isFinite(daysPerYear) || daysPerYear < 4 || daysPerYear > 4_096)
-  ) {
-    throw new Error("browser fixture daysPerYear must be finite and in 4..=4096");
-  }
-  const resolvedDaysPerYear = daysPerYear ?? 365.2422;
-  if (
-    moonSiderealOrbitDays !== undefined &&
-    (!Number.isFinite(moonSiderealOrbitDays) ||
-      moonSiderealOrbitDays < 0.25 ||
-      moonSiderealOrbitDays > resolvedDaysPerYear)
-  ) {
-    throw new Error("browser fixture lunar orbit must be in 0.25..=daysPerYear");
-  }
-  if (
-    moonOrbitPhaseAtWorldEpoch !== undefined &&
-    (!Number.isFinite(moonOrbitPhaseAtWorldEpoch) ||
-      moonOrbitPhaseAtWorldEpoch < 0 ||
-      moonOrbitPhaseAtWorldEpoch >= 1)
-  ) {
-    throw new Error("browser fixture lunar epoch phase must be finite and in 0..<1");
-  }
-  if (
-    planetCircumferenceMetres !== undefined &&
-    (!Number.isFinite(planetCircumferenceMetres) ||
-      planetCircumferenceMetres < 100_000 ||
-      planetCircumferenceMetres > 100_000_000)
-  ) {
-    throw new Error("browser fixture planet circumference must be in 100km..=100000km");
-  }
-  if (
-    axialTiltDegrees !== undefined &&
-    (!Number.isFinite(axialTiltDegrees) || axialTiltDegrees < 0 || axialTiltDegrees > 45)
-  ) {
-    throw new Error("browser fixture axial tilt must be finite and in 0..=45 degrees");
-  }
-  if (
-    moonOrbitInclinationDegrees !== undefined &&
-    (!Number.isFinite(moonOrbitInclinationDegrees) ||
-      moonOrbitInclinationDegrees < 0 ||
-      moonOrbitInclinationDegrees > 30)
-  ) {
-    throw new Error("browser fixture lunar inclination must be finite and in 0..=30 degrees");
-  }
-  for (const [name, value] of [
-    ["celestialSeed", celestialSeed],
-    ["celestialRevision", celestialRevision],
-  ] as const) {
-    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
-      throw new Error(`browser fixture ${name} must be a positive safe integer`);
-    }
-  }
-  if (
-    cloudVelocityMetresPerSecond !== undefined &&
-    (!Array.isArray(cloudVelocityMetresPerSecond) ||
-      cloudVelocityMetresPerSecond.length !== 2 ||
-      !cloudVelocityMetresPerSecond.every(
-        (value) => Number.isFinite(value) && Math.abs(value) <= 100,
-      ))
-  ) {
-    throw new Error("browser fixture cloud velocity must contain two values in -100..=100");
-  }
-  if (
-    weatherCycleSeconds !== undefined &&
-    (!Number.isFinite(weatherCycleSeconds) ||
-      weatherCycleSeconds < 0 ||
-      weatherCycleSeconds > 86_400)
-  ) {
-    throw new Error("browser fixture weatherCycleSeconds must be finite and in 0..=86400");
-  }
-  if (
-    weatherFractionAtUnixEpoch !== undefined &&
-    (!Number.isFinite(weatherFractionAtUnixEpoch) ||
-      weatherFractionAtUnixEpoch < 0 ||
-      weatherFractionAtUnixEpoch >= 1)
-  ) {
-    throw new Error("browser fixture weatherFractionAtUnixEpoch must be finite and in 0..<1");
-  }
-  if (
-    cloudCoverage !== undefined &&
-    (!Number.isFinite(cloudCoverage) || cloudCoverage < 0 || cloudCoverage > 1)
-  ) {
-    throw new Error("browser fixture cloudCoverage must be finite and in 0..=1");
-  }
-  const resolvedCloudBaseMetres = cloudBaseMetres ?? 550;
-  const resolvedCloudTopMetres = cloudTopMetres ?? 1_800;
-  if (
-    !Number.isFinite(resolvedCloudBaseMetres) ||
-    resolvedCloudBaseMetres < 100 ||
-    resolvedCloudBaseMetres > 5_000 ||
-    !Number.isFinite(resolvedCloudTopMetres) ||
-    resolvedCloudTopMetres <= resolvedCloudBaseMetres ||
-    resolvedCloudTopMetres > 10_000
-  ) {
-    throw new Error("browser fixture cloud layer must have 100..=5000m base below a <=10000m top");
-  }
   const directory = await mkdtemp(path.join(tmpdir(), prefix));
   try {
     const backendPort = await reserveEphemeralPort();
     const authToken = randomBytes(32).toString("hex");
     const serviceConfigPath = path.join(directory, "world-service.toml");
     const clientConfigPath = path.join(directory, "client.toml");
-    const [serviceSource, clientSource] = await Promise.all([
-      readFile("config/world-service.toml", "utf8"),
-      readFile("config/client.toml", "utf8"),
-    ]);
-    const resolvedCascadedShadows =
-      cascadedShadows ?? requiredTomlBoolean(clientSource, "cascaded_sun_shadows");
-    const resolvedScreenSpaceAmbientOcclusion =
-      screenSpaceAmbientOcclusion ??
-      requiredTomlBoolean(clientSource, "screen_space_ambient_occlusion");
-    const resolvedSpawnProtectionRadiusVoxels =
-      spawnProtectionRadiusVoxels ?? requiredTomlInteger(serviceSource, "protection_radius_voxels");
-    const resolvedSpawnPillarHeightVoxels =
-      spawnPillarHeightVoxels ?? requiredTomlInteger(serviceSource, "pillar_height_voxels");
-    const resolvedSpawnPillarRadiusVoxels =
-      spawnPillarRadiusVoxels ?? requiredTomlInteger(serviceSource, "pillar_radius_voxels");
-    let clientFixtureSource = clientSource
-      .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${backendPort}${WORLD_PATH}"`)
-      .replace(
-        /^presence_endpoint = .*$/m,
-        `presence_endpoint = "ws://127.0.0.1:${backendPort}${PRESENCE_PATH}"`,
-      )
-      .replace(/^subprotocol = .*$/m, `subprotocol = "${WORLD_SUBPROTOCOL}"`)
-      .replace(/^auth_subprotocol_token = .*$/m, `auth_subprotocol_token = "${authToken}"`);
-    if (cascadedShadows !== undefined) {
-      clientFixtureSource = clientFixtureSource.replace(
-        /^cascaded_sun_shadows = .*$/m,
-        `cascaded_sun_shadows = ${cascadedShadows}`,
-      );
-    }
-    if (screenSpaceAmbientOcclusion !== undefined) {
-      clientFixtureSource = clientFixtureSource.replace(
-        /^screen_space_ambient_occlusion = .*$/m,
-        `screen_space_ambient_occlusion = ${screenSpaceAmbientOcclusion}`,
-      );
-    }
-    await Promise.all([
-      writeFile(
-        serviceConfigPath,
-        serviceSource
-          .replace(/^source = .*$/m, `source = "${source}"`)
-          .replace(/^listen = .*$/m, `listen = "127.0.0.1:${backendPort}"`)
-          .replace(
-            /^allowed_origins = .*$/m,
-            `allowed_origins = ["http://127.0.0.1:${browserPort}"]`,
-          )
-          .replace(/^auth_subprotocol_token = .*$/m, `auth_subprotocol_token = "${authToken}"`)
-          .replace(/^database = .*$/m, 'database = "world-state.sqlite3"')
-          .replace(
-            /^day_length_seconds = .*$/m,
-            `day_length_seconds = ${dayLengthSeconds ?? 1_200}`,
-          )
-          .replace(
-            /^world_day_number_at_unix_epoch = .*$/m,
-            `world_day_number_at_unix_epoch = ${worldDayNumberAtUnixEpoch ?? 0}`,
-          )
-          .replace(
-            /^day_fraction_at_unix_epoch = .*$/m,
-            `day_fraction_at_unix_epoch = ${dayFractionAtUnixEpoch ?? 0.72}`,
-          )
-          .replace(/^days_per_year = .*$/m, `days_per_year = ${resolvedDaysPerYear}`)
-          .replace(
-            /^moon_sidereal_orbit_days = .*$/m,
-            `moon_sidereal_orbit_days = ${moonSiderealOrbitDays ?? 27.321661}`,
-          )
-          .replace(
-            /^moon_orbit_phase_at_world_epoch = .*$/m,
-            `moon_orbit_phase_at_world_epoch = ${moonOrbitPhaseAtWorldEpoch ?? 0}`,
-          )
-          .replace(
-            /^planet_circumference_metres = .*$/m,
-            `planet_circumference_metres = ${planetCircumferenceMetres ?? 40_075_016}`,
-          )
-          .replace(
-            /^axial_tilt_degrees = .*$/m,
-            `axial_tilt_degrees = ${axialTiltDegrees ?? 23.4393}`,
-          )
-          .replace(
-            /^moon_orbit_inclination_degrees = .*$/m,
-            `moon_orbit_inclination_degrees = ${moonOrbitInclinationDegrees ?? 5.145}`,
-          )
-          .replace(/^celestial_seed = .*$/m, `celestial_seed = ${celestialSeed ?? 1_470_258_925}`)
-          .replace(/^celestial_revision = .*$/m, `celestial_revision = ${celestialRevision ?? 1}`)
-          .replace(
-            /^weather_cycle_seconds = .*$/m,
-            `weather_cycle_seconds = ${weatherCycleSeconds ?? 900}`,
-          )
-          .replace(
-            /^weather_fraction_at_unix_epoch = .*$/m,
-            `weather_fraction_at_unix_epoch = ${weatherFractionAtUnixEpoch ?? 0.08}`,
-          )
-          .replace(
-            /^cloud_velocity_metres_per_second = .*$/m,
-            `cloud_velocity_metres_per_second = [${(cloudVelocityMetresPerSecond ?? [5.5, 1.6]).join(", ")}]`,
-          )
-          .replace(/^cloud_coverage = .*$/m, `cloud_coverage = ${cloudCoverage ?? 0.24}`)
-          .replace(/^cloud_base_metres = .*$/m, `cloud_base_metres = ${resolvedCloudBaseMetres}`)
-          .replace(/^cloud_top_metres = .*$/m, `cloud_top_metres = ${resolvedCloudTopMetres}`)
-          .replace(
-            /^xz_voxels = .*$/m,
-            `xz_voxels = [${spawnVoxels?.[0] ?? 0}, ${spawnVoxels?.[1] ?? 0}]`,
-          )
-          .replace(
-            /^pillar_height_voxels = .*$/m,
-            `pillar_height_voxels = ${resolvedSpawnPillarHeightVoxels}`,
-          )
-          .replace(
-            /^pillar_radius_voxels = .*$/m,
-            `pillar_radius_voxels = ${resolvedSpawnPillarRadiusVoxels}`,
-          )
-          .replace(
-            /^protection_radius_voxels = .*$/m,
-            `protection_radius_voxels = ${resolvedSpawnProtectionRadiusVoxels}`,
-          ),
-      ),
-      writeFile(clientConfigPath, clientFixtureSource),
-    ]);
+    const resolved = await writeTypedFixture(directory, {
+      schemaVersion: AUTOMATION_FIXTURE_SCHEMA_VERSION,
+      browserPort,
+      backendPort,
+      authToken,
+      source,
+      spawnVoxels,
+      spawnPillarHeightVoxels,
+      spawnPillarRadiusVoxels,
+      spawnProtectionRadiusVoxels,
+      cascadedShadows,
+      screenSpaceAmbientOcclusion,
+      dayLengthSeconds,
+      worldDayNumberAtUnixEpoch,
+      dayFractionAtUnixEpoch,
+      daysPerYear,
+      moonSiderealOrbitDays,
+      moonOrbitPhaseAtWorldEpoch,
+      planetCircumferenceMetres,
+      axialTiltDegrees,
+      moonOrbitInclinationDegrees,
+      celestialSeed,
+      celestialRevision,
+      weatherCycleSeconds,
+      weatherFractionAtUnixEpoch,
+      cloudVelocityMetresPerSecond,
+      cloudCoverage,
+      cloudBaseMetres,
+      cloudTopMetres,
+    });
 
     const restoreClientConfig = replaceEnvironment("VOXELS_CLIENT_CONFIG_PATH", clientConfigPath);
     const restoreServiceConfig = replaceEnvironment(
@@ -457,29 +329,7 @@ export async function prepareBrowserWorldFixture({
       clientConfigPath,
       serviceConfigPath,
       databasePath: path.join(directory, "world-state.sqlite3"),
-      spawnVoxels: spawnVoxels ?? [0, 0],
-      spawnPillarHeightVoxels: resolvedSpawnPillarHeightVoxels,
-      spawnPillarRadiusVoxels: resolvedSpawnPillarRadiusVoxels,
-      spawnProtectionRadiusVoxels: resolvedSpawnProtectionRadiusVoxels,
-      cascadedShadows: resolvedCascadedShadows,
-      screenSpaceAmbientOcclusion: resolvedScreenSpaceAmbientOcclusion,
-      dayLengthSeconds: dayLengthSeconds ?? 1_200,
-      worldDayNumberAtUnixEpoch: worldDayNumberAtUnixEpoch ?? 0,
-      dayFractionAtUnixEpoch: dayFractionAtUnixEpoch ?? 0.72,
-      daysPerYear: resolvedDaysPerYear,
-      moonSiderealOrbitDays: moonSiderealOrbitDays ?? 27.321661,
-      moonOrbitPhaseAtWorldEpoch: moonOrbitPhaseAtWorldEpoch ?? 0,
-      planetCircumferenceMetres: planetCircumferenceMetres ?? 40_075_016,
-      axialTiltDegrees: axialTiltDegrees ?? 23.4393,
-      moonOrbitInclinationDegrees: moonOrbitInclinationDegrees ?? 5.145,
-      celestialSeed: celestialSeed ?? 1_470_258_925,
-      celestialRevision: celestialRevision ?? 1,
-      weatherCycleSeconds: weatherCycleSeconds ?? 900,
-      weatherFractionAtUnixEpoch: weatherFractionAtUnixEpoch ?? 0.08,
-      cloudVelocityMetresPerSecond: cloudVelocityMetresPerSecond ?? [5.5, 1.6],
-      cloudCoverage: cloudCoverage ?? 0.24,
-      cloudBaseMetres: resolvedCloudBaseMetres,
-      cloudTopMetres: resolvedCloudTopMetres,
+      ...resolved,
       async cleanup() {
         if (cleaned) return;
         cleaned = true;

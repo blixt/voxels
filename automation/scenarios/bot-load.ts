@@ -22,7 +22,7 @@ import {
 import { createShapedLink, type ShapedLink, VXWP_KIND } from "../lib/network.ts";
 import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "../lib/protocol.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
-import type { BrowserWorldFixture, BrowserWorldService } from "../lib/world.ts";
+import type { BrowserWorldFixture, BrowserWorldService, WorldSource } from "../lib/world.ts";
 import { rustTool } from "../../scripts/build-wasm.ts";
 import {
   worldServiceBuildCargoArgs,
@@ -54,7 +54,7 @@ interface BotLoadOptions {
   counts: number[];
   durationSeconds: number;
   layout: BotLayout;
-  source: string;
+  source: WorldSource;
   mode: BotLoadMode;
   serviceProfile: WorldServiceCargoProfile;
   botProfile: WorldServiceCargoProfile;
@@ -146,7 +146,11 @@ function parseArguments(values: readonly string[]): BotLoadOptions {
         maximum: 86_400,
       }) ?? 10,
     layout: arguments_.choice("layout", ["dense", "mixed"], "mixed"),
-    source: arguments_.string("source", "procedural-v16") ?? "procedural-v16",
+    source: arguments_.choice(
+      "source",
+      ["procedural-v16", "terrain-diffusion-30m"] as const,
+      "procedural-v16",
+    ),
     mode: arguments_.flag("growth") ? "growth" : "scale",
     serviceProfile: arguments_.choice("service-profile", ["worldgen", "worldgen-dev"], "worldgen"),
     botProfile: arguments_.choice("bot-profile", ["worldgen", "worldgen-dev"], "worldgen-dev"),

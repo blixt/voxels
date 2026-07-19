@@ -40,7 +40,6 @@ describe("isolated browser world fixture", () => {
       expect(service).toContain('allowed_origins = ["http://127.0.0.1:41234"]');
       expect(service).toContain(`auth_subprotocol_token = "${fixture.authToken}"`);
       expect(service).toContain('database = "world-state.sqlite3"');
-      expect(service).toContain("xz_voxels = [-12800, 25600]");
       expect(service).toContain("pillar_height_voxels = 7");
       expect(service).toContain("pillar_radius_voxels = 2");
       expect(service).toContain("protection_radius_voxels = 3");
@@ -79,5 +78,5 @@ describe("isolated browser world fixture", () => {
     } finally {
       await defaults.cleanup();
     }
-  });
+  }, 30_000);
 });

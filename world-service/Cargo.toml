@@ -10,14 +10,17 @@ workspace = true
 
 [features]
 default = []
+automation-fixture = ["dep:serde_json", "dep:voxels-client-config"]
 terrain-metal = ["voxels-world-terrain-diffusion/metal"]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 futures-util = { version = "0.3", features = ["sink"] }
+voxels-client-config = { path = "../client-config", optional = true }
 voxels-world = { path = "../world" }
 voxels-world-terrain-diffusion = { path = "../world-terrain-diffusion", default-features = false }
 serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
 rusqlite = { version = "=0.40.1", features = ["bundled"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.9.8"
@@ -34,3 +37,8 @@ required-features = ["terrain-metal"]
 [[bin]]
 name = "voxels-worldd"
 path = "src/bin/voxels-worldd.rs"
+
+[[bin]]
+name = "voxels-automation-fixture"
+path = "src/bin/voxels-automation-fixture.rs"
+required-features = ["automation-fixture"]

@@ -21,6 +21,8 @@ use voxels_world_terrain_diffusion::{
 #[cfg(all(feature = "terrain-metal", target_os = "macos"))]
 use voxels_world_terrain_diffusion::{TerrainDiffusionConfig, TerrainPrecision};
 
+#[cfg(feature = "automation-fixture")]
+pub mod automation_fixture;
 mod edits;
 mod presence;
 pub mod server;
