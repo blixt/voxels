@@ -1,148 +1,102 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
-import path from "node:path";
-import { chromium } from "playwright";
+import type { Page } from "playwright";
+import { ScenarioArguments } from "../lib/arguments.ts";
+import { BrowserCapability, chromeWebGpuLaunchOptions } from "../lib/browser.ts";
 import {
   assertSnapshotSchema,
-  chromeWebGpuLaunchOptions,
-  FRAME_SAMPLE_START,
   FRAME_SAMPLE_WIDTH,
   gpuSampleStart,
   GPU_SAMPLE_WIDTH,
-  isBrowserConsoleFailure,
-  reserveEphemeralPort,
   SNAPSHOT,
-} from "./browser-harness.mjs";
-import { prepareBrowserWorldFixture, startBrowserWorldService } from "../automation/lib/world.ts";
+  snapshotValue,
+} from "../lib/engine.ts";
+import { percentile } from "../lib/metrics.ts";
+import { setScenarioEnvironment } from "../lib/process.ts";
+import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
+import { startWorldPreview } from "../lib/world.ts";
 
+const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed/i;
-const BOUNDARY_COVERAGE = process.argv.includes("--boundary-coverage");
-const WATERTIGHT = process.argv.includes("--watertight") || BOUNDARY_COVERAGE;
-const SOURCE = process.env.VOXELS_LOD_TEST_SOURCE ?? "terrain-diffusion-30m";
-const SPAWN = (
-  process.env.VOXELS_LOD_TEST_SPAWN ??
-  (BOUNDARY_COVERAGE ? "1614,294" : WATERTIGHT ? "4194,6034" : "4208,6082")
-)
-  .split(",")
-  .map((value) => Number.parseInt(value.trim(), 10));
-const LOOK = (
-  process.env.VOXELS_LOD_TEST_LOOK ??
-  (BOUNDARY_COVERAGE ? "3.326412741337916,-0.312000215053558" : "2.074606,-0.371797")
-)
-  .split(",")
-  .map((value) => Number.parseFloat(value.trim()));
-const SPAWN_PILLAR_HEIGHT = Number.parseInt(
-  process.env.VOXELS_LOD_TEST_PILLAR_HEIGHT ?? (BOUNDARY_COVERAGE ? "1" : "40"),
-  10,
-);
-const SPAWN_PILLAR_RADIUS = Number.parseInt(
-  process.env.VOXELS_LOD_TEST_PILLAR_RADIUS ?? (BOUNDARY_COVERAGE ? "1" : WATERTIGHT ? "3" : "6"),
-  10,
-);
-const OPEN_WORLD_LAB =
-  process.env.VOXELS_LOD_TEST_WORLD_LAB === "1" ||
-  (BOUNDARY_COVERAGE && process.env.VOXELS_LOD_TEST_WORLD_LAB !== "0");
-const STEP_OFF_PILLAR =
-  process.env.VOXELS_LOD_TEST_STEP_OFF_PILLAR === "1" ||
-  (BOUNDARY_COVERAGE && process.env.VOXELS_LOD_TEST_STEP_OFF_PILLAR !== "0");
-const VIEWPORT_VALUES = (
-  process.env.VOXELS_LOD_TEST_VIEWPORT ?? (BOUNDARY_COVERAGE ? "1848,1345" : "1280,720")
-)
-  .split(",")
-  .map((value) => Number.parseInt(value.trim(), 10));
-const VIEWPORT = { width: VIEWPORT_VALUES[0], height: VIEWPORT_VALUES[1] };
-const DEVICE_SCALE_FACTOR = Number.parseFloat(
-  process.env.VOXELS_LOD_TEST_DPR ?? (BOUNDARY_COVERAGE ? "1.360930735930736" : "1"),
-);
-const CASCADED_SHADOWS = process.env.VOXELS_LOD_TEST_SHADOWS !== "0";
-const SCREEN_SPACE_AMBIENT_OCCLUSION = process.env.VOXELS_LOD_TEST_SSAO === "1";
-const RECORD_VIDEO = process.env.VOXELS_LOD_TEST_RECORD_VIDEO === "1";
-const OUTPUT_DIRECTORY = path.resolve(
-  process.env.VOXELS_LOD_TEST_OUTPUT ??
-    (BOUNDARY_COVERAGE
-      ? "target/terrain-boundary-coverage"
-      : WATERTIGHT
-        ? "target/lod-watertight"
-        : "target/lod-transition"),
-);
+type Vector2 = readonly [number, number];
+type Vector3 = readonly [number, number, number];
+type BoundaryCentres = readonly Vector2[];
 
-if (SPAWN.length !== 2 || !SPAWN.every(Number.isInteger)) {
-  throw new Error("VOXELS_LOD_TEST_SPAWN must be two comma-separated canonical voxel coordinates");
-}
-if (LOOK.length !== 2 || !LOOK.every(Number.isFinite)) {
-  throw new Error("VOXELS_LOD_TEST_LOOK must be comma-separated yaw,pitch radians");
-}
-if (!Number.isInteger(SPAWN_PILLAR_HEIGHT) || SPAWN_PILLAR_HEIGHT < 1) {
-  throw new Error("VOXELS_LOD_TEST_PILLAR_HEIGHT must be a positive integer");
-}
-if (!Number.isInteger(SPAWN_PILLAR_RADIUS) || SPAWN_PILLAR_RADIUS < 1 || SPAWN_PILLAR_RADIUS > 32) {
-  throw new Error("VOXELS_LOD_TEST_PILLAR_RADIUS must be in 1..=32");
-}
-if (
-  VIEWPORT_VALUES.length !== 2 ||
-  !VIEWPORT_VALUES.every((value) => Number.isInteger(value) && value > 0)
-) {
-  throw new Error("VOXELS_LOD_TEST_VIEWPORT must be two positive comma-separated integers");
-}
-if (!Number.isFinite(DEVICE_SCALE_FACTOR) || DEVICE_SCALE_FACTOR <= 0) {
-  throw new Error("VOXELS_LOD_TEST_DPR must be positive");
+interface LodTimings {
+  readonly frameIntervals: number[];
+  readonly gpu: Map<number, { readonly total: number; readonly world: number }>;
 }
 
-function percentile(values, fraction) {
-  if (values.length === 0) return 0;
-  const sorted = values.toSorted((left, right) => left - right);
-  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)];
+function required(values: ArrayLike<number>, index: number, label: string): number {
+  const value = values[index];
+  if (value === undefined) throw new Error(`${label} omitted value ${index}`);
+  return value;
 }
 
-function boundaryCentres(snapshot) {
-  return Array.from({ length: 6 }, (_, index) => [
-    snapshot[SNAPSHOT.lodBoundary0X + index * 2],
-    snapshot[SNAPSHOT.lodBoundary0Z + index * 2],
-  ]);
-}
-
-function sameCentres(left, right) {
-  return left.every(
-    (centre, index) => centre[0] === right[index][0] && centre[1] === right[index][1],
+function boundaryCentres(snapshot: readonly number[]): BoundaryCentres {
+  return Array.from(
+    { length: 6 },
+    (_, index) =>
+      [
+        required(snapshot, SNAPSHOT.lodBoundary0X + index * 2, "LOD boundary"),
+        required(snapshot, SNAPSHOT.lodBoundary0Z + index * 2, "LOD boundary"),
+      ] as const,
   );
 }
 
-function cameraPosition(snapshot) {
-  return [snapshot[SNAPSHOT.cameraX], snapshot[SNAPSHOT.cameraY], snapshot[SNAPSHOT.cameraZ]];
+function sameCentres(left: BoundaryCentres, right: BoundaryCentres): boolean {
+  return (
+    left.length === right.length &&
+    left.every((centre, index) => {
+      const candidate = right[index];
+      return candidate !== undefined && centre[0] === candidate[0] && centre[1] === candidate[1];
+    })
+  );
 }
 
-function planarDistance(left, right) {
+function cameraPosition(snapshot: readonly number[]): Vector3 {
+  return [
+    snapshotValue(snapshot, "cameraX"),
+    snapshotValue(snapshot, "cameraY"),
+    snapshotValue(snapshot, "cameraZ"),
+  ];
+}
+
+function planarDistance(left: Vector3, right: Vector3): number {
   return Math.hypot(left[0] - right[0], left[2] - right[2]);
 }
 
-function spatialDistance(left, right) {
+function spatialDistance(left: Vector3, right: Vector3): number {
   return Math.hypot(left[0] - right[0], left[1] - right[1], left[2] - right[2]);
 }
 
-function collectTiming(snapshot, timings) {
-  const sampleCount = snapshot[SNAPSHOT.sampleCount] ?? 0;
+function collectTiming(snapshot: readonly number[], timings: LodTimings): void {
+  const sampleCount = snapshotValue(snapshot, "sampleCount");
   for (let index = 0; index < sampleCount; index += 1) {
     const start = FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH;
-    timings.frameIntervals.push(snapshot[start]);
+    timings.frameIntervals.push(required(snapshot, start, "frame timing"));
   }
   const start = gpuSampleStart(snapshot);
   const gpuCount = snapshot[start] ?? 0;
   for (let index = 0; index < gpuCount; index += 1) {
     const sample = start + 2 + index * GPU_SAMPLE_WIDTH;
-    timings.gpu.set(snapshot[sample], {
-      total: snapshot[sample + 1],
-      world: snapshot[sample + 8],
+    timings.gpu.set(required(snapshot, sample, "GPU timing"), {
+      total: required(snapshot, sample + 1, "GPU timing"),
+      world: required(snapshot, sample + 8, "GPU timing"),
     });
   }
 }
 
-function resetTimings(timings) {
+function resetTimings(timings: LodTimings): void {
   timings.frameIntervals.length = 0;
   timings.gpu.clear();
 }
 
-async function sampleStablePerformance(page, timings, duration) {
+async function sampleStablePerformance(
+  page: Page,
+  timings: LodTimings,
+  duration: number,
+): Promise<void> {
   await readSnapshot(page, timings);
   resetTimings(timings);
   const deadline = Date.now() + duration;
@@ -152,28 +106,28 @@ async function sampleStablePerformance(page, timings, duration) {
   }
 }
 
-async function readSnapshot(page, timings) {
+async function readSnapshot(page: Page, timings: LodTimings): Promise<readonly number[]> {
   const snapshot = assertSnapshotSchema(
-    await page.evaluate(() => globalThis.__VOXELS__.snapshot()),
+    await page.evaluate(() => globalThis.__VOXELS__!.snapshot()),
   );
   collectTiming(snapshot, timings);
   return snapshot;
 }
 
-async function waitForEngine(page, timings) {
+async function waitForEngine(page: Page, timings: LodTimings): Promise<readonly number[]> {
   await page.waitForFunction(() => typeof globalThis.__VOXELS__?.snapshot === "function", null, {
     timeout: 20_000,
   });
   const deadline = Date.now() + 60_000;
-  let latest = [];
+  let latest: readonly number[] = [];
   while (Date.now() < deadline) {
     latest = await readSnapshot(page, timings);
     if (
-      latest[SNAPSHOT.quads] > 0 &&
-      latest[SNAPSHOT.pendingJobs] === 0 &&
-      latest[SNAPSHOT.surfaceInFlight] === 0 &&
-      latest[SNAPSHOT.allLodsReady] === 1 &&
-      latest[SNAPSHOT.lodTransitionQuads] > 0
+      snapshotValue(latest, "quads") > 0 &&
+      snapshotValue(latest, "pendingJobs") === 0 &&
+      snapshotValue(latest, "surfaceInFlight") === 0 &&
+      snapshotValue(latest, "allLodsReady") === 1 &&
+      snapshotValue(latest, "lodTransitionQuads") > 0
     ) {
       return latest;
     }
@@ -182,25 +136,33 @@ async function waitForEngine(page, timings) {
   throw new Error(`LOD browser fixture did not settle: ${JSON.stringify(latest)}`);
 }
 
-async function setCameraLook(page, targetYaw, targetPitch, timings) {
+async function setCameraLook(
+  page: Page,
+  targetYaw: number,
+  targetPitch: number,
+  timings: LodTimings,
+): Promise<readonly number[]> {
   const sensitivity = 0.0022;
   const current = await readSnapshot(page, timings);
   const yawDelta = Math.atan2(
-    Math.sin(targetYaw - current[SNAPSHOT.yaw]),
-    Math.cos(targetYaw - current[SNAPSHOT.yaw]),
+    Math.sin(targetYaw - snapshotValue(current, "yaw")),
+    Math.cos(targetYaw - snapshotValue(current, "yaw")),
   );
-  await page.evaluate(({ x, y }) => globalThis.__VOXELS__.look(x, y), {
+  await page.evaluate(({ x, y }) => globalThis.__VOXELS__!.look(x, y), {
     x: yawDelta / sensitivity,
-    y: (current[SNAPSHOT.pitch] - targetPitch) / sensitivity,
+    y: (snapshotValue(current, "pitch") - targetPitch) / sensitivity,
   });
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     const snapshot = await readSnapshot(page, timings);
     const yawError = Math.atan2(
-      Math.sin(snapshot[SNAPSHOT.yaw] - targetYaw),
-      Math.cos(snapshot[SNAPSHOT.yaw] - targetYaw),
+      Math.sin(snapshotValue(snapshot, "yaw") - targetYaw),
+      Math.cos(snapshotValue(snapshot, "yaw") - targetYaw),
     );
-    if (Math.abs(yawError) < 0.001 && Math.abs(snapshot[SNAPSHOT.pitch] - targetPitch) < 0.001) {
+    if (
+      Math.abs(yawError) < 0.001 &&
+      Math.abs(snapshotValue(snapshot, "pitch") - targetPitch) < 0.001
+    ) {
       return snapshot;
     }
     await page.waitForTimeout(10);
@@ -208,7 +170,12 @@ async function setCameraLook(page, targetYaw, targetPitch, timings) {
   throw new Error("camera look did not reach the requested regression pose");
 }
 
-async function waitForCentreChange(page, initialCentres, outboundKey, timings) {
+async function waitForCentreChange(
+  page: Page,
+  initialCentres: BoundaryCentres,
+  outboundKey: string,
+  timings: LodTimings,
+): Promise<readonly number[]> {
   const deadline = Date.now() + 4_000;
   await page.keyboard.down(outboundKey);
   try {
@@ -223,9 +190,18 @@ async function waitForCentreChange(page, initialCentres, outboundKey, timings) {
   throw new Error("walking forward did not cross an LOD snap boundary");
 }
 
-async function returnToPose(page, target, initialCentres, timings) {
-  const correctionHistory = [];
-  const brake = async (duration) => {
+async function returnToPose(
+  page: Page,
+  target: Vector3,
+  initialCentres: BoundaryCentres,
+  timings: LodTimings,
+): Promise<readonly number[]> {
+  const correctionHistory: {
+    readonly correction: number;
+    readonly distance: number;
+    readonly position: Vector3;
+  }[] = [];
+  const brake = async (duration: number): Promise<void> => {
     const keys = ["KeyW", "KeyS", "KeyA", "KeyD"];
     for (const key of keys) await page.keyboard.down(key);
     try {
@@ -250,22 +226,24 @@ async function returnToPose(page, target, initialCentres, timings) {
       if (planarDistance(cameraPosition(latest), target) <= 0.015) break;
       continue;
     }
-    const yaw = latest[SNAPSHOT.yaw];
-    const forward = [Math.sin(yaw), -Math.cos(yaw)];
-    const right = [-forward[1], forward[0]];
-    const error = [target[0] - position[0], target[2] - position[2]];
-    const candidates = [
+    const yaw = snapshotValue(latest, "yaw");
+    const forward: Vector2 = [Math.sin(yaw), -Math.cos(yaw)];
+    const right: Vector2 = [-forward[1], forward[0]];
+    const error: Vector2 = [target[0] - position[0], target[2] - position[2]];
+    const candidates: readonly (readonly [string, Vector2])[] = [
       ["KeyW", forward],
-      ["KeyS", forward.map((value) => -value)],
+      ["KeyS", [-forward[0], -forward[1]]],
       ["KeyD", right],
-      ["KeyA", right.map((value) => -value)],
+      ["KeyA", [-right[0], -right[1]]],
     ];
-    const [key] = candidates.toSorted(
+    const candidate = candidates.toSorted(
       (left, rightCandidate) =>
         rightCandidate[1][0] * error[0] +
         rightCandidate[1][1] * error[1] -
         (left[1][0] * error[0] + left[1][1] * error[1]),
     )[0];
+    if (candidate === undefined) throw new Error("camera correction has no movement candidate");
+    const [key] = candidate;
     await page.keyboard.down(key);
     try {
       const deadline = Date.now() + Math.min(40, Math.max(8, distance * 80));
@@ -293,9 +271,13 @@ async function returnToPose(page, target, initialCentres, timings) {
   return latest;
 }
 
-async function waitForStableFrame(page, expectedCentres, timings) {
-  let latest;
-  let previousPosition;
+async function waitForStableFrame(
+  page: Page,
+  expectedCentres: BoundaryCentres,
+  timings: LodTimings,
+): Promise<readonly number[]> {
+  let latest: readonly number[] = [];
+  let previousPosition: Vector3 | undefined;
   let stable = 0;
   const deadline = Date.now() + 10_000;
   while (stable < 12 && Date.now() < deadline) {
@@ -303,13 +285,13 @@ async function waitForStableFrame(page, expectedCentres, timings) {
     const position = cameraPosition(latest);
     const settled =
       sameCentres(boundaryCentres(latest), expectedCentres) &&
-      latest[SNAPSHOT.grounded] === 1 &&
+      snapshotValue(latest, "grounded") === 1 &&
       previousPosition !== undefined &&
       spatialDistance(position, previousPosition) < 0.0015 &&
-      latest[SNAPSHOT.pendingJobs] === 0 &&
-      latest[SNAPSHOT.surfaceInFlight] === 0 &&
-      latest[SNAPSHOT.allLodsReady] === 1 &&
-      latest[SNAPSHOT.lodTransitionQuads] > 0;
+      snapshotValue(latest, "pendingJobs") === 0 &&
+      snapshotValue(latest, "surfaceInFlight") === 0 &&
+      snapshotValue(latest, "allLodsReady") === 1 &&
+      snapshotValue(latest, "lodTransitionQuads") > 0;
     stable = settled ? stable + 1 : 0;
     previousPosition = position;
     await page.waitForTimeout(16);
@@ -322,11 +304,15 @@ async function waitForStableFrame(page, expectedCentres, timings) {
   return latest;
 }
 
-async function waitForStableChangedFrame(page, initialCentres, timings) {
-  let latest;
-  let latestCentres;
-  let previousCentres;
-  let previousPosition;
+async function waitForStableChangedFrame(
+  page: Page,
+  initialCentres: BoundaryCentres,
+  timings: LodTimings,
+): Promise<readonly number[]> {
+  let latest: readonly number[] = [];
+  let latestCentres: BoundaryCentres = [];
+  let previousCentres: BoundaryCentres | undefined;
+  let previousPosition: Vector3 | undefined;
   let stable = 0;
   const deadline = Date.now() + 10_000;
   while (stable < 12 && Date.now() < deadline) {
@@ -335,15 +321,17 @@ async function waitForStableChangedFrame(page, initialCentres, timings) {
     const position = cameraPosition(latest);
     const settled =
       !sameCentres(latestCentres, initialCentres) &&
-      latest[SNAPSHOT.grounded] === 1 &&
+      snapshotValue(latest, "grounded") === 1 &&
       previousPosition !== undefined &&
       spatialDistance(position, previousPosition) < 0.0015 &&
-      latest[SNAPSHOT.pendingJobs] === 0 &&
-      latest[SNAPSHOT.surfaceInFlight] === 0 &&
-      latest[SNAPSHOT.allLodsReady] === 1 &&
-      latest[SNAPSHOT.lodTransitionQuads] > 0;
+      snapshotValue(latest, "pendingJobs") === 0 &&
+      snapshotValue(latest, "surfaceInFlight") === 0 &&
+      snapshotValue(latest, "allLodsReady") === 1 &&
+      snapshotValue(latest, "lodTransitionQuads") > 0;
     stable =
-      settled && previousCentres && sameCentres(latestCentres, previousCentres) ? stable + 1 : 0;
+      settled && previousCentres !== undefined && sameCentres(latestCentres, previousCentres)
+        ? stable + 1
+        : 0;
     previousCentres = latestCentres;
     previousPosition = position;
     await page.waitForTimeout(16);
@@ -356,14 +344,20 @@ async function waitForStableChangedFrame(page, initialCentres, timings) {
   return latest;
 }
 
-async function compareScreenshots(page, before, after) {
+async function compareScreenshots(page: Page, before: Buffer, after: Buffer) {
   return page.evaluate(
     async ({ beforeBase64, afterBase64 }) => {
-      const decode = async (base64) => {
+      const at = (values: ArrayLike<number>, index: number): number => {
+        const value = values[index];
+        if (value === undefined) throw new Error(`image analysis omitted value ${index}`);
+        return value;
+      };
+      const decode = async (base64: string) => {
         const response = await fetch(`data:image/png;base64,${base64}`);
         const bitmap = await createImageBitmap(await response.blob());
         const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
         const context = canvas.getContext("2d", { willReadFrequently: true });
+        if (context === null) throw new Error("LOD comparison canvas is unavailable");
         context.drawImage(bitmap, 0, 0);
         return {
           width: bitmap.width,
@@ -381,28 +375,28 @@ async function compareScreenshots(page, before, after) {
         y0: Math.floor(left.height * 0.28),
         y1: Math.ceil(left.height * 0.58),
       };
-      const linear = (value) => {
+      const linear = (value: number): number => {
         const channel = value / 255;
         return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
       };
-      const luma = (pixels, index) =>
-        0.2126 * linear(pixels[index]) +
-        0.7152 * linear(pixels[index + 1]) +
-        0.0722 * linear(pixels[index + 2]);
-      const isolatedSkyExposures = (pixels) => {
+      const luma = (pixels: Uint8ClampedArray, index: number): number =>
+        0.2126 * linear(at(pixels, index)) +
+        0.7152 * linear(at(pixels, index + 1)) +
+        0.0722 * linear(at(pixels, index + 2));
+      const isolatedSkyExposures = (pixels: Uint8ClampedArray) => {
         // Stay below the irregular tree-lined horizon: this measures pale sky samples fully
         // enclosed by the valley terrain, the one-pixel signature of an uncovered far-LOD
         // T-junction. Keep a few coordinates so a failure is immediately reproducible.
         const crackRoi = { ...roi, y0: Math.max(roi.y0, Math.floor(left.height * 0.3)) };
-        const skyLike = (x, y) => {
+        const skyLike = (x: number, y: number): boolean => {
           const index = (x + y * left.width) * 4;
-          const red = pixels[index];
-          const green = pixels[index + 1];
-          const blue = pixels[index + 2];
+          const red = at(pixels, index);
+          const green = at(pixels, index + 1);
+          const blue = at(pixels, index + 2);
           return red > 150 && green > 160 && blue > 180 && blue > red * 1.05;
         };
         let count = 0;
-        const coordinates = [];
+        const coordinates: Vector2[] = [];
         for (let y = crackRoi.y0 + 1; y < crackRoi.y1 - 1; y += 1) {
           for (let x = crackRoi.x0 + 1; x < crackRoi.x1 - 1; x += 1) {
             if (!skyLike(x, y)) continue;
@@ -445,16 +439,16 @@ async function compareScreenshots(page, before, after) {
             for (let offsetX = 0; offsetX < footprint && x + offsetX < roi.x1; offsetX += 1) {
               const index = (x + offsetX + (y + offsetY) * left.width) * 4;
               if (
-                left.pixels[index] <= 2 &&
-                left.pixels[index + 1] <= 2 &&
-                left.pixels[index + 2] <= 2
+                at(left.pixels, index) <= 2 &&
+                at(left.pixels, index + 1) <= 2 &&
+                at(left.pixels, index + 2) <= 2
               ) {
                 leftNearBlackPixels += 1;
               }
               if (
-                right.pixels[index] <= 2 &&
-                right.pixels[index + 1] <= 2 &&
-                right.pixels[index + 2] <= 2
+                at(right.pixels, index) <= 2 &&
+                at(right.pixels, index + 1) <= 2 &&
+                at(right.pixels, index + 2) <= 2
               ) {
                 rightNearBlackPixels += 1;
               }
@@ -516,12 +510,18 @@ async function compareScreenshots(page, before, after) {
   );
 }
 
-async function analyzeWatertightTerrain(page, screenshot) {
-  return page.evaluate(async (base64) => {
+async function analyzeWatertightTerrain(page: Page, screenshot: Buffer) {
+  return page.evaluate(async (base64: string) => {
+    const at = (values: ArrayLike<number>, index: number): number => {
+      const value = values[index];
+      if (value === undefined) throw new Error(`watertight analysis omitted value ${index}`);
+      return value;
+    };
     const response = await fetch(`data:image/png;base64,${base64}`);
     const bitmap = await createImageBitmap(await response.blob());
     const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
     const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (context === null) throw new Error("watertight analysis canvas is unavailable");
     context.drawImage(bitmap, 0, 0);
     const pixels = context.getImageData(0, 0, bitmap.width, bitmap.height).data;
     // This fixed camera looks down onto uninterrupted terrain here. The historical crack exposed
@@ -541,9 +541,9 @@ async function analyzeWatertightTerrain(page, screenshot) {
     for (let y = roi.y0; y < roi.y1; y += 1) {
       for (let x = roi.x0; x < roi.x1; x += 1) {
         const source = (x + y * bitmap.width) * 4;
-        const red = pixels[source];
-        const green = pixels[source + 1];
-        const blue = pixels[source + 2];
+        const red = at(pixels, source);
+        const green = at(pixels, source + 1);
+        const blue = at(pixels, source + 2);
         const target = x - roi.x0 + (y - roi.y0) * width;
         const exposedSky = red > 25 && red > green * 1.35 && red > blue * 1.08;
         if (exposedSky) {
@@ -560,13 +560,13 @@ async function analyzeWatertightTerrain(page, screenshot) {
         }
       }
     }
-    const connectedComponentSummary = (mask) => {
+    const connectedComponentSummary = (mask: Uint8Array) => {
       const visited = new Uint8Array(mask.length);
       let largest = 0;
       let largestBroad = 0;
       for (let start = 0; start < mask.length; start += 1) {
         if (mask[start] === 0 || visited[start] !== 0) continue;
-        const stack = [start];
+        const stack: number[] = [start];
         visited[start] = 1;
         let component = 0;
         let minX = width;
@@ -575,6 +575,7 @@ async function analyzeWatertightTerrain(page, screenshot) {
         let maxY = 0;
         while (stack.length > 0) {
           const current = stack.pop();
+          if (current === undefined) break;
           component += 1;
           const x = current % width;
           const y = Math.floor(current / width);
@@ -622,7 +623,7 @@ async function analyzeWatertightTerrain(page, screenshot) {
   }, screenshot.toString("base64"));
 }
 
-function summarizePerformance(timings) {
+function summarizePerformance(timings: LodTimings) {
   const gpu = [...timings.gpu.values()];
   return {
     samples: timings.frameIntervals.length,
@@ -644,104 +645,189 @@ function summarizePerformance(timings) {
   };
 }
 
-const timings = { frameIntervals: [], gpu: new Map() };
-const errors = [];
-const port = await reserveEphemeralPort();
-let browser;
-let context;
-let rawVideo;
-let videoStartedAtMs;
-let server;
-let fixture;
-let worldService;
+type LodMode = "transition" | "watertight" | "boundary-coverage";
 
-try {
-  await mkdir(OUTPUT_DIRECTORY, { recursive: true });
-  fixture = await prepareBrowserWorldFixture({
-    browserPort: port,
-    prefix: "voxels-lod-transition-",
-    source: SOURCE,
-    spawnVoxels: SPAWN,
-    spawnPillarHeightVoxels: SPAWN_PILLAR_HEIGHT,
-    spawnPillarRadiusVoxels: SPAWN_PILLAR_RADIUS,
-    cascadedShadows: CASCADED_SHADOWS,
-    screenSpaceAmbientOcclusion: SCREEN_SPACE_AMBIENT_OCCLUSION,
-    dayLengthSeconds: 0,
-    dayFractionAtUnixEpoch: 0.5,
-    weatherCycleSeconds: 0,
-    weatherFractionAtUnixEpoch: 0.08,
-    cloudVelocityMetresPerSecond: [0, 0],
+interface LodOptions {
+  readonly mode: LodMode;
+  readonly source: string;
+  readonly spawn: readonly [number, number];
+  readonly look: readonly [number, number];
+  readonly pillarHeight: number;
+  readonly pillarRadius: number;
+  readonly openWorldLab: boolean;
+  readonly stepOffPillar: boolean;
+  readonly viewport: { readonly width: number; readonly height: number };
+  readonly deviceScaleFactor: number;
+  readonly cascadedShadows: boolean;
+  readonly screenSpaceAmbientOcclusion: boolean;
+  readonly recordVideo: boolean;
+  readonly buildProfile: "debug" | "wasm-dev" | "release";
+}
+
+function parseOptions(arguments_: readonly string[]): LodOptions {
+  const argumentsReader = new ScenarioArguments(arguments_);
+  const mode = argumentsReader.choice(
+    "mode",
+    ["transition", "watertight", "boundary-coverage"] as const,
+    "transition",
+  );
+  const boundaryCoverage = mode === "boundary-coverage";
+  const watertight = mode !== "transition";
+  const spawn = argumentsReader.pair("spawn", {
+    fallback: boundaryCoverage ? [1614, 294] : watertight ? [4194, 6034] : [4208, 6082],
+    integer: true,
+    minimum: -2_147_483_648,
+    maximum: 2_147_483_647,
+  }) ?? [0, 0];
+  const look = argumentsReader.pair("look", {
+    fallback: boundaryCoverage
+      ? [3.326_412_741_337_916, -0.312_000_215_053_558]
+      : [2.074_606, -0.371_797],
+    minimum: -Math.PI * 2,
+    maximum: Math.PI * 2,
+  }) ?? [0, 0];
+  if (look[1] < -Math.PI / 2 || look[1] > Math.PI / 2) {
+    throw new Error("--look pitch must be in -pi/2..=pi/2");
+  }
+  const viewport = argumentsReader.pair("viewport", {
+    fallback: boundaryCoverage ? [1848, 1345] : [1280, 720],
+    separator: "x",
+    integer: true,
+    minimum: 240,
+  }) ?? [1280, 720];
+  const openWorldLab =
+    argumentsReader.flag("world-lab") ||
+    (boundaryCoverage && !argumentsReader.flag("no-world-lab"));
+  const stepOffPillar =
+    argumentsReader.flag("step-off-pillar") ||
+    (boundaryCoverage && !argumentsReader.flag("no-step-off-pillar"));
+  const shadows = argumentsReader.choice("shadows", ["on", "off"] as const, "on");
+  const ambientOcclusion = argumentsReader.choice("ssao", ["on", "off"] as const, "off");
+  const options: LodOptions = {
+    mode,
+    source: argumentsReader.string("source", "terrain-diffusion-30m") ?? "terrain-diffusion-30m",
+    spawn,
+    look,
+    pillarHeight:
+      argumentsReader.number("pillar-height", {
+        fallback: boundaryCoverage ? 1 : 40,
+        integer: true,
+        minimum: 1,
+        maximum: 1_000,
+      }) ?? 1,
+    pillarRadius:
+      argumentsReader.number("pillar-radius", {
+        fallback: boundaryCoverage ? 1 : watertight ? 3 : 6,
+        integer: true,
+        minimum: 1,
+        maximum: 32,
+      }) ?? 1,
+    openWorldLab,
+    stepOffPillar,
+    viewport: { width: viewport[0], height: viewport[1] },
+    deviceScaleFactor:
+      argumentsReader.number("dpr", {
+        fallback: boundaryCoverage ? 1.360_930_735_930_736 : 1,
+        minimum: 0.5,
+        maximum: 4,
+      }) ?? 1,
+    cascadedShadows: shadows === "on",
+    screenSpaceAmbientOcclusion: ambientOcclusion === "on",
+    recordVideo: argumentsReader.flag("video"),
+    buildProfile: argumentsReader.choice(
+      "build",
+      ["debug", "wasm-dev", "release"] as const,
+      "release",
+    ),
+  };
+  argumentsReader.assertEmpty();
+  return options;
+}
+
+async function runLodTransition(context: ScenarioContext, arguments_: readonly string[]) {
+  const options = parseOptions(arguments_);
+  const boundaryCoverage = options.mode === "boundary-coverage";
+  const watertight = options.mode !== "transition";
+  const timings: LodTimings = { frameIntervals: [], gpu: new Map() };
+  setScenarioEnvironment(context, "VOXELS_BROWSER_BUILD_PROFILE", options.buildProfile);
+  const world = await startWorldPreview(context, {
+    fixture: {
+      prefix: "voxels-lod-transition-",
+      source: options.source,
+      spawnVoxels: options.spawn,
+      spawnPillarHeightVoxels: options.pillarHeight,
+      spawnPillarRadiusVoxels: options.pillarRadius,
+      cascadedShadows: options.cascadedShadows,
+      screenSpaceAmbientOcclusion: options.screenSpaceAmbientOcclusion,
+      dayLengthSeconds: 0,
+      dayFractionAtUnixEpoch: 0.5,
+      weatherCycleSeconds: 0,
+      weatherFractionAtUnixEpoch: 0.08,
+      cloudVelocityMetresPerSecond: [0, 0],
+    },
+    service: { metal: options.source === "terrain-diffusion-30m" },
   });
-  process.env.VOXELS_BROWSER_BUILD_PROFILE = process.env.VOXELS_LOD_TEST_BUILD ?? "release";
-  const { build, preview } = await import("vite-plus");
-  await build({ logLevel: "warn" });
-  worldService = await startBrowserWorldService(fixture, {
-    metal: SOURCE === "terrain-diffusion-30m",
+  const browser = await BrowserCapability.start(context, {
+    warningPattern: FAILURE,
+    launch: chromeWebGpuLaunchOptions(),
   });
-  server = await preview({
-    logLevel: "warn",
-    preview: { host: "127.0.0.1", port, strictPort: true },
+  const viewport = await browser.open({
+    url: world.url,
+    label: "lod-transition",
+    viewport: options.viewport,
+    deviceScaleFactor: options.deviceScaleFactor,
+    recordVideo: options.recordVideo,
+    videoFilename: "transition-raw.webm",
   });
-  browser = await chromium.launch(chromeWebGpuLaunchOptions());
-  context = await browser.newContext({
-    viewport: VIEWPORT,
-    deviceScaleFactor: DEVICE_SCALE_FACTOR,
-    ...(RECORD_VIDEO
-      ? {
-          recordVideo: {
-            dir: OUTPUT_DIRECTORY,
-            size: VIEWPORT,
-          },
-        }
-      : {}),
-  });
-  const page = await context.newPage();
-  rawVideo = page.video();
-  videoStartedAtMs = Date.now();
-  page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
-  page.on("console", (message) => {
-    if (isBrowserConsoleFailure(message.type(), message.text(), FAILURE)) {
-      errors.push(`${message.type()}: ${message.text()}`);
-    }
-  });
-  await page.goto(`http://127.0.0.1:${port}`, { waitUntil: "domcontentloaded" });
+  const { page } = viewport;
+  const videoStartedAtMs = Date.now();
   let beforeSnapshot = await waitForEngine(page, timings);
-  beforeSnapshot = await setCameraLook(page, LOOK[0], LOOK[1], timings);
-  if (STEP_OFF_PILLAR) {
+  beforeSnapshot = await setCameraLook(page, options.look[0], options.look[1], timings);
+  if (options.stepOffPillar) {
     await page.keyboard.down("KeyD");
     await page.waitForTimeout(160);
     await page.keyboard.up("KeyD");
   }
   const initialCentres = boundaryCentres(beforeSnapshot);
   beforeSnapshot = await waitForStableFrame(page, initialCentres, timings);
-  if (OPEN_WORLD_LAB) {
+  if (options.openWorldLab) {
     await page.keyboard.press("F3");
     beforeSnapshot = await waitForStableFrame(page, initialCentres, timings);
   }
   const beforePose = cameraPosition(beforeSnapshot);
-  const before = await page.screenshot({ path: path.join(OUTPUT_DIRECTORY, "before.png") });
+  const before = await page.screenshot();
+  await context.artifacts.write("LOD before", "before.png", before, "image/png");
   const beforeVideoSeconds = (Date.now() - videoStartedAtMs) / 1_000;
-  if (RECORD_VIDEO && !WATERTIGHT) await page.waitForTimeout(1_500);
+  if (options.recordVideo && !watertight) await page.waitForTimeout(1_500);
 
-  if (WATERTIGHT) {
+  if (watertight) {
     const headingSamples = [
       {
-        yaw: LOOK[0],
+        yaw: options.look[0],
         image: await analyzeWatertightTerrain(page, before),
       },
     ];
-    if (BOUNDARY_COVERAGE) {
+    if (boundaryCoverage) {
       for (const [index, offset] of [-0.16, -0.08, 0.08, 0.16].entries()) {
         await page.keyboard.press("F3");
-        beforeSnapshot = await setCameraLook(page, LOOK[0] + offset, LOOK[1], timings);
+        beforeSnapshot = await setCameraLook(
+          page,
+          options.look[0] + offset,
+          options.look[1],
+          timings,
+        );
         beforeSnapshot = await waitForStableFrame(page, initialCentres, timings);
         await page.keyboard.press("F3");
         beforeSnapshot = await waitForStableFrame(page, initialCentres, timings);
-        const screenshot = await page.screenshot({
-          path: path.join(OUTPUT_DIRECTORY, `heading-${index + 1}.png`),
-        });
+        const screenshot = await page.screenshot();
+        await context.artifacts.write(
+          `LOD heading ${index + 1}`,
+          `heading-${index + 1}.png`,
+          screenshot,
+          "image/png",
+        );
         headingSamples.push({
-          yaw: LOOK[0] + offset,
+          yaw: options.look[0] + offset,
           image: await analyzeWatertightTerrain(page, screenshot),
         });
       }
@@ -752,11 +838,11 @@ try {
         sample.image.largestCoolExposureComponent > worst.largestCoolExposureComponent
           ? sample.image
           : worst,
-      headingSamples[0].image,
+      headingSamples[0]?.image ?? (await analyzeWatertightTerrain(page, before)),
     );
     const performance = summarizePerformance(timings);
-    const violations = [];
-    if (!BOUNDARY_COVERAGE) {
+    const violations: string[] = [];
+    if (!boundaryCoverage) {
       if (image.largestBroadSkyLikeComponent > 32)
         violations.push("terrain-only ROI contains a connected sky-colored crack");
     }
@@ -766,27 +852,27 @@ try {
     if (performance.fractionAbove16_67Ms > 0.01)
       violations.push("over 1% of measured frames exceeded 16.67ms");
     if (performance.frameMaxMs > 25) violations.push("a measured frame exceeded 25ms");
-    const worldGpuBudgetMs = BOUNDARY_COVERAGE ? 3 : 2;
+    const worldGpuBudgetMs = boundaryCoverage ? 3 : 2;
     if (performance.worldGpuP95Ms > worldGpuBudgetMs)
       violations.push(`world GPU p95 exceeded ${worldGpuBudgetMs}ms`);
     if (performance.totalGpuP95Ms > 7.5) violations.push("total GPU p95 exceeded 7.5ms");
-    if (errors.length > 0) violations.push(...errors);
+    browser.assertHealthy();
     const result = {
       ok: violations.length === 0,
-      mode: BOUNDARY_COVERAGE ? "boundary-coverage" : "watertight",
+      mode: options.mode,
       commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
       dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "",
-      source: SOURCE,
-      spawnVoxels: SPAWN,
-      look: LOOK,
-      browser: browser.version(),
+      source: options.source,
+      spawnVoxels: options.spawn,
+      look: options.look,
+      browser: browser.version,
       pose: beforePose,
       lod: {
         centres: initialCentres,
-        transitionQuads: beforeSnapshot[SNAPSHOT.lodTransitionQuads],
+        transitionQuads: snapshotValue(beforeSnapshot, "lodTransitionQuads"),
         viewportFingerprint: [
-          beforeSnapshot[SNAPSHOT.viewportFingerprintLow24],
-          beforeSnapshot[SNAPSHOT.viewportFingerprintHigh24],
+          snapshotValue(beforeSnapshot, "viewportFingerprintLow24"),
+          snapshotValue(beforeSnapshot, "viewportFingerprintHigh24"),
         ],
       },
       image,
@@ -794,16 +880,19 @@ try {
       performance,
       violations,
     };
-    await writeFile(
-      path.join(OUTPUT_DIRECTORY, "report.json"),
-      `${JSON.stringify(result, null, 2)}\n`,
-    );
-    console.log(JSON.stringify(result, null, 2));
-    if (!result.ok) process.exitCode = 1;
+    await context.artifacts.writeJson("LOD report", "report.json", result);
+    if (!result.ok) throw new Error(`LOD ${options.mode} violations: ${violations.join(", ")}`);
+    return {
+      summary: `LOD ${options.mode} validation passed.`,
+      metrics: performance,
+      details: result,
+    };
   } else {
     const cameraVoxelX = beforePose[0] / 0.1;
-    const desiredXDirection = Math.sign(cameraVoxelX - initialCentres[0][0]) || 1;
-    const forwardXDirection = Math.sign(Math.sin(beforeSnapshot[SNAPSHOT.yaw])) || 1;
+    const firstCentre = initialCentres[0];
+    if (firstCentre === undefined) throw new Error("LOD fixture has no boundary centre");
+    const desiredXDirection = Math.sign(cameraVoxelX - firstCentre[0]) || 1;
+    const forwardXDirection = Math.sign(Math.sin(snapshotValue(beforeSnapshot, "yaw"))) || 1;
     const outboundKey = desiredXDirection === forwardXDirection ? "KeyW" : "KeyS";
     const crossedSnapshot = await waitForCentreChange(page, initialCentres, outboundKey, timings);
     const crossedPose = cameraPosition(crossedSnapshot);
@@ -814,15 +903,16 @@ try {
     const afterSnapshot = await waitForStableChangedFrame(page, initialCentres, timings);
     const afterCentres = boundaryCentres(afterSnapshot);
     const afterPose = cameraPosition(afterSnapshot);
-    const after = await page.screenshot({ path: path.join(OUTPUT_DIRECTORY, "after.png") });
+    const after = await page.screenshot();
+    await context.artifacts.write("LOD after", "after.png", after, "image/png");
     const afterVideoSeconds = (Date.now() - videoStartedAtMs) / 1_000;
-    if (RECORD_VIDEO) await page.waitForTimeout(1_500);
+    if (options.recordVideo) await page.waitForTimeout(1_500);
     await sampleStablePerformance(page, timings, 2_000);
     const image = await compareScreenshots(page, before, after);
     const performance = summarizePerformance(timings);
     const planarPoseErrorMetres = planarDistance(beforePose, afterPose);
     const poseErrorMetres = spatialDistance(beforePose, afterPose);
-    const violations = [];
+    const violations: string[] = [];
     // Ground height follows the returned X/Z position. A few centimetres on a steep voxel slope
     // can legitimately move Y farther, while the screenshots remain horizontally registered.
     if (planarPoseErrorMetres > 0.025)
@@ -849,17 +939,17 @@ try {
     if (performance.frameMaxMs > 25) violations.push("a measured frame exceeded 25ms");
     if (performance.worldGpuP95Ms > 2) violations.push("world GPU p95 exceeded 2ms");
     if (performance.totalGpuP95Ms > 7.5) violations.push("total GPU p95 exceeded 7.5ms");
-    if (errors.length > 0) violations.push(...errors);
+    browser.assertHealthy();
 
     const result = {
       ok: violations.length === 0,
       mode: "transition",
       commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
       dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "",
-      source: SOURCE,
-      spawnVoxels: SPAWN,
-      look: LOOK,
-      browser: browser.version(),
+      source: options.source,
+      spawnVoxels: options.spawn,
+      look: options.look,
+      browser: browser.version,
       pose: {
         before: beforePose,
         crossed: crossedPose,
@@ -870,21 +960,21 @@ try {
       lod: {
         centresBefore: initialCentres,
         centresAfter: afterCentres,
-        transitionQuadsBefore: beforeSnapshot[SNAPSHOT.lodTransitionQuads],
-        transitionQuadsAfter: afterSnapshot[SNAPSHOT.lodTransitionQuads],
+        transitionQuadsBefore: snapshotValue(beforeSnapshot, "lodTransitionQuads"),
+        transitionQuadsAfter: snapshotValue(afterSnapshot, "lodTransitionQuads"),
         viewportFingerprintBefore: [
-          beforeSnapshot[SNAPSHOT.viewportFingerprintLow24],
-          beforeSnapshot[SNAPSHOT.viewportFingerprintHigh24],
+          snapshotValue(beforeSnapshot, "viewportFingerprintLow24"),
+          snapshotValue(beforeSnapshot, "viewportFingerprintHigh24"),
         ],
         viewportFingerprintAfter: [
-          afterSnapshot[SNAPSHOT.viewportFingerprintLow24],
-          afterSnapshot[SNAPSHOT.viewportFingerprintHigh24],
+          snapshotValue(afterSnapshot, "viewportFingerprintLow24"),
+          snapshotValue(afterSnapshot, "viewportFingerprintHigh24"),
         ],
       },
       image,
       performance,
       violations,
-      ...(RECORD_VIDEO
+      ...(options.recordVideo
         ? {
             videoMarkers: {
               beforeSeconds: beforeVideoSeconds,
@@ -893,23 +983,29 @@ try {
           }
         : {}),
     };
-    await writeFile(
-      path.join(OUTPUT_DIRECTORY, "report.json"),
-      `${JSON.stringify(result, null, 2)}\n`,
-    );
-    console.log(JSON.stringify(result, null, 2));
-    if (!result.ok) process.exitCode = 1;
+    await context.artifacts.writeJson("LOD report", "report.json", result);
+    if (!result.ok) throw new Error(`LOD transition violations: ${violations.join(", ")}`);
+    return {
+      summary: "LOD transition validation passed.",
+      metrics: performance,
+      details: result,
+    };
   }
-} catch (error) {
-  console.error(JSON.stringify({ ok: false, error: String(error), errors }, null, 2));
-  process.exitCode = 1;
-} finally {
-  await context?.close();
-  if (rawVideo) {
-    await rawVideo.saveAs(path.join(OUTPUT_DIRECTORY, "transition-raw.webm"));
-  }
-  await browser?.close();
-  await server?.close();
-  await worldService?.close();
-  await fixture?.cleanup();
 }
+
+export default defineScenario({
+  id: "lod-transition",
+  kind: "validation",
+  summary: "Validates LOD continuity, terrain watertightness, and boundary coverage.",
+  uses: {
+    world: true,
+    browser: true,
+    viewport: "browser",
+    screenshots: true,
+    video: true,
+    metrics: true,
+    rust: true,
+  },
+  timeoutMs: 1_800_000,
+  run: runLodTransition,
+});

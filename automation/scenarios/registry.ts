@@ -3,6 +3,7 @@ import benchCore from "./bench-core.ts";
 import benchRuntime from "./bench-runtime.ts";
 import benchWorld from "./bench-world.ts";
 import botLoad from "./bot-load.ts";
+import lodTransition from "./lod-transition.ts";
 import networkCompare from "./network-compare.ts";
 import networkBenchmark from "./network-benchmark.ts";
 import multiplayer from "./multiplayer.ts";
@@ -16,6 +17,7 @@ const definitions = [
   benchRuntime,
   benchWorld,
   botLoad,
+  lodTransition,
   networkCompare,
   networkBenchmark,
   multiplayer,
