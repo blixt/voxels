@@ -1,5 +1,4 @@
-import { execFile, spawn } from "node:child_process";
-import type { ChildProcess } from "node:child_process";
+import { execFile } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -19,7 +18,7 @@ import {
   type ProcessSample,
 } from "../lib/metrics.ts";
 import { createShapedLink, type ShapedLink, VXWP_KIND } from "../lib/network.ts";
-import { runProcess } from "../lib/process.ts";
+import { runProcess, startProcess } from "../lib/process.ts";
 import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "../lib/protocol.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import type { WorldFixture, WorldService, WorldSource } from "../lib/world.ts";
@@ -167,22 +166,6 @@ function executablePath(profile: WorldServiceCargoProfile, binary: string): stri
     profile,
     process.platform === "win32" ? `${binary}.exe` : binary,
   );
-}
-
-function waitForChild(child: ChildProcess, label: string, logs: readonly string[]): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
-      if (code === 0) resolve();
-      else {
-        reject(
-          new Error(
-            `${label} exited with ${signal ? `signal ${signal}` : `status ${code}`}\n${logs.join("")}`,
-          ),
-        );
-      }
-    });
-  });
 }
 
 async function fileBytes(file: string): Promise<number> {
@@ -439,6 +422,7 @@ function summarizeDatabase(
 }
 
 async function runPopulation({
+  context,
   count,
   options,
   fixture,
@@ -448,6 +432,7 @@ async function runPopulation({
   runIndex,
   observer,
 }: {
+  readonly context: ScenarioContext;
   readonly count: number;
   readonly options: BotLoadOptions;
   readonly fixture: WorldFixture;
@@ -464,7 +449,8 @@ async function runPopulation({
   }
   link.reset();
   const logs: string[] = [];
-  const bot = spawn(
+  const botProcess = startProcess(
+    context,
     botBinary,
     [
       `--world-url=ws://127.0.0.1:${link.port}${WORLD_PATH}`,
@@ -479,14 +465,15 @@ async function runPopulation({
       `--report=${reportPath}`,
     ],
     {
+      label: `bots (${count})`,
       cwd: process.cwd(),
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
-      detached: process.platform !== "win32",
     },
   );
+  const { child: bot } = botProcess;
   for (const stream of [bot.stdout, bot.stderr]) {
-    stream.on("data", (bytes) => {
+    stream?.on("data", (bytes) => {
       logs.push(bytes.toString());
       if (logs.length > 200) logs.shift();
     });
@@ -505,11 +492,11 @@ async function runPopulation({
   const observerPromise = collectObserverSamples(observer, count, started, done);
   try {
     try {
-      await waitForChild(bot, `bots (${count})`, logs);
+      await botProcess.completed;
     } catch (error) {
       const serviceLogs = service.logs?.join("") ?? "";
       throw new Error(
-        `${error instanceof Error ? error.message : String(error)}${
+        `${error instanceof Error ? error.message : String(error)}\n${logs.join("")}${
           serviceLogs.length > 0 ? `\nworld service:\n${serviceLogs}` : ""
         }`,
         { cause: error },
@@ -813,6 +800,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
             ? null
             : await startObserver(browser, previewPort, fixture, count, options.recordVideo);
         const stage = await runPopulation({
+          context,
           count,
           options,
           fixture,
