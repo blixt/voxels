@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -21,7 +22,7 @@ function safeSegment(value: string): string {
 }
 
 function timestampRunId(now: Date): string {
-  return now.toISOString().replaceAll(/[:.]/gu, "-");
+  return `${now.toISOString().replaceAll(/[:.]/gu, "-")}-${randomUUID().slice(0, 8)}`;
 }
 
 export class ArtifactStore {

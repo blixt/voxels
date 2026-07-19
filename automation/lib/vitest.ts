@@ -22,7 +22,6 @@ export function scenarioTest(
       const manifest = await runScenario(definition, options.arguments ?? [], {
         artifacts: {
           root: options.artifactsRoot ?? "target/automation-tests",
-          runId: `${definition.id}-${process.pid}`,
         },
         log: () => {},
       });

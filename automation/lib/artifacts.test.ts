@@ -15,6 +15,18 @@ afterEach(async () => {
 });
 
 describe("automation artifacts", () => {
+  it("allocates unique directories for concurrent runs", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "voxels-artifacts-"));
+    temporaryDirectories.push(root);
+    const [left, right] = await Promise.all([
+      ArtifactStore.create("example", { root }),
+      ArtifactStore.create("example", { root }),
+    ]);
+
+    expect(left.runId).not.toBe(right.runId);
+    expect(left.directory).not.toBe(right.directory);
+  });
+
   it("publishes a stable pointer without flattening run artifacts", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "voxels-artifacts-"));
     temporaryDirectories.push(root);
