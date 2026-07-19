@@ -2001,7 +2001,7 @@ impl FrameReassembler {
                 transfer_id,
                 PartialFrame {
                     total_bytes,
-                    bytes: Vec::with_capacity(total_bytes),
+                    bytes: Vec::with_capacity(fragment.bytes.len()),
                 },
             );
         }
@@ -3947,6 +3947,22 @@ mod tests {
             FrameReassembler::default().accept(&orphan),
             Err(ProtocolError::InvalidPayload("frame fragment has no start"))
         ));
+    }
+
+    #[test]
+    fn fragmented_frame_start_allocates_for_received_bytes_not_declared_total() {
+        let start = encode_frame_fragment(73, MAX_PROTOCOL_FRAME_BYTES, 0, &[1]).unwrap();
+        let mut reassembler = FrameReassembler::default();
+        assert_eq!(reassembler.accept(&start), Ok(None));
+
+        let partial = reassembler.transfers.get(&73).expect("active transfer");
+        assert_eq!(partial.total_bytes, MAX_PROTOCOL_FRAME_BYTES);
+        assert_eq!(partial.bytes.len(), 1);
+        assert!(
+            partial.bytes.capacity() <= MAX_FRAME_FRAGMENT_DATA_BYTES,
+            "one received byte reserved {} bytes",
+            partial.bytes.capacity()
+        );
     }
 
     #[test]
