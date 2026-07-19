@@ -47,9 +47,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v21/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v21/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v21";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v22/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v22/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v22";
 const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
@@ -361,8 +361,8 @@ fn prepare_world(
     } else {
         capabilities
     };
-    let capabilities = if config.gameplay.allow_creative_flight {
-        capabilities.union(WorldCapabilities::CREATIVE_FLIGHT)
+    let capabilities = if config.gameplay.allow_spectator_mode {
+        capabilities.union(WorldCapabilities::SPECTATOR_MODE)
     } else {
         capabilities
     };
@@ -2858,7 +2858,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v21, test-local-token"),
+            HeaderValue::from_static("voxels.world.v22, test-local-token"),
         );
         let (mut socket, response) = connect_async(request).await?;
         assert_eq!(
@@ -3814,7 +3814,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v21, test-local-token"),
+            HeaderValue::from_static("voxels.world.v22, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket
@@ -3849,7 +3849,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v21, test-local-token"),
+            HeaderValue::from_static("voxels.world.v22, test-local-token"),
         );
         let (mut socket, _) = connect_async(request).await?;
         socket

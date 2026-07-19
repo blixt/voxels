@@ -107,6 +107,10 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     number,
     { resolve: (submitted: boolean) => void; reject: (reason: Error) => void }
   >();
+  const spectatorResolvers = new Map<
+    number,
+    { resolve: (active: boolean) => void; reject: (reason: Error) => void }
+  >();
   const inventoryResolvers = new Map<
     number,
     { resolve: (values: number[]) => void; reject: (reason: Error) => void }
@@ -126,6 +130,8 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     contractResolvers.clear();
     for (const { reject } of editResolvers.values()) reject(error);
     editResolvers.clear();
+    for (const { reject } of spectatorResolvers.values()) reject(error);
+    spectatorResolvers.clear();
     for (const { reject } of inventoryResolvers.values()) reject(error);
     inventoryResolvers.clear();
     for (const { reject } of surfaceEditStateResolvers.values()) reject(error);
@@ -164,6 +170,13 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
         worker.postMessage({ kind: "snapshot", requestId });
       }),
     profile: (profileId) => worker.postMessage({ kind: "profile", profileId }),
+    spectator: (active) =>
+      new Promise<boolean>((resolve, reject) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        spectatorResolvers.set(requestId, { resolve, reject });
+        worker.postMessage({ kind: "spectator", requestId, active });
+      }),
     look: (deltaX, deltaY) => {
       const buffer = packInput([
         {
@@ -260,6 +273,9 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     } else if (event.data.kind === "snapshot") {
       snapshotResolvers.get(event.data.requestId)?.resolve(event.data.values);
       snapshotResolvers.delete(event.data.requestId);
+    } else if (event.data.kind === "spectator") {
+      spectatorResolvers.get(event.data.requestId)?.resolve(event.data.active);
+      spectatorResolvers.delete(event.data.requestId);
     } else if (event.data.kind === "submitEdit") {
       editResolvers.get(event.data.requestId)?.resolve(event.data.submitted);
       editResolvers.delete(event.data.requestId);

@@ -14,6 +14,11 @@ export class EngineHandle {
     report_mission_control_copy_result(copied: boolean): void;
     resize(css_width: number, css_height: number, dpr: number): void;
     set_reduced_motion(reduced_motion: boolean): void;
+    /**
+     * Enters or leaves the same server-authorized spectator role exposed by World Lab.
+     * Returning restores the exact local body snapshot captured on entry.
+     */
+    set_spectator(active: boolean): boolean;
     snapshot(): Float32Array;
     start_profile(profile_id: number): boolean;
     /**
@@ -63,6 +68,7 @@ export interface InitOutput {
     readonly enginehandle_report_mission_control_copy_result: (a: number, b: number) => void;
     readonly enginehandle_resize: (a: number, b: number, c: number, d: number) => void;
     readonly enginehandle_set_reduced_motion: (a: number, b: number) => void;
+    readonly enginehandle_set_spectator: (a: number, b: number) => number;
     readonly enginehandle_snapshot: (a: number) => [number, number];
     readonly enginehandle_start_profile: (a: number, b: number) => number;
     readonly enginehandle_startup_progress: (a: number) => [number, number];

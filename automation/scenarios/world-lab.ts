@@ -82,27 +82,37 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
   );
 
   await page.mouse.click(1_006, 352);
-  const flying = await viewport.engine.waitForSnapshot(
-    (snapshot) => snapshotValue(snapshot, "creativeFlightActive") === 1,
-    { description: "server-authorized creative flight did not activate" },
+  const spectating = await viewport.engine.waitForSnapshot(
+    (snapshot) => snapshotValue(snapshot, "spectatorActive") === 1,
+    { description: "server-authorized spectator mode did not activate" },
   );
   await page.keyboard.press("F3");
   await page.waitForTimeout(100);
-  const initialY = snapshotValue(flying, "cameraY");
+  const bodyPosition = [
+    snapshotValue(spectating, "cameraX"),
+    snapshotValue(spectating, "cameraY"),
+    snapshotValue(spectating, "cameraZ"),
+  ] as const;
   await page.keyboard.down("Space");
   await page.waitForTimeout(350);
   await page.keyboard.up("Space");
   const ascended = await viewport.engine.waitForSnapshot(
-    (snapshot) => snapshotValue(snapshot, "cameraY") > initialY + 0.5,
-    { description: "creative-flight ascent did not move the player" },
+    (snapshot) => snapshotValue(snapshot, "cameraY") > bodyPosition[1] + 0.5,
+    { description: "spectator ascent did not move the camera" },
   );
 
   await page.keyboard.press("F3");
   await page.waitForTimeout(100);
   await page.mouse.click(1_006, 352);
   await viewport.engine.waitForSnapshot(
-    (snapshot) => snapshotValue(snapshot, "creativeFlightActive") === 0,
-    { description: "creative flight did not return to walking" },
+    (snapshot) =>
+      snapshotValue(snapshot, "spectatorActive") === 0 &&
+      Math.hypot(
+        snapshotValue(snapshot, "cameraX") - bodyPosition[0],
+        snapshotValue(snapshot, "cameraY") - bodyPosition[1],
+        snapshotValue(snapshot, "cameraZ") - bodyPosition[2],
+      ) < 0.001,
+    { description: "spectator mode did not restore the saved body position" },
   );
   await page.mouse.click(813.5, 205);
   await page.mouse.click(813.5, 268);
@@ -118,7 +128,7 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     summary: "World Lab controls and synchronized environment passed.",
     metrics: {
       residentChunks: snapshotValue(settled, "residentChunks"),
-      ascentMetres: snapshotValue(ascended, "cameraY") - initialY,
+      ascentMetres: snapshotValue(ascended, "cameraY") - bodyPosition[1],
     },
     details: {
       browser: browser.version,
@@ -150,7 +160,7 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
       restored: {
         dayFraction: snapshotValue(restored, "dayFraction"),
         weatherFraction: snapshotValue(restored, "weatherFraction"),
-        creativeFlightActive: snapshotValue(restored, "creativeFlightActive"),
+        spectatorActive: snapshotValue(restored, "spectatorActive"),
       },
     },
   };

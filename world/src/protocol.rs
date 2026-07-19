@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 21;
+pub const PROTOCOL_VERSION: u16 = 22;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -77,8 +77,8 @@ impl WorldCapabilities {
     pub const AUTHORED_ROUTES: Self = Self(1 << 6);
     pub const CINDER_VAULT: Self = Self(1 << 7);
     pub const PLAYER_PRESENCE: Self = Self(1 << 8);
-    /// The server permits bounded, collision-aware creative flight for this world connection.
-    pub const CREATIVE_FLIGHT: Self = Self(1 << 9);
+    /// The server permits bodyless, non-editing spectator cameras for this world connection.
+    pub const SPECTATOR_MODE: Self = Self(1 << 9);
     /// The server permits ordinary players to deploy the deterministic airborne glider.
     pub const GLIDING: Self = Self(1 << 10);
 
@@ -271,12 +271,12 @@ impl MaterialInventory {
 pub const PLAYER_POSE_GROUNDED: u16 = 1 << 0;
 pub const PLAYER_POSE_SWIMMING: u16 = 1 << 1;
 pub const PLAYER_POSE_DISCONTINUITY: u16 = 1 << 2;
-pub const PLAYER_POSE_FLYING: u16 = 1 << 3;
+pub const PLAYER_POSE_SPECTATOR: u16 = 1 << 3;
 pub const PLAYER_POSE_GLIDING: u16 = 1 << 4;
 const PLAYER_POSE_FLAGS: u16 = PLAYER_POSE_GROUNDED
     | PLAYER_POSE_SWIMMING
     | PLAYER_POSE_DISCONTINUITY
-    | PLAYER_POSE_FLYING
+    | PLAYER_POSE_SPECTATOR
     | PLAYER_POSE_GLIDING;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2294,10 +2294,17 @@ fn validate_player_pose(
         ));
     }
     if pose.flags & PLAYER_POSE_GLIDING != 0
-        && pose.flags & (PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING | PLAYER_POSE_FLYING) != 0
+        && pose.flags & (PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING | PLAYER_POSE_SPECTATOR) != 0
     {
         return Err(ProtocolError::InvalidPayload(
             "gliding conflicts with another locomotion flag",
+        ));
+    }
+    if pose.flags & PLAYER_POSE_SPECTATOR != 0
+        && pose.flags & (PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING | PLAYER_POSE_GLIDING) != 0
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "spectator conflicts with a player locomotion flag",
         ));
     }
     Ok(())
@@ -2327,6 +2334,11 @@ fn validate_presence_players(players: &[PlayerPresenceState]) -> Result<(), Prot
             ));
         }
         validate_player_pose(&player.pose, true)?;
+        if player.pose.flags & PLAYER_POSE_SPECTATOR != 0 {
+            return Err(ProtocolError::InvalidPayload(
+                "spectators cannot be replicated as player presence",
+            ));
+        }
         prior_player = Some(player.player_id);
     }
     Ok(())
@@ -2350,6 +2362,11 @@ fn validate_presence_delta(delta: &PresenceDelta) -> Result<(), ProtocolError> {
             ));
         }
         validate_player_pose(&update.pose, true)?;
+        if update.pose.flags & PLAYER_POSE_SPECTATOR != 0 {
+            return Err(ProtocolError::InvalidPayload(
+                "spectators cannot be replicated as player presence",
+            ));
+        }
         prior_update = Some(update.connection_id);
     }
     let updated = delta
@@ -3724,7 +3741,7 @@ mod tests {
             capabilities: WorldCapabilities::CANONICAL_CHUNKS
                 .union(WorldCapabilities::AUTHORED_ROUTES)
                 .union(WorldCapabilities::GLIDING)
-                .union(WorldCapabilities::CREATIVE_FLIGHT),
+                .union(WorldCapabilities::SPECTATOR_MODE),
             environment: WorldEnvironmentSnapshot {
                 sample_server_time_ms: 12_345,
                 world_day_number: 82,
@@ -3815,13 +3832,17 @@ mod tests {
             linear_velocity_metres_per_second: [2.0, 0.0, -1.0],
             look_yaw_radians: 0.7,
             look_pitch_radians: -0.2,
-            flags: PLAYER_POSE_FLYING,
+            flags: PLAYER_POSE_SPECTATOR,
         };
         assert_eq!(
             decode_player_pose(&encode_player_pose(pose).expect("encode pose")),
             Ok(pose)
         );
 
+        let visible_pose = PlayerPoseUpdate {
+            flags: PLAYER_POSE_GROUNDED,
+            ..pose
+        };
         let delta = PresenceDelta {
             stream_sequence: 3,
             server_time_ms: 1_010,
@@ -3831,7 +3852,7 @@ mod tests {
                     player_id: PlayerId::from_bytes([1; 16]),
                     connection_id: 7,
                     color_index: 2,
-                    pose,
+                    pose: visible_pose,
                 },
                 PlayerPresenceState {
                     player_id: PlayerId::from_bytes([2; 16]),
@@ -3865,7 +3886,7 @@ mod tests {
                 connection_id: 7,
                 pose: PlayerPoseUpdate {
                     sequence: 5,
-                    ..pose
+                    ..visible_pose
                 },
             }],
             leaves: vec![8],

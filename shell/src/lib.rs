@@ -247,7 +247,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 1;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 27;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 28;
     const FRAME_SAMPLE_WIDTH: u32 = 11;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -264,7 +264,7 @@ mod web {
         "lodBoundary1Z,lodBoundary2X,lodBoundary2Z,lodBoundary3X,lodBoundary3Z,lodBoundary4X,lodBoundary4Z,lodBoundary5X,lodBoundary5Z,dayFraction,localSolarDayFraction,yearFraction,",
         "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
         "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
-        "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,creativeFlightActive,schemaVersion,sampleCount,",
+        "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,schemaVersion,sampleCount,",
         "droppedSamples",
     );
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
@@ -459,6 +459,7 @@ mod web {
         config: EngineConfig,
         renderer: RefCell<Renderer>,
         camera: RefCell<CameraState>,
+        spectator_body: Cell<Option<CameraState>>,
         input: RefCell<InputState>,
         remote: RemoteWorldClient,
         presence: RemotePresenceClient,
@@ -598,12 +599,16 @@ mod web {
             self.frame_milliseconds
                 .set(smoothed_ms(self.frame_milliseconds.get(), frame_ms));
             let simulation_start = performance_now(performance.as_ref());
-            let creative_flight_available = self.creative_flight_available();
+            let spectator_available = self.spectator_available();
             let gliding_available = self.gliding_available();
             let mut camera = self.camera.borrow_mut();
             camera.set_gliding_available(gliding_available);
-            if !creative_flight_available && camera.locomotion() == LocomotionMode::CreativeFlight {
-                camera.set_locomotion(LocomotionMode::Walking);
+            if !spectator_available && camera.locomotion() == LocomotionMode::Spectator {
+                if let Some(body) = self.spectator_body.take() {
+                    *camera = body;
+                } else {
+                    camera.set_locomotion(LocomotionMode::Walking);
+                }
                 self.input.borrow_mut().clear();
             }
             let profiling = self.profile.borrow().running();
@@ -708,11 +713,14 @@ mod web {
             let stream_ms = (performance_now(performance.as_ref()) - stream_start) as f32;
             self.stream_milliseconds
                 .set(smoothed_ms(self.stream_milliseconds.get(), stream_ms));
-            let target = self.dig_target(&camera);
+            let target = if camera.locomotion() == LocomotionMode::Spectator {
+                None
+            } else {
+                self.dig_target(&camera)
+            };
             let mut renderer = self.renderer.borrow_mut();
-            renderer.set_creative_flight_available(creative_flight_available);
-            renderer
-                .set_creative_flight_active(camera.locomotion() == LocomotionMode::CreativeFlight);
+            renderer.set_spectator_available(spectator_available);
+            renderer.set_spectator_active(camera.locomotion() == LocomotionMode::Spectator);
             renderer.set_remote_avatars(&remote_avatars);
             renderer.set_dig_target(target.map(|(hit, volume)| (hit.voxel, volume)));
             let server_time_ms = self.presence.estimated_server_time_ms(time);
@@ -790,7 +798,7 @@ mod web {
                             .x
                             .hypot(camera.velocity.z),
                         grounded: camera.grounded,
-                        creative_flight: camera.locomotion() == LocomotionMode::CreativeFlight,
+                        spectator: camera.locomotion() == LocomotionMode::Spectator,
                     },
                     frames_per_second: if self.frame_milliseconds.get() > 0.0 {
                         1_000.0 / self.frame_milliseconds.get()
@@ -1584,12 +1592,12 @@ mod web {
             self.callback.borrow_mut().take();
         }
 
-        fn creative_flight_available(&self) -> bool {
+        fn spectator_available(&self) -> bool {
             self.config.developer_controls_enabled
                 && self.remote.world_opened().is_some_and(|opened| {
                     opened
                         .capabilities
-                        .contains(WorldCapabilities::CREATIVE_FLIGHT)
+                        .contains(WorldCapabilities::SPECTATOR_MODE)
                 })
         }
 
@@ -1601,19 +1609,32 @@ mod web {
 
         fn apply_renderer_host_ui_action(&self) {
             let action = self.renderer.borrow_mut().take_host_ui_action();
-            let Some(HostUiAction::CreativeFlightRequested(requested)) = action else {
+            let Some(HostUiAction::SpectatorRequested(requested)) = action else {
                 return;
             };
-            let active = requested && self.creative_flight_available();
+            self.set_spectator(requested);
+        }
+
+        fn set_spectator(&self, requested: bool) -> bool {
+            let active = requested && self.spectator_available();
             self.input.borrow_mut().clear();
-            self.camera.borrow_mut().set_locomotion(if active {
-                LocomotionMode::CreativeFlight
-            } else {
-                LocomotionMode::Walking
-            });
-            self.renderer
-                .borrow_mut()
-                .set_creative_flight_active(active);
+            let mut camera = self.camera.borrow_mut();
+            let was_active = camera.locomotion() == LocomotionMode::Spectator;
+            if active && !was_active {
+                self.spectator_body.set(Some(*camera));
+                camera.set_locomotion(LocomotionMode::Spectator);
+            } else if !active && was_active {
+                if let Some(body) = self.spectator_body.take() {
+                    *camera = body;
+                } else {
+                    camera.set_locomotion(LocomotionMode::Walking);
+                }
+            }
+            let active = camera.locomotion() == LocomotionMode::Spectator;
+            self.presence.send_pose_now(&camera, self.last_time.get());
+            drop(camera);
+            self.renderer.borrow_mut().set_spectator_active(active);
+            active
         }
 
         fn feed_input(&self, bytes: &[u8]) -> bool {
@@ -1805,6 +1826,9 @@ mod web {
         }
 
         fn submit_local_edit(&self, action: EditAction) -> [usize; 2] {
+            if self.camera.borrow().locomotion() == LocomotionMode::Spectator {
+                return [0, 0];
+            }
             match self.remote.submit_edit(action) {
                 Ok(_) => [1, 0],
                 Err(error) => {
@@ -2110,6 +2134,14 @@ mod web {
             self.engine
                 .as_ref()
                 .is_some_and(|engine| engine.start_profile(profile_id))
+        }
+
+        /// Enters or leaves the same server-authorized spectator role exposed by World Lab.
+        /// Returning restores the exact local body snapshot captured on entry.
+        pub fn set_spectator(&self, active: bool) -> bool {
+            self.engine
+                .as_ref()
+                .is_some_and(|engine| engine.set_spectator(active))
         }
 
         pub fn feed_input(&self, bytes: &[u8]) -> bool {
@@ -2503,7 +2535,7 @@ mod web {
                     render.cloud_steps[1] as f32,
                     render.fog_density,
                     render.outdoor_exposure,
-                    if camera.locomotion() == LocomotionMode::CreativeFlight {
+                    if camera.locomotion() == LocomotionMode::Spectator {
                         1.0
                     } else {
                         0.0
@@ -2630,7 +2662,7 @@ mod web {
             mission_control: MissionControlConfig {
                 open: rendering.mission_control.open,
                 developer_controls: developer_controls_enabled,
-                creative_flight_available: false,
+                spectator_available: false,
             },
             view_distance_metres: rendering.view_distance_metres,
             directional_shadows: DirectionalShadowConfig {
@@ -2661,10 +2693,10 @@ mod web {
         let opened = remote
             .world_opened()
             .ok_or_else(|| JsValue::from_str("world handshake completed without a manifest"))?;
-        renderer_config.mission_control.creative_flight_available = developer_controls_enabled
+        renderer_config.mission_control.spectator_available = developer_controls_enabled
             && opened
                 .capabilities
-                .contains(WorldCapabilities::CREATIVE_FLIGHT);
+                .contains(WorldCapabilities::SPECTATOR_MODE);
         let edits = EditMap::default();
         let spawn = opened.spawn;
         let resume = opened.player_resume;
@@ -2715,6 +2747,7 @@ mod web {
             config: engine_config,
             renderer: RefCell::new(renderer),
             camera: RefCell::new(camera),
+            spectator_body: Cell::new(None),
             input: RefCell::new(InputState::default()),
             remote,
             presence,

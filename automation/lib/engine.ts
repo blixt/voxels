@@ -152,6 +152,20 @@ export class EngineClient {
     await this.#page.evaluate((id) => globalThis.__VOXELS__!.profile(id), profileId);
   }
 
+  async setSpectator(active: boolean): Promise<readonly number[]> {
+    const actual = await this.#page.evaluate(
+      (requested) => globalThis.__VOXELS__!.spectator(requested),
+      active,
+    );
+    if (actual !== active) {
+      throw new Error(`engine ${active ? "rejected" : "failed to leave"} spectator mode`);
+    }
+    return this.waitForSnapshot(
+      (snapshot) => snapshotValue(snapshot, "spectatorActive") === Number(active),
+      { description: `spectator mode did not become ${active ? "active" : "inactive"}` },
+    );
+  }
+
   async submitEdit(x: number, y: number, z: number, materialId: number): Promise<boolean> {
     return this.#page.evaluate(
       ([voxelX, voxelY, voxelZ, material]) =>

@@ -33,7 +33,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 20;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 21;
 pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 7;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
@@ -167,9 +167,9 @@ impl Default for PresenceConfig {
 pub struct GameplayConfig {
     /// Advertise and accept the normal airborne glider pose flag.
     pub allow_gliding: bool,
-    /// Advertise and accept the bounded creative-flight pose flag. This is intended for authored
-    /// development worlds; movement credit and velocity limits remain authoritative.
-    pub allow_creative_flight: bool,
+    /// Advertise and accept a bodyless spectator camera. Spectators retain bounded movement and
+    /// world-stream interest, but have no avatar or edit authority.
+    pub allow_spectator_mode: bool,
     /// Maximum ray interaction distance before bounded latency tolerance is added.
     pub interaction_reach_centimetres: u16,
     /// Hard extra distance allowed for ordering skew between world and presence WebSockets.
@@ -190,7 +190,7 @@ impl Default for GameplayConfig {
     fn default() -> Self {
         Self {
             allow_gliding: true,
-            allow_creative_flight: false,
+            allow_spectator_mode: false,
             interaction_reach_centimetres: 500,
             interaction_latency_slack_centimetres: 100,
             interaction_pose_max_age_ms: 1_000,
@@ -1025,7 +1025,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 20
+schema_version = 21
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -1067,7 +1067,7 @@ look_error_milliradians = 175
 
 [gameplay]
 allow_gliding = true
-allow_creative_flight = false
+allow_spectator_mode = false
 interaction_reach_centimetres = 500
 interaction_latency_slack_centimetres = 100
 interaction_pose_max_age_ms = 1000
@@ -1165,7 +1165,7 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 20", "schema_version = 19");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 21", "schema_version = 20");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {

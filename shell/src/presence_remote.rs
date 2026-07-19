@@ -10,7 +10,7 @@ use voxels_core::{
     RemotePoseSample, RemotePoseUpdate, RemotePresenceDelta, RemotePresenceTimeline,
 };
 use voxels_world::protocol::{
-    self, OpenPresence, PLAYER_POSE_FLYING, PLAYER_POSE_GLIDING, PLAYER_POSE_GROUNDED,
+    self, OpenPresence, PLAYER_POSE_GLIDING, PLAYER_POSE_GROUNDED, PLAYER_POSE_SPECTATOR,
     PLAYER_POSE_SWIMMING, PlayerId, PlayerPoseUpdate, PresencePing, PresencePong,
     PresenceSessionId, WorldOpened,
 };
@@ -134,6 +134,15 @@ impl RemotePresenceClient {
 
     pub fn estimated_server_time_ms(&self, local_time_ms: f64) -> f64 {
         self.inner.clock.get().server_time(local_time_ms)
+    }
+
+    /// Sends a role transition immediately instead of waiting for the normal pose cadence. The
+    /// server remains authoritative; this only minimizes the interval in which world and presence
+    /// sockets disagree about whether the local session can edit.
+    pub fn send_pose_now(&self, camera: &CameraState, local_time_ms: f64) {
+        if self.inner.state.get() == PresenceConnectionState::Open {
+            self.inner.send_pose(camera, local_time_ms);
+        }
     }
 
     pub fn close(&self) {
@@ -482,8 +491,8 @@ impl PresenceInner {
         if camera.fluid_state().swimming {
             flags |= PLAYER_POSE_SWIMMING;
         }
-        if camera.locomotion() == LocomotionMode::CreativeFlight {
-            flags |= PLAYER_POSE_FLYING;
+        if camera.locomotion() == LocomotionMode::Spectator {
+            flags |= PLAYER_POSE_SPECTATOR;
         }
         if camera.locomotion() == LocomotionMode::Gliding {
             flags |= PLAYER_POSE_GLIDING;

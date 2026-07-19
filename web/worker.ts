@@ -109,6 +109,13 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
     case "profile":
       handle?.start_profile(message.profileId);
       break;
+    case "spectator":
+      scope.postMessage({
+        kind: "spectator",
+        requestId: message.requestId,
+        active: handle?.set_spectator(message.active) ?? false,
+      });
+      break;
     case "snapshot":
       scope.postMessage({
         kind: "snapshot",

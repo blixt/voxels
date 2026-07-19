@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 use uuid::Uuid;
 use voxels_world::protocol::{
-    PLAYER_POSE_DISCONTINUITY, PLAYER_POSE_FLYING, PLAYER_POSE_GLIDING, PLAYER_POSE_GROUNDED,
+    PLAYER_POSE_DISCONTINUITY, PLAYER_POSE_GLIDING, PLAYER_POSE_GROUNDED, PLAYER_POSE_SPECTATOR,
     PLAYER_POSE_SWIMMING, PlayerId, PlayerIdentity, PlayerPoseUpdate, PlayerPresenceState,
     PlayerPresenceUpdate, PlayerResume, PresenceDelta, PresenceSessionId, encode_presence_delta,
 };
@@ -42,6 +42,7 @@ struct PlayerSession {
     color_index: u16,
     presence_attached: bool,
     pose: Option<PlayerPoseUpdate>,
+    body_pose: PlayerPoseUpdate,
     resume_revision: u64,
     last_pose_receipt_ms: u64,
     last_discontinuity_sequence: u64,
@@ -169,6 +170,9 @@ impl PresenceHub {
             return Err("player presence is not attached");
         }
         let pose = player.pose.ok_or("player pose is unavailable")?;
+        if is_spectator(pose) {
+            return Err("spectators cannot edit the world");
+        }
         if player.last_pose_receipt_ms == 0
             || now.saturating_sub(player.last_pose_receipt_ms)
                 > u64::from(self.gameplay.interaction_pose_max_age_ms)
@@ -206,7 +210,7 @@ impl PresenceHub {
         if player.connection_id != connection_id {
             return None;
         }
-        let pose = player.pose?;
+        let pose = player.body_pose;
         Some(PlayerResume {
             revision: player.resume_revision,
             eye_position_metres: pose.eye_position_metres,
@@ -303,6 +307,15 @@ impl PresenceHub {
         inner.sessions.insert(session_id, identity.player_id);
         inner.connections.insert(connection_id, identity.player_id);
         let movement_slack = f32::from(self.gameplay.movement_slack_centimetres) * 0.01;
+        let body_pose = PlayerPoseUpdate {
+            sequence: 0,
+            sample_server_time_ms: 0,
+            eye_position_metres: resume.eye_position_metres,
+            linear_velocity_metres_per_second: [0.0; 3],
+            look_yaw_radians: resume.look_yaw_radians,
+            look_pitch_radians: resume.look_pitch_radians,
+            flags: 0,
+        };
         inner.players.insert(
             identity.player_id,
             PlayerSession {
@@ -310,15 +323,8 @@ impl PresenceHub {
                 session_id,
                 color_index,
                 presence_attached: false,
-                pose: Some(PlayerPoseUpdate {
-                    sequence: 0,
-                    sample_server_time_ms: 0,
-                    eye_position_metres: resume.eye_position_metres,
-                    linear_velocity_metres_per_second: [0.0; 3],
-                    look_yaw_radians: resume.look_yaw_radians,
-                    look_pitch_radians: resume.look_pitch_radians,
-                    flags: 0,
-                }),
+                pose: Some(body_pose),
+                body_pose,
                 resume_revision: resume.revision,
                 last_pose_receipt_ms: 0,
                 last_discontinuity_sequence: 0,
@@ -375,8 +381,8 @@ impl PresenceHub {
         if !valid_pose(pose) {
             return PoseAdmission::Invalid("player pose fields are invalid");
         }
-        if pose.flags & PLAYER_POSE_FLYING != 0 && !self.gameplay.allow_creative_flight {
-            return PoseAdmission::Invalid("creative flight is not enabled for this world");
+        if is_spectator(pose) && !self.gameplay.allow_spectator_mode {
+            return PoseAdmission::Invalid("spectator mode is not enabled for this world");
         }
         if pose.flags & PLAYER_POSE_GLIDING != 0 && !self.gameplay.allow_gliding {
             return PoseAdmission::Invalid("gliding is not enabled for this world");
@@ -409,8 +415,12 @@ impl PresenceHub {
             if pose.sequence <= player.pose.map_or(0, |prior| prior.sequence) {
                 return PoseAdmission::IgnoredStale;
             }
+            let role_transition = player
+                .pose
+                .is_some_and(|prior| is_spectator(prior) != is_spectator(pose));
             if player.last_pose_receipt_ms != 0
                 && now.saturating_sub(player.last_pose_receipt_ms) < min_interval_ms
+                && !role_transition
             {
                 return PoseAdmission::IgnoredRateLimit;
             }
@@ -432,6 +442,16 @@ impl PresenceHub {
             let Some(prior) = player.pose else {
                 return PoseAdmission::SessionClosed;
             };
+            let entering_spectator = !is_spectator(prior) && is_spectator(pose);
+            let leaving_spectator = is_spectator(prior) && !is_spectator(pose);
+            if leaving_spectator {
+                pose.eye_position_metres = player.body_pose.eye_position_metres;
+                pose.linear_velocity_metres_per_second =
+                    player.body_pose.linear_velocity_metres_per_second;
+                pose.look_yaw_radians = player.body_pose.look_yaw_radians;
+                pose.look_pitch_radians = player.body_pose.look_pitch_radians;
+                pose.flags = player.body_pose.flags;
+            }
             let elapsed_ms = now.saturating_sub(player.movement_credit_updated_ms);
             let elapsed_seconds = elapsed_ms as f32 * 0.001;
             let horizontal_credit = replenish_movement_credit(
@@ -446,20 +466,28 @@ impl PresenceHub {
                 elapsed_seconds,
                 vertical_credit_limit,
             );
-            let dx = pose.eye_position_metres[0] - prior.eye_position_metres[0];
-            let dz = pose.eye_position_metres[2] - prior.eye_position_metres[2];
-            let horizontal_distance = dx.mul_add(dx, dz * dz).sqrt();
-            let vertical_distance =
-                (pose.eye_position_metres[1] - prior.eye_position_metres[1]).abs();
-            if horizontal_distance > horizontal_credit + f32::EPSILON {
-                return PoseAdmission::Invalid("player horizontal movement exceeded its budget");
+            if leaving_spectator {
+                player.horizontal_movement_credit_metres = movement_slack;
+                player.vertical_movement_credit_metres = movement_slack;
+            } else {
+                let dx = pose.eye_position_metres[0] - prior.eye_position_metres[0];
+                let dz = pose.eye_position_metres[2] - prior.eye_position_metres[2];
+                let horizontal_distance = dx.mul_add(dx, dz * dz).sqrt();
+                let vertical_distance =
+                    (pose.eye_position_metres[1] - prior.eye_position_metres[1]).abs();
+                if horizontal_distance > horizontal_credit + f32::EPSILON {
+                    return PoseAdmission::Invalid(
+                        "player horizontal movement exceeded its budget",
+                    );
+                }
+                if vertical_distance > vertical_credit + f32::EPSILON {
+                    return PoseAdmission::Invalid("player vertical movement exceeded its budget");
+                }
+                player.horizontal_movement_credit_metres =
+                    (horizontal_credit - horizontal_distance).max(0.0);
+                player.vertical_movement_credit_metres =
+                    (vertical_credit - vertical_distance).max(0.0);
             }
-            if vertical_distance > vertical_credit + f32::EPSILON {
-                return PoseAdmission::Invalid("player vertical movement exceeded its budget");
-            }
-            player.horizontal_movement_credit_metres =
-                (horizontal_credit - horizontal_distance).max(0.0);
-            player.vertical_movement_credit_metres = (vertical_credit - vertical_distance).max(0.0);
             player.movement_credit_updated_ms = now;
             if player.discontinuity_on_next_accept {
                 player.last_discontinuity_sequence = pose.sequence;
@@ -468,7 +496,17 @@ impl PresenceHub {
             let old_cell = player.cell;
             let new_cell = Some(cell_for_pose(pose, self.config.spatial_cell_metres));
             player.pose = Some(pose);
-            player.resume_revision = player.resume_revision.saturating_add(1);
+            if entering_spectator {
+                player.body_pose = PlayerPoseUpdate {
+                    linear_velocity_metres_per_second: prior.linear_velocity_metres_per_second,
+                    flags: prior.flags,
+                    ..pose
+                };
+                player.resume_revision = player.resume_revision.saturating_add(1);
+            } else if !is_spectator(pose) {
+                player.body_pose = pose;
+                player.resume_revision = player.resume_revision.saturating_add(1);
+            }
             player.last_pose_receipt_ms = now;
             player.cell = new_cell;
             (old_cell, new_cell)
@@ -621,7 +659,10 @@ impl PresenceHub {
                     let Some(player) = inner.players.get(player_id) else {
                         continue;
                     };
-                    let Some(pose) = player.pose.filter(|_| player.presence_attached) else {
+                    let Some(pose) = player
+                        .pose
+                        .filter(|pose| player.presence_attached && !is_spectator(*pose))
+                    else {
                         continue;
                     };
                     let dx = pose.eye_position_metres[0] - viewer_pose.eye_position_metres[0];
@@ -852,7 +893,7 @@ fn valid_pose(pose: PlayerPoseUpdate) -> bool {
     const CLIENT_FLAGS: u16 = PLAYER_POSE_GROUNDED
         | PLAYER_POSE_SWIMMING
         | PLAYER_POSE_DISCONTINUITY
-        | PLAYER_POSE_FLYING
+        | PLAYER_POSE_SPECTATOR
         | PLAYER_POSE_GLIDING;
     pose.sequence != 0
         && valid_position(pose.eye_position_metres)
@@ -863,7 +904,15 @@ fn valid_pose(pose: PlayerPoseUpdate) -> bool {
         && valid_look(pose.look_yaw_radians, pose.look_pitch_radians)
         && pose.flags & !CLIENT_FLAGS == 0
         && (pose.flags & PLAYER_POSE_GLIDING == 0
-            || pose.flags & (PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING | PLAYER_POSE_FLYING) == 0)
+            || pose.flags & (PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING | PLAYER_POSE_SPECTATOR)
+                == 0)
+        && (pose.flags & PLAYER_POSE_SPECTATOR == 0
+            || pose.flags & (PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING | PLAYER_POSE_GLIDING)
+                == 0)
+}
+
+const fn is_spectator(pose: PlayerPoseUpdate) -> bool {
+    pose.flags & PLAYER_POSE_SPECTATOR != 0
 }
 
 fn valid_position(position: [f32; 3]) -> bool {
@@ -1186,21 +1235,21 @@ mod tests {
     }
 
     #[test]
-    fn creative_flight_requires_world_authority_and_keeps_movement_limits() {
+    fn spectator_mode_requires_world_authority_and_keeps_movement_limits() {
         let disabled = security_hub(GameplayConfig::default());
         let disabled_claim = disabled
             .join(&identity(21), resume(0.0, 1.62, 0.0))
             .expect("join");
         let disabled_attachment = disabled.attach(disabled_claim.session_id).expect("attach");
-        let mut flying = pose(1, 0.0, 0.0);
-        flying.flags = PLAYER_POSE_FLYING;
+        let mut spectator = pose(1, 0.0, 0.0);
+        spectator.flags = PLAYER_POSE_SPECTATOR;
         assert_eq!(
-            disabled.accept_pose(&disabled_attachment, flying),
-            PoseAdmission::Invalid("creative flight is not enabled for this world")
+            disabled.accept_pose(&disabled_attachment, spectator),
+            PoseAdmission::Invalid("spectator mode is not enabled for this world")
         );
 
         let enabled = security_hub(GameplayConfig {
-            allow_creative_flight: true,
+            allow_spectator_mode: true,
             ..GameplayConfig::default()
         });
         let enabled_claim = enabled
@@ -1208,17 +1257,118 @@ mod tests {
             .expect("join");
         let enabled_attachment = enabled.attach(enabled_claim.session_id).expect("attach");
         assert_eq!(
-            enabled.accept_pose(&enabled_attachment, flying),
+            enabled.accept_pose(&enabled_attachment, spectator),
             PoseAdmission::Accepted
         );
 
         let mut too_fast = pose(2, 0.0, 0.0);
-        too_fast.flags = PLAYER_POSE_FLYING;
+        too_fast.flags = PLAYER_POSE_SPECTATOR;
         too_fast.linear_velocity_metres_per_second = [9.01, 0.0, 0.0];
         assert_eq!(
             enabled.accept_pose(&enabled_attachment, too_fast),
             PoseAdmission::Invalid("player velocity exceeds the authoritative limit")
         );
+    }
+
+    #[test]
+    fn spectator_camera_is_bodyless_read_only_and_returns_to_its_saved_body() {
+        let hub = security_hub(GameplayConfig {
+            allow_spectator_mode: true,
+            ..GameplayConfig::default()
+        });
+        let (_viewer_claim, viewer) = joined_at(&hub, 30, 0.0, 0.0);
+        let (subject_claim, subject) = joined_at(&hub, 31, 0.5, 0.0);
+        let mut viewer_stream = PresenceStreamState::default();
+        let initial = decode_presence_delta(
+            &hub.build_delta(&viewer, &mut viewer_stream)
+                .expect("build viewer delta")
+                .expect("subject enter"),
+        )
+        .expect("decode subject enter");
+        assert_eq!(initial.enters.len(), 1);
+        let subject_connection = initial.enters[0].connection_id;
+        let body_resume = subject_claim.latest_resume().expect("body resume");
+
+        {
+            let mut inner = hub.lock();
+            inner
+                .players
+                .get_mut(&identity(31).player_id)
+                .expect("subject")
+                .last_pose_receipt_ms = 0;
+        }
+        let mut spectator = pose(2, 0.5, 0.0);
+        spectator.flags = PLAYER_POSE_SPECTATOR;
+        spectator.linear_velocity_metres_per_second = [0.0; 3];
+        assert_eq!(
+            hub.accept_pose(&subject, spectator),
+            PoseAdmission::Accepted
+        );
+        assert_eq!(
+            hub.authorize_interaction(subject_claim.connection_id, VoxelCoord::new(5, 16, 0)),
+            Err("spectators cannot edit the world")
+        );
+        let spectator_resume = subject_claim
+            .latest_resume()
+            .expect("spectator body resume");
+        assert_eq!(
+            spectator_resume.eye_position_metres,
+            body_resume.eye_position_metres
+        );
+        assert_eq!(spectator_resume.revision, body_resume.revision + 1);
+        let leave = decode_presence_delta(
+            &hub.build_delta(&viewer, &mut viewer_stream)
+                .expect("build spectator leave")
+                .expect("spectator leave"),
+        )
+        .expect("decode spectator leave");
+        assert_eq!(leave.visible_player_count, 0);
+        assert_eq!(leave.leaves, vec![subject_connection]);
+
+        let edit_recipients = hub.connections_near_voxels([VoxelCoord::new(5, 16, 0)]);
+        assert!(
+            edit_recipients.contains(&subject_claim.connection_id),
+            "spectator camera must retain nearby world-edit interest"
+        );
+        let mut spectator_stream = PresenceStreamState::default();
+        let camera_view = decode_presence_delta(
+            &hub.build_delta(&subject, &mut spectator_stream)
+                .expect("build camera view")
+                .expect("viewer enter"),
+        )
+        .expect("decode camera view");
+        assert_eq!(camera_view.enters.len(), 1);
+
+        {
+            let mut inner = hub.lock();
+            inner
+                .players
+                .get_mut(&identity(31).player_id)
+                .expect("subject")
+                .last_pose_receipt_ms = 0;
+        }
+        let attempted_return = pose(3, 100.0, 100.0);
+        assert_eq!(
+            hub.accept_pose(&subject, attempted_return),
+            PoseAdmission::Accepted
+        );
+        let returned = decode_presence_delta(
+            &hub.build_delta(&viewer, &mut viewer_stream)
+                .expect("build returned body")
+                .expect("body re-enter"),
+        )
+        .expect("decode returned body");
+        assert_eq!(returned.enters.len(), 1);
+        assert_eq!(
+            returned.enters[0].pose.eye_position_metres,
+            body_resume.eye_position_metres
+        );
+        let restored_resume = subject_claim.latest_resume().expect("restored resume");
+        assert_eq!(
+            restored_resume.eye_position_metres,
+            body_resume.eye_position_metres
+        );
+        assert_eq!(restored_resume.revision, spectator_resume.revision + 1);
     }
 
     #[test]

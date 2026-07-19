@@ -1032,7 +1032,7 @@ pub struct Renderer {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostUiAction {
-    CreativeFlightRequested(bool),
+    SpectatorRequested(bool),
 }
 
 struct ShadowGpu {
@@ -2118,8 +2118,8 @@ impl Renderer {
                     .map(|preset| preset.anchor_weather_fraction());
                 _ = self.refresh_effective_environment();
             }
-            UiAction::CreativeFlightRequested(active) => {
-                self.host_ui_action = Some(HostUiAction::CreativeFlightRequested(active));
+            UiAction::SpectatorRequested(active) => {
+                self.host_ui_action = Some(HostUiAction::SpectatorRequested(active));
             }
             UiAction::None | UiAction::PanelOpenChanged(_) => {}
         }
@@ -2129,12 +2129,12 @@ impl Renderer {
         self.host_ui_action.take()
     }
 
-    pub fn set_creative_flight_active(&mut self, active: bool) {
-        self.ui.set_creative_flight_active(active);
+    pub fn set_spectator_active(&mut self, active: bool) {
+        self.ui.set_spectator_active(active);
     }
 
-    pub fn set_creative_flight_available(&mut self, available: bool) {
-        self.ui.set_creative_flight_available(available);
+    pub fn set_spectator_available(&mut self, available: bool) {
+        self.ui.set_spectator_available(available);
     }
 
     pub fn upload_chunk(&mut self, chunk: &Chunk, mesh: &MeshedChunk) -> bool {

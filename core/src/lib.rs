@@ -17,8 +17,8 @@ pub const PLAYER_HEIGHT_METRES: f32 = 1.78;
 pub const PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 const WALK_SPEED: f32 = 4.6;
 const SPRINT_MULTIPLIER: f32 = 1.55;
-const CREATIVE_FLIGHT_SPEED: f32 = 8.0;
-const CREATIVE_FLIGHT_RESPONSE: f32 = 10.0;
+const SPECTATOR_SPEED: f32 = 8.0;
+const SPECTATOR_RESPONSE: f32 = 10.0;
 const GLIDER_FORWARD_SPEED: f32 = 8.4;
 const GLIDER_ACCELERATION: f32 = 12.0;
 const GLIDER_TERMINAL_DESCENT_SPEED: f32 = 2.2;
@@ -282,15 +282,14 @@ pub struct InputState {
     sprint: bool,
 }
 
-/// Player locomotion is explicit so developer flight cannot silently leak into normal collision
-/// semantics. Creative flight still collides with canonical voxels; it is a movement tool, not a
-/// spectator/noclip mode.
+/// Player locomotion is explicit so a bodyless spectator camera cannot silently leak into normal
+/// collision or interaction semantics.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LocomotionMode {
     #[default]
     Walking,
     Gliding,
-    CreativeFlight,
+    Spectator,
 }
 
 impl InputState {
@@ -418,13 +417,13 @@ impl CameraState {
         if self.locomotion == locomotion {
             return;
         }
-        let creative_transition = self.locomotion == LocomotionMode::CreativeFlight
-            || locomotion == LocomotionMode::CreativeFlight;
+        let spectator_transition =
+            self.locomotion == LocomotionMode::Spectator || locomotion == LocomotionMode::Spectator;
         self.locomotion = locomotion;
         self.grounded = false;
         self.jump_was_down = false;
-        if creative_transition {
-            self.velocity.y = 0.0;
+        if spectator_transition {
+            self.velocity = Vec3::ZERO;
         }
     }
 
@@ -445,7 +444,7 @@ impl CameraState {
             return;
         }
         let dt = dt.clamp(0.0, 0.05);
-        if self.locomotion == LocomotionMode::CreativeFlight {
+        if self.locomotion == LocomotionMode::Spectator {
             let forward = Vec3::new(self.yaw.sin(), 0.0, -self.yaw.cos());
             let right = Vec3::new(-forward.z, 0.0, forward.x);
             let mut wish = Vec3::ZERO;
@@ -467,19 +466,16 @@ impl CameraState {
             if input.sprint {
                 wish -= Vec3::Y;
             }
-            let target = wish.normalize_or_zero() * CREATIVE_FLIGHT_SPEED;
-            let response = 1.0 - (-CREATIVE_FLIGHT_RESPONSE * dt).exp();
+            let target = wish.normalize_or_zero() * SPECTATOR_SPEED;
+            let response = 1.0 - (-SPECTATOR_RESPONSE * dt).exp();
             self.velocity += (target - self.velocity) * response;
             self.grounded = false;
             self.jump_was_down = input.jump;
-            self.move_horizontal(
-                Vec2::new(self.velocity.x, self.velocity.z) * dt,
-                voxel_size,
-                false,
-                &mut sample_voxel,
-            );
-            self.move_axis(1, self.velocity.y * dt, voxel_size, &mut sample_voxel);
-            self.refresh_fluid_state(voxel_size, &mut sample_voxel);
+            let next = self.position + self.velocity * dt;
+            if next.is_finite() {
+                self.position = next;
+            }
+            self.fluid = FluidState::default();
             return;
         }
         let was_swimming = self.fluid.swimming;
@@ -1129,9 +1125,9 @@ mod tests {
     }
 
     #[test]
-    fn creative_flight_uses_space_and_shift_without_gravity() {
+    fn spectator_uses_space_and_shift_without_gravity() {
         let mut camera = CameraState::spawn(Vec3::new(0.0, 8.0, 0.0));
-        camera.set_locomotion(LocomotionMode::CreativeFlight);
+        camera.set_locomotion(LocomotionMode::Spectator);
         let mut input = InputState::default();
         input.set_key(5, true);
         for _ in 0..120 {
@@ -1139,7 +1135,7 @@ mod tests {
         }
         let raised_y = camera.position.y;
         assert!(raised_y > 14.0);
-        assert_eq!(camera.locomotion(), LocomotionMode::CreativeFlight);
+        assert_eq!(camera.locomotion(), LocomotionMode::Spectator);
         assert!(!camera.grounded);
 
         input.set_key(5, false);
@@ -1151,15 +1147,15 @@ mod tests {
     }
 
     #[test]
-    fn creative_flight_remains_collision_bounded_and_walking_restores_gravity() {
+    fn spectator_is_collisionless_and_walking_restores_gravity() {
         let mut camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
-        camera.set_locomotion(LocomotionMode::CreativeFlight);
+        camera.set_locomotion(LocomotionMode::Spectator);
         let mut input = InputState::default();
         input.set_key(4, true);
         for _ in 0..120 {
             camera.update(&input, 1.0 / 120.0, 0.1, |x, _, _| solid_if(x >= 5));
         }
-        assert!(camera.position.x <= 0.5 - PLAYER_RADIUS_METRES + 0.001);
+        assert!(camera.position.x > 1.0);
 
         input.clear();
         camera.set_locomotion(LocomotionMode::Walking);

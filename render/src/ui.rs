@@ -164,7 +164,7 @@ impl Default for RendererFeatureConfig {
 pub struct MissionControlConfig {
     pub open: bool,
     pub developer_controls: bool,
-    pub creative_flight_available: bool,
+    pub spectator_available: bool,
 }
 
 const PANEL_HEIGHT: f32 = 632.0;
@@ -266,7 +266,7 @@ pub enum UiTarget {
     Close,
     Time(TimeControl),
     Weather(WeatherControl),
-    CreativeFlight,
+    Spectator,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -282,7 +282,7 @@ pub enum UiAction {
     PanelOpenChanged(bool),
     TimeChanged(TimeControl),
     WeatherChanged(WeatherControl),
-    CreativeFlightRequested(bool),
+    SpectatorRequested(bool),
 }
 
 trait SegmentValue<T> {
@@ -330,7 +330,7 @@ pub struct NavigationTelemetry {
     pub pitch_degrees: f32,
     pub horizontal_speed_metres_per_second: f32,
     pub grounded: bool,
-    pub creative_flight: bool,
+    pub spectator: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -504,15 +504,15 @@ impl EasedValue {
 pub struct MissionControlUi {
     open: bool,
     developer_controls: bool,
-    creative_flight_available: bool,
-    creative_flight_active: bool,
+    spectator_available: bool,
+    spectator_active: bool,
     time_control: TimeControl,
     weather_control: WeatherControl,
     reduced_motion: bool,
     hovered: Option<UiTarget>,
     stats: LiveStats,
     open_motion: EasedValue,
-    flight_motion: EasedValue,
+    spectator_motion: EasedValue,
     hover_motion: BTreeMap<UiTarget, EasedValue>,
     toast_age: f32,
     gameplay_toast: Option<String>,
@@ -541,15 +541,15 @@ impl MissionControlUi {
         Self {
             open: config.open,
             developer_controls: config.developer_controls,
-            creative_flight_available: config.creative_flight_available,
-            creative_flight_active: false,
+            spectator_available: config.spectator_available,
+            spectator_active: false,
             time_control: TimeControl::FollowServer,
             weather_control: WeatherControl::FollowServer,
             reduced_motion: false,
             hovered: None,
             stats: LiveStats::default(),
             open_motion: EasedValue::new(f32::from(config.open)),
-            flight_motion: EasedValue::new(0.0),
+            spectator_motion: EasedValue::new(0.0),
             hover_motion: BTreeMap::new(),
             toast_age: 0.0,
             gameplay_toast: None,
@@ -584,16 +584,16 @@ impl MissionControlUi {
         self.stats = stats;
     }
 
-    pub fn set_creative_flight_active(&mut self, active: bool) {
-        let active = active && self.creative_flight_available;
-        self.creative_flight_active = active;
-        self.flight_motion.set(active, self.reduced_motion);
+    pub fn set_spectator_active(&mut self, active: bool) {
+        let active = active && self.spectator_available;
+        self.spectator_active = active;
+        self.spectator_motion.set(active, self.reduced_motion);
     }
 
-    pub fn set_creative_flight_available(&mut self, available: bool) {
-        self.creative_flight_available = available;
+    pub fn set_spectator_available(&mut self, available: bool) {
+        self.spectator_available = available;
         if !available {
-            self.set_creative_flight_active(false);
+            self.set_spectator_active(false);
         }
     }
 
@@ -704,7 +704,7 @@ impl MissionControlUi {
     pub fn advance(&mut self, dt: f32) {
         self.toast_age += dt.clamp(0.0, 0.1);
         self.open_motion.advance(dt, self.reduced_motion);
-        self.flight_motion.advance(dt, self.reduced_motion);
+        self.spectator_motion.advance(dt, self.reduced_motion);
         for motion in self.hover_motion.values_mut() {
             motion.advance(dt, self.reduced_motion);
         }
@@ -848,9 +848,9 @@ impl MissionControlUi {
             world_card.width,
             60.0,
         );
-        if self.developer_controls && self.creative_flight_available {
+        if self.developer_controls && self.spectator_available {
             regions.push(InteractiveRegion {
-                target: UiTarget::CreativeFlight,
+                target: UiTarget::Spectator,
                 rect: movement_card,
             });
         }
@@ -964,14 +964,12 @@ impl MissionControlUi {
                 self.weather_control = control;
                 UiAction::WeatherChanged(control)
             }
-            Some(UiTarget::CreativeFlight)
-                if self.developer_controls && self.creative_flight_available =>
-            {
-                UiAction::CreativeFlightRequested(!self.creative_flight_active)
+            Some(UiTarget::Spectator) if self.developer_controls && self.spectator_available => {
+                UiAction::SpectatorRequested(!self.spectator_active)
             }
-            Some(UiTarget::Time(_))
-            | Some(UiTarget::Weather(_))
-            | Some(UiTarget::CreativeFlight) => UiAction::None,
+            Some(UiTarget::Time(_)) | Some(UiTarget::Weather(_)) | Some(UiTarget::Spectator) => {
+                UiAction::None
+            }
             Some(UiTarget::Header) | None => UiAction::None,
         }
     }
@@ -1225,7 +1223,7 @@ impl MissionControlUi {
     }
 
     fn push_movement_control(&self, draw: &mut UiDrawList, layout: &UiLayout, opacity: f32) {
-        let target = UiTarget::CreativeFlight;
+        let target = UiTarget::Spectator;
         let hover = self.hover_eased_value(target);
         push_surface(
             draw,
@@ -1237,7 +1235,7 @@ impl MissionControlUi {
         );
         push_text(
             draw,
-            "CREATIVE FLIGHT",
+            "SPECTATOR MODE",
             [layout.movement_card.x + 12.0, layout.movement_card.y + 20.0],
             10.0,
             TEXT_PRIMARY.with_alpha(opacity),
@@ -1245,12 +1243,12 @@ impl MissionControlUi {
         );
         let note = if !self.developer_controls {
             "Developer controls disabled in client config"
-        } else if !self.creative_flight_available {
-            "This world does not authorize flight"
-        } else if self.creative_flight_active {
+        } else if !self.spectator_available {
+            "This world does not authorize spectators"
+        } else if self.spectator_active {
             "WASD move · Space rise · Shift descend"
         } else {
-            "Collision-aware flight · inventory unchanged"
+            "Leave body here · fly without editing"
         };
         push_text(
             draw,
@@ -1266,7 +1264,7 @@ impl MissionControlUi {
             40.0,
             22.0,
         );
-        let value = self.flight_motion.value.clamp(0.0, 1.0);
+        let value = self.spectator_motion.value.clamp(0.0, 1.0);
         push_surface(
             draw,
             track,
@@ -1392,8 +1390,8 @@ impl MissionControlUi {
             );
             let default_toast = if self.stats.swimming {
                 "WASD SWIM  ·  SPACE RISE  ·  SHIFT DIVE  ·  F3 WORLD LAB"
-            } else if self.stats.navigation.creative_flight {
-                "WASD FLY  ·  SPACE RISE  ·  SHIFT DESCEND  ·  F3 WORLD LAB"
+            } else if self.stats.navigation.spectator {
+                "SPECTATING  ·  WASD FLY  ·  SPACE RISE  ·  SHIFT DESCEND  ·  F3 WORLD LAB"
             } else if layout.toast.width < 500.0 {
                 "WASD MOVE  ·  SPACE JUMP / GLIDE  ·  F3 WORLD LAB"
             } else {
@@ -1419,9 +1417,9 @@ impl MissionControlUi {
             PANEL_BORDER.mix(ACCENT, launcher_hover * 0.6),
             SurfaceRole::Launcher,
         );
-        let launcher = if self.stats.navigation.creative_flight {
+        let launcher = if self.stats.navigation.spectator {
             format!(
-                "FLYING  ·  {}  ·  {:.0} FPS",
+                "SPECTATING  ·  {}  ·  {:.0} FPS",
                 self.world_time_label, self.stats.frames_per_second
             )
         } else if self.stats.swimming {
@@ -1670,7 +1668,7 @@ impl MissionControlUi {
             navigation.horizontal_speed_metres_per_second,
             movement_label(stats).to_ascii_lowercase(),
         );
-        let _ = writeln!(report, "Creative flight: {}", navigation.creative_flight);
+        let _ = writeln!(report, "Spectator mode: {}", navigation.spectator);
 
         let _ = writeln!(report, "\nWORLD");
         let _ = writeln!(
@@ -1838,7 +1836,7 @@ impl MissionControlUi {
 
     fn snap_motion(&mut self) {
         self.open_motion.advance(0.0, true);
-        self.flight_motion.advance(0.0, true);
+        self.spectator_motion.advance(0.0, true);
         for motion in self.hover_motion.values_mut() {
             motion.advance(0.0, true);
         }
@@ -1933,8 +1931,8 @@ fn pitch_label(pitch_degrees: f32) -> String {
 }
 
 fn movement_label(stats: LiveStats) -> &'static str {
-    if stats.navigation.creative_flight {
-        "FLYING"
+    if stats.navigation.spectator {
+        "SPECTATING"
     } else if stats.swimming {
         "SWIMMING"
     } else if stats.navigation.grounded {
@@ -1956,7 +1954,7 @@ mod tests {
         MissionControlUi::new(MissionControlConfig {
             open,
             developer_controls: true,
-            creative_flight_available: true,
+            spectator_available: true,
         })
     }
 
@@ -2013,7 +2011,7 @@ mod tests {
     }
 
     #[test]
-    fn time_weather_and_flight_emit_typed_actions() {
+    fn time_weather_and_spectator_controls_emit_typed_actions() {
         let viewport = viewport(1_280.0, 720.0);
         let mut ui = enabled(true);
         assert_eq!(
@@ -2027,14 +2025,14 @@ mod tests {
         );
         assert_eq!(ui.weather_control(), WeatherControl::Storm);
         assert_eq!(
-            activate(&mut ui, UiTarget::CreativeFlight, viewport),
-            UiAction::CreativeFlightRequested(true)
+            activate(&mut ui, UiTarget::Spectator, viewport),
+            UiAction::SpectatorRequested(true)
         );
-        assert!(!ui.creative_flight_active);
-        ui.set_creative_flight_active(true);
+        assert!(!ui.spectator_active);
+        ui.set_spectator_active(true);
         assert_eq!(
-            activate(&mut ui, UiTarget::CreativeFlight, viewport),
-            UiAction::CreativeFlightRequested(false)
+            activate(&mut ui, UiTarget::Spectator, viewport),
+            UiAction::SpectatorRequested(false)
         );
         assert_eq!(
             activate(&mut ui, UiTarget::Time(TimeControl::FollowServer), viewport),
@@ -2048,7 +2046,7 @@ mod tests {
         let mut ui = MissionControlUi::new(MissionControlConfig {
             open: true,
             developer_controls: false,
-            creative_flight_available: false,
+            spectator_available: false,
         });
         assert_eq!(
             activate(&mut ui, UiTarget::Time(TimeControl::Night), viewport),
@@ -2058,7 +2056,7 @@ mod tests {
             activate(&mut ui, UiTarget::Weather(WeatherControl::Rain), viewport),
             UiAction::None
         );
-        assert_eq!(ui.layout(viewport).region(UiTarget::CreativeFlight), None);
+        assert_eq!(ui.layout(viewport).region(UiTarget::Spectator), None);
         assert_eq!(ui.time_control(), TimeControl::FollowServer);
         assert_eq!(ui.weather_control(), WeatherControl::FollowServer);
     }
@@ -2068,7 +2066,7 @@ mod tests {
         let viewport = viewport(1_280.0, 720.0);
         let mut ui = enabled(true);
         ui.set_world_clock(0.72, "STORM", 0.9, 0.95, [5.5, 1.6], 4);
-        ui.set_creative_flight_active(true);
+        ui.set_spectator_active(true);
         let draw = ui.build_draw_list(viewport);
         assert!(
             draw.glass
@@ -2162,12 +2160,12 @@ mod tests {
     }
 
     #[test]
-    fn flight_and_swimming_help_are_state_specific() {
+    fn spectator_and_swimming_help_are_state_specific() {
         let viewport = viewport(1_280.0, 720.0);
         let mut ui = enabled(false);
         ui.set_stats(LiveStats {
             navigation: NavigationTelemetry {
-                creative_flight: true,
+                spectator: true,
                 ..NavigationTelemetry::default()
             },
             frames_per_second: 60.0,

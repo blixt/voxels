@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 23;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 24;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -42,7 +42,7 @@ pub struct ClientConfig {
 }
 
 /// Client-side developer affordances. Server-advertised capabilities remain the authority for
-/// actions such as creative flight; this flag only decides whether the local UI may request them.
+/// actions such as spectator mode; this flag only decides whether the local UI may request them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeveloperConfig {
@@ -677,9 +677,9 @@ mod tests {
                 controls_enabled: true,
             },
             world: WorldTransportConfig {
-                endpoint: "ws://127.0.0.1:9777/v21/world".to_owned(),
-                presence_endpoint: "ws://127.0.0.1:9777/v21/presence".to_owned(),
-                subprotocol: "voxels.world.v21".to_owned(),
+                endpoint: "ws://127.0.0.1:9777/v22/world".to_owned(),
+                presence_endpoint: "ws://127.0.0.1:9777/v22/presence".to_owned(),
+                subprotocol: "voxels.world.v22".to_owned(),
                 auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
                 max_in_flight_batches: 8,
                 buffered_amount_high_water_bytes: 8 * 1024 * 1024,
@@ -801,7 +801,7 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 23", "schema_version = 22");
+        let wrong_schema = fixture.replace("schema_version = 24", "schema_version = 23");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
@@ -811,8 +811,8 @@ mod tests {
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 23",
-            "schema_version = 23\nunknown_root = true",
+            "schema_version = 24",
+            "schema_version = 24\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),

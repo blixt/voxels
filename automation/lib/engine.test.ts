@@ -72,4 +72,26 @@ describe("typed engine client", () => {
       }),
     ).rejects.toThrow("queues remained busy");
   });
+
+  it("enters spectator mode through the typed Rust boundary", async () => {
+    const contract = {
+      version: AUTOMATION_CONTRACT_VERSION,
+      snapshotVersion: SNAPSHOT_SCHEMA_VERSION,
+      frameSampleWidth: FRAME_SAMPLE_WIDTH,
+      gpuSampleWidth: GPU_SAMPLE_WIDTH,
+      snapshotFields: SNAPSHOT_FIELD_NAMES,
+    };
+    const page = pageReturning([
+      contract,
+      true,
+      snapshot({ spectatorActive: 1 }),
+      false,
+      snapshot({ spectatorActive: 0 }),
+    ]);
+    const engine = new EngineClient(page);
+    await engine.ready();
+
+    expect(snapshotValue(await engine.setSpectator(true), "spectatorActive")).toBe(1);
+    expect(snapshotValue(await engine.setSpectator(false), "spectatorActive")).toBe(0);
+  });
 });

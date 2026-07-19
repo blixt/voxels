@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 20
+schema_version = 21
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -57,9 +57,9 @@ look_error_milliradians = 175
 [gameplay]
 # Normal players can deploy the deterministic glider with a fresh Space press while airborne.
 allow_gliding = true
-# Local development explicitly permits collision-aware creative flight. Production worlds can
-# disable this without changing the client; the capability then disappears from WorldOpened.
-allow_creative_flight = true
+# Local development permits bodyless spectator cameras. They retain world-stream interest but have
+# no replicated avatar or edit authority. Production worlds can disable the capability.
+allow_spectator_mode = true
 # Browser raycasts stop at 5m. The extra metre absorbs ordinary ordering skew between the
 # independent presence and world sockets; it is a hard cap, not client-controlled velocity credit.
 interaction_reach_centimetres = 500

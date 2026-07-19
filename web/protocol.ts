@@ -59,6 +59,7 @@ export type ToWorker =
   | { kind: "reducedMotion"; reduced: boolean }
   | { kind: "missionControlCopyResult"; copied: boolean }
   | { kind: "profile"; profileId: number }
+  | { kind: "spectator"; requestId: number; active: boolean }
   | { kind: "snapshot"; requestId: number }
   | {
       kind: "submitEdit";
@@ -87,6 +88,7 @@ export type FromWorker =
   | { kind: "error"; message: string }
   | { kind: "automationContract"; requestId: number; value: string }
   | { kind: "snapshot"; requestId: number; values: number[] }
+  | { kind: "spectator"; requestId: number; active: boolean }
   | { kind: "submitEdit"; requestId: number; submitted: boolean }
   | { kind: "submitDig"; requestId: number; submitted: boolean }
   | { kind: "inventory"; requestId: number; values: number[] }

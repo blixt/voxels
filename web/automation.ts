@@ -1,7 +1,7 @@
 import type { BrowserPlayerSession } from "./local-player.ts";
 
 export const AUTOMATION_CONTRACT_VERSION = 1;
-export const SNAPSHOT_SCHEMA_VERSION = 27;
+export const SNAPSHOT_SCHEMA_VERSION = 28;
 export const FRAME_SAMPLE_WIDTH = 11;
 export const GPU_SAMPLE_WIDTH = 13;
 
@@ -173,7 +173,7 @@ export const SNAPSHOT = Object.freeze({
   cloudLightSteps: 162,
   fogDensity: 163,
   outdoorExposure: 164,
-  creativeFlightActive: 165,
+  spectatorActive: 165,
   schemaVersion: 166,
   sampleCount: 167,
   droppedSamples: 168,
@@ -193,6 +193,7 @@ export interface EngineAutomationApi {
   contract(): Promise<EngineAutomationContract>;
   snapshot(): Promise<number[]>;
   profile(profileId: number): void;
+  spectator(active: boolean): Promise<boolean>;
   look(deltaX: number, deltaY: number): void;
   submitEdit(x: number, y: number, z: number, materialId: number): Promise<boolean>;
   submitDig(x: number, y: number, z: number): Promise<boolean>;
