@@ -27,6 +27,8 @@ mod edits;
 mod generation_limiter;
 mod presence;
 pub mod server;
+#[cfg(feature = "automation-fixture")]
+pub mod storage_benchmark;
 mod traffic;
 
 pub use server::{

@@ -42,3 +42,8 @@ path = "src/bin/voxels-worldd.rs"
 name = "voxels-automation-fixture"
 path = "src/bin/voxels-automation-fixture.rs"
 required-features = ["automation-fixture"]
+
+[[bin]]
+name = "voxels-storage-benchmark"
+path = "src/bin/voxels-storage-benchmark.rs"
+required-features = ["automation-fixture"]
