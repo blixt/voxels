@@ -79,11 +79,33 @@ export interface LinkMessageStats {
   worldProductPriorityFrames?: Record<string, number>;
 }
 
-export interface LinkStats {
+export interface LinkLatencyStats {
+  samples: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  p99Ms: number | null;
+  maxMs: number | null;
+  meanMs: number | null;
+}
+
+interface LinkDirectionAndMessageStats {
   upstream: LinkDirectionStats;
   downstream: LinkDirectionStats;
   paths: Record<string, { upstream: LinkDirectionStats; downstream: LinkDirectionStats }>;
   messages: Record<string, LinkMessageStats>;
+}
+
+export interface LinkStats extends LinkDirectionAndMessageStats {
+  presenceProxyRoundTrip: LinkLatencyStats;
+}
+
+interface MutableLinkStats extends LinkDirectionAndMessageStats {
+  presenceProxyRoundTrip: {
+    samples: number;
+    totalMs: number;
+    maxMs: number;
+    millisecondBuckets: Map<number, number>;
+  };
 }
 
 export interface ShapedLinkProfile {
@@ -133,17 +155,23 @@ function blankDirection(): LinkDirectionStats {
   };
 }
 
-function blankStats(): LinkStats {
+function blankStats(): MutableLinkStats {
   return {
     upstream: blankDirection(),
     downstream: blankDirection(),
     paths: {},
     messages: {},
+    presenceProxyRoundTrip: {
+      samples: 0,
+      totalMs: 0,
+      maxMs: 0,
+      millisecondBuckets: new Map(),
+    },
   };
 }
 
 function directionFor(
-  stats: LinkStats,
+  stats: LinkDirectionAndMessageStats,
   direction: LinkDirection,
   path: string,
 ): LinkDirectionStats {
@@ -282,7 +310,9 @@ class WebSocketFrameParser {
 }
 
 class ConnectionInspector {
-  readonly statsRef: { current: LinkStats };
+  readonly statsRef: { current: MutableLinkStats };
+  readonly now: () => number;
+  readonly pendingPresencePings = new Map<number, number>();
   path = "";
   readonly upgraded: Record<LinkDirection, boolean> = { upstream: false, downstream: false };
   readonly http: Record<LinkDirection, Buffer> = {
@@ -291,8 +321,9 @@ class ConnectionInspector {
   };
   readonly parsers: Record<LinkDirection, WebSocketFrameParser>;
 
-  constructor(statsRef: { current: LinkStats }) {
+  constructor(statsRef: { current: MutableLinkStats }, now = () => performance.now()) {
     this.statsRef = statsRef;
+    this.now = now;
     this.parsers = {
       upstream: new WebSocketFrameParser((opcode, payload, frameBytes, frameCount) =>
         this.onMessage("upstream", opcode, payload, frameBytes, frameCount),
@@ -301,6 +332,10 @@ class ConnectionInspector {
         this.onMessage("downstream", opcode, payload, frameBytes, frameCount),
       ),
     };
+  }
+
+  resetRoundTripState(): void {
+    this.pendingPresencePings.clear();
   }
 
   observe(direction: LinkDirection, bytes: Buffer): void {
@@ -382,6 +417,7 @@ class ConnectionInspector {
       }
     }
     if (direction === "upstream" && kind === VXWP_KIND.presencePing && payload.length === 40) {
+      this.pendingPresencePings.set(payload.readUInt32LE(24), this.now());
       const roundTripMs = payload.readUInt32LE(28);
       stats.messages[key].lastObservedRoundTripMs = roundTripMs;
       stats.messages[key].maxObservedRoundTripMs = Math.max(
@@ -390,6 +426,18 @@ class ConnectionInspector {
       );
     }
     if (direction === "downstream" && kind === VXWP_KIND.presencePong && payload.length === 56) {
+      const sequence = payload.readUInt32LE(24);
+      const started = this.pendingPresencePings.get(sequence);
+      if (started !== undefined) {
+        this.pendingPresencePings.delete(sequence);
+        const elapsedMs = Math.max(0, this.now() - started);
+        const latency = stats.presenceProxyRoundTrip;
+        latency.samples += 1;
+        latency.totalMs += elapsedMs;
+        latency.maxMs = Math.max(latency.maxMs, elapsedMs);
+        const bucket = Math.ceil(elapsedMs);
+        latency.millisecondBuckets.set(bucket, (latency.millisecondBuckets.get(bucket) ?? 0) + 1);
+      }
       const rate = payload.readUInt32LE(28);
       stats.messages[key].lastOutboundRateBytesPerSecond = rate;
       stats.messages[key].maxOutboundRateBytesPerSecond = Math.max(
@@ -545,7 +593,23 @@ function shapeDirection(
   source.on("error", () => destination.destroy());
 }
 
-function clonedStats(stats: LinkStats): LinkStats {
+function latencyPercentile(
+  buckets: ReadonlyMap<number, number>,
+  samples: number,
+  fraction: number,
+): number | null {
+  if (samples === 0) return null;
+  const target = Math.max(1, Math.ceil(samples * fraction));
+  let seen = 0;
+  for (const [milliseconds, count] of [...buckets].sort(([left], [right]) => left - right)) {
+    seen += count;
+    if (seen >= target) return milliseconds;
+  }
+  return null;
+}
+
+function clonedStats(stats: MutableLinkStats): LinkStats {
+  const latency = stats.presenceProxyRoundTrip;
   return {
     upstream: { ...stats.upstream },
     downstream: { ...stats.downstream },
@@ -567,6 +631,17 @@ function clonedStats(stats: LinkStats): LinkStats {
         },
       ]),
     ),
+    presenceProxyRoundTrip: {
+      samples: latency.samples,
+      p50Ms: latencyPercentile(latency.millisecondBuckets, latency.samples, 0.5),
+      p95Ms: latencyPercentile(latency.millisecondBuckets, latency.samples, 0.95),
+      p99Ms: latencyPercentile(latency.millisecondBuckets, latency.samples, 0.99),
+      maxMs: latency.samples === 0 ? null : Math.round(latency.maxMs * 1_000) / 1_000,
+      meanMs:
+        latency.samples === 0
+          ? null
+          : Math.round((latency.totalMs / latency.samples) * 1_000) / 1_000,
+    },
   };
 }
 
@@ -581,6 +656,7 @@ export async function createShapedLink({
 }): Promise<ShapedLink> {
   const statsRef = { current: blankStats() };
   const sockets = new Set<Socket>();
+  const inspectors = new Set<ConnectionInspector>();
   const normalized: NormalizedShapedLinkProfile = {
     oneWayLatencyMs: profile.oneWayLatencyMs,
     upstreamMegabitsPerSecond: profile.upstreamMegabitsPerSecond,
@@ -612,6 +688,7 @@ export async function createShapedLink({
     sockets.add(client);
     sockets.add(backend);
     const inspector = new ConnectionInspector(statsRef);
+    inspectors.add(inspector);
     shapeDirection(client, backend, inspector, "upstream", {
       oneWayLatencyMs: normalized.oneWayLatencyMs,
       megabitsPerSecond: normalized.upstreamMegabitsPerSecond,
@@ -628,6 +705,7 @@ export async function createShapedLink({
     });
     const forget = (socket: Socket): void => {
       sockets.delete(socket);
+      inspectors.delete(inspector);
     };
     client.on("close", () => forget(client));
     backend.on("close", () => forget(backend));
@@ -645,6 +723,7 @@ export async function createShapedLink({
     snapshot: () => clonedStats(statsRef.current),
     reset: () => {
       statsRef.current = blankStats();
+      for (const inspector of inspectors) inspector.resetRoundTripState();
     },
     close: () => {
       closePromise ??= (async () => {
@@ -659,6 +738,9 @@ export async function createShapedLink({
 }
 
 export const testInternals = Object.freeze({
+  blankStats,
+  clonedStats,
+  ConnectionInspector,
   SerializationClock,
   WebSocketFrameParser,
   shapeDirection,

@@ -32,6 +32,14 @@ function maskedFrame(
   return frame;
 }
 
+function vxwpFrame(kind: number, bytes: number, sequence: number): Buffer {
+  const frame = Buffer.alloc(bytes);
+  frame.write("VXWP");
+  frame.writeUInt16LE(kind, 6);
+  frame.writeUInt32LE(sequence, 24);
+  return frame;
+}
+
 describe("network benchmark link", () => {
   it("models decimal megabit serialization independently of propagation", () => {
     expect(serializationMilliseconds(1_250_000, 10)).toBe(1_000);
@@ -98,6 +106,31 @@ describe("network benchmark link", () => {
     expect(testInternals.worldProductPriorityName(request)).toBe("prefetch");
     request[24] = 0;
     expect(testInternals.worldProductPriorityName(request)).toBeNull();
+  });
+
+  it("measures ping to pong inside the proxy without client scheduling time", () => {
+    let now = 100;
+    const stats = testInternals.blankStats();
+    const inspector = new testInternals.ConnectionInspector({ current: stats }, () => now);
+    inspector.path = "/v25/presence";
+    inspector.onMessage("upstream", 0x2, vxwpFrame(13, 40, 7), 40, 1);
+    now = 112.25;
+    inspector.onMessage("downstream", 0x2, vxwpFrame(14, 56, 7), 56, 1);
+
+    expect(testInternals.clonedStats(stats).presenceProxyRoundTrip).toEqual({
+      samples: 1,
+      p50Ms: 13,
+      p95Ms: 13,
+      p99Ms: 13,
+      maxMs: 12.25,
+      meanMs: 12.25,
+    });
+
+    inspector.onMessage("upstream", 0x2, vxwpFrame(13, 40, 8), 40, 1);
+    inspector.resetRoundTripState();
+    now = 140;
+    inspector.onMessage("downstream", 0x2, vxwpFrame(14, 56, 8), 56, 1);
+    expect(testInternals.clonedStats(stats).presenceProxyRoundTrip.samples).toBe(1);
   });
 
   it("delivers artificially delayed bytes before forwarding TCP EOF", async () => {

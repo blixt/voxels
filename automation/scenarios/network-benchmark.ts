@@ -36,6 +36,7 @@ const MOVEMENT_PROGRESS_EPSILON_METRES = 0.025;
 const MAX_MOVEMENT_NO_PROGRESS_MS = 150;
 const MAX_STREAMING_POSE_INTERVAL_MS = 50;
 const MAX_STREAMING_UPSTREAM_QUEUE_DELAY_MS = 10;
+const MAX_STREAMING_PROXY_RTT_OVER_LINK_MS = 50;
 const MAX_STREAMING_RTT_OVER_LINK_MS = 100;
 const TURN_RADIANS = Math.PI;
 const FAILURE =
@@ -413,6 +414,7 @@ async function runScenario({
     meanPoseIntervalMs: poseFrames === 0 ? null : rounded(fullCoverage.elapsedMs / poseFrames, 3),
     maxObservedRoundTripMs:
       stats.messages["upstream:presence_ping"]?.maxObservedRoundTripMs ?? null,
+    proxyRoundTrip: stats.presenceProxyRoundTrip,
     presenceUpstreamPeakQueueDelayMs: rounded(
       stats.paths[PRESENCE_PATH]?.upstream.peakQueueDelayMs ?? 0,
       3,
@@ -513,6 +515,11 @@ function aggregateRuns(runs: readonly NetworkRun[]) {
           ? []
           : [scenario.realtime.maxObservedRoundTripMs],
       );
+      const proxyRoundTripP95 = scenarios.flatMap((scenario) =>
+        scenario.realtime.proxyRoundTrip.p95Ms === null
+          ? []
+          : [scenario.realtime.proxyRoundTrip.p95Ms],
+      );
       return [
         name,
         {
@@ -579,6 +586,7 @@ function aggregateRuns(runs: readonly NetworkRun[]) {
           realtime: {
             meanPoseIntervalMs: numericSummary(poseIntervals),
             maxObservedRoundTripMs: numericSummary(observedRoundTrips),
+            proxyRoundTripP95Ms: numericSummary(proxyRoundTripP95),
             presenceUpstreamPeakQueueDelayMs: numericSummary(
               scenarios.map((scenario) => scenario.realtime.presenceUpstreamPeakQueueDelayMs),
             ),
@@ -632,6 +640,15 @@ function streamingGuardViolations(
       if (run.realtime.presenceUpstreamBackpressurePauses !== 0) {
         violations.push(
           `${label}: presence upload hit ${run.realtime.presenceUpstreamBackpressurePauses} backpressure pauses`,
+        );
+      }
+      if (
+        run.realtime.proxyRoundTrip.p95Ms === null ||
+        run.realtime.proxyRoundTrip.p95Ms >
+          configuredRoundTripMs + MAX_STREAMING_PROXY_RTT_OVER_LINK_MS
+      ) {
+        violations.push(
+          `${label}: proxy-observed p95 RTT ${run.realtime.proxyRoundTrip.p95Ms ?? "n/a"} ms exceeds link RTT plus ${MAX_STREAMING_PROXY_RTT_OVER_LINK_MS} ms`,
         );
       }
       if (
@@ -695,12 +712,12 @@ function markdownReport(result: NetworkMarkdownReport): string {
   });
   const realtimeRows = Object.entries(result.summary).map(([name, summary]) => {
     const realtime = summary.realtime;
-    return `| ${name} | ${realtime.meanPoseIntervalMs.median?.toFixed(1) ?? "n/a"} | ${realtime.maxObservedRoundTripMs.max?.toFixed(1) ?? "n/a"} | ${realtime.presenceUpstreamPeakQueueDelayMs.max?.toFixed(3) ?? "n/a"} | ${realtime.collisionRequestFrames.toLocaleString("en-US")} / ${realtime.ordinaryRequestFrames.toLocaleString("en-US")} | ${realtime.canceledRequestFrames.toLocaleString("en-US")} |`;
+    return `| ${name} | ${realtime.meanPoseIntervalMs.median?.toFixed(1) ?? "n/a"} | ${realtime.proxyRoundTripP95Ms.max?.toFixed(1) ?? "n/a"} | ${realtime.maxObservedRoundTripMs.max?.toFixed(1) ?? "n/a"} | ${realtime.presenceUpstreamPeakQueueDelayMs.max?.toFixed(3) ?? "n/a"} | ${realtime.collisionRequestFrames.toLocaleString("en-US")} / ${realtime.ordinaryRequestFrames.toLocaleString("en-US")} | ${realtime.canceledRequestFrames.toLocaleString("en-US")} |`;
   });
   const guardSummary = result.guards.passed
     ? "Passed."
     : `Failed:\n${result.guards.violations.map((violation) => `- ${violation}`).join("\n")}`;
-  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nWorld source: \`${result.world.source}\`; repetitions: ${result.repetitions}; environment: ${result.environment.cpu}, ${result.environment.platform}, Chrome ${result.environment.chrome}, Node ${result.environment.node}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\nStreaming guards: ${guardSummary}\n\n| Scenario | Interactive ready median (ms) | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at interactive | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Interactive ready” is when canonical terrain and the original four surface rings are complete; kilometre horizon prefetch starts only afterward. “Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Movement continuity\n\n| Scenario | Longest no-progress median (ms) | max (ms) |\n| --- | ---: | ---: |\n${movementRows.join("\n")}\n\nA movement sample counts as progress after at least ${MOVEMENT_PROGRESS_EPSILON_METRES} metres of horizontal displacement. Long no-progress intervals while movement input remains held expose collision stalls caused by missing canonical chunks; the fixed route fails at more than ${MAX_MOVEMENT_NO_PROGRESS_MS} ms.\n\n## Realtime control and collision priority\n\n| Scenario | Mean pose interval (ms) | Max observed RTT (ms) | Presence upload queue max (ms) | Collision / ordinary requests | Canceled requests |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${realtimeRows.join("\n")}\n\nPose traffic uses a dedicated WebSocket and coalesces stale samples instead of queueing them. Collision requests identify the current support volume and intended movement corridor; canceled requests show collision-critical work preempting an already-full ordinary request window.\n\n## Link pressure\n\n| Scenario | Downstream peak queue delay median/max (ms) | Downstream peak queued median/max (bytes) | Source pauses |\n| --- | ---: | ---: | ---: |\n${pressureRows.join("\n")}\n\nQueue delay excludes configured propagation and each pacing quantum's own serialization. A source pause means the proxy's bounded queue applied TCP backpressure.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
+  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nWorld source: \`${result.world.source}\`; repetitions: ${result.repetitions}; environment: ${result.environment.cpu}, ${result.environment.platform}, Chrome ${result.environment.chrome}, Node ${result.environment.node}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\nStreaming guards: ${guardSummary}\n\n| Scenario | Interactive ready median (ms) | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at interactive | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Interactive ready” is when canonical terrain and the original four surface rings are complete; kilometre horizon prefetch starts only afterward. “Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Movement continuity\n\n| Scenario | Longest no-progress median (ms) | max (ms) |\n| --- | ---: | ---: |\n${movementRows.join("\n")}\n\nA movement sample counts as progress after at least ${MOVEMENT_PROGRESS_EPSILON_METRES} metres of horizontal displacement. Long no-progress intervals while movement input remains held expose collision stalls caused by missing canonical chunks; the fixed route fails at more than ${MAX_MOVEMENT_NO_PROGRESS_MS} ms.\n\n## Realtime control and collision priority\n\n| Scenario | Mean pose interval (ms) | Proxy p95 RTT (ms) | Client max RTT (ms) | Presence upload queue max (ms) | Collision / ordinary requests | Canceled requests |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n${realtimeRows.join("\n")}\n\nPose traffic uses a dedicated WebSocket and coalesces stale samples instead of queueing them. Proxy RTT measures ping-to-pong across the shaped link and server without client scheduling after delivery. Collision requests identify the current support volume and intended movement corridor; canceled requests show collision-critical work preempting an already-full ordinary request window.\n\n## Link pressure\n\n| Scenario | Downstream peak queue delay median/max (ms) | Downstream peak queued median/max (bytes) | Source pauses |\n| --- | ---: | ---: | ---: |\n${pressureRows.join("\n")}\n\nQueue delay excludes configured propagation and each pacing quantum's own serialization. A source pause means the proxy's bounded queue applied TCP backpressure.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
 }
 
 async function main(context: ScenarioContext, arguments_: readonly string[]) {
@@ -906,6 +923,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         limits: {
           maximumMeanPoseIntervalMs: MAX_STREAMING_POSE_INTERVAL_MS,
           maximumPresenceUpstreamQueueDelayMs: MAX_STREAMING_UPSTREAM_QUEUE_DELAY_MS,
+          maximumProxyRoundTripOverConfiguredLinkMs: MAX_STREAMING_PROXY_RTT_OVER_LINK_MS,
           maximumRoundTripOverConfiguredLinkMs: MAX_STREAMING_RTT_OVER_LINK_MS,
           requireCollisionCriticalRequests: true,
           requireNoPresenceUpstreamBackpressure: true,

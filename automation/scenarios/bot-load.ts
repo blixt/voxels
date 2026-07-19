@@ -29,7 +29,7 @@ import {
 } from "../../scripts/world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
-const RESULT_SCHEMA_VERSION = 6;
+const RESULT_SCHEMA_VERSION = 7;
 const SAMPLE_INTERVAL_MS = 250;
 const OBSERVER_SAMPLE_INTERVAL_MS = 500;
 const MAX_AUTHORITY_REJECTION_RATE = 0.02;
@@ -83,6 +83,7 @@ interface BotClientReport {
 interface BotHarnessReport {
   readonly wallTimeMs: number;
   readonly connectionCount: number;
+  readonly posesSent: number;
   readonly maxVisiblePlayers: number;
   readonly editsAccepted: number;
   readonly editsSubmitted: number;
@@ -595,6 +596,23 @@ function markdownReport(result: BotLoadResult): string {
     const budget = stage.trafficBudget;
     lines.push(
       `| ${stage.count} | ${((budget.floorBytesPerSecond * 8) / 1_000_000).toFixed(3)} / ${((budget.ceilingBytesPerSecond * 8) / 1_000_000).toFixed(3)} Mbit/s | ${((budget.selectedRateBytesPerSecond.p95 * 8) / 1_000_000).toFixed(3)} / ${((budget.peakSelectedRateBytesPerSecond.max * 8) / 1_000_000).toFixed(3)} Mbit/s | ${budget.queueDelayTargetMs} ms | ${(budget.burstBytes / 1_024).toFixed(0)} KiB | ${(budget.perClientBitsPerSecond.p95 / 1_000_000).toFixed(3)} / ${(budget.perClientBitsPerSecond.max / 1_000_000).toFixed(3)} Mbit/s | ${(budget.payloadByClass.presenceBytes / 1_048_576).toFixed(2)} MiB | ${(budget.payloadByClass.editBytes / 1_048_576).toFixed(2)} MiB | ${(budget.payloadByClass.visibleWorldBytes / 1_048_576).toFixed(2)} MiB | ${budget.overBudgetClients} |`,
+    );
+  }
+  lines.push(
+    "",
+    "## Realtime control path",
+    "",
+    "| Bots | Poses per client-second | Proxy RTT p50/p95/p99/max | Presence upload queue max | Presence upload pauses | Collision requests |",
+    "| ---: | ---: | ---: | ---: | ---: | ---: |",
+  );
+  for (const stage of result.stages) {
+    const realtime = stage.network.presenceProxyRoundTrip;
+    const presenceUpstream = stage.network.paths[PRESENCE_PATH]?.upstream;
+    const collisionRequests =
+      stage.network.messages["upstream:chunk_batch"]?.worldProductPriorityFrames
+        ?.collision_critical ?? 0;
+    lines.push(
+      `| ${stage.count} | ${(stage.botReport.posesSent / stage.count / result.options.durationSeconds).toFixed(1)} | ${realtime.p50Ms?.toFixed(1) ?? "n/a"} / ${realtime.p95Ms?.toFixed(1) ?? "n/a"} / ${realtime.p99Ms?.toFixed(1) ?? "n/a"} / ${realtime.maxMs?.toFixed(1) ?? "n/a"} ms | ${presenceUpstream?.peakQueueDelayMs.toFixed(3) ?? "n/a"} ms | ${presenceUpstream?.backpressurePauses ?? 0} | ${collisionRequests.toLocaleString("en-US")} |`,
     );
   }
   if (result.violations.length > 0) {
