@@ -32,9 +32,10 @@ fn visibility_smith_ggx_correlated_fast(no_v: f32, no_l: f32, alpha: f32) -> f32
   return 0.5 / max(visibility_v + visibility_l, 0.0001);
 }
 
-fn evaluate_direct_dielectric(
+fn evaluate_direct_dielectric_f0(
   albedo: vec3<f32>,
   perceptual_roughness: f32,
+  f0: vec3<f32>,
   normal: vec3<f32>,
   view_direction: vec3<f32>,
   light_direction: vec3<f32>,
@@ -50,11 +51,28 @@ fn evaluate_direct_dielectric(
   let lo_h = max(dot(light_direction, half_direction), 0.0);
   let roughness = max(perceptual_roughness, MIN_PERCEPTUAL_ROUGHNESS);
   let alpha = roughness * roughness;
-  let fresnel = fresnel_schlick(lo_h, DIELECTRIC_F0);
+  let fresnel = fresnel_schlick(lo_h, f0);
   let distribution = distribution_ggx(no_h, alpha);
   let visibility = visibility_smith_ggx_correlated_fast(no_v, no_l, alpha);
   let diffuse = albedo * (vec3<f32>(1.0) - fresnel) / PI;
   return (diffuse + distribution * visibility * fresnel) * no_l;
+}
+
+fn evaluate_direct_dielectric(
+  albedo: vec3<f32>,
+  perceptual_roughness: f32,
+  normal: vec3<f32>,
+  view_direction: vec3<f32>,
+  light_direction: vec3<f32>,
+) -> vec3<f32> {
+  return evaluate_direct_dielectric_f0(
+    albedo,
+    perceptual_roughness,
+    DIELECTRIC_F0,
+    normal,
+    view_direction,
+    light_direction,
+  );
 }
 
 fn specular_ambient_visibility(no_v: f32, ambient_visibility: f32, roughness: f32) -> f32 {

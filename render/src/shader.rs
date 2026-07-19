@@ -85,6 +85,7 @@ mod tests {
             "fn fresnel_schlick(",
             "fn distribution_ggx(",
             "fn visibility_smith_ggx_correlated_fast(",
+            "fn evaluate_direct_dielectric_f0(",
             "fn evaluate_direct_dielectric(",
             "fn specular_ambient_visibility(",
         ] {
@@ -95,8 +96,35 @@ mod tests {
             PBR_SOURCE.matches("fn evaluate_direct_dielectric(").count(),
             1
         );
-        assert!(include_str!("shaders/voxels.wgsl").contains("evaluate_direct_dielectric("));
+        assert!(include_str!("shaders/voxels.wgsl").contains("evaluate_direct_dielectric_f0("));
         assert!(include_str!("shaders/avatar.wgsl").contains("evaluate_direct_dielectric("));
+    }
+
+    #[test]
+    fn rain_uses_one_cloud_sample_to_create_a_physical_water_film() {
+        let voxels = include_str!("shaders/voxels.wgsl");
+        assert!(voxels.contains("fn cloud_surface_weather("));
+        assert!(!voxels.contains("fn cloud_sun_visibility("));
+        assert_eq!(
+            voxels
+                .matches("let surface_weather = cloud_surface_weather(input.world);")
+                .count(),
+            1
+        );
+        assert!(voxels.contains("let local_precipitation = frame.weather.x"));
+        assert!(voxels.contains("surface_weather.y"));
+        assert!(voxels.contains("surface_detail.roughness * 0.24"));
+        assert!(voxels.contains("mix(DIELECTRIC_F0, vec3<f32>(0.02037), wetness)"));
+        assert!(voxels.contains("evaluate_direct_dielectric_f0("));
+
+        let dry_albedo = 0.72_f32;
+        let dry_roughness = 0.84_f32;
+        let wetness = 1.0_f32;
+        let wet_albedo = dry_albedo * (1.0 + (0.64 - 1.0) * wetness);
+        let wet_roughness = (dry_roughness * 0.24).max(0.089);
+        assert!(wet_albedo < dry_albedo);
+        assert!(wet_roughness < dry_roughness * 0.3);
+        assert!((0.02037_f32 - 1.0 / 49.0).abs() < 0.000_04);
     }
 
     #[test]

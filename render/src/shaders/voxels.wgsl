@@ -445,10 +445,10 @@ fn atmospheric_path_length(distance_to_camera: f32) -> f32 {
     + max(distance_to_camera - fog_knee, 0.0) * 0.2;
 }
 
-fn cloud_sun_visibility(world: vec3<f32>) -> f32 {
+fn cloud_surface_weather(world: vec3<f32>) -> vec2<f32> {
   let coverage_control = clamp(frame.fog_exposure.z, 0.0, 1.0);
   if coverage_control < 0.08 {
-    return 1.0;
+    return vec2<f32>(1.0, 0.0);
   }
   let sun = normalize(frame.key_light_direction.xyz);
   let cloud_height = mix(frame.cloud_layer.x, frame.cloud_layer.y, 0.46);
@@ -460,7 +460,13 @@ fn cloud_sun_visibility(world: vec3<f32>) -> f32 {
     frame.environment_time.w,
   );
   let cloud = atmosphere_cloud_envelope(field, coverage_control);
-  return mix(1.0, mix(0.62, 0.40, frame.weather.y), cloud * coverage_control);
+  let sun_visibility = mix(
+    1.0,
+    mix(0.62, 0.40, frame.weather.y),
+    cloud * coverage_control,
+  );
+  let local_precipitation = frame.weather.x * smoothstep(0.08, 0.42, cloud);
+  return vec2<f32>(sun_visibility, local_precipitation);
 }
 
 fn cascade_shadow(world: vec3<f32>, normal: vec3<f32>, cascade: u32) -> f32 {
@@ -591,7 +597,7 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   local_light = mix(local_light, reflection, clamp(fresnel * 0.88 + 0.08, 0.0, 0.92));
   let sun = normalize(frame.key_light_direction.xyz);
   let half_direction = normalize(sun + view_direction);
-  let visibility = sun_visibility(input.world, normal) * cloud_sun_visibility(input.world);
+  let visibility = sun_visibility(input.world, normal) * cloud_surface_weather(input.world).x;
   local_light += frame.key_light_radiance.rgb
     * pow(max(dot(normal, half_direction), 0.0), 260.0)
     * mix(0.18, 1.0, visibility)
@@ -659,12 +665,21 @@ fn distant_surface_radiance(
   // Quad face normals and vertex-produced surface macro normals are already normalized.
   let normal = input.normal;
   let base_mip = i32(textureNumLevels(material_albedo) - 1u);
-  let albedo = textureLoad(
+  let dry_albedo = textureLoad(
     material_albedo,
     vec2<i32>(0),
     i32(material),
     base_mip,
   ).rgb;
+  // The distant path deliberately avoids resampling the multi-octave rain footprint for every
+  // sub-pixel fragment. Scene-scale dampness changes diffuse reflectance continuously while the
+  // exact active-cloud field governs visible drops and nearby surface sheen.
+  let retained_wetness = frame.weather.x
+    * frame.fog_exposure.z
+    * smoothstep(-0.15, 0.65, normal.y)
+    * (1.0 - frame.interior.x)
+    * select(1.0, 0.0, material == 13u || material == 14u);
+  let albedo = dry_albedo * mix(1.0, 0.64, retained_wetness);
   let sky_visibility = normal.y * 0.5 + 0.5;
   let interior_ambient = mix(1.0, 0.05, frame.interior.x);
   let sky_irradiance = mix(
@@ -742,8 +757,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     detail_uv_dy,
     distance_to_camera,
   );
+  let surface_weather = cloud_surface_weather(input.world);
   let shadow = sun_visibility(input.world, input.normal)
-    * cloud_sun_visibility(input.world)
+    * surface_weather.x
     * input.terrain_lighting.x;
   let sky_visibility = surface_detail.normal.y * 0.5 + 0.5;
   let cell = floor(input.world / frame.viewport_voxel.z);
@@ -766,14 +782,34 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     * max(-surface_detail.normal.y, 0.0)
     * 0.35
     * interior_ambient;
-  let albedo = surface_detail.albedo
+  let dry_albedo = surface_detail.albedo
     * material_macro_tint(material, input.world)
     * grain
     * fine_grain;
+  // A thin water film darkens the diffuse substrate and narrows its microfacet distribution.
+  // Its air/water normal-incidence Fresnel value is 0.02037. The exact shared cloud footprint
+  // ensures that exposed nearby surfaces only acquire the live sheen beneath active rain.
+  let rain_exposure = smoothstep(-0.15, 0.65, input.normal.y);
+  let can_be_wet = select(1.0, 0.0, material == 13u || material == 14u);
+  let wetness = clamp(
+    surface_weather.y
+      * rain_exposure
+      * (1.0 - frame.interior.x)
+      * (1.0 - frame.medium.x)
+      * can_be_wet,
+    0.0,
+    1.0,
+  );
+  let albedo = dry_albedo * mix(1.0, 0.64, wetness);
   let view_direction = normalize(frame.camera_time.xyz - input.world);
-  let roughness = surface_detail.roughness;
+  let roughness = mix(
+    surface_detail.roughness,
+    max(MIN_PERCEPTUAL_ROUGHNESS, surface_detail.roughness * 0.24),
+    wetness,
+  );
+  let dielectric_f0 = mix(DIELECTRIC_F0, vec3<f32>(0.02037), wetness);
   let no_v = max(dot(surface_detail.normal, view_direction), 0.0001);
-  let ambient_fresnel = fresnel_schlick_roughness(no_v, DIELECTRIC_F0, roughness);
+  let ambient_fresnel = fresnel_schlick_roughness(no_v, dielectric_f0, roughness);
   let ambient_diffuse = albedo
     * (vec3<f32>(1.0) - ambient_fresnel)
     * (sky_irradiance + bounce)
@@ -797,9 +833,10 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     * reflection_horizon
     * interior_ambient;
   let direct = frame.key_light_radiance.rgb
-    * evaluate_direct_dielectric(
+    * evaluate_direct_dielectric_f0(
       albedo,
       roughness,
+      dielectric_f0,
       surface_detail.normal,
       view_direction,
       sun,
@@ -825,9 +862,10 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     let window = max(1.0 - normalized_squared * normalized_squared, 0.0);
     let attenuation = window * window / max(distance_squared, 0.15 * 0.15);
     let radiance = light.color_intensity.rgb * light.color_intensity.w * attenuation;
-    color += radiance * evaluate_direct_dielectric(
+    color += radiance * evaluate_direct_dielectric_f0(
       albedo,
       roughness,
+      dielectric_f0,
       surface_detail.normal,
       view_direction,
       light_direction,
