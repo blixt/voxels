@@ -44,6 +44,15 @@ describe("automation scenario runner", () => {
     ).toThrow(/without declaring/u);
     expect(() =>
       defineScenario({
+        id: "missing-browser",
+        kind: "capture",
+        summary: "Invalid browser viewport definition.",
+        uses: { viewport: "browser" },
+        async run() {},
+      }),
+    ).toThrow(/without a browser/u);
+    expect(() =>
+      defineScenario({
         id: "fake-native",
         kind: "capture",
         summary: "Invalid native renderer clone.",

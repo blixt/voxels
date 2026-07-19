@@ -130,10 +130,8 @@ function validateDefinition(definition: ScenarioDefinition): void {
   if ((uses.screenshots || uses.video || uses.trace) && uses.viewport === undefined) {
     throw new Error(`scenario ${definition.id} captures a viewport without declaring one`);
   }
-  if (uses.viewport === "browser" && uses.browser === false) {
-    throw new Error(
-      `scenario ${definition.id} requests a browser viewport while disabling browser`,
-    );
+  if (uses.viewport === "browser" && uses.browser !== true) {
+    throw new Error(`scenario ${definition.id} requests a browser viewport without a browser`);
   }
   if (uses.viewport === "native") {
     throw new Error(

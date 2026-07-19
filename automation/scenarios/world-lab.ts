@@ -179,7 +179,7 @@ export default defineScenario({
   id: "world-lab",
   kind: "validation",
   summary: "Exercises Rust World Lab controls and synchronized environment state.",
-  uses: { world: true, viewport: "browser", screenshots: true, rust: true },
+  uses: { world: true, browser: true, viewport: "browser", screenshots: true, rust: true },
   timeoutMs: 360_000,
   run: runWorldLab,
 });
