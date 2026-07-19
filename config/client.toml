@@ -1,5 +1,5 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 24
+schema_version = 25
 
 [developer]
 # Enables local-only time/weather visualization overrides and server-authorized spectator mode.
@@ -50,9 +50,12 @@ max_tracked_chunks = 320
 max_secondary_interest_chunks = 192
 
 [streaming.priority]
-# Keep the immediate 3x3 canonical-chunk vicinity first, then favor this forward cone and the
-# predicted position. These values change request order only; they do not increase residency or
-# bandwidth. Complete surface-LOD levels stay spatially ordered because they activate atomically.
+# Give the swept player body and its current support a hard priority through generation, meshing,
+# upload, and server traffic. This remains bounded secondary interest rather than extra residency.
+collision_lookahead_seconds = 2.0
+# Keep the immediate 3x3 canonical-chunk vicinity first, then favor this forward cone and predicted
+# position for ordinary work. Complete surface-LOD levels stay spatially ordered because they
+# activate atomically.
 velocity_lookahead_seconds = 1.5
 view_cone_half_angle_degrees = 55.0
 

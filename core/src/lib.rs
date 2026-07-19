@@ -389,6 +389,81 @@ impl CameraState {
         Vec3::new(sin_yaw * cos_pitch, sin_pitch, -cos_yaw * cos_pitch).normalize()
     }
 
+    /// Velocity intent used to prefetch canonical collision data before physics reaches it.
+    ///
+    /// This is derived from input and locomotion rather than post-collision velocity: a
+    /// conservative unloaded-space boundary can zero an axis, but it must not also erase the
+    /// request pressure that will remove that boundary.
+    pub fn streaming_velocity(self, input: &InputState) -> Vec3 {
+        let horizontal_forward = Vec3::new(self.yaw.sin(), 0.0, -self.yaw.cos());
+        let right = Vec3::new(-horizontal_forward.z, 0.0, horizontal_forward.x);
+        let mut horizontal_wish = Vec3::ZERO;
+        if input.forward {
+            horizontal_wish += horizontal_forward;
+        }
+        if input.backward {
+            horizontal_wish -= horizontal_forward;
+        }
+        if input.right {
+            horizontal_wish += right;
+        }
+        if input.left {
+            horizontal_wish -= right;
+        }
+
+        if self.locomotion == LocomotionMode::Spectator {
+            let mut wish = horizontal_wish;
+            if input.jump {
+                wish += Vec3::Y;
+            }
+            if input.sprint {
+                wish -= Vec3::Y;
+            }
+            return wish.normalize_or_zero() * SPECTATOR_SPEED;
+        }
+
+        if self.fluid.swimming {
+            let forward = self.forward();
+            let mut wish = Vec3::ZERO;
+            if input.forward {
+                wish += forward;
+            }
+            if input.backward {
+                wish -= forward;
+            }
+            if input.right {
+                wish += right;
+            }
+            if input.left {
+                wish -= right;
+            }
+            if input.jump {
+                wish += Vec3::Y;
+            }
+            if input.sprint {
+                wish -= Vec3::Y;
+            }
+            return wish.normalize_or_zero() * SWIM_SPEED;
+        }
+
+        if self.locomotion == LocomotionMode::Gliding {
+            let direction = if horizontal_wish.length_squared() > f32::EPSILON {
+                horizontal_wish.normalize()
+            } else {
+                horizontal_forward
+            };
+            return Vec3::new(
+                direction.x * GLIDER_FORWARD_SPEED,
+                -GLIDER_TERMINAL_DESCENT_SPEED,
+                direction.z * GLIDER_FORWARD_SPEED,
+            );
+        }
+
+        let speed = WALK_SPEED * if input.sprint { SPRINT_MULTIPLIER } else { 1.0 };
+        let horizontal = horizontal_wish.normalize_or_zero() * speed;
+        Vec3::new(horizontal.x, self.velocity.y, horizontal.z)
+    }
+
     pub const fn fluid_state(self) -> FluidState {
         self.fluid
     }
@@ -1310,6 +1385,33 @@ mod tests {
         input.set_key(5, false);
         camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
         assert!(camera.velocity.y < descent_before);
+    }
+
+    #[test]
+    fn streaming_velocity_keeps_request_pressure_after_collision_stops_motion() {
+        let camera = CameraState::spawn(Vec3::new(0.0, PLAYER_EYE_HEIGHT_METRES, 0.0));
+        let mut input = InputState::default();
+        input.set_key(1, true);
+        input.set_key(6, true);
+
+        let intent = camera.streaming_velocity(&input);
+
+        assert_eq!(camera.velocity, Vec3::ZERO);
+        assert!(intent.z < -WALK_SPEED * 1.5);
+        assert_eq!(intent.y, 0.0);
+    }
+
+    #[test]
+    fn streaming_velocity_projects_the_glider_even_without_directional_input() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, 12.0, 0.0));
+        camera.set_gliding_available(true);
+        camera.set_locomotion(LocomotionMode::Gliding);
+        camera.velocity = Vec3::ZERO;
+
+        let intent = camera.streaming_velocity(&InputState::default());
+
+        assert!((intent.z + GLIDER_FORWARD_SPEED).abs() < f32::EPSILON);
+        assert!((intent.y + GLIDER_TERMINAL_DESCENT_SPEED).abs() < f32::EPSILON);
     }
 
     #[test]

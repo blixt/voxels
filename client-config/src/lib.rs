@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 24;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 25;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -107,6 +107,8 @@ pub struct StreamingConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreamingPriorityConfig {
+    /// Seconds of intended movement whose swept player volume receives hard pipeline urgency.
+    pub collision_lookahead_seconds: f32,
     pub velocity_lookahead_seconds: f32,
     pub view_cone_half_angle_degrees: f32,
 }
@@ -275,6 +277,13 @@ impl ClientConfig {
             "streaming.max_secondary_interest_chunks",
             0,
             self.streaming.max_tracked_chunks,
+        )?;
+        ensure_finite_range(
+            self.streaming.priority.collision_lookahead_seconds,
+            "streaming.priority.collision_lookahead_seconds",
+            0.1,
+            3.0,
+            true,
         )?;
         ensure_finite_range(
             self.streaming.priority.velocity_lookahead_seconds,
@@ -711,6 +720,7 @@ mod tests {
                 max_tracked_chunks: 320,
                 max_secondary_interest_chunks: 192,
                 priority: StreamingPriorityConfig {
+                    collision_lookahead_seconds: 2.0,
                     velocity_lookahead_seconds: 1.5,
                     view_cone_half_angle_degrees: 55.0,
                 },
@@ -801,18 +811,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 24", "schema_version = 23");
+        let wrong_schema = fixture.replace("schema_version = 25", "schema_version = 24");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 23,
+                found: 24,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 24",
-            "schema_version = 24\nunknown_root = true",
+            "schema_version = 25",
+            "schema_version = 25\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),
@@ -852,6 +862,10 @@ mod tests {
         config.streaming.max_tracked_chunks = 1;
         config.streaming.max_secondary_interest_chunks = 2;
         assert_invalid_field(&config, "streaming.max_secondary_interest_chunks");
+
+        let mut config = valid_config();
+        config.streaming.priority.collision_lookahead_seconds = 3.1;
+        assert_invalid_field(&config, "streaming.priority.collision_lookahead_seconds");
 
         let mut config = valid_config();
         config.streaming.priority.velocity_lookahead_seconds = f32::NAN;

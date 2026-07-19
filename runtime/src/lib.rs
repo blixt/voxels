@@ -649,26 +649,46 @@ impl StreamScheduler {
         budget: FrameBudget,
         priority_hint: DirectionalStreamPriority,
     ) -> FrameWork {
+        self.schedule_frame_prioritized_with_urgency(budget, priority_hint, &[])
+    }
+
+    /// Starts bounded work while allowing a small collision/render corridor to preempt ordinary
+    /// desired chunks at every asynchronous stage. Urgency changes ordering only: it cannot admit
+    /// an undesired coordinate, cancel in-flight work, or expand any capacity bound.
+    pub fn schedule_frame_prioritized_with_urgency(
+        &mut self,
+        budget: FrameBudget,
+        priority_hint: DirectionalStreamPriority,
+        urgent: &[ChunkCoord],
+    ) -> FrameWork {
         self.frame = increment_nonzero(self.frame);
         self.started_this_frame = FrameBudget::default();
+        let urgent = urgent
+            .iter()
+            .copied()
+            .map(coord_key)
+            .collect::<BTreeSet<_>>();
 
         let generation = self.start_stage(
             WorkStage::Generation,
             State::QueuedGeneration,
             budget.generation,
             priority_hint,
+            &urgent,
         );
         let meshing = self.start_stage(
             WorkStage::Meshing,
             State::QueuedMeshing,
             budget.meshing,
             priority_hint,
+            &urgent,
         );
         let upload = self.start_stage(
             WorkStage::Upload,
             State::QueuedUpload,
             budget.upload,
             priority_hint,
+            &urgent,
         );
         self.started_this_frame = FrameBudget {
             generation: generation.len(),
@@ -975,6 +995,7 @@ impl StreamScheduler {
         queued: State,
         budget: usize,
         priority_hint: DirectionalStreamPriority,
+        urgent: &BTreeSet<CoordKey>,
     ) -> Vec<WorkTicket> {
         let mut keys: Vec<_> = self
             .entries
@@ -983,7 +1004,10 @@ impl StreamScheduler {
             .map(|(key, _)| *key)
             .collect();
         keys.sort_by_key(|key| {
-            directional_priority(self.focus, coord_from_key(*key), priority_hint)
+            (
+                !urgent.contains(key),
+                directional_priority(self.focus, coord_from_key(*key), priority_hint),
+            )
         });
         keys.truncate(budget);
 
@@ -1406,6 +1430,50 @@ mod tests {
         assert!(
             priority.rank_offset(3, 0).2 < priority.rank_offset(5, 0).2,
             "velocity look-ahead must lead work toward the predicted focus"
+        );
+    }
+
+    #[test]
+    fn urgent_corridor_preempts_ordinary_work_through_every_pipeline_stage() {
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 3,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 1,
+            max_tracked_chunks: 64,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
+        });
+        let focus = ChunkCoord::new(0, 0, 0);
+        let urgent = ChunkCoord::new(3, 0, 0);
+        scheduler.update_focus(focus);
+
+        for stage in [WorkStage::Generation, WorkStage::Meshing, WorkStage::Upload] {
+            let work = scheduler.schedule_frame_prioritized_with_urgency(
+                FrameBudget {
+                    generation: usize::from(stage == WorkStage::Generation),
+                    meshing: usize::from(stage == WorkStage::Meshing),
+                    upload: usize::from(stage == WorkStage::Upload),
+                },
+                DirectionalStreamPriority::neutral(),
+                &[urgent],
+            );
+            let ticket = match stage {
+                WorkStage::Generation => work.generation.first(),
+                WorkStage::Meshing => work.meshing.first(),
+                WorkStage::Upload => work.upload.first(),
+            }
+            .copied()
+            .expect("urgent stage ticket");
+            assert_eq!(ticket.coord, urgent);
+            assert_eq!(scheduler.complete(ticket), CompletionStatus::Accepted);
+        }
+        assert_eq!(
+            scheduler.status(urgent).map(|status| status.state),
+            Some(ChunkState::Resident)
+        );
+        assert_eq!(
+            scheduler.status(focus).map(|status| status.state),
+            Some(ChunkState::QueuedGeneration),
+            "ordinary nearer work must wait behind the urgent path"
         );
     }
 

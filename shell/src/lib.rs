@@ -31,22 +31,20 @@ fn inventory_swipe(anchor: [f32; 2], current: [f32; 2]) -> Option<(i32, [f32; 2]
     ))
 }
 
-/// Canonical chunks intersecting the current view/edit corridor. This bounded secondary interest
-/// keeps raycasts, collision, and rendering in agreement below the normal vertical residency span
-/// without multiplying the primary cylinder for every direction.
 #[cfg(any(target_arch = "wasm32", test))]
-fn interaction_stream_interest(camera: &CameraState) -> Vec<voxels_world::ChunkCoord> {
-    use std::collections::BTreeSet;
+fn insert_chunk_aabb(
+    chunks: &mut std::collections::BTreeSet<voxels_world::ChunkCoord>,
+    minimum: glam::Vec3,
+    maximum: glam::Vec3,
+) {
     use voxels_world::{CHUNK_EDGE, ChunkCoord, VOXEL_SIZE_METRES};
 
-    let end = camera.position
-        + camera.forward() * (INTERACTION_REACH_METRES + INTERACTION_STREAM_MARGIN_METRES);
-    let minimum = camera.position.min(end) - glam::Vec3::splat(INTERACTION_STREAM_MARGIN_METRES);
-    let maximum = camera.position.max(end) + glam::Vec3::splat(INTERACTION_STREAM_MARGIN_METRES);
+    if !minimum.is_finite() || !maximum.is_finite() {
+        return;
+    }
     let chunk_size = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
     let minimum = (minimum / chunk_size).floor().as_ivec3();
     let maximum = (maximum / chunk_size).floor().as_ivec3();
-    let mut chunks = BTreeSet::new();
     for z in minimum.z..=maximum.z {
         for y in minimum.y..=maximum.y {
             for x in minimum.x..=maximum.x {
@@ -56,6 +54,64 @@ fn interaction_stream_interest(camera: &CameraState) -> Vec<voxels_world::ChunkC
                 }
             }
         }
+    }
+}
+
+/// Canonical chunks intersecting the current body/support, intended movement sweep, or view/edit
+/// corridor. This bounded secondary interest is both scheduled and transported as collision
+/// critical, keeping physics and rendering ahead of running, gliding, and swimming.
+#[cfg(any(target_arch = "wasm32", test))]
+fn urgent_stream_interest(
+    camera: &CameraState,
+    streaming_velocity: glam::Vec3,
+    collision_lookahead_seconds: f32,
+) -> Vec<voxels_world::ChunkCoord> {
+    use std::collections::BTreeSet;
+    use voxels_core::{PLAYER_EYE_HEIGHT_METRES, PLAYER_HEIGHT_METRES, PLAYER_RADIUS_METRES};
+    use voxels_world::{CHUNK_EDGE, VOXEL_SIZE_METRES};
+
+    let mut chunks = BTreeSet::new();
+    let view_end = camera.position
+        + camera.forward() * (INTERACTION_REACH_METRES + INTERACTION_STREAM_MARGIN_METRES);
+    insert_chunk_aabb(
+        &mut chunks,
+        camera.position.min(view_end) - glam::Vec3::splat(INTERACTION_STREAM_MARGIN_METRES),
+        camera.position.max(view_end) + glam::Vec3::splat(INTERACTION_STREAM_MARGIN_METRES),
+    );
+
+    let lookahead = if collision_lookahead_seconds.is_finite() {
+        collision_lookahead_seconds.clamp(0.1, 3.0)
+    } else {
+        0.1
+    };
+    let velocity = if streaming_velocity.is_finite() {
+        streaming_velocity
+    } else {
+        glam::Vec3::ZERO
+    };
+    let motion_end = camera.position + velocity * lookahead;
+    let chunk_size = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
+    let steps = ((motion_end - camera.position).length() / (chunk_size * 0.5))
+        .ceil()
+        .max(1.0) as u32;
+    let horizontal_margin = PLAYER_RADIUS_METRES + VOXEL_SIZE_METRES * 2.0;
+    let vertical_margin = VOXEL_SIZE_METRES * 2.0;
+    for step in 0..=steps {
+        let fraction = step as f32 / steps as f32;
+        let eye = camera.position.lerp(motion_end, fraction);
+        insert_chunk_aabb(
+            &mut chunks,
+            eye + glam::Vec3::new(
+                -horizontal_margin,
+                -PLAYER_EYE_HEIGHT_METRES - vertical_margin,
+                -horizontal_margin,
+            ),
+            eye + glam::Vec3::new(
+                horizontal_margin,
+                PLAYER_HEIGHT_METRES - PLAYER_EYE_HEIGHT_METRES + vertical_margin,
+                horizontal_margin,
+            ),
+        );
     }
     chunks.into_iter().collect()
 }
@@ -276,6 +332,7 @@ mod web {
         max_edit_trackers: usize,
         stream_frame_budget: FrameBudget,
         startup_ready_radius_chunks: i32,
+        stream_collision_lookahead_seconds: f32,
         stream_velocity_lookahead_seconds: f32,
         stream_view_cone_half_angle_degrees: f32,
         surface_load_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
@@ -698,7 +755,8 @@ mod web {
                 simulation_ms,
             ));
             let stream_start = performance_now(performance.as_ref());
-            self.stream_world(&camera);
+            let streaming_velocity = camera.streaming_velocity(&self.input.borrow());
+            self.stream_world(&camera, streaming_velocity);
             if let Some(opened) = self.remote.world_opened() {
                 self.presence.ensure_session(&opened, time);
                 self.environment_snapshot.set(opened.environment);
@@ -943,12 +1001,17 @@ mod web {
             }
         }
 
-        fn stream_world(&self, camera: &CameraState) {
+        fn stream_world(&self, camera: &CameraState, streaming_velocity: Vec3) {
             self.drain_remote_generation();
             let focus = world_to_chunk(camera.position);
-            let interest = crate::interaction_stream_interest(camera);
+            let interest = crate::urgent_stream_interest(
+                camera,
+                streaming_velocity,
+                self.config.stream_collision_lookahead_seconds,
+            );
             let priority_hint = directional_stream_priority(
                 camera,
+                streaming_velocity,
                 CHUNK_EDGE as f32 * VOXEL_SIZE_METRES,
                 self.config.stream_velocity_lookahead_seconds,
                 self.config.stream_view_cone_half_angle_degrees,
@@ -958,8 +1021,11 @@ mod web {
                 let changed = scheduler.update_focus_with_interest(focus, &interest);
                 (
                     changed,
-                    scheduler
-                        .schedule_frame_prioritized(self.config.stream_frame_budget, priority_hint),
+                    scheduler.schedule_frame_prioritized_with_urgency(
+                        self.config.stream_frame_budget,
+                        priority_hint,
+                        &interest,
+                    ),
                 )
             };
             let mut uploaded = false;
@@ -2635,6 +2701,7 @@ mod web {
                 upload: streaming.frame_budget.upload as usize,
             },
             startup_ready_radius_chunks: streaming.startup_ready_radius_chunks as i32,
+            stream_collision_lookahead_seconds: streaming.priority.collision_lookahead_seconds,
             stream_velocity_lookahead_seconds: streaming.priority.velocity_lookahead_seconds,
             stream_view_cone_half_angle_degrees: streaming.priority.view_cone_half_angle_degrees,
             surface_load_radius_tiles: streaming
@@ -2855,6 +2922,7 @@ mod web {
 
     fn directional_stream_priority(
         camera: &CameraState,
+        streaming_velocity: glam::Vec3,
         cell_size_metres: f32,
         lookahead_seconds: f32,
         cone_half_angle_degrees: f32,
@@ -2863,8 +2931,8 @@ mod web {
         DirectionalStreamPriority::from_motion(
             [forward.x, forward.z],
             [
-                camera.velocity.x / cell_size_metres,
-                camera.velocity.z / cell_size_metres,
+                streaming_velocity.x / cell_size_metres,
+                streaming_velocity.z / cell_size_metres,
             ],
             lookahead_seconds,
             cone_half_angle_degrees,
@@ -2948,10 +3016,10 @@ mod tests {
     }
 
     #[test]
-    fn interaction_interest_reaches_below_a_downward_edit_corridor() {
+    fn urgent_interest_reaches_below_a_downward_edit_corridor() {
         let mut camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
         camera.pitch = -1.5;
-        let interest = interaction_stream_interest(&camera);
+        let interest = urgent_stream_interest(&camera, glam::Vec3::ZERO, 2.0);
 
         assert!(interest.contains(&voxels_world::ChunkCoord::new(0, 1, 0)));
         assert!(
@@ -2964,15 +3032,36 @@ mod tests {
     }
 
     #[test]
-    fn interaction_interest_is_stable_across_negative_chunk_boundaries() {
+    fn urgent_interest_is_stable_across_negative_chunk_boundaries() {
         let mut camera = CameraState::spawn(glam::Vec3::new(-3.21, 0.05, -3.21));
         camera.pitch = -1.5;
-        let first = interaction_stream_interest(&camera);
-        let second = interaction_stream_interest(&camera);
+        let first = urgent_stream_interest(&camera, glam::Vec3::ZERO, 2.0);
+        let second = urgent_stream_interest(&camera, glam::Vec3::ZERO, 2.0);
 
         assert_eq!(first, second);
         assert!(first.contains(&voxels_world::ChunkCoord::new(-2, 0, -2)));
         assert!(first.iter().any(|coord| coord.y < 0));
+    }
+
+    #[test]
+    fn urgent_interest_covers_current_support_and_projected_glider_path() {
+        let camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
+        let interest = urgent_stream_interest(&camera, glam::Vec3::new(8.3, -2.2, 0.0), 2.0);
+
+        assert!(interest.contains(&voxels_world::ChunkCoord::new(0, 0, 0)));
+        assert!(interest.contains(&voxels_world::ChunkCoord::new(0, 1, 0)));
+        assert!(
+            interest.iter().any(|coord| coord.x >= 5 && coord.z == 0),
+            "two seconds of glider motion must be requested ahead"
+        );
+        assert!(
+            interest.iter().any(|coord| coord.z <= -2),
+            "the independent look/edit corridor must remain urgent"
+        );
+        assert!(
+            interest.len() <= 64,
+            "default urgency must stay tightly bounded"
+        );
     }
 
     #[test]
