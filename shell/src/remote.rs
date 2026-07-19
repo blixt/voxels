@@ -26,6 +26,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket, WorkerGlobalScope};
 
+use crate::request_window::collision_preemption_candidate;
+
 pub type RemoteRequestId = u64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,6 +53,7 @@ pub enum RemoteWorldError {
     Server(String),
     Source(WorldSourceError),
     TimedOut,
+    Preempted,
     Disconnected(String),
     Canceled,
     Closed,
@@ -76,6 +79,9 @@ impl std::fmt::Display for RemoteWorldError {
             Self::Server(reason) => write!(formatter, "world service error: {reason}"),
             Self::Source(error) => error.fmt(formatter),
             Self::TimedOut => formatter.write_str("world request timed out"),
+            Self::Preempted => {
+                formatter.write_str("world request was preempted by collision-critical work")
+            }
             Self::Disconnected(reason) => write!(formatter, "world service disconnected: {reason}"),
             Self::Canceled => formatter.write_str("world request was canceled"),
             Self::Closed => formatter.write_str("remote world client is closed"),
@@ -302,12 +308,22 @@ struct RemoteInner {
 
 enum PendingBatch {
     Chunks {
+        priority: WorldProductPriority,
         expected_coords: Vec<ChunkCoord>,
         delivery: ChunkDelivery,
     },
     Surface {
+        priority: WorldProductPriority,
         tickets: Vec<RemoteSurfaceTicket>,
     },
+}
+
+impl PendingBatch {
+    const fn priority(&self) -> WorldProductPriority {
+        match self {
+            Self::Chunks { priority, .. } | Self::Surface { priority, .. } => *priority,
+        }
+    }
 }
 
 enum ChunkDelivery {
@@ -691,7 +707,7 @@ impl RemoteInner {
                 .borrow()
                 .get(&result.request_id)
                 .and_then(|pending| match pending {
-                    PendingBatch::Surface { tickets } => Some(tickets.clone()),
+                    PendingBatch::Surface { tickets, .. } => Some(tickets.clone()),
                     PendingBatch::Chunks { .. } => None,
                 });
         let Some(tickets) = tickets else {
@@ -884,7 +900,7 @@ impl RemoteInner {
             usize::from(opened.recommended_in_flight_batches)
         });
         let client_window = self.config.max_in_flight_batches as usize;
-        if self.pending.borrow().len() >= server_window.min(client_window) {
+        if !self.ensure_request_window(priority, server_window.min(client_window)) {
             return Err(RemoteWorldError::RequestWindowFull);
         }
         let Some(socket) = self.socket.borrow().clone() else {
@@ -915,6 +931,7 @@ impl RemoteInner {
         self.pending.borrow_mut().insert(
             request_id,
             PendingBatch::Chunks {
+                priority,
                 expected_coords: coords,
                 delivery,
             },
@@ -957,7 +974,7 @@ impl RemoteInner {
             usize::from(opened.recommended_in_flight_batches)
         });
         let client_window = self.config.max_in_flight_batches as usize;
-        if self.pending.borrow().len() >= server_window.min(client_window) {
+        if !self.ensure_request_window(priority, server_window.min(client_window)) {
             return Err(RemoteWorldError::RequestWindowFull);
         }
         let Some(socket) = self.socket.borrow().clone() else {
@@ -987,7 +1004,7 @@ impl RemoteInner {
             .map_err(|error| RemoteWorldError::Socket(js_reason(error)))?;
         self.pending
             .borrow_mut()
-            .insert(request_id, PendingBatch::Surface { tickets });
+            .insert(request_id, PendingBatch::Surface { priority, tickets });
         let weak = Rc::downgrade(self);
         if let Err(error) = schedule_after(self.config.request_timeout_ms, move || {
             if let Some(inner) = weak.upgrade() {
@@ -1016,6 +1033,29 @@ impl RemoteInner {
                 return Err(RemoteWorldError::RequestWindowFull);
             }
         }
+    }
+
+    fn ensure_request_window(&self, priority: WorldProductPriority, window: usize) -> bool {
+        if self.pending.borrow().len() < window {
+            return true;
+        }
+        let candidate = {
+            let pending = self.pending.borrow();
+            collision_preemption_candidate(
+                priority,
+                pending
+                    .iter()
+                    .map(|(&request_id, batch)| (request_id, batch.priority())),
+            )
+        };
+        let Some(request_id) = candidate else {
+            return false;
+        };
+        // Cancellation is emitted first on the ordered world socket. The old local capability is
+        // returned to its scheduler queue before the urgent request claims the released slot.
+        self.send_cancel(request_id);
+        self.finish_pending_error(request_id, RemoteWorldError::Preempted);
+        self.pending.borrow().len() < window
     }
 
     fn timeout_request(&self, request_id: u64) {
@@ -1075,7 +1115,7 @@ impl RemoteInner {
         let Some(pending) = self.pending.borrow_mut().remove(&request_id) else {
             return;
         };
-        let PendingBatch::Surface { tickets } = pending else {
+        let PendingBatch::Surface { tickets, .. } = pending else {
             return;
         };
         self.surface_completions

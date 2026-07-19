@@ -263,6 +263,8 @@ fn world_environment_at(
 mod presence_remote;
 #[cfg(target_arch = "wasm32")]
 pub mod remote;
+#[cfg(any(target_arch = "wasm32", test))]
+mod request_window;
 #[cfg(target_arch = "wasm32")]
 mod web {
     use crate::presence_remote::RemotePresenceClient;
