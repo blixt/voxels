@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 23;
+pub const PROTOCOL_VERSION: u16 = 24;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -35,7 +35,7 @@ pub const EDIT_SESSION_NOT_CURRENT: &str = "edit session is no longer current";
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
-const SURFACE_SNAPSHOT_VERSION: u16 = 6;
+const SURFACE_SNAPSHOT_VERSION: u16 = 7;
 
 const KIND_OPEN_WORLD: u16 = 1;
 const KIND_WORLD_OPENED: u16 = 2;
@@ -2905,9 +2905,7 @@ fn encode_surface_mesh(output: &mut Vec<u8>, mesh: &SurfaceTileMesh) {
     push_u32(output, mesh.quads.len() as u32);
     push_u16(output, mesh.patches.len() as u16);
     push_u16(output, 0);
-    for quad in &mesh.quads {
-        encode_surface_quad(output, *quad);
-    }
+    encode_surface_quads(output, mesh.coord, &mesh.quads);
     for patch in &mesh.patches {
         output.extend_from_slice(&[
             patch.cell_bounds[0][0],
@@ -2944,10 +2942,7 @@ fn decode_surface_mesh(
     {
         return Err(ProtocolError::LimitExceeded("surface mesh geometry"));
     }
-    let mut quads = Vec::with_capacity(quad_count);
-    for _ in 0..quad_count {
-        quads.push(decode_surface_quad(cursor)?);
-    }
+    let quads = decode_surface_quads(cursor, coord, quad_count)?;
     let mut patches = Vec::with_capacity(patch_count);
     for _ in 0..patch_count {
         let cell_bounds = [[cursor.u8()?, cursor.u8()?], [cursor.u8()?, cursor.u8()?]];
@@ -3001,9 +2996,7 @@ fn encode_water_mesh(output: &mut Vec<u8>, mesh: &WaterTileMesh) {
     push_u32(output, mesh.quads.len() as u32);
     push_u16(output, mesh.patches.len() as u16);
     push_u16(output, 0);
-    for quad in &mesh.quads {
-        encode_surface_quad(output, *quad);
-    }
+    encode_surface_quads(output, mesh.coord, &mesh.quads);
     for patch in &mesh.patches {
         output.extend_from_slice(&[
             patch.cell_bounds[0][0],
@@ -3028,10 +3021,7 @@ fn decode_water_mesh(
     {
         return Err(ProtocolError::LimitExceeded("water mesh geometry"));
     }
-    let mut quads = Vec::with_capacity(quad_count);
-    for _ in 0..quad_count {
-        quads.push(decode_surface_quad(cursor)?);
-    }
+    let quads = decode_surface_quads(cursor, coord, quad_count)?;
     let mut patches = Vec::with_capacity(patch_count);
     for _ in 0..patch_count {
         let cell_bounds = [[cursor.u8()?, cursor.u8()?], [cursor.u8()?, cursor.u8()?]];
@@ -3052,38 +3042,107 @@ fn decode_water_mesh(
     Ok(mesh)
 }
 
-fn encode_surface_quad(output: &mut Vec<u8>, quad: SurfaceQuad) {
-    for value in quad.origin {
-        push_i32(output, value);
+fn encode_surface_quads(output: &mut Vec<u8>, coord: SurfaceTileCoord, quads: &[SurfaceQuad]) {
+    let tile_origin = coord.voxel_origin();
+    let mut previous = [i64::from(tile_origin[0]), 0, i64::from(tile_origin[1])];
+    for quad in quads {
+        for (axis, &origin) in quad.origin.iter().enumerate() {
+            let origin = i64::from(origin);
+            push_var_u64(output, zigzag_i64(origin - previous[axis]));
+            previous[axis] = origin;
+        }
+        let metadata = u64::from(quad.face) | (u64::from(quad.material.id()) << 3);
+        push_var_u64(output, metadata);
+        push_var_u64(output, u64::from(quad.extent[0]));
+        push_var_u64(output, u64::from(quad.extent[1]));
     }
-    output.push(quad.face);
-    output.push(0);
-    push_u16(output, quad.extent[0]);
-    push_u16(output, quad.extent[1]);
-    push_u16(output, quad.material.id());
 }
 
-fn decode_surface_quad(cursor: &mut Cursor<'_>) -> Result<SurfaceQuad, ProtocolError> {
-    let origin = [cursor.i32()?, cursor.i32()?, cursor.i32()?];
-    let face = cursor.u8()?;
-    if face > 5 || cursor.u8()? != 0 {
-        return Err(ProtocolError::InvalidPayload("invalid surface quad face"));
+fn decode_surface_quads(
+    cursor: &mut Cursor<'_>,
+    coord: SurfaceTileCoord,
+    quad_count: usize,
+) -> Result<Vec<SurfaceQuad>, ProtocolError> {
+    let tile_origin = coord.voxel_origin();
+    let mut previous = [i64::from(tile_origin[0]), 0, i64::from(tile_origin[1])];
+    let mut quads = Vec::with_capacity(quad_count);
+    for _ in 0..quad_count {
+        let mut origin = [0; 3];
+        for axis in 0..3 {
+            let delta = unzigzag_i64(decode_var_u64(cursor, 5)?);
+            let value = previous[axis]
+                .checked_add(delta)
+                .and_then(|value| i32::try_from(value).ok())
+                .ok_or(ProtocolError::InvalidPayload(
+                    "surface quad origin delta overflows",
+                ))?;
+            origin[axis] = value;
+            previous[axis] = i64::from(value);
+        }
+        let metadata = decode_var_u64(cursor, 3)?;
+        let face = (metadata & 0b111) as u8;
+        if face > 5 {
+            return Err(ProtocolError::InvalidPayload("invalid surface quad face"));
+        }
+        let material_id = u16::try_from(metadata >> 3)
+            .map_err(|_| ProtocolError::UnknownEnum("material", metadata >> 3))?;
+        let material = Material::from_id(material_id).ok_or(ProtocolError::UnknownEnum(
+            "material",
+            u64::from(material_id),
+        ))?;
+        let extent = [
+            u16::try_from(decode_var_u64(cursor, 3)?)
+                .map_err(|_| ProtocolError::LimitExceeded("surface quad extent"))?,
+            u16::try_from(decode_var_u64(cursor, 3)?)
+                .map_err(|_| ProtocolError::LimitExceeded("surface quad extent"))?,
+        ];
+        if extent.contains(&0) {
+            return Err(ProtocolError::InvalidPayload("empty surface quad"));
+        }
+        quads.push(SurfaceQuad {
+            origin,
+            face,
+            extent,
+            material,
+        });
     }
-    let extent = [cursor.u16()?, cursor.u16()?];
-    if extent.contains(&0) {
-        return Err(ProtocolError::InvalidPayload("empty surface quad"));
+    Ok(quads)
+}
+
+fn zigzag_i64(value: i64) -> u64 {
+    ((value as u64) << 1) ^ ((value >> 63) as u64)
+}
+
+fn unzigzag_i64(value: u64) -> i64 {
+    ((value >> 1) as i64) ^ -((value & 1) as i64)
+}
+
+fn push_var_u64(output: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        output.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
     }
-    let material_id = cursor.u16()?;
-    let material = Material::from_id(material_id).ok_or(ProtocolError::UnknownEnum(
-        "material",
-        u64::from(material_id),
-    ))?;
-    Ok(SurfaceQuad {
-        origin,
-        face,
-        extent,
-        material,
-    })
+    output.push(value as u8);
+}
+
+fn decode_var_u64(cursor: &mut Cursor<'_>, max_bytes: usize) -> Result<u64, ProtocolError> {
+    let mut value = 0_u64;
+    for index in 0..max_bytes {
+        let byte = cursor.u8()?;
+        let payload = u64::from(byte & 0x7f);
+        value |= payload << (index * 7);
+        if byte & 0x80 == 0 {
+            if index > 0 && payload == 0 {
+                return Err(ProtocolError::InvalidPayload(
+                    "non-canonical surface varint",
+                ));
+            }
+            return Ok(value);
+        }
+    }
+    Err(ProtocolError::InvalidPayload(
+        "surface varint exceeds its field width",
+    ))
 }
 
 fn encode_range(output: &mut Vec<u8>, range: &std::ops::Range<u32>) {
@@ -4147,6 +4206,58 @@ mod tests {
             "compressed surface result should stay compact"
         );
         assert_eq!(decode_surface_tile_batch_result(&encoded), Ok(response));
+    }
+
+    #[test]
+    fn surface_quad_delta_codec_is_exact_and_rejects_ambiguous_varints() {
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride256, 0, 0);
+        let quads = vec![
+            SurfaceQuad {
+                origin: [i32::MIN, i32::MAX, i32::MIN],
+                face: 0,
+                extent: [1, u16::MAX],
+                material: Material::Stone,
+            },
+            SurfaceQuad {
+                origin: [i32::MAX, i32::MIN, i32::MAX],
+                face: 5,
+                extent: [u16::MAX, 1],
+                material: Material::GlowCrystal,
+            },
+        ];
+        let mut encoded = Vec::new();
+        encode_surface_quads(&mut encoded, coord, &quads);
+        let mut cursor = Cursor::new(&encoded);
+        assert_eq!(
+            decode_surface_quads(&mut cursor, coord, quads.len()),
+            Ok(quads)
+        );
+        assert_eq!(cursor.finish(), Ok(()));
+
+        let mut overlong = Cursor::new(&[0x80; 5]);
+        assert_eq!(
+            decode_surface_quads(&mut overlong, coord, 1),
+            Err(ProtocolError::InvalidPayload(
+                "surface varint exceeds its field width"
+            ))
+        );
+        let mut non_canonical = Cursor::new(&[0x80, 0]);
+        assert_eq!(
+            decode_surface_quads(&mut non_canonical, coord, 1),
+            Err(ProtocolError::InvalidPayload(
+                "non-canonical surface varint"
+            ))
+        );
+        let mut invalid_face = Cursor::new(&[0, 0, 0, 6, 1, 1]);
+        assert_eq!(
+            decode_surface_quads(&mut invalid_face, coord, 1),
+            Err(ProtocolError::InvalidPayload("invalid surface quad face"))
+        );
+        let mut empty_extent = Cursor::new(&[0, 0, 0, 0, 0, 1]);
+        assert_eq!(
+            decode_surface_quads(&mut empty_extent, coord, 1),
+            Err(ProtocolError::InvalidPayload("empty surface quad"))
+        );
     }
 
     #[test]
