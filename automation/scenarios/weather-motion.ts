@@ -1,6 +1,6 @@
 import type { Page } from "playwright";
 import { BrowserCapability } from "../lib/browser.ts";
-import { assertSnapshotSchema, SNAPSHOT, snapshotValue } from "../lib/engine.ts";
+import { type EngineClient, SNAPSHOT, snapshotValue } from "../lib/engine.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { startWorldStack } from "../lib/world.ts";
 
@@ -85,68 +85,43 @@ function median(values: readonly number[]): number {
   return sorted[Math.floor(sorted.length / 2)] ?? 0;
 }
 
-async function waitForEngine(page: Page): Promise<readonly number[]> {
-  await page.waitForFunction(
-    () => typeof globalThis.__VOXELS__?.snapshot === "function",
-    undefined,
-    { timeout: 20_000 },
+async function waitForEngine(engine: EngineClient): Promise<readonly number[]> {
+  return engine.waitForSnapshot(
+    (snapshot) =>
+      snapshotValue(snapshot, "allLodsReady") === 1 &&
+      snapshotValue(snapshot, "pendingJobs") === 0 &&
+      snapshotValue(snapshot, "residentChunks") > 0,
+    {
+      timeoutMs: 60_000,
+      intervalMs: 50,
+      description: "weather motion fixture did not settle",
+    },
   );
-  const deadline = performance.now() + 60_000;
-  let latest: readonly number[] = [];
-  while (performance.now() < deadline) {
-    latest = assertSnapshotSchema(await page.evaluate(() => globalThis.__VOXELS__!.snapshot()));
-    if (
-      snapshotValue(latest, "allLodsReady") === 1 &&
-      snapshotValue(latest, "pendingJobs") === 0 &&
-      snapshotValue(latest, "residentChunks") > 0
-    ) {
-      return latest;
-    }
-    await page.waitForTimeout(50);
-  }
-  throw new Error(`weather motion fixture did not settle: ${JSON.stringify(latest)}`);
 }
 
 async function waitForWeatherFraction(
-  page: Page,
+  engine: EngineClient,
   target: number,
   tolerance = 0.008,
 ): Promise<readonly number[]> {
-  const deadline = performance.now() + WEATHER_CYCLE_SECONDS * 1_100;
-  while (performance.now() < deadline) {
-    const snapshot = assertSnapshotSchema(
-      await page.evaluate(() => globalThis.__VOXELS__!.snapshot()),
-    );
-    const distance = Math.abs(snapshotValue(snapshot, "weatherFraction") - target);
-    if (Math.min(distance, 1 - distance) <= tolerance) return snapshot;
-    await page.waitForTimeout(25);
-  }
-  throw new Error(`timed out waiting for weather fraction ${target}`);
+  return engine.waitForSnapshot(
+    (snapshot) => {
+      const distance = Math.abs(snapshotValue(snapshot, "weatherFraction") - target);
+      return Math.min(distance, 1 - distance) <= tolerance;
+    },
+    {
+      timeoutMs: WEATHER_CYCLE_SECONDS * 1_100,
+      description: `timed out waiting for weather fraction ${target}`,
+    },
+  );
 }
 
-async function setCameraLook(page: Page, targetYaw: number, targetPitch: number): Promise<void> {
-  const sensitivity = 0.0022;
-  const current = await page.evaluate(() => globalThis.__VOXELS__!.snapshot());
-  const wrappedYawDelta = Math.atan2(
-    Math.sin(targetYaw - snapshotValue(current, "yaw")),
-    Math.cos(targetYaw - snapshotValue(current, "yaw")),
-  );
-  await page.evaluate(({ deltaX, deltaY }) => globalThis.__VOXELS__!.look(deltaX, deltaY), {
-    deltaX: wrappedYawDelta / sensitivity,
-    deltaY: (snapshotValue(current, "pitch") - targetPitch) / sensitivity,
-  });
-  await page.waitForFunction(
-    async ({ yaw, pitch, yawIndex, pitchIndex }) => {
-      const snapshot = await globalThis.__VOXELS__!.snapshot();
-      const currentYaw = snapshot[yawIndex];
-      const currentPitch = snapshot[pitchIndex];
-      if (currentYaw === undefined || currentPitch === undefined) return false;
-      const yawError = Math.atan2(Math.sin(currentYaw - yaw), Math.cos(currentYaw - yaw));
-      return Math.abs(yawError) < 0.001 && Math.abs(currentPitch - pitch) < 0.001;
-    },
-    { yaw: targetYaw, pitch: targetPitch, yawIndex: SNAPSHOT.yaw, pitchIndex: SNAPSHOT.pitch },
-    { timeout: 5_000 },
-  );
+async function setCameraLook(
+  engine: EngineClient,
+  targetYaw: number,
+  targetPitch: number,
+): Promise<void> {
+  await engine.setCameraLook(targetYaw, targetPitch);
 }
 
 async function captureBurst(
@@ -637,16 +612,17 @@ async function runWeatherMotion(context: ScenarioContext, arguments_: readonly s
     ...world.clientRoute,
   });
   const { page } = viewport;
-  const settled = await waitForEngine(page);
+  const { engine } = viewport;
+  const settled = await waitForEngine(engine);
 
   const baselineCamera = { yaw: 0.35, pitch: 0.32 };
   const rotatedCamera = { yaw: 0.39, pitch: 0.32 };
-  await waitForWeatherFraction(page, 0.32);
-  await setCameraLook(page, baselineCamera.yaw, baselineCamera.pitch);
+  await waitForWeatherFraction(engine, 0.32);
+  await setCameraLook(engine, baselineCamera.yaw, baselineCamera.pitch);
   const cloudBaseline = await captureBurst(context, page, 5, 18, "cloud-baseline");
-  await setCameraLook(page, rotatedCamera.yaw, rotatedCamera.pitch);
+  await setCameraLook(engine, rotatedCamera.yaw, rotatedCamera.pitch);
   const cloudRotated = await captureBurst(context, page, 5, 18, "cloud-rotated");
-  await setCameraLook(page, baselineCamera.yaw, baselineCamera.pitch);
+  await setCameraLook(engine, baselineCamera.yaw, baselineCamera.pitch);
   const cloudReturned = await captureBurst(context, page, 5, 18, "cloud-returned");
   const cloud = await analyzeCloudRotation(page, cloudBaseline, cloudRotated, cloudReturned, {
     baseline: baselineCamera,
@@ -655,14 +631,12 @@ async function runWeatherMotion(context: ScenarioContext, arguments_: readonly s
 
   let rain: Awaited<ReturnType<typeof analyzeRainMotion>> | undefined;
   if (!cloudLayeringOnly) {
-    await waitForWeatherFraction(page, 0.5);
-    await setCameraLook(page, 0.35, 0.05);
+    await waitForWeatherFraction(engine, 0.5);
+    await setCameraLook(engine, 0.35, 0.05);
     const rainFrames = await captureBurst(context, page, 10, 28, "rain");
     rain = await analyzeRainMotion(page, rainFrames);
   }
-  const finalSnapshot = assertSnapshotSchema(
-    await page.evaluate(() => globalThis.__VOXELS__!.snapshot()),
-  );
+  const finalSnapshot = await engine.snapshot();
 
   const correlatedRainPairs = rain?.pairs.filter((pair) => pair.score >= 0.08) ?? [];
   // The analysis samples every fourth pixel. Displacements below one sampled interval per

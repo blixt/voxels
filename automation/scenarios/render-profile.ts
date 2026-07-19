@@ -4,7 +4,7 @@ import path from "node:path";
 import type { CDPSession, Page } from "playwright";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import { BrowserCapability, chromeWebGpuLaunchOptions } from "../lib/browser.ts";
-import { SNAPSHOT, snapshotValue } from "../lib/engine.ts";
+import { type EngineClient, snapshotValue } from "../lib/engine.ts";
 import {
   captureRenderSnapshot,
   sampleRenderSnapshots,
@@ -93,36 +93,30 @@ function requiredGpu(distribution: RenderPhaseSummary["gpu"]["totalMs"], label: 
 
 async function setMaterialDetail(
   page: Page,
+  engine: EngineClient,
   enabled: boolean,
   viewportWidth: number,
 ): Promise<void> {
-  const current = await page.evaluate(
-    (index) => globalThis.__VOXELS__!.snapshot().then((snapshot) => snapshot[index] === 1),
-    SNAPSHOT.materialDetail,
-  );
+  const current = (await engine.value("materialDetail")) === 1;
   if (current === enabled) return;
   await page.keyboard.press("F3");
   await page.waitForTimeout(200);
   // Material detail is the eighth Rust-owned feature row. The click targets the toggle,
   // exercising the same canvas hit-testing path as a human rather than a JavaScript render option.
   await page.mouse.click(viewportWidth - 57, 607);
-  await page.waitForFunction(
-    async ({ index, expected }) => {
-      const snapshot = await globalThis.__VOXELS__!.snapshot();
-      return (snapshot[index] === 1) === expected;
-    },
-    { index: SNAPSHOT.materialDetail, expected: enabled },
-    { timeout: 5_000 },
+  await engine.waitForSnapshot(
+    (snapshot) => (snapshotValue(snapshot, "materialDetail") === 1) === enabled,
+    { description: `material detail did not become ${enabled ? "enabled" : "disabled"}` },
   );
   await page.keyboard.press("F3");
   await page.waitForTimeout(800);
 }
 
-async function materialDetailProfile(page: Page, viewportWidth: number) {
-  await setMaterialDetail(page, false, viewportWidth);
-  const off = summarizeRenderPhase(await sampleRenderSnapshots(page, 5_000));
-  await setMaterialDetail(page, true, viewportWidth);
-  const on = summarizeRenderPhase(await sampleRenderSnapshots(page, 5_000));
+async function materialDetailProfile(page: Page, engine: EngineClient, viewportWidth: number) {
+  await setMaterialDetail(page, engine, false, viewportWidth);
+  const off = summarizeRenderPhase(await sampleRenderSnapshots(engine, 5_000));
+  await setMaterialDetail(page, engine, true, viewportWidth);
+  const on = summarizeRenderPhase(await sampleRenderSnapshots(engine, 5_000));
   const offWorld = requiredGpu(off.gpu.worldMs, "material detail off world");
   const onWorld = requiredGpu(on.gpu.worldMs, "material detail on world");
   const offTotal = requiredGpu(off.gpu.totalMs, "material detail off total");
@@ -167,18 +161,17 @@ async function materialDetailProfile(page: Page, viewportWidth: number) {
   return result;
 }
 
-async function waitForDayFraction(page: Page, target: number): Promise<void> {
-  const deadline = performance.now() + 60_000;
-  while (performance.now() < deadline) {
-    const snapshot = await page.evaluate(() => globalThis.__VOXELS__!.snapshot());
-    const distance = Math.abs(snapshotValue(snapshot, "dayFraction") - target);
-    if (Math.min(distance, 1 - distance) <= 0.012) return;
-    await page.waitForTimeout(50);
-  }
-  throw new Error(`timed out waiting for day fraction ${target}`);
+async function waitForDayFraction(engine: EngineClient, target: number): Promise<void> {
+  await engine.waitForSnapshot(
+    (snapshot) => {
+      const distance = Math.abs(snapshotValue(snapshot, "dayFraction") - target);
+      return Math.min(distance, 1 - distance) <= 0.012;
+    },
+    { timeoutMs: 60_000, intervalMs: 50, description: `day fraction did not reach ${target}` },
+  );
 }
 
-async function atmosphereProfile(page: Page, context: ScenarioContext) {
+async function atmosphereProfile(page: Page, engine: EngineClient, context: ScenarioContext) {
   const anchors = [
     ["midnight", 0.0],
     ["dawn", 0.235],
@@ -189,11 +182,11 @@ async function atmosphereProfile(page: Page, context: ScenarioContext) {
   type AnchorName = (typeof anchors)[number][0];
   const phases: Partial<Record<AnchorName, RenderPhaseSummary>> = {};
   for (const [name, dayFraction] of anchors) {
-    await waitForDayFraction(page, dayFraction);
+    await waitForDayFraction(engine, dayFraction);
     const screenshot = context.artifacts.resolve(`atmosphere-${name}.png`);
     await page.screenshot({ path: screenshot });
     context.artifacts.record(`atmosphere ${name}`, screenshot, "image/png");
-    phases[name] = summarizeRenderPhase(await sampleRenderSnapshots(page, 800));
+    phases[name] = summarizeRenderPhase(await sampleRenderSnapshots(engine, 800));
   }
 
   const phase = (name: AnchorName): RenderPhaseSummary => {
@@ -274,18 +267,17 @@ async function atmosphereProfile(page: Page, context: ScenarioContext) {
   return phases;
 }
 
-async function waitForWeatherFraction(page: Page, target: number): Promise<void> {
-  const deadline = performance.now() + 60_000;
-  while (performance.now() < deadline) {
-    const snapshot = await page.evaluate(() => globalThis.__VOXELS__!.snapshot());
-    const distance = Math.abs(snapshotValue(snapshot, "weatherFraction") - target);
-    if (Math.min(distance, 1 - distance) <= 0.012) return;
-    await page.waitForTimeout(50);
-  }
-  throw new Error(`timed out waiting for weather fraction ${target}`);
+async function waitForWeatherFraction(engine: EngineClient, target: number): Promise<void> {
+  await engine.waitForSnapshot(
+    (snapshot) => {
+      const distance = Math.abs(snapshotValue(snapshot, "weatherFraction") - target);
+      return Math.min(distance, 1 - distance) <= 0.012;
+    },
+    { timeoutMs: 60_000, intervalMs: 50, description: `weather fraction did not reach ${target}` },
+  );
 }
 
-async function weatherProfile(page: Page, context: ScenarioContext) {
+async function weatherProfile(page: Page, engine: EngineClient, context: ScenarioContext) {
   const anchors = [
     ["clear", 0.08],
     ["cloudy", 0.23],
@@ -297,11 +289,11 @@ async function weatherProfile(page: Page, context: ScenarioContext) {
   type AnchorName = (typeof anchors)[number][0];
   const phases: Partial<Record<AnchorName, RenderPhaseSummary>> = {};
   for (const [name, weatherFraction] of anchors) {
-    await waitForWeatherFraction(page, weatherFraction);
+    await waitForWeatherFraction(engine, weatherFraction);
     const screenshot = context.artifacts.resolve(`weather-${name}.png`);
     await page.screenshot({ path: screenshot });
     context.artifacts.record(`weather ${name}`, screenshot, "image/png");
-    phases[name] = summarizeRenderPhase(await sampleRenderSnapshots(page, 800));
+    phases[name] = summarizeRenderPhase(await sampleRenderSnapshots(engine, 800));
   }
 
   const phase = (name: AnchorName): RenderPhaseSummary => {
@@ -357,15 +349,15 @@ async function weatherProfile(page: Page, context: ScenarioContext) {
   return phases;
 }
 
-async function sustainedProfile(page: Page) {
-  await page.evaluate(() => globalThis.__VOXELS__!.profile(1));
+async function sustainedProfile(engine: EngineClient) {
+  await engine.startProfile(1);
   const captures: RenderSnapshotCapture[] = [];
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
-    const next = await captureRenderSnapshot(page);
+    const next = await captureRenderSnapshot(engine);
     captures.push(next);
     if (snapshotValue(next.snapshot, "profileComplete") === 1) break;
-    await page.waitForTimeout(250);
+    await engine.wait(250);
   }
   const latest = captures.at(-1)?.snapshot;
   if (latest === undefined || snapshotValue(latest, "profileComplete") !== 1) {
@@ -436,49 +428,13 @@ async function sustainedProfile(page: Page) {
   return result;
 }
 
-async function waitForEngine(page: Page): Promise<readonly number[]> {
-  await page.waitForFunction(() => typeof globalThis.__VOXELS__?.snapshot === "function", null, {
-    timeout: 20_000,
-  });
-  const deadline = Date.now() + 60_000;
-  let lastSnapshot: readonly number[] = [];
-  while (Date.now() < deadline) {
-    const snapshot = await page.evaluate(() => globalThis.__VOXELS__!.snapshot());
-    lastSnapshot = snapshot;
-    if (
+async function waitForEngine(engine: EngineClient): Promise<readonly number[]> {
+  return engine.waitForSnapshot(
+    (snapshot) =>
       snapshotValue(snapshot, "quads") > 0 &&
       snapshotValue(snapshot, "residentChunks") > 0 &&
-      snapshotValue(snapshot, "pendingJobs") === 0
-    ) {
-      return snapshot;
-    }
-    await page.waitForTimeout(50);
-  }
-  throw new Error(`release engine did not settle: ${JSON.stringify(lastSnapshot)}`);
-}
-
-async function setCameraLook(page: Page, targetYaw: number, targetPitch: number): Promise<void> {
-  const sensitivity = 0.0022;
-  const current = await page.evaluate(() => globalThis.__VOXELS__!.snapshot());
-  const wrappedYawDelta = Math.atan2(
-    Math.sin(targetYaw - snapshotValue(current, "yaw")),
-    Math.cos(targetYaw - snapshotValue(current, "yaw")),
-  );
-  await page.evaluate(({ deltaX, deltaY }) => globalThis.__VOXELS__!.look(deltaX, deltaY), {
-    deltaX: wrappedYawDelta / sensitivity,
-    deltaY: (snapshotValue(current, "pitch") - targetPitch) / sensitivity,
-  });
-  await page.waitForFunction(
-    async ({ yaw, pitch, yawIndex, pitchIndex }) => {
-      const snapshot = await globalThis.__VOXELS__!.snapshot();
-      const currentYaw = snapshot[yawIndex];
-      const currentPitch = snapshot[pitchIndex];
-      if (currentYaw === undefined || currentPitch === undefined) return false;
-      const yawError = Math.atan2(Math.sin(currentYaw - yaw), Math.cos(currentYaw - yaw));
-      return Math.abs(yawError) < 0.001 && Math.abs(currentPitch - pitch) < 0.001;
-    },
-    { yaw: targetYaw, pitch: targetPitch, yawIndex: SNAPSHOT.yaw, pitchIndex: SNAPSHOT.pitch },
-    { timeout: 5_000 },
+      snapshotValue(snapshot, "pendingJobs") === 0,
+    { timeoutMs: 60_000, intervalMs: 50, description: "release engine did not settle" },
   );
 }
 
@@ -605,10 +561,10 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
     deviceScaleFactor: options.deviceScaleFactor,
     ...world.clientRoute,
   });
-  const { page } = viewport;
-  await waitForEngine(page);
+  const { engine, page } = viewport;
+  await waitForEngine(engine);
   if (options.cameraLook !== undefined) {
-    await setCameraLook(page, options.cameraLook[0], options.cameraLook[1]);
+    await engine.setCameraLook(options.cameraLook[0], options.cameraLook[1]);
   }
   const settledMilliseconds = performance.now() - navigationStarted;
   let traceSession = options.trace ? await startChromiumTrace(page.context(), page) : undefined;
@@ -624,25 +580,27 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
   let scenarios: Readonly<Record<string, unknown>>;
   if (options.mode === "stationary") {
     scenarios = {
-      steady: summarizeRenderPhase(await sampleRenderSnapshots(page, 4_000)),
+      steady: summarizeRenderPhase(await sampleRenderSnapshots(engine, 4_000)),
     };
   } else if (options.mode === "sustained") {
-    scenarios = { sustained: await sustainedProfile(page) };
+    scenarios = { sustained: await sustainedProfile(engine) };
   } else if (options.mode === "materials") {
-    scenarios = { materials: await materialDetailProfile(page, options.viewport.width) };
+    scenarios = {
+      materials: await materialDetailProfile(page, engine, options.viewport.width),
+    };
   } else if (options.mode === "atmosphere") {
-    scenarios = { atmosphere: await atmosphereProfile(page, context) };
+    scenarios = { atmosphere: await atmosphereProfile(page, engine, context) };
   } else if (options.mode === "weather") {
-    scenarios = { weather: await weatherProfile(page, context) };
+    scenarios = { weather: await weatherProfile(page, engine, context) };
   } else {
     await mark(page, "voxels:steady:start");
-    const steady = summarizeRenderPhase(await sampleRenderSnapshots(page, 4_000));
+    const steady = summarizeRenderPhase(await sampleRenderSnapshots(engine, 4_000));
     await mark(page, "voxels:steady:end");
     await mark(page, "voxels:traversal:start");
     await page.keyboard.down("KeyW");
     let traversalSamples: RenderSnapshotCapture[];
     try {
-      traversalSamples = await sampleRenderSnapshots(page, 6_000);
+      traversalSamples = await sampleRenderSnapshots(engine, 6_000);
     } finally {
       await page.keyboard.up("KeyW");
     }
@@ -653,7 +611,7 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
   if (options.screenshot) {
     await viewport.screenshot("render profile", { filename: "render-profile.png" });
   }
-  const finalSnapshot = await page.evaluate(() => globalThis.__VOXELS__!.snapshot());
+  const finalSnapshot = await engine.snapshot();
 
   browser.assertHealthy();
   if (traceSession !== undefined) {

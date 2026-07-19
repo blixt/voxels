@@ -1,6 +1,5 @@
-import type { Page } from "playwright";
 import {
-  assertSnapshotSchema,
+  type EngineClient,
   FRAME_SAMPLE_WIDTH,
   gpuSampleStart,
   GPU_SAMPLE_WIDTH,
@@ -57,10 +56,8 @@ function summary(values: readonly number[]): DistributionSummary {
   };
 }
 
-export async function captureRenderSnapshot(page: Page): Promise<RenderSnapshotCapture> {
-  const snapshot = assertSnapshotSchema(
-    await page.evaluate(() => globalThis.__VOXELS__!.snapshot()),
-  );
+export async function captureRenderSnapshot(engine: EngineClient): Promise<RenderSnapshotCapture> {
+  const snapshot = await engine.snapshot();
   const samples: number[][] = [];
   const count = snapshotValue(snapshot, "sampleCount");
   for (let index = 0; index < count; index += 1) {
@@ -100,15 +97,15 @@ export async function captureRenderSnapshot(page: Page): Promise<RenderSnapshotC
 }
 
 export async function sampleRenderSnapshots(
-  page: Page,
+  engine: EngineClient,
   durationMs: number,
   intervalMs = 250,
 ): Promise<RenderSnapshotCapture[]> {
   const captures: RenderSnapshotCapture[] = [];
   const deadline = Date.now() + durationMs;
   while (Date.now() < deadline) {
-    captures.push(await captureRenderSnapshot(page));
-    if (Date.now() < deadline) await page.waitForTimeout(intervalMs);
+    captures.push(await captureRenderSnapshot(engine));
+    if (Date.now() < deadline) await engine.wait(intervalMs);
   }
   return captures;
 }

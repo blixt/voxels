@@ -3,7 +3,7 @@ import type { Page } from "playwright";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import { BrowserCapability, chromeWebGpuLaunchOptions } from "../lib/browser.ts";
 import {
-  assertSnapshotSchema,
+  type EngineClient,
   FRAME_SAMPLE_WIDTH,
   gpuSampleStart,
   GPU_SAMPLE_WIDTH,
@@ -94,84 +94,60 @@ function resetTimings(timings: LodTimings): void {
 
 async function sampleStablePerformance(
   page: Page,
+  engine: EngineClient,
   timings: LodTimings,
   duration: number,
 ): Promise<void> {
-  await readSnapshot(page, timings);
+  await readSnapshot(engine, timings);
   resetTimings(timings);
   const deadline = Date.now() + duration;
   while (Date.now() < deadline) {
     await page.waitForTimeout(100);
-    await readSnapshot(page, timings);
+    await readSnapshot(engine, timings);
   }
 }
 
-async function readSnapshot(page: Page, timings: LodTimings): Promise<readonly number[]> {
-  const snapshot = assertSnapshotSchema(
-    await page.evaluate(() => globalThis.__VOXELS__!.snapshot()),
-  );
+async function readSnapshot(engine: EngineClient, timings: LodTimings): Promise<readonly number[]> {
+  const snapshot = await engine.snapshot();
   collectTiming(snapshot, timings);
   return snapshot;
 }
 
-async function waitForEngine(page: Page, timings: LodTimings): Promise<readonly number[]> {
-  await page.waitForFunction(() => typeof globalThis.__VOXELS__?.snapshot === "function", null, {
-    timeout: 20_000,
-  });
-  const deadline = Date.now() + 60_000;
-  let latest: readonly number[] = [];
-  while (Date.now() < deadline) {
-    latest = await readSnapshot(page, timings);
-    if (
-      snapshotValue(latest, "quads") > 0 &&
-      snapshotValue(latest, "pendingJobs") === 0 &&
-      snapshotValue(latest, "surfaceInFlight") === 0 &&
-      snapshotValue(latest, "allLodsReady") === 1 &&
-      snapshotValue(latest, "lodTransitionQuads") > 0
-    ) {
-      return latest;
-    }
-    await page.waitForTimeout(25);
-  }
-  throw new Error(`LOD browser fixture did not settle: ${JSON.stringify(latest)}`);
+async function waitForEngine(
+  engine: EngineClient,
+  timings: LodTimings,
+): Promise<readonly number[]> {
+  return engine.waitForSnapshot(
+    (snapshot) =>
+      snapshotValue(snapshot, "quads") > 0 &&
+      snapshotValue(snapshot, "pendingJobs") === 0 &&
+      snapshotValue(snapshot, "surfaceInFlight") === 0 &&
+      snapshotValue(snapshot, "allLodsReady") === 1 &&
+      snapshotValue(snapshot, "lodTransitionQuads") > 0,
+    {
+      timeoutMs: 60_000,
+      description: "LOD browser fixture did not settle",
+      onSnapshot: (snapshot) => collectTiming(snapshot, timings),
+    },
+  );
 }
 
 async function setCameraLook(
-  page: Page,
+  engine: EngineClient,
   targetYaw: number,
   targetPitch: number,
   timings: LodTimings,
 ): Promise<readonly number[]> {
-  const sensitivity = 0.0022;
-  const current = await readSnapshot(page, timings);
-  const yawDelta = Math.atan2(
-    Math.sin(targetYaw - snapshotValue(current, "yaw")),
-    Math.cos(targetYaw - snapshotValue(current, "yaw")),
-  );
-  await page.evaluate(({ x, y }) => globalThis.__VOXELS__!.look(x, y), {
-    x: yawDelta / sensitivity,
-    y: (snapshotValue(current, "pitch") - targetPitch) / sensitivity,
+  return engine.setCameraLook(targetYaw, targetPitch, {
+    intervalMs: 10,
+    description: "camera look did not reach the requested regression pose",
+    onSnapshot: (snapshot) => collectTiming(snapshot, timings),
   });
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    const snapshot = await readSnapshot(page, timings);
-    const yawError = Math.atan2(
-      Math.sin(snapshotValue(snapshot, "yaw") - targetYaw),
-      Math.cos(snapshotValue(snapshot, "yaw") - targetYaw),
-    );
-    if (
-      Math.abs(yawError) < 0.001 &&
-      Math.abs(snapshotValue(snapshot, "pitch") - targetPitch) < 0.001
-    ) {
-      return snapshot;
-    }
-    await page.waitForTimeout(10);
-  }
-  throw new Error("camera look did not reach the requested regression pose");
 }
 
 async function waitForCentreChange(
   page: Page,
+  engine: EngineClient,
   initialCentres: BoundaryCentres,
   outboundKey: string,
   timings: LodTimings,
@@ -180,7 +156,7 @@ async function waitForCentreChange(
   await page.keyboard.down(outboundKey);
   try {
     while (Date.now() < deadline) {
-      const snapshot = await readSnapshot(page, timings);
+      const snapshot = await readSnapshot(engine, timings);
       if (!sameCentres(boundaryCentres(snapshot), initialCentres)) return snapshot;
       await page.waitForTimeout(8);
     }
@@ -192,6 +168,7 @@ async function waitForCentreChange(
 
 async function returnToPose(
   page: Page,
+  engine: EngineClient,
   target: Vector3,
   initialCentres: BoundaryCentres,
   timings: LodTimings,
@@ -207,7 +184,7 @@ async function returnToPose(
     try {
       const deadline = Date.now() + duration;
       while (Date.now() < deadline) {
-        await readSnapshot(page, timings);
+        await readSnapshot(engine, timings);
         await page.waitForTimeout(16);
       }
     } finally {
@@ -215,14 +192,14 @@ async function returnToPose(
     }
   };
   await brake(300);
-  let latest = await readSnapshot(page, timings);
+  let latest = await readSnapshot(engine, timings);
   for (let correction = 0; correction < 80; correction += 1) {
     const position = cameraPosition(latest);
     const distance = planarDistance(position, target);
     correctionHistory.push({ correction, distance, position });
     if (distance <= 0.008) {
       await brake(200);
-      latest = await readSnapshot(page, timings);
+      latest = await readSnapshot(engine, timings);
       if (planarDistance(cameraPosition(latest), target) <= 0.015) break;
       continue;
     }
@@ -248,14 +225,14 @@ async function returnToPose(
     try {
       const deadline = Date.now() + Math.min(40, Math.max(8, distance * 80));
       while (Date.now() < deadline) {
-        latest = await readSnapshot(page, timings);
+        latest = await readSnapshot(engine, timings);
         await page.waitForTimeout(4);
       }
     } finally {
       await page.keyboard.up(key);
     }
     await brake(48);
-    latest = await readSnapshot(page, timings);
+    latest = await readSnapshot(engine, timings);
   }
   const error = planarDistance(cameraPosition(latest), target);
   if (error > 0.025) {
@@ -273,6 +250,7 @@ async function returnToPose(
 
 async function waitForStableFrame(
   page: Page,
+  engine: EngineClient,
   expectedCentres: BoundaryCentres,
   timings: LodTimings,
 ): Promise<readonly number[]> {
@@ -281,7 +259,7 @@ async function waitForStableFrame(
   let stable = 0;
   const deadline = Date.now() + 10_000;
   while (stable < 12 && Date.now() < deadline) {
-    latest = await readSnapshot(page, timings);
+    latest = await readSnapshot(engine, timings);
     const position = cameraPosition(latest);
     const settled =
       sameCentres(boundaryCentres(latest), expectedCentres) &&
@@ -306,6 +284,7 @@ async function waitForStableFrame(
 
 async function waitForStableChangedFrame(
   page: Page,
+  engine: EngineClient,
   initialCentres: BoundaryCentres,
   timings: LodTimings,
 ): Promise<readonly number[]> {
@@ -316,7 +295,7 @@ async function waitForStableChangedFrame(
   let stable = 0;
   const deadline = Date.now() + 10_000;
   while (stable < 12 && Date.now() < deadline) {
-    latest = await readSnapshot(page, timings);
+    latest = await readSnapshot(engine, timings);
     latestCentres = boundaryCentres(latest);
     const position = cameraPosition(latest);
     const settled =
@@ -784,20 +763,20 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     videoFilename: "transition-raw.webm",
     ...world.clientRoute,
   });
-  const { page } = viewport;
+  const { engine, page } = viewport;
   const videoStartedAtMs = Date.now();
-  let beforeSnapshot = await waitForEngine(page, timings);
-  beforeSnapshot = await setCameraLook(page, options.look[0], options.look[1], timings);
+  let beforeSnapshot = await waitForEngine(engine, timings);
+  beforeSnapshot = await setCameraLook(engine, options.look[0], options.look[1], timings);
   if (options.stepOffPillar) {
     await page.keyboard.down("KeyD");
     await page.waitForTimeout(160);
     await page.keyboard.up("KeyD");
   }
   const initialCentres = boundaryCentres(beforeSnapshot);
-  beforeSnapshot = await waitForStableFrame(page, initialCentres, timings);
+  beforeSnapshot = await waitForStableFrame(page, engine, initialCentres, timings);
   if (options.openWorldLab) {
     await page.keyboard.press("F3");
-    beforeSnapshot = await waitForStableFrame(page, initialCentres, timings);
+    beforeSnapshot = await waitForStableFrame(page, engine, initialCentres, timings);
   }
   const beforePose = cameraPosition(beforeSnapshot);
   const before = await page.screenshot();
@@ -816,14 +795,14 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       for (const [index, offset] of [-0.16, -0.08, 0.08, 0.16].entries()) {
         await page.keyboard.press("F3");
         beforeSnapshot = await setCameraLook(
-          page,
+          engine,
           options.look[0] + offset,
           options.look[1],
           timings,
         );
-        beforeSnapshot = await waitForStableFrame(page, initialCentres, timings);
+        beforeSnapshot = await waitForStableFrame(page, engine, initialCentres, timings);
         await page.keyboard.press("F3");
-        beforeSnapshot = await waitForStableFrame(page, initialCentres, timings);
+        beforeSnapshot = await waitForStableFrame(page, engine, initialCentres, timings);
         const screenshot = await page.screenshot();
         await context.artifacts.write(
           `LOD heading ${index + 1}`,
@@ -837,7 +816,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
         });
       }
     }
-    await sampleStablePerformance(page, timings, 2_000);
+    await sampleStablePerformance(page, engine, timings, 2_000);
     const image = headingSamples.reduce(
       (worst, sample) =>
         sample.image.largestCoolExposureComponent > worst.largestCoolExposureComponent
@@ -899,20 +878,26 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     const desiredXDirection = Math.sign(cameraVoxelX - firstCentre[0]) || 1;
     const forwardXDirection = Math.sign(Math.sin(snapshotValue(beforeSnapshot, "yaw"))) || 1;
     const outboundKey = desiredXDirection === forwardXDirection ? "KeyW" : "KeyS";
-    const crossedSnapshot = await waitForCentreChange(page, initialCentres, outboundKey, timings);
+    const crossedSnapshot = await waitForCentreChange(
+      page,
+      engine,
+      initialCentres,
+      outboundKey,
+      timings,
+    );
     const crossedPose = cameraPosition(crossedSnapshot);
     if (planarDistance(crossedPose, beforePose) <= 0) {
       throw new Error("LOD focus changed without measurable player movement");
     }
-    await returnToPose(page, beforePose, initialCentres, timings);
-    const afterSnapshot = await waitForStableChangedFrame(page, initialCentres, timings);
+    await returnToPose(page, engine, beforePose, initialCentres, timings);
+    const afterSnapshot = await waitForStableChangedFrame(page, engine, initialCentres, timings);
     const afterCentres = boundaryCentres(afterSnapshot);
     const afterPose = cameraPosition(afterSnapshot);
     const after = await page.screenshot();
     await context.artifacts.write("LOD after", "after.png", after, "image/png");
     const afterVideoSeconds = (Date.now() - videoStartedAtMs) / 1_000;
     if (options.recordVideo) await page.waitForTimeout(1_500);
-    await sampleStablePerformance(page, timings, 2_000);
+    await sampleStablePerformance(page, engine, timings, 2_000);
     const image = await compareScreenshots(page, before, after);
     const performance = summarizePerformance(timings);
     const planarPoseErrorMetres = planarDistance(beforePose, afterPose);

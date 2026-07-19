@@ -1,6 +1,5 @@
-import type { Page } from "playwright";
 import { BrowserCapability } from "../lib/browser.ts";
-import { snapshotValue } from "../lib/engine.ts";
+import { type EngineClient, snapshotValue } from "../lib/engine.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { startWorldStack } from "../lib/world.ts";
 
@@ -10,31 +9,13 @@ function near(value: number, target: number, tolerance = 0.002): boolean {
   return Math.abs(value - target) <= tolerance;
 }
 
-async function waitForSnapshot(
-  page: Page,
-  predicate: (snapshot: readonly number[]) => boolean,
-  description: string,
-  timeoutMs = 5_000,
-): Promise<readonly number[]> {
-  const deadline = Date.now() + timeoutMs;
-  let latest: readonly number[] = [];
-  while (Date.now() < deadline) {
-    latest = await page.evaluate(() => globalThis.__VOXELS__!.snapshot());
-    if (predicate(latest)) return latest;
-    await page.waitForTimeout(25);
-  }
-  throw new Error(`${description}: ${JSON.stringify(latest)}`);
-}
-
-async function waitForSettledWorld(page: Page): Promise<readonly number[]> {
-  return waitForSnapshot(
-    page,
+async function waitForSettledWorld(engine: EngineClient): Promise<readonly number[]> {
+  return engine.waitForSnapshot(
     (snapshot) =>
       snapshotValue(snapshot, "allLodsReady") === 1 &&
       snapshotValue(snapshot, "pendingJobs") === 0 &&
       snapshotValue(snapshot, "residentChunks") > 0,
-    "World Lab fixture did not settle",
-    60_000,
+    { description: "World Lab fixture did not settle", timeoutMs: 60_000 },
   );
 }
 
@@ -62,7 +43,7 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     ...world.clientRoute,
   });
   const { page } = viewport;
-  const settled = await waitForSettledWorld(page);
+  const settled = await waitForSettledWorld(viewport.engine);
   const expectedYearFraction = 0.5 / world.fixture.daysPerYear;
   const expectedMoonOrbitFraction =
     (0.5 / world.fixture.moonSiderealOrbitDays + world.fixture.moonOrbitPhaseAtWorldEpoch) % 1;
@@ -90,22 +71,20 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
   // Rust owns these hit regions; renderer unit tests cover their responsive layout separately.
   await page.mouse.click(1_044.5, 205); // GOLDEN
   await page.mouse.click(1_198.5, 268); // STORM
-  const overridden = await waitForSnapshot(
-    page,
+  const overridden = await viewport.engine.waitForSnapshot(
     (snapshot) =>
       near(snapshotValue(snapshot, "dayFraction"), 0.72) &&
       near(snapshotValue(snapshot, "localSolarDayFraction"), 0.72) &&
       snapshotValue(snapshot, "sunDirectionX") < -0.95 &&
       near(snapshotValue(snapshot, "twinklePhase"), expectedTwinklePhase, 0.000_01) &&
       near(snapshotValue(snapshot, "weatherFraction"), 0.68),
-    "time/weather override did not reach the renderer",
+    { description: "time/weather override did not reach the renderer" },
   );
 
   await page.mouse.click(1_006, 352);
-  const flying = await waitForSnapshot(
-    page,
+  const flying = await viewport.engine.waitForSnapshot(
     (snapshot) => snapshotValue(snapshot, "creativeFlightActive") === 1,
-    "server-authorized creative flight did not activate",
+    { description: "server-authorized creative flight did not activate" },
   );
   await page.keyboard.press("F3");
   await page.waitForTimeout(100);
@@ -113,28 +92,25 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
   await page.keyboard.down("Space");
   await page.waitForTimeout(350);
   await page.keyboard.up("Space");
-  const ascended = await waitForSnapshot(
-    page,
+  const ascended = await viewport.engine.waitForSnapshot(
     (snapshot) => snapshotValue(snapshot, "cameraY") > initialY + 0.5,
-    "creative-flight ascent did not move the player",
+    { description: "creative-flight ascent did not move the player" },
   );
 
   await page.keyboard.press("F3");
   await page.waitForTimeout(100);
   await page.mouse.click(1_006, 352);
-  await waitForSnapshot(
-    page,
+  await viewport.engine.waitForSnapshot(
     (snapshot) => snapshotValue(snapshot, "creativeFlightActive") === 0,
-    "creative flight did not return to walking",
+    { description: "creative flight did not return to walking" },
   );
   await page.mouse.click(813.5, 205);
   await page.mouse.click(813.5, 268);
-  const restored = await waitForSnapshot(
-    page,
+  const restored = await viewport.engine.waitForSnapshot(
     (snapshot) =>
       near(snapshotValue(snapshot, "dayFraction"), 0.5) &&
       near(snapshotValue(snapshot, "weatherFraction"), 0.08),
-    "server environment did not resume after selecting LIVE",
+    { description: "server environment did not resume after selecting LIVE" },
   );
   browser.assertHealthy();
 

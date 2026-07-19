@@ -32,6 +32,18 @@ export interface SurfaceEditState {
   readonly activationMask: number;
 }
 
+export interface SnapshotWaitOptions {
+  readonly timeoutMs?: number;
+  readonly intervalMs?: number;
+  readonly description?: string;
+  readonly onSnapshot?: (snapshot: readonly number[]) => void;
+}
+
+export interface CameraLookOptions extends SnapshotWaitOptions {
+  readonly sensitivity?: number;
+  readonly tolerance?: number;
+}
+
 export class EngineClient {
   readonly #page: Page;
   #contract: EngineAutomationContract | undefined;
@@ -66,11 +78,70 @@ export class EngineClient {
     return value;
   }
 
+  async wait(milliseconds: number): Promise<void> {
+    await this.#page.waitForTimeout(milliseconds);
+  }
+
+  async waitForSnapshot(
+    predicate: (snapshot: readonly number[]) => boolean,
+    {
+      timeoutMs = 5_000,
+      intervalMs = 25,
+      description = "engine state did not settle",
+      onSnapshot,
+    }: SnapshotWaitOptions = {},
+  ): Promise<readonly number[]> {
+    const deadline = performance.now() + timeoutMs;
+    let latest: readonly number[] = [];
+    while (performance.now() < deadline) {
+      latest = await this.snapshot();
+      onSnapshot?.(latest);
+      if (predicate(latest)) return latest;
+      await this.wait(intervalMs);
+    }
+    throw new Error(`${description}: ${JSON.stringify(latest)}`);
+  }
+
   async look(deltaX: number, deltaY: number): Promise<void> {
     await this.#page.evaluate(([x, y]) => globalThis.__VOXELS__!.look(x, y), [
       deltaX,
       deltaY,
     ] as const);
+  }
+
+  async setCameraLook(
+    targetYaw: number,
+    targetPitch: number,
+    {
+      sensitivity = 0.0022,
+      tolerance = 0.001,
+      description = "camera did not reach the requested look direction",
+      ...waitOptions
+    }: CameraLookOptions = {},
+  ): Promise<readonly number[]> {
+    const current = await this.snapshot();
+    waitOptions.onSnapshot?.(current);
+    const yawDelta = Math.atan2(
+      Math.sin(targetYaw - snapshotValue(current, "yaw")),
+      Math.cos(targetYaw - snapshotValue(current, "yaw")),
+    );
+    await this.look(
+      yawDelta / sensitivity,
+      (snapshotValue(current, "pitch") - targetPitch) / sensitivity,
+    );
+    return this.waitForSnapshot(
+      (snapshot) => {
+        const yawError = Math.atan2(
+          Math.sin(snapshotValue(snapshot, "yaw") - targetYaw),
+          Math.cos(snapshotValue(snapshot, "yaw") - targetYaw),
+        );
+        return (
+          Math.abs(yawError) < tolerance &&
+          Math.abs(snapshotValue(snapshot, "pitch") - targetPitch) < tolerance
+        );
+      },
+      { ...waitOptions, description },
+    );
   }
 
   async startProfile(profileId: number): Promise<void> {
