@@ -82,6 +82,7 @@ export class BrowserCapability {
     readonly filename: string;
   }[] = [];
   readonly #warningPattern: RegExp;
+  #closePromise: Promise<void> | undefined;
 
   private constructor(scenario: ScenarioContext, browser: Browser, warningPattern: RegExp) {
     this.#scenario = scenario;
@@ -135,10 +136,7 @@ export class BrowserCapability {
       recordFailure({ source: "page", page: label, message: error.message });
     });
     page.on("console", (message) => {
-      if (
-        message.type() === "error" ||
-        (message.type() === "warning" && this.#warningPattern.test(message.text()))
-      ) {
+      if (isBrowserConsoleFailure(message.type(), message.text(), this.#warningPattern)) {
         recordFailure({ source: "console", page: label, message: message.text() });
       }
     });
@@ -156,7 +154,12 @@ export class BrowserCapability {
     return browserViewport;
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    this.#closePromise ??= this.#close();
+    return this.#closePromise;
+  }
+
+  async #close(): Promise<void> {
     const errors: unknown[] = [];
     for (const context of this.#contexts.splice(0).toReversed()) {
       try {

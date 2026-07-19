@@ -4,13 +4,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { cpus, platform, release, tmpdir } from "node:os";
 import path from "node:path";
 import { connect } from "node:net";
-import { chromium } from "playwright";
-import type { Browser, Page } from "playwright";
-import {
-  chromeWebGpuLaunchOptions,
-  isBrowserConsoleFailure,
-  reserveEphemeralPort,
-} from "../lib/browser.ts";
+import type { Page } from "playwright";
+import { BrowserCapability, type BrowserFailure, reserveEphemeralPort } from "../lib/browser.ts";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import {
   assertSnapshotSchema,
@@ -218,15 +213,6 @@ async function captureSnapshot(page: Page, frameState: FrameState): Promise<read
   return current;
 }
 
-function observePage(page: Page, label: string, errors: string[]): void {
-  page.on("pageerror", (error) => errors.push(`${label} pageerror: ${error.message}`));
-  page.on("console", (message) => {
-    if (isBrowserConsoleFailure(message.type(), message.text(), FAILURE)) {
-      errors.push(`${label} ${message.type()}: ${message.text()}`);
-    }
-  });
-}
-
 async function turn(
   page: Page,
   radians: number,
@@ -312,7 +298,7 @@ async function runScenario({
   readonly page: Page;
   readonly link: ShapedLink;
   readonly action: (context: BenchmarkActionContext) => unknown;
-  readonly errors: readonly string[];
+  readonly errors: readonly BrowserFailure[];
   readonly timeoutMs?: number;
 }) {
   link.reset();
@@ -386,7 +372,11 @@ async function runScenario({
       `${name} did not reach complete LOD coverage: ${JSON.stringify(samples.at(-1))}`,
     );
   }
-  if (errors.length > 0) throw new Error(errors.join("\n"));
+  if (errors.length > 0) {
+    throw new Error(
+      errors.map((error) => `${error.page} ${error.source}: ${error.message}`).join("\n"),
+    );
+  }
   const measurementStartedMs = markedMeasurementStartedMs ?? actionFinishedMs;
   if (measurementStartedMs === null) throw new Error(`${name} action never started measurement`);
   const final = samples.at(-1);
@@ -689,7 +679,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
   const previousClientConfig = process.env.VOXELS_CLIENT_CONFIG_PATH;
   process.env.VOXELS_CLIENT_CONFIG_PATH = clientConfigPath;
 
-  let browser: Browser | undefined;
+  let browser: BrowserCapability | undefined;
   let previewServer: Awaited<ReturnType<(typeof import("vite-plus"))["preview"]>> | undefined;
   let worldService: ChildProcess | undefined;
   let link: ShapedLink | undefined;
@@ -720,20 +710,23 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
       root: process.cwd(),
       preview: { host: PREVIEW_HOST, port: previewPort, strictPort: true },
     });
-    browser = await chromium.launch(chromeWebGpuLaunchOptions());
+    browser = await BrowserCapability.start(context, { warningPattern: FAILURE });
     const runs: NetworkRun[] = [];
     for (let repetition = 0; repetition < repetitions; repetition += 1) {
-      const errors: string[] = [];
-      const browserContext = await browser.newContext({ viewport: VIEWPORT });
-      const page = await browserContext.newPage();
-      observePage(page, `run-${repetition + 1}`, errors);
+      const viewport = await browser.open({
+        url: "about:blank",
+        label: `run-${repetition + 1}`,
+        viewport: VIEWPORT,
+        engine: false,
+      });
+      const page = viewport.page;
       const url = `http://${PREVIEW_HOST}:${previewPort}/?player=network-bench-${repetition + 1}`;
       runs.push(
         await runScenario({
           name: "cold_spawn",
           page,
           link,
-          errors,
+          errors: viewport.failures,
           action: async () => {
             await page.goto(url, { waitUntil: "domcontentloaded" });
             await waitForSnapshotApi(page);
@@ -745,7 +738,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
           name: "resident_walk",
           page,
           link,
-          errors,
+          errors: viewport.failures,
           // Spawn faces -Z from the exact chunk boundary. Walking backward stays inside the
           // already-resident spawn chunk and is the control for unexpected world traffic.
           action: (context) =>
@@ -757,7 +750,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
           name: "cached_turn_180",
           page,
           link,
-          errors,
+          errors: viewport.failures,
           action: (context) => turn(page, TURN_RADIANS, context),
         }),
       );
@@ -766,23 +759,26 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
           name: "streaming_walk",
           page,
           link,
-          errors,
+          errors: viewport.failures,
           action: (context) =>
             walkDistance(page, STREAMING_WALK_METRES, { ...context, sprint: true }),
         }),
       );
-      await browserContext.close();
+      await viewport.close();
 
-      const pivotErrors: string[] = [];
-      const pivotContext = await browser.newContext({ viewport: VIEWPORT });
-      const pivotPage = await pivotContext.newPage();
-      observePage(pivotPage, `pivot-${repetition + 1}`, pivotErrors);
+      const pivotViewport = await browser.open({
+        url: "about:blank",
+        label: `pivot-${repetition + 1}`,
+        viewport: VIEWPORT,
+        engine: false,
+      });
+      const pivotPage = pivotViewport.page;
       runs.push(
         await runScenario({
           name: "turn_during_spawn",
           page: pivotPage,
           link,
-          errors: pivotErrors,
+          errors: pivotViewport.failures,
           action: async (context) => {
             await pivotPage.goto(
               `http://${PREVIEW_HOST}:${previewPort}/?player=network-pivot-${repetition + 1}`,
@@ -805,7 +801,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
           },
         }),
       );
-      await pivotContext.close();
+      await pivotViewport.close();
     }
 
     const git = {
@@ -820,7 +816,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         platform: `${platform()} ${release()}`,
         cpu: cpus()[0]?.model ?? "unknown",
         logicalCpus: cpus().length,
-        chrome: browser.version(),
+        chrome: browser.version,
         node: process.version,
       },
       world: { source: worldSource },

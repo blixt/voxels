@@ -4,11 +4,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { cpus, platform, release, tmpdir } from "node:os";
 import path from "node:path";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import type { Page } from "playwright";
 import { build, preview } from "vite-plus";
 import {
+  BrowserCapability,
   chromeWebGpuLaunchOptions,
-  isBrowserConsoleFailure,
   reserveEphemeralPort,
 } from "../lib/browser.ts";
 import {
@@ -36,6 +36,7 @@ const EXPECTED_PARTS_PER_AVATAR = 13;
 const FAR_TIER_MINIMUM_METRES = 105;
 const OBSERVER_WALK_METRES = 120;
 const PLAYER_EYE_HEIGHT_METRES = 1.62;
+const BUILDER_DIG_SPACING_VOXELS = 8;
 const VIEWPORT = { width: 960, height: 540 };
 const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 // Six unthrottled WebGPU clients intentionally contend on one local GPU and worker pool. This gate
@@ -63,7 +64,6 @@ interface PlayerIdentity {
 interface MultiplayerPlayer {
   readonly name: string;
   readonly page: Page;
-  readonly context: BrowserContext;
   readonly link: ShapedLink;
   readonly initial: readonly number[];
   readonly identity: PlayerIdentity;
@@ -122,15 +122,6 @@ function frameTimingSummary(values: readonly number[]): FrameTimingSummary {
     above33_33ms: frameMs.filter((value) => value > 33.33).length,
     droppedSamples: snapshotValue(values, "droppedSamples"),
   };
-}
-
-function observePage(page: Page, label: string, errors: string[]): void {
-  page.on("pageerror", (error) => errors.push(`${label} pageerror: ${error.message}`));
-  page.on("console", (message) => {
-    if (isBrowserConsoleFailure(message.type(), message.text(), FAILURE)) {
-      errors.push(`${label} ${message.type()}: ${message.text()}`);
-    }
-  });
 }
 
 async function snapshot(page: Page): Promise<readonly number[]> {
@@ -544,13 +535,11 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
       .replace(/^database = .*$/m, 'database = "world-state.sqlite3"'),
   );
 
-  let browser: Browser | undefined;
+  let browser: BrowserCapability | undefined;
   let previewServer: Awaited<ReturnType<typeof preview>> | undefined;
   let worldService: ChildProcess | undefined;
   const links: ShapedLink[] = [];
-  const contexts: BrowserContext[] = [];
   const worldLogs: string[] = [];
-  const errors: string[] = [];
   try {
     await build({ logLevel: "warn" });
     // Keep the readiness deadline about service startup, not an arbitrary clean Rust compile. This
@@ -575,14 +564,18 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
       logLevel: "warn",
       preview: { host: "127.0.0.1", port: previewPort, strictPort: true },
     });
-    browser = await chromium.launch({
-      ...chromeWebGpuLaunchOptions(),
-      args: [
-        ...(chromeWebGpuLaunchOptions().args ?? []),
-        "--disable-background-timer-throttling",
-        "--disable-backgrounding-occluded-windows",
-        "--disable-renderer-backgrounding",
-      ],
+    const launch = chromeWebGpuLaunchOptions();
+    browser = await BrowserCapability.start(scenario, {
+      warningPattern: FAILURE,
+      launch: {
+        ...launch,
+        args: [
+          ...(launch.args ?? []),
+          "--disable-background-timer-throttling",
+          "--disable-backgrounding-occluded-windows",
+          "--disable-renderer-backgrounding",
+        ],
+      },
     });
 
     const names = ["observer", "builder-1", "builder-2", "builder-3", "builder-4", "builder-5"];
@@ -601,11 +594,6 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     const activeBrowser = browser;
     const players: MultiplayerPlayer[] = await Promise.all(
       names.map(async (name, index) => {
-        const context = await activeBrowser.newContext({
-          viewport: VIEWPORT,
-          deviceScaleFactor: 1,
-        });
-        contexts.push(context);
         const port = required(ports, index, `${name} link port`);
         const configToml = clientSource
           .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${port}${WORLD_PATH}"`)
@@ -613,26 +601,30 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
             /^presence_endpoint = .*$/m,
             `presence_endpoint = "ws://127.0.0.1:${port}${PRESENCE_PATH}"`,
           );
-        await context.route("**/config/client.toml", (route) =>
-          route.fulfill({
-            status: 200,
-            contentType: "text/plain; charset=utf-8",
-            headers: { "Cache-Control": "no-store" },
-            body: configToml,
-          }),
-        );
-        const page = await context.newPage();
-        observePage(page, name, errors);
         const navigationStarted = performance.now();
-        await page.goto(`http://127.0.0.1:${previewPort}/?player=${name}`, {
-          waitUntil: "domcontentloaded",
+        const viewport = await activeBrowser.open({
+          url: `http://127.0.0.1:${previewPort}/?player=${name}`,
+          label: name,
+          viewport: VIEWPORT,
+          deviceScaleFactor: 1,
+          engine: false,
+          beforeNavigate: async (browserContext) => {
+            await browserContext.route("**/config/client.toml", (route) =>
+              route.fulfill({
+                status: 200,
+                contentType: "text/plain; charset=utf-8",
+                headers: { "Cache-Control": "no-store" },
+                body: configToml,
+              }),
+            );
+          },
         });
+        const page = viewport.page;
         const initial = await waitForEngine(page, name);
         const identity = await page.evaluate(() => globalThis.__VOXELS__!.player);
         return {
           name,
           page,
-          context,
           link: required(links, index, `${name} shaped link`),
           initial,
           identity,
@@ -655,45 +647,26 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
 
     await mkdir(outputDirectory, { recursive: true });
     const builders = players.slice(1);
-    const movementKeys: readonly (readonly string[])[] = [
-      ["KeyW"],
-      ["KeyS"],
-      ["KeyA"],
-      ["KeyD"],
-      ["KeyW", "KeyD"],
-    ];
-    const builderBeforeMovement = await Promise.all(builders.map(({ page }) => snapshot(page)));
-    for (let index = 0; index < builders.length; index += 1) {
-      const builder = required(builders, index, "movement builder");
-      for (const key of required(movementKeys, index, "movement fixture")) {
-        await builder.page.keyboard.down(key);
-      }
-    }
     const observer = required(players, 0, "observer");
+    // Keep the builders together while moving beyond the protected 6.4 m starting area. The later
+    // dig and tower remain ordinary reach-checked player actions at this editable worksite.
+    const builderWalks = builders.map(({ page }) => walkDistance(page, 10));
     await observer.page.waitForTimeout(350);
     const walkingScreenshot = path.join(outputDirectory, "observer-near-five-walking.png");
     await observer.page.screenshot({ path: walkingScreenshot });
     scenario.artifacts.record("near walking builders", walkingScreenshot, "image/png");
-    for (let index = 0; index < builders.length; index += 1) {
-      const builder = required(builders, index, "movement builder");
-      for (const key of required(movementKeys, index, "movement fixture")) {
-        await builder.page.keyboard.up(key);
-      }
-    }
-    const builderAfterMovement = await Promise.all(builders.map(({ page }) => snapshot(page)));
-    const builderTravelMetres = builders.map((_builder, index) => {
-      const before = required(builderBeforeMovement, index, "builder before movement");
-      const after = required(builderAfterMovement, index, "builder after movement");
-      return Math.hypot(
-        snapshotValue(after, "cameraX") - snapshotValue(before, "cameraX"),
-        snapshotValue(after, "cameraZ") - snapshotValue(before, "cameraZ"),
-      );
-    });
-    if (builderTravelMetres.some((distance) => distance < 0.5)) {
-      throw new Error(
-        `one or more builder movement fixtures stalled: ${JSON.stringify(builderTravelMetres)}`,
-      );
-    }
+    const completedBuilderWalks = await Promise.all(builderWalks);
+    const builderTravelMetres = completedBuilderWalks.map((walk) => walk.distanceMetres);
+    const builderAfterMovement = await Promise.all(
+      builders.map((builder) =>
+        waitFor(
+          builder.page,
+          `${builder.name} grounded worksite`,
+          (next) => snapshotValue(next, "grounded") === 1,
+          30_000,
+        ),
+      ),
+    );
     const observerWalk = await walkDistance(observer.page, OBSERVER_WALK_METRES);
     const farRosters = await Promise.all(players.map(waitForRoster));
     const builderCentroid = builders.reduce(
@@ -759,14 +732,21 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
         `steady-state frame gate failed: ${timingViolations.join(", ")}; ${JSON.stringify(diagnostics)}`,
       );
     }
-    if (errors.length > 0) throw new Error(errors.join("\n"));
+    if (browser.failures.length > 0) {
+      throw new Error(
+        browser.failures
+          .map((error) => `${error.page} ${error.source}: ${error.message}`)
+          .join("\n"),
+      );
+    }
 
     const inventoryBeforeDig = await Promise.all(builders.map(({ page }) => inventory(page)));
     const digSubmissions = await Promise.all(
       builders.map((builder, index) => {
         const position = required(builderAfterMovement, index, "builder dig position");
+        const lateralOffset = (index - Math.floor(BUILDER_COUNT / 2)) * BUILDER_DIG_SPACING_VOXELS;
         return builder.page.evaluate(([x, y, z]) => globalThis.__VOXELS__!.submitDig(x, y, z), [
-          Math.floor(snapshotValue(position, "cameraX") * 10),
+          Math.floor(snapshotValue(position, "cameraX") * 10) + lateralOffset,
           Math.round((snapshotValue(position, "cameraY") - PLAYER_EYE_HEIGHT_METRES) * 10 - 1),
           Math.floor(snapshotValue(position, "cameraZ") * 10),
         ] as const);
@@ -791,7 +771,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
 
     // A 4.5 m column with a 1.7 m crossbar remains inside every builder's authoritative reach
     // envelope while producing a legible far-LOD silhouette from ordinary mined material.
-    const builderOrigin = required(builderBeforeMovement, 0, "tower builder origin");
+    const builderOrigin = required(builderAfterMovement, 0, "tower builder origin");
     const towerX = Math.floor(snapshotValue(builderOrigin, "cameraX") * 10);
     const towerZ = Math.floor(snapshotValue(builderOrigin, "cameraZ") * 10);
     const towerBaseY = Math.round(
@@ -977,7 +957,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
         platform: `${platform()} ${release()}`,
         cpu: cpus()[0]?.model ?? "unknown",
         logicalCpus: cpus().length,
-        chrome: browser.version(),
+        chrome: browser.version,
         node: process.version,
       },
       fixture: {
@@ -1027,11 +1007,6 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
       details: result,
     };
   } finally {
-    await Promise.all(
-      contexts.map((context, index) =>
-        settleCleanup(`browser context ${index + 1}`, context.close()),
-      ),
-    );
     if (browser) await settleCleanup("browser", browser.close());
     await Promise.all(
       links.map((link, index) => settleCleanup(`shaped link ${index + 1}`, link.close())),
