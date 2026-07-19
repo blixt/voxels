@@ -594,7 +594,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
   const previewPort = await reserveEphemeralPort();
   const fixture = await prepareWorldFixture({
     originPort: previewPort,
-    clientPort: proxyPort,
+    clientPorts: [proxyPort],
     prefix: "voxels-network-benchmark-",
     source: worldSource,
   });
@@ -612,7 +612,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
     profile,
   });
   context.defer("network benchmark shaped link", () => link.close());
-  const clientRoute = routeWorldClient(fixture);
+  const clientRoute = routeWorldClient(fixture, 0);
   const browser = await BrowserCapability.start(context, { warningPattern: FAILURE });
   try {
     const runs: NetworkRun[] = [];

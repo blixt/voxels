@@ -1,11 +1,5 @@
-import { execFileSync, spawn } from "node:child_process";
-import type { ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { connect } from "node:net";
-import { cpus, platform, release, tmpdir } from "node:os";
-import path from "node:path";
+import { cpus, platform, release } from "node:os";
 import type { Page } from "playwright";
-import { build, preview } from "vite-plus";
 import {
   BrowserCapability,
   chromeWebGpuLaunchOptions,
@@ -18,14 +12,15 @@ import {
   SNAPSHOT_SCHEMA_VERSION,
   snapshotValue,
 } from "../lib/engine.ts";
-import { rustTool } from "../../scripts/build-wasm.ts";
 import { createShapedLink, type LinkStats, type ShapedLink } from "../lib/network.ts";
 import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "../lib/protocol.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import {
-  worldServiceBuildCargoArgs,
-  worldServiceCargoArgs,
-} from "../../scripts/world-service-command.ts";
+  prepareWorldFixture,
+  routeWorldClient,
+  startWebPreview,
+  startWorldService,
+} from "../lib/world.ts";
 
 const RESULT_SCHEMA_VERSION = 4;
 const FIXTURE_VERSION = 6;
@@ -86,10 +81,6 @@ function required<T>(values: readonly T[], index: number, label: string): T {
   const value = values[index];
   if (value === undefined) throw new Error(`${label} omitted index ${index}`);
   return value;
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function rounded(value: number, digits = 1): number {
@@ -360,59 +351,6 @@ function viewportFingerprint(values: readonly number[]): readonly [number, numbe
   ];
 }
 
-async function waitForPort(
-  port: number,
-  child: ChildProcess,
-  logs: readonly string[],
-): Promise<void> {
-  const deadline = performance.now() + 60_000;
-  while (performance.now() < deadline) {
-    if (child.exitCode !== null) {
-      throw new Error(`world service exited with ${child.exitCode}: ${logs.slice(-20).join("")}`);
-    }
-    const ready = await new Promise<boolean>((resolve) => {
-      const socket = connect({ host: "127.0.0.1", port });
-      socket.once("connect", () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.once("error", () => resolve(false));
-    });
-    if (ready) return;
-    await sleep(50);
-  }
-  throw new Error(`world service did not listen on ${port}: ${logs.slice(-20).join("")}`);
-}
-
-async function stopChild(child: ChildProcess | undefined): Promise<void> {
-  if (!child || child.exitCode !== null) return;
-  child.kill("SIGTERM");
-  const exited = await Promise.race([
-    new Promise<boolean>((resolve) => child.once("exit", () => resolve(true))),
-    sleep(2_000).then(() => false),
-  ]);
-  if (!exited && child.exitCode === null) child.kill("SIGKILL");
-}
-
-async function settleCleanup(
-  label: string,
-  operation: Promise<unknown>,
-  timeoutMs = 5_000,
-): Promise<void> {
-  const result = await Promise.race([
-    operation.then(
-      () => ({ completed: true, error: null }),
-      (error) => ({ completed: true, error }),
-    ),
-    sleep(timeoutMs).then(() => ({ completed: false, error: null })),
-  ]);
-  if (!result.completed) {
-    process.stderr.write(`cleanup timed out after ${timeoutMs}ms: ${label}\n`);
-  } else if (result.error) {
-    process.stderr.write(`cleanup failed: ${label}: ${String(result.error)}\n`);
-  }
-}
-
 async function walkDistance(
   page: Page,
   targetDistanceMetres: number,
@@ -516,106 +454,54 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
   if (arguments_.length > 0) {
     throw new Error(`multiplayer takes no arguments; received ${arguments_.join(" ")}`);
   }
-  const outputDirectory = scenario.artifacts.directory;
-  const temporary = await mkdtemp(path.join(tmpdir(), "voxels-multiplayer-browser-"));
-  const backendPort = await reserveEphemeralPort();
   const previewPort = await reserveEphemeralPort();
-  const serviceConfigPath = path.join(temporary, "world-service.toml");
-  const [serviceSource, clientSource] = await Promise.all([
-    readFile("config/world-service.toml", "utf8"),
-    readFile("config/client.toml", "utf8"),
-  ]);
-  await writeFile(
-    serviceConfigPath,
-    serviceSource
-      .replace(/^listen = .*$/m, `listen = "127.0.0.1:${backendPort}"`)
-      .replace(/^allowed_origins = .*$/m, `allowed_origins = ["http://127.0.0.1:${previewPort}"]`)
-      .replace(/^database = .*$/m, 'database = "world-state.sqlite3"'),
+  const names = ["observer", "builder-1", "builder-2", "builder-3", "builder-4", "builder-5"];
+  const ports = await Promise.all(names.map(() => reserveEphemeralPort()));
+  const fixture = await prepareWorldFixture({
+    originPort: previewPort,
+    clientPorts: ports,
+    prefix: "voxels-multiplayer-browser-",
+    source: "terrain-diffusion-30m",
+  });
+  scenario.defer("multiplayer fixture", () => fixture.cleanup());
+  await startWebPreview(scenario, { port: previewPort, buildProfile: "release" });
+  const service = await startWorldService(scenario, fixture, { metal: true });
+  const links = await Promise.all(
+    ports.map((port) =>
+      createShapedLink({
+        listenPort: port,
+        targetPort: fixture.backendPort,
+        profile: LINK_PROFILE,
+      }),
+    ),
   );
-
-  let browser: BrowserCapability | undefined;
-  let previewServer: Awaited<ReturnType<typeof preview>> | undefined;
-  let worldService: ChildProcess | undefined;
-  const links: ShapedLink[] = [];
-  const worldLogs: string[] = [];
+  for (const [index, link] of links.entries()) {
+    scenario.defer(`multiplayer shaped link ${index + 1}`, () => link.close());
+  }
+  const launch = chromeWebGpuLaunchOptions();
+  const browser = await BrowserCapability.start(scenario, {
+    warningPattern: FAILURE,
+    launch: {
+      ...launch,
+      args: [
+        ...(launch.args ?? []),
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+      ],
+    },
+  });
   try {
-    await build({ logLevel: "warn" });
-    // Keep the readiness deadline about service startup, not an arbitrary clean Rust compile. This
-    // also prevents a timed-out cargo child from repeatedly abandoning the same profile build.
-    execFileSync(rustTool("cargo"), worldServiceBuildCargoArgs({ metal: true }), {
-      stdio: "inherit",
-    });
-    worldService = spawn(
-      rustTool("cargo"),
-      worldServiceCargoArgs({ metal: true, configPath: serviceConfigPath }),
-      { stdio: ["ignore", "pipe", "pipe"] },
-    );
-    for (const stream of [worldService.stdout, worldService.stderr]) {
-      if (stream === null) continue;
-      stream.on("data", (bytes) => {
-        worldLogs.push(bytes.toString());
-        if (worldLogs.length > 200) worldLogs.shift();
-      });
-    }
-    await waitForPort(backendPort, worldService, worldLogs);
-    previewServer = await preview({
-      logLevel: "warn",
-      preview: { host: "127.0.0.1", port: previewPort, strictPort: true },
-    });
-    const launch = chromeWebGpuLaunchOptions();
-    browser = await BrowserCapability.start(scenario, {
-      warningPattern: FAILURE,
-      launch: {
-        ...launch,
-        args: [
-          ...(launch.args ?? []),
-          "--disable-background-timer-throttling",
-          "--disable-backgrounding-occluded-windows",
-          "--disable-renderer-backgrounding",
-        ],
-      },
-    });
-
-    const names = ["observer", "builder-1", "builder-2", "builder-3", "builder-4", "builder-5"];
-    const ports: number[] = [];
-    for (const _name of names) ports.push(await reserveEphemeralPort());
-    for (const port of ports) {
-      links.push(
-        await createShapedLink({
-          listenPort: port,
-          targetPort: backendPort,
-          profile: LINK_PROFILE,
-        }),
-      );
-    }
-
-    const activeBrowser = browser;
     const players: MultiplayerPlayer[] = await Promise.all(
       names.map(async (name, index) => {
-        const port = required(ports, index, `${name} link port`);
-        const configToml = clientSource
-          .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${port}${WORLD_PATH}"`)
-          .replace(
-            /^presence_endpoint = .*$/m,
-            `presence_endpoint = "ws://127.0.0.1:${port}${PRESENCE_PATH}"`,
-          );
         const navigationStarted = performance.now();
-        const viewport = await activeBrowser.open({
+        const viewport = await browser.open({
           url: `http://127.0.0.1:${previewPort}/?player=${name}`,
           label: name,
           viewport: VIEWPORT,
           deviceScaleFactor: 1,
           engine: false,
-          beforeNavigate: async (browserContext) => {
-            await browserContext.route("**/config/client.toml", (route) =>
-              route.fulfill({
-                status: 200,
-                contentType: "text/plain; charset=utf-8",
-                headers: { "Cache-Control": "no-store" },
-                body: configToml,
-              }),
-            );
-          },
+          ...routeWorldClient(fixture, index),
         });
         const page = viewport.page;
         const initial = await waitForEngine(page, name);
@@ -643,14 +529,13 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     await Promise.all(players.map(waitForRoster));
     const initialRosterMs = performance.now() - rosterStarted;
 
-    await mkdir(outputDirectory, { recursive: true });
     const builders = players.slice(1);
     const observer = required(players, 0, "observer");
     // Keep the builders together while moving beyond the protected 6.4 m starting area. The later
     // dig and tower remain ordinary reach-checked player actions at this editable worksite.
     const builderWalks = builders.map(({ page }) => walkDistance(page, 10));
     await observer.page.waitForTimeout(350);
-    const walkingScreenshot = path.join(outputDirectory, "observer-near-five-walking.png");
+    const walkingScreenshot = scenario.artifacts.resolve("observer-near-five-walking.png");
     await observer.page.screenshot({ path: walkingScreenshot });
     scenario.artifacts.record("near walking builders", walkingScreenshot, "image/png");
     const completedBuilderWalks = await Promise.all(builderWalks);
@@ -691,7 +576,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
       y: snapshotValue(observerFar, "cameraY"),
       z: builderCentroid.z,
     });
-    const farScreenshot = path.join(outputDirectory, "observer-far-five.png");
+    const farScreenshot = scenario.artifacts.resolve("observer-far-five.png");
     await observer.page.screenshot({ path: farScreenshot });
     scenario.artifacts.record("far builders", farScreenshot, "image/png");
     await Promise.all(players.map(waitForSettledWorld));
@@ -833,7 +718,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
       y: (towerBaseY + towerHeightVoxels / 2) / 10,
       z: towerZ / 10,
     });
-    const beforeTowerPath = path.join(outputDirectory, "observer-far-tower-before.png");
+    const beforeTowerPath = scenario.artifacts.resolve("observer-far-tower-before.png");
     const beforeTowerScreenshot = await observer.page.screenshot({ path: beforeTowerPath });
     scenario.artifacts.record("tower before", beforeTowerPath, "image/png");
     const beforeTowerSnapshot = await snapshot(observer.page);
@@ -874,7 +759,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     );
     const towerConvergenceMs = performance.now() - towerStarted;
     await observer.page.waitForTimeout(1_000);
-    const afterTowerPath = path.join(outputDirectory, "observer-far-five-tower.png");
+    const afterTowerPath = scenario.artifacts.resolve("observer-far-five-tower.png");
     const afterTowerScreenshot = await observer.page.screenshot({ path: afterTowerPath });
     scenario.artifacts.record("tower after", afterTowerPath, "image/png");
     const afterTowerSnapshot = await snapshot(observer.page);
@@ -1004,14 +889,13 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
       },
       details: result,
     };
-  } finally {
-    if (browser) await settleCleanup("browser", browser.close());
-    await Promise.all(
-      links.map((link, index) => settleCleanup(`shaped link ${index + 1}`, link.close())),
+  } catch (error) {
+    const reason = error instanceof Error ? error.stack : String(error);
+    const serviceLog = service.logs.join("").trim();
+    throw new Error(
+      `${reason}\n\nNative world-service output:\n${serviceLog || "(no output captured)"}`,
+      { cause: error },
     );
-    if (previewServer) await settleCleanup("preview server", previewServer.close());
-    await stopChild(worldService);
-    await rm(temporary, { recursive: true, force: true });
   }
 }
 

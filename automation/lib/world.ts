@@ -21,13 +21,13 @@ import {
 import type { WorldServiceCargoProfile } from "../../scripts/world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
-const AUTOMATION_FIXTURE_SCHEMA_VERSION = 1;
+const AUTOMATION_FIXTURE_SCHEMA_VERSION = 2;
 
 export type WorldSource = "procedural-v16" | "terrain-diffusion-30m";
 
 export interface WorldFixtureOptions {
   readonly originPort: number;
-  readonly clientPort?: number;
+  readonly clientPorts?: readonly number[];
   readonly prefix?: string;
   readonly source?: WorldSource;
   readonly spawnVoxels?: readonly [number, number];
@@ -61,6 +61,7 @@ export interface WorldFixture {
   readonly originPort: number;
   readonly authToken: string;
   readonly clientConfigPath: string;
+  readonly clientConfigPaths: readonly string[];
   readonly serviceConfigPath: string;
   readonly databasePath: string;
   readonly spawnVoxels: readonly [number, number];
@@ -136,6 +137,7 @@ type FixtureResolved = Omit<
   | "originPort"
   | "authToken"
   | "clientConfigPath"
+  | "clientConfigPaths"
   | "serviceConfigPath"
   | "databasePath"
   | "cleanup"
@@ -216,12 +218,19 @@ function parseFixtureResponse(value: unknown): FixtureResolved {
 
 async function writeTypedFixture(
   directory: string,
+  clientPorts: readonly number[],
   overlay: Readonly<Record<string, unknown>>,
-): Promise<FixtureResolved> {
+): Promise<{
+  readonly resolved: FixtureResolved;
+  readonly clientConfigPaths: readonly string[];
+}> {
   const requestPath = path.join(directory, "fixture-request.json");
   const responsePath = path.join(directory, "fixture-response.json");
   const serviceConfigPath = path.join(directory, "world-service.toml");
   const clientConfigPath = path.join(directory, "client.toml");
+  const clientConfigPaths = clientPorts.map((_, index) =>
+    path.join(directory, `client-${index + 1}.toml`),
+  );
   await writeFile(
     requestPath,
     `${JSON.stringify(
@@ -230,7 +239,8 @@ async function writeTypedFixture(
         clientSourcePath: path.resolve("config/client.toml"),
         serviceOutputPath: serviceConfigPath,
         clientOutputPath: clientConfigPath,
-        overlay,
+        clientOutputPaths: clientConfigPaths,
+        overlay: { ...overlay, clientPorts },
       },
       null,
       2,
@@ -255,12 +265,15 @@ async function writeTypedFixture(
     ],
     { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 },
   );
-  return parseFixtureResponse(JSON.parse(await readFile(responsePath, "utf8")));
+  return {
+    resolved: parseFixtureResponse(JSON.parse(await readFile(responsePath, "utf8"))),
+    clientConfigPaths: Object.freeze(clientConfigPaths),
+  };
 }
 
 export async function prepareWorldFixture({
   originPort,
-  clientPort,
+  clientPorts = [],
   prefix = "voxels-browser-world-",
   source = "procedural-v16",
   spawnVoxels,
@@ -293,11 +306,10 @@ export async function prepareWorldFixture({
     const authToken = randomBytes(32).toString("hex");
     const serviceConfigPath = path.join(directory, "world-service.toml");
     const clientConfigPath = path.join(directory, "client.toml");
-    const resolved = await writeTypedFixture(directory, {
+    const generated = await writeTypedFixture(directory, clientPorts, {
       schemaVersion: AUTOMATION_FIXTURE_SCHEMA_VERSION,
       browserPort: originPort,
       backendPort,
-      clientPort,
       authToken,
       source,
       spawnVoxels,
@@ -332,9 +344,10 @@ export async function prepareWorldFixture({
       originPort,
       authToken,
       clientConfigPath,
+      clientConfigPaths: generated.clientConfigPaths,
       serviceConfigPath,
       databasePath: path.join(directory, "world-state.sqlite3"),
-      ...resolved,
+      ...generated.resolved,
       async cleanup() {
         if (cleaned) return;
         cleaned = true;
@@ -410,10 +423,20 @@ export async function startWorldService(
   throw new Error(`world service readiness timed out:\n${logs.join("")}`);
 }
 
-export function routeWorldClient(fixture: WorldFixture): WorldClientRoute {
+export function routeWorldClient(
+  fixture: WorldFixture,
+  routedClientIndex?: number,
+): WorldClientRoute {
+  const clientConfigPath =
+    routedClientIndex === undefined
+      ? fixture.clientConfigPath
+      : fixture.clientConfigPaths[routedClientIndex];
+  if (clientConfigPath === undefined) {
+    throw new Error(`world fixture has no routed client config ${routedClientIndex}`);
+  }
   return Object.freeze({
     async beforeNavigate(_context: BrowserContext, page: Page): Promise<void> {
-      const clientConfig = await readFile(fixture.clientConfigPath, "utf8");
+      const clientConfig = await readFile(clientConfigPath, "utf8");
       await page.route("**/config/client.toml", (route) =>
         route.fulfill({
           status: 200,

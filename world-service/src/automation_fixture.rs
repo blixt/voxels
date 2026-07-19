@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use voxels_client_config::{ClientConfig, ClientConfigError};
 
-pub const AUTOMATION_FIXTURE_SCHEMA_VERSION: u32 = 1;
+pub const AUTOMATION_FIXTURE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -21,7 +21,7 @@ pub struct AutomationFixtureOverlay {
     pub schema_version: u32,
     pub browser_port: u16,
     pub backend_port: u16,
-    pub client_port: Option<u16>,
+    pub client_ports: Vec<u16>,
     pub auth_token: String,
     pub source: WorldSourceMode,
     pub spawn_voxels: Option<[i32; 2]>,
@@ -81,6 +81,7 @@ pub struct AutomationFixtureResolved {
 pub struct AutomationFixtureConfig {
     pub service_toml: String,
     pub client_toml: String,
+    pub routed_client_tomls: Vec<String>,
     pub resolved: AutomationFixtureResolved,
 }
 
@@ -206,12 +207,25 @@ pub fn build_automation_fixture(
         service.environment.cloud_top_metres = value;
     }
 
-    let client_port = overlay.client_port.unwrap_or(overlay.backend_port);
-    client.world.endpoint = format!("ws://127.0.0.1:{client_port}{WORLD_WEBSOCKET_PATH}");
-    client.world.presence_endpoint =
-        format!("ws://127.0.0.1:{client_port}{PRESENCE_WEBSOCKET_PATH}");
-    client.world.subprotocol = WORLD_WEBSOCKET_PROTOCOL.to_owned();
-    client.world.auth_subprotocol_token = overlay.auth_token;
+    let configure_client = |client: &mut ClientConfig, port: u16| {
+        client.world.endpoint = format!("ws://127.0.0.1:{port}{WORLD_WEBSOCKET_PATH}");
+        client.world.presence_endpoint = format!("ws://127.0.0.1:{port}{PRESENCE_WEBSOCKET_PATH}");
+        client.world.subprotocol = WORLD_WEBSOCKET_PROTOCOL.to_owned();
+        client
+            .world
+            .auth_subprotocol_token
+            .clone_from(&overlay.auth_token);
+    };
+    let routed_clients = overlay
+        .client_ports
+        .iter()
+        .map(|port| {
+            let mut routed = client.clone();
+            configure_client(&mut routed, *port);
+            routed
+        })
+        .collect::<Vec<_>>();
+    configure_client(&mut client, overlay.backend_port);
     if let Some(value) = overlay.cascaded_shadows {
         client.rendering.features.cascaded_sun_shadows = value;
     }
@@ -248,6 +262,10 @@ pub fn build_automation_fixture(
     Ok(AutomationFixtureConfig {
         service_toml: service.to_toml()?,
         client_toml: client.to_toml()?,
+        routed_client_tomls: routed_clients
+            .into_iter()
+            .map(|client| client.to_toml())
+            .collect::<Result<_, _>>()?,
         resolved,
     })
 }
@@ -261,7 +279,7 @@ mod tests {
             schema_version: AUTOMATION_FIXTURE_SCHEMA_VERSION,
             browser_port: 41_234,
             backend_port: 41_235,
-            client_port: None,
+            client_ports: Vec::new(),
             auth_token: "automation-token".to_owned(),
             source: WorldSourceMode::ProceduralV16,
             spawn_voxels: Some([-12_800, 25_600]),
@@ -329,14 +347,15 @@ mod tests {
     #[test]
     fn fixture_can_route_clients_through_a_separate_transport() {
         let mut shaped = overlay();
-        shaped.client_port = Some(41_236);
+        shaped.client_ports = vec![41_236, 41_237];
         let fixture = build_automation_fixture(
             include_str!("../../config/world-service.toml"),
             include_str!("../../config/client.toml"),
             shaped,
         )
         .expect("valid shaped-link fixture");
-        let client = ClientConfig::from_toml(&fixture.client_toml).expect("client round trip");
+        let client =
+            ClientConfig::from_toml(&fixture.routed_client_tomls[0]).expect("client round trip");
 
         assert_eq!(
             client.world.endpoint,
@@ -346,5 +365,6 @@ mod tests {
             client.world.presence_endpoint,
             format!("ws://127.0.0.1:41236{PRESENCE_WEBSOCKET_PATH}")
         );
+        assert_eq!(fixture.routed_client_tomls.len(), 2);
     }
 }

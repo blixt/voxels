@@ -69,9 +69,11 @@ describe("isolated browser world fixture", () => {
       await fixture.cleanup();
     }
 
-    const defaults = await prepareWorldFixture({ originPort: 41_235, clientPort: 41_236 });
+    const defaults = await prepareWorldFixture({ originPort: 41_235, clientPorts: [41_236] });
     try {
-      const client = await readFile(defaults.clientConfigPath, "utf8");
+      const routedClientPath = defaults.clientConfigPaths[0];
+      if (routedClientPath === undefined) throw new Error("fixture omitted routed client config");
+      const client = await readFile(routedClientPath, "utf8");
       expect(client).toContain(`endpoint = "ws://127.0.0.1:41236${WORLD_PATH}"`);
       expect(client).toContain(`presence_endpoint = "ws://127.0.0.1:41236${PRESENCE_PATH}"`);
       expect(client).toContain("cascaded_sun_shadows = true");

@@ -14,6 +14,7 @@ struct FixtureRequest {
     client_source_path: PathBuf,
     service_output_path: PathBuf,
     client_output_path: PathBuf,
+    client_output_paths: Vec<PathBuf>,
     overlay: AutomationFixtureOverlay,
 }
 
@@ -40,6 +41,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     fs::write(request.service_output_path, fixture.service_toml)?;
     fs::write(request.client_output_path, fixture.client_toml)?;
+    if request.client_output_paths.len() != fixture.routed_client_tomls.len() {
+        return Err(format!(
+            "received {} routed client paths for {} configs",
+            request.client_output_paths.len(),
+            fixture.routed_client_tomls.len()
+        )
+        .into());
+    }
+    for (output_path, client_toml) in request
+        .client_output_paths
+        .into_iter()
+        .zip(fixture.routed_client_tomls)
+    {
+        fs::write(output_path, client_toml)?;
+    }
     fs::write(
         response_path,
         serde_json::to_vec_pretty(&FixtureResponse {
