@@ -139,10 +139,22 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let sun_direction = normalize(frame.sun_direction.xyz);
   let moon_direction = normalize(frame.moon_direction.xyz);
   let key_light_direction = normalize(frame.key_light_direction.xyz);
-  let elevation = clamp(ray.y * 0.5 + 0.5, 0.0, 1.0);
   let horizon = pow(1.0 - abs(ray.y), 5.0);
-  let rayleigh = pow(max(ray.y, 0.0), 0.42);
-  let base = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, rayleigh);
+  let sky_elevation = max(ray.y, 0.0);
+  let rayleigh = pow(sky_elevation, 0.42);
+  let upper_atmosphere = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, rayleigh);
+  // An infinite planar world has no geometric planet disc behind distant terrain. Extend the
+  // atmosphere below the mathematical horizon so a high spectator camera sees one continuous
+  // aerial-perspective backdrop rather than a flat horizon color ending above a dead lower half.
+  // The ground irradiance only tints the nadir; keeping some horizon scattering also makes sparse
+  // ultra-distant terrain disappear into haze instead of exposing its coverage boundary.
+  let lower_depth = smoothstep(0.0, 0.78, max(-ray.y, 0.0));
+  let lower_atmosphere = mix(
+    frame.sky_horizon.rgb,
+    frame.ground_atmosphere.rgb,
+    lower_depth * 0.72,
+  );
+  let base = mix(lower_atmosphere, upper_atmosphere, smoothstep(-0.015, 0.025, ray.y));
   let sun_azimuth = normalize(sun_direction.xz + vec2<f32>(0.0001));
   let ray_azimuth = normalize(ray.xz + vec2<f32>(0.0001));
   let horizon_alignment = pow(max(dot(ray_azimuth, sun_azimuth), 0.0), 3.0);
@@ -158,8 +170,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let moon_glow = pow(moon_amount, 320.0)
     * moon_visible * frame.equatorial_up.w * 0.018;
   let moon_surface = moon_surface_radiance(ray, moon_direction, sun_direction, moon_visible);
-  let below_horizon = mix(frame.ground_atmosphere.rgb, base, smoothstep(0.0, 0.12, elevation));
-  var color = below_horizon
+  var color = base
     + warm_horizon
     + vec3<f32>(5.8, 4.6, 3.4) * (sun_disc * 1.15 + sun_glow * sun_visible)
     + moon_surface

@@ -359,6 +359,18 @@ mod tests {
     }
 
     #[test]
+    fn sky_atmosphere_continues_smoothly_below_the_flight_horizon() {
+        let sky = include_str!("shaders/sky.wgsl");
+        assert!(sky.contains("let lower_depth = smoothstep(0.0, 0.78, max(-ray.y, 0.0));"));
+        assert!(sky.contains("lower_depth * 0.72"));
+        assert!(sky.contains(
+            "let base = mix(lower_atmosphere, upper_atmosphere, smoothstep(-0.015, 0.025, ray.y));"
+        ));
+        assert!(!sky.contains("ray.y * 0.5 + 0.5"));
+        assert!(!sky.contains("let below_horizon ="));
+    }
+
+    #[test]
     fn stars_use_the_synchronized_equatorial_catalog_and_bounded_twinkle() {
         let sky = include_str!("shaders/sky.wgsl");
         assert!(sky.contains("fn octahedral_encode("));
