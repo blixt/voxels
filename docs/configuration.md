@@ -32,14 +32,15 @@ The file controls:
 - view/shadow settings;
 - the fixed rendering feature baseline and the World Lab's initial open state;
 - whether local developer controls expose time/weather visualization overrides and the
-  server-authorized creative-flight request;
+  server-authorized spectator-mode request;
 - bounded diagnostic probe sizes and cadence;
 - automated profile speed and warmup/measurement durations.
 
 The World Lab deliberately does not expose ordinary renderer feature toggles. It keeps operational
 rendering policy in the file and reserves the in-game surface for useful play/debug controls: local
-time and weather previews plus creative flight when both client developer controls and the server's
-gameplay capability allow it. Time/weather previews do not mutate the shared environment.
+time and weather previews plus a read-only spectator camera when both client developer controls and
+the server's gameplay capability allow it. Time/weather previews do not mutate the shared
+environment.
 
 Player identity is intentionally not client configuration. The browser keeps a versioned local
 registry: `/` selects its stable default player, while `/?player=alice` selects or creates a named

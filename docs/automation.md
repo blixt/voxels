@@ -11,12 +11,15 @@ vp run automation -- list
 vp run automation -- run lod-transition
 vp run automation -- run bot-load --counts=64 --no-browser
 vp run automation -- run bot-load --counts=16 --duration=10 --video
+vp run automation -- run spectator-feed --url=http://127.0.0.1:5173 --duration=30
 vp run automation -- describe render-profile
 ```
 
 `list` and `describe` expose each scenario's kind and declared mechanisms. `run` creates an isolated
-run directory, records a manifest, installs signal-safe cleanup, and invokes the scenario. It never
-uses the development database or browser profile.
+run directory, records a manifest, installs signal-safe cleanup, and invokes the scenario. Scenarios
+create temporary services, databases, and browser profiles by default. A scenario that deliberately
+attaches to a running world requires an explicit URL; spectator feeds cannot edit terrain but may
+create or update their named player identity in the service's ordinary player store.
 
 Static checks remain ordinary Vite+ commands:
 
@@ -109,6 +112,35 @@ scenario may therefore launch bots behind a shaped link while a browser observes
 same world. `bot-load --video` is the concrete combined case. Video and screenshots capture a
 viewport; they do not own one.
 
+## Spectator feeds
+
+`spectator-feed` turns the automation renderer into a reusable regional camera rather than a test
+double. Without arguments it owns an isolated world. Pass an explicit URL to attach it to a running
+development or deployed client:
+
+```sh
+vp dev
+vp run automation -- run spectator-feed \
+  --url=http://127.0.0.1:5173 \
+  --player=coast-camera \
+  --duration=30 \
+  --motion=orbit \
+  --look=1.2,-0.25
+```
+
+The scenario negotiates the server-authorized spectator role through Rust, confirms that both edit
+entry points are inert, then captures 1920x1080 start/end frames and raw WebM video. `--motion` is
+`stationary`, `forward`, `orbit`, or `rise`; `--no-video` produces screenshots only. An optional
+`--session-state=path/to/state.json` preserves the isolated browser identity between runs. The feed
+still has no server shortcut: terrain streams by camera interest and movement stays inside ordinary
+pose budgets.
+
+This is also the product boundary for later live outputs. A WebRTC, WebTransport, or broadcast
+encoder can consume the spectator viewport without changing player simulation, world authority, or
+the scenario API. Protocol-faithful helpful bots can reuse the existing native bot capability, but
+production bots should receive explicit server-owned identities and narrowly scoped actions rather
+than treating an automation browser as trusted authority.
+
 ## Rust engine boundary
 
 Automation controls engine semantics through the Rust/WASM worker API, never by mutating browser
@@ -119,8 +151,9 @@ state or renderer internals. The boundary is versioned and runtime-checked:
 - The browser exposes one `EngineAutomationApi` interface.
 - TypeScript decodes the compact numeric snapshot into named, readonly state only after validating
   the Rust schema version and exact field layout.
-- Semantic actions such as look, profile start, dig, place, inventory, and surface diagnostics use
-  typed methods. New controls start in Rust and extend the worker union before scenarios can use them.
+- Semantic actions such as look, spectator role changes, profile start, dig, place, inventory, and
+  surface diagnostics use typed methods. New controls start in Rust and extend the worker union
+  before scenarios can use them.
 
 The numeric wire format remains allocation-conscious for high-frequency profiling, while scripts do
 not contain raw indices.

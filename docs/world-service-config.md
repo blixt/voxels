@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 20
+schema_version = 21
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -68,7 +68,7 @@ look_error_milliradians = 175
 
 [gameplay]
 allow_gliding = true
-allow_creative_flight = true
+allow_spectator_mode = true
 interaction_reach_centimetres = 500
 interaction_latency_slack_centimetres = 100
 interaction_pose_max_age_ms = 1000
@@ -162,9 +162,12 @@ the cloud base/top bound the volumetric layer. The derived weather drives sky co
 shadows, fog, cloud density, precipitation, and cold-region snow from one revisioned environment
 snapshot without per-frame network messages.
 
-`allow_creative_flight` advertises a world capability and accepts the corresponding player-pose
-flag. Flight remains subject to the same horizontal/vertical speed and movement-credit budgets;
-disabling it removes the capability and rejects flying poses.
+`allow_spectator_mode` advertises a world capability and accepts the corresponding player-pose
+flag. A spectator has no replicated avatar and cannot dig or place, but its camera retains ordinary
+world-stream and edit-notification interest. The parked body remains the reconnect resume point.
+Camera flight remains subject to the same horizontal/vertical speed and movement-credit budgets;
+leaving spectator mode restores the authoritative body pose instead of accepting a client-proposed
+return location. Disabling the setting removes the capability and rejects spectator poses.
 
 `float16` is the high-performance default; `float32` is available for diagnostics. If
 `model_cache` is omitted on macOS, the service loads the immutable pinned revision from

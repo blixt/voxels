@@ -138,10 +138,12 @@ See [docs/architecture.md](docs/architecture.md) for format, authority, and rese
   world service and streamed to every interested browser.
 - Press <kbd>F3</kbd> for the Rust-rendered World Lab. It keeps the useful navigation and performance
   readout, copies a complete diagnostic report, and—when developer controls are enabled—can preview
-  time-of-day and weather locally without mutating the shared server clock. Creative flight is
-  collision-aware and only activates when the server advertises that gameplay capability; use
-  <kbd>Space</kbd> to rise and <kbd>Shift</kbd> to descend. Renderer policy stays in
-  `config/client.toml` instead of filling the play UI with operational toggles.
+  time-of-day and weather locally without mutating the shared server clock. Spectator mode leaves
+  the authoritative player body in place and switches to a collisionless, bodyless, read-only
+  camera; use <kbd>Space</kbd> to rise and <kbd>Shift</kbd> to descend. Leaving spectator mode
+  returns to the exact saved body pose. It activates only when the server advertises that capability.
+  Renderer policy stays in `config/client.toml` instead of filling the play UI with operational
+  toggles.
 
 The shared server clock drives a familiar full year: seasonal sun paths, lunar phases, a rotating
 sidereal star field, and subtle deterministic twinkle are identical for every client. World
@@ -156,3 +158,14 @@ edit-convergence records. It is intentionally an automation hook rather than a s
 model; the browser owns no simulation or UI state. `submitEdit(...)` and `surfaceEditState(...)`
 exercise the production server-edit path and expose only bounded convergence state for multiplayer
 regression tests.
+
+The same typed boundary can operate a product-facing observer without granting edit authority:
+
+```sh
+# Start `vp dev`, then attach a temporary spectator camera and record a regional orbit.
+vp run automation -- run spectator-feed --url=http://127.0.0.1:5173 --duration=30
+```
+
+The capture uses the production Rust camera, streaming, renderer, and presence protocol. It writes
+start/end screenshots and WebM video, verifies that edits are unavailable, and returns the parked
+body to its exact original pose. See [Automation scenarios](docs/automation.md#spectator-feeds).
