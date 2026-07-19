@@ -220,6 +220,7 @@ export async function runScenario(
     artifacts: artifacts.records,
   };
   await artifacts.writeJson("scenario manifest", "manifest.json", manifest);
+  await artifacts.publishLatest(manifest.status);
   if (failure !== undefined) throw failure;
   return manifest;
 }

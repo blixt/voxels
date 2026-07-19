@@ -26,10 +26,14 @@ function timestampRunId(now: Date): string {
 
 export class ArtifactStore {
   readonly directory: string;
+  readonly scenarioDirectory: string;
+  readonly runId: string;
   readonly records: ArtifactRecord[] = [];
 
-  private constructor(directory: string) {
+  private constructor(directory: string, scenarioDirectory: string, runId: string) {
     this.directory = directory;
+    this.scenarioDirectory = scenarioDirectory;
+    this.runId = runId;
   }
 
   static async create(scenarioId: string, options: ArtifactOptions = {}): Promise<ArtifactStore> {
@@ -37,9 +41,10 @@ export class ArtifactStore {
       options.root ?? process.env.VOXELS_AUTOMATION_OUTPUT ?? "target/automation",
     );
     const runId = safeSegment(options.runId ?? timestampRunId(new Date()));
-    const directory = path.join(root, safeSegment(scenarioId), runId);
+    const scenarioDirectory = path.join(root, safeSegment(scenarioId));
+    const directory = path.join(scenarioDirectory, runId);
     await mkdir(directory, { recursive: true });
-    return new ArtifactStore(directory);
+    return new ArtifactStore(directory, scenarioDirectory, runId);
   }
 
   resolve(...segments: readonly string[]): string {
@@ -105,5 +110,22 @@ export class ArtifactStore {
     const destination = this.resolve(filename);
     await copyFile(source, destination);
     return this.record(label, destination, mediaType);
+  }
+
+  async publishLatest(status: "passed" | "failed"): Promise<void> {
+    await writeFile(
+      path.join(this.scenarioDirectory, "latest.json"),
+      `${JSON.stringify(
+        {
+          schemaVersion: 1,
+          runId: this.runId,
+          status,
+          directory: this.directory,
+          manifest: this.resolve("manifest.json"),
+        },
+        null,
+        2,
+      )}\n`,
+    );
   }
 }
