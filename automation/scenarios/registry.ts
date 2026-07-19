@@ -5,6 +5,7 @@ import benchWorld from "./bench-world.ts";
 import botLoad from "./bot-load.ts";
 import networkCompare from "./network-compare.ts";
 import terrainLightingCompare from "./terrain-lighting-compare.ts";
+import weatherMotion from "./weather-motion.ts";
 import worldLab from "./world-lab.ts";
 
 const definitions = [
@@ -14,6 +15,7 @@ const definitions = [
   botLoad,
   networkCompare,
   terrainLightingCompare,
+  weatherMotion,
   worldLab,
 ] as const;
 
