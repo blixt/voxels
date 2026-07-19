@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use voxels_client_config::{ClientConfig, ClientConfigError};
 
-pub const AUTOMATION_FIXTURE_SCHEMA_VERSION: u32 = 2;
+pub const AUTOMATION_FIXTURE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -75,6 +75,11 @@ pub struct AutomationFixtureResolved {
     pub cloud_coverage: f32,
     pub cloud_base_metres: f32,
     pub cloud_top_metres: f32,
+    pub outbound_bandwidth_floor_bytes_per_second: usize,
+    pub outbound_bandwidth_ceiling_bytes_per_second: usize,
+    pub outbound_bandwidth_burst_bytes: usize,
+    pub outbound_queue_delay_target_ms: u16,
+    pub outbound_feedback_timeout_ms: u16,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -257,6 +262,15 @@ pub fn build_automation_fixture(
         cloud_coverage: service.environment.cloud_coverage,
         cloud_base_metres: service.environment.cloud_base_metres,
         cloud_top_metres: service.environment.cloud_top_metres,
+        outbound_bandwidth_floor_bytes_per_second: service
+            .transport
+            .outbound_bandwidth_floor_bytes_per_second,
+        outbound_bandwidth_ceiling_bytes_per_second: service
+            .transport
+            .outbound_bandwidth_ceiling_bytes_per_second,
+        outbound_bandwidth_burst_bytes: service.transport.outbound_bandwidth_burst_bytes,
+        outbound_queue_delay_target_ms: service.transport.outbound_queue_delay_target_ms,
+        outbound_feedback_timeout_ms: service.transport.outbound_feedback_timeout_ms,
     };
 
     Ok(AutomationFixtureConfig {
@@ -328,6 +342,10 @@ mod tests {
         );
         assert!(!fixture.resolved.cascaded_shadows);
         assert_eq!(fixture.resolved.cloud_top_metres, 1_400.0);
+        assert_eq!(
+            fixture.resolved.outbound_bandwidth_ceiling_bytes_per_second,
+            4 * 1_024 * 1_024
+        );
     }
 
     #[test]

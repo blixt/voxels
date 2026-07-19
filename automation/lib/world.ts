@@ -21,7 +21,7 @@ import {
 import type { WorldServiceCargoProfile } from "../../scripts/world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
-const AUTOMATION_FIXTURE_SCHEMA_VERSION = 2;
+const AUTOMATION_FIXTURE_SCHEMA_VERSION = 3;
 
 export type WorldSource = "procedural-v16" | "terrain-diffusion-30m";
 
@@ -87,6 +87,11 @@ export interface WorldFixture {
   readonly cloudCoverage: number;
   readonly cloudBaseMetres: number;
   readonly cloudTopMetres: number;
+  readonly outboundBandwidthFloorBytesPerSecond: number;
+  readonly outboundBandwidthCeilingBytesPerSecond: number;
+  readonly outboundBandwidthBurstBytes: number;
+  readonly outboundQueueDelayTargetMs: number;
+  readonly outboundFeedbackTimeoutMs: number;
   cleanup(): Promise<void>;
 }
 
@@ -163,6 +168,11 @@ const FIXTURE_NUMBER_FIELDS = [
   "cloudCoverage",
   "cloudBaseMetres",
   "cloudTopMetres",
+  "outboundBandwidthFloorBytesPerSecond",
+  "outboundBandwidthCeilingBytesPerSecond",
+  "outboundBandwidthBurstBytes",
+  "outboundQueueDelayTargetMs",
+  "outboundFeedbackTimeoutMs",
 ] as const satisfies readonly (keyof FixtureResolved)[];
 
 const FIXTURE_BOOLEAN_FIELDS = [

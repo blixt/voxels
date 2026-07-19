@@ -218,28 +218,16 @@ async function databaseContents(databasePath: string): Promise<Record<string, un
   return first as Record<string, unknown>;
 }
 
-function requiredConfigInteger(toml: string, key: string): number {
-  const match = toml.match(new RegExp(`^${key} = ([0-9]+)$`, "mu"));
-  if (match === null) throw new Error(`missing integer ${key} in world-service config`);
-  return Number(match[1]);
-}
-
 function messageBytes(report: BotClientReport, kind: number): number {
   return report.traffic.receivedByKind?.[String(kind)]?.payloadBytes ?? 0;
 }
 
-function summarizeTrafficBudget(report: BotHarnessReport, serviceConfig: string) {
-  const floorBytesPerSecond = requiredConfigInteger(
-    serviceConfig,
-    "outbound_bandwidth_floor_bytes_per_second",
-  );
-  const ceilingBytesPerSecond = requiredConfigInteger(
-    serviceConfig,
-    "outbound_bandwidth_ceiling_bytes_per_second",
-  );
-  const burstBytes = requiredConfigInteger(serviceConfig, "outbound_bandwidth_burst_bytes");
-  const queueDelayTargetMs = requiredConfigInteger(serviceConfig, "outbound_queue_delay_target_ms");
-  const feedbackTimeoutMs = requiredConfigInteger(serviceConfig, "outbound_feedback_timeout_ms");
+function summarizeTrafficBudget(report: BotHarnessReport, fixture: WorldFixture) {
+  const floorBytesPerSecond = fixture.outboundBandwidthFloorBytesPerSecond;
+  const ceilingBytesPerSecond = fixture.outboundBandwidthCeilingBytesPerSecond;
+  const burstBytes = fixture.outboundBandwidthBurstBytes;
+  const queueDelayTargetMs = fixture.outboundQueueDelayTargetMs;
+  const feedbackTimeoutMs = fixture.outboundFeedbackTimeoutMs;
   const seconds = report.wallTimeMs / 1_000;
   const receivedBytes = report.reports.map((client) => client.traffic.receivedPayloadBytes);
   const bitsPerSecond = receivedBytes.map((bytes) => (bytes * 8) / seconds);
@@ -509,14 +497,13 @@ async function runPopulation({
   const samples = await samplesPromise;
   const observerReport = await observerPromise;
   const report = JSON.parse(await readFile(reportPath, "utf8")) as BotHarnessReport;
-  const serviceConfig = await readFile(fixture.serviceConfigPath, "utf8");
   const after = await databaseFiles(fixture.databasePath);
   const contents = await databaseContents(fixture.databasePath);
   return {
     count,
     wallTimeMs,
     botReport: report,
-    trafficBudget: summarizeTrafficBudget(report, serviceConfig),
+    trafficBudget: summarizeTrafficBudget(report, fixture),
     process: {
       service: summarizeProcess(samples.service),
       bots: summarizeProcess(samples.bots),

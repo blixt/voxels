@@ -59,6 +59,11 @@ describe("isolated browser world fixture", () => {
       expect(fixture.weatherCycleSeconds).toBe(36);
       expect(fixture.weatherFractionAtUnixEpoch).toBe(0.62);
       expect(fixture.cloudCoverage).toBe(0.31);
+      expect(fixture.outboundBandwidthFloorBytesPerSecond).toBe(96 * 1_024);
+      expect(fixture.outboundBandwidthCeilingBytesPerSecond).toBe(4 * 1_024 * 1_024);
+      expect(fixture.outboundBandwidthBurstBytes).toBe(64 * 1_024);
+      expect(fixture.outboundQueueDelayTargetMs).toBe(25);
+      expect(fixture.outboundFeedbackTimeoutMs).toBe(3_000);
       expect(fixture.databasePath.startsWith(fixture.directory)).toBe(true);
       expect({
         client: process.env.VOXELS_CLIENT_CONFIG_PATH,
