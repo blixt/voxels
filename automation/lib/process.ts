@@ -41,6 +41,16 @@ function completion(child: ChildProcess, label: string): Promise<void> {
   });
 }
 
+function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    if (process.platform !== "win32" && child.pid !== undefined) process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+  }
+}
+
 export function startProcess(
   context: ScenarioContext,
   command: string,
@@ -48,23 +58,37 @@ export function startProcess(
   options: StartProcessOptions,
 ): ManagedProcess {
   context.throwIfAborted();
+  const { label, stopSignal = "SIGTERM", ...spawnOptions } = options;
   const child = spawn(command, [...arguments_], {
-    ...options,
-    signal: context.signal,
+    ...spawnOptions,
+    detached: spawnOptions.detached ?? process.platform !== "win32",
   });
-  const completed = completion(child, options.label);
+  const completed = completion(child, label);
   let stopped = false;
-  const stop = async (signal = options.stopSignal ?? "SIGTERM"): Promise<void> => {
+  const stop = async (signal = stopSignal): Promise<void> => {
     if (stopped || child.exitCode !== null || child.signalCode !== null) return;
     stopped = true;
-    child.kill(signal);
+    signalProcessTree(child, signal);
     try {
-      await completed;
+      await Promise.race([completed, new Promise<void>((resolve) => setTimeout(resolve, 2_000))]);
     } catch (error) {
       if (child.signalCode !== signal) throw error;
     }
+    if (child.exitCode === null && child.signalCode === null) {
+      signalProcessTree(child, "SIGKILL");
+      try {
+        await completed;
+      } catch (error) {
+        if (child.signalCode !== "SIGKILL") throw error;
+      }
+    }
   };
-  context.defer(`process ${options.label}`, stop);
+  const abort = (): void => {
+    void stop();
+  };
+  context.signal.addEventListener("abort", abort, { once: true });
+  void completed.finally(() => context.signal.removeEventListener("abort", abort)).catch(() => {});
+  context.defer(`process ${label}`, stop);
   return Object.freeze({ child, completed, stop });
 }
 

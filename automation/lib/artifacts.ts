@@ -28,7 +28,9 @@ export class ArtifactStore {
   readonly directory: string;
   readonly scenarioDirectory: string;
   readonly runId: string;
-  readonly records: ArtifactRecord[] = [];
+
+  readonly #records: ArtifactRecord[] = [];
+  #sealed = false;
 
   private constructor(directory: string, scenarioDirectory: string, runId: string) {
     this.directory = directory;
@@ -47,6 +49,14 @@ export class ArtifactStore {
     return new ArtifactStore(directory, scenarioDirectory, runId);
   }
 
+  get records(): readonly ArtifactRecord[] {
+    return Object.freeze([...this.#records]);
+  }
+
+  seal(): void {
+    this.#sealed = true;
+  }
+
   resolve(...segments: readonly string[]): string {
     const resolved = path.join(this.directory, ...segments.map(safeSegment));
     const relative = path.relative(this.directory, resolved);
@@ -63,12 +73,13 @@ export class ArtifactStore {
   }
 
   record(label: string, artifactPath: string, mediaType?: string): string {
+    this.#assertWritable();
     const absolute = path.resolve(artifactPath);
     const relative = path.relative(this.directory, absolute);
     if (relative.startsWith("..") || path.isAbsolute(relative)) {
       throw new Error(`artifact ${absolute} is outside ${this.directory}`);
     }
-    this.records.push(
+    this.#records.push(
       Object.freeze({
         label,
         path: absolute,
@@ -79,6 +90,7 @@ export class ArtifactStore {
   }
 
   async writeJson(label: string, filename: string, value: unknown): Promise<string> {
+    this.#assertWritable();
     const destination = this.resolve(filename);
     await writeFile(destination, `${JSON.stringify(value, null, 2)}\n`);
     return this.record(label, destination, "application/json");
@@ -96,6 +108,7 @@ export class ArtifactStore {
     value: string,
     mediaType = "text/plain",
   ): Promise<string> {
+    this.#assertWritable();
     const destination = this.resolve(filename);
     await writeFile(destination, value);
     return this.record(label, destination, mediaType);
@@ -107,12 +120,14 @@ export class ArtifactStore {
     value: Uint8Array,
     mediaType?: string,
   ): Promise<string> {
+    this.#assertWritable();
     const destination = this.resolve(filename);
     await writeFile(destination, value);
     return this.record(label, destination, mediaType);
   }
 
   async copy(label: string, source: string, filename: string, mediaType?: string): Promise<string> {
+    this.#assertWritable();
     const destination = this.resolve(filename);
     await copyFile(source, destination);
     return this.record(label, destination, mediaType);
@@ -133,5 +148,9 @@ export class ArtifactStore {
         2,
       )}\n`,
     );
+  }
+
+  #assertWritable(): void {
+    if (this.#sealed) throw new Error("automation artifacts are sealed");
   }
 }

@@ -64,6 +64,31 @@ export interface ScenarioRunOptions {
 
 type Cleanup = () => void | Promise<void>;
 
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("automation scenario aborted");
+}
+
+function interruptible<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener("abort", onAbort);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export class ScenarioContext {
   readonly artifacts: ArtifactStore;
   readonly signal: AbortSignal;
@@ -71,6 +96,7 @@ export class ScenarioContext {
 
   readonly #cleanups: { readonly label: string; readonly cleanup: Cleanup }[] = [];
   readonly #log: (message: string) => void;
+  #cleanupPromise: Promise<readonly Error[]> | undefined;
 
   constructor(
     definition: ScenarioDefinition,
@@ -89,18 +115,41 @@ export class ScenarioContext {
   }
 
   defer(label: string, cleanup: Cleanup): void {
+    if (this.#cleanupPromise !== undefined) {
+      throw new Error(`cannot register cleanup ${label} after scenario cleanup started`);
+    }
     this.#cleanups.push({ label, cleanup });
   }
 
   throwIfAborted(): void {
-    if (this.signal.aborted) {
-      throw this.signal.reason instanceof Error
-        ? this.signal.reason
-        : new Error("automation scenario aborted");
-    }
+    if (this.signal.aborted) throw abortReason(this.signal);
   }
 
-  async cleanup(): Promise<Error[]> {
+  wait(milliseconds: number): Promise<void> {
+    if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+      return Promise.reject(new Error("scenario wait duration must be a non-negative number"));
+    }
+    if (this.signal.aborted) return Promise.reject(abortReason(this.signal));
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, milliseconds);
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        this.signal.removeEventListener("abort", onAbort);
+        reject(abortReason(this.signal));
+      };
+      this.signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  cleanup(): Promise<readonly Error[]> {
+    this.#cleanupPromise ??= this.#runCleanup();
+    return this.#cleanupPromise;
+  }
+
+  async #runCleanup(): Promise<readonly Error[]> {
     const errors: Error[] = [];
     for (const entry of this.#cleanups.toReversed()) {
       try {
@@ -115,7 +164,7 @@ export class ScenarioContext {
       }
     }
     this.#cleanups.length = 0;
-    return errors;
+    return Object.freeze(errors);
   }
 }
 
@@ -187,7 +236,7 @@ export async function runScenario(
   let failure: unknown;
   try {
     context.throwIfAborted();
-    result = (await definition.run(context, arguments_)) ?? {};
+    result = (await interruptible(definition.run(context, arguments_), abort.signal)) ?? {};
     context.throwIfAborted();
   } catch (error) {
     failure = error;
@@ -197,6 +246,7 @@ export async function runScenario(
       for (const signal of signals) process.off(signal, onSignal);
     }
     const cleanupErrors = await context.cleanup();
+    artifacts.seal();
     if (cleanupErrors.length > 0) {
       failure =
         failure === undefined

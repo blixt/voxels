@@ -69,4 +69,30 @@ describe("automation scenario runner", () => {
       }),
     ).toThrow(/parity/u);
   });
+
+  it("interrupts cooperative work and cleans resources at its deadline", async () => {
+    let cleaned = false;
+    const scenario = defineScenario({
+      id: "runner-timeout",
+      kind: "validation",
+      summary: "Exercises deadline cancellation.",
+      uses: {},
+      timeoutMs: 25,
+      async run(context) {
+        context.defer("deadline resource", () => {
+          cleaned = true;
+        });
+        await context.wait(10_000);
+      },
+    });
+    const started = performance.now();
+    await expect(
+      runScenario(scenario, [], {
+        artifacts: { root: "target/automation-tests", runId: "runner-timeout" },
+        log: () => {},
+      }),
+    ).rejects.toThrow("scenario timed out after 25ms");
+    expect(performance.now() - started).toBeLessThan(250);
+    expect(cleaned).toBe(true);
+  });
 });
