@@ -23,6 +23,18 @@ fn ordered_threshold(pixel: vec2<u32>) -> f32 {
   return (ORDERED_4X4[index] + 0.5) / 16.0;
 }
 
+fn dithered_cloud_alpha(alpha: f32, pixel: vec2<u32>) -> f32 {
+  // Keep a small, explicit coverage vocabulary. Ordered rounding preserves mean opacity while
+  // producing stable hard pixel clusters instead of a translucent blur or temporal noise.
+  let levels = 12.0;
+  let scaled = clamp(alpha, 0.0, 1.0) * levels;
+  let lower = floor(scaled);
+  let fraction = fract(scaled);
+  let threshold = ordered_threshold(pixel + vec2<u32>(2u, 1u));
+  let rounded = lower + select(0.0, 1.0, threshold < fraction);
+  return min(rounded / levels, 1.0);
+}
+
 fn screen_triangle(index: u32, depth: f32) -> vec4<f32> {
   let x = f32((index << 1u) & 2u);
   let y = f32(index & 2u);
@@ -268,9 +280,10 @@ fn fs_composite(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32
   }
   let maximum = vec2<i32>(source_dimensions) - vec2<i32>(1);
   let cloud = textureLoad(cloud_target, clamp(source_base + offset, vec2<i32>(0), maximum), 0);
-  // Ordered reconstruction preserves the expected half-resolution coverage across neighboring
-  // pixels while never inventing a blurred source value or changing with time.
-  let reconstructed_alpha = smoothstep(0.035, 0.965, cloud.a);
+  // Ordered reconstruction preserves expected coverage across neighboring full-resolution pixels.
+  // Alpha uses the same stable screen lattice with a rotated phase, so neither spatial nor mip
+  // filtering can turn a deliberate voxel cell into a soft cloud edge.
+  let reconstructed_alpha = dithered_cloud_alpha(cloud.a, pixel);
   let radiance_scale = reconstructed_alpha / max(cloud.a, 0.0001);
   // Reintroduce the part of the analytic bow that ordinary premultiplied cloud composition would
   // remove. The sky contributes (1-a) of the bow and this pass contributes a, so the scattering

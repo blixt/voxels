@@ -343,7 +343,10 @@ mod tests {
         assert!(clouds.contains("advected.y * 2.1"));
         assert!(clouds.contains("ambient * ambient_visibility + direct"));
         assert!(clouds.contains("mix(1.10, 0.86, powder)"));
-        assert!(clouds.contains("let reconstructed_alpha = smoothstep("));
+        assert!(clouds.contains("fn dithered_cloud_alpha("));
+        assert!(clouds.contains("let levels = 12.0"));
+        assert!(clouds.contains("let reconstructed_alpha = dithered_cloud_alpha("));
+        assert!(!clouds.contains("smoothstep(0.035, 0.965, cloud.a)"));
     }
 
     #[test]
