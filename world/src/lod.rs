@@ -15,7 +15,7 @@ pub const SURFACE_TILE_EDGE_CELLS: i32 = 32;
 /// uploading overlapping tile-sized geometry.
 pub const SURFACE_PATCH_EDGE_CELLS: i32 = 8;
 pub const SURFACE_PATCHES_PER_TILE_EDGE: i32 = SURFACE_TILE_EDGE_CELLS / SURFACE_PATCH_EDGE_CELLS;
-pub const SURFACE_LOD_LEVEL_COUNT: usize = 6;
+pub const SURFACE_LOD_LEVEL_COUNT: usize = 8;
 pub const SURFACE_SHADING_EDGE_SAMPLES: usize = 34;
 pub const SURFACE_PARENT_SHADING_EDGE_SAMPLES: usize = 18;
 pub const SURFACE_HORIZON_CELL_COUNT: usize =
@@ -33,6 +33,8 @@ pub enum SurfaceLodLevel {
     Stride16 = 3,
     Stride32 = 4,
     Stride64 = 5,
+    Stride128 = 6,
+    Stride256 = 7,
 }
 
 impl SurfaceLodLevel {
@@ -43,6 +45,8 @@ impl SurfaceLodLevel {
         Self::Stride16,
         Self::Stride32,
         Self::Stride64,
+        Self::Stride128,
+        Self::Stride256,
     ];
 
     pub const fn index(self) -> u8 {
@@ -57,6 +61,8 @@ impl SurfaceLodLevel {
             Self::Stride16 => 16,
             Self::Stride32 => 32,
             Self::Stride64 => 64,
+            Self::Stride128 => 128,
+            Self::Stride256 => 256,
         }
     }
 
@@ -72,6 +78,8 @@ impl SurfaceLodLevel {
             16 => Some(Self::Stride16),
             32 => Some(Self::Stride32),
             64 => Some(Self::Stride64),
+            128 => Some(Self::Stride128),
+            256 => Some(Self::Stride256),
             _ => None,
         }
     }
@@ -83,7 +91,9 @@ impl SurfaceLodLevel {
             Self::Stride8 => Some(Self::Stride16),
             Self::Stride16 => Some(Self::Stride32),
             Self::Stride32 => Some(Self::Stride64),
-            Self::Stride64 => None,
+            Self::Stride64 => Some(Self::Stride128),
+            Self::Stride128 => Some(Self::Stride256),
+            Self::Stride256 => None,
         }
     }
 }
@@ -209,6 +219,8 @@ impl SurfacePatchId {
             SurfaceLodLevel::Stride16 => SurfaceLodLevel::Stride8,
             SurfaceLodLevel::Stride32 => SurfaceLodLevel::Stride16,
             SurfaceLodLevel::Stride64 => SurfaceLodLevel::Stride32,
+            SurfaceLodLevel::Stride128 => SurfaceLodLevel::Stride64,
+            SurfaceLodLevel::Stride256 => SurfaceLodLevel::Stride128,
         };
         let x = self.x.checked_mul(2)?;
         let z = self.z.checked_mul(2)?;
@@ -1119,7 +1131,9 @@ fn append_skyline_proxy(
                 SurfaceLodLevel::Stride8
                 | SurfaceLodLevel::Stride16
                 | SurfaceLodLevel::Stride32
-                | SurfaceLodLevel::Stride64 => &[([top - 7, top + 3], 8)],
+                | SurfaceLodLevel::Stride64
+                | SurfaceLodLevel::Stride128
+                | SurfaceLodLevel::Stride256 => &[([top - 7, top + 3], 8)],
             };
             for &([min_y, max_y], radius) in crown_layers {
                 let radius = (radius + radius_bonus).min(FEATURE_MAX_RADIUS_VOXELS);
@@ -1519,6 +1533,8 @@ fn append_ecology_tree_proxy(
         SurfaceLodLevel::Stride16 => 5,
         SurfaceLodLevel::Stride32 => 3,
         SurfaceLodLevel::Stride64 => 2,
+        SurfaceLodLevel::Stride128 => 2,
+        SurfaceLodLevel::Stride256 => 2,
     };
     let bounds = feature.bounds();
     let mut slices =
@@ -2023,8 +2039,8 @@ mod tests {
             .into_iter()
             .map(SurfaceLodLevel::tile_span_voxels)
             .collect();
-        assert_eq!(strides, [2, 4, 8, 16, 32, 64]);
-        assert_eq!(spans, [64, 128, 256, 512, 1_024, 2_048]);
+        assert_eq!(strides, [2, 4, 8, 16, 32, 64, 128, 256]);
+        assert_eq!(spans, [64, 128, 256, 512, 1_024, 2_048, 4_096, 8_192]);
         assert_eq!(
             SurfaceLodLevel::from_stride_voxels(8),
             Some(SurfaceLodLevel::Stride8)
@@ -2040,7 +2056,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(tiles.len(), SurfaceLodLevel::ALL.len());
         assert_eq!(tiles.first().unwrap().voxel_origin(), [192, -128]);
-        assert_eq!(tiles.last().unwrap().voxel_origin(), [6144, -4096]);
+        assert_eq!(tiles.last().unwrap().voxel_origin(), [24_576, -16_384]);
     }
 
     #[test]
@@ -2103,7 +2119,7 @@ mod tests {
         );
         assert_eq!(parent.children(), Some(children));
         assert_eq!(
-            SurfacePatchId::new(SurfaceLodLevel::Stride64, -1, 0).parent(),
+            SurfacePatchId::new(SurfaceLodLevel::Stride256, -1, 0).parent(),
             None
         );
         assert_eq!(

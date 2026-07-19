@@ -64,14 +64,14 @@ generation = 2
 meshing = 1
 upload = 3
 
-# One radius for each surface LOD level: stride 2, 4, 8, 16, 32, and 64. The two
-# ultra-coarse rings use 3.2 m and 6.4 m cells to carry silhouettes to the horizon cheaply.
+# One radius for each surface LOD level: stride 2 through 256. The four background rings use
+# 3.2–25.6 m cells; each fixed-size tile doubles linear coverage without increasing its mesh cost.
 [streaming.surface]
-load_radius_tiles = [4, 4, 4, 5, 4, 5]
+load_radius_tiles = [4, 4, 4, 5, 4, 5, 4, 3]
 retention_margin_tiles = 1
 
 [rendering]
-view_distance_metres = 1000.0
+view_distance_metres = 2400.0
 
 [rendering.shadows]
 vertical_fov_radians = 1.1868238 # 68 degrees

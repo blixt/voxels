@@ -177,7 +177,7 @@ impl Default for RendererConfig {
         Self {
             features: RendererFeatureConfig::default(),
             mission_control: MissionControlConfig::default(),
-            view_distance_metres: 1_000.0,
+            view_distance_metres: 2_400.0,
             directional_shadows: DirectionalShadowConfig::default(),
             volumetric_clouds: VolumetricCloudConfig::default(),
         }
@@ -195,7 +195,7 @@ struct FrameUniform {
     target_voxel_max: [f32; 4],
     render_options: [f32; 4],
     lod_options: [f32; 4],
-    lod_boundary_centres: [[f32; 4]; 3],
+    lod_boundary_centres: [[f32; 4]; 4],
     camera_forward: [f32; 4],
     shadow_splits: [f32; 4],
     shadow_texel_sizes: [f32; 4],
@@ -219,11 +219,11 @@ struct FrameUniform {
     interior: [f32; 4],
 }
 
-const _: () = assert!(size_of::<FrameUniform>() == 784);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, weather) == 720);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, cloud_layer) == 736);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 752);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 768);
+const _: () = assert!(size_of::<FrameUniform>() == 800);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, weather) == 736);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, cloud_layer) == 752);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 768);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 784);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
@@ -603,8 +603,8 @@ pub struct RenderDiagnostics {
     /// Candidate LOD edges still covered by their resident source edge because an exact connector
     /// was not complete when the current draw plan was installed.
     pub lod_incomplete_transition_edges: u32,
-    /// Grid-snapped centres, in canonical voxels, for the six geometric LOD boundaries.
-    pub lod_boundary_centres: [[i32; 2]; 6],
+    /// Grid-snapped centres, in canonical voxels, for the eight geometric LOD boundaries.
+    pub lod_boundary_centres: [[i32; 2]; 8],
     pub surface_width: u32,
     pub surface_height: u32,
     pub dpr: f32,
@@ -3193,7 +3193,7 @@ impl Renderer {
                 .map_or(0, |mesh| mesh.quad_count),
             lod_incomplete_transition_edges: self.lod_draw_plan.incomplete_transition_edges,
             lod_boundary_centres: geometric_lod_focus
-                .map_or([[0; 2]; 6], GeometricLodFocus::boundary_centres),
+                .map_or([[0; 2]; 8], GeometricLodFocus::boundary_centres),
             surface_width: self.config.width,
             surface_height: self.config.height,
             dpr: self.dpr,
@@ -4416,7 +4416,7 @@ fn frame_uniform(
     let view_projection = view_projection(config, camera, renderer_config.view_distance_metres);
     let camera_forward = camera.forward();
     let fluid = camera.fluid_state();
-    let boundary_centres = lod_focus.map_or([[0; 2]; 6], GeometricLodFocus::boundary_centres);
+    let boundary_centres = lod_focus.map_or([[0; 2]; 8], GeometricLodFocus::boundary_centres);
     FrameUniform {
         view_projection: view_projection.to_cols_array_2d(),
         inverse_view_projection: view_projection.inverse().to_cols_array_2d(),
@@ -6012,6 +6012,18 @@ mod tests {
         )));
         assert!(!mesh_casts_directional_shadow(&(
             SurfaceLodLevel::Stride64.index() + 1,
+            0,
+            0,
+            0,
+        )));
+        assert!(!mesh_casts_directional_shadow(&(
+            SurfaceLodLevel::Stride128.index() + 1,
+            0,
+            0,
+            0,
+        )));
+        assert!(!mesh_casts_directional_shadow(&(
+            SurfaceLodLevel::Stride256.index() + 1,
             0,
             0,
             0,

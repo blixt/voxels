@@ -35,7 +35,7 @@ function required(values: ArrayLike<number>, index: number, label: string): numb
 
 function boundaryCentres(snapshot: readonly number[]): BoundaryCentres {
   return Array.from(
-    { length: 6 },
+    { length: 8 },
     (_, index) =>
       [
         required(snapshot, SNAPSHOT.lodBoundary0X + index * 2, "LOD boundary"),

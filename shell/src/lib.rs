@@ -303,7 +303,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 1;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 28;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 29;
     const FRAME_SAMPLE_WIDTH: u32 = 11;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -315,9 +315,9 @@ mod web {
         "profileTrackedHigh,profileSurfaceHigh,profilePendingHigh,profilePendingMeshHigh,profileArenaCapacityHighMiB,profileWasmHighMiB,profileEvictions,materialDetail,daylightPhase,surfaceRegion,cloudCoverage,screenSpaceAmbientOcclusion,",
         "gpuDepthPrepassMs,gpuAmbientOcclusionMs,ambientOcclusionMiB,depthPrepassDrawCalls,enclosure,interiorExposure,caveHeadlamp,enclosureProbeUs,localLightCandidates,activeLocalLights,clippedLocalLights,occludedLocalLights,",
         "portalRejectedLocalLights,localLightVisibilityTests,openCinderPortals,cinderPortalRevision,localLighting,placementMaterial,streamInterestRequested,streamInterestNormalized,streamInterestDesired,streamInterestTruncated,streamPlanOverflow,portalActiveChunks,",
-        "portalActiveColumns,unreachablePortalActive,remoteAvatars,avatarParts,avatarDrawCalls,viewportFingerprintLow24,viewportFingerprintHigh24,allLodsReady,surfaceInFlight,interactiveLodsReady,stride32Tiles,stride64Tiles,",
+        "portalActiveColumns,unreachablePortalActive,remoteAvatars,avatarParts,avatarDrawCalls,viewportFingerprintLow24,viewportFingerprintHigh24,allLodsReady,surfaceInFlight,interactiveLodsReady,stride32Tiles,stride64Tiles,stride128Tiles,stride256Tiles,",
         "renderCullMs,renderEncodeMs,renderSubmitMs,drawListTestedSlices,drawListSelectedSlices,surfaceWidth,surfaceHeight,devicePixelRatio,lodTransitionQuads,lodBoundary0X,lodBoundary0Z,lodBoundary1X,",
-        "lodBoundary1Z,lodBoundary2X,lodBoundary2Z,lodBoundary3X,lodBoundary3Z,lodBoundary4X,lodBoundary4Z,lodBoundary5X,lodBoundary5Z,dayFraction,localSolarDayFraction,yearFraction,",
+        "lodBoundary1Z,lodBoundary2X,lodBoundary2Z,lodBoundary3X,lodBoundary3Z,lodBoundary4X,lodBoundary4Z,lodBoundary5X,lodBoundary5Z,lodBoundary6X,lodBoundary6Z,lodBoundary7X,lodBoundary7Z,dayFraction,localSolarDayFraction,yearFraction,",
         "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
         "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
         "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,schemaVersion,sampleCount,",
@@ -1527,13 +1527,17 @@ mod web {
                     let index = coord.level.index() as usize;
                     let dx = i128::from(coord.x) - i128::from(focus[index].x);
                     let dz = i128::from(coord.z) - i128::from(focus[index].z);
-                    (
-                        index >= INTERACTIVE_SURFACE_LOD_LEVELS,
-                        u8::MAX - coord.level.index(),
-                        dx * dx + dz * dz,
-                        coord.z,
-                        coord.x,
-                    )
+                    let background = index >= INTERACTIVE_SURFACE_LOD_LEVELS;
+                    // Interactive startup keeps its broad parent cover first. Once gameplay is
+                    // ready, complete each background level from fine to coarse so the renderer
+                    // can extend its exact hierarchy one ring at a time instead of waiting for the
+                    // entire horizon set before showing any additional distance.
+                    let level_order = if background {
+                        coord.level.index()
+                    } else {
+                        u8::MAX - coord.level.index()
+                    };
+                    (background, level_order, dx * dx + dz * dz, coord.z, coord.x)
                 });
                 let mut queue = self.surface_queue.borrow_mut();
                 queue.clear();
@@ -2544,6 +2548,8 @@ mod web {
                     },
                     lod_tiles[4] as f32,
                     lod_tiles[5] as f32,
+                    lod_tiles[6] as f32,
+                    lod_tiles[7] as f32,
                     render.cpu_cull_ms,
                     render.cpu_encode_ms,
                     render.cpu_submit_ms,
@@ -2565,6 +2571,10 @@ mod web {
                     render.lod_boundary_centres[4][1] as f32,
                     render.lod_boundary_centres[5][0] as f32,
                     render.lod_boundary_centres[5][1] as f32,
+                    render.lod_boundary_centres[6][0] as f32,
+                    render.lod_boundary_centres[6][1] as f32,
+                    render.lod_boundary_centres[7][0] as f32,
+                    render.lod_boundary_centres[7][1] as f32,
                     render.day_fraction,
                     render.local_solar_day_fraction,
                     render.year_fraction,

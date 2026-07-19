@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 22;
+pub const PROTOCOL_VERSION: u16 = 23;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -35,7 +35,7 @@ pub const EDIT_SESSION_NOT_CURRENT: &str = "edit session is no longer current";
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
-const SURFACE_SNAPSHOT_VERSION: u16 = 5;
+const SURFACE_SNAPSHOT_VERSION: u16 = 6;
 
 const KIND_OPEN_WORLD: u16 = 1;
 const KIND_WORLD_OPENED: u16 = 2;
@@ -3455,6 +3455,8 @@ fn decode_surface_lod(value: u8) -> Result<SurfaceLodLevel, ProtocolError> {
         3 => SurfaceLodLevel::Stride16,
         4 => SurfaceLodLevel::Stride32,
         5 => SurfaceLodLevel::Stride64,
+        6 => SurfaceLodLevel::Stride128,
+        7 => SurfaceLodLevel::Stride256,
         _ => {
             return Err(ProtocolError::UnknownEnum(
                 "surface LOD level",
@@ -4141,10 +4143,11 @@ mod tests {
             other => panic!("unexpected product: {other:?}"),
         };
         let mut encoded = encode_surface_snapshot(&snapshot).expect("encode");
-        encoded[4..6].copy_from_slice(&6_u16.to_le_bytes());
+        let unsupported = SURFACE_SNAPSHOT_VERSION + 1;
+        encoded[4..6].copy_from_slice(&unsupported.to_le_bytes());
         assert_eq!(
             decode_surface_snapshot(&encoded, coord, source.source_identity_hash()),
-            Err(ProtocolError::UnsupportedVersion(6))
+            Err(ProtocolError::UnsupportedVersion(unsupported))
         );
 
         snapshot.terrain.patches[0].quad_range.end = u32::MAX;

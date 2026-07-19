@@ -7,11 +7,11 @@ use voxels_world::{CHUNK_EDGE, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId
 
 /// Half extents in canonical 10 cm voxels. Every boundary is a multiple of the patch span on both
 /// sides, so whole patches can change owner without overlap, holes, or fragment clipping.
-pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 6] = [96, 256, 512, 1_024, 2_048, 4_096];
+pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 8] = [96, 256, 512, 1_024, 2_048, 4_096, 8_192, 16_384];
 // Snap only as coarsely as both adjacent representations require. In particular, the near handoff
 // moves in one 3.2 m chunk rather than a 9.6 m feature cell, cutting its worst visible replacement
 // strip by two thirds while preserving whole-chunk and whole-patch ownership.
-const LOD_BOUNDARY_SNAP: [i32; 6] = [32, 32, 64, 128, 256, 512];
+const LOD_BOUNDARY_SNAP: [i32; 8] = [32, 32, 64, 128, 256, 512, 1_024, 2_048];
 const LOD_SNAP_HYSTERESIS_DIVISOR: i32 = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,7 +22,7 @@ pub enum LodOwner {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GeometricLodFocus {
-    boundary_centres: [[i32; 2]; 6],
+    boundary_centres: [[i32; 2]; 8],
     surface_level_count: u8,
 }
 
@@ -69,7 +69,7 @@ impl GeometricLodFocus {
         self
     }
 
-    pub const fn boundary_centres(self) -> [[i32; 2]; 6] {
+    pub const fn boundary_centres(self) -> [[i32; 2]; 8] {
         self.boundary_centres
     }
 
@@ -511,6 +511,8 @@ mod tests {
                 [128, -128],
                 [0, 0],
                 [0, 0],
+                [0, 0],
+                [0, 0],
             ]
         );
         let canonical = focus.boundary_centres()[0];
@@ -565,6 +567,8 @@ mod tests {
             ([1_280, -64], LodOwner::Surface(SurfaceLodLevel::Stride16)),
             ([2_560, -64], LodOwner::Surface(SurfaceLodLevel::Stride32)),
             ([5_120, -64], LodOwner::Surface(SurfaceLodLevel::Stride64)),
+            ([10_240, -64], LodOwner::Surface(SurfaceLodLevel::Stride128)),
+            ([20_480, -64], LodOwner::Surface(SurfaceLodLevel::Stride256)),
         ];
         for (point, expected) in probes {
             assert_eq!(focus.owner_at(point[0], point[1]), expected);
@@ -598,7 +602,7 @@ mod tests {
     #[test]
     fn advancing_ready_prefix_does_not_move_slow_horizon_boundaries() {
         let initial = GeometricLodFocus::snapped(0, 0);
-        let advanced = initial.advanced_for_levels(1_100, -900, 4, 6);
+        let advanced = initial.advanced_for_levels(1_100, -900, 4, 8);
         let expected = GeometricLodFocus::snapped(1_100, -900);
         assert_eq!(
             &advanced.boundary_centres()[..4],
@@ -610,7 +614,7 @@ mod tests {
         );
         assert_eq!(
             advanced.owner_at(100_000, 100_000),
-            LodOwner::Surface(SurfaceLodLevel::Stride64)
+            LodOwner::Surface(SurfaceLodLevel::Stride256)
         );
     }
 

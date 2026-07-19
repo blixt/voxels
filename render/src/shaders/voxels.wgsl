@@ -130,7 +130,7 @@ fn surface_parent_normal_blend(world: vec3<f32>, material: u32) -> f32 {
     return 0.0;
   }
   let level = (material >> 27u) & 7u;
-  if level >= 5u {
+  if level >= 7u {
     return 0.0;
   }
   let boundary = level + 1u;
@@ -140,6 +140,8 @@ fn surface_parent_normal_blend(world: vec3<f32>, material: u32) -> f32 {
     case 3u: { half_extent = 102.4; }
     case 4u: { half_extent = 204.8; }
     case 5u: { half_extent = 409.6; }
+    case 6u: { half_extent = 819.2; }
+    case 7u: { half_extent = 1638.4; }
     default: {}
   }
   let delta = abs(world.xz - lod_boundary_center(boundary));

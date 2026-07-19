@@ -124,7 +124,7 @@ pub struct FrameBudgetConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SurfaceStreamingConfig {
-    pub load_radius_tiles: [u32; 6],
+    pub load_radius_tiles: [u32; 8],
     pub retention_margin_tiles: u32,
 }
 
@@ -730,12 +730,12 @@ mod tests {
                     upload: 3,
                 },
                 surface: SurfaceStreamingConfig {
-                    load_radius_tiles: [4, 4, 4, 5, 4, 5],
+                    load_radius_tiles: [4, 4, 4, 5, 4, 5, 4, 3],
                     retention_margin_tiles: 1,
                 },
             },
             rendering: RenderingConfig {
-                view_distance_metres: 1_000.0,
+                view_distance_metres: 2_400.0,
                 shadows: ShadowConfig {
                     vertical_fov_radians: 68.0_f32.to_radians(),
                     near_plane: 0.05,

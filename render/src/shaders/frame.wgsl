@@ -7,7 +7,7 @@ struct Frame {
   target_voxel_max: vec4<f32>,
   render_options: vec4<f32>,
   lod_options: vec4<f32>,
-  lod_boundary_centres: array<vec4<f32>, 3>,
+  lod_boundary_centres: array<vec4<f32>, 4>,
   camera_forward: vec4<f32>,
   shadow_splits: vec4<f32>,
   shadow_texel_sizes: vec4<f32>,
