@@ -1,6 +1,4 @@
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -96,22 +94,6 @@ export function summarizeProcess(samples: readonly ProcessSample[]): {
     ...summary,
     threads: threadSamples.length > 0 ? numericSummary(threadSamples) : null,
   };
-}
-
-export async function writeHarnessReport(
-  directory: string,
-  result: unknown,
-  markdown: string,
-): Promise<void> {
-  await mkdir(directory, { recursive: true });
-  const timestamp = new Date().toISOString().replaceAll(":", "-");
-  const json = `${JSON.stringify(result, null, 2)}\n`;
-  await Promise.all([
-    writeFile(path.join(directory, `${timestamp}.json`), json),
-    writeFile(path.join(directory, `${timestamp}.md`), markdown),
-    writeFile(path.join(directory, "latest.json"), json),
-    writeFile(path.join(directory, "latest.md"), markdown),
-  ]);
 }
 
 async function processThreadCount(pid: number): Promise<number | null> {

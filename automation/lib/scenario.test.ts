@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vite-plus/test";
 import { defineScenario, runScenario } from "./scenario.ts";
 
@@ -29,6 +30,13 @@ describe("automation scenario runner", () => {
     expect(manifest.scenario.uses.metrics).toBe(true);
     expect(manifest.result?.metrics).toEqual({ samples: 1 });
     expect(manifest.artifacts.map((artifact) => artifact.label)).toContain("evidence");
+    const persisted = JSON.parse(
+      await readFile(
+        "target/automation-tests/runner-contract/runner-contract/manifest.json",
+        "utf8",
+      ),
+    ) as typeof manifest;
+    expect(persisted.artifacts).toEqual(manifest.artifacts);
     expect(cleanup).toEqual(["second", "first"]);
   });
 

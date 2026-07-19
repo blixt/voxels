@@ -221,9 +221,9 @@ export async function runScenario(
     status: failure === undefined ? "passed" : "failed",
     ...(result === undefined ? {} : { result }),
     ...(failure === undefined ? {} : { error: errorText(failure) }),
-    artifacts: artifacts.records,
+    artifacts: Object.freeze([...artifacts.records]),
   };
-  await artifacts.writeJson("scenario manifest", "manifest.json", manifest);
+  await artifacts.writeMetadataJson("manifest.json", manifest);
   await artifacts.publishLatest(manifest.status);
   if (failure !== undefined) throw failure;
   return manifest;

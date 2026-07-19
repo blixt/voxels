@@ -52,8 +52,6 @@ const LINK_PROFILE = Object.freeze({
   oneWayLatencyMs: 20,
   downstreamMegabitsPerSecond: 50,
   upstreamMegabitsPerSecond: 10,
-  jitterMs: 0,
-  packetLossPercent: 0,
 });
 
 interface PlayerIdentity {

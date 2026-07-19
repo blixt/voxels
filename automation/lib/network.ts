@@ -8,26 +8,49 @@ const VXWP_MAGIC = Buffer.from("VXWP");
 const DEFAULT_QUANTUM_BYTES = 16 * 1024;
 const QUEUE_BANDWIDTH_DELAY_PRODUCTS = 2;
 
+export const VXWP_KIND = Object.freeze({
+  openWorld: 1,
+  worldOpened: 2,
+  chunkBatch: 3,
+  chunkBatchResult: 4,
+  cancel: 5,
+  error: 6,
+  surfaceTileBatch: 7,
+  surfaceTileBatchResult: 8,
+  openPresence: 9,
+  presenceOpened: 10,
+  playerPose: 11,
+  presenceDelta: 12,
+  presencePing: 13,
+  presencePong: 14,
+  editCommand: 15,
+  editCommit: 16,
+  resyncRequired: 17,
+  frameFragment: 18,
+} as const);
+
+export type VxwpKind = (typeof VXWP_KIND)[keyof typeof VXWP_KIND];
+
 export const VXWP_KIND_NAMES = Object.freeze({
-  1: "open_world",
-  2: "world_opened",
-  3: "chunk_batch",
-  4: "chunk_batch_result",
-  5: "cancel",
-  6: "error",
-  7: "surface_tile_batch",
-  8: "surface_tile_batch_result",
-  9: "open_presence",
-  10: "presence_opened",
-  11: "player_pose",
-  12: "presence_delta",
-  13: "presence_ping",
-  14: "presence_pong",
-  15: "edit_command",
-  16: "edit_commit",
-  17: "resync_required",
-  18: "frame_fragment",
-} satisfies Record<number, string>);
+  [VXWP_KIND.openWorld]: "open_world",
+  [VXWP_KIND.worldOpened]: "world_opened",
+  [VXWP_KIND.chunkBatch]: "chunk_batch",
+  [VXWP_KIND.chunkBatchResult]: "chunk_batch_result",
+  [VXWP_KIND.cancel]: "cancel",
+  [VXWP_KIND.error]: "error",
+  [VXWP_KIND.surfaceTileBatch]: "surface_tile_batch",
+  [VXWP_KIND.surfaceTileBatchResult]: "surface_tile_batch_result",
+  [VXWP_KIND.openPresence]: "open_presence",
+  [VXWP_KIND.presenceOpened]: "presence_opened",
+  [VXWP_KIND.playerPose]: "player_pose",
+  [VXWP_KIND.presenceDelta]: "presence_delta",
+  [VXWP_KIND.presencePing]: "presence_ping",
+  [VXWP_KIND.presencePong]: "presence_pong",
+  [VXWP_KIND.editCommand]: "edit_command",
+  [VXWP_KIND.editCommit]: "edit_commit",
+  [VXWP_KIND.resyncRequired]: "resync_required",
+  [VXWP_KIND.frameFragment]: "frame_fragment",
+} satisfies Record<VxwpKind, string>);
 
 export type LinkDirection = "upstream" | "downstream";
 
@@ -322,7 +345,7 @@ class ConnectionInspector {
       stats.messages[key].maxPayloadBytes,
       payload.length,
     );
-    if (direction === "upstream" && kind === 13 && payload.length === 40) {
+    if (direction === "upstream" && kind === VXWP_KIND.presencePing && payload.length === 40) {
       const roundTripMs = payload.readUInt32LE(28);
       stats.messages[key].lastObservedRoundTripMs = roundTripMs;
       stats.messages[key].maxObservedRoundTripMs = Math.max(
@@ -330,7 +353,7 @@ class ConnectionInspector {
         roundTripMs,
       );
     }
-    if (direction === "downstream" && kind === 14 && payload.length === 56) {
+    if (direction === "downstream" && kind === VXWP_KIND.presencePong && payload.length === 56) {
       const rate = payload.readUInt32LE(28);
       stats.messages[key].lastOutboundRateBytesPerSecond = rate;
       stats.messages[key].maxOutboundRateBytesPerSecond = Math.max(

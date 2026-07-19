@@ -19,7 +19,7 @@ import {
   summarizeProcess,
   type ProcessSample,
 } from "../lib/metrics.ts";
-import { createShapedLink, type ShapedLink } from "../lib/network.ts";
+import { createShapedLink, type ShapedLink, VXWP_KIND } from "../lib/network.ts";
 import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "../lib/protocol.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import type { BrowserWorldFixture, BrowserWorldService } from "../lib/world.ts";
@@ -283,11 +283,20 @@ function summarizeTrafficBudget(report: BotHarnessReport, serviceConfig: string)
     envelopeBytes: numericSummary(envelopeBytes),
     overBudgetClients,
     payloadByClass: {
-      presenceBytes: report.reports.reduce((sum, client) => sum + messageBytes(client, 16), 0),
-      editBytes: report.reports.reduce((sum, client) => sum + messageBytes(client, 12), 0),
+      presenceBytes: report.reports.reduce(
+        (sum, client) => sum + messageBytes(client, VXWP_KIND.presenceDelta),
+        0,
+      ),
+      editBytes: report.reports.reduce(
+        (sum, client) => sum + messageBytes(client, VXWP_KIND.editCommit),
+        0,
+      ),
       visibleWorldBytes: report.reports.reduce(
         (sum, client) =>
-          sum + messageBytes(client, 4) + messageBytes(client, 8) + messageBytes(client, 18),
+          sum +
+          messageBytes(client, VXWP_KIND.chunkBatchResult) +
+          messageBytes(client, VXWP_KIND.surfaceTileBatchResult) +
+          messageBytes(client, VXWP_KIND.frameFragment),
         0,
       ),
     },

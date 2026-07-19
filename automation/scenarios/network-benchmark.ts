@@ -42,8 +42,6 @@ const DEFAULT_PROFILE = Object.freeze({
   oneWayLatencyMs: 20,
   downstreamMegabitsPerSecond: 50,
   upstreamMegabitsPerSecond: 10,
-  jitterMs: 0,
-  packetLossPercent: 0,
 });
 
 interface NumberSummary {
@@ -632,18 +630,6 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         fallback: DEFAULT_PROFILE.upstreamMegabitsPerSecond,
         minimum: 0.001,
       }) ?? DEFAULT_PROFILE.upstreamMegabitsPerSecond,
-    jitterMs:
-      options.number("jitter-ms", {
-        fallback: DEFAULT_PROFILE.jitterMs,
-        minimum: 0,
-        maximum: 10_000,
-      }) ?? DEFAULT_PROFILE.jitterMs,
-    packetLossPercent:
-      options.number("loss-percent", {
-        fallback: DEFAULT_PROFILE.packetLossPercent,
-        minimum: 0,
-        maximum: 100,
-      }) ?? DEFAULT_PROFILE.packetLossPercent,
   };
   options.assertEmpty();
   const temporary = await mkdtemp(path.join(tmpdir(), "voxels-network-benchmark-"));

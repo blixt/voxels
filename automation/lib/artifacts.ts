@@ -84,6 +84,12 @@ export class ArtifactStore {
     return this.record(label, destination, "application/json");
   }
 
+  async writeMetadataJson(filename: string, value: unknown): Promise<string> {
+    const destination = this.resolve(filename);
+    await writeFile(destination, `${JSON.stringify(value, null, 2)}\n`);
+    return destination;
+  }
+
   async writeText(
     label: string,
     filename: string,
