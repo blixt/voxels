@@ -593,6 +593,7 @@ export async function createShapedLink({
     server.once("error", reject);
     server.listen(listenPort, "127.0.0.1", resolve);
   });
+  let closePromise: Promise<void> | undefined;
   return {
     port: listenPort,
     profile: normalized,
@@ -600,11 +601,14 @@ export async function createShapedLink({
     reset: () => {
       statsRef.current = blankStats();
     },
-    close: async () => {
-      for (const socket of sockets) socket.destroy();
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
+    close: () => {
+      closePromise ??= (async () => {
+        for (const socket of sockets) socket.destroy();
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        );
+      })();
+      return closePromise;
     },
   };
 }

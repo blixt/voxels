@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import { PassThrough } from "node:stream";
-import { serializationMilliseconds, testInternals } from "./network.ts";
+import { reserveEphemeralPort } from "./browser.ts";
+import { createShapedLink, serializationMilliseconds, testInternals } from "./network.ts";
 
 function maskedFrame(
   payload: Buffer,
@@ -111,5 +112,25 @@ describe("network benchmark link", () => {
     await ended;
 
     expect(Buffer.concat(received).toString("utf8")).toBe("final VXWP error");
+  });
+
+  it("can be closed explicitly before scenario cleanup", async () => {
+    const [listenPort, targetPort] = await Promise.all([
+      reserveEphemeralPort(),
+      reserveEphemeralPort(),
+    ]);
+    const link = await createShapedLink({
+      listenPort,
+      targetPort,
+      profile: {
+        name: "close-test",
+        oneWayLatencyMs: 0,
+        upstreamMegabitsPerSecond: 1_000,
+        downstreamMegabitsPerSecond: 1_000,
+      },
+    });
+
+    await link.close();
+    await expect(link.close()).resolves.toBeUndefined();
   });
 });
