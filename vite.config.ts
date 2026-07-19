@@ -507,6 +507,10 @@ export default defineConfig(({ command, mode }) => ({
   },
   run: {
     tasks: {
+      automation: {
+        command: "node automation/cli.ts",
+        cache: false,
+      },
       "bench:world": { command: "node scripts/bench-world.ts", cache: false },
       "bench:core": {
         command: "node scripts/bench-core.ts",

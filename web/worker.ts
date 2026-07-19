@@ -77,6 +77,13 @@ self.addEventListener("error", (event) => {
 
 function dispatch(message: Exclude<ToWorker, InitMessage>): void {
   switch (message.kind) {
+    case "automationContract":
+      scope.postMessage({
+        kind: "automationContract",
+        requestId: message.requestId,
+        value: handle?.automation_contract() ?? "",
+      });
+      break;
     case "input":
       {
         const next = handle?.feed_input(new Uint8Array(message.buffer)) ?? false;

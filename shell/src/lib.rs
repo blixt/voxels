@@ -246,7 +246,27 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const SNAPSHOT_SCHEMA_VERSION: f32 = 27.0;
+    const AUTOMATION_CONTRACT_VERSION: u32 = 1;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 27;
+    const FRAME_SAMPLE_WIDTH: u32 = 11;
+    const GPU_SAMPLE_WIDTH: u32 = 13;
+    const SNAPSHOT_FIELD_NAMES: &str = concat!(
+        "cameraX,cameraY,cameraZ,yaw,pitch,grounded,quads,edits,residentChunks,trackedChunks,visibleChunks,drawCalls,",
+        "arenaPages,arenaAllocatedMiB,arenaCapacityMiB,pendingJobs,surfaceTiles,frameMs,shadowDrawCalls,shadowCascades,loadP95Frames,loadMaxFrames,remeshP95Frames,remeshMaxFrames,",
+        "stride2Tiles,stride4Tiles,stride8Tiles,stride16Tiles,waterQuads,waterDrawCalls,refractionCopyMiB,immersion,eyeDepthMetres,eyesSubmerged,swimming,targetVoxelX,",
+        "targetVoxelY,targetVoxelZ,targetPresent,coreGpuMiB,cpuMs,simulationMs,streamMs,renderMs,gpuSampleId,gpuTotalMs,gpuShadowMs,gpuWorldMs,",
+        "gpuWaterMs,gpuUiMs,wasmCommittedMiB,canonicalVoxelMiB,pendingMeshMiB,editLogicalMiB,totalEvictions,staleCompletions,profilePhase,profileElapsedSeconds,profileDistanceMetres,profileComplete,",
+        "profileTrackedHigh,profileSurfaceHigh,profilePendingHigh,profilePendingMeshHigh,profileArenaCapacityHighMiB,profileWasmHighMiB,profileEvictions,materialDetail,daylightPhase,surfaceRegion,cloudCoverage,screenSpaceAmbientOcclusion,",
+        "gpuDepthPrepassMs,gpuAmbientOcclusionMs,ambientOcclusionMiB,depthPrepassDrawCalls,enclosure,interiorExposure,caveHeadlamp,enclosureProbeUs,localLightCandidates,activeLocalLights,clippedLocalLights,occludedLocalLights,",
+        "portalRejectedLocalLights,localLightVisibilityTests,openCinderPortals,cinderPortalRevision,localLighting,placementMaterial,streamInterestRequested,streamInterestNormalized,streamInterestDesired,streamInterestTruncated,streamPlanOverflow,portalActiveChunks,",
+        "portalActiveColumns,unreachablePortalActive,remoteAvatars,avatarParts,avatarDrawCalls,viewportFingerprintLow24,viewportFingerprintHigh24,allLodsReady,surfaceInFlight,interactiveLodsReady,stride32Tiles,stride64Tiles,",
+        "renderCullMs,renderEncodeMs,renderSubmitMs,drawListTestedSlices,drawListSelectedSlices,surfaceWidth,surfaceHeight,devicePixelRatio,lodTransitionQuads,lodBoundary0X,lodBoundary0Z,lodBoundary1X,",
+        "lodBoundary1Z,lodBoundary2X,lodBoundary2Z,lodBoundary3X,lodBoundary3Z,lodBoundary4X,lodBoundary4Z,lodBoundary5X,lodBoundary5Z,dayFraction,localSolarDayFraction,yearFraction,",
+        "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
+        "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
+        "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,creativeFlightActive,schemaVersion,sampleCount,",
+        "droppedSamples",
+    );
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
     #[derive(Clone, Copy, Debug)]
     struct EngineConfig {
@@ -2079,6 +2099,13 @@ mod web {
 
     #[wasm_bindgen]
     impl EngineHandle {
+        pub fn automation_contract(&self) -> String {
+            format!(
+                "{AUTOMATION_CONTRACT_VERSION}\n{SNAPSHOT_SCHEMA_VERSION}\n\
+                 {FRAME_SAMPLE_WIDTH}\n{GPU_SAMPLE_WIDTH}\n{SNAPSHOT_FIELD_NAMES}"
+            )
+        }
+
         pub fn start_profile(&self, profile_id: u32) -> bool {
             self.engine
                 .as_ref()
@@ -2481,7 +2508,7 @@ mod web {
                     } else {
                         0.0
                     },
-                    SNAPSHOT_SCHEMA_VERSION,
+                    SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
                 let gpu_timings = engine.renderer.borrow_mut().drain_gpu_timings();

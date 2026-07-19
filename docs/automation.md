@@ -117,7 +117,9 @@ artifact directory and test timeout. A single `.test.ts` file can define the wor
 screenshot, inspect typed engine state or pixels, and fail normally:
 
 ```ts
-const scenario = defineScenario({ /* setup, capture, assertions */ });
+const scenario = defineScenario({
+  /* setup, capture, assertions */
+});
 scenarioTest(scenario);
 ```
 
@@ -141,4 +143,3 @@ viewport as unavailable instead of maintaining a cheaper renderer clone whose be
 4. Keep only scenario-specific actions, metrics, and assertions in the file.
 5. Register it in the typed scenario registry.
 6. Run `vp run automation -- describe <id>`, then the scenario and `vp check`.
-

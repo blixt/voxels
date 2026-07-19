@@ -17,6 +17,6 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["web", "scripts", "vite.config.ts", "vite.config.test.ts"],
+  "include": ["automation", "web", "scripts", "vite.config.ts", "vite.config.test.ts"],
   "exclude": ["web/generated"]
 }

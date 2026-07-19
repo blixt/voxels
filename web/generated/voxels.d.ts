@@ -4,6 +4,7 @@
 export class EngineHandle {
     private constructor();
     free(): void;
+    automation_contract(): string;
     destroy(): Promise<void>;
     feed_input(bytes: Uint8Array): boolean;
     /**
@@ -55,6 +56,7 @@ export interface InitOutput {
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
     readonly create_engine: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: any) => any;
+    readonly enginehandle_automation_contract: (a: number) => [number, number];
     readonly enginehandle_destroy: (a: number) => any;
     readonly enginehandle_feed_input: (a: number, b: number, c: number) => number;
     readonly enginehandle_inventory: (a: number) => [number, number];

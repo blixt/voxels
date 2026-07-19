@@ -53,6 +53,7 @@ export interface InitMessage {
 
 export type ToWorker =
   | InitMessage
+  | { kind: "automationContract"; requestId: number }
   | { kind: "input"; buffer: ArrayBuffer }
   | { kind: "resize"; cssWidth: number; cssHeight: number; dpr: number }
   | { kind: "reducedMotion"; reduced: boolean }
@@ -84,6 +85,7 @@ export type FromWorker =
   | { kind: "uiMode"; cursor: boolean }
   | { kind: "copyMissionControl"; text: string }
   | { kind: "error"; message: string }
+  | { kind: "automationContract"; requestId: number; value: string }
   | { kind: "snapshot"; requestId: number; values: number[] }
   | { kind: "submitEdit"; requestId: number; submitted: boolean }
   | { kind: "submitDig"; requestId: number; submitted: boolean }

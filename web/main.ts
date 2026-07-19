@@ -1,6 +1,11 @@
 import "./style.css";
 import { loadClientConfig } from "./client-config.ts";
 import { writeClipboardText } from "./clipboard.ts";
+import {
+  type EngineAutomationApi,
+  type EngineAutomationContract,
+  parseAutomationContract,
+} from "./automation.ts";
 import { watchDevicePixelRatio } from "./display.ts";
 import { terminateAfterAcknowledgement } from "./hmr-lifecycle.ts";
 import { PressedKeys, WheelAccumulator, requestPointerLockSafely } from "./input.ts";
@@ -94,6 +99,10 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     number,
     { resolve: (values: number[]) => void; reject: (reason: Error) => void }
   >();
+  const contractResolvers = new Map<
+    number,
+    { resolve: (value: EngineAutomationContract) => void; reject: (reason: Error) => void }
+  >();
   const editResolvers = new Map<
     number,
     { resolve: (submitted: boolean) => void; reject: (reason: Error) => void }
@@ -107,22 +116,14 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     { resolve: (values: number[]) => void; reject: (reason: Error) => void }
   >();
   const debugGlobal = globalThis as typeof globalThis & {
-    __VOXELS__?: {
-      snapshot(): Promise<number[]>;
-      profile(profileId: number): void;
-      look(deltaX: number, deltaY: number): void;
-      submitEdit(x: number, y: number, z: number, materialId: number): Promise<boolean>;
-      submitDig(x: number, y: number, z: number): Promise<boolean>;
-      inventory(): Promise<number[]>;
-      surfaceEditState(stride: number, x: number, z: number): Promise<number[]>;
-      readonly player: BrowserPlayerSession;
-      playerUrl(name: string): string;
-    };
+    __VOXELS__?: EngineAutomationApi;
   };
   const rejectPending = (message: string): void => {
     const error = new Error(message);
     for (const { reject } of snapshotResolvers.values()) reject(error);
     snapshotResolvers.clear();
+    for (const { reject } of contractResolvers.values()) reject(error);
+    contractResolvers.clear();
     for (const { reject } of editResolvers.values()) reject(error);
     editResolvers.clear();
     for (const { reject } of inventoryResolvers.values()) reject(error);
@@ -148,6 +149,13 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     delete debugGlobal.__VOXELS__;
   };
   debugGlobal.__VOXELS__ = {
+    contract: () =>
+      new Promise<EngineAutomationContract>((resolve, reject) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        contractResolvers.set(requestId, { resolve, reject });
+        worker.postMessage({ kind: "automationContract", requestId });
+      }),
     snapshot: () =>
       new Promise<number[]>((resolve, reject) => {
         const requestId = nextSnapshotRequest;
@@ -238,6 +246,17 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
       });
     } else if (event.data.kind === "error") {
       failWorker(`The Rust engine could not start.\n${event.data.message}`);
+    } else if (event.data.kind === "automationContract") {
+      try {
+        contractResolvers
+          .get(event.data.requestId)
+          ?.resolve(parseAutomationContract(event.data.value));
+      } catch (error) {
+        contractResolvers
+          .get(event.data.requestId)
+          ?.reject(error instanceof Error ? error : new Error(String(error)));
+      }
+      contractResolvers.delete(event.data.requestId);
     } else if (event.data.kind === "snapshot") {
       snapshotResolvers.get(event.data.requestId)?.resolve(event.data.values);
       snapshotResolvers.delete(event.data.requestId);
