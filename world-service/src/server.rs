@@ -937,7 +937,7 @@ impl GenerationRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum ProductKey {
     Chunk {
         coord: ChunkCoord,
@@ -988,11 +988,17 @@ struct ProductGenerationCompletion {
     result: Result<Vec<EncodedProduct>, String>,
 }
 
+struct CachedProduct {
+    product: Arc<EncodedProduct>,
+    last_access: u64,
+}
+
 struct ProductCache {
     max_bytes: usize,
     retained_bytes: usize,
-    entries: HashMap<ProductKey, Arc<EncodedProduct>>,
-    lru: VecDeque<ProductKey>,
+    entries: HashMap<ProductKey, CachedProduct>,
+    lru: BTreeSet<(u64, ProductKey)>,
+    next_access: u64,
 }
 
 impl ProductCache {
@@ -1001,14 +1007,18 @@ impl ProductCache {
             max_bytes,
             retained_bytes: 0,
             entries: HashMap::new(),
-            lru: VecDeque::new(),
+            lru: BTreeSet::new(),
+            next_access: 1,
         }
     }
 
     fn get(&mut self, key: &ProductKey) -> Option<Arc<EncodedProduct>> {
-        let value = Arc::clone(self.entries.get(key)?);
-        self.lru.retain(|candidate| candidate != key);
-        self.lru.push_back(*key);
+        let access = self.record_access();
+        let entry = self.entries.get_mut(key)?;
+        self.lru.remove(&(entry.last_access, *key));
+        entry.last_access = access;
+        let value = Arc::clone(&entry.product);
+        self.lru.insert((access, *key));
         Some(value)
     }
 
@@ -1018,20 +1028,37 @@ impl ProductCache {
             return;
         }
         if let Some(replaced) = self.entries.remove(&key) {
-            self.retained_bytes = self.retained_bytes.saturating_sub(replaced.encoded_len());
-            self.lru.retain(|candidate| candidate != &key);
+            self.retained_bytes = self
+                .retained_bytes
+                .saturating_sub(replaced.product.encoded_len());
+            self.lru.remove(&(replaced.last_access, key));
         }
         while self.retained_bytes.saturating_add(encoded_len) > self.max_bytes {
-            let Some(oldest) = self.lru.pop_front() else {
+            let Some((_, oldest)) = self.lru.pop_first() else {
                 break;
             };
             if let Some(evicted) = self.entries.remove(&oldest) {
-                self.retained_bytes = self.retained_bytes.saturating_sub(evicted.encoded_len());
+                self.retained_bytes = self
+                    .retained_bytes
+                    .saturating_sub(evicted.product.encoded_len());
             }
         }
+        let access = self.record_access();
         self.retained_bytes = self.retained_bytes.saturating_add(encoded_len);
-        self.lru.push_back(key);
-        self.entries.insert(key, product);
+        self.lru.insert((access, key));
+        self.entries.insert(
+            key,
+            CachedProduct {
+                product,
+                last_access: access,
+            },
+        );
+    }
+
+    fn record_access(&mut self) -> u64 {
+        let access = self.next_access;
+        self.next_access = self.next_access.saturating_add(1);
+        access
     }
 }
 
@@ -2779,12 +2806,14 @@ mod tests {
         assert!(cache.get(&key2).is_none());
         assert!(cache.get(&key3).is_some());
         assert!(cache.retained_bytes <= cache.max_bytes);
+        assert_eq!(cache.lru.len(), cache.entries.len());
 
         let (key4, product4) = product(4);
         let mut undersized = ProductCache::new(item_len - 1);
         undersized.insert(key4, product4);
         assert!(undersized.get(&key4).is_none());
         assert_eq!(undersized.retained_bytes, 0);
+        assert!(undersized.lru.is_empty());
     }
 
     #[tokio::test]
