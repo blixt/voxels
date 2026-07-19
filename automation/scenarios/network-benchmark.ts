@@ -4,7 +4,7 @@ import type { Page } from "playwright";
 import { BrowserCapability, type BrowserFailure, reserveEphemeralPort } from "../lib/browser.ts";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import {
-  assertSnapshotSchema,
+  type EngineClient,
   FRAME_SAMPLE_WIDTH,
   SNAPSHOT,
   SNAPSHOT_SCHEMA_VERSION,
@@ -182,16 +182,15 @@ function firstPermanentlyFinalSample(
   return final;
 }
 
-async function waitForSnapshotApi(page: Page): Promise<void> {
-  await page.waitForFunction(() => typeof globalThis.__VOXELS__?.snapshot === "function", null, {
-    timeout: 30_000,
-  });
+async function waitForSnapshotApi(engine: EngineClient): Promise<void> {
+  await engine.ready();
 }
 
-async function captureSnapshot(page: Page, frameState: FrameState): Promise<readonly number[]> {
-  const current = assertSnapshotSchema(
-    await page.evaluate(() => globalThis.__VOXELS__!.snapshot()),
-  );
+async function captureSnapshot(
+  engine: EngineClient,
+  frameState: FrameState,
+): Promise<readonly number[]> {
+  const current = await engine.snapshot();
   const count = snapshotValue(current, "sampleCount");
   for (let index = 0; index < count; index += 1) {
     const start = FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH;
@@ -202,16 +201,14 @@ async function captureSnapshot(page: Page, frameState: FrameState): Promise<read
 }
 
 async function turn(
-  page: Page,
+  engine: EngineClient,
   radians: number,
   { capture, markMeasurementStart }: BenchmarkActionContext,
 ) {
   const before = await capture();
   markMeasurementStart();
-  await page.evaluate((movementX) => {
-    globalThis.__VOXELS__!.look(movementX, 0);
-  }, radians / 0.0022);
-  await page.waitForTimeout(80);
+  await engine.look(radians / 0.0022, 0);
+  await engine.wait(80);
   const after = await capture();
   const delta = Math.abs(
     Math.atan2(
@@ -276,14 +273,14 @@ async function walkDistance(
 
 async function runScenario({
   name,
-  page,
+  engine,
   link,
   action,
   errors,
   timeoutMs = SCENARIO_TIMEOUT_MS,
 }: {
   readonly name: string;
-  readonly page: Page;
+  readonly engine: EngineClient;
   readonly link: ShapedLink;
   readonly action: (context: BenchmarkActionContext) => unknown;
   readonly errors: readonly BrowserFailure[];
@@ -297,7 +294,7 @@ async function runScenario({
   let markedMeasurementStartedMs: number | null = null;
   let actionError: unknown;
   const actionContext: BenchmarkActionContext = {
-    capture: () => captureSnapshot(page, frameState),
+    capture: () => captureSnapshot(engine, frameState),
     markMeasurementStart: () => {
       markedMeasurementStartedMs ??= performance.now() - started;
       return markedMeasurementStartedMs;
@@ -320,7 +317,7 @@ async function runScenario({
     await sleep(SAMPLE_INTERVAL_MS);
     let current: readonly number[];
     try {
-      current = await captureSnapshot(page, frameState);
+      current = await captureSnapshot(engine, frameState);
     } catch (error) {
       if (performance.now() - started < 30_000) continue;
       throw error;
@@ -625,23 +622,24 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         ...clientRoute,
       });
       const page = viewport.page;
+      const { engine } = viewport;
       const url = `http://${PREVIEW_HOST}:${previewPort}/?player=network-bench-${repetition + 1}`;
       runs.push(
         await runScenario({
           name: "cold_spawn",
-          page,
+          engine,
           link,
           errors: viewport.failures,
           action: async () => {
             await page.goto(url, { waitUntil: "domcontentloaded" });
-            await waitForSnapshotApi(page);
+            await waitForSnapshotApi(engine);
           },
         }),
       );
       runs.push(
         await runScenario({
           name: "resident_walk",
-          page,
+          engine,
           link,
           errors: viewport.failures,
           // Spawn faces -Z from the exact chunk boundary. Walking backward stays inside the
@@ -653,16 +651,16 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
       runs.push(
         await runScenario({
           name: "cached_turn_180",
-          page,
+          engine,
           link,
           errors: viewport.failures,
-          action: (context) => turn(page, TURN_RADIANS, context),
+          action: (context) => turn(engine, TURN_RADIANS, context),
         }),
       );
       runs.push(
         await runScenario({
           name: "streaming_walk",
-          page,
+          engine,
           link,
           errors: viewport.failures,
           action: (context) =>
@@ -679,10 +677,11 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         ...clientRoute,
       });
       const pivotPage = pivotViewport.page;
+      const pivotEngine = pivotViewport.engine;
       runs.push(
         await runScenario({
           name: "turn_during_spawn",
-          page: pivotPage,
+          engine: pivotEngine,
           link,
           errors: pivotViewport.failures,
           action: async (context) => {
@@ -690,7 +689,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
               `http://${PREVIEW_HOST}:${previewPort}/?player=network-pivot-${repetition + 1}`,
               { waitUntil: "domcontentloaded" },
             );
-            await waitForSnapshotApi(pivotPage);
+            await waitForSnapshotApi(pivotEngine);
             const deadline = performance.now() + 30_000;
             while (performance.now() < deadline) {
               const current = await context.capture();
@@ -699,7 +698,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
                 snapshotValue(current, "quads") > 0 &&
                 snapshotValue(current, "allLodsReady") === 0
               ) {
-                return turn(pivotPage, TURN_RADIANS, context);
+                return turn(pivotEngine, TURN_RADIANS, context);
               }
               await pivotPage.waitForTimeout(SAMPLE_INTERVAL_MS);
             }
