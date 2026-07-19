@@ -294,34 +294,63 @@ fn benchmark_hits(
     profile: StorageBenchmarkProfile,
     operations: u32,
 ) -> Result<Vec<VoxelCoord>, Box<dyn std::error::Error>> {
-    (0..operations)
-        .map(|index| {
-            let [x, z] = benchmark_xz(profile, index);
-            let request = SurfaceSampleBlockRequest {
-                origin: [x, z],
-                sample_shape: [1, 1],
-            };
-            let result = source.generate_batch(WorldProductBatch {
-                priority: WorldProductPriority::CollisionCritical,
-                requests: vec![WorldProductRequest::SurfaceSampleBlock(request)],
-            })?;
-            let item = result
-                .items
-                .into_iter()
-                .next()
-                .ok_or("source omitted benchmark surface sample")?;
-            let snapshot = match item.result? {
-                WorldProduct::SurfaceSampleBlock(snapshot) if snapshot.request == request => {
-                    snapshot
-                }
-                _ => return Err("source returned mismatched benchmark surface sample".into()),
-            };
-            let sample = snapshot
-                .sample(x, z)
-                .ok_or("benchmark surface sample omitted its origin")?;
-            Ok(VoxelCoord::new(x, sample.height, z))
+    let coordinates = (0..operations)
+        .map(|index| benchmark_xz(profile, index))
+        .collect::<Vec<_>>();
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(coordinates.len());
+    let chunk_size = coordinates.len().div_ceil(workers);
+    std::thread::scope(
+        |scope| -> Result<Vec<VoxelCoord>, Box<dyn std::error::Error>> {
+            let handles = coordinates
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .copied()
+                            .map(|[x, z]| benchmark_hit(source, x, z))
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut hits = Vec::with_capacity(coordinates.len());
+            for handle in handles {
+                let worker = handle
+                    .join()
+                    .map_err(|_| "benchmark source sampling worker panicked")?;
+                hits.extend(worker?);
+            }
+            Ok(hits)
+        },
+    )
+}
+
+fn benchmark_hit(source: &dyn WorldSourceEngine, x: i32, z: i32) -> Result<VoxelCoord, String> {
+    let request = SurfaceSampleBlockRequest {
+        origin: [x, z],
+        sample_shape: [1, 1],
+    };
+    let result = source
+        .generate_batch(WorldProductBatch {
+            priority: WorldProductPriority::CollisionCritical,
+            requests: vec![WorldProductRequest::SurfaceSampleBlock(request)],
         })
-        .collect()
+        .map_err(|error| error.to_string())?;
+    let item = result
+        .items
+        .into_iter()
+        .next()
+        .ok_or_else(|| "source omitted benchmark surface sample".to_owned())?;
+    let snapshot = match item.result.map_err(|error| error.to_string())? {
+        WorldProduct::SurfaceSampleBlock(snapshot) if snapshot.request == request => snapshot,
+        _ => return Err("source returned mismatched benchmark surface sample".to_owned()),
+    };
+    let sample = snapshot
+        .sample(x, z)
+        .ok_or_else(|| "benchmark surface sample omitted its origin".to_owned())?;
+    Ok(VoxelCoord::new(x, sample.height, z))
 }
 
 fn benchmark_world_id() -> WorldId {
