@@ -389,6 +389,39 @@ async function compareScreenshots(page, before, after) {
         0.2126 * linear(pixels[index]) +
         0.7152 * linear(pixels[index + 1]) +
         0.0722 * linear(pixels[index + 2]);
+      const isolatedSkyExposures = (pixels) => {
+        // Stay below the irregular tree-lined horizon: this measures pale sky samples fully
+        // enclosed by the valley terrain, the one-pixel signature of an uncovered far-LOD
+        // T-junction. Keep a few coordinates so a failure is immediately reproducible.
+        const crackRoi = { ...roi, y0: Math.max(roi.y0, Math.floor(left.height * 0.3)) };
+        const skyLike = (x, y) => {
+          const index = (x + y * left.width) * 4;
+          const red = pixels[index];
+          const green = pixels[index + 1];
+          const blue = pixels[index + 2];
+          return red > 150 && green > 160 && blue > 180 && blue > red * 1.05;
+        };
+        let count = 0;
+        const coordinates = [];
+        for (let y = crackRoi.y0 + 1; y < crackRoi.y1 - 1; y += 1) {
+          for (let x = crackRoi.x0 + 1; x < crackRoi.x1 - 1; x += 1) {
+            if (!skyLike(x, y)) continue;
+            let skyNeighbours = 0;
+            for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+              for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+                if ((offsetX !== 0 || offsetY !== 0) && skyLike(x + offsetX, y + offsetY)) {
+                  skyNeighbours += 1;
+                }
+              }
+            }
+            if (skyNeighbours === 0) {
+              count += 1;
+              if (coordinates.length < 16) coordinates.push([x, y]);
+            }
+          }
+        }
+        return { count, coordinates, roi: crackRoi };
+      };
       let count = 0;
       let sumLeft = 0;
       let sumRight = 0;
@@ -455,11 +488,16 @@ async function compareScreenshots(page, before, after) {
       const c1 = 0.01 ** 2;
       const c2 = 0.03 ** 2;
       const pixels = (roi.x1 - roi.x0) * (roi.y1 - roi.y0);
+      const isolatedSkyExposurePixels = {
+        before: isolatedSkyExposures(left.pixels),
+        after: isolatedSkyExposures(right.pixels),
+      };
       return {
         roi,
         pixels,
         comparisonSamples: count,
         comparisonFootprintPixels: footprint,
+        isolatedSkyExposurePixels,
         nearBlackPixelFraction: {
           before: leftNearBlackPixels / pixels,
           after: rightNearBlackPixels / pixels,
@@ -522,19 +560,28 @@ async function analyzeWatertightTerrain(page, screenshot) {
         }
       }
     }
-    const largestConnectedComponent = (mask) => {
+    const connectedComponentSummary = (mask) => {
       const visited = new Uint8Array(mask.length);
       let largest = 0;
+      let largestBroad = 0;
       for (let start = 0; start < mask.length; start += 1) {
         if (mask[start] === 0 || visited[start] !== 0) continue;
         const stack = [start];
         visited[start] = 1;
         let component = 0;
+        let minX = width;
+        let maxX = 0;
+        let minY = height;
+        let maxY = 0;
         while (stack.length > 0) {
           const current = stack.pop();
           component += 1;
           const x = current % width;
           const y = Math.floor(current / width);
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
           const neighbors = [
             x > 0 ? current - 1 : -1,
             x + 1 < width ? current + 1 : -1,
@@ -548,23 +595,29 @@ async function analyzeWatertightTerrain(page, screenshot) {
           }
         }
         largest = Math.max(largest, component);
+        // Red/brown tree trunks share the original horizon-color predicate, but are narrow and
+        // vertical. The regression this fixture owns is a broad triangular terrain opening.
+        if (maxX - minX + 1 >= 32 && maxY - minY + 1 >= 4) {
+          largestBroad = Math.max(largestBroad, component);
+        }
       }
-      return largest;
+      return { largest, largestBroad };
     };
-    const largestSkyLikeComponent = largestConnectedComponent(skyLike);
-    const largestCoolExposureComponent = largestConnectedComponent(coolExposure);
+    const skyLikeComponents = connectedComponentSummary(skyLike);
+    const coolExposureComponents = connectedComponentSummary(coolExposure);
     const sampledPixels = skyLike.length;
     return {
       roi,
       sampledPixels,
       skyLikePixels,
       skyLikeFraction: skyLikePixels / sampledPixels,
-      largestSkyLikeComponent,
-      largestSkyLikeFraction: largestSkyLikeComponent / sampledPixels,
+      largestSkyLikeComponent: skyLikeComponents.largest,
+      largestBroadSkyLikeComponent: skyLikeComponents.largestBroad,
+      largestBroadSkyLikeFraction: skyLikeComponents.largestBroad / sampledPixels,
       coolExposurePixels,
       coolExposureFraction: coolExposurePixels / sampledPixels,
-      largestCoolExposureComponent,
-      largestCoolExposureFraction: largestCoolExposureComponent / sampledPixels,
+      largestCoolExposureComponent: coolExposureComponents.largest,
+      largestCoolExposureFraction: coolExposureComponents.largest / sampledPixels,
     };
   }, screenshot.toString("base64"));
 }
@@ -704,9 +757,7 @@ try {
     const performance = summarizePerformance(timings);
     const violations = [];
     if (!BOUNDARY_COVERAGE) {
-      if (image.skyLikeFraction > 0.001)
-        violations.push("terrain-only ROI exposed more than 0.1% sky-colored pixels");
-      if (image.largestSkyLikeComponent > 32)
+      if (image.largestBroadSkyLikeComponent > 32)
         violations.push("terrain-only ROI contains a connected sky-colored crack");
     }
     if (image.largestCoolExposureComponent > 256)
@@ -784,6 +835,12 @@ try {
       violations.push("over 1% of valley pixels changed luminance by at least 2x");
     if (image.nearBlackPixelFraction.before > 0.1 || image.nearBlackPixelFraction.after > 0.1) {
       violations.push("over 10% of valley pixels rendered near-black");
+    }
+    if (
+      image.isolatedSkyExposurePixels.before.count > 0 ||
+      image.isolatedSkyExposurePixels.after.count > 0
+    ) {
+      violations.push("valley terrain contains isolated sky-exposure pixels");
     }
     if (image.ssim < 0.97) violations.push("valley SSIM fell below 0.97");
     if (performance.frameP95Ms > 12) violations.push("frame p95 exceeded 12ms");

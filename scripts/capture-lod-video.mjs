@@ -28,6 +28,8 @@ function isVisuallyValid(report) {
     report.image?.catastrophicDarkFraction <= 0.01 &&
     report.image?.nearBlackPixelFraction?.before <= 0.1 &&
     report.image?.nearBlackPixelFraction?.after <= 0.1 &&
+    report.image?.isolatedSkyExposurePixels?.before?.count === 0 &&
+    report.image?.isolatedSkyExposurePixels?.after?.count === 0 &&
     report.image?.ssim >= 0.97
   );
 }
@@ -96,7 +98,7 @@ function annotateFrame(source, destination, label, accent, report) {
       `${catastrophicPercent}% of sampled regions changed luminance by at least 2x`,
       "-annotate",
       "+40+1045",
-      `SSIM ${report.image.ssim.toFixed(3)} · LOD transition quads ${report.lod.transitionQuadsBefore} → ${report.lod.transitionQuadsAfter}`,
+      `SSIM ${report.image.ssim.toFixed(3)} · isolated sky pixels 0 · LOD transition quads ${report.lod.transitionQuadsBefore} → ${report.lod.transitionQuadsAfter}`,
       "-fill",
       "#f2f6ff",
       "-pointsize",
@@ -264,6 +266,7 @@ try {
         metrics: {
           poseErrorMillimetres: report.pose.errorMetres * 1_000,
           catastrophicDarkFraction: report.image.catastrophicDarkFraction,
+          isolatedSkyExposurePixels: report.image.isolatedSkyExposurePixels,
           nearBlackPixelFraction: report.image.nearBlackPixelFraction,
           ssim: report.image.ssim,
         },
