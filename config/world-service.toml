@@ -109,7 +109,7 @@ weather_revision = 1
 # it at durable storage. Compatibility tokens make local iteration start fresh state after schema,
 # world, or source changes without deleting the previous world. Explicit paths remain strict.
 database = "../tmp/world-state/schema-{edit_schema}/{world_id}-{source_hash}.sqlite3"
-change_queue_capacity = 256
+change_queue_capacity = 1024
 
 [spawn]
 # Must lie inside the selected source's valid coverage. New players begin on a server-authored

@@ -308,7 +308,7 @@ impl Default for EditPersistenceConfig {
             database: PathBuf::from(
                 "../tmp/world-state/schema-{edit_schema}/{world_id}-{source_hash}.sqlite3",
             ),
-            change_queue_capacity: 256,
+            change_queue_capacity: 1_024,
         }
     }
 }
@@ -1112,7 +1112,7 @@ weather_revision = 1
 
 [edits]
 database = "world-state/schema-{edit_schema}/{world_id}-{source_hash}.sqlite3"
-change_queue_capacity = 256
+change_queue_capacity = 1024
 
 [spawn]
 xz_voxels = [0, 0]
