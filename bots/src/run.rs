@@ -1128,7 +1128,9 @@ fn aggregate_report(
         edit_authority_rejections =
             edit_authority_rejections.saturating_add(report.edit_authority_rejections);
         for (reason, count) in &report.authority_rejection_reasons {
-            let aggregate = authority_rejection_reasons.entry(reason.clone()).or_default();
+            let aggregate = authority_rejection_reasons
+                .entry(reason.clone())
+                .or_default();
             *aggregate = aggregate.saturating_add(*count);
         }
         mutations_committed = mutations_committed.saturating_add(report.mutations_committed);

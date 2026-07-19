@@ -363,8 +363,7 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(worksites.len(), 64);
         assert!(worksites.iter().all(|[x, z]| {
-            let volume =
-                DigVolume::for_hit(VoxelCoord::new(*x, 0, *z)).expect("bounded worksite");
+            let volume = DigVolume::for_hit(VoxelCoord::new(*x, 0, *z)).expect("bounded worksite");
             volume.coordinates().all(|coord| {
                 // The load fixture protects a 3-voxel-radius vertical cylinder.
                 coord.x * coord.x + coord.z * coord.z > 3 * 3
@@ -383,8 +382,7 @@ mod tests {
                 unreachable!("downward dig always returns a dig action");
             };
             let distance_metres =
-                ((hit.x * hit.x + hit.y * hit.y + hit.z * hit.z) as f32).sqrt()
-                    * VOXEL_SIZE_METRES;
+                ((hit.x * hit.x + hit.y * hit.y + hit.z * hit.z) as f32).sqrt() * VOXEL_SIZE_METRES;
             assert!(
                 distance_metres < 4.5,
                 "worksite {index} consumes {distance_metres:.2} m of interaction reach"
