@@ -177,6 +177,17 @@ mod tests {
     }
 
     #[test]
+    fn subpixel_distant_surfaces_use_prefiltered_macro_lighting() {
+        let voxels = include_str!("shaders/voxels.wgsl");
+        assert!(voxels.contains("fn distant_surface_radiance("));
+        assert!(voxels.contains("if distance_to_camera >= 144.0"));
+        assert!(voxels.contains("smoothstep(96.0, 144.0, distance_to_camera)"));
+        assert!(voxels.contains("transport_surface_radiance(distant_radiance"));
+        assert!(voxels.contains("let detail_uv_dx = dpdx(continuous_uv);"));
+        assert!(!voxels.contains("if distance_to_camera >= 144.0 {\n    discard;"));
+    }
+
+    #[test]
     fn terrain_horizon_lighting_tracks_key_direction_and_preserves_sky_access() {
         fn smoothstep(low: f32, high: f32, value: f32) -> f32 {
             let amount = ((value - low) / (high - low)).clamp(0.0, 1.0);

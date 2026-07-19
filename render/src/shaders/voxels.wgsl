@@ -288,18 +288,26 @@ struct SurfaceDetail {
   roughness: f32,
 };
 
+fn surface_uv(world: vec3<f32>, normal: vec3<f32>) -> vec2<f32> {
+  let dominant_axis = abs(normal);
+  if dominant_axis.x >= dominant_axis.y && dominant_axis.x >= dominant_axis.z {
+    return select(vec2<f32>(world.y, -world.z), world.yz, normal.x >= 0.0);
+  }
+  if dominant_axis.y >= dominant_axis.z {
+    return select(world.xz, vec2<f32>(world.x, -world.z), normal.y >= 0.0);
+  }
+  return select(vec2<f32>(-world.x, world.y), world.xy, normal.z >= 0.0);
+}
+
 fn surface_basis(world: vec3<f32>, normal: vec3<f32>) -> SurfaceBasis {
   let n = normalize(normal);
   let dominant_axis = abs(n);
   var basis: SurfaceBasis;
+  basis.uv = surface_uv(world, n);
   var tangent_seed = vec3<f32>(1.0, 0.0, 0.0);
   if dominant_axis.x >= dominant_axis.y && dominant_axis.x >= dominant_axis.z {
-    basis.uv = select(vec2<f32>(world.y, -world.z), world.yz, n.x >= 0.0);
     tangent_seed = vec3<f32>(0.0, 1.0, 0.0);
-  } else if dominant_axis.y >= dominant_axis.z {
-    basis.uv = select(world.xz, vec2<f32>(world.x, -world.z), n.y >= 0.0);
-  } else {
-    basis.uv = select(vec2<f32>(-world.x, world.y), world.xy, n.z >= 0.0);
+  } else if dominant_axis.y < dominant_axis.z {
     tangent_seed = select(
       vec3<f32>(-1.0, 0.0, 0.0),
       vec3<f32>(1.0, 0.0, 0.0),
@@ -334,23 +342,24 @@ fn pixelated_material_uv(surface_metres: vec2<f32>, material_scale: f32) -> vec2
   return ((world_texel + vec2<f32>(0.5)) / texels_per_metre) * material_scale;
 }
 
-fn sample_surface_detail(world: vec3<f32>, geometric_normal: vec3<f32>, material: u32) -> SurfaceDetail {
+fn sample_surface_detail(
+  world: vec3<f32>,
+  geometric_normal: vec3<f32>,
+  material: u32,
+  basis: SurfaceBasis,
+  uv_dx: vec2<f32>,
+  uv_dy: vec2<f32>,
+  detail_distance: f32,
+) -> SurfaceDetail {
   var detail: SurfaceDetail;
   detail.normal = geometric_normal;
-  let detail_distance = distance(world, frame.camera_time.xyz);
-  // Derivatives must be evaluated in uniform control flow even when only nearby fragments sample
-  // the detailed atlas. Naga can then discard this setup entirely for the flat pipeline override.
-  let basis = surface_basis(world, geometric_normal);
   let material_scale = material_detail_scale(material);
-  let continuous_uv = basis.uv * material_scale;
   let uv = pixelated_material_uv(basis.uv, material_scale);
-  let uv_dx = dpdx(continuous_uv);
-  let uv_dy = dpdy(continuous_uv);
   // Past this point even one screen pixel covers many authored material texels at 720p. Sampling
   // two anisotropic atlas layers and rebuilding a tangent frame cannot add visible information;
   // the atlas' terminal mip is the same prefiltered material, without paying that per-fragment
   // cost across kilometre-scale terrain.
-  if MATERIAL_DETAIL != 0u && detail_distance < 160.0 {
+  if MATERIAL_DETAIL != 0u && detail_distance < 144.0 {
     // Derive mip selection from the continuous coordinates. Derivatives of the quantized UV are
     // zero inside a block and discontinuous at its edge, which would otherwise force unstable LOD.
     detail.albedo = textureSampleGrad(
@@ -643,11 +652,97 @@ fn screen_space_ambient_visibility(pixel_position: vec2<f32>, world: vec3<f32>) 
   return clamp(select(1.0, weighted_visibility / total_weight, total_weight > 0.0001), 0.30, 1.0);
 }
 
+fn distant_surface_radiance(
+  input: VertexOut,
+  material: u32,
+  sun: vec3<f32>,
+) -> vec3<f32> {
+  // Quad face normals and vertex-produced surface macro normals are already normalized.
+  let normal = input.normal;
+  let base_mip = i32(textureNumLevels(material_albedo) - 1u);
+  let albedo = textureLoad(
+    material_albedo,
+    vec2<i32>(0),
+    i32(material),
+    base_mip,
+  ).rgb;
+  let sky_visibility = normal.y * 0.5 + 0.5;
+  let interior_ambient = mix(1.0, 0.05, frame.interior.x);
+  let sky_irradiance = mix(
+    frame.ground_atmosphere.rgb,
+    frame.sky_horizon.rgb * 0.48,
+    sky_visibility,
+  ) * interior_ambient;
+  let ambient = albedo * sky_irradiance * input.terrain_lighting.y * 0.96;
+  // Cloud cover already modulates the synchronized key radiance. Evaluating the multi-octave
+  // local cloud field per sub-pixel terrain fragment is both unstable and visually redundant.
+  let key_visibility = input.terrain_lighting.x;
+  let diffuse = albedo
+    * frame.key_light_radiance.rgb
+    * max(dot(normal, sun), 0.0)
+    * key_visibility
+    * mix(1.0, 0.10, frame.interior.x)
+    * 0.197;
+  // Full microfacet, local-light, grain, six-metre macro tint, cloud-shadow, and SSAO evaluation
+  // cannot contribute stable information at this distance. Sampling their prefiltered material
+  // color and broad sky fill avoids turning unresolved surface variation into temporal shimmer.
+  return ambient + diffuse;
+}
+
+fn transport_surface_radiance(color: vec3<f32>, world: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
+  let camera_to_surface = world - frame.camera_time.xyz;
+  let distance_to_camera = length(camera_to_surface);
+  let fog_view_direction = camera_to_surface / max(distance_to_camera, 0.0001);
+  let average_height = max((world.y + frame.camera_time.y) * 0.5, 0.0);
+  let height_density = exp(-average_height * frame.fog_exposure.x);
+  let optical_depth = atmospheric_path_length(distance_to_camera)
+    * frame.ground_atmosphere.w * height_density * frame.render_options.y;
+  let transmittance = exp(-optical_depth);
+  let sky_factor = pow(max(fog_view_direction.y, 0.0), 0.42);
+  var fog_radiance = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, sky_factor);
+  let sun_amount = max(dot(fog_view_direction, sun), 0.0);
+  fog_radiance += frame.key_light_radiance.rgb * pow(sun_amount, 32.0) * 0.012;
+  var transported = color * transmittance + fog_radiance * (1.0 - transmittance);
+  let cave_transmittance = exp(-distance_to_camera * frame.interior.z);
+  let cave_air = vec3<f32>(0.010, 0.014, 0.020);
+  transported = mix(cave_air, transported, cave_transmittance);
+  let water_transmittance = exp(-vec3<f32>(0.36, 0.14, 0.07) * distance_to_camera);
+  let water_scattering = srgb_to_linear(vec3<f32>(0.018, 0.20, 0.27));
+  let underwater_color = transported * water_transmittance
+    + water_scattering * (vec3<f32>(1.0) - water_transmittance);
+  transported = mix(transported, underwater_color, frame.medium.x);
+  return max(transported * frame.fog_exposure.y * frame.interior.y, vec3<f32>(0.0));
+}
+
 @fragment
 fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let material = input.material & 0xffffu;
-  let surface_detail = sample_surface_detail(input.world, input.normal, material);
-  let sun = normalize(frame.key_light_direction.xyz);
+  // EnvironmentState normalizes this direction before it enters the frame uniform.
+  let sun = frame.key_light_direction.xyz;
+  let distance_to_camera = distance(input.world, frame.camera_time.xyz);
+  // Derivatives must be evaluated in uniform control flow. Supplying the explicit gradients to
+  // the near-field sampler lets distant fragments skip the tangent basis and texture lookups.
+  let material_scale = material_detail_scale(material);
+  let continuous_uv = surface_uv(input.world, input.normal) * material_scale;
+  let detail_uv_dx = dpdx(continuous_uv);
+  let detail_uv_dy = dpdy(continuous_uv);
+  if distance_to_camera >= 144.0 {
+    let distant_radiance = distant_surface_radiance(input, material, sun);
+    return vec4<f32>(
+      transport_surface_radiance(distant_radiance, input.world, sun),
+      1.0,
+    );
+  }
+  let detail_basis = surface_basis(input.world, input.normal);
+  let surface_detail = sample_surface_detail(
+    input.world,
+    input.normal,
+    material,
+    detail_basis,
+    detail_uv_dx,
+    detail_uv_dy,
+    distance_to_camera,
+  );
   let shadow = sun_visibility(input.world, input.normal)
     * cloud_sun_visibility(input.world)
     * input.terrain_lighting.x;
@@ -794,26 +889,13 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     let outline = 1.0 - smoothstep(0.045, 0.085, edge);
     color = mix(color, vec3<f32>(1.4, 1.08, 0.42), outline * 0.88);
   }
-  let camera_to_surface = input.world - frame.camera_time.xyz;
-  let distance_to_camera = length(camera_to_surface);
-  let fog_view_direction = camera_to_surface / max(distance_to_camera, 0.0001);
-  let average_height = max((input.world.y + frame.camera_time.y) * 0.5, 0.0);
-  let height_density = exp(-average_height * frame.fog_exposure.x);
-  let optical_depth = atmospheric_path_length(distance_to_camera)
-    * frame.ground_atmosphere.w * height_density * frame.render_options.y;
-  let transmittance = exp(-optical_depth);
-  let sky_factor = pow(max(fog_view_direction.y, 0.0), 0.42);
-  var fog_radiance = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, sky_factor);
-  let sun_amount = max(dot(fog_view_direction, sun), 0.0);
-  fog_radiance += frame.key_light_radiance.rgb * pow(sun_amount, 32.0) * 0.012;
-  color = color * transmittance + fog_radiance * (1.0 - transmittance);
-  let cave_transmittance = exp(-distance_to_camera * frame.interior.z);
-  let cave_air = vec3<f32>(0.010, 0.014, 0.020);
-  color = mix(cave_air, color, cave_transmittance);
-  let water_transmittance = exp(-vec3<f32>(0.36, 0.14, 0.07) * distance_to_camera);
-  let water_scattering = srgb_to_linear(vec3<f32>(0.018, 0.20, 0.27));
-  let underwater_color = color * water_transmittance
-    + water_scattering * (vec3<f32>(1.0) - water_transmittance);
-  color = mix(color, underwater_color, frame.medium.x);
-  return vec4<f32>(max(color * frame.fog_exposure.y * frame.interior.y, vec3<f32>(0.0)), 1.0);
+  if distance_to_camera > 96.0 {
+    let distant_radiance = distant_surface_radiance(input, material, sun);
+    color = mix(
+      color,
+      distant_radiance,
+      smoothstep(96.0, 144.0, distance_to_camera),
+    );
+  }
+  return vec4<f32>(transport_surface_radiance(color, input.world, sun), 1.0);
 }
