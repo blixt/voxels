@@ -319,6 +319,15 @@ mod tests {
     }
 
     #[test]
+    fn far_voxel_faces_expand_raster_coverage_without_stretching_world_space() {
+        let voxels = include_str!("shaders/voxels.wgsl");
+        assert!(voxels.contains("if (material & 0x80000000u) != 0u"));
+        assert!(voxels.contains("let coverage_margin ="));
+        assert!(voxels.contains("out.position = frame.view_projection * vec4<f32>(coverage_world"));
+        assert!(voxels.contains("out.world = world"));
+    }
+
+    #[test]
     fn precipitation_vertical_lattice_is_camera_invariant_within_a_world_cell() {
         const HEIGHT: f32 = 32.0;
         fn world_y(initial_phase: f32, server_time: f32, fall_duration: f32, camera_y: f32) -> f32 {

@@ -182,6 +182,30 @@ fn vs_main(
     default: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 0); normal.z = -1.0; }
   }
   let world = vec3<f32>(origin + local) * frame.viewport_voxel.z;
+  var coverage_world = world;
+  if (material & 0x80000000u) != 0u {
+    let level = (material >> 27u) & 7u;
+    // Greedy far-surface quads deliberately retain T-junctions to minimize geometry and draw
+    // bandwidth. Give their rasterized edges a small, LOD-relative overlap so sub-pixel
+    // background wedges cannot appear at convex step corners. Keep `world` canonical below:
+    // coverage may overlap, while material sampling, lighting, and interaction never stretch.
+    let coverage_margin = f32(2u << level) * frame.viewport_voxel.z * 0.01;
+    let direction = vec2<f32>(uv) * 2.0 - vec2<f32>(1.0);
+    switch face {
+      case 0u, 1u: {
+        coverage_world.y += direction.y * coverage_margin;
+        coverage_world.z += direction.x * coverage_margin;
+      }
+      case 2u, 3u: {
+        coverage_world.x += direction.x * coverage_margin;
+        coverage_world.z += direction.y * coverage_margin;
+      }
+      default: {
+        coverage_world.x += direction.x * coverage_margin;
+        coverage_world.y += direction.y * coverage_margin;
+      }
+    }
+  }
   let surface_macro_normal = (ao & 0x01000000u) != 0u;
   var terrain_lighting = vec2<f32>(1.0);
   if surface_macro_normal {
@@ -209,7 +233,7 @@ fn vs_main(
     terrain_lighting = mix(vec2<f32>(1.0), resolved_horizon_lighting, horizon_strength);
   }
   var out: VertexOut;
-  out.position = frame.view_projection * vec4<f32>(world, 1.0);
+  out.position = frame.view_projection * vec4<f32>(coverage_world, 1.0);
   out.world = world;
   out.normal = normal;
   out.material = material;
