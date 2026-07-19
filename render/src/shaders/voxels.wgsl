@@ -457,7 +457,7 @@ fn cloud_surface_weather(world: vec3<f32>) -> vec2<f32> {
     mix(0.62, 0.40, frame.weather.y),
     cloud * coverage_control,
   );
-  let local_precipitation = frame.weather.x * smoothstep(0.08, 0.42, cloud);
+  let local_precipitation = liquid_precipitation() * smoothstep(0.08, 0.42, cloud);
   return vec2<f32>(sun_visibility, local_precipitation);
 }
 
@@ -666,7 +666,7 @@ fn distant_surface_radiance(
   // The distant path deliberately avoids resampling the multi-octave rain footprint for every
   // sub-pixel fragment. Scene-scale dampness changes diffuse reflectance continuously while the
   // exact active-cloud field governs visible drops and nearby surface sheen.
-  let retained_wetness = frame.weather.x
+  let retained_wetness = liquid_precipitation()
     * frame.fog_exposure.z
     * smoothstep(-0.15, 0.65, normal.y)
     * (1.0 - frame.interior.x)

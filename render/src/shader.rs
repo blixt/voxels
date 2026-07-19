@@ -105,13 +105,15 @@ mod tests {
         let voxels = include_str!("shaders/voxels.wgsl");
         assert!(voxels.contains("fn cloud_surface_weather("));
         assert!(!voxels.contains("fn cloud_sun_visibility("));
+        assert!(FRAME_SOURCE.contains("fn liquid_precipitation()"));
+        assert!(FRAME_SOURCE.contains("max(frame.weather.x - frame.weather.w, 0.0)"));
         assert_eq!(
             voxels
                 .matches("let surface_weather = cloud_surface_weather(input.world);")
                 .count(),
             1
         );
-        assert!(voxels.contains("let local_precipitation = frame.weather.x"));
+        assert!(voxels.contains("let local_precipitation = liquid_precipitation()"));
         assert!(voxels.contains("surface_weather.y"));
         assert!(voxels.contains("surface_detail.roughness * 0.24"));
         assert!(voxels.contains("mix(DIELECTRIC_F0, vec3<f32>(0.02037), wetness)"));
@@ -437,6 +439,7 @@ mod tests {
         let clouds = include_str!("shaders/clouds.wgsl");
         assert!(frame.contains("fn primary_rainbow_radiance("));
         assert!(frame.contains("fn primary_rainbow_weather_possible()"));
+        assert!(frame.contains("liquid_precipitation() > 0.04"));
         assert!(frame.contains("let antisolar_cosine = dot(ray, -sun);"));
         assert!(frame.contains("0.6691306"));
         assert!(frame.contains("atmosphere_cloud_envelope_world(shower_world_xz)"));

@@ -124,9 +124,13 @@ fn primary_rainbow_peak(cosine: f32, centre: f32, half_width: f32) -> f32 {
   return 1.0 - smoothstep(half_width * 0.25, half_width, abs(cosine - centre));
 }
 
+fn liquid_precipitation() -> f32 {
+  return max(frame.weather.x - frame.weather.w, 0.0);
+}
+
 fn primary_rainbow_weather_possible() -> bool {
   let sun_y = normalize(frame.sun_direction.xyz).y;
-  return frame.weather.x > 0.04
+  return liquid_precipitation() > 0.04
     && sun_y > 0.015
     && sun_y < 0.6691306
     && frame.sun_direction.w > 0.001
@@ -158,7 +162,8 @@ fn primary_rainbow_radiance(ray: vec3<f32>) -> vec3<f32> {
   }
   let horizontal = ray.xz / max(length(ray.xz), 0.0001);
   let shower_world_xz = frame.camera_time.xz + horizontal * 1800.0;
-  let local_rain = atmosphere_cloud_envelope_world(shower_world_xz) * frame.weather.x;
+  let local_rain = atmosphere_cloud_envelope_world(shower_world_xz)
+    * liquid_precipitation();
   if local_rain <= 0.025 {
     return vec3<f32>(0.0);
   }
