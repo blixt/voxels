@@ -588,6 +588,7 @@ impl EditAuthority {
             player_id,
             command,
             revision,
+            player.inventory,
             inventory,
             &mutations,
             &durable_overrides,
@@ -1134,6 +1135,7 @@ fn persist_action(
     player_id: PlayerId,
     command: EditCommand,
     revision: u64,
+    previous_inventory: MaterialInventory,
     inventory: MaterialInventory,
     mutations: &[VoxelMutation],
     durable_overrides: &[Option<Material>],
@@ -1144,35 +1146,44 @@ fn persist_action(
         .transaction()
         .map_err(sql_error("begin edit transaction"))?;
     if !mutations.is_empty() {
-        for (mutation, durable_override) in mutations.iter().zip(durable_overrides) {
-            if let Some(material) = durable_override {
-                transaction
-                    .execute(
-                        "INSERT INTO voxel_edits(x,y,z,material,revision) VALUES(?1,?2,?3,?4,?5)
+        let revision_sql = to_sql_i64(revision, "edit revision")?;
+        {
+            let mut upsert = transaction
+                .prepare_cached(
+                    "INSERT INTO voxel_edits(x,y,z,material,revision) VALUES(?1,?2,?3,?4,?5)
                          ON CONFLICT(x,y,z) DO UPDATE SET
                             material=excluded.material, revision=excluded.revision",
-                        params![
+                )
+                .map_err(sql_error("prepare voxel mutation"))?;
+            let mut delete = transaction
+                .prepare_cached("DELETE FROM voxel_edits WHERE x=?1 AND y=?2 AND z=?3")
+                .map_err(sql_error("prepare pristine voxel mutation"))?;
+            for (mutation, durable_override) in mutations.iter().zip(durable_overrides) {
+                if let Some(material) = durable_override {
+                    upsert
+                        .execute(params![
                             mutation.coord.x,
                             mutation.coord.y,
                             mutation.coord.z,
                             material.id(),
-                            to_sql_i64(revision, "edit revision")?,
-                        ],
-                    )
-                    .map_err(sql_error("persist voxel mutation"))?;
-            } else {
-                transaction
-                    .execute(
-                        "DELETE FROM voxel_edits WHERE x=?1 AND y=?2 AND z=?3",
-                        params![mutation.coord.x, mutation.coord.y, mutation.coord.z],
-                    )
-                    .map_err(sql_error("delete pristine voxel mutation"))?;
+                            revision_sql,
+                        ])
+                        .map_err(sql_error("persist voxel mutation"))?;
+                } else {
+                    delete
+                        .execute(params![
+                            mutation.coord.x,
+                            mutation.coord.y,
+                            mutation.coord.z
+                        ])
+                        .map_err(sql_error("delete pristine voxel mutation"))?;
+                }
             }
         }
         transaction
             .execute(
                 "UPDATE metadata SET revision=?1 WHERE singleton=1",
-                [to_sql_i64(revision, "edit revision")?],
+                [revision_sql],
             )
             .map_err(sql_error("persist edit revision"))?;
         transaction
@@ -1184,7 +1195,7 @@ fn persist_action(
                 ],
             )
             .map_err(sql_error("persist inventory revision"))?;
-        persist_inventory(&transaction, player_id, inventory)?;
+        persist_inventory_delta(&transaction, player_id, previous_inventory, inventory)?;
         persist_product_revisions(
             &transaction,
             revision,
@@ -1204,6 +1215,36 @@ fn persist_action(
     transaction
         .commit()
         .map_err(sql_error("commit edit action"))
+}
+
+fn persist_inventory_delta(
+    transaction: &Transaction<'_>,
+    player_id: PlayerId,
+    before: MaterialInventory,
+    after: MaterialInventory,
+) -> Result<(), EditAuthorityError> {
+    let mut statement = transaction
+        .prepare_cached("UPDATE player_inventory SET units=?1 WHERE player_id=?2 AND material=?3")
+        .map_err(sql_error("prepare material inventory update"))?;
+    for material in Material::ALL {
+        let index = usize::from(material.id());
+        if before.counts[index] == after.counts[index] {
+            continue;
+        }
+        let updated = statement
+            .execute(params![
+                to_sql_i64(after.counts[index], "material inventory count")?,
+                player_id.as_bytes().as_slice(),
+                material.id(),
+            ])
+            .map_err(sql_error("persist material inventory update"))?;
+        if updated != 1 {
+            return Err(EditAuthorityError(
+                "durable material inventory row is missing".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn persist_product_revisions(
