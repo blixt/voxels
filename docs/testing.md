@@ -85,6 +85,7 @@ The normal capacity curve uses a fresh isolated world service and database for e
 vp run automation -- run bot-load
 vp run automation -- run bot-load --counts=16,32,64 --duration=30
 vp run automation -- run bot-load --counts=64 --layout=dense
+vp run automation -- run bot-load --counts=16 --duration=10 --video
 vp run automation -- run bot-load --counts=256,512,1000 --duration=10 --no-browser \
   --service-profile=worldgen --bot-profile=worldgen
 ```

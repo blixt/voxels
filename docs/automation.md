@@ -10,6 +10,7 @@ browser, world-service, network, artifact, and cleanup details.
 vp run automation -- list
 vp run automation -- run lod-transition
 vp run automation -- run bot-load --counts=64 --no-browser
+vp run automation -- run bot-load --counts=16 --duration=10 --video
 vp run automation -- describe render-profile
 ```
 
@@ -105,7 +106,8 @@ reports all use the same artifact API.
 
 A browser viewport, recorder, shaped link, service, and bot army are independent mechanisms. A
 scenario may therefore launch bots behind a shaped link while a browser observes and records the
-same world. Video and screenshots capture a viewport; they do not own one.
+same world. `bot-load --video` is the concrete combined case. Video and screenshots capture a
+viewport; they do not own one.
 
 ## Rust engine boundary
 

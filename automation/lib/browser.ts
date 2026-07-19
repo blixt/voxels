@@ -26,6 +26,7 @@ export interface OpenPageOptions {
   readonly recordVideo?: boolean;
   readonly videoFilename?: string;
   readonly engine?: boolean;
+  readonly beforeNavigate?: (context: BrowserContext, page: Page) => void | Promise<void>;
 }
 
 export interface ScreenshotOptions {
@@ -34,14 +35,24 @@ export interface ScreenshotOptions {
 }
 
 export class BrowserViewport {
+  readonly context: BrowserContext;
+  readonly failures: BrowserFailure[];
   readonly page: Page;
   readonly engine: EngineClient;
   readonly label: string;
 
   readonly #scenario: ScenarioContext;
 
-  constructor(scenario: ScenarioContext, page: Page, label: string) {
+  constructor(
+    scenario: ScenarioContext,
+    context: BrowserContext,
+    page: Page,
+    label: string,
+    failures: BrowserFailure[],
+  ) {
     this.#scenario = scenario;
+    this.context = context;
+    this.failures = failures;
     this.page = page;
     this.label = label;
     this.engine = new EngineClient(page);
@@ -52,6 +63,10 @@ export class BrowserViewport {
     const destination = this.#scenario.artifacts.resolve(filename);
     await this.page.screenshot({ path: destination, fullPage: options.fullPage ?? false });
     return this.#scenario.artifacts.record(label, destination, "image/png");
+  }
+
+  async close(): Promise<void> {
+    await this.context.close();
   }
 }
 
@@ -111,19 +126,25 @@ export class BrowserCapability {
     const context = await this.#browser.newContext(contextOptions);
     this.#contexts.push(context);
     const page = await context.newPage();
+    const failures: BrowserFailure[] = [];
+    const recordFailure = (failure: BrowserFailure): void => {
+      failures.push(failure);
+      this.failures.push(failure);
+    };
     page.on("pageerror", (error) => {
-      this.failures.push({ source: "page", page: label, message: error.message });
+      recordFailure({ source: "page", page: label, message: error.message });
     });
     page.on("console", (message) => {
       if (
         message.type() === "error" ||
         (message.type() === "warning" && this.#warningPattern.test(message.text()))
       ) {
-        this.failures.push({ source: "console", page: label, message: message.text() });
+        recordFailure({ source: "console", page: label, message: message.text() });
       }
     });
+    await options.beforeNavigate?.(context, page);
     await page.goto(options.url, { waitUntil: "domcontentloaded" });
-    const browserViewport = new BrowserViewport(this.#scenario, page, label);
+    const browserViewport = new BrowserViewport(this.#scenario, context, page, label, failures);
     if (options.recordVideo) {
       this.#videos.push({
         page,

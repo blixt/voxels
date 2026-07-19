@@ -1,17 +1,11 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { chromium } from "playwright";
-import type { Browser, BrowserContext, Page } from "playwright";
 import { build, preview } from "vite-plus";
 import { prepareBrowserWorldFixture, startBrowserWorldService } from "../lib/world.ts";
-import {
-  chromeWebGpuLaunchOptions,
-  isBrowserConsoleFailure,
-  reserveEphemeralPort,
-} from "../lib/browser.ts";
+import { BrowserCapability, type BrowserViewport, reserveEphemeralPort } from "../lib/browser.ts";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import {
   assertSnapshotSchema,
@@ -65,6 +59,7 @@ interface BotLoadOptions {
   serviceProfile: WorldServiceCargoProfile;
   botProfile: WorldServiceCargoProfile;
   browser: boolean;
+  recordVideo: boolean;
 }
 
 interface BotClientReport {
@@ -107,9 +102,7 @@ interface MutableDone {
 }
 
 interface Observer {
-  readonly context: BrowserContext;
-  readonly page: Page;
-  readonly errors: string[];
+  readonly viewport: BrowserViewport;
 }
 
 interface ObserverSample {
@@ -141,6 +134,9 @@ function parseArguments(values: readonly string[]): BotLoadOptions {
   ) {
     throw new Error("--counts must contain integers in 1..=1024");
   }
+  const browser = !arguments_.flag("no-browser");
+  const recordVideo = arguments_.flag("video");
+  if (recordVideo && !browser) throw new Error("--video requires the browser observer");
   const options: BotLoadOptions = {
     counts,
     durationSeconds:
@@ -154,7 +150,8 @@ function parseArguments(values: readonly string[]): BotLoadOptions {
     mode: arguments_.flag("growth") ? "growth" : "scale",
     serviceProfile: arguments_.choice("service-profile", ["worldgen", "worldgen-dev"], "worldgen"),
     botProfile: arguments_.choice("bot-profile", ["worldgen", "worldgen-dev"], "worldgen-dev"),
-    browser: !arguments_.flag("no-browser"),
+    browser,
+    recordVideo,
   };
   arguments_.assertEmpty();
   return options;
@@ -339,7 +336,7 @@ async function collectObserverSamples(
   let fullWorldReadyMs: number | null = null;
   while (!done.value) {
     const values = assertSnapshotSchema(
-      await observer.page.evaluate(() => globalThis.__VOXELS__!.snapshot()),
+      await observer.viewport.page.evaluate(() => globalThis.__VOXELS__!.snapshot()),
     );
     const remoteAvatars = snapshotValue(values, "remoteAvatars");
     const elapsedMs = performance.now() - started;
@@ -379,7 +376,7 @@ async function collectObserverSamples(
       interactiveLodsReady: snapshotValue(values, "interactiveLodsReady") === 1,
       allLodsReady: snapshotValue(values, "allLodsReady") === 1,
     });
-    await observer.page.waitForTimeout(OBSERVER_SAMPLE_INTERVAL_MS);
+    await observer.viewport.page.waitForTimeout(OBSERVER_SAMPLE_INTERVAL_MS);
   }
   const final = samples.at(-1);
   return {
@@ -406,7 +403,7 @@ async function collectObserverSamples(
             allLodsReady: final.allLodsReady,
           },
     samples,
-    errors: [...observer.errors],
+    errors: observer.viewport.failures.map((failure) => `${failure.source}: ${failure.message}`),
   };
 }
 
@@ -452,7 +449,7 @@ async function runPopulation({
   const reportPath = path.join(fixture.directory, `bots-${count}-${runIndex}.json`);
   const before = await databaseFiles(fixture.databasePath);
   if (observer !== null) {
-    await observer.page.evaluate(() => globalThis.__VOXELS__!.snapshot());
+    await observer.viewport.page.evaluate(() => globalThis.__VOXELS__!.snapshot());
   }
   link.reset();
   const logs: string[] = [];
@@ -686,46 +683,42 @@ function stageViolations(stage: BotLoadStageBase, browserEnabled: boolean): stri
 }
 
 async function startObserver(
-  browser: Browser,
+  browser: BrowserCapability,
   previewPort: number,
   fixture: BrowserWorldFixture,
   proxyPort: number,
+  count: number,
+  recordVideo: boolean,
 ): Promise<Observer> {
-  const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1 });
-  const page = await context.newPage();
-  const errors: string[] = [];
-  const recordError = (message: string): void => {
-    if (errors.length < 32 && !errors.includes(message)) errors.push(message);
-  };
-  page.on("pageerror", (error) => recordError(`pageerror: ${error.message}`));
-  page.on("console", (message) => {
-    if (isBrowserConsoleFailure(message.type(), message.text(), BROWSER_FAILURE)) {
-      recordError(`${message.type()}: ${message.text()}`);
-    }
-  });
   const clientConfig = (await readFile(fixture.clientConfigPath, "utf8"))
     .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${proxyPort}${WORLD_PATH}"`)
     .replace(
       /^presence_endpoint = .*$/m,
       `presence_endpoint = "ws://127.0.0.1:${proxyPort}${PRESENCE_PATH}"`,
     );
-  await page.route("**/config/client.toml", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "text/plain; charset=utf-8",
-      body: clientConfig,
-    }),
-  );
-  await page.goto(`http://127.0.0.1:${previewPort}`, { waitUntil: "domcontentloaded" });
-  await page.waitForFunction(() => typeof globalThis.__VOXELS__?.snapshot === "function", null, {
-    timeout: 30_000,
+  const viewport = await browser.open({
+    url: `http://127.0.0.1:${previewPort}`,
+    label: `bot-observer-${count}`,
+    viewport: VIEWPORT,
+    recordVideo,
+    videoFilename: `bot-observer-${count}.webm`,
+    beforeNavigate: async (_context, page) => {
+      await page.route("**/config/client.toml", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/plain; charset=utf-8",
+          body: clientConfig,
+        }),
+      );
+    },
   });
+  const page = viewport.page;
   const deadline = performance.now() + 30_000;
   let latest: readonly number[] = [];
   while (performance.now() < deadline) {
     latest = assertSnapshotSchema(await page.evaluate(() => globalThis.__VOXELS__!.snapshot()));
     if (snapshotValue(latest, "quads") > 0 && snapshotValue(latest, "residentChunks") > 0) {
-      return { context, page, errors };
+      return { viewport };
     }
     await page.waitForTimeout(100);
   }
@@ -737,14 +730,13 @@ async function startObserver(
       pendingJobs: latest[SNAPSHOT.pendingJobs],
       allLodsReady: latest[SNAPSHOT.allLodsReady],
       interactiveLodsReady: latest[SNAPSHOT.interactiveLodsReady],
-      errors,
+      errors: viewport.failures,
     })}`,
   );
 }
 
 async function main(context: ScenarioContext, arguments_: readonly string[]) {
   const options = parseArguments(arguments_);
-  const outputDirectory = context.artifacts.directory;
   execFileSync(
     rustTool("cargo"),
     worldServiceBuildCargoArgs({ metal: false, profile: options.serviceProfile }),
@@ -771,7 +763,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
   let growthFixture: BrowserWorldFixture | undefined;
   let growthService: BrowserWorldService | undefined;
   let growthLink: ShapedLink | undefined;
-  let browser: Browser | undefined;
+  let browser: BrowserCapability | undefined;
   let previewServer: Awaited<ReturnType<typeof preview>> | undefined;
   let previewPort: number | undefined;
   try {
@@ -791,7 +783,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         logLevel: "warn",
         preview: { host: "127.0.0.1", port: previewPort, strictPort: true },
       });
-      browser = await chromium.launch(chromeWebGpuLaunchOptions());
+      browser = await BrowserCapability.start(context, { warningPattern: BROWSER_FAILURE });
     }
     for (const [runIndex, count] of options.counts.entries()) {
       const fixture: BrowserWorldFixture =
@@ -830,7 +822,14 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         observer =
           browser === undefined || previewPort === undefined
             ? null
-            : await startObserver(browser, previewPort, fixture, proxy.port);
+            : await startObserver(
+                browser,
+                previewPort,
+                fixture,
+                proxy.port,
+                count,
+                options.recordVideo,
+              );
         const stage = await runPopulation({
           count,
           options,
@@ -845,15 +844,12 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         result.violations.push(...violations);
         result.stages.push({ ...stage, violations });
         if (observer !== null && runIndex === options.counts.length - 1) {
-          await mkdir(outputDirectory, { recursive: true });
-          const screenshotPath = path.join(outputDirectory, "observer.png");
-          await observer.page.screenshot({
-            path: screenshotPath,
+          await observer.viewport.screenshot("bot observer", {
+            filename: "observer.png",
           });
-          context.artifacts.record("bot observer", screenshotPath, "image/png");
         }
       } finally {
-        if (observer !== null) await observer.context.close();
+        if (observer !== null) await observer.viewport.close();
         if (options.mode === "scale") {
           await proxy.close();
           await service.close();
@@ -865,7 +861,6 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
     if (growthLink) await growthLink.close();
     if (growthService) await growthService.close();
     if (growthFixture) await growthFixture.cleanup();
-    if (browser) await browser.close();
     if (previewServer) await previewServer.close();
   }
   const markdown = markdownReport(result);
@@ -895,6 +890,7 @@ export default defineScenario({
     browser: true,
     viewport: "browser",
     screenshots: true,
+    video: true,
     bots: true,
     network: true,
     metrics: true,
