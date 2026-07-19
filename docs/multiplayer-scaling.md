@@ -176,7 +176,7 @@ horizontal/vertical movement credit; a client discontinuity bit cannot authorize
 require a fresh same-connection pose and bounded reach. A WAN game still needs server-owned input and
 collision simulation plus authenticated identity.
 
-Voxel edits and per-material inventories are native server authority: strict SQLite schema 9 is bound
+Voxel edits and per-material inventories are native server authority: strict SQLite schema 10 is bound
 to the world/source manifest, operations are idempotent per player/edit-session, and commits carry
 connection identity and global order, while local chunk/surface revisions prevent unrelated cache
 invalidation. The presence spatial index

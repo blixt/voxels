@@ -694,7 +694,6 @@ fn initialize_schema(
                     y INTEGER NOT NULL,
                     z INTEGER NOT NULL,
                     material INTEGER NOT NULL,
-                    revision INTEGER NOT NULL CHECK(revision >= 1),
                     PRIMARY KEY (x, y, z)
                  ) WITHOUT ROWID;
                  CREATE TABLE chunk_revisions (
@@ -795,26 +794,20 @@ fn load_edits(connection: &Connection) -> Result<(EditMap, u64), EditAuthorityEr
         .map_err(sql_error("read edit revision"))?;
     let revision = positive_u64(revision, "edit revision")?;
     let mut statement = connection
-        .prepare("SELECT x, y, z, material, revision FROM voxel_edits ORDER BY x, y, z")
+        .prepare("SELECT x, y, z, material FROM voxel_edits ORDER BY x, y, z")
         .map_err(sql_error("prepare edit load"))?;
     let rows = statement
         .query_map([], |row| {
             Ok((
                 VoxelCoord::new(row.get(0)?, row.get(1)?, row.get(2)?),
                 row.get::<_, u16>(3)?,
-                row.get::<_, i64>(4)?,
             ))
         })
         .map_err(sql_error("load edits"))?;
     let mut edits = EditMap::default();
     for row in rows {
-        let (coord, material_id, row_revision) = row.map_err(sql_error("decode edit row"))?;
+        let (coord, material_id) = row.map_err(sql_error("decode edit row"))?;
         let material = decode_material(material_id, "durable edit")?;
-        if positive_u64(row_revision, "durable edit revision")? > revision {
-            return Err(EditAuthorityError(
-                "durable edit revision exceeds the world revision".to_owned(),
-            ));
-        }
         edits.insert_override(coord, material);
     }
     Ok((edits, revision))
@@ -1176,9 +1169,9 @@ fn persist_action(
         {
             let mut upsert = transaction
                 .prepare_cached(
-                    "INSERT INTO voxel_edits(x,y,z,material,revision) VALUES(?1,?2,?3,?4,?5)
+                    "INSERT INTO voxel_edits(x,y,z,material) VALUES(?1,?2,?3,?4)
                          ON CONFLICT(x,y,z) DO UPDATE SET
-                            material=excluded.material, revision=excluded.revision",
+                            material=excluded.material",
                 )
                 .map_err(sql_error("prepare voxel mutation"))?;
             let mut delete = transaction
@@ -1192,7 +1185,6 @@ fn persist_action(
                             mutation.coord.y,
                             mutation.coord.z,
                             material.id(),
-                            revision_sql,
                         ])
                         .map_err(sql_error("persist voxel mutation"))?;
                 } else {
@@ -2667,7 +2659,7 @@ mod tests {
         let error = EditAuthority::from_connection(connection, world_id(6), &source, 4, None)
             .err()
             .unwrap();
-        assert!(error.to_string().contains("schema 6; expected 9"));
+        assert!(error.to_string().contains("schema 6; expected 10"));
         assert!(
             error
                 .to_string()
