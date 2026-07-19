@@ -24,6 +24,7 @@ export interface OpenPageOptions {
   readonly viewport?: ViewportSize;
   readonly deviceScaleFactor?: number;
   readonly recordVideo?: boolean;
+  readonly engine?: boolean;
 }
 
 export interface ScreenshotOptions {
@@ -75,8 +76,8 @@ export class BrowserCapability {
     scenario: ScenarioContext,
     options: { readonly warningPattern?: RegExp; readonly launch?: LaunchOptions } = {},
   ): Promise<BrowserCapability> {
-    if (scenario.definition.uses.viewport !== "browser") {
-      throw new Error(`scenario ${scenario.definition.id} did not declare a browser viewport`);
+    if (!scenario.definition.uses.browser && scenario.definition.uses.viewport !== "browser") {
+      throw new Error(`scenario ${scenario.definition.id} did not declare browser automation`);
     }
     const browser = await chromium.launch(options.launch ?? chromeWebGpuLaunchOptions());
     const capability = new BrowserCapability(
@@ -117,7 +118,7 @@ export class BrowserCapability {
     });
     await page.goto(options.url, { waitUntil: "domcontentloaded" });
     const browserViewport = new BrowserViewport(this.#scenario, page, label);
-    await browserViewport.engine.ready();
+    if (options.engine ?? true) await browserViewport.engine.ready();
     return browserViewport;
   }
 
