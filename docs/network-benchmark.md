@@ -40,6 +40,11 @@ view-priority changes improve visible completion even if background rings are st
 view-complete contract, where all tiles needed for the current screen-space target must be loaded,
 processed, and rendered before the view is complete.
 
+Fixed-distance movement also reports `longestNoProgressMs`. A sample advances after at least 2.5 cm
+of horizontal movement; the deterministic route fails if held movement makes no progress for more
+than 150 ms. This makes conservative missing-chunk collision walls a direct regression rather than
+inferring them from total walk duration or viewport convergence.
+
 The proxy counts delivered TCP stream bytes in both directions and classifies WebSocket/VXWP frames
 by endpoint and message kind. “Stream bytes” include HTTP Upgrade and WebSocket framing, but exclude
 TCP/IP, TLS, retransmissions, and Ethernet overhead. The JSON also retains VXWP payload counts so the
@@ -191,3 +196,17 @@ The next credible gains are not constant changes: they require priority-aware se
 best-effort cancellation of genuinely obsolete focus work, or a bespoke progressive `VXST` surface
 codec. Those need new protocol/scheduler invariants and multi-client fairness tests, so they are the
 boundary beyond this low-hanging optimization pass.
+
+## 2026-07-19 swept collision urgency
+
+Canonical work under the player and across the configured intended-movement sweep now preempts
+ordinary generation, meshing, upload, and world-service traffic. The direction comes from current
+input and locomotion rather than post-collision velocity, so conservative missing-chunk collision
+cannot erase the request pressure needed to remove its own temporary boundary. The independent
+view/edit corridor remains urgent.
+
+A one-run Chrome 150 check on the same 40 ms RTT, 50/10 Mbit link and procedural fixture covered
+35.045 m in 4,984.1 ms. Its longest interval without at least 2.5 cm of progress was 27.3 ms, the
+viewport was fully informed 169.1 ms after stopping, no frame exceeded 33.33 ms, and streaming work
+was 2.4 ms p95. This is a correctness smoke test rather than a statistically stable performance
+comparison; use the default five runs for optimization claims.

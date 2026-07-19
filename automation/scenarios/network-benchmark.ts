@@ -22,8 +22,8 @@ import {
 } from "../lib/world.ts";
 import type { WorldSource } from "../lib/world.ts";
 
-const RESULT_SCHEMA_VERSION = 4;
-const FIXTURE_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 5;
+const FIXTURE_VERSION = 3;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
 const SAMPLE_INTERVAL_MS = 16;
@@ -32,6 +32,8 @@ const READY_STABLE_SAMPLES = 3;
 const SCENARIO_TIMEOUT_MS = 90_000;
 const RESIDENT_WALK_METRES = 2;
 const STREAMING_WALK_METRES = 35;
+const MOVEMENT_PROGRESS_EPSILON_METRES = 0.025;
+const MAX_MOVEMENT_NO_PROGRESS_MS = 150;
 const TURN_RADIANS = Math.PI;
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|websocket|protocol|world service/i;
@@ -231,10 +233,24 @@ async function walkDistance(
   if (sprint) await page.keyboard.down("ShiftLeft");
   await page.keyboard.down(key);
   let after = before;
+  let previous = before;
+  let lastProgressAt = started;
+  let longestNoProgressMs = 0;
   try {
     while (performance.now() - started < timeoutMs) {
       await page.waitForTimeout(25);
       after = await capture();
+      const observedAt = performance.now();
+      const stepDistance = Math.hypot(
+        snapshotValue(after, "cameraX") - snapshotValue(previous, "cameraX"),
+        snapshotValue(after, "cameraZ") - snapshotValue(previous, "cameraZ"),
+      );
+      if (stepDistance >= MOVEMENT_PROGRESS_EPSILON_METRES) {
+        lastProgressAt = observedAt;
+      } else {
+        longestNoProgressMs = Math.max(longestNoProgressMs, observedAt - lastProgressAt);
+      }
+      previous = after;
       const distance = Math.hypot(
         snapshotValue(after, "cameraX") - snapshotValue(before, "cameraX"),
         snapshotValue(after, "cameraZ") - snapshotValue(before, "cameraZ"),
@@ -254,10 +270,16 @@ async function walkDistance(
       `walk fixture covered ${distanceMetres.toFixed(2)} of ${targetDistanceMetres} metres`,
     );
   }
+  if (longestNoProgressMs > MAX_MOVEMENT_NO_PROGRESS_MS) {
+    throw new Error(
+      `walk fixture stopped progressing for ${longestNoProgressMs.toFixed(1)} ms while movement remained held`,
+    );
+  }
   return {
     requestedDistanceMetres: targetDistanceMetres,
     actionDurationMs: rounded(performance.now() - started),
     distanceMetres: rounded(distanceMetres, 3),
+    longestNoProgressMs: rounded(longestNoProgressMs),
   };
 }
 
@@ -443,6 +465,11 @@ function aggregateRuns(runs: readonly NetworkRun[]) {
       const downstreamQueuedBytes = scenarios.map(
         (scenario) => scenario.linkPressure.downstream.peakQueuedBytes,
       );
+      const longestNoProgressMs = scenarios.flatMap((scenario) => {
+        if (typeof scenario.action !== "object" || scenario.action === null) return [];
+        const value = (scenario.action as Record<string, unknown>).longestNoProgressMs;
+        return typeof value === "number" && Number.isFinite(value) ? [value] : [];
+      });
       return [
         name,
         {
@@ -502,6 +529,10 @@ function aggregateRuns(runs: readonly NetworkRun[]) {
               0,
             ),
           },
+          movement:
+            longestNoProgressMs.length > 0
+              ? { longestNoProgressMs: numericSummary(longestNoProgressMs) }
+              : null,
         },
       ];
     }),
@@ -542,7 +573,15 @@ function markdownReport(result: NetworkMarkdownReport): string {
     const pressure = summary.linkPressure;
     return `| ${name} | ${pressure.downstreamPeakQueueDelayMs.median.toFixed(3)} / ${pressure.downstreamPeakQueueDelayMs.max.toFixed(3)} | ${pressure.downstreamPeakQueuedBytes.median.toLocaleString("en-US")} / ${pressure.downstreamPeakQueuedBytes.max.toLocaleString("en-US")} | ${pressure.downstreamBackpressurePauses.toLocaleString("en-US")} |`;
   });
-  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nWorld source: \`${result.world.source}\`; repetitions: ${result.repetitions}; environment: ${result.environment.cpu}, ${result.environment.platform}, Chrome ${result.environment.chrome}, Node ${result.environment.node}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\n| Scenario | Interactive ready median (ms) | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at interactive | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Interactive ready” is when canonical terrain and the original four surface rings are complete; kilometre horizon prefetch starts only afterward. “Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Link pressure\n\n| Scenario | Downstream peak queue delay median/max (ms) | Downstream peak queued median/max (bytes) | Source pauses |\n| --- | ---: | ---: | ---: |\n${pressureRows.join("\n")}\n\nQueue delay excludes configured propagation and each pacing quantum's own serialization. A source pause means the proxy's bounded queue applied TCP backpressure.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
+  const movementRows = Object.entries(result.summary).flatMap(([name, summary]) => {
+    const movement = summary.movement;
+    if (movement === null) return [];
+    const noProgress = movement.longestNoProgressMs;
+    return [
+      `| ${name} | ${noProgress.median?.toFixed(1) ?? "n/a"} | ${noProgress.max?.toFixed(1) ?? "n/a"} |`,
+    ];
+  });
+  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nWorld source: \`${result.world.source}\`; repetitions: ${result.repetitions}; environment: ${result.environment.cpu}, ${result.environment.platform}, Chrome ${result.environment.chrome}, Node ${result.environment.node}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\n| Scenario | Interactive ready median (ms) | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at interactive | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Interactive ready” is when canonical terrain and the original four surface rings are complete; kilometre horizon prefetch starts only afterward. “Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Movement continuity\n\n| Scenario | Longest no-progress median (ms) | max (ms) |\n| --- | ---: | ---: |\n${movementRows.join("\n")}\n\nA movement sample counts as progress after at least ${MOVEMENT_PROGRESS_EPSILON_METRES} metres of horizontal displacement. Long no-progress intervals while movement input remains held expose collision stalls caused by missing canonical chunks; the fixed route fails at more than ${MAX_MOVEMENT_NO_PROGRESS_MS} ms.\n\n## Link pressure\n\n| Scenario | Downstream peak queue delay median/max (ms) | Downstream peak queued median/max (bytes) | Source pauses |\n| --- | ---: | ---: | ---: |\n${pressureRows.join("\n")}\n\nQueue delay excludes configured propagation and each pacing quantum's own serialization. A source pause means the proxy's bounded queue applied TCP backpressure.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
 }
 
 async function main(context: ScenarioContext, arguments_: readonly string[]) {
@@ -723,6 +762,8 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         readyStableSamples: READY_STABLE_SAMPLES,
         residentWalkMetres: RESIDENT_WALK_METRES,
         streamingWalkMetres: STREAMING_WALK_METRES,
+        movementProgressEpsilonMetres: MOVEMENT_PROGRESS_EPSILON_METRES,
+        maximumMovementNoProgressMs: MAX_MOVEMENT_NO_PROGRESS_MS,
         turnRadians: TURN_RADIANS,
       },
       protocol: {

@@ -51,12 +51,14 @@ Rust enum layout and Serde output are not wire formats.
    capabilities, negotiated request window, echoed player claim, spawn sample, authoritative resume
    pose, per-material inventory, and a random edit-session ID. The client
    rejects an identity mismatch and does not inspect the provider type to choose generation behavior.
-3. The browser preserves the complete immediate 3x3 chunk vicinity, then reorders queued canonical
-   chunks every frame by the configured camera cone and velocity-predicted focus. Surface work stays
-   spatially ordered because each level activates atomically; it starts with stride-16, stride-8,
-   stride-4, then stride-2 coverage. Once that complete set and exact near chunks are ready,
-   stride-64 and stride-32 horizon batches run as `Prefetch` work. The server caps global prefetch
-   workers, so kilometre silhouettes cannot consume all generation capacity.
+3. The browser gives the current player body/support, intended movement sweep, and view/edit corridor
+   hard urgency through every canonical pipeline stage. It preserves the complete immediate 3x3
+   vicinity, then reorders ordinary queued chunks every frame by the configured camera cone and
+   velocity-predicted focus. Surface work stays spatially ordered because each level activates
+   atomically; it starts with stride-16, stride-8, stride-4, then stride-2 coverage. Once that complete
+   set and exact near chunks are ready, stride-64 and stride-32 horizon batches run as `Prefetch`
+   work. The server caps global prefetch workers, so kilometre silhouettes cannot consume all
+   generation capacity.
 4. The browser concurrently submits exact chunk-coordinate batches in that priority order. VXWP
    preserves the ordered coordinates, request ID, and coordinate keys; every decoded product is
    checked against the negotiated source identity. Directional priority changes no cache key,
@@ -174,15 +176,19 @@ Streaming direction is deployment-tunable without changing the wire format:
 
 ```toml
 [streaming.priority]
+collision_lookahead_seconds = 2.0
 velocity_lookahead_seconds = 1.5
 view_cone_half_angle_degrees = 55.0
 ```
 
-The current 3x3 canonical-chunk vicinity always wins. Beyond it, queued work inside the cone wins
-over side and rear work, while velocity look-ahead orders that cone toward where the player will be.
-Rotation or motion can reprioritize work that has not started, but never cancels or duplicates an
-in-flight request. Surface tiles retain spatial order: browser measurements showed that directional
-surface ordering only disrupted generation locality because a partial level cannot be presented.
+The current body and support, its intended two-second swept path, and the independent view/edit
+corridor are collision-critical. They preempt ordinary generation, meshing, upload, and world-service
+traffic, including after conservative unloaded-space collision has stopped actual velocity. This
+urgent set is bounded secondary interest: it neither increases residency limits nor cancels or
+duplicates in-flight work. Beyond it, queued work inside the cone wins over side and rear work, while
+velocity look-ahead orders that cone toward where the player will be. Surface tiles retain spatial
+order: browser measurements showed that directional surface ordering only disrupted generation
+locality because a partial level cannot be presented.
 
 Ensure the Vite origin is in the server's `allowed_origins`. Terrain Diffusion is the checked-in
 default. Fetch the pinned model once, then start the Metal-capable daemon:
