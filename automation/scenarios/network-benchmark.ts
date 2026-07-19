@@ -1,35 +1,43 @@
 import { spawn, execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import type { ChildProcess } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { cpus, platform, release, tmpdir } from "node:os";
 import path from "node:path";
 import { connect } from "node:net";
 import { chromium } from "playwright";
+import type { Browser, Page } from "playwright";
 import {
-  assertSnapshotSchema,
   chromeWebGpuLaunchOptions,
-  FRAME_SAMPLE_START,
-  FRAME_SAMPLE_WIDTH,
   isBrowserConsoleFailure,
   reserveEphemeralPort,
+} from "../lib/browser.ts";
+import {
+  assertSnapshotSchema,
+  FRAME_SAMPLE_WIDTH,
   SNAPSHOT,
   SNAPSHOT_SCHEMA_VERSION,
-} from "./browser-harness.mjs";
-import { rustTool } from "./build-wasm.ts";
-import { createShapedLink } from "../automation/lib/network.ts";
-import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "../automation/lib/protocol.ts";
-import { worldServiceBuildCargoArgs, worldServiceCargoArgs } from "./world-service-command.ts";
+  snapshotValue,
+} from "../lib/engine.ts";
+import { rustTool } from "../../scripts/build-wasm.ts";
+import { createShapedLink, type LinkStats, type ShapedLink } from "../lib/network.ts";
+import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "../lib/protocol.ts";
+import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
+import {
+  worldServiceBuildCargoArgs,
+  worldServiceCargoArgs,
+} from "../../scripts/world-service-command.ts";
 
 const RESULT_SCHEMA_VERSION = 4;
 const FIXTURE_VERSION = 2;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
 const SAMPLE_INTERVAL_MS = 16;
+const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 const READY_STABLE_SAMPLES = 3;
 const SCENARIO_TIMEOUT_MS = 90_000;
 const RESIDENT_WALK_METRES = 2;
 const STREAMING_WALK_METRES = 35;
 const TURN_RADIANS = Math.PI;
-const OUTPUT_DIRECTORY = path.resolve("target/network-benchmark");
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|websocket|protocol|world service/i;
 const DEFAULT_PROFILE = Object.freeze({
@@ -42,56 +50,104 @@ const DEFAULT_PROFILE = Object.freeze({
   packetLossPercent: 0,
 });
 
-function argumentValue(name, fallback) {
+interface NumberSummary {
+  readonly median: number | null;
+  readonly p95: number | null;
+  readonly max: number | null;
+}
+
+interface ByteSummary {
+  readonly total: number;
+  readonly upstream: number;
+  readonly downstream: number;
+  readonly worldUpstream: number;
+  readonly worldDownstream: number;
+  readonly presenceUpstream: number;
+  readonly presenceDownstream: number;
+  readonly vxwpUpstream: number;
+  readonly vxwpDownstream: number;
+}
+
+interface ViewportSample {
+  readonly elapsedMs: number;
+  readonly signature: string;
+  readonly visibleChunks: number;
+  readonly quads: number;
+  readonly pendingJobs: number;
+  readonly surfaceInFlight: number;
+  readonly interactiveLodsReady: boolean;
+  readonly stride32Tiles: number;
+  readonly stride64Tiles: number;
+  readonly allLodsReady: boolean;
+  readonly bytes: ByteSummary;
+}
+
+interface FrameState {
+  samples: number[][];
+  droppedSamples: number;
+}
+
+interface BenchmarkActionContext {
+  readonly capture: () => Promise<readonly number[]>;
+  readonly markMeasurementStart: () => number;
+}
+
+function argumentValue(arguments_: readonly string[], name: string, fallback: string): string {
   const prefix = `--${name}=`;
-  const value = process.argv.find((argument) => argument.startsWith(prefix))?.slice(prefix.length);
+  const value = arguments_.find((argument) => argument.startsWith(prefix))?.slice(prefix.length);
   return value ?? fallback;
 }
 
-function positiveInteger(value, name) {
+function positiveInteger(value: string, name: string): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be positive`);
   return parsed;
 }
 
-function positiveNumber(value, name) {
+function positiveNumber(value: string, name: string): number {
   const parsed = Number.parseFloat(value);
   if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`${name} must be positive`);
   return parsed;
 }
 
-function requiredTomlString(contents, key) {
+function requiredTomlString(contents: string, key: string): string {
   const match = contents.match(new RegExp(`^${key}\\s*=\\s*"([^"]+)"\\s*$`, "mu"));
   if (match === null) throw new Error(`missing string ${key} in world-service config`);
-  return match[1];
+  const value = match[1];
+  if (value === undefined) throw new Error(`string ${key} had no capture`);
+  return value;
 }
 
-function sleep(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function percentile(values, fraction) {
+function percentile(values: readonly number[], fraction: number): number | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((left, right) => left - right);
-  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)];
+  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)] ?? null;
 }
 
-function rounded(value, digits = 1) {
+function rounded(value: number, digits = 1): number {
   const scale = 10 ** digits;
   return Math.round(value * scale) / scale;
 }
 
-function numericSummary(values) {
+function numericSummary(values: readonly number[]): NumberSummary {
   if (values.length === 0) return { median: null, p95: null, max: null };
   return {
-    median: rounded(percentile(values, 0.5)),
-    p95: rounded(percentile(values, 0.95)),
+    median: rounded(percentile(values, 0.5) ?? 0),
+    p95: rounded(percentile(values, 0.95) ?? 0),
     max: rounded(Math.max(...values)),
   };
 }
 
-function frameTimingSummary(samples, droppedSamples) {
-  const column = (index) => samples.map((sample) => sample[index]);
+function frameTimingSummary(samples: readonly number[][], droppedSamples: number) {
+  const column = (index: number): number[] =>
+    samples.flatMap((sample) => {
+      const value = sample[index];
+      return value === undefined ? [] : [value];
+    });
   const frameMs = column(0);
   return {
     samples: samples.length,
@@ -105,7 +161,7 @@ function frameTimingSummary(samples, droppedSamples) {
   };
 }
 
-function byteSummary(stats) {
+function byteSummary(stats: LinkStats): ByteSummary {
   const world = stats.paths[WORLD_PATH] ?? {
     upstream: { streamBytes: 0, vxwpPayloadBytes: 0 },
     downstream: { streamBytes: 0, vxwpPayloadBytes: 0 },
@@ -127,7 +183,7 @@ function byteSummary(stats) {
   };
 }
 
-function viewportSignature(snapshot) {
+function viewportSignature(snapshot: readonly number[]): string {
   return [
     snapshot[SNAPSHOT.viewportFingerprintLow24],
     snapshot[SNAPSHOT.viewportFingerprintHigh24],
@@ -137,39 +193,49 @@ function viewportSignature(snapshot) {
   ].join(":");
 }
 
-function sameSignature(left, right) {
+function sameSignature(
+  left: ViewportSample | undefined,
+  right: ViewportSample | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return false;
   return left.signature === right.signature;
 }
 
-function firstPermanentlyFinalSample(samples, actionFinishedMs) {
+function firstPermanentlyFinalSample(
+  samples: readonly ViewportSample[],
+  actionFinishedMs: number,
+): ViewportSample | null {
   const final = samples.at(-1);
   if (!final) return null;
   for (let index = 0; index < samples.length; index += 1) {
     const sample = samples[index];
+    if (sample === undefined) continue;
     if (sample.elapsedMs < actionFinishedMs || !sameSignature(sample, final)) continue;
     if (samples.slice(index).every((candidate) => sameSignature(candidate, final))) return sample;
   }
   return final;
 }
 
-async function waitForSnapshotApi(page) {
+async function waitForSnapshotApi(page: Page): Promise<void> {
   await page.waitForFunction(() => typeof globalThis.__VOXELS__?.snapshot === "function", null, {
     timeout: 30_000,
   });
 }
 
-async function captureSnapshot(page, frameState) {
-  const current = assertSnapshotSchema(await page.evaluate(() => globalThis.__VOXELS__.snapshot()));
-  const count = current[SNAPSHOT.sampleCount];
+async function captureSnapshot(page: Page, frameState: FrameState): Promise<readonly number[]> {
+  const current = assertSnapshotSchema(
+    await page.evaluate(() => globalThis.__VOXELS__!.snapshot()),
+  );
+  const count = snapshotValue(current, "sampleCount");
   for (let index = 0; index < count; index += 1) {
     const start = FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH;
     frameState.samples.push(current.slice(start, start + FRAME_SAMPLE_WIDTH));
   }
-  frameState.droppedSamples += current[SNAPSHOT.droppedSamples];
+  frameState.droppedSamples += snapshotValue(current, "droppedSamples");
   return current;
 }
 
-function observePage(page, label, errors) {
+function observePage(page: Page, label: string, errors: string[]): void {
   page.on("pageerror", (error) => errors.push(`${label} pageerror: ${error.message}`));
   page.on("console", (message) => {
     if (isBrowserConsoleFailure(message.type(), message.text(), FAILURE)) {
@@ -178,18 +244,22 @@ function observePage(page, label, errors) {
   });
 }
 
-async function turn(page, radians, { capture, markMeasurementStart }) {
+async function turn(
+  page: Page,
+  radians: number,
+  { capture, markMeasurementStart }: BenchmarkActionContext,
+) {
   const before = await capture();
   markMeasurementStart();
   await page.evaluate((movementX) => {
-    globalThis.__VOXELS__.look(movementX, 0);
+    globalThis.__VOXELS__!.look(movementX, 0);
   }, radians / 0.0022);
   await page.waitForTimeout(80);
   const after = await capture();
   const delta = Math.abs(
     Math.atan2(
-      Math.sin(after[SNAPSHOT.yaw] - before[SNAPSHOT.yaw]),
-      Math.cos(after[SNAPSHOT.yaw] - before[SNAPSHOT.yaw]),
+      Math.sin(snapshotValue(after, "yaw") - snapshotValue(before, "yaw")),
+      Math.cos(snapshotValue(after, "yaw") - snapshotValue(before, "yaw")),
     ),
   );
   if (delta < Math.abs(radians) * 0.8) {
@@ -199,9 +269,18 @@ async function turn(page, radians, { capture, markMeasurementStart }) {
 }
 
 async function walkDistance(
-  page,
-  targetDistanceMetres,
-  { capture, sprint = false, key = "KeyW", timeoutMs = 15_000 },
+  page: Page,
+  targetDistanceMetres: number,
+  {
+    capture,
+    sprint = false,
+    key = "KeyW",
+    timeoutMs = 15_000,
+  }: BenchmarkActionContext & {
+    readonly sprint?: boolean;
+    readonly key?: string;
+    readonly timeoutMs?: number;
+  },
 ) {
   const before = await capture();
   const started = performance.now();
@@ -213,8 +292,8 @@ async function walkDistance(
       await page.waitForTimeout(25);
       after = await capture();
       const distance = Math.hypot(
-        after[SNAPSHOT.cameraX] - before[SNAPSHOT.cameraX],
-        after[SNAPSHOT.cameraZ] - before[SNAPSHOT.cameraZ],
+        snapshotValue(after, "cameraX") - snapshotValue(before, "cameraX"),
+        snapshotValue(after, "cameraZ") - snapshotValue(before, "cameraZ"),
       );
       if (distance >= targetDistanceMetres) break;
     }
@@ -223,8 +302,8 @@ async function walkDistance(
     if (sprint) await page.keyboard.up("ShiftLeft");
   }
   const distanceMetres = Math.hypot(
-    after[SNAPSHOT.cameraX] - before[SNAPSHOT.cameraX],
-    after[SNAPSHOT.cameraZ] - before[SNAPSHOT.cameraZ],
+    snapshotValue(after, "cameraX") - snapshotValue(before, "cameraX"),
+    snapshotValue(after, "cameraZ") - snapshotValue(before, "cameraZ"),
   );
   if (distanceMetres < targetDistanceMetres) {
     throw new Error(
@@ -238,15 +317,29 @@ async function walkDistance(
   };
 }
 
-async function runScenario({ name, page, link, action, errors, timeoutMs = SCENARIO_TIMEOUT_MS }) {
+async function runScenario({
+  name,
+  page,
+  link,
+  action,
+  errors,
+  timeoutMs = SCENARIO_TIMEOUT_MS,
+}: {
+  readonly name: string;
+  readonly page: Page;
+  readonly link: ShapedLink;
+  readonly action: (context: BenchmarkActionContext) => unknown;
+  readonly errors: readonly string[];
+  readonly timeoutMs?: number;
+}) {
   link.reset();
   const started = performance.now();
-  const frameState = { samples: [], droppedSamples: 0 };
-  let actionResult;
-  let actionFinishedMs = null;
-  let markedMeasurementStartedMs = null;
-  let actionError;
-  const actionContext = {
+  const frameState: FrameState = { samples: [], droppedSamples: 0 };
+  let actionResult: unknown;
+  let actionFinishedMs: number | null = null;
+  let markedMeasurementStartedMs: number | null = null;
+  let actionError: unknown;
+  const actionContext: BenchmarkActionContext = {
     capture: () => captureSnapshot(page, frameState),
     markMeasurementStart: () => {
       markedMeasurementStartedMs ??= performance.now() - started;
@@ -263,12 +356,12 @@ async function runScenario({ name, page, link, action, errors, timeoutMs = SCENA
       actionError = error;
       actionFinishedMs = performance.now() - started;
     });
-  const samples = [];
+  const samples: ViewportSample[] = [];
   let consecutiveReady = 0;
   while (performance.now() - started < timeoutMs) {
     if (actionError) throw actionError;
     await sleep(SAMPLE_INTERVAL_MS);
-    let current;
+    let current: readonly number[];
     try {
       current = await captureSnapshot(page, frameState);
     } catch (error) {
@@ -280,22 +373,22 @@ async function runScenario({ name, page, link, action, errors, timeoutMs = SCENA
     samples.push({
       elapsedMs,
       signature: viewportSignature(current),
-      visibleChunks: current[SNAPSHOT.visibleChunks],
-      quads: current[SNAPSHOT.quads],
-      pendingJobs: current[SNAPSHOT.pendingJobs],
-      surfaceInFlight: current[SNAPSHOT.surfaceInFlight],
-      interactiveLodsReady: current[SNAPSHOT.interactiveLodsReady] === 1,
-      stride32Tiles: current[SNAPSHOT.stride32Tiles],
-      stride64Tiles: current[SNAPSHOT.stride64Tiles],
-      allLodsReady: current[SNAPSHOT.allLodsReady] === 1,
+      visibleChunks: snapshotValue(current, "visibleChunks"),
+      quads: snapshotValue(current, "quads"),
+      pendingJobs: snapshotValue(current, "pendingJobs"),
+      surfaceInFlight: snapshotValue(current, "surfaceInFlight"),
+      interactiveLodsReady: snapshotValue(current, "interactiveLodsReady") === 1,
+      stride32Tiles: snapshotValue(current, "stride32Tiles"),
+      stride64Tiles: snapshotValue(current, "stride64Tiles"),
+      allLodsReady: snapshotValue(current, "allLodsReady") === 1,
       bytes: wire,
     });
     const measurementStartedMs = markedMeasurementStartedMs ?? actionFinishedMs;
     const ready =
       measurementStartedMs !== null &&
-      current[SNAPSHOT.allLodsReady] === 1 &&
-      current[SNAPSHOT.visibleChunks] > 0 &&
-      current[SNAPSHOT.quads] > 0;
+      snapshotValue(current, "allLodsReady") === 1 &&
+      snapshotValue(current, "visibleChunks") > 0 &&
+      snapshotValue(current, "quads") > 0;
     consecutiveReady = ready
       ? consecutiveReady > 0 && sameSignature(samples.at(-2), samples.at(-1))
         ? consecutiveReady + 1
@@ -312,6 +405,7 @@ async function runScenario({ name, page, link, action, errors, timeoutMs = SCENA
   }
   if (errors.length > 0) throw new Error(errors.join("\n"));
   const measurementStartedMs = markedMeasurementStartedMs ?? actionFinishedMs;
+  if (measurementStartedMs === null) throw new Error(`${name} action never started measurement`);
   const final = samples.at(-1);
   const fullCoverage = samples.at(-READY_STABLE_SAMPLES);
   const informed = firstPermanentlyFinalSample(samples, measurementStartedMs);
@@ -319,6 +413,15 @@ async function runScenario({ name, page, link, action, errors, timeoutMs = SCENA
     (sample) => sample.elapsedMs >= measurementStartedMs && sample.interactiveLodsReady,
   );
   const firstUseful = samples.find((sample) => sample.visibleChunks > 0 && sample.quads > 0);
+  if (
+    final === undefined ||
+    fullCoverage === undefined ||
+    informed === null ||
+    interactive === undefined ||
+    actionFinishedMs === null
+  ) {
+    throw new Error(`${name} completed without the required stable samples`);
+  }
   const stats = link.snapshot();
   return {
     name,
@@ -357,13 +460,17 @@ async function runScenario({ name, page, link, action, errors, timeoutMs = SCENA
   };
 }
 
-async function waitForPort(port, child, logs) {
+async function waitForPort(
+  port: number,
+  child: ChildProcess,
+  logs: readonly string[],
+): Promise<void> {
   const deadline = performance.now() + 90_000;
   while (performance.now() < deadline) {
     if (child.exitCode !== null) {
       throw new Error(`world service exited with ${child.exitCode}\n${logs.join("")}`);
     }
-    const connected = await new Promise((resolve) => {
+    const connected = await new Promise<boolean>((resolve) => {
       const socket = connect({ host: "127.0.0.1", port });
       socket.once("connect", () => {
         socket.destroy();
@@ -377,18 +484,22 @@ async function waitForPort(port, child, logs) {
   throw new Error(`world service did not listen on ${port}\n${logs.join("")}`);
 }
 
-function stopChild(child) {
+function stopChild(child: ChildProcess | undefined): Promise<unknown> {
   if (!child || child.exitCode !== null) return Promise.resolve();
   child.kill("SIGTERM");
   return Promise.race([
-    new Promise((resolve) => child.once("exit", resolve)),
+    new Promise<void>((resolve) => {
+      child.once("exit", () => resolve());
+    }),
     sleep(3_000).then(() => {
       if (child.exitCode === null) child.kill("SIGKILL");
     }),
   ]);
 }
 
-function aggregateRuns(runs) {
+type NetworkRun = Awaited<ReturnType<typeof runScenario>>;
+
+function aggregateRuns(runs: readonly NetworkRun[]) {
   const grouped = Map.groupBy(runs, (run) => run.name);
   return Object.fromEntries(
     [...grouped.entries()].map(([name, scenarios]) => {
@@ -426,36 +537,36 @@ function aggregateRuns(runs) {
         {
           runs: scenarios.length,
           viewportFullyInformedMs: {
-            median: rounded(percentile(viewport, 0.5)),
-            p95: rounded(percentile(viewport, 0.95)),
+            median: rounded(percentile(viewport, 0.5) ?? 0),
+            p95: rounded(percentile(viewport, 0.95) ?? 0),
             min: rounded(Math.min(...viewport)),
             max: rounded(Math.max(...viewport)),
           },
           interactiveCoverageReadyMs: {
-            median: rounded(percentile(interactive, 0.5)),
-            p95: rounded(percentile(interactive, 0.95)),
+            median: rounded(percentile(interactive, 0.5) ?? 0),
+            p95: rounded(percentile(interactive, 0.95) ?? 0),
             max: rounded(Math.max(...interactive)),
           },
           fullCoverageSettledMs: {
-            median: rounded(percentile(coverage, 0.5)),
-            p95: rounded(percentile(coverage, 0.95)),
+            median: rounded(percentile(coverage, 0.5) ?? 0),
+            p95: rounded(percentile(coverage, 0.95) ?? 0),
             max: rounded(Math.max(...coverage)),
           },
           bytesAtViewportInformed: {
-            medianTotal: percentile(viewportBytes, 0.5),
-            medianWorldDownstream: percentile(viewportWorldBytes, 0.5),
+            medianTotal: percentile(viewportBytes, 0.5) ?? 0,
+            medianWorldDownstream: percentile(viewportWorldBytes, 0.5) ?? 0,
           },
           bytesAtInteractiveCoverage: {
-            medianWorldDownstream: percentile(interactiveWorldBytes, 0.5),
+            medianWorldDownstream: percentile(interactiveWorldBytes, 0.5) ?? 0,
           },
           bytesAtFullCoverage: {
-            medianTotal: percentile(coverageBytes, 0.5),
-            medianWorldDownstream: percentile(coverageWorldBytes, 0.5),
+            medianTotal: percentile(coverageBytes, 0.5) ?? 0,
+            medianWorldDownstream: percentile(coverageWorldBytes, 0.5) ?? 0,
           },
           frameTiming: {
-            medianP95Ms: rounded(percentile(frameP95, 0.5)),
+            medianP95Ms: rounded(percentile(frameP95, 0.5) ?? 0),
             maxMs: rounded(Math.max(...frameMax)),
-            streamingMedianP95Ms: rounded(percentile(streamingP95, 0.5)),
+            streamingMedianP95Ms: rounded(percentile(streamingP95, 0.5) ?? 0),
             above33_33ms: scenarios.reduce(
               (total, scenario) => total + scenario.frameTiming.frameMs.above33_33ms,
               0,
@@ -468,11 +579,11 @@ function aggregateRuns(runs) {
           },
           linkPressure: {
             downstreamPeakQueueDelayMs: {
-              median: rounded(percentile(downstreamQueueDelay, 0.5), 3),
+              median: rounded(percentile(downstreamQueueDelay, 0.5) ?? 0, 3),
               max: rounded(Math.max(...downstreamQueueDelay), 3),
             },
             downstreamPeakQueuedBytes: {
-              median: percentile(downstreamQueuedBytes, 0.5),
+              median: percentile(downstreamQueuedBytes, 0.5) ?? 0,
               max: Math.max(...downstreamQueuedBytes),
             },
             downstreamBackpressurePauses: scenarios.reduce(
@@ -486,7 +597,28 @@ function aggregateRuns(runs) {
   );
 }
 
-function markdownReport(result) {
+type NetworkSummary = ReturnType<typeof aggregateRuns>;
+
+interface NetworkMarkdownReport {
+  readonly generatedAt: string;
+  readonly git: { readonly commit: string; readonly dirty: boolean };
+  readonly world: { readonly source: string };
+  readonly repetitions: number;
+  readonly environment: {
+    readonly cpu: string;
+    readonly platform: string;
+    readonly chrome: string;
+    readonly node: string;
+  };
+  readonly link: {
+    readonly roundTripLatencyMs: number;
+    readonly downstreamMegabitsPerSecond: number;
+    readonly upstreamMegabitsPerSecond: number;
+  };
+  readonly summary: NetworkSummary;
+}
+
+function markdownReport(result: NetworkMarkdownReport): string {
   const rows = Object.entries(result.summary).map(([name, summary]) => {
     const viewport = summary.viewportFullyInformedMs;
     return `| ${name} | ${summary.interactiveCoverageReadyMs.median.toFixed(1)} | ${viewport.median.toFixed(1)} | ${viewport.max.toFixed(1)} | ${summary.fullCoverageSettledMs.median.toFixed(1)} | ${summary.bytesAtInteractiveCoverage.medianWorldDownstream.toLocaleString("en-US")} | ${summary.bytesAtViewportInformed.medianWorldDownstream.toLocaleString("en-US")} | ${summary.bytesAtFullCoverage.medianTotal.toLocaleString("en-US")} |`;
@@ -502,23 +634,25 @@ function markdownReport(result) {
   return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nWorld source: \`${result.world.source}\`; repetitions: ${result.repetitions}; environment: ${result.environment.cpu}, ${result.environment.platform}, Chrome ${result.environment.chrome}, Node ${result.environment.node}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\n| Scenario | Interactive ready median (ms) | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at interactive | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Interactive ready” is when canonical terrain and the original four surface rings are complete; kilometre horizon prefetch starts only afterward. “Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Link pressure\n\n| Scenario | Downstream peak queue delay median/max (ms) | Downstream peak queued median/max (bytes) | Source pauses |\n| --- | ---: | ---: | ---: |\n${pressureRows.join("\n")}\n\nQueue delay excludes configured propagation and each pacing quantum's own serialization. A source pause means the proxy's bounded queue applied TCP backpressure.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
 }
 
-async function main() {
-  const repetitions = positiveInteger(argumentValue("runs", "5"), "runs");
+async function main(context: ScenarioContext, arguments_: readonly string[]) {
+  const value = (name: string, fallback: string): string =>
+    argumentValue(arguments_, name, fallback);
+  const repetitions = positiveInteger(value("runs", "5"), "runs");
   const roundTripLatencyMs = positiveNumber(
-    argumentValue("rtt-ms", String(DEFAULT_PROFILE.roundTripLatencyMs)),
+    value("rtt-ms", String(DEFAULT_PROFILE.roundTripLatencyMs)),
     "rtt-ms",
   );
   const profile = {
     ...DEFAULT_PROFILE,
-    name: argumentValue("profile", DEFAULT_PROFILE.name),
+    name: value("profile", DEFAULT_PROFILE.name),
     roundTripLatencyMs,
     oneWayLatencyMs: roundTripLatencyMs / 2,
     downstreamMegabitsPerSecond: positiveNumber(
-      argumentValue("downstream-mbps", String(DEFAULT_PROFILE.downstreamMegabitsPerSecond)),
+      value("downstream-mbps", String(DEFAULT_PROFILE.downstreamMegabitsPerSecond)),
       "downstream-mbps",
     ),
     upstreamMegabitsPerSecond: positiveNumber(
-      argumentValue("upstream-mbps", String(DEFAULT_PROFILE.upstreamMegabitsPerSecond)),
+      value("upstream-mbps", String(DEFAULT_PROFILE.upstreamMegabitsPerSecond)),
       "upstream-mbps",
     ),
   };
@@ -552,13 +686,14 @@ async function main() {
         `presence_endpoint = "ws://127.0.0.1:${proxyPort}${PRESENCE_PATH}"`,
       ),
   );
+  const previousClientConfig = process.env.VOXELS_CLIENT_CONFIG_PATH;
   process.env.VOXELS_CLIENT_CONFIG_PATH = clientConfigPath;
 
-  let browser;
-  let previewServer;
-  let worldService;
-  let link;
-  const worldLogs = [];
+  let browser: Browser | undefined;
+  let previewServer: Awaited<ReturnType<(typeof import("vite-plus"))["preview"]>> | undefined;
+  let worldService: ChildProcess | undefined;
+  let link: ShapedLink | undefined;
+  const worldLogs: string[] = [];
   try {
     const { build, preview } = await import("vite-plus");
     await build({ mode: "production" });
@@ -573,6 +708,7 @@ async function main() {
       { stdio: ["ignore", "pipe", "pipe"] },
     );
     for (const stream of [worldService.stdout, worldService.stderr]) {
+      if (stream === null) throw new Error("world service did not expose output pipes");
       stream.on("data", (bytes) => {
         worldLogs.push(bytes.toString());
         if (worldLogs.length > 200) worldLogs.shift();
@@ -585,11 +721,11 @@ async function main() {
       preview: { host: PREVIEW_HOST, port: previewPort, strictPort: true },
     });
     browser = await chromium.launch(chromeWebGpuLaunchOptions());
-    const runs = [];
+    const runs: NetworkRun[] = [];
     for (let repetition = 0; repetition < repetitions; repetition += 1) {
-      const errors = [];
-      const context = await browser.newContext({ viewport: VIEWPORT });
-      const page = await context.newPage();
+      const errors: string[] = [];
+      const browserContext = await browser.newContext({ viewport: VIEWPORT });
+      const page = await browserContext.newPage();
       observePage(page, `run-${repetition + 1}`, errors);
       const url = `http://${PREVIEW_HOST}:${previewPort}/?player=network-bench-${repetition + 1}`;
       runs.push(
@@ -635,9 +771,9 @@ async function main() {
             walkDistance(page, STREAMING_WALK_METRES, { ...context, sprint: true }),
         }),
       );
-      await context.close();
+      await browserContext.close();
 
-      const pivotErrors = [];
+      const pivotErrors: string[] = [];
       const pivotContext = await browser.newContext({ viewport: VIEWPORT });
       const pivotPage = await pivotContext.newPage();
       observePage(pivotPage, `pivot-${repetition + 1}`, pivotErrors);
@@ -657,9 +793,9 @@ async function main() {
             while (performance.now() < deadline) {
               const current = await context.capture();
               if (
-                current[SNAPSHOT.visibleChunks] > 0 &&
-                current[SNAPSHOT.quads] > 0 &&
-                current[SNAPSHOT.allLodsReady] === 0
+                snapshotValue(current, "visibleChunks") > 0 &&
+                snapshotValue(current, "quads") > 0 &&
+                snapshotValue(current, "allLodsReady") === 0
               ) {
                 return turn(pivotPage, TURN_RADIANS, context);
               }
@@ -715,18 +851,16 @@ async function main() {
       summary: aggregateRuns(runs),
       runs,
     };
-    await mkdir(OUTPUT_DIRECTORY, { recursive: true });
-    const stamp = result.generatedAt.replaceAll(":", "-");
-    const jsonPath = path.join(OUTPUT_DIRECTORY, `${stamp}.json`);
-    const markdownPath = path.join(OUTPUT_DIRECTORY, `${stamp}.md`);
     const report = markdownReport(result);
     await Promise.all([
-      writeFile(jsonPath, `${JSON.stringify(result, null, 2)}\n`),
-      writeFile(markdownPath, report),
-      writeFile(path.join(OUTPUT_DIRECTORY, "latest.json"), `${JSON.stringify(result, null, 2)}\n`),
-      writeFile(path.join(OUTPUT_DIRECTORY, "latest.md"), report),
+      context.artifacts.writeJson("network benchmark", "report.json", result),
+      context.artifacts.writeText("network benchmark", "report.md", report, "text/markdown"),
     ]);
-    process.stdout.write(`${report}\nJSON: ${jsonPath}\nMarkdown: ${markdownPath}\n`);
+    return {
+      summary: `Completed ${runs.length} network benchmark runs.`,
+      metrics: result.summary,
+      details: result,
+    };
   } catch (error) {
     const reason = error instanceof Error ? error.stack : String(error);
     const serviceLog = worldLogs.join("").trim();
@@ -739,8 +873,24 @@ async function main() {
     await previewServer?.close();
     await link?.close();
     await stopChild(worldService);
+    if (previousClientConfig === undefined) delete process.env.VOXELS_CLIENT_CONFIG_PATH;
+    else process.env.VOXELS_CLIENT_CONFIG_PATH = previousClientConfig;
     await rm(temporary, { recursive: true, force: true });
   }
 }
 
-await main();
+export default defineScenario({
+  id: "network-benchmark",
+  kind: "benchmark",
+  summary: "Measures prioritized world streaming through a shaped bidirectional remote link.",
+  uses: {
+    world: true,
+    browser: true,
+    viewport: "browser",
+    network: true,
+    metrics: true,
+    rust: true,
+  },
+  timeoutMs: 1_800_000,
+  run: main,
+});
