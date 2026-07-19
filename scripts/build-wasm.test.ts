@@ -1,9 +1,12 @@
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { strict as assert } from "node:assert";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "vite-plus/test";
 import {
   normalizeWasmDeclaration,
   prependPathEntry,
+  publishWasmArtifacts,
   RUST_INPUT_FILES,
   RUST_SOURCE_DIRS,
   validateWasmBindgenCliVersion,
@@ -92,5 +95,25 @@ export interface InitOutput {
       "C:\\cargo\\bin;C:\\Windows",
     );
     assert.equal(prependPathEntry("/cargo/bin", "", ":"), "/cargo/bin");
+  });
+
+  it("invalidates an installed artifact set before publishing replacements", () => {
+    const root = mkdtempSync(join(tmpdir(), "voxels-wasm-publish-"));
+    const staging = join(root, "staging");
+    const output = join(root, "output");
+    try {
+      mkdirSync(staging);
+      mkdirSync(output);
+      writeFileSync(join(staging, "blocked"), "new artifact");
+      writeFileSync(join(staging, "voxels-build-profile"), "release\n");
+      mkdirSync(join(output, "blocked"));
+      writeFileSync(join(output, "blocked", "in-use"), "prevents replacement");
+      writeFileSync(join(output, "voxels-build-profile"), "wasm-dev\n");
+
+      assert.throws(() => publishWasmArtifacts(staging, output));
+      assert.equal(existsSync(join(output, "voxels-build-profile")), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

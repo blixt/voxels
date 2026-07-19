@@ -155,27 +155,36 @@ export function buildWasm(profile: WasmBuildProfile = "wasm-dev"): void {
       join(ROOT, "target", TARGET, profile, "voxels.wasm"),
     ]);
     writeFileSync(join(staging, PROFILE_MARKER), `${profile}\n`);
-    publish(staging);
+    publishWasmArtifacts(staging);
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
 }
 
-function publish(staging: string): void {
+export function publishWasmArtifacts(staging: string, output = OUT): void {
   const declaration = join(staging, "voxels.d.ts");
   if (existsSync(declaration)) {
     const source = readFileSync(declaration, "utf8");
     writeFileSync(declaration, normalizeWasmDeclaration(source));
   }
-  mkdirSync(OUT, { recursive: true });
-  const next = readdirSync(staging).sort(
-    (left, right) => Number(left.endsWith(".js")) - Number(right.endsWith(".js")),
-  );
-  for (const name of next) renameSync(join(staging, name), join(OUT, name));
-  const keep = new Set(next);
-  for (const name of readdirSync(OUT)) {
-    if (!keep.has(name)) rmSync(join(OUT, name), { recursive: true, force: true });
+  mkdirSync(output, { recursive: true });
+  const next = readdirSync(staging);
+  if (!next.includes(PROFILE_MARKER)) {
+    throw new Error(`staged WASM build is missing ${PROFILE_MARKER}`);
   }
+  const artifacts = next
+    .filter((name) => name !== PROFILE_MARKER)
+    .sort((left, right) => Number(left.endsWith(".js")) - Number(right.endsWith(".js")));
+
+  // The marker is the commit record for the generated artifact set. Remove the old record before
+  // replacing any files and publish the new one last so interrupted builds are never reused.
+  rmSync(join(output, PROFILE_MARKER), { force: true });
+  for (const name of artifacts) renameSync(join(staging, name), join(output, name));
+  const keep = new Set(artifacts);
+  for (const name of readdirSync(output)) {
+    if (!keep.has(name)) rmSync(join(output, name), { recursive: true, force: true });
+  }
+  renameSync(join(staging, PROFILE_MARKER), join(output, PROFILE_MARKER));
 }
 
 export function normalizeWasmDeclaration(source: string): string {
