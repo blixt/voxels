@@ -806,7 +806,7 @@ mod tests {
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 22,
+                found: 23,
             })
         );
 

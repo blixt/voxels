@@ -1169,8 +1169,8 @@ sea_level_voxels = 52
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 20,
-                found: 19,
+                expected: 21,
+                found: 20,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");
