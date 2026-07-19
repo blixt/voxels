@@ -89,6 +89,17 @@ describe("network benchmark link", () => {
     ]);
   });
 
+  it("decodes world-product priority from the typed VXWP request payload", () => {
+    const request = Buffer.alloc(25);
+    request.write("VXWP");
+    request[24] = 1;
+    expect(testInternals.worldProductPriorityName(request)).toBe("collision_critical");
+    request[24] = 5;
+    expect(testInternals.worldProductPriorityName(request)).toBe("prefetch");
+    request[24] = 0;
+    expect(testInternals.worldProductPriorityName(request)).toBeNull();
+  });
+
   it("delivers artificially delayed bytes before forwarding TCP EOF", async () => {
     const source = new PassThrough();
     const destination = new PassThrough();

@@ -5,6 +5,7 @@ import type { Duplex } from "node:stream";
 const HTTP_HEADER_END = Buffer.from("\r\n\r\n");
 const MAX_HTTP_HEADER_BYTES = 64 * 1024;
 const VXWP_MAGIC = Buffer.from("VXWP");
+const VXWP_HEADER_BYTES = 24;
 const DEFAULT_QUANTUM_BYTES = 16 * 1024;
 const QUEUE_BANDWIDTH_DELAY_PRODUCTS = 2;
 
@@ -75,6 +76,7 @@ export interface LinkMessageStats {
   maxObservedRoundTripMs?: number;
   lastOutboundRateBytesPerSecond?: number;
   maxOutboundRateBytesPerSecond?: number;
+  worldProductPriorityFrames?: Record<string, number>;
 }
 
 export interface LinkStats {
@@ -155,6 +157,24 @@ function directionFor(
 
 function increment(target: LinkDirectionStats, field: DirectionStatField, amount: number): void {
   target[field] += amount;
+}
+
+function worldProductPriorityName(payload: Buffer): string | null {
+  if (payload.length <= VXWP_HEADER_BYTES) return null;
+  switch (payload[VXWP_HEADER_BYTES]) {
+    case 1:
+      return "collision_critical";
+    case 2:
+      return "visible_chunk";
+    case 3:
+      return "visible_surface";
+    case 4:
+      return "replacement_surface";
+    case 5:
+      return "prefetch";
+    default:
+      return null;
+  }
 }
 
 class WebSocketFrameParser {
@@ -327,7 +347,12 @@ class ConnectionInspector {
     increment(totals, "websocketFrameBytes", frameBytes);
     increment(pathTotals, "frames", frameCount);
     increment(pathTotals, "websocketFrameBytes", frameBytes);
-    if (opcode !== 0x2 || payload.length < 24 || !payload.subarray(0, 4).equals(VXWP_MAGIC)) return;
+    if (
+      opcode !== 0x2 ||
+      payload.length < VXWP_HEADER_BYTES ||
+      !payload.subarray(0, 4).equals(VXWP_MAGIC)
+    )
+      return;
     const kind = payload.readUInt16LE(6);
     const name = (VXWP_KIND_NAMES as Readonly<Record<number, string>>)[kind] ?? `kind_${kind}`;
     const key = `${direction}:${name}`;
@@ -345,6 +370,17 @@ class ConnectionInspector {
       stats.messages[key].maxPayloadBytes,
       payload.length,
     );
+    if (
+      direction === "upstream" &&
+      (kind === VXWP_KIND.chunkBatch || kind === VXWP_KIND.surfaceTileBatch)
+    ) {
+      const priority = worldProductPriorityName(payload);
+      if (priority !== null) {
+        stats.messages[key].worldProductPriorityFrames ??= {};
+        stats.messages[key].worldProductPriorityFrames[priority] =
+          (stats.messages[key].worldProductPriorityFrames[priority] ?? 0) + 1;
+      }
+    }
     if (direction === "upstream" && kind === VXWP_KIND.presencePing && payload.length === 40) {
       const roundTripMs = payload.readUInt32LE(28);
       stats.messages[key].lastObservedRoundTripMs = roundTripMs;
@@ -520,7 +556,16 @@ function clonedStats(stats: LinkStats): LinkStats {
       ]),
     ),
     messages: Object.fromEntries(
-      Object.entries(stats.messages).map(([key, value]) => [key, { ...value }]),
+      Object.entries(stats.messages).map(([key, value]) => [
+        key,
+        {
+          ...value,
+          worldProductPriorityFrames:
+            value.worldProductPriorityFrames === undefined
+              ? undefined
+              : { ...value.worldProductPriorityFrames },
+        },
+      ]),
     ),
   };
 }
@@ -617,4 +662,5 @@ export const testInternals = Object.freeze({
   SerializationClock,
   WebSocketFrameParser,
   shapeDirection,
+  worldProductPriorityName,
 });
