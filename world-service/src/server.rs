@@ -1669,6 +1669,9 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
         inbound_tx,
         pose_tx,
         state.max_frame_bytes,
+        outbound.clone(),
+        Arc::clone(&traffic),
+        Arc::clone(&state.presence),
     ));
     let writer = tokio::spawn(write_presence_frames(
         sink,
@@ -1868,16 +1871,52 @@ async fn read_presence_frames(
     inbound: mpsc::Sender<InboundFrame>,
     latest_pose: watch::Sender<Option<voxels_world::protocol::PlayerPoseUpdate>>,
     max_frame_bytes: usize,
+    outbound: mpsc::Sender<PresenceOutboundFrame>,
+    traffic: Arc<ClientTrafficShaper>,
+    presence: Arc<PresenceHub>,
 ) {
     while let Some(message) = stream.next().await {
         let frame = match message {
             Ok(Message::Binary(bytes)) if bytes.len() <= max_frame_bytes => {
                 let bytes = bytes.to_vec();
-                if message_kind(&bytes).ok() == Some(player_pose_kind())
-                    && let Ok(pose) = decode_player_pose(&bytes)
-                {
-                    latest_pose.send_replace(Some(pose));
-                    continue;
+                match message_kind(&bytes).ok() {
+                    Some(kind) if kind == player_pose_kind() => {
+                        if let Ok(pose) = decode_player_pose(&bytes) {
+                            latest_pose.send_replace(Some(pose));
+                            continue;
+                        }
+                    }
+                    Some(kind) if kind == presence_ping_kind() => {
+                        if let Ok(ping) = decode_presence_ping(&bytes) {
+                            if ping.observed_round_trip_ms > 0 {
+                                traffic.observe_round_trip(Duration::from_millis(u64::from(
+                                    ping.observed_round_trip_ms,
+                                )));
+                            }
+                            let receive_time = presence.now_ms();
+                            let pong = PresencePong {
+                                sequence: ping.sequence,
+                                outbound_rate_bytes_per_second: u32::try_from(
+                                    traffic.current_rate_bytes_per_second(),
+                                )
+                                .unwrap_or(u32::MAX),
+                                client_send_time_ms: ping.client_send_time_ms,
+                                server_receive_time_ms: receive_time,
+                                server_send_time_ms: presence.now_ms().max(receive_time),
+                            };
+                            let Ok(pong) = encode_presence_pong(pong) else {
+                                break;
+                            };
+                            if queue_presence_frame(&outbound, TrafficPriority::Critical, pong)
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+                    _ => {}
                 }
                 InboundFrame::Binary(bytes)
             }
