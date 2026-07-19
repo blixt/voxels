@@ -3,8 +3,8 @@ use std::hint::black_box;
 use voxels_world::codec::{decode_chunk, encode_chunk};
 use voxels_world::protocol::{
     ChunkBatchItem, ChunkBatchResult, SurfaceTileBatchItem, SurfaceTileBatchResult,
-    decode_chunk_batch_result, decode_surface_tile_batch_result, encode_chunk_batch_result,
-    encode_surface_tile_batch_result,
+    clone_message_with_request_id, decode_chunk_batch_result, decode_surface_tile_batch_result,
+    encode_chunk_batch_result, encode_surface_tile_batch_result,
 };
 use voxels_world::{
     CHUNK_EDGE, CINDER_VAULT, CINDER_VAULT_MOUTH_ANCHOR_XZ, ChunkCoord, EditMap, Generator,
@@ -244,47 +244,53 @@ fn streaming_codec(criterion: &mut Criterion) {
             })
         })
         .collect::<Vec<_>>();
-    let chunk_products = source
-        .generate_batch(WorldProductBatch {
-            priority: WorldProductPriority::VisibleChunk,
-            requests: chunk_coords
-                .iter()
-                .copied()
-                .map(WorldProductRequest::ChunkWithHalo)
-                .collect(),
-        })
-        .expect("generate representative surface chunks");
+    let Ok(chunk_products) = source.generate_batch(WorldProductBatch {
+        priority: WorldProductPriority::VisibleChunk,
+        requests: chunk_coords
+            .iter()
+            .copied()
+            .map(WorldProductRequest::ChunkWithHalo)
+            .collect(),
+    }) else {
+        return;
+    };
     let chunk_response = ChunkBatchResult {
         request_id: 2,
         source_identity_hash: identity,
         items: chunk_products
             .items
             .into_iter()
-            .map(|item| match (item.request, item.result) {
+            .filter_map(|item| match (item.request, item.result) {
                 (WorldProductRequest::ChunkWithHalo(coord), Ok(WorldProduct::Chunk(snapshot))) => {
-                    ChunkBatchItem {
+                    Some(ChunkBatchItem {
                         coord,
                         edit_revision: 1,
                         result: Ok(snapshot),
-                    }
+                    })
                 }
-                _ => panic!("chunk benchmark source returned an unexpected product"),
+                _ => None,
             })
             .collect(),
     };
-    let chunk_wire = encode_chunk_batch_result(&chunk_response).expect("encode chunk corpus");
-    eprintln!(
-        "stream codec corpus: chunks={} wire_bytes={}",
-        chunk_response.items.len(),
+    if chunk_response.items.len() != chunk_coords.len() {
+        return;
+    }
+    let Ok(chunk_wire) = encode_chunk_batch_result(&chunk_response) else {
+        return;
+    };
+    let mut group = criterion.benchmark_group(format!(
+        "VXWP 3x3 chunk stream ({} wire bytes)",
         chunk_wire.len()
-    );
-    let mut group = criterion.benchmark_group("VXWP 3x3 chunk stream");
+    ));
     group.throughput(criterion::Throughput::Bytes(chunk_wire.len() as u64));
     group.bench_function("encode", |bencher| {
         bencher.iter(|| encode_chunk_batch_result(&chunk_response));
     });
     group.bench_function("decode", |bencher| {
         bencher.iter(|| decode_chunk_batch_result(&chunk_wire));
+    });
+    group.bench_function("cached frame clone", |bencher| {
+        bencher.iter(|| clone_message_with_request_id(&chunk_wire, 4));
     });
     group.finish();
 
@@ -297,49 +303,54 @@ fn streaming_codec(criterion: &mut Criterion) {
             ]
         })
         .collect::<Vec<_>>();
-    let surface_products = source
-        .generate_batch(WorldProductBatch {
-            priority: WorldProductPriority::VisibleSurface,
-            requests: surface_coords
-                .iter()
-                .copied()
-                .map(WorldProductRequest::SurfaceTile)
-                .collect(),
-        })
-        .expect("generate representative horizon tiles");
+    let Ok(surface_products) = source.generate_batch(WorldProductBatch {
+        priority: WorldProductPriority::VisibleSurface,
+        requests: surface_coords
+            .iter()
+            .copied()
+            .map(WorldProductRequest::SurfaceTile)
+            .collect(),
+    }) else {
+        return;
+    };
     let surface_response = SurfaceTileBatchResult {
         request_id: 3,
         source_identity_hash: identity,
         items: surface_products
             .items
             .into_iter()
-            .map(|item| match (item.request, item.result) {
+            .filter_map(|item| match (item.request, item.result) {
                 (
                     WorldProductRequest::SurfaceTile(coord),
                     Ok(WorldProduct::SurfaceTile(snapshot)),
-                ) => SurfaceTileBatchItem {
+                ) => Some(SurfaceTileBatchItem {
                     coord,
                     edit_revision: 1,
                     result: Ok(snapshot),
-                },
-                _ => panic!("surface benchmark source returned an unexpected product"),
+                }),
+                _ => None,
             })
             .collect(),
     };
-    let surface_wire =
-        encode_surface_tile_batch_result(&surface_response).expect("encode surface corpus");
-    eprintln!(
-        "stream codec corpus: surface_tiles={} wire_bytes={}",
-        surface_response.items.len(),
+    if surface_response.items.len() != surface_coords.len() {
+        return;
+    }
+    let Ok(surface_wire) = encode_surface_tile_batch_result(&surface_response) else {
+        return;
+    };
+    let mut group = criterion.benchmark_group(format!(
+        "VXWP 16-tile horizon stream ({} wire bytes)",
         surface_wire.len()
-    );
-    let mut group = criterion.benchmark_group("VXWP 16-tile horizon stream");
+    ));
     group.throughput(criterion::Throughput::Bytes(surface_wire.len() as u64));
     group.bench_function("encode", |bencher| {
         bencher.iter(|| encode_surface_tile_batch_result(&surface_response));
     });
     group.bench_function("decode", |bencher| {
         bencher.iter(|| decode_surface_tile_batch_result(&surface_wire));
+    });
+    group.bench_function("cached frame clone", |bencher| {
+        bencher.iter(|| clone_message_with_request_id(&surface_wire, 5));
     });
     group.finish();
 }

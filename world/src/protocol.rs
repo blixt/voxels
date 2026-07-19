@@ -2067,6 +2067,20 @@ pub fn message_request_id(bytes: &[u8]) -> Result<u64, ProtocolError> {
     Ok(decode_frame(bytes)?.request_id)
 }
 
+/// Clones one validated frame while replacing only its request identifier.
+///
+/// Result batches use this to share an immutable compressed payload across clients without
+/// decompressing or recompressing it. The payload length and every payload byte remain unchanged.
+pub fn clone_message_with_request_id(
+    bytes: &[u8],
+    request_id: u64,
+) -> Result<Vec<u8>, ProtocolError> {
+    decode_frame(bytes)?;
+    let mut cloned = bytes.to_vec();
+    cloned[12..20].copy_from_slice(&request_id.to_le_bytes());
+    Ok(cloned)
+}
+
 pub const fn open_world_kind() -> u16 {
     KIND_OPEN_WORLD
 }
@@ -4029,6 +4043,13 @@ mod tests {
             "compressed result should stay compact"
         );
         assert_eq!(decode_chunk_batch_result(&encoded), Ok(response.clone()));
+        let reassigned =
+            clone_message_with_request_id(&encoded, 99).expect("clone with new request id");
+        let mut expected = response.clone();
+        expected.request_id = 99;
+        assert_eq!(decode_chunk_batch_result(&reassigned), Ok(expected));
+        assert_eq!(&reassigned[..12], &encoded[..12]);
+        assert_eq!(&reassigned[20..], &encoded[20..]);
 
         let mut unknown_codec = encoded.clone();
         unknown_codec[FRAME_HEADER_BYTES] = 0xff;

@@ -22,10 +22,10 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 #[cfg(test)]
 use voxels_world::protocol::DigVolume;
 use voxels_world::protocol::{
@@ -33,14 +33,15 @@ use voxels_world::protocol::{
     EncodedSurfaceTileBatchItem, FRAME_FRAGMENT_OVERHEAD_BYTES, PlayerIdentity, PlayerResume,
     PresenceOpened, PresencePong, ResyncRequired, SpawnPoint, SurfaceTileBatchItem,
     SurfaceTileBatchRequest, VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
-    WorldOpened, cancel_kind, chunk_batch_kind, decode_cancel, decode_chunk_batch,
-    decode_edit_command, decode_open_presence, decode_open_world, decode_player_pose,
-    decode_presence_ping, decode_surface_tile_batch, edit_command_kind, encode_chunk_batch_item,
-    encode_chunk_batch_result_from_items, encode_edit_commit, encode_error, encode_frame_fragment,
-    encode_presence_opened, encode_presence_pong, encode_resync_required,
-    encode_surface_tile_batch_item, encode_surface_tile_batch_result_from_items,
-    encode_world_opened, message_kind, message_request_id, open_presence_kind, open_world_kind,
-    player_pose_kind, presence_ping_kind, surface_tile_batch_kind,
+    WorldOpened, cancel_kind, chunk_batch_kind, clone_message_with_request_id, decode_cancel,
+    decode_chunk_batch, decode_edit_command, decode_open_presence, decode_open_world,
+    decode_player_pose, decode_presence_ping, decode_surface_tile_batch, edit_command_kind,
+    encode_chunk_batch_item, encode_chunk_batch_result_from_items, encode_edit_commit,
+    encode_error, encode_frame_fragment, encode_presence_opened, encode_presence_pong,
+    encode_resync_required, encode_surface_tile_batch_item,
+    encode_surface_tile_batch_result_from_items, encode_world_opened, message_kind,
+    message_request_id, open_presence_kind, open_world_kind, player_pose_kind, presence_ping_kind,
+    surface_tile_batch_kind,
 };
 use voxels_world::{
     CHUNK_EDGE, ChunkCoord, Material, MeshingHalo, SurfaceSampleBlockRequest, WORLD_SCHEMA_VERSION,
@@ -53,6 +54,7 @@ pub const PRESENCE_WEBSOCKET_PATH: &str = "/v23/presence";
 pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v23";
 const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 const PREFETCH_WORKER_DIVISOR: usize = 4;
+const RESPONSE_CACHE_BUDGET_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 
 /// Prepared server state. Source construction and spawn coverage validation happen before bind.
@@ -1087,6 +1089,138 @@ impl ProductCache {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct BatchResponseKey(Box<[ProductKey]>);
+
+impl BatchResponseKey {
+    fn from_products(products: &[Arc<EncodedProduct>]) -> Self {
+        Self(
+            products
+                .iter()
+                .map(|product| product.key())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )
+    }
+}
+
+struct CachedBatchResponse {
+    bytes: Arc<[u8]>,
+    last_access: u64,
+}
+
+/// Byte-bounded compressed-response cache with per-key assembly serialization.
+///
+/// A response key retains product ordering and edit revisions but excludes the connection-scoped
+/// request id. Cache hits therefore clone the already-compressed frame and rewrite only its header.
+struct BatchResponseCache {
+    max_bytes: usize,
+    retained_bytes: usize,
+    entries: HashMap<BatchResponseKey, CachedBatchResponse>,
+    lru: BTreeSet<(u64, BatchResponseKey)>,
+    flights: HashMap<BatchResponseKey, Weak<AsyncMutex<()>>>,
+    next_access: u64,
+}
+
+impl BatchResponseCache {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            max_bytes,
+            retained_bytes: 0,
+            entries: HashMap::new(),
+            lru: BTreeSet::new(),
+            flights: HashMap::new(),
+            next_access: 1,
+        }
+    }
+
+    fn get(&mut self, key: &BatchResponseKey) -> Option<Arc<[u8]>> {
+        let access = self.record_access();
+        let entry = self.entries.get_mut(key)?;
+        self.lru.remove(&(entry.last_access, key.clone()));
+        entry.last_access = access;
+        let bytes = Arc::clone(&entry.bytes);
+        self.lru.insert((access, key.clone()));
+        Some(bytes)
+    }
+
+    fn insert(&mut self, key: BatchResponseKey, bytes: Arc<[u8]>) {
+        let encoded_len = bytes.len();
+        if self.max_bytes == 0 || encoded_len > self.max_bytes {
+            return;
+        }
+        if let Some(replaced) = self.entries.remove(&key) {
+            self.retained_bytes = self.retained_bytes.saturating_sub(replaced.bytes.len());
+            self.lru.remove(&(replaced.last_access, key.clone()));
+        }
+        while self.retained_bytes.saturating_add(encoded_len) > self.max_bytes {
+            let Some((_, oldest)) = self.lru.pop_first() else {
+                break;
+            };
+            if let Some(evicted) = self.entries.remove(&oldest) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(evicted.bytes.len());
+            }
+        }
+        let access = self.record_access();
+        self.retained_bytes = self.retained_bytes.saturating_add(encoded_len);
+        self.lru.insert((access, key.clone()));
+        self.entries.insert(
+            key,
+            CachedBatchResponse {
+                bytes,
+                last_access: access,
+            },
+        );
+    }
+
+    fn flight_lock(&mut self, key: &BatchResponseKey) -> Arc<AsyncMutex<()>> {
+        if let Some(lock) = self.flights.get(key).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(AsyncMutex::new(()));
+        self.flights.insert(key.clone(), Arc::downgrade(&lock));
+        lock
+    }
+
+    fn finish_flight(&mut self, key: &BatchResponseKey, lock: &Arc<AsyncMutex<()>>) {
+        let matches = self
+            .flights
+            .get(key)
+            .and_then(Weak::upgrade)
+            .is_some_and(|current| Arc::ptr_eq(&current, lock));
+        if matches {
+            self.flights.remove(key);
+        }
+    }
+
+    fn record_access(&mut self) -> u64 {
+        let access = self.next_access;
+        self.next_access = self.next_access.saturating_add(1);
+        access
+    }
+}
+
+fn lock_batch_response_cache(
+    cache: &Mutex<BatchResponseCache>,
+) -> MutexGuard<'_, BatchResponseCache> {
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn get_cached_batch_response(
+    cache: &Mutex<BatchResponseCache>,
+    key: &BatchResponseKey,
+    request_id: u64,
+) -> Result<Option<Vec<u8>>, String> {
+    let bytes = { lock_batch_response_cache(cache).get(key) };
+    bytes
+        .map(|bytes| {
+            clone_message_with_request_id(&bytes, request_id).map_err(|error| error.to_string())
+        })
+        .transpose()
+}
+
 #[derive(Clone, Copy)]
 struct ProductWaiter {
     batch_id: u64,
@@ -2110,9 +2244,12 @@ async fn run_generation_dispatcher(
 ) {
     let (completion_tx, mut completions) = mpsc::unbounded_channel();
     let source_identity_hash = source.identity().identity_hash();
+    let response_cache_bytes = product_cache_bytes / RESPONSE_CACHE_BUDGET_DIVISOR;
+    let encoded_product_cache_bytes = product_cache_bytes.saturating_sub(response_cache_bytes);
     let mut in_flight = HashMap::<ProductFlightKey, Vec<ProductWaiter>>::new();
     let mut pending = HashMap::<u64, PendingGenerationBatch>::new();
-    let mut cache = ProductCache::new(product_cache_bytes);
+    let mut cache = ProductCache::new(encoded_product_cache_bytes);
+    let response_cache = Arc::new(Mutex::new(BatchResponseCache::new(response_cache_bytes)));
     let mut next_batch_id = 1_u64;
     let mut jobs_open = true;
     loop {
@@ -2153,6 +2290,7 @@ async fn run_generation_dispatcher(
                         batch,
                         source_identity_hash,
                         Arc::clone(&generation_limiter),
+                        Arc::clone(&response_cache),
                         max_frame_bytes,
                     );
                     continue;
@@ -2228,6 +2366,7 @@ async fn run_generation_dispatcher(
                         batch,
                         source_identity_hash,
                         Arc::clone(&generation_limiter),
+                        Arc::clone(&response_cache),
                         max_frame_bytes,
                     );
                 }
@@ -2275,6 +2414,7 @@ fn spawn_generation_assembly(
     batch: PendingGenerationBatch,
     source_identity_hash: voxels_world::WorldSourceIdentityHash,
     generation_limiter: Arc<PriorityGenerationLimiter>,
+    response_cache: Arc<Mutex<BatchResponseCache>>,
     max_frame_bytes: usize,
 ) {
     tokio::spawn(async move {
@@ -2282,6 +2422,7 @@ fn spawn_generation_assembly(
             batch,
             source_identity_hash,
             generation_limiter,
+            response_cache,
             max_frame_bytes,
         )
         .await;
@@ -2292,11 +2433,41 @@ async fn assemble_and_deliver_generation_batch(
     batch: PendingGenerationBatch,
     source_identity_hash: voxels_world::WorldSourceIdentityHash,
     generation_limiter: Arc<PriorityGenerationLimiter>,
+    response_cache: Arc<Mutex<BatchResponseCache>>,
     max_frame_bytes: usize,
 ) {
     if batch.job.tracked.is_cancelled() {
         batch.job.tracked.finish();
         return;
+    }
+    let request_id = batch.job.request.request_id();
+    let Some(items) = batch.items.into_iter().collect::<Option<Vec<_>>>() else {
+        deliver_generation_job(
+            batch.job,
+            Err("completed generation batch is missing a product".to_owned()),
+            max_frame_bytes,
+        )
+        .await;
+        return;
+    };
+    let products = match items.into_iter().collect::<Result<Vec<_>, _>>() {
+        Ok(products) => products,
+        Err(message) => {
+            deliver_generation_job(batch.job, Err(message), max_frame_bytes).await;
+            return;
+        }
+    };
+    let response_key = BatchResponseKey::from_products(&products);
+    match get_cached_batch_response(&response_cache, &response_key, request_id) {
+        Ok(Some(response)) => {
+            deliver_generation_job(batch.job, Ok(response), max_frame_bytes).await;
+            return;
+        }
+        Ok(None) => {}
+        Err(message) => {
+            deliver_generation_job(batch.job, Err(message), max_frame_bytes).await;
+            return;
+        }
     }
     let priority = batch.job.request.priority();
     let session = Arc::clone(&batch.job.tracked.session);
@@ -2312,27 +2483,66 @@ async fn assemble_and_deliver_generation_batch(
         batch.job.tracked.finish();
         return;
     }
-    let request = batch.job.request.clone();
-    let Some(items) = batch.items.into_iter().collect::<Option<Vec<_>>>() else {
-        drop(global_permit);
-        drop(session_permit);
-        deliver_generation_job(
-            batch.job,
-            Err("completed generation batch is missing a product".to_owned()),
-            max_frame_bytes,
-        )
-        .await;
+    match get_cached_batch_response(&response_cache, &response_key, request_id) {
+        Ok(Some(response)) => {
+            drop(global_permit);
+            drop(session_permit);
+            deliver_generation_job(batch.job, Ok(response), max_frame_bytes).await;
+            return;
+        }
+        Ok(None) => {}
+        Err(message) => {
+            drop(global_permit);
+            drop(session_permit);
+            deliver_generation_job(batch.job, Err(message), max_frame_bytes).await;
+            return;
+        }
+    }
+    let response_flight = { lock_batch_response_cache(&response_cache).flight_lock(&response_key) };
+    let response_flight_guard = response_flight.lock().await;
+    if batch.job.tracked.is_cancelled() {
+        lock_batch_response_cache(&response_cache).finish_flight(&response_key, &response_flight);
+        batch.job.tracked.finish();
         return;
-    };
+    }
+    match get_cached_batch_response(&response_cache, &response_key, request_id) {
+        Ok(Some(response)) => {
+            lock_batch_response_cache(&response_cache)
+                .finish_flight(&response_key, &response_flight);
+            drop(response_flight_guard);
+            drop(global_permit);
+            drop(session_permit);
+            deliver_generation_job(batch.job, Ok(response), max_frame_bytes).await;
+            return;
+        }
+        Ok(None) => {}
+        Err(message) => {
+            lock_batch_response_cache(&response_cache)
+                .finish_flight(&response_key, &response_flight);
+            drop(response_flight_guard);
+            drop(global_permit);
+            drop(session_permit);
+            deliver_generation_job(batch.job, Err(message), max_frame_bytes).await;
+            return;
+        }
+    }
+    let request = batch.job.request.clone();
     let response = tokio::task::spawn_blocking(move || {
-        let items = items.into_iter().collect::<Result<Vec<_>, _>>()?;
-        assemble_generation_response(&request, source_identity_hash, &items)
+        assemble_generation_response(&request, source_identity_hash, &products)
     })
     .await
     .map_err(|_| "world response assembly task failed".to_owned())
     .and_then(|result| result);
     drop(global_permit);
     drop(session_permit);
+    if let Ok(bytes) = &response
+        && bytes.len() <= max_frame_bytes
+    {
+        lock_batch_response_cache(&response_cache)
+            .insert(response_key.clone(), Arc::from(bytes.clone()));
+    }
+    lock_batch_response_cache(&response_cache).finish_flight(&response_key, &response_flight);
+    drop(response_flight_guard);
     deliver_generation_job(batch.job, response, max_frame_bytes).await;
 }
 
@@ -2870,6 +3080,77 @@ mod tests {
         assert!(undersized.get(&key4).is_none());
         assert_eq!(undersized.retained_bytes, 0);
         assert!(undersized.lru.is_empty());
+    }
+
+    #[test]
+    fn compressed_batch_cache_is_byte_bounded_lru_and_request_id_agnostic() {
+        fn key(x: i32) -> BatchResponseKey {
+            BatchResponseKey(
+                vec![ProductKey::Chunk {
+                    coord: ChunkCoord::new(x, 0, 0),
+                    edit_revision: 1,
+                }]
+                .into_boxed_slice(),
+            )
+        }
+
+        let bytes1 = Arc::<[u8]>::from(encode_error(1, "one"));
+        let bytes2 = Arc::<[u8]>::from(encode_error(2, "two"));
+        let bytes3 = Arc::<[u8]>::from(encode_error(3, "six"));
+        assert_eq!(bytes1.len(), bytes2.len());
+        assert_eq!(bytes2.len(), bytes3.len());
+        let mut cache = BatchResponseCache::new(bytes1.len() * 2);
+        cache.insert(key(1), Arc::clone(&bytes1));
+        cache.insert(key(2), bytes2);
+        assert!(cache.get(&key(1)).is_some());
+        cache.insert(key(3), bytes3);
+        assert!(cache.get(&key(1)).is_some());
+        assert!(cache.get(&key(2)).is_none());
+        assert!(cache.get(&key(3)).is_some());
+        assert!(cache.retained_bytes <= cache.max_bytes);
+        assert_eq!(cache.lru.len(), cache.entries.len());
+
+        let cache = Mutex::new(cache);
+        let cloned = get_cached_batch_response(&cache, &key(1), 99)
+            .expect("cached frame remains valid")
+            .expect("cached response");
+        assert_eq!(
+            voxels_world::protocol::decode_error(&cloned),
+            Ok((99, "one".to_owned()))
+        );
+
+        let old_revision = key(1);
+        let new_revision = BatchResponseKey(
+            vec![ProductKey::Chunk {
+                coord: ChunkCoord::new(1, 0, 0),
+                edit_revision: 2,
+            }]
+            .into_boxed_slice(),
+        );
+        assert_ne!(old_revision, new_revision);
+        assert!(
+            get_cached_batch_response(&cache, &new_revision, 100)
+                .expect("cache lookup")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn compressed_batch_cache_serializes_assembly_per_product_sequence() {
+        let key = BatchResponseKey(
+            vec![ProductKey::Chunk {
+                coord: ChunkCoord::new(1, 0, 0),
+                edit_revision: 1,
+            }]
+            .into_boxed_slice(),
+        );
+        let mut cache = BatchResponseCache::new(1024);
+        let first = cache.flight_lock(&key);
+        let second = cache.flight_lock(&key);
+        assert!(Arc::ptr_eq(&first, &second));
+        cache.finish_flight(&key, &first);
+        let next = cache.flight_lock(&key);
+        assert!(!Arc::ptr_eq(&first, &next));
     }
 
     #[tokio::test]
