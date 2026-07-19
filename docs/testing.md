@@ -20,6 +20,9 @@ vp run automation -- run bot-load
 
 # Streaming, scheduling, compression, or remote-link change
 vp run automation -- run network-benchmark
+
+# Durable edit layout, write latency, checkpointing, or restart change
+vp run automation -- run storage-benchmark
 ```
 
 `vp run verify` is the complete static and build gate: TypeScript checks, TypeScript tests, host Rust
@@ -38,6 +41,7 @@ behavioral, visual, resource, or transport evidence that the general gate cannot
 | Six browser users   | `vp run automation -- run multiplayer`                                                                  | Isolated identities, shaped WAN links, avatars, collaborative edits, and far-LOD convergence |
 | Remote streaming    | `vp run automation -- run network-benchmark`                                                            | Cold spawn, walk, turn, viewport readiness, full coverage, and exact link bytes              |
 | Network comparison  | `vp run automation -- run network-compare before.json after.json`                                       | Compatible before/after timing and byte deltas                                               |
+| Durable world store | `vp run automation -- run storage-benchmark`                                                            | Edit latency, logical/physical SQLite growth, checkpoint, exact retry, and cold restart      |
 | LOD transition      | `vp run automation -- run lod-transition`                                                               | Same-pose real-browser handoff and image evidence                                            |
 | Watertight LOD      | `vp run automation -- run lod-transition --mode=watertight`                                             | Strict seam/coverage regression path                                                         |
 | Terrain boundary    | `vp run automation -- run lod-transition --mode=boundary-coverage`                                      | Reported vertical boundary pose, sky exposure, and exact browser scale                       |
@@ -142,6 +146,22 @@ Compare both total bytes and logical row counts. For a long-duration result, the
 are bytes per live edited voxel, operation-history rows per accepted action, and bandwidth per
 connected player-second. Run growth mode without a browser when the database trend itself is the
 experiment.
+
+Use the dedicated native storage scenario when the edit database itself is the subject:
+
+```sh
+# Repeatable clustered and expanding-frontier profiles
+vp run automation -- run storage-benchmark --operations=2000 --players=100
+
+# Long-horizon frontier expansion from 1,000 independent player identities
+vp run automation -- run storage-benchmark --operations=20000 --players=1000 --profile=frontier
+```
+
+It drives the production edit planner and SQLite transaction path, forces a WAL checkpoint, inspects
+per-table page and payload sizes through SQLite `dbstat`, reopens the database cold, and verifies an
+old operation retries to the exact original outcome. The harness creates its own temporary database.
+The native runner fails closed if a requested main, WAL, or SHM path already exists; it never deletes
+or reuses a developer world.
 
 ## Reproducibility rules
 
