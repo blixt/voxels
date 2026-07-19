@@ -186,7 +186,7 @@ Ensure the Vite origin is in the server's `allowed_origins`. Terrain Diffusion i
 default. Fetch the pinned model once, then start the Metal-capable daemon:
 
 ```sh
-vp run terrain:fetch
+vp run automation -- run terrain-fetch
 ```
 
 ```toml
@@ -210,8 +210,8 @@ vp dev
 Open `http://127.0.0.1:5173`, grant Chrome's local/loopback network permission when prompted, and
 play normally. To compare generators, change only `source` in `config/world-service.toml`, restart
 `vp dev`, and reload. Vite owns the native daemon lifecycle, so Ctrl-C stops both processes. The
-client configuration does not change. Use `vp run world:serve` only when testing the daemon without
-the browser development server.
+client configuration does not change. Native provider-only checks use the `world-source` and
+`terrain-diffusion` automation scenarios instead of managing a persistent diagnostic daemon.
 
 ## Local players and two-browser testing
 
@@ -247,7 +247,7 @@ move fully server-side before Internet multiplayer.
 To run the automated six-client release smoke test, run:
 
 ```sh
-vp run test:multiplayer-browser
+vp run automation -- run multiplayer
 ```
 
 It launches six independent browser contexts with shaped links and fresh identities, keeps five

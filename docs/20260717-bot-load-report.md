@@ -8,7 +8,7 @@ MacBook Pro (Mac15,9), Apple M3 Max with 16 CPU cores and 128 GB RAM. The daemon
 The command was:
 
 ```sh
-vp run bench:bots -- --duration=5
+vp run automation -- run bot-load --duration=5
 ```
 
 Each population used a fresh temporary database, so rows compare isolated load rather than cumulative
@@ -72,7 +72,7 @@ WAL checkpoints, so it plateaus between some population rows even as logical his
 A separate persistent native-only growth probe used:
 
 ```sh
-vp run bench:bots -- --counts=4,8,16 --duration=3 --growth --no-browser
+vp run automation -- run bot-load --counts=4,8,16 --duration=3 --growth --no-browser
 ```
 
 It passed with zero rejections. The same stable players resumed between waves; cumulative live voxel

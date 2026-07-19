@@ -4,10 +4,10 @@ This is the shaped-link streaming suite. See the canonical
 [testing and performance map](testing.md) to choose between it, native bot capacity, the six-browser
 collaboration gate, renderer profiles, and portable microbenchmarks.
 
-`vp run bench:network` is the repeatable end-to-end regression suite for native-server world
-streaming. It builds release WASM, writes temporary client/server configs, starts its own
-`voxels-worldd`, inserts a deterministic full-duplex TCP shaper, runs isolated real-Chrome contexts,
-and tears everything down. It does not reuse or reset a developer's OPFS data.
+`vp run automation -- run network-benchmark` is the repeatable end-to-end regression suite for
+native-server world streaming. It builds release WASM, writes temporary client/server configs, starts
+its own `voxels-worldd`, inserts a deterministic full-duplex TCP shaper, runs isolated real-Chrome
+contexts, and tears everything down. It does not reuse or reset a developer's OPFS data.
 
 The checked-in `good_remote` profile is deliberately explicit:
 
@@ -56,16 +56,18 @@ Scenarios are:
 - `turn_during_spawn`: exact 180° pivot as soon as first geometry appears, exposing view-priority and
   obsolete-work behavior during a cold load.
 
-The generated versioned JSON and Markdown live under ignored `target/network-benchmark/`, including
-`latest.json` and `latest.md`. Five repetitions are the default:
+The generated versioned JSON and Markdown live under
+`target/automation/network-benchmark/<run-id>/`. The stable
+`target/automation/network-benchmark/latest.json` pointer identifies the last completed run. Five
+repetitions are the default:
 
 ```sh
-vp run bench:network
-vp run bench:network -- --runs=1
-vp run bench:network -- --runs=1 --profile=constrained --rtt-ms=80 \
+vp run automation -- run network-benchmark
+vp run automation -- run network-benchmark --runs=1
+vp run automation -- run network-benchmark --runs=1 --profile=constrained --rtt-ms=80 \
   --downstream-mbps=2 --upstream-mbps=1
-vp run bench:network:compare -- target/network-benchmark/before.json \
-  target/network-benchmark/after.json
+vp run automation -- run network-compare target/automation/before/report.json \
+  target/automation/after/report.json
 ```
 
 The runner also records peak user-space queue delay after removing propagation and one pacing

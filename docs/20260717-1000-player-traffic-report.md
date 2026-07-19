@@ -25,7 +25,7 @@ normally spaced movement updates into an authority-breaking burst.
 Both rows used:
 
 ```sh
-vp run bench:bots -- --counts=1000 --duration=3 --no-browser \
+vp run automation -- run bot-load --counts=1000 --duration=3 --no-browser \
   --service-profile=worldgen --bot-profile=worldgen
 ```
 
@@ -53,7 +53,7 @@ during this short all-dense burst.
 The final sustained command was:
 
 ```sh
-vp run bench:bots -- --counts=1000 --duration=10 --no-browser \
+vp run automation -- run bot-load --counts=1000 --duration=10 --no-browser \
   --service-profile=worldgen --bot-profile=worldgen
 ```
 

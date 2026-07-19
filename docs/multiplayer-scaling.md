@@ -58,7 +58,7 @@ Valve likewise documents snapshot rate limits, interpolation, and bounded extrap
 ## Deterministic scale checks
 
 The canonical command map, including native bot populations and browser gates, is
-[Testing and performance](testing.md). `vp run bench:bots` adds real VXWP movement, terrain
+[Testing and performance](testing.md). `vp run automation -- run bot-load` adds real VXWP movement, terrain
 streaming, digging, building, following, process sampling, exact per-client wire budgets, SQLite
 growth, and an optional Chromium observer at up to 1,000 clients. See the
 [2026-07-17 bot load baseline](20260717-bot-load-report.md) and the
@@ -89,7 +89,7 @@ mid, and far cadence plus prediction suppresses unchanged or predictable records
 
 ### Six independent browser users
 
-`vp run test:multiplayer-browser` owns its native service, preview server, temporary configuration,
+`vp run automation -- run multiplayer` owns its native service, preview server, temporary configuration,
 and six independent ephemeral BrowserContexts. Each context has separate local storage and OPFS data,
 receives an independently shaped 40 ms RTT, 50/10 Mbit/s link, and must negotiate a distinct browser
 user and player identity. Five builders and one observer start together. The observer then travels at
@@ -113,7 +113,7 @@ around the aimed tower; revision bookkeeping alone cannot pass. Use the explicit
 release checks:
 
 ```sh
-vp run test:multiplayer-browser -- --require-tower
+vp run automation -- run multiplayer
 ```
 
 The run records convergence time, edit-only world traffic, the observer's required/accepted surface

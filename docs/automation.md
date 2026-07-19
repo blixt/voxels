@@ -34,50 +34,63 @@ automation/
   cli.ts                  one command-line entry point
   scenarios/              readable intent and scenario-specific assertions
   lib/
+    arguments.ts          strict reusable scenario option parsing
     scenario.ts           definition, registry contract, runner, cleanup
     artifacts.ts          run directories, JSON, screenshots, video, manifests
-    browser.ts            Chromium lifecycle, pages, errors, screenshots, traces
+    browser.ts            Chromium lifecycle, pages, errors, screenshots, video
     engine.ts             typed Rust automation API and snapshot decoding
     world.ts              isolated service/client configs and daemon lifecycle
-    bots.ts               native bot-army process capability
     metrics.ts            summaries and process sampling
+    render-metrics.ts     frame, CPU, and GPU snapshot collection
     network.ts            deterministic shaped loopback links and accounting
     protocol.ts           versioned VXWP constants used by automation
 ```
 
-Build, Rust-check, Terrain Diffusion model-management, and daemon convenience scripts are repository
-tooling rather than scenarios and remain under `scripts/`. There are no `.mjs` files.
+Only build integration and the Rust static gate remain under `scripts/`. Model setup, native
+benchmarks, provider validation, browser captures, network experiments, multiplayer checks, and bot
+loads are scenarios. There are no `.mjs` files.
 
 ## Scenario contract
 
 Every scenario declares what it is and which mechanisms it uses:
 
 ```ts
+import { ScenarioArguments } from "../lib/arguments.ts";
+import { BrowserCapability } from "../lib/browser.ts";
+import { defineScenario } from "../lib/scenario.ts";
+import { startWorldPreview } from "../lib/world.ts";
+
 export default defineScenario({
   id: "weather-motion",
   kind: "validation",
   summary: "Clouds remain world-anchored and precipitation falls.",
   uses: {
     world: true,
+    browser: true,
     viewport: "browser",
     screenshots: true,
     metrics: true,
   },
   async run(context, arguments_) {
-    const world = await context.world.start({ weather: "accelerated" });
-    const page = await context.browser.open({ world });
-    const before = await page.screenshot("before");
+    new ScenarioArguments(arguments_).assertEmpty();
+    const world = await startWorldPreview(context, {
+      fixture: { weatherCycleSeconds: 120 },
+    });
+    const browser = await BrowserCapability.start(context);
+    const viewport = await browser.open({ url: world.url, label: "weather" });
+    await viewport.screenshot("before");
     // Scenario-specific movement and assertions stay here.
-    await page.screenshot("after");
-    return context.pass({ before });
+    await viewport.screenshot("after");
+    browser.assertHealthy();
+    return { summary: "Weather motion passed." };
   },
 });
 ```
 
-`kind` is one of `validation`, `benchmark`, `capture`, `bot-load`, or `analysis`. `uses` is data, not
-documentation: the runner validates unavailable combinations and records the exact mechanisms in the
-artifact manifest. Mechanisms are lazy, so a native bot or Criterion scenario does not build WASM,
-launch Chrome, or allocate a viewport.
+`kind` is one of `validation`, `benchmark`, `capture`, `bot-load`, `analysis`, or `setup`. `uses` is
+data, not documentation: the runner validates unavailable combinations and records the exact
+mechanisms in the artifact manifest. Mechanisms are lazy, so a native bot or Criterion scenario does
+not build WASM, launch Chrome, or allocate a viewport.
 
 Scenario code receives a `ScenarioContext` with owned capabilities. Each capability registers cleanup
 when it acquires a resource. Cleanup runs in reverse order on success, assertion failure, signal, or
@@ -86,11 +99,11 @@ child-process failure. Scenario files must not install their own process signal 
 ## Artifacts and composition
 
 Every run has one `target/automation/<scenario>/<run-id>/` directory containing `manifest.json` and
-scenario outputs. Stable `latest.json` pointers are allowed for local iteration, while timestamped
-results remain comparison-safe. Screenshots, raw video, annotated video, browser traces, logs, and
-metric reports all use the same artifact API.
+scenario outputs. `target/automation/<scenario>/latest.json` points to the last completed run while
+timestamped results remain comparison-safe. Screenshots, raw video, browser traces, logs, and metric
+reports all use the same artifact API.
 
-A browser viewport, recorder, shaped link, service, and bot army are independent capabilities. A
+A browser viewport, recorder, shaped link, service, and bot army are independent mechanisms. A
 scenario may therefore launch bots behind a shaped link while a browser observes and records the
 same world. Video and screenshots capture a viewport; they do not own one.
 
@@ -141,5 +154,5 @@ viewport as unavailable instead of maintaining a cheaper renderer clone whose be
 2. Declare `id`, `kind`, `summary`, and `uses`.
 3. Use context capabilities instead of spawning shared infrastructure directly.
 4. Keep only scenario-specific actions, metrics, and assertions in the file.
-5. Register it in the typed scenario registry.
-6. Run `vp run automation -- describe <id>`, then the scenario and `vp check`.
+5. Run `vp run automation -- describe <id>`, then the scenario and `vp check`. Discovery is
+   automatic; adding a second registry entry is intentionally unnecessary.

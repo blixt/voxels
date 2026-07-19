@@ -16,35 +16,45 @@ and streaming while the native Rust world service owns generation and durable wo
 6. Run host Rust tests and host/WASM Clippy with `vp run check:rust`.
 7. Build production WASM and assets with `vp build`; inspect them with `vp preview`.
 8. Launch six isolated release clients with shaped links and verify avatars plus a five-builder
-   far-LOD tower in real Chrome with `vp run test:multiplayer-browser -- --require-tower`.
+   far-LOD tower in real Chrome with `vp run automation -- run multiplayer`.
 
 `vp run verify` runs the complete TypeScript, Rust, test, lint, and production-build gate.
-`vp run bench:world` runs native Criterion baselines for chunk generation, VXCH encode/decode, and
-greedy meshing. Reports are written under the ignored `target/criterion/` directory.
-`vp run bench:core` compares 120 dry and submerged fixed simulation steps.
-`vp run bench:network` owns a temporary native world service, deterministic bidirectional WAN
-shaper, release preview, and isolated Chrome contexts; it reports viewport/full-coverage settling,
-stream bytes, message attribution, and offline compression headroom. Compare two JSON artifacts with
-`vp run bench:network:compare -- <baseline.json> <candidate.json>`; see
+`vp run automation -- list` is the single index for behavioral tests, benchmarks, bot loads,
+screenshots, traces, video, and provider setup. Every run is isolated under `target/automation/`;
+see [Automation scenarios](docs/automation.md) for the authoring API and composition model.
+`vp run automation -- run bench-world` runs native Criterion baselines for chunk generation, VXCH
+encode/decode, and greedy meshing. Reports are written under the ignored `target/criterion/`
+directory.
+`vp run automation -- run bench-core` compares 120 dry and submerged fixed simulation steps.
+`vp run automation -- run network-benchmark` owns a temporary native world service, deterministic
+bidirectional WAN shaper, release preview, and isolated Chrome contexts; it reports
+viewport/full-coverage settling, stream bytes, message attribution, and offline compression
+headroom. Compare two JSON artifacts with
+`vp run automation -- run network-compare <baseline.json> <candidate.json>`; see
 [Remote world streaming benchmarks](docs/network-benchmark.md).
-`vp run test:bots` is a fast four-client native multiplayer smoke. `vp run bench:bots` drives
-4/8/16/32/64 protocol-faithful explorers, diggers, builders, and followers while measuring server and
-driver CPU/RAM, exact wire traffic, SQLite growth, edit latency, and one real Chromium observer.
+The following is a fast four-client native multiplayer smoke:
+
+```sh
+vp run automation -- run bot-load --counts=4 --duration=3 \
+  --service-profile=worldgen-dev --no-browser
+```
+
+`vp run automation -- run bot-load` drives 4/8/16/32/64 protocol-faithful explorers, diggers,
+builders, and followers while measuring server and driver CPU/RAM, exact wire traffic, SQLite
+growth, edit latency, and one real Chromium observer.
 All verification and profiling entry points are indexed in the canonical
 [testing and performance map](docs/testing.md); the initial bot capacity results are in the
 [2026-07-17 load report](docs/20260717-bot-load-report.md).
-`vp run terrain:fetch`, `vp run terrain:counterproof`, `vp run terrain:smoke`,
-`vp run terrain:base`, `vp run terrain:detail`, and `vp run terrain:survey` exercise the optional
-native Rust/Metal Terrain Diffusion provider on Apple silicon; see
-[the provider notes](docs/terrain-diffusion-metal.md).
+`vp run automation -- run terrain-fetch` and the `terrain-diffusion` scenario's `full`,
+`counterproof`, `base`, `detail`, and `survey` modes exercise the optional native Rust/Metal Terrain
+Diffusion provider on Apple silicon; see [the provider notes](docs/terrain-diffusion-metal.md).
 The server-owned [world source configuration](docs/world-service-config.md) defaults to native
 Terrain Diffusion/Metal generation and can select the procedural source without exposing that choice
-to clients. `vp run world:source-smoke` loads the TOML and verifies the selected source with one
-macro-field request. `vp run world:ecology-survey` prints a 3.2 km deterministic forest-density map,
-tree-count percentiles, and the densest spawn coordinates. `vp dev` starts and stops the
-Metal-capable daemon with Vite; `vp run world:serve` remains available for daemon-only diagnostics.
-Either source can be selected by changing only the server's `source` value and restarting
-development. The browser always consumes the same canonical protocol. See
+to clients. `vp run automation -- run world-source` loads the TOML and verifies the selected source
+with one macro-field request. Its `ecology-survey` mode prints a 3.2 km deterministic forest-density
+map, tree-count percentiles, and the densest spawn coordinates. `vp dev` starts and stops the
+Metal-capable daemon with Vite. Either source can be selected by changing only the server's `source`
+value and restarting development. The browser always consumes the same canonical protocol. See
 [Native world streaming](docs/native-world-streaming.md) for the matching endpoint/token settings,
 Chrome local-network permission, binary VXWP protocol, transport rationale, and exact run steps.
 Client runtime, streaming, rendering/World Lab, diagnostics, and profiling
@@ -55,36 +65,30 @@ Opening the bare development URL reuses the browser's default local player and l
 same daemon; see [Local players](docs/native-world-streaming.md#local-players-and-two-browser-testing).
 Each client renders the others as unique saturated-color articulated voxel figures with distance-
 driven gait, independent head look, body-follow hysteresis, shadows, depth, and contact AO.
-`vp run profile:browser` builds release WASM, serves it from an isolated origin, and records raw
-frame/CPU phase distributions for steady and traversal scenarios in system Chrome. Provider-specific
-coast, route, landmark, and cave tours remain unavailable until the world protocol advertises those
-queries and authored locations.
-`vp run profile:chromium` runs the same isolated headless Chromium workload and also writes a CDP
-performance trace under `target/`. Set `VOXELS_PROFILE_BUILD=wasm-dev`,
-`VOXELS_PROFILE_SOURCE=terrain-diffusion-30m`, `VOXELS_PROFILE_DPR=2`,
-`VOXELS_PROFILE_SPAWN=-12800,25600`,
-`VOXELS_PROFILE_LOOK=2.07,-0.37`, `VOXELS_PROFILE_SHADOWS=off`, `VOXELS_PROFILE_SSAO=off`,
-`VOXELS_PROFILE_OUTPUT=target/render-profile/result.json`, or `VOXELS_PROFILE_TRACE_PATH=...` to
-reproduce a particular local configuration without touching an existing browser profile or world.
-Pass `--stationary` to capture and measure that exact spawn/look pose without traversal.
-`vp run profile:sustained` drives a Rust-owned 1.08 km fixed-step closed rail. One lap warms the exact
-terrain used by two measured laps, making its arena-plateau gate prove allocation reuse before every
-canonical and LOD queue must drain.
-`vp run profile:materials` toggles Rust-generated material detail through canvas hit-testing and gates
-identical geometry/residency plus the incremental frame and GPU cost.
-`vp run profile:atmosphere` accelerates the server-owned clock through midnight, dawn, noon,
-golden hour, and blue hour, captures each anchor, and gates shadow behavior, identical geometry,
-and frame/GPU budgets.
-`vp run profile:weather` freezes the sun at noon, advances the synchronized weather timeline through
-clear, cloudy, overcast, rain, storm, and clearing anchors, captures each state, and separately gates
-volumetric-cloud GPU cost, precipitation, lighting/fog response, geometry invariants, and 120 Hz
-frame pacing.
-`vp run test:weather-motion-browser` verifies that projected rain moves downward and that cloud
+`vp run automation -- run render-profile` builds release WASM, serves it from an isolated origin,
+and records raw frame/CPU phase distributions for steady and traversal scenarios in system Chrome.
+Provider-specific coast, route, landmark, and cave tours remain unavailable until the world protocol
+advertises those queries and authored locations.
+`vp run automation -- run render-profile --trace` runs the same isolated headless Chromium workload
+and also writes a CDP performance trace into its artifact directory. A reproducible fixed pose can be
+expressed entirely in the scenario file or CLI:
+
+```sh
+vp run automation -- run render-profile --mode=stationary --build=wasm-dev \
+  --source=terrain-diffusion-30m --dpr=2 --spawn=-12800,25600 --look=2.07,-0.37 \
+  --shadows=off --ssao=off --screenshot
+```
+
+`render-profile` also has `sustained`, `materials`, `atmosphere`, and `weather` modes for the warmed
+1.08 km traversal, material A/B, celestial anchors, and synchronized weather budgets respectively.
+`vp run automation -- run weather-motion` verifies that projected rain moves downward and that cloud
 lighting/density remain stable when the camera rotates away and returns.
 Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture
 
+- `automation/`: typed TypeScript scenario API, reusable capabilities, and all capture, benchmark,
+  bot, browser-validation, video, screenshot, trace, and analysis scenarios.
 - `client-config/`: strict, versioned, host-testable client TOML schema and validation.
 - `core/`: portable player, input, physics, and game simulation.
 - `world/`: deterministic chunks, generation, versioned transport codecs, surface LODs, and meshing.

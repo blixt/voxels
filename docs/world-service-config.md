@@ -204,14 +204,14 @@ than deployment settings.
 Fetch and verify the model once if Terrain Diffusion will be selected:
 
 ```sh
-vp run terrain:fetch
+vp run automation -- run terrain-fetch
 ```
 
 Then load the configuration, construct the selected provider, and request one canonical macro
 sample:
 
 ```sh
-vp run world:source-smoke
+vp run automation -- run world-source
 ```
 
 The command reports the selected source kind and stable source-identity hash. In Terrain Diffusion

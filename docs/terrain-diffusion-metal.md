@@ -25,7 +25,7 @@ The provider pins:
 - sampler, scheduler, macro-field, coordinate, and voxel-composer versions in
   `WorldSourceIdentity`.
 
-`vp run terrain:fetch` streams the seven pinned files into
+`vp run automation -- run terrain-fetch` streams the seven pinned files into
 `~/Library/Caches/voxels/terrain-diffusion/<revision>`. Each download uses a partial file and atomic
 rename; all 1.137 GB of published weights are verified before the path is returned. Inference is
 offline after the fetch.
@@ -33,12 +33,12 @@ offline after the fetch.
 ## Running it
 
 ```sh
-vp run terrain:fetch
-vp run terrain:counterproof
-vp run terrain:smoke
-vp run terrain:base
-vp run terrain:detail
-vp run terrain:survey
+vp run automation -- run terrain-fetch
+vp run automation -- run terrain-diffusion --mode=counterproof
+vp run automation -- run terrain-diffusion
+vp run automation -- run terrain-diffusion --mode=base
+vp run automation -- run terrain-diffusion --mode=detail
+vp run automation -- run terrain-diffusion --mode=survey
 ```
 
 Set `VOXELS_TERRAIN_SEED` to an unsigned integer to reproduce or compare another generated world;

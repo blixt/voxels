@@ -14,7 +14,7 @@ Measured on an Apple M3 Max with Rust 1.97.0 using the release-profile command b
 100 samples after its standard warm-up.
 
 ```sh
-vp run bench:world
+vp run automation -- run bench-world
 ```
 
 | Operation                                  |                Before |    After |  Change |
@@ -166,7 +166,7 @@ bathymetry. The deterministic coastal showcase column now contains 2.2 m of cano
 
 Exact fluid sensing roughly doubles portable camera-update cost, but the absolute budget is small. On
 the same release benchmark host, 120 dry grounded ticks measured 90.48 us and 120 submerged ticks
-measured 177.87 us: about 0.75 us versus 1.48 us per 120 Hz tick. `vp run bench:core` preserves both
+measured 177.87 us: about 0.75 us versus 1.48 us per 120 Hz tick. `vp run automation -- run bench-core` preserves both
 baselines. The browser gate entered the Rust underwater showcase, toggled water rendering off and back
 on while verifying physics stayed submerged, and completed with no WGPU/shader warning or error. The
 captured frame retained only canvas-rendered crosshair, depth/immersion status, and swim-help chrome.
@@ -177,7 +177,7 @@ to storage ownership handoff.
 
 ## 2026-07-12: raw release frame profiling and bounded streaming
 
-`vp run profile:browser` now builds optimized WASM, serves `dist` from an isolated ephemeral origin,
+`vp run automation -- run render-profile` now builds optimized WASM, serves `dist` from an isolated ephemeral origin,
 and drains raw Rust worker frame samples from a fixed 512-entry ring. The versioned snapshot keeps
 display interval separate from total worker CPU, simulation, streaming, and render-submission time;
 the harness reports p50/p95/p99/max and hitch counts without treating an exponentially smoothed UI
@@ -285,7 +285,7 @@ through world-anchored face coordinates. Eight explicitly generated mip levels p
 energy and unresolved normal variance. A second specialized flat pipeline provides a true zero-sample
 comparison path, selected by the seventh Rust-rendered Mission Control toggle.
 
-`vp run profile:materials` opens the panel and changes that toggle through canvas hit-testing, then
+`vp run automation -- run render-profile --mode=materials` opens the panel and changes that toggle through canvas hit-testing, then
 records five-second OFF and ON windows in one release browser session. It requires both observed states
 and identical geometry, residency, draw calls, arena allocations, water work, and refraction bandwidth.
 The final M3 Max / system Chrome run produced:
@@ -312,7 +312,7 @@ weathered structure. Mip filtering and distance-faded normal strength keep the f
 
 ## 2026-07-12: sustained deterministic streaming rail
 
-`vp run profile:sustained` starts one numeric debug command through the browser transport; all
+`vp run automation -- run render-profile --mode=sustained` starts one numeric debug command through the browser transport; all
 scenario timing and movement remain in portable Rust. The camera follows a fixed 120 Hz circular rail
 at 12 m/s: one 360 m lap warms the allocator, two identical laps measure it, and the cumulative 1.08 km
 run then stops and requires canonical and all six surface-LOD queues to drain. The first four rings
@@ -427,7 +427,7 @@ clear day, golden hour, and blue hour alter one shared sun/sky/fog/cloud environ
 sparse procedural star field. The sky and terrain evaluate the same world-anchored cloud field so
 cloud motion also modulates direct sunlight without adding a render pass, texture, draw, or allocation.
 
-`vp run profile:atmosphere` changes all four phases through the explicit Rust Mission Control TIME
+`vp run automation -- run render-profile --mode=atmosphere` changes all four phases through the explicit Rust Mission Control TIME
 action. At 1280x720 on the M3 Max / system Chrome, every four-second window held
 the 120 Hz cap with zero dropped samples and no frame over 16.67 ms:
 
@@ -463,8 +463,8 @@ applies the depth-aware half-resolution result only to indirect light. The imple
 temporal history and therefore adds no invalidation protocol for streaming replacements, edits, or
 teleports. Mission Control owns the toggle and live AO timing; the browser still owns no UI state.
 
-`vp run profile:gtao` followed all five pilgrim-road marks to a dense badlands and ruin view before
-measuring matched four-second windows at 1280x720 on the M3 Max / system Chrome:
+The historical GTAO profile followed all five pilgrim-road marks to a dense badlands and ruin view
+before measuring matched four-second windows at 1280x720 on the M3 Max / system Chrome:
 
 | Spatial AO | Frame p95 | Active GPU p95 | World GPU p95 | Depth p95 |   AO p95 |
 | ---------- | --------: | -------------: | ------------: | --------: | -------: |
@@ -492,13 +492,13 @@ invalidation, while each LOD proxy remains capped at four boxes and 24 quads. Ex
 route anchors keep their established placement; only the one hero cell in each 8x8 composition area
 pays for the larger form.
 
-`vp run profile:heroes` advanced the Rust landmark catalog exclusively through canvas clicks and
-captured all six fixed views. At 1280x720 on the M3 Max / system Chrome, every three-second view held
-the 120 Hz cap with zero dropped samples, no frame above 16.67 ms, no stale completions, settled queues,
-and exact opaque/depth ownership. The worst frame p95 was 9.7 ms and the worst active GPU p95 was
-5.967 ms. The six views exercised 1.13–1.63 million visible quads, 353–420 draw calls, regional cloud
-lighting, water/refraction where present, and the full screen-space AO path without exceeding its
-7.5 ms active-GPU gate.
+The historical semantic-heroes profile advanced the Rust landmark catalog exclusively through canvas
+clicks and captured all six fixed views. At 1280x720 on the M3 Max / system Chrome, every three-second
+view held the 120 Hz cap with zero dropped samples, no frame above 16.67 ms, no stale completions,
+settled queues, and exact opaque/depth ownership. The worst frame p95 was 9.7 ms and the worst active
+GPU p95 was 5.967 ms. The six views exercised 1.13–1.63 million visible quads, 353–420 draw calls,
+regional cloud lighting, water/refraction where present, and the full screen-space AO path without
+exceeding its 7.5 ms active-GPU gate.
 
 Native Criterion means for the largest forest form were 300.77 us for a hero-intersecting canonical
 crown chunk, 152.01 us for its stride-2 tile, and 179.96 us for its stride-16 tile. The representative
@@ -564,8 +564,8 @@ v14 adds four sparse material-14 crystal formations. Host validation proves more
 survives ambient cave noise, and random, chunk, region, edit, and versioned codec paths agree. The
 material-detail atlas grows from 14 to 15 deterministic layers and 2,621,400 derived bytes.
 
-`vp run profile:caves` drives the three-stop tour only through Rust canvas controls and records the
-approach, descent, and chamber after streaming and eye adaptation settle:
+The historical cave profile drove the three-stop tour only through Rust canvas controls and recorded
+the approach, descent, and chamber after streaming and eye adaptation settled:
 
 | Integrated cave measurement                        | Approach / descent / chamber |
 | -------------------------------------------------- | ---------------------------: |
@@ -601,8 +601,8 @@ active lights from successfully uploaded canonical chunks. Host tests cover expo
 deterministic centroids and ordering, stable capped ranking, world-space conversion, GPU layout, and
 the Rust placement palette. The release WGSL validator covers the fixed uniform and bounded loop.
 
-`vp run profile:lights` disables the independent cave headlamp and measures matched six-second chamber
-windows through the Rust Mission Control toggle:
+The historical emissive-light profile disabled the independent cave headlamp and measured matched
+six-second chamber windows through the Rust Mission Control toggle:
 
 | Cinder Vault chamber         | Local lights off | Local lights on |    Delta |
 | ---------------------------- | ---------------: | --------------: | -------: |
@@ -635,28 +635,29 @@ plane disconnects only its edge and reverting restores it; and an exterior-to-ch
 requires the mouth and exceeds the current 6.4 m light-selection radius. The world suite now contains
 101 tests without adding a persisted format or changing generator output.
 
-`vp run profile:portals` visits a fourth Rust-owned Cinder tour stop on playable terrain directly above
-the chamber. Radial streaming deliberately keeps the underground source chunks resident, creating the
-adversarial case that Euclidean lighting gets wrong. The exact release result retained 10 candidates,
-performed 10 bounded visibility queries, rejected all 10 by portal geodesic, and submitted zero active,
-occluded, or clipped lights. All seven pristine portals remained open at revision zero.
+The historical portal profile visited a fourth Rust-owned Cinder tour stop on playable terrain
+directly above the chamber. Radial streaming deliberately kept the underground source chunks
+resident, creating the adversarial case that Euclidean lighting gets wrong. The exact release result
+retained 10 candidates, performed 10 bounded visibility queries, rejected all 10 by portal geodesic,
+and submitted zero active, occluded, or clipped lights. All seven pristine portals remained open at
+revision zero.
 
 The six-second overhead window measured 8.8 ms frame p95, 3.5 ms CPU p95, 3.1 ms render-submission
 p95, 3.895 ms active-GPU p95, and 0.789 ms world-GPU p95 with zero dropped samples, pending work, or
 stale completions. The chamber A/B then retained all 10 connected lights with zero portal rejection,
 8.8 ms frame p95, and unchanged chunks, geometry, draws, and mesh allocation.
 
-`vp run profile:portal-edits` adds an end-to-end durability gate without controlling the user's
-browser. Rust places basalt in all 25 canonical mouth-probe voxels, reducing the leader and observer
-tab from seven open portals to six. A fresh worker then hydrated all 25 sparse edits and reconstructed
-six open portals at revision zero. Rust reverted the generated-air overrides, returned live state to
-seven portals, and a second reload hydrated zero edits and the pristine seven-portal mask. The isolated
-two-tab release run reported no OPFS, SQLite, worker, or WebGPU errors.
+The historical portal-edit profile added an end-to-end durability gate without controlling the
+user's browser. Rust placed basalt in all 25 canonical mouth-probe voxels, reducing the leader and
+observer tab from seven open portals to six. A fresh worker then hydrated all 25 sparse edits and
+reconstructed six open portals at revision zero. Rust reverted the generated-air overrides, returned
+live state to seven portals, and a second reload hydrated zero edits and the pristine seven-portal
+mask. The isolated two-tab release run reported no OPFS, SQLite, worker, or WebGPU errors.
 
-`vp run profile:portal-streaming` then gates the topology as a bounded streaming input. Far from
-Cinder it requested and activated zero secondary chunks with 243 primary chunks tracked. Every open
-approach, descent, chamber, and overhead phase requested, admitted, and atomically activated all 73
-conservative cave chunks across 32 columns; tracking never exceeded 320, neither capacity layer
+The historical portal-streaming profile then gated the topology as a bounded streaming input. Far
+from Cinder it requested and activated zero secondary chunks with 243 primary chunks tracked. Every
+open approach, descent, chamber, and overhead phase requested, admitted, and atomically activated all
+73 conservative cave chunks across 32 columns; tracking never exceeded 320, neither capacity layer
 truncated, the world plan never overflowed, and no unreachable chunk remained active. Sealing the
 mouth from outside dropped requested and active portal chunks to zero while keeping retained
 allocations harmless; entering the sealed chamber restored its 73-chunk connected interior plan.
@@ -678,7 +679,7 @@ zero dropped samples or browser errors.
 The follow-up face-resolution gate quantizes both albedo and tangent normal/roughness lookup to three
 cells per 10 cm voxel axis, or 3.33 cm per visible block. A host test covers all three texel centers,
 exact and just-inside face boundaries, negative coordinates, nearest sampling, and the explicit-gradient
-WGSL path. `vp run profile:materials` kept material-off/on frame p95 identical at 9.2 ms, moved world
+WGSL path. `vp run automation -- run render-profile --mode=materials` kept material-off/on frame p95 identical at 9.2 ms, moved world
 GPU p95 by 0.239 ms, changed no geometry, residency, draws, or mesh allocation, and recorded zero
 dropped samples or browser errors in isolated headless Chrome.
 
@@ -690,9 +691,9 @@ only ignored artifacts under `target/criterion`; the browser profile uses a prev
 reserved ephemeral port and does not open or reset an existing browser origin:
 
 ```sh
-vp run bench:world
-vp run bench:runtime
-vp run profile:browser
+vp run automation -- run bench-world
+vp run automation -- run bench-runtime
+vp run automation -- run render-profile
 ```
 
 | Portable operation                                             | Criterion mean |            Derived throughput |
@@ -839,19 +840,16 @@ cascade, depth prepass, ambient occlusion, opaque world, water, and UI/present. 
 roughly 90-99% GPU coverage and no telemetry drops, replacing the earlier latest-sample snapshot that
 could produce misleading percentiles.
 
-`vp run profile:chromium` launches its own Playwright Chromium process and isolated temporary world
-database, so it neither depends on browser MCP nor touches a player's tabs, sessions, OPFS world, or
-configured edit database. Chromium's CDP tracing captures renderer scheduling, V8 CPU samples,
-WebGPU/GPU, compositor, Viz, timeline, and user-timing categories around named steady and traversal
-regions. The JSON trace can be loaded directly into Chrome's Performance tooling or Perfetto.
+`vp run automation -- run render-profile --trace` launches its own Playwright Chromium process and
+isolated temporary world database, so it neither depends on browser MCP nor touches a player's tabs,
+sessions, OPFS world, or configured edit database. Chromium's CDP tracing captures renderer
+scheduling, V8 CPU samples, WebGPU/GPU, compositor, Viz, timeline, and user-timing categories around
+named steady and traversal regions. The JSON trace can be loaded directly into Chrome's Performance
+tooling or Perfetto.
 
 ```sh
-VOXELS_PROFILE_BUILD=wasm-dev \
-VOXELS_PROFILE_SOURCE=terrain-diffusion-30m \
-VOXELS_PROFILE_DPR=2 \
-VOXELS_PROFILE_OUTPUT=target/render-profile/result.json \
-VOXELS_PROFILE_TRACE_PATH=target/render-profile/trace.json \
-vp run profile:chromium
+vp run automation -- run render-profile --trace --build=wasm-dev \
+  --source=terrain-diffusion-30m --dpr=2
 ```
 
 At 1280x720 DPR 1 in Chromium 150 on the M3 Max, the old debug WASM measured 41.1 ms steady median,
@@ -921,10 +919,11 @@ synthetic equal-climate 128 m windows the tree counts were 0 minimum, 3 p10, 32 
 315 maximum, with locally dominant but mixed stands. This isolates the spatial ecology from climate
 and proves that forest/open-land contrast is not merely a biome transition.
 
-`vp run world:ecology-survey` evaluates the configured native source directly. A 625-window survey
-of the checked-in Terrain Diffusion world measured 0 minimum, 2 p10, 89 median, 270 p90, and 316
-maximum trees per 128 m window. It found eight compatible tree species in the surveyed local climate
-and prints five dense origins that can be passed to `VOXELS_PROFILE_SPAWN=x,z`.
+`vp run automation -- run world-source --mode=ecology-survey` evaluates the configured native source
+directly. A 625-window survey of the checked-in Terrain Diffusion world measured 0 minimum, 2 p10, 89
+median, 270 p90, and 316 maximum trees per 128 m window. It found eight compatible tree species in
+the surveyed local climate and prints five dense origins that can be passed to the render profile as
+`--spawn=x,z`.
 
 At 1280x720 DPR 1 in Chromium 150 on the M3 Max, both an open spawn and a dense 316-tree-window spawn
 held the 120 Hz frame budget:
@@ -934,16 +933,16 @@ held the 120 Hz frame budget:
 | Open meadow             |      1,843,736 |   467 |       8.3 / 9.8 ms |   3.57 / 4.90 ms |                    0 |
 | Dense mixed forest      |      2,205,653 |   506 |       8.3 / 9.6 ms |   4.04 / 4.31 ms |                    0 |
 
-The dense run used `VOXELS_PROFILE_SPAWN=-6400,1280`; its six-second forward traversal also measured
-8.3 ms median, 9.7 ms p95, and no frame over 16.67 ms. Both profiler runs used isolated temporary
-server databases and did not touch the player's persisted world.
+The dense run used `--spawn=-6400,1280`; its six-second forward traversal also measured 8.3 ms
+median, 9.7 ms p95, and no frame over 16.67 ms. Both profiler runs used isolated temporary server
+databases and did not touch the player's persisted world.
 
 ## 2026-07-15: dense-scene renderer attribution and exact-output optimization
 
 A matched pair of clean, trace-enabled Chromium runs at the 316-tree dense spawn isolated the next
 costs without changing view distance, tree density, geometry, materials, lighting resolution, or LOD
 thresholds. Both runs used Chromium 150, 1280x720 at DPR 1, `wasm-dev`, Terrain Diffusion, and
-`VOXELS_PROFILE_SPAWN=-6400,1280`. The baseline trace is
+`--spawn=-6400,1280`. The baseline trace is
 `target/render-profile/ecology-perf-dense-trace.json`; the optimized trace is
 `target/render-profile/ecology-perf-dense-final-trace.json`.
 
@@ -1013,7 +1012,7 @@ same seeded large-scale coverage function, so cloud shapes and their moving illu
 and snow use a separate full-resolution depth-aware pass, allowing precipitation to disappear inside
 enclosed caves while keeping cloud cost independent of the number of visible terrain chunks.
 
-`vp run profile:weather` freezes the sun at noon, moves through six weather anchors, captures each
+`vp run automation -- run render-profile --mode=weather` freezes the sun at noon, moves through six weather anchors, captures each
 state, and asserts frame pacing, GPU budgets, half-resolution cloud rendering, weather response, and
 identical geometry/residency. The run below used Chromium 150 at 1280x720 DPR 1 on the M3 Max with
 14 view samples, two light samples, screen-space AO, cascaded shadows when weather permits them, and
