@@ -1193,6 +1193,15 @@ impl BatchResponseCache {
         }
     }
 
+    /// Releases an unsuccessful owner without detaching waiters from the same flight. A lone
+    /// owner can remove its stale weak entry immediately; otherwise the next waiter inherits the
+    /// key and either populates the cache or performs the final cleanup.
+    fn abandon_flight(&mut self, key: &BatchResponseKey, lock: &Arc<AsyncMutex<()>>) {
+        if Arc::strong_count(lock) == 1 {
+            self.finish_flight(key, lock);
+        }
+    }
+
     fn record_access(&mut self) -> u64 {
         let access = self.next_access;
         self.next_access = self.next_access.saturating_add(1);
@@ -2498,7 +2507,7 @@ async fn assemble_and_deliver_generation_batch(
     let response_flight = { lock_batch_response_cache(&response_cache).flight_lock(&response_key) };
     let response_flight_guard = response_flight.lock().await;
     if batch.job.tracked.is_cancelled() {
-        lock_batch_response_cache(&response_cache).finish_flight(&response_key, &response_flight);
+        lock_batch_response_cache(&response_cache).abandon_flight(&response_key, &response_flight);
         batch.job.tracked.finish();
         return;
     }
@@ -2532,13 +2541,15 @@ async fn assemble_and_deliver_generation_batch(
     .and_then(|result| result);
     drop(global_permit);
     drop(session_permit);
-    if let Ok(bytes) = &response
-        && bytes.len() <= max_frame_bytes
-    {
-        lock_batch_response_cache(&response_cache)
-            .insert(response_key.clone(), Arc::from(bytes.clone()));
+    if let Ok(bytes) = &response {
+        if bytes.len() <= max_frame_bytes {
+            lock_batch_response_cache(&response_cache)
+                .insert(response_key.clone(), Arc::from(bytes.clone()));
+        }
+        lock_batch_response_cache(&response_cache).finish_flight(&response_key, &response_flight);
+    } else {
+        lock_batch_response_cache(&response_cache).abandon_flight(&response_key, &response_flight);
     }
-    lock_batch_response_cache(&response_cache).finish_flight(&response_key, &response_flight);
     drop(response_flight_guard);
     deliver_generation_job(batch.job, response, max_frame_bytes).await;
 }
@@ -3148,6 +3159,29 @@ mod tests {
         cache.finish_flight(&key, &first);
         let next = cache.flight_lock(&key);
         assert!(!Arc::ptr_eq(&first, &next));
+    }
+
+    #[test]
+    fn cancelled_batch_owner_preserves_the_single_flight_for_waiters() {
+        let key = BatchResponseKey(
+            vec![ProductKey::Chunk {
+                coord: ChunkCoord::new(2, 0, 0),
+                edit_revision: 1,
+            }]
+            .into_boxed_slice(),
+        );
+        let mut cache = BatchResponseCache::new(1024);
+        let owner = cache.flight_lock(&key);
+        let waiter = cache.flight_lock(&key);
+        cache.abandon_flight(&key, &owner);
+        let joined = cache.flight_lock(&key);
+        assert!(Arc::ptr_eq(&waiter, &joined));
+
+        drop(owner);
+        drop(joined);
+        cache.abandon_flight(&key, &waiter);
+        let next = cache.flight_lock(&key);
+        assert!(!Arc::ptr_eq(&waiter, &next));
     }
 
     #[tokio::test]
