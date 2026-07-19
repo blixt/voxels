@@ -321,9 +321,10 @@ mod tests {
     #[test]
     fn far_voxel_faces_expand_raster_coverage_without_stretching_world_space() {
         let voxels = include_str!("shaders/voxels.wgsl");
-        assert!(voxels.contains("if (material & 0x80000000u) != 0u"));
-        assert!(voxels.contains("let coverage_margin ="));
-        assert!(voxels.contains("out.position = frame.view_projection * vec4<f32>(coverage_world"));
+        assert!(voxels.contains("if (material & 0x80000000u) == 0u"));
+        assert!(voxels.contains("fn conservative_surface_clip("));
+        assert!(voxels.contains("direction * 1.5 / frame.viewport_voxel.xy"));
+        assert!(voxels.contains("out.position = conservative_surface_clip(world, face, uv"));
         assert!(voxels.contains("out.world = world"));
     }
 

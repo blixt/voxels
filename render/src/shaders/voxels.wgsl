@@ -159,6 +159,56 @@ fn surface_wall_macro_blend(world: vec3<f32>) -> f32 {
   return smoothstep(0.0, 48.0, distance_from_near_field) * 0.82;
 }
 
+fn conservative_axis_offset(clip: vec4<f32>, axis: vec3<f32>, direction: f32) -> vec2<f32> {
+  let endpoint = clip + frame.view_projection * vec4<f32>(axis, 0.0);
+  if clip.w <= 0.00001 || endpoint.w <= 0.00001 {
+    return vec2<f32>(0.0);
+  }
+  let pixel_delta = (endpoint.xy / endpoint.w - clip.xy / clip.w)
+    * frame.viewport_voxel.xy * 0.5;
+  let pixel_length = length(pixel_delta);
+  if pixel_length <= 0.00001 {
+    return vec2<f32>(0.0);
+  }
+  // WebGPU does not expose conservative rasterization. Expanding each streamed surface face by
+  // three quarters of a physical framebuffer pixel gives shared edges a deterministic overlap,
+  // independent of camera distance or LOD stride, while canonical world attributes stay exact.
+  return pixel_delta / pixel_length * direction * 1.5 / frame.viewport_voxel.xy;
+}
+
+fn conservative_surface_clip(
+  world: vec3<f32>,
+  face: u32,
+  uv: vec2<i32>,
+  material: u32,
+) -> vec4<f32> {
+  var clip = frame.view_projection * vec4<f32>(world, 1.0);
+  if (material & 0x80000000u) == 0u {
+    return clip;
+  }
+  var axis_u = vec3<f32>(1.0, 0.0, 0.0);
+  var axis_v = vec3<f32>(0.0, 1.0, 0.0);
+  switch face {
+    case 0u, 1u: {
+      axis_u = vec3<f32>(0.0, 0.0, 1.0);
+      axis_v = vec3<f32>(0.0, 1.0, 0.0);
+    }
+    case 2u, 3u: {
+      axis_u = vec3<f32>(1.0, 0.0, 0.0);
+      axis_v = vec3<f32>(0.0, 0.0, 1.0);
+    }
+    default: {
+      axis_u = vec3<f32>(1.0, 0.0, 0.0);
+      axis_v = vec3<f32>(0.0, 1.0, 0.0);
+    }
+  }
+  let direction = vec2<f32>(uv) * 2.0 - vec2<f32>(1.0);
+  let ndc_offset = conservative_axis_offset(clip, axis_u, direction.x)
+    + conservative_axis_offset(clip, axis_v, direction.y);
+  clip = vec4<f32>(clip.xy + ndc_offset * clip.w, clip.zw);
+  return clip;
+}
+
 @vertex
 fn vs_main(
   @builtin(vertex_index) vertex_index: u32,
@@ -184,30 +234,6 @@ fn vs_main(
     default: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 0); normal.z = -1.0; }
   }
   let world = vec3<f32>(origin + local) * frame.viewport_voxel.z;
-  var coverage_world = world;
-  if (material & 0x80000000u) != 0u {
-    let level = (material >> 27u) & 7u;
-    // Greedy far-surface quads deliberately retain T-junctions to minimize geometry and draw
-    // bandwidth. Give their rasterized edges a small, LOD-relative overlap so sub-pixel
-    // background wedges cannot appear at convex step corners. Keep `world` canonical below:
-    // coverage may overlap, while material sampling, lighting, and interaction never stretch.
-    let coverage_margin = f32(2u << level) * frame.viewport_voxel.z * 0.01;
-    let direction = vec2<f32>(uv) * 2.0 - vec2<f32>(1.0);
-    switch face {
-      case 0u, 1u: {
-        coverage_world.y += direction.y * coverage_margin;
-        coverage_world.z += direction.x * coverage_margin;
-      }
-      case 2u, 3u: {
-        coverage_world.x += direction.x * coverage_margin;
-        coverage_world.z += direction.y * coverage_margin;
-      }
-      default: {
-        coverage_world.x += direction.x * coverage_margin;
-        coverage_world.y += direction.y * coverage_margin;
-      }
-    }
-  }
   let surface_macro_normal = (ao & 0x01000000u) != 0u;
   var terrain_lighting = vec2<f32>(1.0);
   if surface_macro_normal {
@@ -235,7 +261,7 @@ fn vs_main(
     terrain_lighting = mix(vec2<f32>(1.0), resolved_horizon_lighting, horizon_strength);
   }
   var out: VertexOut;
-  out.position = frame.view_projection * vec4<f32>(coverage_world, 1.0);
+  out.position = conservative_surface_clip(world, face, uv, material);
   out.world = world;
   out.normal = normal;
   out.material = material;
@@ -311,15 +337,22 @@ fn pixelated_material_uv(surface_metres: vec2<f32>, material_scale: f32) -> vec2
 fn sample_surface_detail(world: vec3<f32>, geometric_normal: vec3<f32>, material: u32) -> SurfaceDetail {
   var detail: SurfaceDetail;
   detail.normal = geometric_normal;
-  if MATERIAL_DETAIL != 0u {
-    let basis = surface_basis(world, geometric_normal);
-    let material_scale = material_detail_scale(material);
-    let continuous_uv = basis.uv * material_scale;
-    let uv = pixelated_material_uv(basis.uv, material_scale);
+  let detail_distance = distance(world, frame.camera_time.xyz);
+  // Derivatives must be evaluated in uniform control flow even when only nearby fragments sample
+  // the detailed atlas. Naga can then discard this setup entirely for the flat pipeline override.
+  let basis = surface_basis(world, geometric_normal);
+  let material_scale = material_detail_scale(material);
+  let continuous_uv = basis.uv * material_scale;
+  let uv = pixelated_material_uv(basis.uv, material_scale);
+  let uv_dx = dpdx(continuous_uv);
+  let uv_dy = dpdy(continuous_uv);
+  // Past this point even one screen pixel covers many authored material texels at 720p. Sampling
+  // two anisotropic atlas layers and rebuilding a tangent frame cannot add visible information;
+  // the atlas' terminal mip is the same prefiltered material, without paying that per-fragment
+  // cost across kilometre-scale terrain.
+  if MATERIAL_DETAIL != 0u && detail_distance < 160.0 {
     // Derive mip selection from the continuous coordinates. Derivatives of the quantized UV are
     // zero inside a block and discontinuous at its edge, which would otherwise force unstable LOD.
-    let uv_dx = dpdx(continuous_uv);
-    let uv_dy = dpdy(continuous_uv);
     detail.albedo = textureSampleGrad(
       material_albedo,
       material_sampler,
@@ -357,15 +390,23 @@ fn sample_surface_detail(world: vec3<f32>, geometric_normal: vec3<f32>, material
     ));
   } else {
     let base_mip = i32(textureNumLevels(material_albedo) - 1u);
-    // The atlas is the sole render-side material definition. The flat debug mode reads its 1x1
-    // average instead of maintaining a second color/roughness table that can silently drift.
+    // The atlas remains the sole material definition for flat debug mode and distant terrain.
+    // Preserve normal-map variance in the terminal mip so the far roughness still matches the
+    // fully sampled PBR material even though sub-pixel tangent normals are intentionally omitted.
     detail.albedo = textureLoad(material_albedo, vec2<i32>(0), i32(material), base_mip).rgb;
-    detail.roughness = textureLoad(
+    let packed_surface = textureLoad(
       material_surface,
       vec2<i32>(0),
       i32(material),
       base_mip,
-    ).a;
+    );
+    let averaged_normal = packed_surface.rgb * 2.0 - vec3<f32>(1.0);
+    let normal_variance = 1.0 - clamp(length(averaged_normal), 0.001, 1.0);
+    detail.roughness = sqrt(clamp(
+      packed_surface.a * packed_surface.a + normal_variance * 0.72,
+      0.01,
+      1.0,
+    ));
   }
   return detail;
 }
