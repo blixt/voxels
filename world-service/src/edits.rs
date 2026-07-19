@@ -246,19 +246,8 @@ impl EditAuthority {
             )
             .map_err(sql_error("configure edit database"))?;
         initialize_schema(&mut connection, world_id, source.identity().identity_hash())?;
-        let (edits, rows, revision) = load_edits(&connection)?;
-        let mut chunk_revisions = BTreeMap::new();
-        let mut surface_revisions = BTreeMap::new();
-        for (coord, row_revision) in rows {
-            for chunk in EditMap::affected_chunks(coord) {
-                bump_product_revision(&mut chunk_revisions, chunk, row_revision);
-            }
-            for level in SurfaceLodLevel::ALL {
-                for tile in source.surface_tiles_affected_by_voxel(&edits, level, coord) {
-                    bump_product_revision(&mut surface_revisions, tile, row_revision);
-                }
-            }
-        }
+        let (edits, revision) = load_edits(&connection)?;
+        let (chunk_revisions, surface_revisions) = load_product_revisions(&connection, revision)?;
         Ok(Arc::new(Self {
             inner: Mutex::new(EditState {
                 connection,
@@ -681,6 +670,20 @@ fn initialize_schema(
                     revision INTEGER NOT NULL CHECK(revision >= 1),
                     PRIMARY KEY (x, y, z)
                  ) WITHOUT ROWID;
+                 CREATE TABLE chunk_revisions (
+                    x INTEGER NOT NULL,
+                    y INTEGER NOT NULL,
+                    z INTEGER NOT NULL,
+                    revision INTEGER NOT NULL CHECK(revision >= 1),
+                    PRIMARY KEY (x, y, z)
+                 ) WITHOUT ROWID;
+                 CREATE TABLE surface_revisions (
+                    stride INTEGER NOT NULL,
+                    x INTEGER NOT NULL,
+                    z INTEGER NOT NULL,
+                    revision INTEGER NOT NULL CHECK(revision >= 1),
+                    PRIMARY KEY (stride, x, z)
+                 ) WITHOUT ROWID;
                  CREATE TABLE players (
                     player_id BLOB PRIMARY KEY CHECK(length(player_id) = 16),
                     current_edit_session BLOB CHECK(
@@ -755,9 +758,7 @@ fn initialize_schema(
     Ok(())
 }
 
-type LoadedRows = (EditMap, Vec<(VoxelCoord, u64)>, u64);
-
-fn load_edits(connection: &Connection) -> Result<LoadedRows, EditAuthorityError> {
+fn load_edits(connection: &Connection) -> Result<(EditMap, u64), EditAuthorityError> {
     let revision = connection
         .query_row(
             "SELECT revision FROM metadata WHERE singleton=1",
@@ -765,6 +766,7 @@ fn load_edits(connection: &Connection) -> Result<LoadedRows, EditAuthorityError>
             |row| row.get::<_, i64>(0),
         )
         .map_err(sql_error("read edit revision"))?;
+    let revision = positive_u64(revision, "edit revision")?;
     let mut statement = connection
         .prepare("SELECT x, y, z, material, revision FROM voxel_edits ORDER BY x, y, z")
         .map_err(sql_error("prepare edit load"))?;
@@ -778,14 +780,77 @@ fn load_edits(connection: &Connection) -> Result<LoadedRows, EditAuthorityError>
         })
         .map_err(sql_error("load edits"))?;
     let mut edits = EditMap::default();
-    let mut revisions = Vec::new();
     for row in rows {
         let (coord, material_id, row_revision) = row.map_err(sql_error("decode edit row"))?;
         let material = decode_material(material_id, "durable edit")?;
+        if positive_u64(row_revision, "durable edit revision")? > revision {
+            return Err(EditAuthorityError(
+                "durable edit revision exceeds the world revision".to_owned(),
+            ));
+        }
         edits.insert_override(coord, material);
-        revisions.push((coord, row_revision as u64));
     }
-    Ok((edits, revisions, (revision as u64).max(INITIAL_REVISION)))
+    Ok((edits, revision))
+}
+
+type ProductRevisions = (BTreeMap<ChunkCoord, u64>, BTreeMap<SurfaceTileCoord, u64>);
+
+fn load_product_revisions(
+    connection: &Connection,
+    world_revision: u64,
+) -> Result<ProductRevisions, EditAuthorityError> {
+    let mut chunk_revisions = BTreeMap::new();
+    let mut chunk_statement = connection
+        .prepare("SELECT x,y,z,revision FROM chunk_revisions ORDER BY x,y,z")
+        .map_err(sql_error("prepare chunk revisions"))?;
+    let rows = chunk_statement
+        .query_map([], |row| {
+            Ok((
+                ChunkCoord::new(row.get(0)?, row.get(1)?, row.get(2)?),
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(sql_error("load chunk revisions"))?;
+    for row in rows {
+        let (coord, revision) = row.map_err(sql_error("decode chunk revision"))?;
+        let revision = positive_u64(revision, "chunk revision")?;
+        if revision > world_revision || !coord.is_world_representable() {
+            return Err(EditAuthorityError(
+                "durable chunk revision is inconsistent".to_owned(),
+            ));
+        }
+        chunk_revisions.insert(coord, revision);
+    }
+
+    let mut surface_revisions = BTreeMap::new();
+    let mut surface_statement = connection
+        .prepare("SELECT stride,x,z,revision FROM surface_revisions ORDER BY stride,x,z")
+        .map_err(sql_error("prepare surface revisions"))?;
+    let rows = surface_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i32>(0)?,
+                row.get::<_, i32>(1)?,
+                row.get::<_, i32>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(sql_error("load surface revisions"))?;
+    for row in rows {
+        let (stride, x, z, revision) = row.map_err(sql_error("decode surface revision"))?;
+        let level = SurfaceLodLevel::from_stride_voxels(stride).ok_or_else(|| {
+            EditAuthorityError(format!("unknown durable surface revision stride {stride}"))
+        })?;
+        let coord = SurfaceTileCoord::new(level, x, z);
+        let revision = positive_u64(revision, "surface revision")?;
+        if revision > world_revision || !coord.is_world_representable() {
+            return Err(EditAuthorityError(
+                "durable surface revision is inconsistent".to_owned(),
+            ));
+        }
+        surface_revisions.insert(coord, revision);
+    }
+    Ok((chunk_revisions, surface_revisions))
 }
 
 fn load_durable_player(
@@ -1120,6 +1185,12 @@ fn persist_action(
             )
             .map_err(sql_error("persist inventory revision"))?;
         persist_inventory(&transaction, player_id, inventory)?;
+        persist_product_revisions(
+            &transaction,
+            revision,
+            affected_chunks,
+            affected_surface_tiles,
+        )?;
     }
     persist_operation(
         &transaction,
@@ -1133,6 +1204,47 @@ fn persist_action(
     transaction
         .commit()
         .map_err(sql_error("commit edit action"))
+}
+
+fn persist_product_revisions(
+    transaction: &Transaction<'_>,
+    revision: u64,
+    chunks: &[ChunkCoord],
+    surfaces: &[SurfaceTileCoord],
+) -> Result<(), EditAuthorityError> {
+    let revision = to_sql_i64(revision, "product revision")?;
+    {
+        let mut statement = transaction
+            .prepare_cached(
+                "INSERT INTO chunk_revisions(x,y,z,revision) VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(x,y,z) DO UPDATE SET revision=excluded.revision",
+            )
+            .map_err(sql_error("prepare chunk revisions"))?;
+        for coord in chunks {
+            statement
+                .execute(params![coord.x, coord.y, coord.z, revision])
+                .map_err(sql_error("persist chunk revision"))?;
+        }
+    }
+    {
+        let mut statement = transaction
+            .prepare_cached(
+                "INSERT INTO surface_revisions(stride,x,z,revision) VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(stride,x,z) DO UPDATE SET revision=excluded.revision",
+            )
+            .map_err(sql_error("prepare surface revisions"))?;
+        for coord in surfaces {
+            statement
+                .execute(params![
+                    coord.level.stride_voxels(),
+                    coord.x,
+                    coord.z,
+                    revision
+                ])
+                .map_err(sql_error("persist surface revision"))?;
+        }
+    }
+    Ok(())
 }
 
 #[allow(
@@ -1554,13 +1666,6 @@ fn positive_u64(value: i64, context: &'static str) -> Result<u64, EditAuthorityE
 fn to_sql_i64(value: u64, context: &'static str) -> Result<i64, EditAuthorityError> {
     i64::try_from(value)
         .map_err(|_| EditAuthorityError(format!("{context} exceeded SQLite INTEGER")))
-}
-
-fn bump_product_revision<K: Ord>(revisions: &mut BTreeMap<K, u64>, key: K, revision: u64) {
-    revisions
-        .entry(key)
-        .and_modify(|current| *current = (*current).max(revision))
-        .or_insert(revision);
 }
 
 fn sql_error(context: &'static str) -> impl FnOnce(rusqlite::Error) -> EditAuthorityError {
@@ -2424,16 +2529,16 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "voxels-edit-authority-v5-{}-{unique}.sqlite3",
+            "voxels-edit-authority-v9-{}-{unique}.sqlite3",
             std::process::id()
         ));
         let player = player_id(5);
         let coord = VoxelCoord::new(-57, 300, 89);
-        {
+        let (affected_chunks, affected_surfaces, edit_revision) = {
             let authority =
                 EditAuthority::open_with_inventory(&path, world_id(4), &source, 4, 2).unwrap();
             let (_opened, edit_session_id) = admit_player(&authority, player, resume(1));
-            authority
+            let applied = authority
                 .apply(
                     &source,
                     player,
@@ -2448,7 +2553,12 @@ mod tests {
             let mut stale = resume(3);
             stale.eye_position_metres = [99.0, 99.0, 99.0];
             authority.save_player_resume(player, stale).unwrap();
-        }
+            (
+                applied.commit.affected_chunks,
+                applied.commit.affected_surface_tiles,
+                applied.commit.revision,
+            )
+        };
         {
             let reopened =
                 EditAuthority::open_with_inventory(&path, world_id(4), &source, 4, 99).unwrap();
@@ -2463,6 +2573,21 @@ mod tests {
                     .override_at(coord),
                 Some(Material::GlowCrystal)
             );
+            assert!(
+                reopened
+                    .snapshot_chunks(&affected_chunks)
+                    .revisions
+                    .iter()
+                    .all(|revision| *revision == edit_revision)
+            );
+            assert!(!affected_surfaces.is_empty());
+            assert!(
+                reopened
+                    .snapshot_surface(&affected_surfaces)
+                    .revisions
+                    .iter()
+                    .all(|revision| *revision == edit_revision)
+            );
         }
         remove_sqlite_files(&path);
     }
@@ -2475,7 +2600,7 @@ mod tests {
         let error = EditAuthority::from_connection(connection, world_id(6), &source, 4, None)
             .err()
             .unwrap();
-        assert!(error.to_string().contains("schema 6; expected 8"));
+        assert!(error.to_string().contains("schema 6; expected 9"));
         assert!(
             error
                 .to_string()

@@ -351,6 +351,8 @@ fn inspect_database(path: &Path) -> Result<DatabaseInspection, Box<dyn std::erro
     for table in [
         "metadata",
         "voxel_edits",
+        "chunk_revisions",
+        "surface_revisions",
         "players",
         "player_inventory",
         "edit_operations",

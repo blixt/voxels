@@ -37,7 +37,7 @@ pub use server::{
 };
 
 pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 22;
-pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 8;
+pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 9;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
     0x76, 0x6f, 0x78, 0x65, 0x6c, 0x73, 0x40, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x01,
@@ -1389,7 +1389,7 @@ sea_level_voxels = 52
         assert_eq!(
             loaded.edit_database_path(source_hash),
             PathBuf::from(format!(
-                "test-fixtures/voxels-config/state/schema-8/{expected_world_id}-{source_hash}.sqlite3"
+                "test-fixtures/voxels-config/state/schema-9/{expected_world_id}-{source_hash}.sqlite3"
             ))
         );
 
