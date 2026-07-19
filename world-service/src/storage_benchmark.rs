@@ -112,7 +112,7 @@ pub fn run_storage_benchmark(
     request: StorageBenchmarkRequest,
 ) -> Result<StorageBenchmarkResponse, Box<dyn std::error::Error>> {
     validate_request(&request)?;
-    remove_database_files(&request.database_path)?;
+    ensure_database_absent(&request.database_path)?;
 
     let source = ProceduralWorldSource::new(BENCHMARK_SEED);
     let world_id = benchmark_world_id();
@@ -431,16 +431,20 @@ fn file_len(path: &Path) -> std::io::Result<u64> {
     }
 }
 
-fn remove_database_files(path: &Path) -> std::io::Result<()> {
+fn ensure_database_absent(path: &Path) -> std::io::Result<()> {
     for candidate in [
         path.to_path_buf(),
         PathBuf::from(format!("{}-wal", path.display())),
         PathBuf::from(format!("{}-shm", path.display())),
     ] {
-        match fs::remove_file(candidate) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+        if candidate.try_exists()? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "storage benchmark requires a fresh database path; refusing to overwrite {}",
+                    candidate.display()
+                ),
+            ));
         }
     }
     Ok(())
@@ -502,5 +506,13 @@ mod tests {
         assert_eq!(summary.p99, 99);
         assert_eq!(summary.maximum, 100);
         assert_eq!(summary.mean, 50.5);
+    }
+
+    #[test]
+    fn benchmark_refuses_to_overwrite_an_existing_database() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let error = ensure_database_absent(&manifest).expect_err("manifest already exists");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("refusing to overwrite"));
     }
 }
