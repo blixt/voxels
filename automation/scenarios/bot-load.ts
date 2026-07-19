@@ -1,18 +1,17 @@
-import { execFile, execFileSync, spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { build, preview } from "vite-plus";
-import { prepareWorldFixture, startWorldService } from "../lib/world.ts";
+import {
+  prepareWorldFixture,
+  routeWorldClient,
+  startWebPreview,
+  startWorldService,
+} from "../lib/world.ts";
 import { BrowserCapability, type BrowserViewport, reserveEphemeralPort } from "../lib/browser.ts";
 import { ScenarioArguments } from "../lib/arguments.ts";
-import {
-  assertSnapshotSchema,
-  FRAME_SAMPLE_WIDTH,
-  SNAPSHOT,
-  snapshotValue,
-} from "../lib/engine.ts";
+import { FRAME_SAMPLE_WIDTH, SNAPSHOT, snapshotValue } from "../lib/engine.ts";
 import {
   numericSummary,
   sampleProcess,
@@ -20,6 +19,7 @@ import {
   type ProcessSample,
 } from "../lib/metrics.ts";
 import { createShapedLink, type ShapedLink, VXWP_KIND } from "../lib/network.ts";
+import { runProcess } from "../lib/process.ts";
 import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "../lib/protocol.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import type { WorldFixture, WorldService, WorldSource } from "../lib/world.ts";
@@ -348,9 +348,7 @@ async function collectObserverSamples(
   let interactiveWorldReadyMs: number | null = null;
   let fullWorldReadyMs: number | null = null;
   while (!done.value) {
-    const values = assertSnapshotSchema(
-      await observer.viewport.page.evaluate(() => globalThis.__VOXELS__!.snapshot()),
-    );
+    const values = await observer.viewport.engine.snapshot();
     const remoteAvatars = snapshotValue(values, "remoteAvatars");
     const elapsedMs = performance.now() - started;
     if (rosterReadyMs === null && remoteAvatars === expectedBots) {
@@ -462,7 +460,7 @@ async function runPopulation({
   const reportPath = path.join(fixture.directory, `bots-${count}-${runIndex}.json`);
   const before = await databaseFiles(fixture.databasePath);
   if (observer !== null) {
-    await observer.viewport.page.evaluate(() => globalThis.__VOXELS__!.snapshot());
+    await observer.viewport.engine.snapshot();
   }
   link.reset();
   const logs: string[] = [];
@@ -699,67 +697,53 @@ async function startObserver(
   browser: BrowserCapability,
   previewPort: number,
   fixture: WorldFixture,
-  proxyPort: number,
   count: number,
   recordVideo: boolean,
 ): Promise<Observer> {
-  const clientConfig = (await readFile(fixture.clientConfigPath, "utf8"))
-    .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${proxyPort}${WORLD_PATH}"`)
-    .replace(
-      /^presence_endpoint = .*$/m,
-      `presence_endpoint = "ws://127.0.0.1:${proxyPort}${PRESENCE_PATH}"`,
-    );
   const viewport = await browser.open({
     url: `http://127.0.0.1:${previewPort}`,
     label: `bot-observer-${count}`,
     viewport: VIEWPORT,
     recordVideo,
     videoFilename: `bot-observer-${count}.webm`,
-    beforeNavigate: async (_context, page) => {
-      await page.route("**/config/client.toml", (route) =>
-        route.fulfill({
-          status: 200,
-          contentType: "text/plain; charset=utf-8",
-          body: clientConfig,
-        }),
-      );
-    },
+    ...routeWorldClient(fixture, 0),
   });
-  const page = viewport.page;
-  const deadline = performance.now() + 30_000;
-  let latest: readonly number[] = [];
-  while (performance.now() < deadline) {
-    latest = assertSnapshotSchema(await page.evaluate(() => globalThis.__VOXELS__!.snapshot()));
-    if (snapshotValue(latest, "quads") > 0 && snapshotValue(latest, "residentChunks") > 0) {
-      return { viewport };
-    }
-    await page.waitForTimeout(100);
-  }
-  throw new Error(
-    `browser observer did not load terrain: ${JSON.stringify({
-      quads: latest[SNAPSHOT.quads],
-      residentChunks: latest[SNAPSHOT.residentChunks],
-      trackedChunks: latest[SNAPSHOT.trackedChunks],
-      pendingJobs: latest[SNAPSHOT.pendingJobs],
-      allLodsReady: latest[SNAPSHOT.allLodsReady],
-      interactiveLodsReady: latest[SNAPSHOT.interactiveLodsReady],
-      errors: viewport.failures,
-    })}`,
+  await viewport.engine.waitForSnapshot(
+    (snapshot) =>
+      snapshotValue(snapshot, "quads") > 0 && snapshotValue(snapshot, "residentChunks") > 0,
+    {
+      timeoutMs: 30_000,
+      intervalMs: 100,
+      description: `browser observer did not load terrain; errors: ${JSON.stringify(viewport.failures)}`,
+    },
   );
+  return { viewport };
 }
 
 async function main(context: ScenarioContext, arguments_: readonly string[]) {
   const options = parseArguments(arguments_);
-  execFileSync(
+  await runProcess(
+    context,
     rustTool("cargo"),
     worldServiceBuildCargoArgs({ metal: false, profile: options.serviceProfile }),
-    { cwd: process.cwd(), env: process.env, stdio: "inherit" },
+    {
+      label: "bot world-service build",
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: "inherit",
+    },
   );
-  execFileSync(rustTool("cargo"), ["build", "--profile", options.botProfile, "-p", "voxels-bots"], {
-    cwd: process.cwd(),
-    env: process.env,
-    stdio: "inherit",
-  });
+  await runProcess(
+    context,
+    rustTool("cargo"),
+    ["build", "--profile", options.botProfile, "-p", "voxels-bots"],
+    {
+      label: "bot harness build",
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: "inherit",
+    },
+  );
   const botBinary = executablePath(options.botProfile, "voxels-bots");
   const result: BotLoadResult = {
     schemaVersion: RESULT_SCHEMA_VERSION,
@@ -777,38 +761,29 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
   let growthService: WorldService | undefined;
   let growthLink: ShapedLink | undefined;
   let browser: BrowserCapability | undefined;
-  let previewServer: Awaited<ReturnType<typeof preview>> | undefined;
   let previewPort: number | undefined;
   try {
     if (options.browser) {
       previewPort = await reserveEphemeralPort();
-      const buildFixture = await prepareWorldFixture({
-        originPort: previewPort,
-        prefix: "voxels-bots-browser-build-",
-        source: options.source,
-      });
-      try {
-        await build({ logLevel: "warn" });
-      } finally {
-        await buildFixture.cleanup();
-      }
-      previewServer = await preview({
-        logLevel: "warn",
-        preview: { host: "127.0.0.1", port: previewPort, strictPort: true },
-      });
+      await startWebPreview(context, { port: previewPort, buildProfile: "release" });
       browser = await BrowserCapability.start(context, { warningPattern: BROWSER_FAILURE });
     }
     for (const [runIndex, count] of options.counts.entries()) {
-      const fixture: WorldFixture =
-        growthFixture ??
-        (await prepareWorldFixture({
+      const proxyPort = growthLink?.port ?? (await reserveEphemeralPort());
+      let fixture = growthFixture;
+      if (fixture === undefined) {
+        const createdFixture = await prepareWorldFixture({
           originPort: previewPort ?? (await reserveEphemeralPort()),
+          clientPorts: [proxyPort],
           prefix: `voxels-bots-${count}-`,
           source: options.source,
           // Keep the spawn safe without lifting nearby terrain beyond ordinary interaction reach.
           spawnPillarHeightVoxels: BOT_SPAWN_PILLAR_HEIGHT_VOXELS,
           spawnProtectionRadiusVoxels: BOT_SPAWN_PROTECTION_RADIUS_VOXELS,
-        }));
+        });
+        context.defer(`bot fixture ${count}`, () => createdFixture.cleanup());
+        fixture = createdFixture;
+      }
       const service: WorldService =
         growthService ??
         (await startWorldService(context, fixture, {
@@ -818,12 +793,13 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         }));
       let proxy: ShapedLink | undefined = growthLink;
       if (proxy === undefined) {
-        const proxyPort = await reserveEphemeralPort();
-        proxy = await createShapedLink({
+        const createdProxy = await createShapedLink({
           listenPort: proxyPort,
           targetPort: fixture.backendPort,
           profile: NETWORK_PROFILE,
         });
+        context.defer(`bot shaped link ${count}`, () => createdProxy.close());
+        proxy = createdProxy;
       }
       if (options.mode === "growth" && growthFixture === undefined) {
         growthFixture = fixture;
@@ -835,14 +811,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         observer =
           browser === undefined || previewPort === undefined
             ? null
-            : await startObserver(
-                browser,
-                previewPort,
-                fixture,
-                proxy.port,
-                count,
-                options.recordVideo,
-              );
+            : await startObserver(browser, previewPort, fixture, count, options.recordVideo);
         const stage = await runPopulation({
           count,
           options,
@@ -874,7 +843,6 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
     if (growthLink) await growthLink.close();
     if (growthService) await growthService.close();
     if (growthFixture) await growthFixture.cleanup();
-    if (previewServer) await previewServer.close();
   }
   const markdown = markdownReport(result);
   await Promise.all([
