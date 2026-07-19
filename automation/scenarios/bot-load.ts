@@ -702,10 +702,11 @@ async function startObserver(
 
 async function main(context: ScenarioContext, arguments_: readonly string[]) {
   const options = parseArguments(arguments_);
+  const metal = options.source === "terrain-diffusion-30m";
   await runProcess(
     context,
     rustTool("cargo"),
-    worldServiceBuildCargoArgs({ metal: false, profile: options.serviceProfile }),
+    worldServiceBuildCargoArgs({ metal, profile: options.serviceProfile }),
     {
       label: "bot world-service build",
       cwd: process.cwd(),
@@ -769,7 +770,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         growthService ??
         (await startWorldService(context, fixture, {
           build: false,
-          metal: false,
+          metal,
           profile: options.serviceProfile,
         }));
       let proxy: ShapedLink | undefined = growthLink;
