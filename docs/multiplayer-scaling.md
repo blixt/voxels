@@ -64,20 +64,24 @@ growth, and an optional Chromium observer at up to 1,000 clients. See the
 [2026-07-17 bot load baseline](20260717-bot-load-report.md) and the
 [1,000-player traffic-shaping report](20260717-1000-player-traffic-report.md) for measured results.
 The [adaptive backpressure report](20260717-adaptive-backpressure-report.md) records the shaped-link
-controller tradeoffs and exact browser artifacts.
+controller tradeoffs and exact browser artifacts. The
+[2026-07-19 server pressure report](20260719-server-pressure-report.md) adds current
+128–1,000-client procedural and native Metal Terrain Diffusion results plus generation-worker
+sweeps.
 
 Run the focused optimized probe with:
 
 ```sh
-PATH="$HOME/.cargo/bin:$PATH" cargo test --release -p voxels-world-service presence::tests:: -- --nocapture
+PATH="$HOME/.cargo/bin:$PATH" cargo test --profile worldgen \
+  -p voxels-world-service presence::tests:: -- --nocapture
 ```
 
-On 2026-07-17 on an Apple M3 Max (16 CPU cores), the checked-in tests measured:
+On 2026-07-19 on an Apple M3 Max (16 CPU cores), the checked-in tests measured:
 
 | Scenario                                                               |                                              Result |
 | ---------------------------------------------------------------------- | --------------------------------------------------: |
 | 1,000 players at one location; one observer discovers 999 peers        |                       16 deltas, 80,688 bytes total |
-| Scheduler query, ranking, validation, and encoding for those 16 deltas |                                      2.543 ms total |
+| Scheduler query, ranking, validation, and encoding for those 16 deltas |                               1.711 ms median total |
 | One observer plus 999 players outside its interest cells               | 0 entity bytes after the initial empty stream frame |
 
 Timing is a local diagnostic, not a CI threshold. The durable regressions assert the record budget,
