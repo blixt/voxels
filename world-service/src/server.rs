@@ -1375,16 +1375,11 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     }
                     continue;
                 }
-                match encode_edit_commit(&commit) {
-                    Ok(bytes) => {
-                        if send_frame(&outbound, bytes, TrafficPriority::WorldChange)
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+                if send_frame(&outbound, commit.to_vec(), TrafficPriority::WorldChange)
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
                 continue;
             }
@@ -1542,7 +1537,9 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
                 );
             }
             recipients.remove(&player_claim.connection_id);
-            state.edits.publish(&applied.commit, &recipients);
+            if state.edits.publish(&applied.commit, &recipients).is_err() {
+                break;
+            }
             let bytes = match encode_edit_commit(&applied.commit) {
                 Ok(bytes) => bytes,
                 Err(_) => break,

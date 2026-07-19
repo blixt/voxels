@@ -14,7 +14,7 @@ use voxels_world::protocol::{
     DIG_VOLUME_VOXELS, DigVolume, EDIT_SESSION_NOT_CURRENT, EditAction, EditCommand, EditCommit,
     EditSessionId, MATERIAL_INVENTORY_SLOTS, MAX_EDIT_AFFECTED_CHUNKS,
     MAX_EDIT_AFFECTED_SURFACE_TILES, MAX_EDIT_MUTATIONS, MaterialInventory, PlayerId, PlayerResume,
-    VoxelMutation,
+    ProtocolError, VoxelMutation, encode_edit_commit,
 };
 use voxels_world::{
     ChunkCoord, EditMap, Material, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES,
@@ -87,12 +87,12 @@ struct EditState {
 }
 
 struct EditSubscriber {
-    sender: mpsc::Sender<EditCommit>,
+    sender: mpsc::Sender<Arc<[u8]>>,
     overflowed: Arc<AtomicBool>,
 }
 
 pub(crate) struct EditSubscription {
-    pub(crate) receiver: mpsc::Receiver<EditCommit>,
+    pub(crate) receiver: mpsc::Receiver<Arc<[u8]>>,
     pub(crate) overflowed: Arc<AtomicBool>,
 }
 
@@ -432,25 +432,51 @@ impl EditAuthority {
         self.lock_subscribers().remove(&connection_id);
     }
 
-    pub(crate) fn publish(&self, commit: &EditCommit, recipients: &BTreeSet<u64>) {
+    pub(crate) fn publish(
+        &self,
+        commit: &EditCommit,
+        recipients: &BTreeSet<u64>,
+    ) -> Result<(), ProtocolError> {
+        let editor_bytes = if recipients.contains(&commit.editor_connection_id) {
+            Some(Arc::<[u8]>::from(encode_edit_commit(commit)?))
+        } else {
+            None
+        };
+        let public_bytes = if recipients
+            .iter()
+            .any(|connection_id| *connection_id != commit.editor_connection_id)
+        {
+            let mut public = commit.clone();
+            public.editor_inventory = None;
+            Some(Arc::<[u8]>::from(encode_edit_commit(&public)?))
+        } else {
+            None
+        };
         let mut subscribers = self.lock_subscribers();
         subscribers.retain(|connection_id, subscriber| {
             if !recipients.contains(connection_id) {
                 return !subscriber.sender.is_closed();
             }
-            let mut delivery = commit.clone();
-            if *connection_id != commit.editor_connection_id {
-                delivery.editor_inventory = None;
-            }
-            match subscriber.sender.try_send(delivery) {
-                Ok(()) => true,
-                Err(mpsc::error::TrySendError::Full(_)) => {
+            let Some(bytes) = (if *connection_id == commit.editor_connection_id {
+                editor_bytes.as_ref()
+            } else {
+                public_bytes.as_ref()
+            }) else {
+                return true;
+            };
+            match subscriber.sender.try_reserve() {
+                Ok(permit) => {
+                    permit.send(Arc::clone(bytes));
+                    true
+                }
+                Err(mpsc::error::TrySendError::Full(())) => {
                     subscriber.overflowed.store(true, Ordering::Release);
                     true
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => false,
+                Err(mpsc::error::TrySendError::Closed(())) => false,
             }
         });
+        Ok(())
     }
 
     pub(crate) fn revision(&self) -> u64 {
@@ -2686,25 +2712,17 @@ mod tests {
             .unwrap();
         let mut editor = authority.subscribe(80);
         let mut observer = authority.subscribe(81);
-        authority.publish(&applied.commit, &BTreeSet::from([80, 81]));
-        assert!(
-            editor
-                .receiver
-                .recv()
-                .await
-                .unwrap()
-                .editor_inventory
-                .is_some()
-        );
-        assert!(
-            observer
-                .receiver
-                .recv()
-                .await
-                .unwrap()
-                .editor_inventory
-                .is_none()
-        );
+        authority
+            .publish(&applied.commit, &BTreeSet::from([80, 81]))
+            .unwrap();
+        let editor =
+            voxels_world::protocol::decode_edit_commit(&editor.receiver.recv().await.unwrap())
+                .unwrap();
+        let observer =
+            voxels_world::protocol::decode_edit_commit(&observer.receiver.recv().await.unwrap())
+                .unwrap();
+        assert!(editor.editor_inventory.is_some());
+        assert!(observer.editor_inventory.is_none());
     }
 
     #[tokio::test]
@@ -2731,11 +2749,20 @@ mod tests {
                 place(2, session, VoxelCoord::new(1, 300, 0), Material::Stone),
             )
             .unwrap();
-        authority.publish(&first.commit, &BTreeSet::from([90]));
-        authority.publish(&second.commit, &BTreeSet::from([90]));
+        authority
+            .publish(&first.commit, &BTreeSet::from([90]))
+            .unwrap();
+        authority
+            .publish(&second.commit, &BTreeSet::from([90]))
+            .unwrap();
 
         let popped_stale = subscription.receiver.recv().await.unwrap();
-        assert_eq!(popped_stale.revision, first.commit.revision);
+        assert_eq!(
+            voxels_world::protocol::decode_edit_commit(&popped_stale)
+                .unwrap()
+                .revision,
+            first.commit.revision
+        );
         assert!(subscription.discard_stale_after_overflow());
         assert!(matches!(
             subscription.receiver.try_recv(),
@@ -2750,9 +2777,15 @@ mod tests {
                 place(3, session, VoxelCoord::new(2, 300, 0), Material::Stone),
             )
             .unwrap();
-        authority.publish(&third.commit, &BTreeSet::from([90]));
+        authority
+            .publish(&third.commit, &BTreeSet::from([90]))
+            .unwrap();
         assert_eq!(
-            subscription.receiver.recv().await.unwrap().revision,
+            voxels_world::protocol::decode_edit_commit(
+                &subscription.receiver.recv().await.unwrap()
+            )
+            .unwrap()
+            .revision,
             third.commit.revision,
             "new commits after the resync boundary must still flow"
         );
