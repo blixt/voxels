@@ -437,14 +437,6 @@ fn hash31(position: vec3<f32>) -> f32 {
   return fract(sin(value) * 43758.5453);
 }
 
-fn atmospheric_path_length(distance_to_camera: f32) -> f32 {
-  // Preserve the authored near haze exactly, then compress only the horizon portion so elevated
-  // silhouettes remain legible without making low terrain look close or removing aerial depth.
-  let fog_knee = min(frame.viewport_voxel.w, 220.0);
-  return min(distance_to_camera, fog_knee)
-    + max(distance_to_camera - fog_knee, 0.0) * 0.2;
-}
-
 fn cloud_surface_weather(world: vec3<f32>) -> vec2<f32> {
   let coverage_control = clamp(frame.fog_exposure.z, 0.0, 1.0);
   if coverage_control < 0.08 {
@@ -606,7 +598,7 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   let fog_view_direction = camera_to_surface / max(distance_to_camera, 0.0001);
   let average_height = max((input.world.y + frame.camera_time.y) * 0.5, 0.0);
   let height_density = exp(-average_height * frame.fog_exposure.x);
-  let optical_depth = atmospheric_path_length(distance_to_camera)
+  let optical_depth = distance_to_camera
     * frame.ground_atmosphere.w * height_density * frame.render_options.y;
   let transmittance = exp(-optical_depth);
   let sky_factor = pow(max(fog_view_direction.y, 0.0), 0.42);
@@ -709,7 +701,7 @@ fn transport_surface_radiance(color: vec3<f32>, world: vec3<f32>, sun: vec3<f32>
   let fog_view_direction = camera_to_surface / max(distance_to_camera, 0.0001);
   let average_height = max((world.y + frame.camera_time.y) * 0.5, 0.0);
   let height_density = exp(-average_height * frame.fog_exposure.x);
-  let optical_depth = atmospheric_path_length(distance_to_camera)
+  let optical_depth = distance_to_camera
     * frame.ground_atmosphere.w * height_density * frame.render_options.y;
   let transmittance = exp(-optical_depth);
   let sky_factor = pow(max(fog_view_direction.y, 0.0), 0.42);

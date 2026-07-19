@@ -550,8 +550,8 @@ impl OutdoorEnvironment {
             sky_horizon: Vec3::new(0.58, 0.72, 0.88),
             sky_zenith: Vec3::new(0.055, 0.20, 0.56),
             ground_irradiance: Vec3::new(0.16, 0.19, 0.16),
-            fog_density: 0.012,
-            fog_height_falloff: 0.075,
+            fog_density: 0.000_09,
+            fog_height_falloff: 0.000_28,
             exposure: 1.0,
             cloud_coverage: 0.42,
             cloud_density: 0.42,
@@ -639,8 +639,12 @@ impl OutdoorEnvironment {
             ground_irradiance: Vec3::new(0.010, 0.014, 0.028)
                 .lerp(Vec3::new(0.16, 0.19, 0.16), daylight)
                 .lerp(Vec3::new(0.18, 0.105, 0.065), twilight_amount * 0.34),
-            fog_density: scalar_lerp(0.018, 0.012, daylight),
-            fog_height_falloff: scalar_lerp(0.058, 0.075, daylight),
+            // Beer-Lambert extinction in inverse metres. Clear air keeps nearby terrain crisp and
+            // retains most contrast at the 2.4 km horizon; humidity and weather below thicken it.
+            fog_density: scalar_lerp(0.000_13, 0.000_09, daylight),
+            // A several-kilometre scale height avoids treating an ordinary 100 m hill as if it
+            // had risen above the atmosphere.
+            fog_height_falloff: scalar_lerp(0.000_18, 0.000_28, daylight),
             exposure: scalar_lerp(1.42, 1.0, daylight),
             cloud_coverage: weather.coverage,
             cloud_density: weather.density,
@@ -1005,7 +1009,7 @@ mod tests {
                     (environment.key_light_radiance.x * 100.0).round() as i32,
                     (environment.sky_horizon.x * 100.0).round() as i32,
                     (environment.sky_zenith.z * 100.0).round() as i32,
-                    (environment.fog_density * 10_000.0).round() as i32,
+                    (environment.fog_density * 10_000_000.0).round() as i32,
                     (environment.cloud_coverage * 100.0).round() as i32,
                     (environment.star_visibility * 100.0).round() as i32,
                     (environment.sun_direction.y * 100.0).round() as i32,
@@ -1200,6 +1204,42 @@ mod tests {
         assert!(storm.fog_density > clear.fog_density);
         assert!(storm.cloud_coverage > clear.cloud_coverage);
         assert!(storm.precipitation > clear.precipitation);
+    }
+
+    #[test]
+    fn humidity_fog_preserves_near_contrast_and_softens_only_the_far_horizon() {
+        fn transmittance(environment: OutdoorEnvironment, distance: f32, altitude: f32) -> f32 {
+            let height_density = (-altitude * environment.fog_height_falloff).exp();
+            (-distance * environment.fog_density * height_density).exp()
+        }
+
+        let sample = AtmosphereSample {
+            humidity: 0.65,
+            coldness: 0.25,
+            aerosol: 0.10,
+            cloudiness: 0.42,
+            horizon_warmth: 0.18,
+            haze: 0.35,
+        };
+        let clear = equatorial_environment(
+            sample,
+            0.5,
+            WeatherState::for_cycle(0.08, 0.24, 0.0, 7, sample.coldness),
+        );
+        let storm = equatorial_environment(
+            sample,
+            0.5,
+            WeatherState::for_cycle(0.68, 0.24, 0.0, 7, sample.coldness),
+        );
+        let clear_near = transmittance(clear, 50.0, 130.0);
+        let clear_mid = transmittance(clear, 1_200.0, 130.0);
+        let clear_horizon = transmittance(clear, 2_400.0, 130.0);
+        let storm_horizon = transmittance(storm, 2_400.0, 130.0);
+
+        assert!(clear_near > 0.99);
+        assert!(clear_mid > 0.82);
+        assert!((0.62..0.88).contains(&clear_horizon));
+        assert!((0.25..clear_horizon).contains(&storm_horizon));
     }
 
     #[test]

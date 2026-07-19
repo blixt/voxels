@@ -128,6 +128,19 @@ mod tests {
     }
 
     #[test]
+    fn terrain_fog_integrates_physical_distance_without_a_horizon_knee() {
+        let voxels = include_str!("shaders/voxels.wgsl");
+        assert!(!voxels.contains("fn atmospheric_path_length("));
+        assert!(!voxels.contains("fog_knee"));
+        assert_eq!(
+            voxels
+                .matches("let optical_depth = distance_to_camera")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn dig_outline_uses_the_authoritative_spherical_stencil() {
         let voxels = include_str!("shaders/voxels.wgsl");
         assert!(voxels.contains("let target_center ="));
