@@ -121,8 +121,6 @@ impl Default for LoopbackTransportConfig {
 pub struct PresenceConfig {
     /// Per-connection replication scheduler cadence.
     pub broadcast_interval_ms: u16,
-    /// Bounded blocking workers used to build receiver-specific presence deltas.
-    pub replication_workers: u16,
     /// Hard player bound for this single, unsharded world.
     pub max_players: u16,
     /// Per-player inbound abuse bound. Clients normally send at 30 Hz.
@@ -150,7 +148,6 @@ impl Default for PresenceConfig {
     fn default() -> Self {
         Self {
             broadcast_interval_ms: 33,
-            replication_workers: 4,
             max_players: 1_024,
             max_pose_updates_per_second: 60,
             spatial_cell_metres: 64,
@@ -604,11 +601,6 @@ impl WorldServiceConfig {
         if !(16..=1_000).contains(&self.presence.broadcast_interval_ms) {
             return Err(WorldServiceConfigError::InvalidPresence(
                 "broadcast_interval_ms must be in 16..=1000",
-            ));
-        }
-        if !(1..=64).contains(&self.presence.replication_workers) {
-            return Err(WorldServiceConfigError::InvalidPresence(
-                "replication_workers must be in 1..=64",
             ));
         }
         if self.presence.max_players == 0
@@ -1080,7 +1072,6 @@ collision_generation_workers_per_client = 1
 
 [presence]
 broadcast_interval_ms = 33
-replication_workers = 4
 max_players = 512
 max_pose_updates_per_second = 60
 spatial_cell_metres = 64

@@ -103,13 +103,6 @@ pub(crate) struct PresenceAttachment {
     player_id: PlayerId,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct PresenceViewer {
-    connection_id: u64,
-    session_id: PresenceSessionId,
-    player_id: PlayerId,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PoseAdmission {
     Accepted,
@@ -529,16 +522,8 @@ impl PresenceHub {
         attachment: &PresenceAttachment,
         stream: &mut PresenceStreamState,
     ) -> Result<Option<Vec<u8>>, String> {
-        self.build_delta_for(attachment.viewer(), stream)
-    }
-
-    pub(crate) fn build_delta_for(
-        &self,
-        viewer: PresenceViewer,
-        stream: &mut PresenceStreamState,
-    ) -> Result<Option<Vec<u8>>, String> {
         let now = self.now_ms();
-        let candidates = self.nearby_candidates(viewer, stream)?;
+        let candidates = self.nearby_candidates(attachment, stream)?;
         let visible_player_count = u16::try_from(candidates.len()).unwrap_or(u16::MAX);
         let relevant = candidates
             .iter()
@@ -638,7 +623,7 @@ impl PresenceHub {
 
     fn nearby_candidates(
         &self,
-        attachment: PresenceViewer,
+        attachment: &PresenceAttachment,
         stream: &PresenceStreamState,
     ) -> Result<Vec<Candidate>, String> {
         let inner = self.lock();
@@ -806,16 +791,6 @@ impl Drop for PresenceAttachment {
     fn drop(&mut self) {
         self.hub
             .detach_presence(self.player_id, self.connection_id, self.session_id);
-    }
-}
-
-impl PresenceAttachment {
-    pub(crate) const fn viewer(&self) -> PresenceViewer {
-        PresenceViewer {
-            connection_id: self.connection_id,
-            session_id: self.session_id,
-            player_id: self.player_id,
-        }
     }
 }
 

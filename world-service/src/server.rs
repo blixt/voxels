@@ -5,7 +5,7 @@ use crate::{
     WorldServiceSourceError,
     edits::{ChunkEditSnapshot, EditAuthority, LoadedPlayer, ProtectedSpawn, SurfaceEditSnapshot},
     generation_limiter::PriorityGenerationLimiter,
-    presence::{PoseAdmission, PresenceHub, PresenceStreamState, PresenceViewer},
+    presence::{PoseAdmission, PresenceHub, PresenceStreamState},
     traffic::{ClientTrafficRegistry, ClientTrafficShaper, TrafficPriority},
 };
 use axum::Router;
@@ -135,9 +135,6 @@ impl WorldServer {
             ))),
             presence_connections: Arc::new(Semaphore::new(usize::from(
                 config.transport.max_connections,
-            ))),
-            presence_replication_workers: Arc::new(Semaphore::new(usize::from(
-                config.presence.replication_workers,
             ))),
             traffic: ClientTrafficRegistry::new(
                 config.transport.outbound_bandwidth_floor_bytes_per_second,
@@ -585,7 +582,6 @@ struct ServerState {
     collision_generation_workers_per_client: u16,
     connections: Arc<Semaphore>,
     presence_connections: Arc<Semaphore>,
-    presence_replication_workers: Arc<Semaphore>,
     traffic: Arc<ClientTrafficRegistry>,
     world: WorldBootstrap,
     environment: EnvironmentAuthority,
@@ -864,13 +860,6 @@ struct PresenceOutboundFrame {
     bytes: Vec<u8>,
     priority: TrafficPriority,
     _delta_permit: Option<OwnedSemaphorePermit>,
-}
-
-struct BuiltPresenceDelta {
-    stream: PresenceStreamState,
-    result: Result<Option<Vec<u8>>, String>,
-    delta_permit: OwnedSemaphorePermit,
-    outbound_permit: mpsc::OwnedPermit<PresenceOutboundFrame>,
 }
 
 struct GenerationJob {
@@ -1699,8 +1688,6 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
 
     let mut peer_closed = false;
     let mut pose_open = true;
-    let viewer = attachment.viewer();
-    let mut delta_task = None::<tokio::task::JoinHandle<Result<BuiltPresenceDelta, String>>>;
     loop {
         tokio::select! {
             // Input authority is latency-sensitive. A replication tick may already be overdue
@@ -1828,54 +1815,22 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     break;
                 }
             }
-            built = async {
-                delta_task
-                    .as_mut()
-                    .expect("presence delta task is guarded")
-                    .await
-            }, if delta_task.is_some() => {
-                delta_task = None;
-                let built = match built {
-                    Ok(Ok(built)) => built,
-                    Ok(Err(error)) => {
-                        let _ = queue_presence_frame(
-                            &outbound,
-                            TrafficPriority::Critical,
-                            encode_error(0, &error),
-                        ).await;
-                        break;
-                    }
-                    Err(error) => {
-                        let _ = queue_presence_frame(
-                            &outbound,
-                            TrafficPriority::Critical,
-                            encode_error(0, &format!("presence replication task failed: {error}")),
-                        ).await;
-                        break;
-                    }
+            _ = replication_tick.tick() => {
+                let Ok(delta_permit) = Arc::clone(&delta_slot).try_acquire_owned() else {
+                    continue;
                 };
-                let BuiltPresenceDelta {
-                    stream: built_stream,
-                    result,
-                    delta_permit,
-                    outbound_permit,
-                } = built;
-                stream = built_stream;
-                match result {
+                match state.presence.build_delta(&attachment, &mut stream) {
                     Ok(Some(bytes)) => {
-                        outbound_permit.send(PresenceOutboundFrame {
+                        if outbound.send(PresenceOutboundFrame {
                             bytes,
                             priority: TrafficPriority::RealtimePresence,
                             _delta_permit: Some(delta_permit),
-                        });
+                        }).await.is_err() {
+                            break;
+                        }
                     }
-                    Ok(None) => {
-                        drop(outbound_permit);
-                        drop(delta_permit);
-                    }
+                    Ok(None) => drop(delta_permit),
                     Err(error) => {
-                        drop(outbound_permit);
-                        drop(delta_permit);
                         let _ = queue_presence_frame(
                             &outbound,
                             TrafficPriority::Critical,
@@ -1885,28 +1840,7 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
                     }
                 }
             }
-            _ = replication_tick.tick(), if delta_task.is_none() => {
-                let Ok(delta_permit) = Arc::clone(&delta_slot).try_acquire_owned() else {
-                    continue;
-                };
-                let Ok(outbound_permit) = outbound.clone().try_reserve_owned() else {
-                    drop(delta_permit);
-                    continue;
-                };
-                delta_task = Some(spawn_presence_delta(
-                    Arc::clone(&state.presence),
-                    viewer,
-                    std::mem::take(&mut stream),
-                    Arc::clone(&state.presence_replication_workers),
-                    delta_permit,
-                    outbound_permit,
-                ));
-            }
         }
-    }
-    if let Some(delta_task) = delta_task {
-        delta_task.abort();
-        let _ = delta_task.await;
     }
     drop(outbound);
     if peer_closed {
@@ -1915,34 +1849,6 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
     reader.abort();
     let _ = reader.await;
     let _ = writer.await;
-}
-
-fn spawn_presence_delta(
-    presence: Arc<PresenceHub>,
-    viewer: PresenceViewer,
-    mut stream: PresenceStreamState,
-    workers: Arc<Semaphore>,
-    delta_permit: OwnedSemaphorePermit,
-    outbound_permit: mpsc::OwnedPermit<PresenceOutboundFrame>,
-) -> tokio::task::JoinHandle<Result<BuiltPresenceDelta, String>> {
-    tokio::spawn(async move {
-        let worker_permit = workers
-            .acquire_owned()
-            .await
-            .map_err(|_| "presence replication worker pool closed".to_owned())?;
-        tokio::task::spawn_blocking(move || {
-            let _worker_permit = worker_permit;
-            let result = presence.build_delta_for(viewer, &mut stream);
-            BuiltPresenceDelta {
-                stream,
-                result,
-                delta_permit,
-                outbound_permit,
-            }
-        })
-        .await
-        .map_err(|error| format!("presence replication worker failed: {error}"))
-    })
 }
 
 fn pose_admission_error(admission: PoseAdmission) -> Option<&'static str> {
