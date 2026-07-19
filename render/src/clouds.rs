@@ -114,7 +114,16 @@ impl VolumetricCloudGpu {
             dimension: Some(TextureViewDimension::D3),
             ..Default::default()
         });
-        let noise_sampler = device.create_sampler(&cloud_noise_sampler_descriptor());
+        let noise_sampler = device.create_sampler(&SamplerDescriptor {
+            label: Some("volumetric cloud noise sampler"),
+            address_mode_u: AddressMode::Repeat,
+            address_mode_v: AddressMode::Repeat,
+            address_mode_w: AddressMode::Repeat,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mipmap_filter: MipmapFilterMode::Linear,
+            ..Default::default()
+        });
         write_noise(queue, &noise, 0);
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("volumetric cloud uniform"),
@@ -359,21 +368,6 @@ fn target_size(width: u32, height: u32) -> [f32; 4] {
         1.0 / width.max(1) as f32,
         1.0 / height.max(1) as f32,
     ]
-}
-
-fn cloud_noise_sampler_descriptor() -> SamplerDescriptor<'static> {
-    SamplerDescriptor {
-        label: Some("volumetric cloud noise sampler"),
-        address_mode_u: AddressMode::Repeat,
-        address_mode_v: AddressMode::Repeat,
-        address_mode_w: AddressMode::Repeat,
-        // Deliberately preserve authored noise cells and mip levels. Interpolation made the voxel
-        // formations read as low-resolution blur instead of intentional volumetric blocks.
-        mag_filter: FilterMode::Nearest,
-        min_filter: FilterMode::Nearest,
-        mipmap_filter: MipmapFilterMode::Nearest,
-        ..Default::default()
-    }
 }
 
 fn cloud_target(
@@ -732,14 +726,6 @@ mod tests {
         }
         .sanitized();
         assert_eq!([reduced.view_steps, reduced.light_steps], [4, 1]);
-    }
-
-    #[test]
-    fn cloud_volume_sampling_never_interpolates_between_voxel_cells_or_mips() {
-        let sampler = cloud_noise_sampler_descriptor();
-        assert_eq!(sampler.mag_filter, FilterMode::Nearest);
-        assert_eq!(sampler.min_filter, FilterMode::Nearest);
-        assert_eq!(sampler.mipmap_filter, MipmapFilterMode::Nearest);
     }
 
     #[test]

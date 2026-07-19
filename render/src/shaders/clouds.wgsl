@@ -23,18 +23,6 @@ fn ordered_threshold(pixel: vec2<u32>) -> f32 {
   return (ORDERED_4X4[index] + 0.5) / 16.0;
 }
 
-fn dithered_cloud_alpha(alpha: f32, pixel: vec2<u32>) -> f32 {
-  // Keep a small, explicit coverage vocabulary. Ordered rounding preserves mean opacity while
-  // producing stable hard pixel clusters instead of a translucent blur or temporal noise.
-  let levels = 12.0;
-  let scaled = clamp(alpha, 0.0, 1.0) * levels;
-  let lower = floor(scaled);
-  let fraction = fract(scaled);
-  let threshold = ordered_threshold(pixel + vec2<u32>(2u, 1u));
-  let rounded = lower + select(0.0, 1.0, threshold < fraction);
-  return min(rounded / levels, 1.0);
-}
-
 fn screen_triangle(index: u32, depth: f32) -> vec4<f32> {
   let x = f32((index << 1u) & 2u);
   let y = f32(index & 2u);
@@ -232,7 +220,22 @@ fn fs_trace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     if density <= 0.001 {
       continue;
     }
-    let light_visibility = light_transmittance(world, light_direction, filter_width_metres);
+    // Severe weather continuously removes directional shadow contrast. Once that synchronized
+    // strength reaches its floor, secondary sun-ray marches cannot affect visible direct light;
+    // retain the multiple-scattering floor without paying two more density evaluations per step.
+    var light_visibility = 0.52;
+    if frame.key_light_radiance.w > 0.02 {
+      let traced_light_visibility = light_transmittance(
+        world,
+        light_direction,
+        filter_width_metres,
+      );
+      light_visibility = mix(
+        0.52,
+        traced_light_visibility,
+        smoothstep(0.02, 0.18, frame.key_light_radiance.w),
+      );
+    }
     let height = clamp((world.y - clouds.layer.x) / max(clouds.layer.y - clouds.layer.x, 1.0), 0.0, 1.0);
     let base_darkening = mix(0.46, 1.0, smoothstep(0.0, 0.56, height));
     let direct = frame.key_light_radiance.rgb * phase * light_visibility * base_darkening;
@@ -280,17 +283,23 @@ fn fs_composite(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32
   }
   let maximum = vec2<i32>(source_dimensions) - vec2<i32>(1);
   let cloud = textureLoad(cloud_target, clamp(source_base + offset, vec2<i32>(0), maximum), 0);
-  // Ordered reconstruction preserves expected coverage across neighboring full-resolution pixels.
-  // Alpha uses the same stable screen lattice with a rotated phase, so neither spatial nor mip
-  // filtering can turn a deliberate voxel cell into a soft cloud edge.
-  let reconstructed_alpha = dithered_cloud_alpha(cloud.a, pixel);
+  // Three explicit opacity tiers replace the continuous reconstruction curve. The volume keeps
+  // its physically integrated radiance, but the visible coverage reads as deliberate hard cells.
+  let reconstructed_alpha = select(
+    0.0,
+    select(0.5, 1.0, cloud.a > 0.72),
+    cloud.a > 0.18,
+  );
   let radiance_scale = reconstructed_alpha / max(cloud.a, 0.0001);
   // Reintroduce the part of the analytic bow that ordinary premultiplied cloud composition would
   // remove. The sky contributes (1-a) of the bow and this pass contributes a, so the scattering
   // remains visible against a dark rain cloud without being counted twice.
-  let rainbow = primary_rainbow_radiance(
-    camera_ray(position.xy, frame.viewport_voxel.xy),
-  );
+  var rainbow = vec3<f32>(0.0);
+  if primary_rainbow_weather_possible() {
+    rainbow = primary_rainbow_radiance(
+      camera_ray(position.xy, frame.viewport_voxel.xy),
+    );
+  }
   return vec4<f32>(
     cloud.rgb * radiance_scale + rainbow * reconstructed_alpha,
     reconstructed_alpha,

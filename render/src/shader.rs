@@ -343,10 +343,12 @@ mod tests {
         assert!(clouds.contains("advected.y * 2.1"));
         assert!(clouds.contains("ambient * ambient_visibility + direct"));
         assert!(clouds.contains("mix(1.10, 0.86, powder)"));
-        assert!(clouds.contains("fn dithered_cloud_alpha("));
-        assert!(clouds.contains("let levels = 12.0"));
-        assert!(clouds.contains("let reconstructed_alpha = dithered_cloud_alpha("));
+        assert!(clouds.contains("if frame.key_light_radiance.w > 0.02"));
+        assert!(clouds.contains("smoothstep(0.02, 0.18, frame.key_light_radiance.w)"));
+        assert!(clouds.contains("select(0.5, 1.0, cloud.a > 0.72)"));
+        assert!(clouds.contains("cloud.a > 0.18"));
         assert!(!clouds.contains("smoothstep(0.035, 0.965, cloud.a)"));
+        assert!(clouds.contains("let radiance_scale ="));
     }
 
     #[test]
@@ -434,6 +436,7 @@ mod tests {
         let sky = include_str!("shaders/sky.wgsl");
         let clouds = include_str!("shaders/clouds.wgsl");
         assert!(frame.contains("fn primary_rainbow_radiance("));
+        assert!(frame.contains("fn primary_rainbow_weather_possible()"));
         assert!(frame.contains("let antisolar_cosine = dot(ray, -sun);"));
         assert!(frame.contains("0.6691306"));
         assert!(frame.contains("atmosphere_cloud_envelope_world(shower_world_xz)"));
@@ -444,6 +447,7 @@ mod tests {
             .unwrap();
         assert!(angular_reject < cloud_sample);
         assert!(sky.contains("color += primary_rainbow_radiance(ray);"));
+        assert!(clouds.contains("if primary_rainbow_weather_possible()"));
         assert!(clouds.contains("rainbow * reconstructed_alpha"));
     }
 

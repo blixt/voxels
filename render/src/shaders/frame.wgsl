@@ -124,7 +124,22 @@ fn primary_rainbow_peak(cosine: f32, centre: f32, half_width: f32) -> f32 {
   return 1.0 - smoothstep(half_width * 0.25, half_width, abs(cosine - centre));
 }
 
+fn primary_rainbow_weather_possible() -> bool {
+  let sun_y = normalize(frame.sun_direction.xyz).y;
+  return frame.weather.x > 0.04
+    && sun_y > 0.015
+    && sun_y < 0.6691306
+    && frame.sun_direction.w > 0.001
+    && frame.medium.x < 0.999
+    && frame.interior.x < 0.999;
+}
+
 fn primary_rainbow_radiance(ray: vec3<f32>) -> vec3<f32> {
+  // This condition is uniform for the entire frame. In the overwhelmingly common case it keeps
+  // the full-screen sky and cloud-composite invocations out of all angular and weather work.
+  if !primary_rainbow_weather_possible() {
+    return vec3<f32>(0.0);
+  }
   let sun = normalize(frame.sun_direction.xyz);
   // A primary bow is centred on the antisolar point. Its red outer edge is about 42 degrees from
   // that point and the violet inner edge is about 40 degrees. Reject everything outside the
@@ -138,7 +153,7 @@ fn primary_rainbow_radiance(ray: vec3<f32>) -> vec3<f32> {
   let low_sun = smoothstep(0.015, 0.055, sun.y)
     * (1.0 - smoothstep(0.635, 0.6691306, sun.y))
     * frame.sun_direction.w;
-  if low_sun <= 0.001 || frame.weather.x <= 0.04 {
+  if low_sun <= 0.001 {
     return vec3<f32>(0.0);
   }
   let horizontal = ray.xz / max(length(ray.xz), 0.0001);
