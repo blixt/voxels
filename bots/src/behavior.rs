@@ -1,9 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::f32::consts::{PI, TAU};
+#[cfg(test)]
+use voxels_world::protocol::DigVolume;
 use voxels_world::protocol::EditAction;
 use voxels_world::{Material, VOXEL_SIZE_METRES, VoxelCoord};
 
 const DECISION_INTERVAL_SECONDS: f32 = 0.5;
+const WORKSITE_GRID_EDGE: i32 = 8;
+const WORKSITE_SPACING_VOXELS: i32 = 4;
+const DOWNWARD_DIG_BASE_DEPTH_VOXELS: i32 = 17;
+const DOWNWARD_DIG_DEPTH_LEVELS: u64 = 5;
+const DOWNWARD_DIG_DEPTH_STEP_VOXELS: i32 = 5;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -131,7 +138,8 @@ impl BehaviorState {
                 downward_dig(
                     context.eye_position_metres,
                     self.index,
-                    ((self.decision_index.saturating_sub(1) % 5) * 5) as i32,
+                    (self.decision_index.saturating_sub(1) % DOWNWARD_DIG_DEPTH_LEVELS) as i32
+                        * DOWNWARD_DIG_DEPTH_STEP_VOXELS,
                 )
             } else {
                 forward_dig(
@@ -231,7 +239,7 @@ fn downward_dig(eye: [f32; 3], index: usize, extra_depth_voxels: i32) -> EditAct
     EditAction::Dig {
         hit: VoxelCoord::new(
             position.x + offset_x,
-            position.y - 17 - extra_depth_voxels,
+            position.y - DOWNWARD_DIG_BASE_DEPTH_VOXELS - extra_depth_voxels,
             position.z + offset_z,
         ),
     }
@@ -243,7 +251,7 @@ fn tower_site_dig(eye: [f32; 3], index: usize) -> EditAction {
     EditAction::Dig {
         hit: VoxelCoord::new(
             position.x + offset_x,
-            position.y - 17,
+            position.y - DOWNWARD_DIG_BASE_DEPTH_VOXELS,
             position.z + offset_z,
         ),
     }
@@ -273,7 +281,7 @@ fn copied_action(
             Some(EditAction::Dig {
                 hit: VoxelCoord::new(
                     follower.x + offset_x,
-                    follower.y - 17,
+                    follower.y - DOWNWARD_DIG_BASE_DEPTH_VOXELS,
                     follower.z + offset_z,
                 ),
             })
@@ -305,16 +313,14 @@ fn normalize_yaw(yaw: f32) -> f32 {
 }
 
 fn worksite_offset(index: usize) -> [i32; 2] {
-    const GRID_EDGE: i32 = 8;
-    const SPACING_VOXELS: i32 = 6;
-    let x = index as i32 % GRID_EDGE;
-    let z = index as i32 / GRID_EDGE % GRID_EDGE;
+    let x = index as i32 % WORKSITE_GRID_EDGE;
+    let z = index as i32 / WORKSITE_GRID_EDGE % WORKSITE_GRID_EDGE;
     let centre_skipping_axis = |coordinate: i32| {
-        let centred = coordinate - GRID_EDGE / 2;
+        let centred = coordinate - WORKSITE_GRID_EDGE / 2;
         if centred >= 0 {
-            (centred + 1) * SPACING_VOXELS
+            (centred + 1) * WORKSITE_SPACING_VOXELS
         } else {
-            centred * SPACING_VOXELS
+            centred * WORKSITE_SPACING_VOXELS
         }
     };
     [centre_skipping_axis(x), centre_skipping_axis(z)]
@@ -357,10 +363,33 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(worksites.len(), 64);
         assert!(worksites.iter().all(|[x, z]| {
-            // The benchmark protects a 3-voxel-radius pillar and digs a 5-voxel-radius sphere.
-            // Keeping every hit more than 8 voxels from the origin prevents overlap.
-            x * x + z * z > 8 * 8
+            let volume =
+                DigVolume::for_hit(VoxelCoord::new(*x, 0, *z)).expect("bounded worksite");
+            volume.coordinates().all(|coord| {
+                // The load fixture protects a 3-voxel-radius vertical cylinder.
+                coord.x * coord.x + coord.z * coord.z > 3 * 3
+            })
         }));
+    }
+
+    #[test]
+    fn deepest_worksite_digs_leave_pose_latency_reach_headroom() {
+        for index in 0..64 {
+            let EditAction::Dig { hit } = downward_dig(
+                [0.0; 3],
+                index,
+                (DOWNWARD_DIG_DEPTH_LEVELS as i32 - 1) * DOWNWARD_DIG_DEPTH_STEP_VOXELS,
+            ) else {
+                unreachable!("downward dig always returns a dig action");
+            };
+            let distance_metres =
+                ((hit.x * hit.x + hit.y * hit.y + hit.z * hit.z) as f32).sqrt()
+                    * VOXEL_SIZE_METRES;
+            assert!(
+                distance_metres < 4.5,
+                "worksite {index} consumes {distance_metres:.2} m of interaction reach"
+            );
+        }
     }
 
     #[test]
