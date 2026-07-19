@@ -55,6 +55,7 @@ const VIEWPORT = { width: VIEWPORT_VALUES[0], height: VIEWPORT_VALUES[1] };
 const DEVICE_SCALE_FACTOR = Number.parseFloat(
   process.env.VOXELS_LOD_TEST_DPR ?? (BOUNDARY_COVERAGE ? "1.360930735930736" : "1"),
 );
+const RECORD_VIDEO = process.env.VOXELS_LOD_TEST_RECORD_VIDEO === "1";
 const OUTPUT_DIRECTORY = path.resolve(
   process.env.VOXELS_LOD_TEST_OUTPUT ??
     (BOUNDARY_COVERAGE
@@ -571,6 +572,8 @@ const timings = { frameIntervals: [], gpu: new Map() };
 const errors = [];
 const port = await reserveEphemeralPort();
 let browser;
+let context;
+let rawVideo;
 let server;
 let fixture;
 let worldService;
@@ -603,11 +606,20 @@ try {
     preview: { host: "127.0.0.1", port, strictPort: true },
   });
   browser = await chromium.launch(chromeWebGpuLaunchOptions());
-  const context = await browser.newContext({
+  context = await browser.newContext({
     viewport: VIEWPORT,
     deviceScaleFactor: DEVICE_SCALE_FACTOR,
+    ...(RECORD_VIDEO
+      ? {
+          recordVideo: {
+            dir: OUTPUT_DIRECTORY,
+            size: VIEWPORT,
+          },
+        }
+      : {}),
   });
   const page = await context.newPage();
+  rawVideo = page.video();
   page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
   page.on("console", (message) => {
     if (isBrowserConsoleFailure(message.type(), message.text(), FAILURE)) {
@@ -630,6 +642,7 @@ try {
   }
   const beforePose = cameraPosition(beforeSnapshot);
   const before = await page.screenshot({ path: path.join(OUTPUT_DIRECTORY, "before.png") });
+  if (RECORD_VIDEO && !WATERTIGHT) await page.waitForTimeout(1_500);
 
   if (WATERTIGHT) {
     const headingSamples = [
@@ -725,6 +738,7 @@ try {
     const afterCentres = boundaryCentres(afterSnapshot);
     const afterPose = cameraPosition(afterSnapshot);
     const after = await page.screenshot({ path: path.join(OUTPUT_DIRECTORY, "after.png") });
+    if (RECORD_VIDEO) await page.waitForTimeout(1_500);
     await sampleStablePerformance(page, timings, 2_000);
     const image = await compareScreenshots(page, before, after);
     const performance = summarizePerformance(timings);
@@ -795,6 +809,10 @@ try {
   console.error(JSON.stringify({ ok: false, error: String(error), errors }, null, 2));
   process.exitCode = 1;
 } finally {
+  await context?.close();
+  if (rawVideo) {
+    await rawVideo.saveAs(path.join(OUTPUT_DIRECTORY, "transition-raw.webm"));
+  }
   await browser?.close();
   await server?.close();
   await worldService?.close();

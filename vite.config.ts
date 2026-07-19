@@ -608,6 +608,10 @@ export default defineConfig(({ command, mode }) => ({
         command: "node scripts/browser-lod-transition.mjs --boundary-coverage",
         cache: false,
       },
+      "capture:lod-video": {
+        command: "node scripts/capture-lod-video.mjs",
+        cache: false,
+      },
       "test:multiplayer-browser": {
         command: "node scripts/browser-multiplayer.mjs",
         cache: false,
