@@ -24,6 +24,7 @@ export interface OpenPageOptions {
   readonly viewport?: ViewportSize;
   readonly deviceScaleFactor?: number;
   readonly recordVideo?: boolean;
+  readonly videoFilename?: string;
   readonly engine?: boolean;
 }
 
@@ -60,6 +61,11 @@ export class BrowserCapability {
   readonly #scenario: ScenarioContext;
   readonly #browser: Browser;
   readonly #contexts: BrowserContext[] = [];
+  readonly #videos: {
+    readonly page: Page;
+    readonly label: string;
+    readonly filename: string;
+  }[] = [];
   readonly #warningPattern: RegExp;
 
   private constructor(scenario: ScenarioContext, browser: Browser, warningPattern: RegExp) {
@@ -118,6 +124,13 @@ export class BrowserCapability {
     });
     await page.goto(options.url, { waitUntil: "domcontentloaded" });
     const browserViewport = new BrowserViewport(this.#scenario, page, label);
+    if (options.recordVideo) {
+      this.#videos.push({
+        page,
+        label,
+        filename: options.videoFilename ?? videoArtifactName(label),
+      });
+    }
     if (options.engine ?? true) await browserViewport.engine.ready();
     return browserViewport;
   }
@@ -127,6 +140,17 @@ export class BrowserCapability {
     for (const context of this.#contexts.splice(0).toReversed()) {
       try {
         await context.close();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    for (const video of this.#videos.splice(0)) {
+      try {
+        const recording = video.page.video();
+        if (recording === null) throw new Error(`page ${video.label} has no video recording`);
+        const destination = this.#scenario.artifacts.resolve(video.filename);
+        await recording.saveAs(destination);
+        this.#scenario.artifacts.record(`${video.label} video`, destination, "video/webm");
       } catch (error) {
         errors.push(error);
       }
