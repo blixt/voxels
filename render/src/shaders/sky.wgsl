@@ -176,6 +176,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     + moon_surface
     + vec3<f32>(0.42, 0.50, 0.68) * moon_glow;
   color += celestial_star_radiance(ray, moon_disc);
+  color += primary_rainbow_radiance(ray);
   let interface_distance = max(
     (frame.medium.w - frame.camera_time.y) / max(ray.y, 0.05),
     0.0,

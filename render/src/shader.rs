@@ -368,6 +368,42 @@ mod tests {
     }
 
     #[test]
+    fn primary_rainbow_obeys_antisolar_geometry_and_weather() {
+        fn visible(
+            sun_elevation_degrees: f32,
+            bow_radius_degrees: f32,
+            precipitation: f32,
+        ) -> bool {
+            let sun_y = sun_elevation_degrees.to_radians().sin();
+            let antisolar_cosine = bow_radius_degrees.to_radians().cos();
+            (0.015..0.669_130_6).contains(&sun_y)
+                && (0.7314..=0.7716).contains(&antisolar_cosine)
+                && precipitation > 0.04
+        }
+
+        assert!(visible(18.0, 42.0, 0.7));
+        assert!(!visible(50.0, 42.0, 0.7));
+        assert!(!visible(18.0, 20.0, 0.7));
+        assert!(!visible(18.0, 42.0, 0.0));
+
+        let frame = FRAME_SOURCE;
+        let sky = include_str!("shaders/sky.wgsl");
+        let clouds = include_str!("shaders/clouds.wgsl");
+        assert!(frame.contains("fn primary_rainbow_radiance("));
+        assert!(frame.contains("let antisolar_cosine = dot(ray, -sun);"));
+        assert!(frame.contains("0.6691306"));
+        assert!(frame.contains("atmosphere_cloud_envelope_world(shower_world_xz)"));
+        assert!(frame.contains("if antisolar_cosine < 0.7314"));
+        let angular_reject = frame.find("if antisolar_cosine < 0.7314").unwrap();
+        let cloud_sample = frame
+            .find("atmosphere_cloud_envelope_world(shower_world_xz)")
+            .unwrap();
+        assert!(angular_reject < cloud_sample);
+        assert!(sky.contains("color += primary_rainbow_radiance(ray);"));
+        assert!(clouds.contains("rainbow * reconstructed_alpha"));
+    }
+
+    #[test]
     fn moon_uses_phase_ready_sphere_lighting_and_bounded_apparent_facets() {
         let sky = include_str!("shaders/sky.wgsl");
         assert!(sky.contains("fn moon_surface_radiance("));

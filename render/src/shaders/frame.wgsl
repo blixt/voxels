@@ -119,3 +119,56 @@ fn atmosphere_cloud_envelope_world(world_xz: vec2<f32>) -> f32 {
   );
   return atmosphere_cloud_envelope(field, frame.fog_exposure.z);
 }
+
+fn primary_rainbow_peak(cosine: f32, centre: f32, half_width: f32) -> f32 {
+  return 1.0 - smoothstep(half_width * 0.25, half_width, abs(cosine - centre));
+}
+
+fn primary_rainbow_radiance(ray: vec3<f32>) -> vec3<f32> {
+  let sun = normalize(frame.sun_direction.xyz);
+  // A primary bow is centred on the antisolar point. Its red outer edge is about 42 degrees from
+  // that point and the violet inner edge is about 40 degrees. Reject everything outside the
+  // narrow cone before evaluating the world-space shower field.
+  let antisolar_cosine = dot(ray, -sun);
+  if antisolar_cosine < 0.7314 || antisolar_cosine > 0.7716 {
+    return vec3<f32>(0.0);
+  }
+  // The ground hides the cone once the Sun rises above its 42-degree radius. Gentle endpoint
+  // fades avoid a temporal switch as the synchronized celestial clock crosses either horizon.
+  let low_sun = smoothstep(0.015, 0.055, sun.y)
+    * (1.0 - smoothstep(0.635, 0.6691306, sun.y))
+    * frame.sun_direction.w;
+  if low_sun <= 0.001 || frame.weather.x <= 0.04 {
+    return vec3<f32>(0.0);
+  }
+  let horizontal = ray.xz / max(length(ray.xz), 0.0001);
+  let shower_world_xz = frame.camera_time.xz + horizontal * 1800.0;
+  let local_rain = atmosphere_cloud_envelope_world(shower_world_xz) * frame.weather.x;
+  if local_rain <= 0.025 {
+    return vec3<f32>(0.0);
+  }
+
+  // Cosines encode increasing angular radius in reverse order. These overlapping narrow lobes
+  // approximate wavelength dispersion without acos, a lookup texture, or another render pass.
+  let spectrum =
+    vec3<f32>(1.00, 0.10, 0.03) * primary_rainbow_peak(antisolar_cosine, 0.7396, 0.0042)
+    + vec3<f32>(1.00, 0.34, 0.02) * primary_rainbow_peak(antisolar_cosine, 0.7443, 0.0040)
+    + vec3<f32>(1.00, 0.78, 0.04) * primary_rainbow_peak(antisolar_cosine, 0.7484, 0.0038)
+    + vec3<f32>(0.18, 0.92, 0.16) * primary_rainbow_peak(antisolar_cosine, 0.7527, 0.0038)
+    + vec3<f32>(0.08, 0.36, 1.00) * primary_rainbow_peak(antisolar_cosine, 0.7567, 0.0038)
+    + vec3<f32>(0.42, 0.10, 0.86) * primary_rainbow_peak(antisolar_cosine, 0.7604, 0.0038);
+  let sunlight = clamp(
+    dot(frame.key_light_radiance.rgb, vec3<f32>(0.2126, 0.7152, 0.0722)) * 0.24,
+    0.0,
+    1.0,
+  );
+  let clearing = 1.0 - frame.weather.y * 0.82;
+  return spectrum
+    * low_sun
+    * sunlight
+    * clearing
+    * smoothstep(0.025, 0.55, local_rain)
+    * (1.0 - frame.medium.x)
+    * (1.0 - frame.interior.x)
+    * 0.16;
+}

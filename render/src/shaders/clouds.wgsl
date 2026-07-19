@@ -272,5 +272,14 @@ fn fs_composite(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32
   // pixels while never inventing a blurred source value or changing with time.
   let reconstructed_alpha = smoothstep(0.035, 0.965, cloud.a);
   let radiance_scale = reconstructed_alpha / max(cloud.a, 0.0001);
-  return vec4<f32>(cloud.rgb * radiance_scale, reconstructed_alpha) * (1.0 - frame.medium.x);
+  // Reintroduce the part of the analytic bow that ordinary premultiplied cloud composition would
+  // remove. The sky contributes (1-a) of the bow and this pass contributes a, so the scattering
+  // remains visible against a dark rain cloud without being counted twice.
+  let rainbow = primary_rainbow_radiance(
+    camera_ray(position.xy, frame.viewport_voxel.xy),
+  );
+  return vec4<f32>(
+    cloud.rgb * radiance_scale + rainbow * reconstructed_alpha,
+    reconstructed_alpha,
+  ) * (1.0 - frame.medium.x);
 }
