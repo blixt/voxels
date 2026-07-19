@@ -1,7 +1,13 @@
 import { inspect } from "node:util";
 import { ArtifactStore, type ArtifactOptions, type ArtifactRecord } from "./artifacts.ts";
 
-export type ScenarioKind = "validation" | "benchmark" | "capture" | "bot-load" | "analysis";
+export type ScenarioKind =
+  | "validation"
+  | "benchmark"
+  | "capture"
+  | "bot-load"
+  | "analysis"
+  | "setup";
 export type ViewportKind = "browser" | "native";
 
 export interface ScenarioUses {
