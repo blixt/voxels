@@ -120,6 +120,7 @@ impl EditMap {
     pub fn snapshot_for_chunks(&self, coords: &[ChunkCoord]) -> Self {
         let mut snapshot = Self::default();
         for coord in coords {
+            let requested_origin = coord.world_origin();
             for dz in -1..=1 {
                 for dy in -1..=1 {
                     for dx in -1..=1 {
@@ -143,15 +144,13 @@ impl EditMap {
                                 origin[1] + local[1] as i32,
                                 origin[2] + local[2] as i32,
                             );
-                            if coords.iter().any(|requested| {
-                                let origin = requested.world_origin();
-                                voxel.x >= origin[0].saturating_sub(1)
-                                    && voxel.x <= origin[0].saturating_add(CHUNK_EDGE as i32)
-                                    && voxel.y >= origin[1].saturating_sub(1)
-                                    && voxel.y <= origin[1].saturating_add(CHUNK_EDGE as i32)
-                                    && voxel.z >= origin[2].saturating_sub(1)
-                                    && voxel.z <= origin[2].saturating_add(CHUNK_EDGE as i32)
-                            }) {
+                            if voxel.x >= requested_origin[0].saturating_sub(1)
+                                && voxel.x <= requested_origin[0].saturating_add(CHUNK_EDGE as i32)
+                                && voxel.y >= requested_origin[1].saturating_sub(1)
+                                && voxel.y <= requested_origin[1].saturating_add(CHUNK_EDGE as i32)
+                                && voxel.z >= requested_origin[2].saturating_sub(1)
+                                && voxel.z <= requested_origin[2].saturating_add(CHUNK_EDGE as i32)
+                            {
                                 snapshot.insert_override(voxel, material);
                             }
                         }
@@ -634,6 +633,27 @@ mod tests {
 
             assert_eq!(snapshot.override_at(coord), Some(Material::Basalt));
         }
+    }
+
+    #[test]
+    fn chunk_snapshots_union_only_the_requested_meshing_shells() {
+        let mut edits = EditMap::default();
+        let first_shell = VoxelCoord::new(CHUNK_EDGE as i32, 7, 7);
+        let second_shell = VoxelCoord::new(CHUNK_EDGE as i32 * 2 - 1, 7, 7);
+        let second_core = VoxelCoord::new(CHUNK_EDGE as i32 * 2, 7, 7);
+        let gap = VoxelCoord::new(CHUNK_EDGE as i32 + CHUNK_EDGE as i32 / 2, 7, 7);
+        for coord in [first_shell, second_shell, second_core, gap] {
+            edits.insert_override(coord, Material::Basalt);
+        }
+
+        let snapshot =
+            edits.snapshot_for_chunks(&[ChunkCoord::new(0, 0, 0), ChunkCoord::new(2, 0, 0)]);
+
+        assert_eq!(snapshot.override_at(first_shell), Some(Material::Basalt));
+        assert_eq!(snapshot.override_at(second_shell), Some(Material::Basalt));
+        assert_eq!(snapshot.override_at(second_core), Some(Material::Basalt));
+        assert_eq!(snapshot.override_at(gap), None);
+        assert_eq!(snapshot.len(), 3);
     }
 
     #[test]
