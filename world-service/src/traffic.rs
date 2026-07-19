@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use tokio::sync::Notify;
 use tokio::time::{Duration, Instant};
 
-const MIN_PACING_QUANTUM_BYTES: usize = 8 * 1024;
+/// Small enough to keep one non-preemptible write near the queue-delay target on constrained
+/// links, while still amortizing VXWP fragment and WebSocket framing overhead.
+const MIN_PACING_QUANTUM_BYTES: usize = 2 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum TrafficPriority {
@@ -306,16 +308,12 @@ impl ClientTrafficShaper {
     }
 
     pub(crate) fn frame_fragment_bytes(&self, frame_bytes: usize) -> Option<usize> {
-        if frame_bytes <= self.max_frame_fragment_bytes {
-            return None;
-        }
         let rate = self.lock().current_bytes_per_second;
         let delay_budget_bytes = (rate * self.queue_delay_target.as_secs_f64()).floor() as usize;
-        Some(
-            delay_budget_bytes
-                .max(MIN_PACING_QUANTUM_BYTES)
-                .min(self.max_frame_fragment_bytes),
-        )
+        let fragment_bytes = delay_budget_bytes
+            .max(MIN_PACING_QUANTUM_BYTES)
+            .min(self.max_frame_fragment_bytes);
+        (frame_bytes > fragment_bytes).then_some(fragment_bytes)
     }
 
     fn lock(&self) -> MutexGuard<'_, TrafficState> {
@@ -691,7 +689,7 @@ mod tests {
             Duration::from_secs(3),
             32 * 1024,
         );
-        assert_eq!(shaper.lock().tokens, 8_192.0);
+        assert_eq!(shaper.lock().tokens, 2_048.0);
         {
             let mut state = shaper.lock();
             state.current_bytes_per_second = 80_000.0;
@@ -707,6 +705,22 @@ mod tests {
         }
         shaper.observe_round_trip(Duration::from_millis(260));
         assert_eq!(shaper.current_rate_bytes_per_second(), 40_000);
-        assert_eq!(shaper.lock().tokens, 8_192.0);
+        assert_eq!(shaper.lock().tokens, 8_000.0);
+    }
+
+    #[test]
+    fn response_fragmentation_tracks_the_latency_budget_below_the_hard_cap() {
+        let shaper = ClientTrafficShaper::new(
+            100_000,
+            800_000,
+            64 * 1024,
+            Duration::from_millis(25),
+            Duration::from_secs(3),
+            32 * 1024,
+        );
+
+        assert_eq!(shaper.frame_fragment_bytes(2_500), None);
+        assert_eq!(shaper.frame_fragment_bytes(2_501), Some(2_500));
+        assert_eq!(shaper.frame_fragment_bytes(12 * 1024), Some(2_500));
     }
 }
