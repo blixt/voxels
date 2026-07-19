@@ -1389,7 +1389,7 @@ sea_level_voxels = 52
         assert_eq!(
             loaded.edit_database_path(source_hash),
             PathBuf::from(format!(
-                "test-fixtures/voxels-config/state/schema-9/{expected_world_id}-{source_hash}.sqlite3"
+                "test-fixtures/voxels-config/state/schema-{EDIT_DATABASE_SCHEMA_VERSION}/{expected_world_id}-{source_hash}.sqlite3"
             ))
         );
 
