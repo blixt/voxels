@@ -24,6 +24,9 @@ describe("browser key state", () => {
 
     expect(keys.keyDown("F3")).toBe(8);
     expect(keys.keyDown("F3")).toBe(8);
+    expect(keys.keyDown("KeyQ")).toBe(7);
+    expect(keys.keyDown("Digit1")).toBe(9);
+    expect(keys.keyDown("Digit0")).toBe(18);
     expect(keyCode("Escape")).toBe(0);
     expect(keys.keyUp("Escape")).toBe(0);
   });

@@ -296,8 +296,8 @@ mod web {
         revision_satisfies,
     };
     use voxels_world::protocol::{
-        BrowserUserId, DigVolume, EditAction, MaterialInventory, PlayerId, PlayerIdentity,
-        VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
+        BrowserUserId, EditAction, EditShape, EditVolume, MaterialInventory, PlayerId,
+        PlayerIdentity, VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
     };
     use voxels_world::{
         AtmosphereSample, CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT_PORTAL_COUNT,
@@ -783,7 +783,8 @@ mod web {
             let target = if camera.locomotion() == LocomotionMode::Spectator {
                 None
             } else {
-                self.dig_target(&camera)
+                let shape = self.renderer.borrow().edit_shape();
+                self.dig_target(&camera, shape)
             };
             let mut renderer = self.renderer.borrow_mut();
             renderer.set_spectator_available(spectator_available);
@@ -1721,6 +1722,16 @@ mod web {
                 let record = bytemuck::pod_read_unaligned::<InputRecord>(chunk);
                 match record.kind {
                     KIND_POINTER_DOWN => {
+                        if self
+                            .renderer
+                            .borrow()
+                            .edit_shape_control_contains(record.x, record.y)
+                        {
+                            self.renderer
+                                .borrow_mut()
+                                .handle_ui_pointer_down(record.x, record.y);
+                            continue;
+                        }
                         if record.code == 1
                             && self
                                 .renderer
@@ -1805,6 +1816,18 @@ mod web {
                             if !was_open && is_open {
                                 self.input.borrow_mut().clear();
                             }
+                        } else if !self.renderer.borrow().ui_open()
+                            && record.flags & 1 == 0
+                            && record.code == 7
+                        {
+                            self.renderer.borrow_mut().cycle_edit_shape();
+                        } else if !self.renderer.borrow().ui_open()
+                            && record.flags & 1 == 0
+                            && (9..=18).contains(&record.code)
+                        {
+                            self.renderer
+                                .borrow_mut()
+                                .select_placement_slot(usize::from(record.code - 9));
                         } else if !self.renderer.borrow().ui_open() {
                             self.input.borrow_mut().set_key(record.code, true);
                         }
@@ -1814,7 +1837,7 @@ mod web {
                             self.renderer
                                 .borrow_mut()
                                 .handle_ui_key(record.code, false, false);
-                        } else {
+                        } else if record.code != 7 && !(9..=18).contains(&record.code) {
                             self.input.borrow_mut().set_key(record.code, false);
                         }
                     }
@@ -1834,9 +1857,10 @@ mod web {
             let Some(hit) = hit else {
                 return;
             };
+            let shape = self.renderer.borrow().edit_shape();
             let action = if buttons & 1 != 0 {
                 let hit_coord = VoxelCoord::new(hit.voxel[0], hit.voxel[1], hit.voxel[2]);
-                let Some(volume) = DigVolume::for_hit(hit_coord) else {
+                let Some(volume) = EditVolume::for_hit(hit_coord, shape) else {
                     return;
                 };
                 if !self.dig_volume_resident(volume) {
@@ -1845,9 +1869,27 @@ mod web {
                         .show_gameplay_toast("Loading edit area…");
                     return;
                 }
-                EditAction::Dig { hit: hit_coord }
+                EditAction::Dig {
+                    hit: hit_coord,
+                    shape,
+                }
             } else if buttons & 2 != 0 {
-                if camera.intersects_voxel(hit.adjacent, VOXEL_SIZE_METRES) {
+                let surface = VoxelCoord::new(hit.voxel[0], hit.voxel[1], hit.voxel[2]);
+                let Some(volume) = EditVolume::for_placement(surface, hit.normal, shape) else {
+                    return;
+                };
+                if volume.coordinates().any(|coord| {
+                    camera.intersects_voxel([coord.x, coord.y, coord.z], VOXEL_SIZE_METRES)
+                }) {
+                    self.renderer
+                        .borrow_mut()
+                        .show_gameplay_toast("Cannot place through your body");
+                    return;
+                }
+                if !self.dig_volume_resident(volume) {
+                    self.renderer
+                        .borrow_mut()
+                        .show_gameplay_toast("Loading edit area…");
                     return;
                 }
                 let placement_material = { self.renderer.borrow().placement_material() };
@@ -1858,16 +1900,16 @@ mod web {
                     return;
                 };
                 EditAction::Place {
-                    coord: VoxelCoord::new(hit.adjacent[0], hit.adjacent[1], hit.adjacent[2]),
+                    coord: volume.centre(),
                     material: placement_material,
+                    shape,
                 }
             } else {
                 return;
             };
 
-            // The server expands the hit voxel to the shared half-metre spherical stencil and
-            // atomically owns material yield/debit. The browser never emits independently raceable
-            // voxel mutations.
+            // The server expands the anchor to the shared metre-scale stencil and atomically owns
+            // material yield/debit. The browser never emits independently raceable mutations.
             let _ = self.submit_local_edit(action);
         }
 
@@ -2171,14 +2213,20 @@ mod web {
             )
         }
 
-        fn dig_target(&self, camera: &CameraState) -> Option<(VoxelHit, DigVolume)> {
+        fn dig_target(
+            &self,
+            camera: &CameraState,
+            shape: EditShape,
+        ) -> Option<(VoxelHit, EditVolume)> {
             let hit = self.raycast_target(camera)?;
-            let volume =
-                DigVolume::for_hit(VoxelCoord::new(hit.voxel[0], hit.voxel[1], hit.voxel[2]))?;
+            let volume = EditVolume::for_hit(
+                VoxelCoord::new(hit.voxel[0], hit.voxel[1], hit.voxel[2]),
+                shape,
+            )?;
             self.dig_volume_resident(volume).then_some((hit, volume))
         }
 
-        fn dig_volume_resident(&self, volume: DigVolume) -> bool {
+        fn dig_volume_resident(&self, volume: EditVolume) -> bool {
             let minimum = volume.min.chunk();
             let maximum = volume.max.chunk();
             let chunks = self.chunks.borrow();
@@ -2297,16 +2345,18 @@ mod web {
             engine.submit_local_edit(EditAction::Place {
                 coord: VoxelCoord::new(x, y, z),
                 material,
+                shape: EditShape::Cube,
             })[0]
                 == 1
         }
 
         /// Deterministic browser-harness seam for the exact gameplay dig action. The server, not
-        /// this API, expands the hit voxel into the fixed half-metre sphere and validates reach.
+        /// this API, expands the hit voxel into the one-cubic-metre sphere and validates reach.
         pub fn submit_dig(&self, x: i32, y: i32, z: i32) -> bool {
             self.engine.as_ref().is_some_and(|engine| {
                 engine.submit_local_edit(EditAction::Dig {
                     hit: VoxelCoord::new(x, y, z),
+                    shape: EditShape::Sphere,
                 })[0]
                     == 1
             })

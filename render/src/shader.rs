@@ -143,12 +143,12 @@ mod tests {
     }
 
     #[test]
-    fn dig_outline_uses_the_authoritative_spherical_stencil() {
+    fn edit_outline_uses_the_authoritative_sphere_or_cube_stencil() {
         let voxels = include_str!("shaders/voxels.wgsl");
         assert!(voxels.contains("let target_center ="));
-        assert!(voxels.contains("let target_diameter = frame.target_voxel_max.w;"));
+        assert!(voxels.contains("let target_is_cube = frame.target_voxel.w > 1.5;"));
         assert!(voxels.contains(
-            "dot(target_delta, target_delta) * 4.0 <= target_diameter * target_diameter"
+            "let inside_target_shape = target_is_cube || dot(target_delta, target_delta) < 39.0;"
         ));
     }
 

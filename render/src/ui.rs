@@ -6,6 +6,7 @@
 
 use crate::environment::{DaylightPhase, WeatherPreset};
 use std::{collections::BTreeMap, fmt::Write};
+use voxels_world::protocol::EditShape;
 
 const PANEL_INSET: f32 = 18.0;
 const PANEL_WIDTH: f32 = 500.0;
@@ -20,8 +21,11 @@ const BUTTON_GAP: f32 = 8.0;
 const ACTION_BUTTON_WIDTH: f32 = 86.0;
 const CHROME_HEIGHT: f32 = 44.0;
 const LAUNCHER_WIDTH: f32 = 246.0;
-const INVENTORY_WIDTH: f32 = 390.0;
-const INVENTORY_HEIGHT: f32 = 108.0;
+const INVENTORY_WIDTH: f32 = 430.0;
+const INVENTORY_HEIGHT: f32 = 188.0;
+const EDIT_SHAPE_WIDTH: f32 = 154.0;
+const EDIT_SHAPE_COMPACT_WIDTH: f32 = 82.0;
+const EDIT_SHAPE_HEIGHT: f32 = 66.0;
 const CHROME_STACK_GAP: f32 = 8.0;
 const PANEL_TOP: f32 = PANEL_INSET + CHROME_HEIGHT + 12.0;
 const AUTO_COMPACT_WIDTH: f32 = 720.0;
@@ -261,6 +265,7 @@ impl WeatherControl {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum UiTarget {
     Launcher,
+    EditShape,
     Header,
     CopyDiagnostics,
     Close,
@@ -278,6 +283,7 @@ pub enum UiKey {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiAction {
     None,
+    EditShapeChanged(EditShape),
     CopyDiagnostics,
     PanelOpenChanged(bool),
     TimeChanged(TimeControl),
@@ -437,6 +443,7 @@ pub struct InteractiveRegion {
 pub struct UiLayout {
     pub launcher: Rect,
     pub inventory: Rect,
+    pub edit_shape: Rect,
     pub toast: Rect,
     pub crosshair: Rect,
     pub panel: Rect,
@@ -528,6 +535,7 @@ pub struct MissionControlUi {
     inventory_summary: [String; 2],
     inventory_items: Vec<InventoryItem>,
     selected_inventory_index: Option<usize>,
+    edit_shape: EditShape,
 }
 
 impl Default for MissionControlUi {
@@ -565,6 +573,7 @@ impl MissionControlUi {
             inventory_summary: [String::new(), String::new()],
             inventory_items: Vec::new(),
             selected_inventory_index: None,
+            edit_shape: EditShape::Sphere,
         }
     }
 
@@ -658,6 +667,14 @@ impl MissionControlUi {
             selected_index.filter(|index| *index < self.inventory_items.len());
     }
 
+    pub const fn edit_shape(&self) -> EditShape {
+        self.edit_shape
+    }
+
+    pub fn set_edit_shape(&mut self, shape: EditShape) {
+        self.edit_shape = shape;
+    }
+
     pub fn show_gameplay_toast(&mut self, message: impl Into<String>) {
         self.gameplay_toast = Some(message.into());
         self.toast_age = 0.0;
@@ -748,6 +765,21 @@ impl MissionControlUi {
             inventory_width,
             INVENTORY_HEIGHT,
         );
+        let edit_shape_width = if compact {
+            EDIT_SHAPE_COMPACT_WIDTH
+        } else {
+            EDIT_SHAPE_WIDTH
+        };
+        let edit_shape = Rect::new(
+            PANEL_INSET.min((viewport_width - edit_shape_width).max(0.0)),
+            if compact {
+                (inventory.y - CHROME_STACK_GAP - EDIT_SHAPE_HEIGHT).max(0.0)
+            } else {
+                (viewport_height - PANEL_INSET - EDIT_SHAPE_HEIGHT).max(0.0)
+            },
+            edit_shape_width.min(viewport_width.max(0.0)),
+            EDIT_SHAPE_HEIGHT,
+        );
         let crosshair = Rect::new(
             crosshair_center[0] - 6.0,
             crosshair_center[1] - 6.0,
@@ -770,6 +802,10 @@ impl MissionControlUi {
             InteractiveRegion {
                 target: UiTarget::Launcher,
                 rect: launcher,
+            },
+            InteractiveRegion {
+                target: UiTarget::EditShape,
+                rect: edit_shape,
             },
             InteractiveRegion {
                 target: UiTarget::Header,
@@ -894,6 +930,7 @@ impl MissionControlUi {
         UiLayout {
             launcher,
             inventory,
+            edit_shape,
             toast,
             crosshair,
             panel,
@@ -913,7 +950,11 @@ impl MissionControlUi {
             return layout
                 .regions
                 .iter()
-                .find(|region| region.target == UiTarget::Launcher && region.rect.contains(point))
+                .find(|region| {
+                    matches!(region.target, UiTarget::Launcher | UiTarget::EditShape)
+                        && region.rect.contains(point)
+                        && (region.target != UiTarget::EditShape || !self.spectator_active)
+                })
                 .map(|region| region.target);
         }
         layout
@@ -926,6 +967,10 @@ impl MissionControlUi {
 
     pub fn inventory_contains_css(&self, point: [f32; 2], viewport: Viewport) -> bool {
         !self.spectator_active && self.layout(viewport).inventory.contains(point)
+    }
+
+    pub fn edit_shape_contains_css(&self, point: [f32; 2], viewport: Viewport) -> bool {
+        !self.open && !self.spectator_active && self.layout(viewport).edit_shape.contains(point)
     }
 
     pub fn hit_test_device(&self, point: [f32; 2], viewport: Viewport) -> Option<UiTarget> {
@@ -946,14 +991,20 @@ impl MissionControlUi {
     }
 
     pub fn activate_css(&mut self, point: [f32; 2], viewport: Viewport) -> UiAction {
-        if self.hit_test_css(point, viewport) == Some(UiTarget::Launcher) {
-            return self.toggle_open();
+        match self.hit_test_css(point, viewport) {
+            Some(UiTarget::Launcher) => return self.toggle_open(),
+            Some(UiTarget::EditShape) if !self.open && !self.spectator_active => {
+                self.edit_shape = self.edit_shape.next();
+                return UiAction::EditShapeChanged(self.edit_shape);
+            }
+            _ => {}
         }
         if !self.open {
             return UiAction::None;
         }
         match self.hit_test_css(point, viewport) {
             Some(UiTarget::Launcher) => self.toggle_open(),
+            Some(UiTarget::EditShape) => UiAction::None,
             Some(UiTarget::CopyDiagnostics) => UiAction::CopyDiagnostics,
             Some(UiTarget::Close) => self.set_open(false),
             Some(UiTarget::Time(control)) if self.developer_controls => {
@@ -1372,6 +1423,7 @@ impl MissionControlUi {
         // Mission Control header. Hiding it behind the modal prevents overlap on narrow screens.
         if !self.open && !self.spectator_active {
             self.push_inventory_wheel(draw, layout.inventory);
+            self.push_edit_shape_control(draw, layout.edit_shape, layout.compact);
         }
 
         let toast_alpha = if self.toast_age <= TOAST_HOLD_SECONDS {
@@ -1454,12 +1506,88 @@ impl MissionControlUi {
         );
     }
 
+    fn push_edit_shape_control(&self, draw: &mut UiDrawList, rect: Rect, compact: bool) {
+        push_surface(
+            draw,
+            rect,
+            18.0,
+            PANEL_COLOR,
+            PANEL_BORDER,
+            SurfaceRole::Inventory,
+        );
+        let icon_size = if compact { 36.0 } else { 42.0 };
+        let icon = Rect::new(
+            rect.x
+                + if compact {
+                    (rect.width - icon_size) * 0.5
+                } else {
+                    12.0
+                },
+            rect.y + (rect.height - icon_size) * 0.5,
+            icon_size,
+            icon_size,
+        );
+        push_surface(
+            draw,
+            icon,
+            if self.edit_shape == EditShape::Sphere {
+                icon_size * 0.5
+            } else {
+                7.0
+            },
+            ACCENT.with_alpha(0.88),
+            TEXT_PRIMARY.with_alpha(0.72),
+            if self.edit_shape == EditShape::Sphere {
+                SurfaceRole::InventoryOrb
+            } else {
+                SurfaceRole::Inventory
+            },
+        );
+        if compact {
+            push_text(
+                draw,
+                self.edit_shape.label(),
+                [rect.center()[0], rect.y + rect.height - 7.0],
+                7.0,
+                TEXT_PRIMARY,
+                TextAlign::Center,
+            );
+            return;
+        }
+        push_text(
+            draw,
+            "DIG / PLACE",
+            [rect.x + 64.0, rect.y + 23.0],
+            7.5,
+            TEXT_MUTED,
+            TextAlign::Left,
+        );
+        push_text(
+            draw,
+            self.edit_shape.label(),
+            [rect.x + 64.0, rect.y + 43.0],
+            11.0,
+            TEXT_PRIMARY,
+            TextAlign::Left,
+        );
+        let key = Rect::new(rect.x + rect.width - 31.0, rect.y + 9.0, 22.0, 22.0);
+        push_surface(
+            draw,
+            key,
+            6.0,
+            CARD_COLOR,
+            PANEL_BORDER,
+            SurfaceRole::Inventory,
+        );
+        push_text(draw, "Q", key.center(), 9.0, ACCENT, TextAlign::Center);
+    }
+
     fn push_inventory_wheel(&self, draw: &mut UiDrawList, rect: Rect) {
         let Some(selected) = self
             .selected_inventory_index
             .filter(|index| *index < self.inventory_items.len())
         else {
-            let prompt = Rect::new(rect.center()[0] - 94.0, rect.y + 26.0, 188.0, 34.0);
+            let prompt = Rect::new(rect.center()[0] - 94.0, rect.y + 66.0, 188.0, 34.0);
             push_surface(
                 draw,
                 prompt,
@@ -1480,57 +1608,51 @@ impl MissionControlUi {
         };
 
         let item_count = self.inventory_items.len();
-        let center_x = rect.center()[0];
-        let mut visible = Vec::<(i32, usize)>::new();
-        for offset in [0_i32, -1, 1, -2, 2] {
-            let index = (selected as i32 + offset).rem_euclid(item_count as i32) as usize;
-            if !visible.iter().any(|(_, existing)| *existing == index) {
-                visible.push((offset, index));
-            }
-            if visible.len() == item_count.min(5) {
-                break;
-            }
-        }
-        visible.sort_unstable_by_key(|(offset, _)| *offset);
-        for (offset, index) in visible {
+        debug_assert!(item_count <= 10);
+        let wheel_center = [rect.center()[0], rect.y + 88.0];
+        let radius = [170.0, 66.0];
+        for index in 0..item_count {
             let item = self.inventory_items[index];
-            let distance = offset.unsigned_abs() as f32;
-            let size = match offset.unsigned_abs() {
-                0 => 50.0,
-                1 => 38.0,
-                _ => 30.0,
-            };
-            let x_offset = match offset {
-                -2 => -116.0,
-                -1 => -66.0,
-                0 => 0.0,
-                1 => 66.0,
-                _ => 116.0,
-            };
-            let y_offset = match offset.unsigned_abs() {
-                0 => 0.0,
-                1 => 24.0,
-                _ => 43.0,
-            };
+            let offset = (index + item_count - selected) % item_count;
+            let angle = -std::f32::consts::FRAC_PI_2
+                + std::f32::consts::TAU * offset as f32 / item_count as f32;
+            let selected_item = index == selected;
+            let size = if selected_item { 46.0 } else { 30.0 };
             let orb = Rect::new(
-                center_x + x_offset - size * 0.5,
-                rect.y + y_offset,
+                wheel_center[0] + angle.cos() * radius[0] - size * 0.5,
+                wheel_center[1] + angle.sin() * radius[1] - size * 0.5,
                 size,
                 size,
             );
-            let selected_item = offset == 0;
             push_surface(
                 draw,
                 orb,
                 size * 0.5,
                 item.color
                     .with_alpha(if selected_item { 0.96 } else { 0.72 }),
-                if selected_item {
-                    ACCENT
-                } else {
-                    PANEL_BORDER.with_alpha((1.0 - distance * 0.2).max(0.35))
-                },
+                if selected_item { ACCENT } else { PANEL_BORDER },
                 SurfaceRole::InventoryOrb,
+            );
+            let key = Rect::new(orb.x - 4.0, orb.y - 4.0, 17.0, 17.0);
+            push_surface(
+                draw,
+                key,
+                8.5,
+                PANEL_COLOR,
+                if selected_item { ACCENT } else { PANEL_BORDER },
+                SurfaceRole::Inventory,
+            );
+            push_text(
+                draw,
+                if index == 9 {
+                    "0".to_owned()
+                } else {
+                    (index + 1).to_string()
+                },
+                key.center(),
+                8.0,
+                TEXT_PRIMARY,
+                TextAlign::Center,
             );
             push_text(
                 draw,
@@ -1549,7 +1671,7 @@ impl MissionControlUi {
         push_text(
             draw,
             selected_item.label,
-            [center_x, rect.y + rect.height - 7.0],
+            [wheel_center[0], wheel_center[1] + 4.0],
             9.5,
             ACCENT,
             TextAlign::Center,
@@ -1990,7 +2112,7 @@ mod tests {
             let layout = ui.layout(viewport);
             let panel = layout.panel;
             for region in &layout.regions {
-                if region.target == UiTarget::Launcher {
+                if matches!(region.target, UiTarget::Launcher | UiTarget::EditShape) {
                     continue;
                 }
                 assert!(region.rect.x >= panel.x - 0.01);
@@ -2008,6 +2130,65 @@ mod tests {
             assert!(layout.movement_card.y >= layout.world_card.y + layout.world_card.height);
             assert!(layout.navigation.y >= layout.movement_card.y + layout.movement_card.height);
         }
+    }
+
+    #[test]
+    fn gameplay_shape_control_cycles_by_touch_and_hides_desktop_hint_when_compact() {
+        let desktop = viewport(1_280.0, 720.0);
+        let mut ui = enabled(false);
+        assert_eq!(ui.edit_shape(), EditShape::Sphere);
+        assert_eq!(
+            activate(&mut ui, UiTarget::EditShape, desktop),
+            UiAction::EditShapeChanged(EditShape::Cube)
+        );
+        assert_eq!(ui.edit_shape(), EditShape::Cube);
+        assert!(
+            ui.build_draw_list(desktop)
+                .text
+                .iter()
+                .any(|run| run.text == "Q")
+        );
+
+        let compact = viewport(390.0, 844.0);
+        assert!(
+            !ui.build_draw_list(compact)
+                .text
+                .iter()
+                .any(|run| run.text == "Q")
+        );
+    }
+
+    #[test]
+    fn material_wheel_draws_ten_numbered_slots_with_the_selection_on_top() {
+        let viewport = viewport(1_280.0, 720.0);
+        let mut ui = enabled(false);
+        ui.set_inventory(
+            Some("STONE"),
+            100,
+            [String::new(), String::new()],
+            (0..10)
+                .map(|index| InventoryItem {
+                    label: "STONE",
+                    count: 100 + index,
+                    color: Color::new(0.2, 0.3, 0.4, 1.0),
+                })
+                .collect(),
+            Some(3),
+        );
+        let layout = ui.layout(viewport);
+        let draw = ui.build_draw_list(viewport);
+        for label in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"] {
+            assert!(draw.text.iter().any(|run| run.text == label));
+        }
+        let selected = draw
+            .glass
+            .iter()
+            .find(|surface| surface.role == SurfaceRole::InventoryOrb && surface.border == ACCENT)
+            .expect("selected inventory orb");
+        assert!(
+            selected.rect.center()[1] < layout.inventory.center()[1],
+            "the selected material belongs at the top of the wheel"
+        );
     }
 
     #[test]

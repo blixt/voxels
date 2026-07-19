@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use voxels_core::{CameraState, EnclosureSample, RemoteAvatarPose};
-use voxels_world::protocol::{DIG_DIAMETER_VOXELS, DigVolume};
+use voxels_world::protocol::{EditShape, EditVolume};
 use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, Material, MeshedChunk,
     Quad, RenderLayer, SurfaceBounds, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId,
@@ -56,6 +56,7 @@ const PLACEMENT_MATERIALS: [Material; Material::ALL.len() - 1] = [
     Material::Water,
     Material::GlowCrystal,
 ];
+const MATERIAL_WHEEL_SLOTS: usize = 10;
 const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 const FAR_MATERIAL_FLAG: u32 = 1 << 31;
 const SURFACE_LOD_SHIFT: u32 = 27;
@@ -156,6 +157,31 @@ impl PlacementInventory {
             }
         }
         false
+    }
+
+    fn visible_materials(&self) -> Vec<Material> {
+        let available = PLACEMENT_MATERIALS
+            .into_iter()
+            .filter(|material| self.count(*material) > 0)
+            .collect::<Vec<_>>();
+        if available.len() <= MATERIAL_WHEEL_SLOTS {
+            return available;
+        }
+        let selected = self
+            .selected
+            .and_then(|selected| available.iter().position(|material| *material == selected))
+            .unwrap_or(0);
+        let start = (selected + available.len() - MATERIAL_WHEEL_SLOTS / 2) % available.len();
+        (0..MATERIAL_WHEEL_SLOTS)
+            .map(|offset| available[(start + offset) % available.len()])
+            .collect()
+    }
+
+    fn select_visible_slot(&mut self, slot: usize) -> bool {
+        let Some(material) = self.visible_materials().get(slot).copied() else {
+            return false;
+        };
+        self.select(material)
     }
 }
 
@@ -1004,7 +1030,8 @@ pub struct Renderer {
     diagnostics: RenderDiagnostics,
     gpu_timer: Option<GpuTimer>,
     target_voxel: Option<[i32; 3]>,
-    target_volume: Option<DigVolume>,
+    target_volume: Option<EditVolume>,
+    edit_shape: EditShape,
     options: RenderOptions,
     environment: OutdoorEnvironment,
     server_world_environment: WorldEnvironmentState,
@@ -1788,6 +1815,7 @@ impl Renderer {
             gpu_timer,
             target_voxel: None,
             target_volume: None,
+            edit_shape: EditShape::Sphere,
             options,
             environment,
             server_world_environment: world_environment,
@@ -1874,9 +1902,19 @@ impl Renderer {
         self.remote_avatars.extend_from_slice(avatars);
     }
 
-    pub fn set_dig_target(&mut self, target: Option<([i32; 3], DigVolume)>) {
+    pub fn set_dig_target(&mut self, target: Option<([i32; 3], EditVolume)>) {
         self.target_voxel = target.map(|(hit, _)| hit);
         self.target_volume = target.map(|(_, volume)| volume);
+    }
+
+    pub const fn edit_shape(&self) -> EditShape {
+        self.edit_shape
+    }
+
+    pub fn cycle_edit_shape(&mut self) -> EditShape {
+        self.edit_shape = self.edit_shape.next();
+        self.ui.set_edit_shape(self.edit_shape);
+        self.edit_shape
     }
 
     pub fn set_atmosphere(&mut self, sample: AtmosphereSample, region: SurfaceRegion) {
@@ -2049,6 +2087,15 @@ impl Renderer {
         changed
     }
 
+    /// Selects one of the ten currently visible wheel slots (`1` through `0`).
+    pub fn select_placement_slot(&mut self, slot: usize) -> bool {
+        let changed = self.placement_inventory.select_visible_slot(slot);
+        if changed {
+            sync_inventory_ui(&mut self.ui, &self.placement_inventory);
+        }
+        changed
+    }
+
     pub fn show_gameplay_toast(&mut self, message: impl Into<String>) {
         self.ui.show_gameplay_toast(message);
     }
@@ -2095,6 +2142,11 @@ impl Renderer {
             .inventory_contains_css([css_x, css_y], self.ui_viewport())
     }
 
+    pub fn edit_shape_control_contains(&self, css_x: f32, css_y: f32) -> bool {
+        self.ui
+            .edit_shape_contains_css([css_x, css_y], self.ui_viewport())
+    }
+
     fn ui_viewport(&self) -> Viewport {
         Viewport::new(
             self.config.width as f32,
@@ -2105,6 +2157,10 @@ impl Renderer {
 
     fn apply_ui_action(&mut self, action: UiAction) {
         match action {
+            UiAction::EditShapeChanged(shape) => {
+                self.edit_shape = shape;
+                self.ui.set_edit_shape(shape);
+            }
             UiAction::CopyDiagnostics => {
                 self.diagnostics_copy_requested = true;
             }
@@ -4317,21 +4373,18 @@ fn compact_inventory_count(value: u64) -> String {
 
 fn sync_inventory_ui(ui: &mut MissionControlUi, inventory: &PlacementInventory) {
     let selected = inventory.selected();
-    let items = PLACEMENT_MATERIALS
-        .into_iter()
-        .filter(|material| inventory.count(*material) > 0)
+    let materials = inventory.visible_materials();
+    let items = materials
+        .iter()
+        .copied()
         .map(|material| InventoryItem {
             label: placement_material_label(material),
             count: inventory.count(material),
             color: inventory_material_color(material),
         })
         .collect::<Vec<_>>();
-    let selected_index = selected.and_then(|selected| {
-        PLACEMENT_MATERIALS
-            .into_iter()
-            .filter(|material| inventory.count(*material) > 0)
-            .position(|material| material == selected)
-    });
+    let selected_index =
+        selected.and_then(|selected| materials.iter().position(|material| *material == selected));
     ui.set_inventory(
         selected.map(placement_material_label),
         selected.map_or(0, |material| inventory.count(material)),
@@ -4399,7 +4452,7 @@ fn frame_uniform(
     config: &SurfaceConfiguration,
     camera: &CameraState,
     time: f32,
-    target: Option<DigVolume>,
+    target: Option<EditVolume>,
     state: FrameState,
     shadows: &DirectionalShadowCascades,
     lod_focus: Option<GeometricLodFocus>,
@@ -4437,7 +4490,7 @@ fn frame_uniform(
                 volume.min.x as f32,
                 volume.min.y as f32,
                 volume.min.z as f32,
-                1.0,
+                f32::from(volume.shape().id()) + 1.0,
             ]
         }),
         target_voxel_max: target.map_or([0.0; 4], |volume| {
@@ -4445,7 +4498,7 @@ fn frame_uniform(
                 volume.max.x as f32,
                 volume.max.y as f32,
                 volume.max.z as f32,
-                DIG_DIAMETER_VOXELS as f32,
+                0.0,
             ]
         }),
         render_options: [
@@ -5251,6 +5304,19 @@ mod tests {
         assert_eq!(inventory.selected(), Some(Material::Water));
         assert!(inventory.cycle(-1));
         assert_eq!(inventory.selected(), Some(Material::Dirt));
+    }
+
+    #[test]
+    fn placement_inventory_exposes_ten_keyboard_slots_around_the_selection() {
+        let mut inventory = PlacementInventory::new();
+        inventory.set_counts(std::array::from_fn(|index| u64::from(index > 0)));
+        assert_eq!(inventory.visible_materials().len(), MATERIAL_WHEEL_SLOTS);
+        assert!(inventory.select(Material::GlowCrystal));
+        let visible = inventory.visible_materials();
+        assert!(visible.contains(&Material::GlowCrystal));
+        let expected = visible[3];
+        assert!(inventory.select_visible_slot(3));
+        assert_eq!(inventory.selected(), Some(expected));
     }
 
     #[test]

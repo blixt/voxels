@@ -6,7 +6,18 @@ const KEY_CODES: Readonly<Record<string, number>> = {
   Space: 5,
   ShiftLeft: 6,
   ShiftRight: 6,
+  KeyQ: 7,
   F3: 8,
+  Digit1: 9,
+  Digit2: 10,
+  Digit3: 11,
+  Digit4: 12,
+  Digit5: 13,
+  Digit6: 14,
+  Digit7: 15,
+  Digit8: 16,
+  Digit9: 17,
+  Digit0: 18,
 };
 
 export function keyCode(code: string): number {

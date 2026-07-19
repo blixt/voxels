@@ -903,12 +903,13 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let voxel = floor(inside_position / frame.viewport_voxel.z);
   let target_center = (frame.target_voxel.xyz + frame.target_voxel_max.xyz) * 0.5;
   let target_delta = voxel - target_center;
-  let target_diameter = frame.target_voxel_max.w;
+  let target_is_cube = frame.target_voxel.w > 1.5;
+  let inside_target_shape = target_is_cube || dot(target_delta, target_delta) < 39.0;
   let targeted = frame.render_options.w > 0.5
     && frame.target_voxel.w > 0.5
     && all(voxel >= frame.target_voxel.xyz)
     && all(voxel <= frame.target_voxel_max.xyz)
-    && dot(target_delta, target_delta) * 4.0 <= target_diameter * target_diameter;
+    && inside_target_shape;
   if targeted {
     let coordinate = fract(input.world / frame.viewport_voxel.z + vec3<f32>(0.0001));
     var edge = 1.0;
