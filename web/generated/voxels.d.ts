@@ -36,6 +36,7 @@ export class EngineHandle {
      */
     surface_edit_state(stride: number, x: number, z: number): Float64Array;
     take_mission_control_copy(): string | undefined;
+    ui_open(): boolean;
 }
 
 export function create_engine(canvas: OffscreenCanvas, css_width: number, css_height: number, dpr: number, reduced_motion: boolean, config_toml: string, player: Array<any>): Promise<EngineHandle>;
@@ -67,6 +68,7 @@ export interface InitOutput {
     readonly enginehandle_submit_edit: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly enginehandle_surface_edit_state: (a: number, b: number, c: number, d: number) => [number, number];
     readonly enginehandle_take_mission_control_copy: (a: number) => [number, number];
+    readonly enginehandle_ui_open: (a: number) => number;
     readonly memory: WebAssembly.Memory;
 }
 

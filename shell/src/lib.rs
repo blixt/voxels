@@ -2093,6 +2093,12 @@ mod web {
             }
         }
 
+        pub fn ui_open(&self) -> bool {
+            self.engine
+                .as_ref()
+                .is_some_and(|engine| engine.renderer.borrow().ui_open())
+        }
+
         pub fn take_mission_control_copy(&self) -> Option<String> {
             self.engine
                 .as_ref()

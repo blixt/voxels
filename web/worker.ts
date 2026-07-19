@@ -175,6 +175,8 @@ scope.onmessage = (event) => {
         // Boot-time teardown awaits this same engine and owns its destruction.
         if (disposed) return;
         handle = engine;
+        cursorMode = engine.ui_open();
+        scope.postMessage({ kind: "uiMode", cursor: cursorMode });
         for (const queued of pending.splice(0)) dispatch(queued);
         monitorReadiness(engine);
       })
