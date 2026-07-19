@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { numericSummary, percentile } from "./harness-metrics.mjs";
+import { numericSummary, percentile } from "./metrics.ts";
 
 describe("shared harness metrics", () => {
   it("uses nearest-rank percentiles consistently", () => {

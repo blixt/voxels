@@ -1,22 +1,66 @@
-import { readFile } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
+export interface NetworkScenarioSummary {
+  readonly viewportFullyInformedMs: { readonly median: number; readonly max: number };
+  readonly fullCoverageSettledMs: { readonly median: number };
+  readonly bytesAtViewportInformed: { readonly medianWorldDownstream: number };
+  readonly bytesAtFullCoverage: { readonly medianTotal: number };
+}
 
-function percentage(delta, baseline) {
+export interface NetworkBenchmarkResult {
+  readonly schemaVersion: number;
+  readonly browserSnapshotSchema: unknown;
+  readonly fixture: unknown;
+  readonly protocol: unknown;
+  readonly link: unknown;
+  readonly world: unknown;
+  readonly environment: unknown;
+  repetitions: number;
+  readonly summary: Record<string, NetworkScenarioSummary>;
+  readonly git: { readonly commit: string };
+}
+
+export interface MetricDelta {
+  readonly before: number;
+  readonly after: number;
+  readonly delta: number;
+  readonly percent: number | null;
+}
+
+export interface NetworkScenarioComparison {
+  readonly viewportMedianMs: MetricDelta;
+  readonly viewportMaxMs: MetricDelta;
+  readonly fullCoverageMedianMs: MetricDelta;
+  readonly viewportWorldBytes: MetricDelta;
+  readonly fullCoverageBytes: MetricDelta;
+}
+
+export type NetworkBenchmarkComparison = Record<string, NetworkScenarioComparison>;
+
+function percentage(delta: number, baseline: number): number | null {
   return baseline === 0 ? null : (delta / baseline) * 100;
 }
 
-function metric(before, after) {
+function metric(before: number, after: number): MetricDelta {
   const delta = after - before;
   return { before, after, delta, percent: percentage(delta, before) };
 }
 
-function requireSameFixture(baseline, candidate, field) {
+function requireSameFixture(
+  baseline: NetworkBenchmarkResult,
+  candidate: NetworkBenchmarkResult,
+  field: keyof Pick<
+    NetworkBenchmarkResult,
+    "browserSnapshotSchema" | "fixture" | "protocol" | "link" | "world" | "environment"
+  >,
+): void {
   if (JSON.stringify(baseline[field]) !== JSON.stringify(candidate[field])) {
     throw new Error(`${field} mismatch`);
   }
 }
 
-export function compareNetworkBenchmarks(baseline, candidate) {
+export function compareNetworkBenchmarks(
+  baseline: NetworkBenchmarkResult,
+  candidate: NetworkBenchmarkResult,
+): NetworkBenchmarkComparison {
   if (baseline.schemaVersion !== candidate.schemaVersion) {
     throw new Error(
       `result schema mismatch: ${baseline.schemaVersion} versus ${candidate.schemaVersion}`,
@@ -45,6 +89,9 @@ export function compareNetworkBenchmarks(baseline, candidate) {
     baselineScenarios.map((name) => {
       const before = baseline.summary[name];
       const after = candidate.summary[name];
+      if (before === undefined || after === undefined) {
+        throw new Error(`scenario ${name} is missing after set validation`);
+      }
       return [
         name,
         {
@@ -74,33 +121,23 @@ export function compareNetworkBenchmarks(baseline, candidate) {
   );
 }
 
-function signed(value, digits = 1) {
+function signed(value: number, digits = 1): string {
   return `${value >= 0 ? "+" : ""}${value.toFixed(digits)}`;
 }
 
-function formatDelta(value, suffix = "") {
+function formatDelta(value: MetricDelta, suffix = ""): string {
   const percent = value.percent === null ? "n/a" : `${signed(value.percent)}%`;
   return `${signed(value.delta)}${suffix} (${percent})`;
 }
 
-export function comparisonMarkdown(baseline, candidate, comparison) {
+export function comparisonMarkdown(
+  baseline: NetworkBenchmarkResult,
+  candidate: NetworkBenchmarkResult,
+  comparison: NetworkBenchmarkComparison,
+): string {
   const rows = Object.entries(comparison).map(
     ([name, values]) =>
       `| ${name} | ${formatDelta(values.viewportMedianMs, " ms")} | ${formatDelta(values.viewportMaxMs, " ms")} | ${formatDelta(values.fullCoverageMedianMs, " ms")} | ${formatDelta(values.viewportWorldBytes, " B")} | ${formatDelta(values.fullCoverageBytes, " B")} |`,
   );
   return `# Network benchmark comparison\n\nBaseline: \`${baseline.git.commit}\`  \nCandidate: \`${candidate.git.commit}\`\n\nNegative values are improvements; positive values are degradations.\n\n| Scenario | Viewport median | Viewport max | Full coverage median | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n`;
 }
-
-async function main() {
-  const paths = process.argv.slice(2).filter((argument) => argument !== "--");
-  if (paths.length !== 2) {
-    throw new Error("usage: vp run bench:network:compare -- <baseline.json> <candidate.json>");
-  }
-  const [baseline, candidate] = await Promise.all(
-    paths.map(async (file) => JSON.parse(await readFile(file, "utf8"))),
-  );
-  const comparison = compareNetworkBenchmarks(baseline, candidate);
-  process.stdout.write(comparisonMarkdown(baseline, candidate, comparison));
-}
-
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

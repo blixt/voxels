@@ -9,7 +9,7 @@ import {
   reserveEphemeralPort,
   SNAPSHOT,
 } from "./browser-harness.mjs";
-import { prepareBrowserWorldFixture, startBrowserWorldService } from "./browser-world-fixture.mjs";
+import { prepareBrowserWorldFixture, startBrowserWorldService } from "../automation/lib/world.ts";
 
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed/i;

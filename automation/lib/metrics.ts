@@ -5,18 +5,36 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export function percentile(values, fraction) {
+export interface NumericSummary {
+  readonly samples: number;
+  readonly min: number;
+  readonly p50: number;
+  readonly p95: number;
+  readonly p99: number;
+  readonly max: number;
+  readonly mean: number;
+}
+
+export interface ProcessSample {
+  readonly atUnixMs: number;
+  readonly cpuPercent: number;
+  readonly rssBytes: number;
+  readonly virtualBytes: number;
+  readonly threads: number | null;
+}
+
+export function percentile(values: readonly number[], fraction: number): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((left, right) => left - right);
   const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1));
-  return sorted[index];
+  return sorted[index] ?? 0;
 }
 
-export function numericSummary(values, digits = 3) {
+export function numericSummary(values: readonly number[], digits = 3): NumericSummary {
   if (values.length === 0) {
     return { samples: 0, min: 0, p50: 0, p95: 0, p99: 0, max: 0, mean: 0 };
   }
-  const round = (value) => {
+  const round = (value: number): number => {
     const scale = 10 ** digits;
     return Math.round(value * scale) / scale;
   };
@@ -31,17 +49,26 @@ export function numericSummary(values, digits = 3) {
   };
 }
 
-export async function sampleProcess(pid) {
+export async function sampleProcess(pid: number): Promise<ProcessSample | null> {
   try {
     const { stdout } = await execFileAsync("ps", ["-o", "pcpu=,rss=,vsz=", "-p", String(pid)]);
     const values = stdout.trim().split(/\s+/u).map(Number);
-    if (values.length !== 3 || values.some((value) => !Number.isFinite(value))) return null;
+    const [cpuPercent, rssKiB, virtualKiB] = values;
+    if (
+      values.length !== 3 ||
+      cpuPercent === undefined ||
+      rssKiB === undefined ||
+      virtualKiB === undefined ||
+      values.some((value) => !Number.isFinite(value))
+    ) {
+      return null;
+    }
     const threads = await processThreadCount(pid);
     return {
       atUnixMs: Date.now(),
-      cpuPercent: values[0],
-      rssBytes: values[1] * 1_024,
-      virtualBytes: values[2] * 1_024,
+      cpuPercent,
+      rssBytes: rssKiB * 1_024,
+      virtualBytes: virtualKiB * 1_024,
       threads,
     };
   } catch {
@@ -49,7 +76,13 @@ export async function sampleProcess(pid) {
   }
 }
 
-export function summarizeProcess(samples) {
+export function summarizeProcess(samples: readonly ProcessSample[]): {
+  readonly samples: number;
+  readonly cpuPercent: NumericSummary;
+  readonly rssMiB: NumericSummary;
+  readonly virtualMiB: NumericSummary;
+  readonly threads: NumericSummary | null;
+} {
   const summary = {
     samples: samples.length,
     cpuPercent: numericSummary(samples.map((sample) => sample.cpuPercent)),
@@ -58,14 +91,18 @@ export function summarizeProcess(samples) {
   };
   const threadSamples = samples
     .map((sample) => sample.threads)
-    .filter((threads) => Number.isFinite(threads));
+    .filter((threads): threads is number => threads !== null && Number.isFinite(threads));
   return {
     ...summary,
     threads: threadSamples.length > 0 ? numericSummary(threadSamples) : null,
   };
 }
 
-export async function writeHarnessReport(directory, result, markdown) {
+export async function writeHarnessReport(
+  directory: string,
+  result: unknown,
+  markdown: string,
+): Promise<void> {
   await mkdir(directory, { recursive: true });
   const timestamp = new Date().toISOString().replaceAll(":", "-");
   const json = `${JSON.stringify(result, null, 2)}\n`;
@@ -77,7 +114,7 @@ export async function writeHarnessReport(directory, result, markdown) {
   ]);
 }
 
-async function processThreadCount(pid) {
+async function processThreadCount(pid: number): Promise<number | null> {
   try {
     if (process.platform === "darwin") {
       const { stdout } = await execFileAsync("ps", ["-M", "-p", String(pid)]);

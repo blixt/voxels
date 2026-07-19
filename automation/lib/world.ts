@@ -1,15 +1,95 @@
 import { randomBytes } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { connect } from "node:net";
-import { reserveEphemeralPort } from "./browser-harness.mjs";
-import { rustTool } from "./build-wasm.ts";
-import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./vxwp-contract.mjs";
-import { worldServiceBuildCargoArgs, worldServiceExecutablePath } from "./world-service-command.ts";
+import { reserveEphemeralPort } from "./browser.ts";
+import { rustTool } from "../../scripts/build-wasm.ts";
+import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./protocol.ts";
+import {
+  worldServiceBuildCargoArgs,
+  worldServiceExecutablePath,
+} from "../../scripts/world-service-command.ts";
+import type { WorldServiceCargoProfile } from "../../scripts/world-service-command.ts";
 
-function replaceEnvironment(name, value) {
+export interface BrowserWorldFixtureOptions {
+  readonly browserPort: number;
+  readonly prefix?: string;
+  readonly source?: string;
+  readonly spawnVoxels?: readonly [number, number];
+  readonly spawnPillarHeightVoxels?: number;
+  readonly spawnPillarRadiusVoxels?: number;
+  readonly spawnProtectionRadiusVoxels?: number;
+  readonly cascadedShadows?: boolean;
+  readonly screenSpaceAmbientOcclusion?: boolean;
+  readonly dayLengthSeconds?: number;
+  readonly worldDayNumberAtUnixEpoch?: number;
+  readonly dayFractionAtUnixEpoch?: number;
+  readonly daysPerYear?: number;
+  readonly moonSiderealOrbitDays?: number;
+  readonly moonOrbitPhaseAtWorldEpoch?: number;
+  readonly planetCircumferenceMetres?: number;
+  readonly axialTiltDegrees?: number;
+  readonly moonOrbitInclinationDegrees?: number;
+  readonly celestialSeed?: number;
+  readonly celestialRevision?: number;
+  readonly weatherCycleSeconds?: number;
+  readonly weatherFractionAtUnixEpoch?: number;
+  readonly cloudVelocityMetresPerSecond?: readonly [number, number];
+  readonly cloudCoverage?: number;
+  readonly cloudBaseMetres?: number;
+  readonly cloudTopMetres?: number;
+}
+
+export interface BrowserWorldFixture {
+  readonly directory: string;
+  readonly backendPort: number;
+  readonly browserPort: number;
+  readonly authToken: string;
+  readonly clientConfigPath: string;
+  readonly serviceConfigPath: string;
+  readonly databasePath: string;
+  readonly spawnVoxels: readonly [number, number];
+  readonly spawnPillarHeightVoxels: number;
+  readonly spawnPillarRadiusVoxels: number;
+  readonly spawnProtectionRadiusVoxels: number;
+  readonly cascadedShadows: boolean;
+  readonly screenSpaceAmbientOcclusion: boolean;
+  readonly dayLengthSeconds: number;
+  readonly worldDayNumberAtUnixEpoch: number;
+  readonly dayFractionAtUnixEpoch: number;
+  readonly daysPerYear: number;
+  readonly moonSiderealOrbitDays: number;
+  readonly moonOrbitPhaseAtWorldEpoch: number;
+  readonly planetCircumferenceMetres: number;
+  readonly axialTiltDegrees: number;
+  readonly moonOrbitInclinationDegrees: number;
+  readonly celestialSeed: number;
+  readonly celestialRevision: number;
+  readonly weatherCycleSeconds: number;
+  readonly weatherFractionAtUnixEpoch: number;
+  readonly cloudVelocityMetresPerSecond: readonly [number, number];
+  readonly cloudCoverage: number;
+  readonly cloudBaseMetres: number;
+  readonly cloudTopMetres: number;
+  cleanup(): Promise<void>;
+}
+
+export interface StartBrowserWorldServiceOptions {
+  readonly build?: boolean;
+  readonly metal?: boolean;
+  readonly profile?: WorldServiceCargoProfile;
+}
+
+export interface BrowserWorldService {
+  readonly child: ChildProcess;
+  readonly logs: string[];
+  close(): Promise<void>;
+}
+
+function replaceEnvironment(name: string, value: string): () => void {
   const previous = process.env[name];
   process.env[name] = value;
   return () => {
@@ -18,13 +98,13 @@ function replaceEnvironment(name, value) {
   };
 }
 
-function requiredTomlBoolean(contents, key) {
+function requiredTomlBoolean(contents: string, key: string): boolean {
   const value = new RegExp(`^${key}\\s*=\\s*(true|false)\\s*(?:#.*)?$`, "mu").exec(contents)?.[1];
   if (value === undefined) throw new Error(`missing boolean ${key} in client config`);
   return value === "true";
 }
 
-function requiredTomlInteger(contents, key) {
+function requiredTomlInteger(contents: string, key: string): number {
   const value = new RegExp(`^${key}\\s*=\\s*([0-9]+)\\s*(?:#.*)?$`, "mu").exec(contents)?.[1];
   if (value === undefined) throw new Error(`missing integer ${key} in service config`);
   return Number(value);
@@ -57,7 +137,7 @@ export async function prepareBrowserWorldFixture({
   cloudCoverage,
   cloudBaseMetres,
   cloudTopMetres,
-}) {
+}: BrowserWorldFixtureOptions): Promise<BrowserWorldFixture> {
   if (!Number.isInteger(browserPort) || browserPort <= 0 || browserPort > 65_535) {
     throw new Error("browser fixture port must be in 1..=65535");
   }
@@ -173,7 +253,7 @@ export async function prepareBrowserWorldFixture({
   for (const [name, value] of [
     ["celestialSeed", celestialSeed],
     ["celestialRevision", celestialRevision],
-  ]) {
+  ] as const) {
     if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
       throw new Error(`browser fixture ${name} must be a positive safe integer`);
     }
@@ -398,8 +478,8 @@ export async function prepareBrowserWorldFixture({
   }
 }
 
-function portAcceptsConnections(port) {
-  return new Promise((resolve) => {
+function portAcceptsConnections(port: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     const socket = connect({ host: "127.0.0.1", port });
     socket.setTimeout(250, () => {
       socket.destroy();
@@ -413,19 +493,21 @@ function portAcceptsConnections(port) {
   });
 }
 
-function signalProcessTree(child, signal) {
+function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
   if (child.exitCode !== null || child.signalCode !== null) return;
   try {
     if (process.platform !== "win32" && child.pid !== undefined) process.kill(-child.pid, signal);
     else child.kill(signal);
   } catch (error) {
-    if (error.code !== "ESRCH") throw error;
+    if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
   }
 }
 
-async function stopProcessTree(child) {
+async function stopProcessTree(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  const exited = new Promise((resolve) => child.once("exit", resolve));
+  const exited = new Promise<void>((resolve) => {
+    child.once("exit", () => resolve());
+  });
   signalProcessTree(child, "SIGTERM");
   await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 2_000))]);
   if (child.exitCode === null && child.signalCode === null) {
@@ -435,9 +517,9 @@ async function stopProcessTree(child) {
 }
 
 export async function startBrowserWorldService(
-  fixture,
-  { build = true, metal = false, profile = "worldgen" } = {},
-) {
+  fixture: BrowserWorldFixture,
+  { build = true, metal = false, profile = "worldgen" }: StartBrowserWorldServiceOptions = {},
+): Promise<BrowserWorldService> {
   if (build) {
     execFileSync(rustTool("cargo"), worldServiceBuildCargoArgs({ metal, profile }), {
       cwd: process.cwd(),
@@ -451,7 +533,7 @@ export async function startBrowserWorldService(
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32",
   });
-  const logs = [];
+  const logs: string[] = [];
   for (const stream of [child.stdout, child.stderr]) {
     stream.on("data", (bytes) => {
       logs.push(bytes.toString());

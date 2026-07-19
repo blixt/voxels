@@ -16,8 +16,8 @@ import {
   SNAPSHOT_SCHEMA_VERSION,
 } from "./browser-harness.mjs";
 import { rustTool } from "./build-wasm.ts";
-import { createShapedLink } from "./network-benchmark-link.mjs";
-import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "./vxwp-contract.mjs";
+import { createShapedLink } from "../automation/lib/network.ts";
+import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "../automation/lib/protocol.ts";
 import { worldServiceBuildCargoArgs, worldServiceCargoArgs } from "./world-service-command.ts";
 
 const RESULT_SCHEMA_VERSION = 4;

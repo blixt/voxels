@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vite-plus/test";
 import { PassThrough } from "node:stream";
-import { serializationMilliseconds, testInternals } from "./network-benchmark-link.mjs";
+import { serializationMilliseconds, testInternals } from "./network.ts";
 
 function maskedFrame(
-  payload,
-  { opcode = 0x2, final = true, mask = Buffer.from([0x12, 0x34, 0x56, 0x78]) } = {},
-) {
+  payload: Buffer,
+  {
+    opcode = 0x2,
+    final = true,
+    mask = Buffer.from([0x12, 0x34, 0x56, 0x78]),
+  }: {
+    readonly opcode?: number;
+    readonly final?: boolean;
+    readonly mask?: Buffer;
+  } = {},
+): Buffer {
   const length = payload.length;
   if (length >= 126) throw new Error("test helper only supports short frames");
   const frame = Buffer.alloc(2 + mask.length + length);
@@ -13,7 +21,12 @@ function maskedFrame(
   frame[1] = 0x80 | length;
   mask.copy(frame, 2);
   for (let index = 0; index < length; index += 1) {
-    frame[6 + index] = payload[index] ^ mask[index & 3];
+    const payloadByte = payload[index];
+    const maskByte = mask[index & 3];
+    if (payloadByte === undefined || maskByte === undefined) {
+      throw new Error("test frame payload or mask is incomplete");
+    }
+    frame[6 + index] = payloadByte ^ maskByte;
   }
   return frame;
 }
@@ -38,7 +51,7 @@ describe("network benchmark link", () => {
   });
 
   it("parses masked WebSocket binary frames across arbitrary TCP boundaries", () => {
-    const messages = [];
+    const messages: { opcode: number; payload: string; frameBytes: number }[] = [];
     const parser = new testInternals.WebSocketFrameParser((opcode, payload, frameBytes) => {
       messages.push({ opcode, payload: payload.toString("utf8"), frameBytes });
     });
@@ -50,7 +63,12 @@ describe("network benchmark link", () => {
   });
 
   it("attributes every frame byte in a fragmented WebSocket message", () => {
-    const messages = [];
+    const messages: {
+      opcode: number;
+      payload: string;
+      frameBytes: number;
+      frameCount: number;
+    }[] = [];
     const parser = new testInternals.WebSocketFrameParser(
       (opcode, payload, frameBytes, frameCount) => {
         messages.push({ opcode, payload: payload.toString("utf8"), frameBytes, frameCount });
@@ -73,7 +91,7 @@ describe("network benchmark link", () => {
   it("delivers artificially delayed bytes before forwarding TCP EOF", async () => {
     const source = new PassThrough();
     const destination = new PassThrough();
-    const received = [];
+    const received: Buffer[] = [];
     destination.on("data", (bytes) => received.push(Buffer.from(bytes)));
     const ended = new Promise((resolve) => destination.once("end", resolve));
     const inspector = {

@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vite-plus/test";
-import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH, WORLD_SUBPROTOCOL } from "./vxwp-contract.mjs";
+import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH, WORLD_SUBPROTOCOL } from "./protocol.ts";
 
-function requiredMatch(source, pattern, description) {
+function requiredMatch(source: string, pattern: RegExp, description: string): string {
   const value = pattern.exec(source)?.[1];
   if (!value) throw new Error(`could not read ${description}`);
   return value;

@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
-import { compareNetworkBenchmarks } from "./network-benchmark-compare.mjs";
+import { compareNetworkBenchmarks, type NetworkBenchmarkResult } from "./network-compare.ts";
 
-function result(viewport, coverage, bytes, down = 50) {
+function result(
+  viewport: number,
+  coverage: number,
+  bytes: number,
+  down = 50,
+): NetworkBenchmarkResult {
   return {
     schemaVersion: 4,
     environment: {
@@ -24,6 +29,7 @@ function result(viewport, coverage, bytes, down = 50) {
       downstreamMaxQueuedBytes: 500_000,
     },
     repetitions: 5,
+    git: { commit: "fixture" },
     summary: {
       cold_spawn: {
         viewportFullyInformedMs: { median: viewport, max: viewport * 1.1 },
@@ -41,15 +47,15 @@ describe("network benchmark comparison", () => {
       result(1_000, 1_500, 10_000),
       result(800, 1_600, 8_000),
     );
-    expect(comparison.cold_spawn.viewportMedianMs).toEqual({
+    expect(comparison.cold_spawn?.viewportMedianMs).toEqual({
       before: 1_000,
       after: 800,
       delta: -200,
       percent: -20,
     });
-    expect(comparison.cold_spawn.fullCoverageMedianMs.delta).toBe(100);
-    expect(comparison.cold_spawn.viewportWorldBytes.percent).toBe(-20);
-    expect(comparison.cold_spawn.fullCoverageBytes.percent).toBe(-20);
+    expect(comparison.cold_spawn?.fullCoverageMedianMs.delta).toBe(100);
+    expect(comparison.cold_spawn?.viewportWorldBytes.percent).toBe(-20);
+    expect(comparison.cold_spawn?.fullCoverageBytes.percent).toBe(-20);
   });
 
   it("rejects incomparable link profiles", () => {
@@ -60,7 +66,7 @@ describe("network benchmark comparison", () => {
 
   it("rejects incomparable fixtures", () => {
     const candidate = result(800, 1_600, 8_000);
-    candidate.fixture.streamingWalkMetres = 50;
+    (candidate.fixture as { streamingWalkMetres: number }).streamingWalkMetres = 50;
     expect(() => compareNetworkBenchmarks(result(1_000, 1_500, 10_000), candidate)).toThrow(
       "fixture mismatch",
     );
@@ -69,13 +75,17 @@ describe("network benchmark comparison", () => {
   it("rejects incomplete or expanded scenario sets", () => {
     const baseline = result(1_000, 1_500, 10_000);
     const missing = result(800, 1_600, 8_000);
-    missing.summary.resident_walk = structuredClone(missing.summary.cold_spawn);
+    const coldSpawn = missing.summary.cold_spawn;
+    if (coldSpawn === undefined) throw new Error("test fixture lacks cold_spawn");
+    missing.summary.resident_walk = structuredClone(coldSpawn);
     expect(() => compareNetworkBenchmarks(missing, baseline)).toThrow(
       "scenario set mismatch: cold_spawn, resident_walk versus cold_spawn",
     );
 
     const expanded = result(800, 1_600, 8_000);
-    expanded.summary.streaming_walk = structuredClone(expanded.summary.cold_spawn);
+    const expandedColdSpawn = expanded.summary.cold_spawn;
+    if (expandedColdSpawn === undefined) throw new Error("test fixture lacks cold_spawn");
+    expanded.summary.streaming_walk = structuredClone(expandedColdSpawn);
     expect(() => compareNetworkBenchmarks(baseline, expanded)).toThrow(
       "scenario set mismatch: cold_spawn versus cold_spawn, streaming_walk",
     );
@@ -91,11 +101,11 @@ describe("network benchmark comparison", () => {
     );
 
     const procedural = result(800, 1_600, 8_000);
-    procedural.world.source = "procedural-v16";
+    (procedural.world as { source: string }).source = "procedural-v16";
     expect(() => compareNetworkBenchmarks(baseline, procedural)).toThrow("world mismatch");
 
     const otherCpu = result(800, 1_600, 8_000);
-    otherCpu.environment.cpu = "Other CPU";
+    (otherCpu.environment as { cpu: string }).cpu = "Other CPU";
     expect(() => compareNetworkBenchmarks(baseline, otherCpu)).toThrow("environment mismatch");
   });
 });

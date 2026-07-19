@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vite-plus/test";
-import { prepareBrowserWorldFixture } from "./browser-world-fixture.mjs";
-import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./vxwp-contract.mjs";
+import { prepareBrowserWorldFixture } from "./world.ts";
+import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./protocol.ts";
 
 describe("isolated browser world fixture", () => {
   it("binds matching temporary configuration and preserves omitted renderer defaults", async () => {

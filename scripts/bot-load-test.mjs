@@ -4,7 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
 import { build, preview } from "vite-plus";
-import { prepareBrowserWorldFixture, startBrowserWorldService } from "./browser-world-fixture.mjs";
+import { prepareBrowserWorldFixture, startBrowserWorldService } from "../automation/lib/world.ts";
 import {
   assertSnapshotSchema,
   chromeWebGpuLaunchOptions,
@@ -20,9 +20,9 @@ import {
   sampleProcess,
   summarizeProcess,
   writeHarnessReport,
-} from "./harness-metrics.mjs";
-import { createShapedLink } from "./network-benchmark-link.mjs";
-import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./vxwp-contract.mjs";
+} from "../automation/lib/metrics.ts";
+import { createShapedLink } from "../automation/lib/network.ts";
+import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "../automation/lib/protocol.ts";
 import { worldServiceBuildCargoArgs } from "./world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
