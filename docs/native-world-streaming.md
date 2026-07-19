@@ -258,7 +258,9 @@ has applied all commits, the far observer has accepted and uploaded the revised 
 tile, and a before/after pixel comparison proves the aimed tower is visibly legible. It owns a
 temporary native edit database, rejects browser/WGPU/socket errors, and writes ignored
 metrics/screenshots under
-`target/multiplayer-browser/`; it never opens or resets a user's normal browser profile or world.
+`target/automation/multiplayer/<run-id>/`; the stable
+`target/automation/multiplayer/latest.json` pointer identifies the newest run. It never opens or
+resets a user's normal browser profile or world.
 
 ## Far-LOD transition policy and next step
 

@@ -95,8 +95,10 @@ receives an independently shaped 40 ms RTT, 50/10 Mbit/s link, and must negotiat
 user and player identity. Five builders and one observer start together. The observer then travels at
 least 120 m from the builders, beyond the configured 96 m mid-presence tier, and all six clients must
 still render the other five articulated avatars. Per-player `/v21/world` and `/v21/presence` stream and
-VXWP byte counts are written to `target/multiplayer-browser/latest.json`; the far observer screenshot
-is `target/multiplayer-browser/observer-far-five.png`.
+VXWP byte counts and screenshots are written to the isolated
+`target/automation/multiplayer/<run-id>/` directory. The stable
+`target/automation/multiplayer/latest.json` pointer identifies the newest run; its far-observer
+screenshot is `observer-far-five.png`.
 
 The harness also samples a steady-state frame-history window for every context. Because all six
 unthrottled WebGPU renderers contend on one local GPU and worker pool, this is a bounded-stall gate,
@@ -118,7 +120,7 @@ vp run automation -- run multiplayer
 
 The run records convergence time, edit-only world traffic, the observer's required/accepted surface
 revision, pre/post GPU mesh fingerprints, pixel evidence, per-client frame health, and screenshots in
-`target/multiplayer-browser/`. A separate native WebSocket regression decodes the resulting coarse
+`target/automation/multiplayer/<run-id>/`. A separate native WebSocket regression decodes the resulting coarse
 mesh and proves the tower's top survives stride-16; the browser gate proves the real worker uploads
 that revised product and changes the rendered silhouette.
 
