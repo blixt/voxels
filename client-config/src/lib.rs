@@ -701,7 +701,9 @@ mod tests {
             multiplayer: MultiplayerConfig {
                 pose_send_interval_ms: 33,
                 clock_sync_interval_ms: 250,
-                buffered_amount_high_water_bytes: 65_536,
+                // Presence is latest-state traffic. A one-byte watermark means only an empty
+                // browser application queue may accept the next pose or clock sample.
+                buffered_amount_high_water_bytes: 1,
                 interpolation_delay_ms: 100,
                 min_interpolation_delay_ms: 67,
                 max_interpolation_delay_ms: 200,

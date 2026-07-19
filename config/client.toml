@@ -26,8 +26,9 @@ reconnect_attempt_limit = 30
 pose_send_interval_ms = 33
 # Fast feedback lets the server stop a bandwidth probe before it becomes a standing queue.
 clock_sync_interval_ms = 250
-# Pose packets are latest-state data: skip a send instead of queueing when this watermark is hit.
-buffered_amount_high_water_bytes = 65536
+# Pose packets are latest-state data: once any application byte is still queued, skip this sample
+# instead of putting a newer pose behind stale motion on the ordered WebSocket stream.
+buffered_amount_high_water_bytes = 1
 # Adaptive receiver delay starts here and remains inside the declared min/max envelope.
 interpolation_delay_ms = 100
 min_interpolation_delay_ms = 67
