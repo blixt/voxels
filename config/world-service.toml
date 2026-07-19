@@ -41,6 +41,8 @@ collision_generation_workers_per_client = 1
 [presence]
 # Per-client spatial deltas tick at about 30 Hz; unchanged poses are omitted.
 broadcast_interval_ms = 33
+# Keep crowd delta construction off realtime socket tasks without creating unbounded workers.
+replication_workers = 4
 max_players = 1024
 # Browsers normally send at 30 Hz; this higher ceiling permits modest timer catch-up without abuse.
 max_pose_updates_per_second = 60
