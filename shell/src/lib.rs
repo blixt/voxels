@@ -1522,7 +1522,11 @@ mod web {
                         .borrow_mut()
                         .extend(tickets.into_iter().map(|ticket| ticket.coord));
                 }
-                Err(RemoteWorldError::Backpressured | RemoteWorldError::RequestWindowFull) => {
+                Err(
+                    RemoteWorldError::Backpressured
+                    | RemoteWorldError::RequestWindowFull
+                    | RemoteWorldError::NotOpen,
+                ) => {
                     let mut queue = self.surface_queue.borrow_mut();
                     for ticket in tickets.into_iter().rev() {
                         queue.push_front(ticket.coord);
