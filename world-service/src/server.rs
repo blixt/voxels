@@ -2793,13 +2793,13 @@ mod tests {
     use tokio_tungstenite::tungstenite::protocol::Message as ClientMessage;
     use uuid::Uuid;
     use voxels_world::protocol::{
-        BrowserUserId, ChunkBatchRequest, EditCommand, EditCommit, OpenPresence, OpenWorld,
-        PLAYER_POSE_GROUNDED, PlayerId, PlayerIdentity, PlayerPoseUpdate, PresenceDelta,
+        BrowserUserId, ChunkBatchRequest, EditCommand, EditCommit, FrameReassembler, OpenPresence,
+        OpenWorld, PLAYER_POSE_GROUNDED, PlayerId, PlayerIdentity, PlayerPoseUpdate, PresenceDelta,
         PresenceOpened, PresenceSessionId, SurfaceTileBatchRequest, decode_chunk_batch_result,
         decode_edit_commit, decode_error, decode_presence_delta, decode_presence_opened,
         decode_surface_tile_batch_result, decode_world_opened, edit_commit_kind,
         encode_chunk_batch, encode_edit_command, encode_open_presence, encode_open_world,
-        encode_player_pose, encode_surface_tile_batch, presence_delta_kind,
+        encode_player_pose, encode_surface_tile_batch, frame_fragment_kind, presence_delta_kind,
     };
     use voxels_world::{
         ChunkCoord, ProceduralWorldSource, SurfaceLodLevel, SurfaceTileCoord, VoxelCoord,
@@ -2810,6 +2810,34 @@ mod tests {
         inner: ProceduralWorldSource,
         batch_calls: Arc<AtomicUsize>,
         product_calls: Arc<Mutex<HashMap<WorldProductRequest, usize>>>,
+    }
+
+    struct TestClient<S> {
+        socket: tokio_tungstenite::WebSocketStream<S>,
+        reassembler: FrameReassembler,
+    }
+
+    impl<S> TestClient<S> {
+        fn new(socket: tokio_tungstenite::WebSocketStream<S>) -> Self {
+            Self {
+                socket,
+                reassembler: FrameReassembler::default(),
+            }
+        }
+    }
+
+    impl<S> std::ops::Deref for TestClient<S> {
+        type Target = tokio_tungstenite::WebSocketStream<S>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.socket
+        }
+    }
+
+    impl<S> std::ops::DerefMut for TestClient<S> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.socket
+        }
     }
 
     impl WorldSourceEngine for CountingSource {
@@ -3232,7 +3260,8 @@ mod tests {
             SEC_WEBSOCKET_PROTOCOL,
             HeaderValue::from_static("voxels.world.v25, test-local-token"),
         );
-        let (mut socket, response) = connect_async(request).await?;
+        let (socket, response) = connect_async(request).await?;
+        let mut socket = TestClient::new(socket);
         assert_eq!(
             response.headers().get(SEC_WEBSOCKET_PROTOCOL),
             Some(&HeaderValue::from_static(WORLD_WEBSOCKET_PROTOCOL))
@@ -4156,9 +4185,7 @@ mod tests {
         identity: PlayerIdentity,
     ) -> Result<
         (
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
+            TestClient<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
             WorldOpened,
         ),
         Box<dyn std::error::Error>,
@@ -4173,9 +4200,7 @@ mod tests {
         identity: PlayerIdentity,
     ) -> Result<
         (
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
+            TestClient<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
             Vec<u8>,
         ),
         Box<dyn std::error::Error>,
@@ -4188,7 +4213,8 @@ mod tests {
             SEC_WEBSOCKET_PROTOCOL,
             HeaderValue::from_static("voxels.world.v25, test-local-token"),
         );
-        let (mut socket, _) = connect_async(request).await?;
+        let (socket, _) = connect_async(request).await?;
+        let mut socket = TestClient::new(socket);
         socket
             .send(ClientMessage::Binary(
                 encode_open_world(&OpenWorld {
@@ -4207,9 +4233,7 @@ mod tests {
         session_id: PresenceSessionId,
     ) -> Result<
         (
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
+            TestClient<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
             PresenceOpened,
         ),
         Box<dyn std::error::Error>,
@@ -4223,7 +4247,8 @@ mod tests {
             SEC_WEBSOCKET_PROTOCOL,
             HeaderValue::from_static("voxels.world.v25, test-local-token"),
         );
-        let (mut socket, _) = connect_async(request).await?;
+        let (socket, _) = connect_async(request).await?;
+        let mut socket = TestClient::new(socket);
         socket
             .send(ClientMessage::Binary(
                 encode_open_presence(OpenPresence { session_id })?.into(),
@@ -4234,7 +4259,7 @@ mod tests {
     }
 
     async fn next_presence_delta<S>(
-        socket: &mut tokio_tungstenite::WebSocketStream<S>,
+        socket: &mut TestClient<S>,
         enter_count: usize,
         leave_count: usize,
     ) -> Result<PresenceDelta, Box<dyn std::error::Error>>
@@ -4256,7 +4281,7 @@ mod tests {
     }
 
     async fn wait_for_visible_connections<S>(
-        socket: &mut tokio_tungstenite::WebSocketStream<S>,
+        socket: &mut TestClient<S>,
         expected: &BTreeSet<u64>,
     ) -> Result<PresenceDelta, Box<dyn std::error::Error>>
     where
@@ -4283,7 +4308,7 @@ mod tests {
     }
 
     async fn next_edit_commit<S>(
-        socket: &mut tokio_tungstenite::WebSocketStream<S>,
+        socket: &mut TestClient<S>,
     ) -> Result<(EditCommit, usize), Box<dyn std::error::Error>>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -4301,7 +4326,7 @@ mod tests {
     }
 
     async fn next_client_binary<S>(
-        socket: &mut tokio_tungstenite::WebSocketStream<S>,
+        socket: &mut TestClient<S>,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -4312,7 +4337,13 @@ mod tests {
                 .await
                 .ok_or("server closed before sending a binary frame")??;
             if let ClientMessage::Binary(bytes) = message {
-                return Ok(bytes.to_vec());
+                let bytes = bytes.to_vec();
+                if message_kind(&bytes)? != frame_fragment_kind() {
+                    return Ok(bytes);
+                }
+                if let Some(completed) = socket.reassembler.accept(&bytes)? {
+                    return Ok(completed);
+                }
             }
         }
     }
