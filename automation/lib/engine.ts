@@ -1,4 +1,5 @@
 import type { Page } from "playwright";
+import type { BrowserPlayerSession } from "../../web/local-player.ts";
 import {
   FRAME_SAMPLE_WIDTH,
   GPU_SAMPLE_WIDTH,
@@ -168,6 +169,18 @@ export class EngineClient {
 
   async inventory(): Promise<readonly number[]> {
     return this.#page.evaluate(() => globalThis.__VOXELS__!.inventory());
+  }
+
+  async playerSession(): Promise<BrowserPlayerSession> {
+    const player = await this.#page.evaluate(() => globalThis.__VOXELS__!.player);
+    if (
+      typeof player.browserUserId !== "string" ||
+      typeof player.playerId !== "string" ||
+      typeof player.playerName !== "string"
+    ) {
+      throw new Error("engine returned an invalid browser player session");
+    }
+    return Object.freeze(player);
   }
 
   async surfaceEditState(stride: number, x: number, z: number): Promise<SurfaceEditState> {

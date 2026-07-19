@@ -6,11 +6,12 @@ import {
   reserveEphemeralPort,
 } from "../lib/browser.ts";
 import {
-  assertSnapshotSchema,
+  type EngineClient,
   FRAME_SAMPLE_WIDTH,
   SNAPSHOT,
   SNAPSHOT_SCHEMA_VERSION,
   snapshotValue,
+  type SurfaceEditState,
 } from "../lib/engine.ts";
 import { createShapedLink, type LinkStats, type ShapedLink } from "../lib/network.ts";
 import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "../lib/protocol.ts";
@@ -57,6 +58,7 @@ interface PlayerIdentity {
 interface MultiplayerPlayer {
   readonly name: string;
   readonly page: Page;
+  readonly engine: EngineClient;
   readonly link: ShapedLink;
   readonly initial: readonly number[];
   readonly identity: PlayerIdentity;
@@ -75,6 +77,19 @@ interface Point3 {
   readonly x: number;
   readonly y: number;
   readonly z: number;
+}
+
+function surfaceEditReport(state: SurfaceEditState) {
+  return {
+    tile: [state.tileX, state.tileZ],
+    requiredRevision: state.requiredServerRevision,
+    acceptedRevision: state.acceptedServerRevision,
+    resident: state.resident,
+    dirty: state.dirty,
+    fingerprint: `0x${state.fingerprint.toString(16).padStart(16, "0")}`,
+    quadCount: state.quadCount,
+    activationMask: state.activationMask,
+  };
 }
 
 function required<T>(values: readonly T[], index: number, label: string): T {
@@ -113,27 +128,16 @@ function frameTimingSummary(values: readonly number[]): FrameTimingSummary {
   };
 }
 
-async function snapshot(page: Page): Promise<readonly number[]> {
-  return assertSnapshotSchema(await page.evaluate(() => globalThis.__VOXELS__!.snapshot()));
-}
-
-async function aimAt(page: Page, targetMetres: Point3): Promise<void> {
-  const current = await snapshot(page);
+async function aimAt(engine: EngineClient, targetMetres: Point3): Promise<void> {
+  const current = await engine.snapshot();
   const deltaX = targetMetres.x - snapshotValue(current, "cameraX");
   const deltaY = targetMetres.y - snapshotValue(current, "cameraY");
   const deltaZ = targetMetres.z - snapshotValue(current, "cameraZ");
   const horizontalDistance = Math.hypot(deltaX, deltaZ);
   const desiredYaw = Math.atan2(deltaX, -deltaZ);
   const desiredPitch = Math.atan2(deltaY, horizontalDistance);
-  const yawDelta = Math.atan2(
-    Math.sin(desiredYaw - snapshotValue(current, "yaw")),
-    Math.cos(desiredYaw - snapshotValue(current, "yaw")),
-  );
-  await page.evaluate(
-    ([movementX, movementY]) => globalThis.__VOXELS__!.look(movementX, movementY),
-    [yawDelta / 0.0022, (snapshotValue(current, "pitch") - desiredPitch) / 0.0022] as const,
-  );
-  await page.waitForTimeout(250);
+  await engine.setCameraLook(desiredYaw, desiredPitch);
+  await engine.wait(250);
 }
 
 async function analyzeTowerPixels(page: Page, before: Buffer, after: Buffer) {
@@ -226,25 +230,8 @@ async function analyzeTowerPixels(page: Page, before: Buffer, after: Buffer) {
   );
 }
 
-async function surfaceEditState(
-  page: Page,
-  stride: number,
-  x: number,
-  z: number,
-): Promise<readonly number[]> {
-  return page.evaluate(
-    ([requestedStride, voxelX, voxelZ]) =>
-      globalThis.__VOXELS__!.surfaceEditState(requestedStride, voxelX, voxelZ),
-    [stride, x, z] as const,
-  );
-}
-
-async function inventory(page: Page): Promise<readonly number[]> {
-  return page.evaluate(() => globalThis.__VOXELS__!.inventory());
-}
-
 async function waitForEarnedInventory(
-  page: Page,
+  engine: EngineClient,
   label: string,
   previousRevision: number,
   timeoutMs = 30_000,
@@ -252,66 +239,58 @@ async function waitForEarnedInventory(
   const deadline = performance.now() + timeoutMs;
   let latest: readonly number[] = [];
   while (performance.now() < deadline) {
-    latest = await inventory(page);
+    latest = await engine.inventory();
     if (
       required(latest, 0, "inventory revision") > previousRevision &&
       latest.slice(2).some((count) => count > 0)
     ) {
       return latest;
     }
-    await page.waitForTimeout(50);
+    await engine.wait(50);
   }
   throw new Error(`${label} did not receive earned inventory: ${JSON.stringify(latest)}`);
 }
 
 async function waitForSurfaceEditConvergence(
-  page: Page,
+  engine: EngineClient,
   stride: number,
   x: number,
   z: number,
   timeoutMs = 30_000,
-): Promise<readonly number[]> {
+): Promise<SurfaceEditState> {
   const deadline = performance.now() + timeoutMs;
-  let latest: readonly number[] = [];
+  let latest: SurfaceEditState | undefined;
   while (performance.now() < deadline) {
-    latest = await surfaceEditState(page, stride, x, z);
+    latest = await engine.surfaceEditState(stride, x, z);
     if (
-      latest.length === 10 &&
-      required(latest, 2, "surface required revision") > 1 &&
-      required(latest, 3, "surface accepted revision") ===
-        required(latest, 2, "surface required revision") &&
-      required(latest, 4, "surface resident") === 1 &&
-      required(latest, 5, "surface dirty") === 0
+      latest.requiredServerRevision > 1 &&
+      latest.acceptedServerRevision === latest.requiredServerRevision &&
+      latest.resident &&
+      !latest.dirty
     ) {
       return latest;
     }
-    await page.waitForTimeout(50);
+    await engine.wait(50);
   }
   throw new Error(`far surface edit did not converge: ${JSON.stringify(latest)}`);
 }
 
 async function waitFor(
-  page: Page,
+  engine: EngineClient,
   label: string,
   predicate: (snapshot: readonly number[]) => boolean,
   timeoutMs = 90_000,
 ): Promise<readonly number[]> {
-  const deadline = performance.now() + timeoutMs;
-  let latest: readonly number[] = [];
-  while (performance.now() < deadline) {
-    latest = await snapshot(page);
-    if (predicate(latest)) return latest;
-    await page.waitForTimeout(50);
-  }
-  throw new Error(`${label} did not converge: ${JSON.stringify(latest.slice(0, 108))}`);
+  return engine.waitForSnapshot(predicate, {
+    timeoutMs,
+    intervalMs: 50,
+    description: `${label} did not converge`,
+  });
 }
 
-async function waitForEngine(page: Page, label: string): Promise<readonly number[]> {
-  await page.waitForFunction(() => typeof globalThis.__VOXELS__?.snapshot === "function", null, {
-    timeout: 30_000,
-  });
+async function waitForEngine(engine: EngineClient, label: string): Promise<readonly number[]> {
   return waitFor(
-    page,
+    engine,
     `${label} engine startup`,
     (next) =>
       snapshotValue(next, "quads") > 0 &&
@@ -322,7 +301,7 @@ async function waitForEngine(page: Page, label: string): Promise<readonly number
 
 async function waitForRoster(player: MultiplayerPlayer): Promise<readonly number[]> {
   return waitFor(
-    player.page,
+    player.engine,
     `${player.name} six-player roster`,
     (next) =>
       snapshotValue(next, "remoteAvatars") === EXPECTED_REMOTE_PLAYERS &&
@@ -335,7 +314,7 @@ async function waitForRoster(player: MultiplayerPlayer): Promise<readonly number
 
 async function waitForSettledWorld(player: MultiplayerPlayer): Promise<readonly number[]> {
   return waitFor(
-    player.page,
+    player.engine,
     `${player.name} settled world coverage`,
     (next) =>
       snapshotValue(next, "allLodsReady") === 1 &&
@@ -353,6 +332,7 @@ function viewportFingerprint(values: readonly number[]): readonly [number, numbe
 
 async function walkDistance(
   page: Page,
+  engine: EngineClient,
   targetDistanceMetres: number,
 ): Promise<{
   readonly before: readonly number[];
@@ -360,7 +340,7 @@ async function walkDistance(
   readonly distanceMetres: number;
   readonly durationMs: number;
 }> {
-  const before = await snapshot(page);
+  const before = await engine.snapshot();
   const started = performance.now();
   await page.keyboard.down("ShiftLeft");
   await page.keyboard.down("KeyS");
@@ -368,7 +348,7 @@ async function walkDistance(
   try {
     while (performance.now() - started < 35_000) {
       await page.waitForTimeout(50);
-      after = await snapshot(page);
+      after = await engine.snapshot();
       const distance = Math.hypot(
         snapshotValue(after, "cameraX") - snapshotValue(before, "cameraX"),
         snapshotValue(after, "cameraZ") - snapshotValue(before, "cameraZ"),
@@ -504,11 +484,13 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
           ...routeWorldClient(fixture, index),
         });
         const page = viewport.page;
-        const initial = await waitForEngine(page, name);
-        const identity = await page.evaluate(() => globalThis.__VOXELS__!.player);
+        const { engine } = viewport;
+        const initial = await waitForEngine(engine, name);
+        const identity = await engine.playerSession();
         return {
           name,
           page,
+          engine,
           link: required(links, index, `${name} shaped link`),
           initial,
           identity,
@@ -533,7 +515,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     const observer = required(players, 0, "observer");
     // Keep the builders together while moving beyond the protected 6.4 m starting area. The later
     // dig and tower remain ordinary reach-checked player actions at this editable worksite.
-    const builderWalks = builders.map(({ page }) => walkDistance(page, 10));
+    const builderWalks = builders.map(({ engine, page }) => walkDistance(page, engine, 10));
     await observer.page.waitForTimeout(350);
     const walkingScreenshot = scenario.artifacts.resolve("observer-near-five-walking.png");
     await observer.page.screenshot({ path: walkingScreenshot });
@@ -543,14 +525,14 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     const builderAfterMovement = await Promise.all(
       builders.map((builder) =>
         waitFor(
-          builder.page,
+          builder.engine,
           `${builder.name} grounded worksite`,
           (next) => snapshotValue(next, "grounded") === 1,
           30_000,
         ),
       ),
     );
-    const observerWalk = await walkDistance(observer.page, OBSERVER_WALK_METRES);
+    const observerWalk = await walkDistance(observer.page, observer.engine, OBSERVER_WALK_METRES);
     const farRosters = await Promise.all(players.map(waitForRoster));
     const builderCentroid = builders.reduce(
       (center, _builder, index) => {
@@ -571,7 +553,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
         `observer reached only ${distanceFromBuildersMetres.toFixed(2)}m from builders`,
       );
     }
-    await aimAt(observer.page, {
+    await aimAt(observer.engine, {
       x: builderCentroid.x,
       y: snapshotValue(observerFar, "cameraY"),
       z: builderCentroid.z,
@@ -581,9 +563,9 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     scenario.artifacts.record("far builders", farScreenshot, "image/png");
     await Promise.all(players.map(waitForSettledWorld));
     // Drain unequal startup/walk histories, then measure one identical steady window everywhere.
-    await Promise.all(players.map(({ page }) => snapshot(page)));
+    await Promise.all(players.map(({ engine }) => engine.snapshot()));
     await observer.page.waitForTimeout(3_000);
-    const steadySnapshots = await Promise.all(players.map(({ page }) => snapshot(page)));
+    const steadySnapshots = await Promise.all(players.map(({ engine }) => engine.snapshot()));
     const frameTimings = steadySnapshots.map(frameTimingSummary);
     const timingViolations = frameTimings.flatMap((timing, index) => {
       const violations: string[] = [];
@@ -623,16 +605,16 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
       );
     }
 
-    const inventoryBeforeDig = await Promise.all(builders.map(({ page }) => inventory(page)));
+    const inventoryBeforeDig = await Promise.all(builders.map(({ engine }) => engine.inventory()));
     const digSubmissions = await Promise.all(
       builders.map((builder, index) => {
         const position = required(builderAfterMovement, index, "builder dig position");
         const lateralOffset = (index - Math.floor(BUILDER_COUNT / 2)) * BUILDER_DIG_SPACING_VOXELS;
-        return builder.page.evaluate(([x, y, z]) => globalThis.__VOXELS__!.submitDig(x, y, z), [
+        return builder.engine.submitDig(
           Math.floor(snapshotValue(position, "cameraX") * 10) + lateralOffset,
           Math.round((snapshotValue(position, "cameraY") - PLAYER_EYE_HEIGHT_METRES) * 10 - 1),
           Math.floor(snapshotValue(position, "cameraZ") * 10),
-        ] as const);
+        );
       }),
     );
     if (digSubmissions.some((submitted) => !submitted)) {
@@ -641,7 +623,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     const earnedInventories = await Promise.all(
       builders.map((builder, index) =>
         waitForEarnedInventory(
-          builder.page,
+          builder.engine,
           `${builder.name} dig`,
           required(
             required(inventoryBeforeDig, index, "pre-dig inventory"),
@@ -706,14 +688,14 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     await Promise.all(
       players.map((player) =>
         waitFor(
-          player.page,
+          player.engine,
           `${player.name} authoritative collaborative digs`,
           (next) => snapshotValue(next, "edits") === dugVoxelCount,
           30_000,
         ),
       ),
     );
-    await aimAt(observer.page, {
+    await aimAt(observer.engine, {
       x: towerX / 10,
       y: (towerBaseY + towerHeightVoxels / 2) / 10,
       z: towerZ / 10,
@@ -721,21 +703,16 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     const beforeTowerPath = scenario.artifacts.resolve("observer-far-tower-before.png");
     const beforeTowerScreenshot = await observer.page.screenshot({ path: beforeTowerPath });
     scenario.artifacts.record("tower before", beforeTowerPath, "image/png");
-    const beforeTowerSnapshot = await snapshot(observer.page);
+    const beforeTowerSnapshot = await observer.engine.snapshot();
     const beforeViewportFingerprint = viewportFingerprint(beforeTowerSnapshot);
     const beforeTowerNetwork = players.map((player) => player.link.snapshot());
-    const beforeTowerSurfaceState = await surfaceEditState(observer.page, 16, towerX, towerZ);
+    const beforeTowerSurfaceState = await observer.engine.surfaceEditState(16, towerX, towerZ);
     const towerStarted = performance.now();
     const submissions = await Promise.all(
       builders.flatMap((builder, builderIndex) =>
         towerVoxels
           .filter((_voxel, index) => index % BUILDER_COUNT === builderIndex)
-          .map((voxel) =>
-            builder.page.evaluate(
-              ([x, y, z, materialId]) => globalThis.__VOXELS__!.submitEdit(x, y, z, materialId),
-              [voxel.x, voxel.y, voxel.z, towerMaterialId] as const,
-            ),
-          ),
+          .map((voxel) => builder.engine.submitEdit(voxel.x, voxel.y, voxel.z, towerMaterialId)),
       ),
     );
     if (submissions.some((submitted) => !submitted)) {
@@ -744,7 +721,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     const convergedClients = await Promise.all(
       players.map((player) =>
         waitFor(
-          player.page,
+          player.engine,
           `${player.name} authoritative tower edits`,
           (next) => snapshotValue(next, "edits") === dugVoxelCount + towerVoxelCount,
           30_000,
@@ -752,7 +729,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
       ),
     );
     const observerSurfaceState = await waitForSurfaceEditConvergence(
-      observer.page,
+      observer.engine,
       16,
       towerX,
       towerZ,
@@ -762,7 +739,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     const afterTowerPath = scenario.artifacts.resolve("observer-far-five-tower.png");
     const afterTowerScreenshot = await observer.page.screenshot({ path: afterTowerPath });
     scenario.artifacts.record("tower after", afterTowerPath, "image/png");
-    const afterTowerSnapshot = await snapshot(observer.page);
+    const afterTowerSnapshot = await observer.engine.snapshot();
     const visualEvidence = await analyzeTowerPixels(
       observer.page,
       beforeTowerScreenshot,
@@ -776,8 +753,8 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
       throw new Error(
         `distant tower was not visually legible: ${JSON.stringify({
           visualEvidence,
-          beforeSurface: beforeTowerSurfaceState,
-          afterSurface: observerSurfaceState,
+          beforeSurface: surfaceEditReport(beforeTowerSurfaceState),
+          afterSurface: surfaceEditReport(observerSurfaceState),
         })}`,
       );
     }
@@ -807,21 +784,9 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
       builders: BUILDER_COUNT,
       distanceMetres: rounded(distanceFromBuildersMetres, 3),
       convergenceMs: rounded(towerConvergenceMs),
-      observerSurface: {
-        tile: observerSurfaceState.slice(0, 2),
-        requiredRevision: required(observerSurfaceState, 2, "surface required revision"),
-        acceptedRevision: required(observerSurfaceState, 3, "surface accepted revision"),
-        resident: required(observerSurfaceState, 4, "surface resident") === 1,
-        dirty: required(observerSurfaceState, 5, "surface dirty") === 1,
-        fingerprint: observerSurfaceState.slice(6, 8),
-        quadCount: required(observerSurfaceState, 8, "surface quad count"),
-        activationMask: required(observerSurfaceState, 9, "surface activation mask"),
-      },
+      observerSurface: surfaceEditReport(observerSurfaceState),
       surfaceFingerprintChanged:
-        required(beforeTowerSurfaceState, 6, "surface fingerprint") !==
-          required(observerSurfaceState, 6, "surface fingerprint") ||
-        required(beforeTowerSurfaceState, 7, "surface fingerprint") !==
-          required(observerSurfaceState, 7, "surface fingerprint"),
+        beforeTowerSurfaceState.fingerprint !== observerSurfaceState.fingerprint,
       viewportFingerprintChanged:
         snapshotValue(afterTowerSnapshot, "viewportFingerprintLow24") !==
           beforeViewportFingerprint[0] ||
