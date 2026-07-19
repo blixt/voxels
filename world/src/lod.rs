@@ -525,7 +525,7 @@ pub fn generate_edited_surface_tile_mesh(
     if edits.is_empty() {
         let surface = |x, z| edits.surface_sample(generator, x, z);
         return generate_surface_tile_mesh_with_options(
-            coord, &surface, None, None, true, &features,
+            coord, &surface, None, None, true, 0, &features,
         );
     }
     let aliases = collidable_edit_aliases(generator, edits, coord);
@@ -543,6 +543,7 @@ pub fn generate_edited_surface_tile_mesh(
         Some(&shading_surface),
         Some(&shading_surface),
         true,
+        0,
         &features,
     )
 }
@@ -717,7 +718,7 @@ pub fn generate_surface_tile_mesh_with(
     coord: SurfaceTileCoord,
     surface: impl Fn(i32, i32) -> (i32, Material),
 ) -> SurfaceTileMesh {
-    generate_surface_tile_mesh_with_options(coord, &surface, None, None, true, &[])
+    generate_surface_tile_mesh_with_options(coord, &surface, None, None, true, 0, &[])
 }
 
 pub fn generate_surface_tile_mesh_with_features(
@@ -725,7 +726,7 @@ pub fn generate_surface_tile_mesh_with_features(
     surface: impl Fn(i32, i32) -> (i32, Material),
     skyline_features: &[SkylineFeature],
 ) -> SurfaceTileMesh {
-    generate_surface_tile_mesh_with_options(coord, &surface, None, None, true, skyline_features)
+    generate_surface_tile_mesh_with_options(coord, &surface, None, None, true, 0, skyline_features)
 }
 
 pub fn generate_surface_tile_mesh_with_features_and_shading(
@@ -735,12 +736,31 @@ pub fn generate_surface_tile_mesh_with_features_and_shading(
     parent_shading_surface: impl Fn(i32, i32) -> (i32, Material),
     skyline_features: &[SkylineFeature],
 ) -> SurfaceTileMesh {
+    generate_surface_tile_mesh_with_aggregated_ecology_and_shading(
+        coord,
+        surface,
+        shading_surface,
+        parent_shading_surface,
+        skyline_features,
+        0,
+    )
+}
+
+pub(crate) fn generate_surface_tile_mesh_with_aggregated_ecology_and_shading(
+    coord: SurfaceTileCoord,
+    surface: impl Fn(i32, i32) -> (i32, Material),
+    shading_surface: impl Fn(i32, i32) -> (i32, Material),
+    parent_shading_surface: impl Fn(i32, i32) -> (i32, Material),
+    skyline_features: &[SkylineFeature],
+    ecology_aggregate_shift: u8,
+) -> SurfaceTileMesh {
     generate_surface_tile_mesh_with_options(
         coord,
         &surface,
         Some(&shading_surface),
         Some(&parent_shading_surface),
         true,
+        ecology_aggregate_shift,
         skyline_features,
     )
 }
@@ -813,6 +833,7 @@ fn generate_surface_tile_mesh_with_options(
     shading_surface: Option<&dyn Fn(i32, i32) -> (i32, Material)>,
     parent_shading_surface: Option<&dyn Fn(i32, i32) -> (i32, Material)>,
     patch_edges: bool,
+    ecology_aggregate_shift: u8,
     skyline_features: &[SkylineFeature],
 ) -> SurfaceTileMesh {
     let [origin_x, origin_z] = coord.voxel_origin();
@@ -914,7 +935,7 @@ fn generate_surface_tile_mesh_with_options(
                     && feature.anchor[2] < patch_max_z
             }) {
                 let feature_start = quads.len();
-                append_skyline_proxy(&mut quads, coord.level, feature);
+                append_skyline_proxy(&mut quads, coord.level, feature, ecology_aggregate_shift);
                 for quad in &quads[feature_start..] {
                     bounds.include_quad(*quad);
                 }
@@ -1105,6 +1126,7 @@ fn append_skyline_proxy(
     quads: &mut Vec<SurfaceQuad>,
     level: SurfaceLodLevel,
     feature: SkylineFeature,
+    ecology_aggregate_shift: u8,
 ) {
     let [anchor_x, ground, anchor_z] = feature.anchor;
     let top = feature.trunk_top;
@@ -1112,7 +1134,7 @@ fn append_skyline_proxy(
     match feature.kind {
         SkylineFeatureKind::Broadleaf => {
             if let Some(species) = feature.tree_species() {
-                append_ecology_tree_proxy(quads, level, feature, species);
+                append_ecology_tree_proxy(quads, level, feature, species, ecology_aggregate_shift);
                 return;
             }
             append_box(
@@ -1500,9 +1522,32 @@ fn append_ecology_tree_proxy(
     level: SurfaceLodLevel,
     feature: SkylineFeature,
     _species: TreeSpecies,
+    aggregate_shift: u8,
 ) {
     let [anchor_x, ground, anchor_z] = feature.anchor;
     let top = feature.trunk_top;
+    if aggregate_shift > 0 {
+        let bounds = feature.bounds();
+        let aggregate_scale = 1_i32 << aggregate_shift.min(2);
+        let radius_x = ((bounds[1][0] - bounds[0][0] + 1) / 2)
+            .saturating_mul(aggregate_scale)
+            .min(level.stride_voxels() / 2);
+        let radius_z = ((bounds[1][2] - bounds[0][2] + 1) / 2)
+            .saturating_mul(aggregate_scale)
+            .min(level.stride_voxels() / 2);
+        let crown_min_y = ground + (top - ground) * 2 / 5;
+        append_box(
+            quads,
+            [anchor_x - radius_x, crown_min_y, anchor_z - radius_z],
+            [
+                anchor_x + radius_x + 1,
+                bounds[1][1],
+                anchor_z + radius_z + 1,
+            ],
+            Material::Leaves,
+        );
+        return;
+    }
     let trunk_radius = i32::from(
         feature.material_at(VoxelCoord::new(anchor_x + 1, ground + 1, anchor_z))
             == Some(Material::Wood),
@@ -1700,7 +1745,7 @@ mod tests {
             assert!(feature.material_at(canonical_probe).is_some());
             for level in SurfaceLodLevel::ALL {
                 let mut quads = Vec::new();
-                append_skyline_proxy(&mut quads, level, feature);
+                append_skyline_proxy(&mut quads, level, feature, 0);
                 assert!(!quads.is_empty());
                 assert!(quads.len() <= 60, "{kind:?} emitted {} quads", quads.len());
                 assert!(quads.iter().all(|quad| quad.material.is_renderable()));
@@ -1722,7 +1767,7 @@ mod tests {
                 route_landmark: None,
             };
             let mut near = Vec::new();
-            append_skyline_proxy(&mut near, SurfaceLodLevel::Stride2, feature);
+            append_skyline_proxy(&mut near, SurfaceLodLevel::Stride2, feature, 0);
             assert!(!near.is_empty(), "{species:?} lacked a near proxy");
             assert!(
                 near.len() <= 150,
@@ -1732,7 +1777,7 @@ mod tests {
             assert!(near.iter().any(|quad| quad.material == Material::Leaves));
 
             let mut horizon = Vec::new();
-            append_skyline_proxy(&mut horizon, SurfaceLodLevel::Stride64, feature);
+            append_skyline_proxy(&mut horizon, SurfaceLodLevel::Stride64, feature, 0);
             assert!(
                 (18..=30).contains(&horizon.len()),
                 "{species:?} horizon proxy used {} quads",
@@ -1747,6 +1792,44 @@ mod tests {
                 .max();
             assert_eq!(near_top, horizon_top, "{species:?} horizon height popped");
         }
+    }
+
+    #[test]
+    fn aggregated_horizon_tree_is_one_area_preserving_canopy_box() {
+        let feature = SkylineFeature {
+            id: crate::SkylineFeatureId::default(),
+            kind: SkylineFeatureKind::Broadleaf,
+            anchor: [20, 40, -30],
+            trunk_top: 112,
+            orientation: 2,
+            variant: TreeSpecies::Oak.encode_variant(5),
+            prominence: 2,
+            route_landmark: None,
+        };
+        let mut quads = Vec::new();
+        append_ecology_tree_proxy(
+            &mut quads,
+            SurfaceLodLevel::Stride256,
+            feature,
+            TreeSpecies::Oak,
+            2,
+        );
+        assert_eq!(quads.len(), 6);
+        assert!(quads.iter().all(|quad| quad.material == Material::Leaves));
+        let (minimum, maximum) = quads.iter().map(|quad| quad_voxel_bounds(*quad)).fold(
+            ([i32::MAX; 3], [i32::MIN; 3]),
+            |(mut minimum, mut maximum), (quad_minimum, quad_maximum)| {
+                for axis in 0..3 {
+                    minimum[axis] = minimum[axis].min(quad_minimum[axis]);
+                    maximum[axis] = maximum[axis].max(quad_maximum[axis]);
+                }
+                (minimum, maximum)
+            },
+        );
+        let canonical = feature.bounds();
+        assert!(maximum[0] - minimum[0] > canonical[1][0] - canonical[0][0]);
+        assert!(maximum[2] - minimum[2] > canonical[1][2] - canonical[0][2]);
+        assert_eq!(maximum[1], canonical[1][1]);
     }
 
     #[derive(Clone, Copy)]
@@ -1835,7 +1918,7 @@ mod tests {
                     let mut previous = canonical.clone();
                     for level in SurfaceLodLevel::ALL {
                         let mut quads = Vec::new();
-                        append_ecology_tree_proxy(&mut quads, level, feature, species);
+                        append_ecology_tree_proxy(&mut quads, level, feature, species, 0);
                         let proxy = proxy_tree_silhouette(&quads, view);
                         let adjacent_iou = silhouette_iou(&previous, &proxy);
                         worst_adjacent_iou = worst_adjacent_iou.min(adjacent_iou);
@@ -1892,7 +1975,7 @@ mod tests {
                 let pristine =
                     generate_edited_surface_tile_mesh(generator, &EditMap::default(), coord);
                 let mut direct_proxy = Vec::new();
-                append_skyline_proxy(&mut direct_proxy, level, feature);
+                append_skyline_proxy(&mut direct_proxy, level, feature, 0);
                 assert!(!direct_proxy.is_empty());
                 assert!(direct_proxy.len() <= 60);
 
@@ -2311,6 +2394,7 @@ mod tests {
                 None,
                 None,
                 false,
+                0,
                 &[],
             );
             let sides: Vec<_> = tile
@@ -2749,7 +2833,7 @@ mod tests {
                     .iter()
                     .map(|feature| {
                         let mut quads = Vec::new();
-                        append_skyline_proxy(&mut quads, level, *feature);
+                        append_skyline_proxy(&mut quads, level, *feature, 0);
                         quads
                             .iter()
                             .filter(|quad| {
@@ -2777,7 +2861,7 @@ mod tests {
                     })
                     .map(|feature| {
                         let mut quads = Vec::new();
-                        append_skyline_proxy(&mut quads, level, *feature);
+                        append_skyline_proxy(&mut quads, level, *feature, 0);
                         quads
                             .iter()
                             .filter(|quad| {
@@ -2858,7 +2942,7 @@ mod tests {
             let edited =
                 skyline_quad_count(&generate_edited_surface_tile_mesh(generator, &edits, coord));
             let mut expected = Vec::new();
-            append_skyline_proxy(&mut expected, level, feature);
+            append_skyline_proxy(&mut expected, level, feature, 0);
             let expected = expected
                 .iter()
                 .filter(|quad| matches!(quad.material, Material::Wood | Material::Leaves))
@@ -2912,7 +2996,7 @@ mod tests {
 
             for level in SurfaceLodLevel::ALL {
                 let mut direct_proxy = Vec::new();
-                append_skyline_proxy(&mut direct_proxy, level, feature);
+                append_skyline_proxy(&mut direct_proxy, level, feature, 0);
                 assert!(!direct_proxy.is_empty());
                 assert!(direct_proxy.len() <= 60);
 
@@ -2963,7 +3047,7 @@ mod tests {
         let mut reference_proxy = None;
         for level in SurfaceLodLevel::ALL {
             let mut direct_proxy = Vec::new();
-            append_skyline_proxy(&mut direct_proxy, level, feature);
+            append_skyline_proxy(&mut direct_proxy, level, feature, 0);
             assert_eq!(direct_proxy.len(), 24);
             if let Some(reference) = &reference_proxy {
                 assert_eq!(&direct_proxy, reference);

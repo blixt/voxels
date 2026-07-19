@@ -5,6 +5,7 @@
 //! learned macro shape. It adds deterministic climate-driven vegetation, but does not invent caves,
 //! routes, or authored atlas content.
 
+use crate::lod::generate_surface_tile_mesh_with_aggregated_ecology_and_shading;
 use crate::{
     AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, ChunkSnapshot, EditMap,
     FEATURE_MAX_RADIUS_VOXELS, MACRO_FIELD_SCHEMA_VERSION, MAX_MACRO_BLOCK_SAMPLES,
@@ -16,8 +17,7 @@ use crate::{
     SurfaceSearchSnapshot, SurfaceTileCoord, SurfaceTileSnapshot, TreeSpecies, VoxelBlockRequest,
     VoxelBlockSnapshot, VoxelCoord, WorldProduct, WorldProductBatch, WorldProductBatchItem,
     WorldProductBatchResult, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
-    WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash,
-    generate_surface_tile_mesh_with_features_and_shading, generate_water_tile_mesh_with,
+    WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash, generate_water_tile_mesh_with,
     surface_tiles_affected_by_column,
 };
 use std::collections::BTreeMap;
@@ -491,13 +491,17 @@ impl HeightfieldWorldSource {
             None
         };
         let aliases = self.collidable_edit_aliases(edits, coord, priority)?;
-        let mut features = self.ecology_features_anchored_in(coord.voxel_bounds_xz(), priority)?;
+        let (mut features, ecology_aggregate_shift) =
+            self.ecology_features_for_surface(coord, priority)?;
         features.retain(|feature| {
-            edits.skyline_feature_is_pristine_with(*feature, |coord| {
-                feature.material_at(coord).unwrap_or(Material::Air)
-            })
+            // An outer representative is an area-filtered forest stand, not the selected
+            // canonical tree. Removing that one sub-pixel tree must not erase the whole canopy.
+            ecology_aggregate_shift > 0
+                || edits.skyline_feature_is_pristine_with(*feature, |coord| {
+                    feature.material_at(coord).unwrap_or(Material::Air)
+                })
         });
-        let terrain = generate_surface_tile_mesh_with_features_and_shading(
+        let terrain = generate_surface_tile_mesh_with_aggregated_ecology_and_shading(
             coord,
             |x, z| {
                 let sampled = self
@@ -520,6 +524,7 @@ impl HeightfieldWorldSource {
                     .unwrap_or((i32::MIN, Material::Stone))
             },
             &features,
+            ecology_aggregate_shift,
         );
         let water = generate_water_tile_mesh_with(coord, |x, z| {
             region.column(x, z).is_some_and(|column| {
@@ -697,6 +702,31 @@ impl HeightfieldWorldSource {
             return Ok(Vec::new());
         }
         let candidates = ecology_candidates_in(self.composer_seed, bounds)?;
+        self.ecology_features_from_candidates(candidates, priority)
+    }
+
+    fn ecology_features_for_surface(
+        &self,
+        coord: SurfaceTileCoord,
+        priority: WorldProductPriority,
+    ) -> Result<(Vec<SkylineFeature>, u8), WorldSourceError> {
+        if !self.add_subgrid_relief {
+            return Ok((Vec::new(), 0));
+        }
+        let candidates = ecology_candidates_in(self.composer_seed, coord.voxel_bounds_xz())?;
+        let (candidates, aggregate_shift) =
+            aggregate_ecology_candidates_for_surface(coord.level, candidates);
+        Ok((
+            self.ecology_features_from_candidates(candidates, priority)?,
+            aggregate_shift,
+        ))
+    }
+
+    fn ecology_features_from_candidates(
+        &self,
+        candidates: Vec<EcologyCandidate>,
+        priority: WorldProductPriority,
+    ) -> Result<Vec<SkylineFeature>, WorldSourceError> {
         let mut features = Vec::new();
         for candidate_batch in candidates.chunks(MAX_WORLD_PRODUCT_BATCH) {
             let requests = candidate_batch
@@ -909,7 +939,7 @@ struct PreparedColumn {
     ecotone: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct EcologyCandidate {
     cell_x: i32,
     cell_z: i32,
@@ -1013,6 +1043,48 @@ fn ecology_candidates_in(
         }
     }
     Ok(candidates)
+}
+
+fn aggregate_ecology_candidates_for_surface(
+    level: SurfaceLodLevel,
+    candidates: Vec<EcologyCandidate>,
+) -> (Vec<EcologyCandidate>, u8) {
+    let aggregate_shift = match level {
+        SurfaceLodLevel::Stride128 => 1,
+        SurfaceLodLevel::Stride256 => 2,
+        _ => 0,
+    };
+    if aggregate_shift == 0 {
+        return (candidates, 0);
+    }
+    let group_edge = 1_i32 << aggregate_shift;
+    let represented_candidates = (group_edge * group_edge) as f32;
+    let mut groups = BTreeMap::<(i32, i32), EcologyCandidate>::new();
+    for candidate in candidates {
+        let key = (
+            candidate.cell_x.div_euclid(group_edge),
+            candidate.cell_z.div_euclid(group_edge),
+        );
+        let replace = groups.get(&key).is_none_or(|current| {
+            (candidate.priority, candidate.cell_x, candidate.cell_z)
+                < (current.priority, current.cell_x, current.cell_z)
+        });
+        if replace {
+            groups.insert(key, candidate);
+        }
+    }
+    let candidates = groups
+        .into_values()
+        .map(|mut candidate| {
+            // One area-preserving representative should appear whenever any member of its
+            // aggregate stand would appear. Transform the still-independent uniform occurrence
+            // channel so ecology_tree's original density threshold gets exactly that probability.
+            candidate.occurrence =
+                1.0 - (1.0 - candidate.occurrence).powf(1.0 / represented_candidates);
+            candidate
+        })
+        .collect();
+    (candidates, aggregate_shift)
 }
 
 fn ecology_candidate(seed: u64, cell_x: i32, cell_z: i32) -> Option<EcologyCandidate> {
@@ -1899,7 +1971,7 @@ mod tests {
     }
 
     #[test]
-    fn diffusion_ecology_is_deterministic_canonical_lod_visible_and_edit_suppressed() {
+    fn diffusion_ecology_is_deterministic_canonical_near_lod_editable_and_far_aggregated() {
         let source = diffusion_heightfield();
         let bounds = [[-2_048, -2_048], [2_048, 2_048]];
         let features = source.skyline_features_anchored_in(bounds);
@@ -1955,10 +2027,20 @@ mod tests {
                 .iter()
                 .filter(|quad| matches!(quad.material, Material::Wood | Material::Leaves))
                 .count();
-            assert!(
-                edited_tree_quads < pristine_tree_quads,
-                "edit absent at {level:?}"
-            );
+            if matches!(
+                level,
+                SurfaceLodLevel::Stride128 | SurfaceLodLevel::Stride256
+            ) {
+                assert_eq!(
+                    edited_tree_quads, pristine_tree_quads,
+                    "one sub-pixel tree changed an aggregate stand at {level:?}"
+                );
+            } else {
+                assert!(
+                    edited_tree_quads < pristine_tree_quads,
+                    "edit absent at {level:?}"
+                );
+            }
             assert!(
                 source
                     .surface_tiles_affected_by_voxel(&edits, level, trunk)
@@ -2042,6 +2124,35 @@ mod tests {
                     assert!(delta_x * delta_x + delta_z * delta_z >= minimum_squared);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn outer_surface_ecology_uses_deterministic_area_representatives() {
+        let seed = 0xa11c_e5eed;
+        for (level, expected_shift) in [
+            (SurfaceLodLevel::Stride128, 1),
+            (SurfaceLodLevel::Stride256, 2),
+        ] {
+            let coord = SurfaceTileCoord::new(level, -1, 2);
+            let raw =
+                ecology_candidates_in(seed, coord.voxel_bounds_xz()).expect("bounded ecology");
+            let (aggregated, shift) = aggregate_ecology_candidates_for_surface(level, raw.clone());
+            let (repeated, repeated_shift) =
+                aggregate_ecology_candidates_for_surface(level, raw.clone());
+            assert_eq!(shift, expected_shift);
+            assert_eq!(repeated_shift, expected_shift);
+            assert_eq!(aggregated, repeated);
+            assert!(
+                aggregated.len()
+                    <= SURFACE_TILE_EDGE_CELLS as usize * SURFACE_TILE_EDGE_CELLS as usize
+            );
+            assert!(aggregated.len() < raw.len());
+            assert!(
+                aggregated
+                    .iter()
+                    .all(|candidate| (0.0..=1.0).contains(&candidate.occurrence))
+            );
         }
     }
 
