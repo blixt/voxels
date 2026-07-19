@@ -2,16 +2,19 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use voxels_world::codec::{decode_chunk, encode_chunk};
 use voxels_world::protocol::{
-    ChunkBatchItem, ChunkBatchResult, decode_chunk_batch_result, encode_chunk_batch_result,
+    ChunkBatchItem, ChunkBatchResult, SurfaceTileBatchItem, SurfaceTileBatchResult,
+    decode_chunk_batch_result, decode_surface_tile_batch_result, encode_chunk_batch_result,
+    encode_surface_tile_batch_result,
 };
 use voxels_world::{
-    CINDER_VAULT, CINDER_VAULT_MOUTH_ANCHOR_XZ, ChunkCoord, EditMap, Generator, Material,
-    MeshingHalo, ProceduralWorldSource, SkylineFeatureKind, SurfaceLodLevel, SurfaceTileCoord,
-    VoxelCoord, WorldProduct, WorldProductBatch, WorldProductPriority, WorldProductRequest,
-    WorldSourceEngine, first_pilgrim_road_length_voxels, first_pilgrim_road_point_at_distance,
-    first_pilgrim_route_anchor, first_pilgrim_route_anchor_for_feature_cell,
-    generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, generate_surface_tile_mesh,
-    mesh_chunk, sample_first_pilgrim_road,
+    CHUNK_EDGE, CINDER_VAULT, CINDER_VAULT_MOUTH_ANCHOR_XZ, ChunkCoord, EditMap, Generator,
+    Material, MeshingHalo, ProceduralWorldSource, SkylineFeatureKind, SurfaceLodLevel,
+    SurfaceTileCoord, VoxelCoord, WorldProduct, WorldProductBatch, WorldProductPriority,
+    WorldProductRequest, WorldSourceEngine, first_pilgrim_road_length_voxels,
+    first_pilgrim_road_point_at_distance, first_pilgrim_route_anchor,
+    first_pilgrim_route_anchor_for_feature_cell, generate_edited_surface_tile_mesh,
+    generate_edited_water_tile_mesh, generate_surface_tile_mesh, mesh_chunk,
+    sample_first_pilgrim_road,
 };
 
 const SEED: u64 = 0x5eed_cafe;
@@ -227,6 +230,120 @@ fn codec(criterion: &mut Criterion) {
     group.finish();
 }
 
+fn streaming_codec(criterion: &mut Criterion) {
+    let source = ProceduralWorldSource::new(SEED);
+    let identity = source.source_identity_hash();
+    let generator = Generator::new(SEED);
+    let chunk_coords = (-1..=1)
+        .flat_map(|z| {
+            let generator = &generator;
+            (-1..=1).map(move |x| {
+                let edge = CHUNK_EDGE as i32;
+                let surface = generator.surface_height(x * edge + edge / 2, z * edge + edge / 2);
+                ChunkCoord::new(x, surface.div_euclid(edge), z)
+            })
+        })
+        .collect::<Vec<_>>();
+    let chunk_products = source
+        .generate_batch(WorldProductBatch {
+            priority: WorldProductPriority::VisibleChunk,
+            requests: chunk_coords
+                .iter()
+                .copied()
+                .map(WorldProductRequest::ChunkWithHalo)
+                .collect(),
+        })
+        .expect("generate representative surface chunks");
+    let chunk_response = ChunkBatchResult {
+        request_id: 2,
+        source_identity_hash: identity,
+        items: chunk_products
+            .items
+            .into_iter()
+            .map(|item| match (item.request, item.result) {
+                (WorldProductRequest::ChunkWithHalo(coord), Ok(WorldProduct::Chunk(snapshot))) => {
+                    ChunkBatchItem {
+                        coord,
+                        edit_revision: 1,
+                        result: Ok(snapshot),
+                    }
+                }
+                _ => panic!("chunk benchmark source returned an unexpected product"),
+            })
+            .collect(),
+    };
+    let chunk_wire = encode_chunk_batch_result(&chunk_response).expect("encode chunk corpus");
+    eprintln!(
+        "stream codec corpus: chunks={} wire_bytes={}",
+        chunk_response.items.len(),
+        chunk_wire.len()
+    );
+    let mut group = criterion.benchmark_group("VXWP 3x3 chunk stream");
+    group.throughput(criterion::Throughput::Bytes(chunk_wire.len() as u64));
+    group.bench_function("encode", |bencher| {
+        bencher.iter(|| encode_chunk_batch_result(&chunk_response));
+    });
+    group.bench_function("decode", |bencher| {
+        bencher.iter(|| decode_chunk_batch_result(&chunk_wire));
+    });
+    group.finish();
+
+    let surface_coords = SurfaceLodLevel::ALL
+        .into_iter()
+        .flat_map(|level| {
+            [
+                SurfaceTileCoord::new(level, 0, 0),
+                SurfaceTileCoord::new(level, 1, 0),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let surface_products = source
+        .generate_batch(WorldProductBatch {
+            priority: WorldProductPriority::VisibleSurface,
+            requests: surface_coords
+                .iter()
+                .copied()
+                .map(WorldProductRequest::SurfaceTile)
+                .collect(),
+        })
+        .expect("generate representative horizon tiles");
+    let surface_response = SurfaceTileBatchResult {
+        request_id: 3,
+        source_identity_hash: identity,
+        items: surface_products
+            .items
+            .into_iter()
+            .map(|item| match (item.request, item.result) {
+                (
+                    WorldProductRequest::SurfaceTile(coord),
+                    Ok(WorldProduct::SurfaceTile(snapshot)),
+                ) => SurfaceTileBatchItem {
+                    coord,
+                    edit_revision: 1,
+                    result: Ok(snapshot),
+                },
+                _ => panic!("surface benchmark source returned an unexpected product"),
+            })
+            .collect(),
+    };
+    let surface_wire =
+        encode_surface_tile_batch_result(&surface_response).expect("encode surface corpus");
+    eprintln!(
+        "stream codec corpus: surface_tiles={} wire_bytes={}",
+        surface_response.items.len(),
+        surface_wire.len()
+    );
+    let mut group = criterion.benchmark_group("VXWP 16-tile horizon stream");
+    group.throughput(criterion::Throughput::Bytes(surface_wire.len() as u64));
+    group.bench_function("encode", |bencher| {
+        bencher.iter(|| encode_surface_tile_batch_result(&surface_response));
+    });
+    group.bench_function("decode", |bencher| {
+        bencher.iter(|| decode_surface_tile_batch_result(&surface_wire));
+    });
+    group.finish();
+}
+
 fn meshing(criterion: &mut Criterion) {
     let generator = Generator::new(SEED);
     criterion.bench_function("greedy mesh generated chunk", |bencher| {
@@ -316,6 +433,7 @@ criterion_group!(
     cave_mouth_surface_lod,
     route_queries,
     codec,
+    streaming_codec,
     meshing,
     water_meshing,
     water_surface_lod,
