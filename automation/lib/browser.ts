@@ -67,6 +67,10 @@ export class BrowserCapability {
     this.#warningPattern = warningPattern;
   }
 
+  get version(): string {
+    return this.#browser.version();
+  }
+
   static async start(
     scenario: ScenarioContext,
     options: { readonly warningPattern?: RegExp; readonly launch?: LaunchOptions } = {},
@@ -132,6 +136,15 @@ export class BrowserCapability {
       errors.push(error);
     }
     if (errors.length > 0) throw new AggregateError(errors, "browser cleanup failed");
+  }
+
+  assertHealthy(): void {
+    if (this.failures.length === 0) return;
+    throw new Error(
+      this.failures
+        .map((failure) => `${failure.source} (${failure.page}): ${failure.message}`)
+        .join("\n"),
+    );
   }
 }
 

@@ -5,7 +5,10 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { connect } from "node:net";
+import { build, preview } from "vite-plus";
+import type { PreviewServer } from "vite-plus";
 import { reserveEphemeralPort } from "./browser.ts";
+import type { ScenarioContext } from "./scenario.ts";
 import { rustTool } from "../../scripts/build-wasm.ts";
 import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./protocol.ts";
 import {
@@ -87,6 +90,20 @@ export interface BrowserWorldService {
   readonly child: ChildProcess;
   readonly logs: string[];
   close(): Promise<void>;
+}
+
+export interface WorldPreviewOptions {
+  readonly fixture?: Omit<BrowserWorldFixtureOptions, "browserPort">;
+  readonly service?: StartBrowserWorldServiceOptions;
+  readonly build?: boolean;
+}
+
+export interface WorldPreview {
+  readonly port: number;
+  readonly url: string;
+  readonly fixture: BrowserWorldFixture;
+  readonly service: BrowserWorldService;
+  readonly server: PreviewServer;
 }
 
 function replaceEnvironment(name: string, value: string): () => void {
@@ -552,4 +569,39 @@ export async function startBrowserWorldService(
   }
   await stopProcessTree(child);
   throw new Error(`world service readiness timed out:\n${logs.join("")}`);
+}
+
+export async function startWorldPreview(
+  context: ScenarioContext,
+  options: WorldPreviewOptions = {},
+): Promise<WorldPreview> {
+  if (!context.definition.uses.world || context.definition.uses.viewport !== "browser") {
+    throw new Error(
+      `scenario ${context.definition.id} must declare a browser viewport and world service`,
+    );
+  }
+  const port = await reserveEphemeralPort();
+  const fixture = await prepareBrowserWorldFixture({
+    ...options.fixture,
+    browserPort: port,
+  });
+  context.defer("world fixture", () => fixture.cleanup());
+  if (options.build ?? true) await build({ logLevel: "warn" });
+  const service = await startBrowserWorldService(fixture, {
+    ...options.service,
+    build: options.service?.build ?? options.build ?? true,
+  });
+  context.defer("world service", () => service.close());
+  const server = await preview({
+    logLevel: "warn",
+    preview: { host: "127.0.0.1", port, strictPort: true },
+  });
+  context.defer("world preview", () => server.close());
+  return {
+    port,
+    url: `http://127.0.0.1:${port}`,
+    fixture,
+    service,
+    server,
+  };
 }
