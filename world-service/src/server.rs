@@ -1687,6 +1687,10 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
     let mut pose_open = true;
     loop {
         tokio::select! {
+            // Input authority is latency-sensitive. A replication tick may already be overdue
+            // while a dense-area delta is being prepared, so always drain control frames and the
+            // latest coalesced pose before spending another turn on observer replication.
+            biased;
             message = inbound.recv() => {
                 let bytes = match message {
                     Some(InboundFrame::Binary(bytes)) => bytes,
