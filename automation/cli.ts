@@ -1,6 +1,7 @@
 import { inspect } from "node:util";
+import type { ScenarioDefinition } from "./lib/scenario.ts";
 import { runScenario } from "./lib/scenario.ts";
-import { scenarioById, scenarios } from "./scenarios/registry.ts";
+import { loadScenarios, scenarioById } from "./scenarios/registry.ts";
 
 function usage(): never {
   throw new Error(
@@ -8,7 +9,7 @@ function usage(): never {
   );
 }
 
-function printScenario(scenario: (typeof scenarios)[number]): void {
+function printScenario(scenario: ScenarioDefinition): void {
   console.log(
     JSON.stringify(
       {
@@ -29,6 +30,7 @@ async function main(arguments_: readonly string[]): Promise<void> {
     (argument) => argument !== "--",
   );
   if (command === "list") {
+    const scenarios = await loadScenarios();
     for (const scenario of scenarios) {
       console.log(
         `${scenario.id.padEnd(24)} ${scenario.kind.padEnd(10)} ${scenario.summary} [${Object.entries(
@@ -42,7 +44,7 @@ async function main(arguments_: readonly string[]): Promise<void> {
     return;
   }
   if (id === undefined) usage();
-  const scenario = scenarioById(id);
+  const scenario = await scenarioById(id);
   if (scenario === undefined) {
     throw new Error(`unknown automation scenario ${id}; run 'vp run automation -- list'`);
   }
