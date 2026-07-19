@@ -27,6 +27,7 @@ export type WorldSource = "procedural-v16" | "terrain-diffusion-30m";
 
 export interface WorldFixtureOptions {
   readonly originPort: number;
+  readonly clientPort?: number;
   readonly prefix?: string;
   readonly source?: WorldSource;
   readonly spawnVoxels?: readonly [number, number];
@@ -259,6 +260,7 @@ async function writeTypedFixture(
 
 export async function prepareWorldFixture({
   originPort,
+  clientPort,
   prefix = "voxels-browser-world-",
   source = "procedural-v16",
   spawnVoxels,
@@ -295,6 +297,7 @@ export async function prepareWorldFixture({
       schemaVersion: AUTOMATION_FIXTURE_SCHEMA_VERSION,
       browserPort: originPort,
       backendPort,
+      clientPort,
       authToken,
       source,
       spawnVoxels,

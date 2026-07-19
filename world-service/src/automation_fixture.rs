@@ -21,6 +21,7 @@ pub struct AutomationFixtureOverlay {
     pub schema_version: u32,
     pub browser_port: u16,
     pub backend_port: u16,
+    pub client_port: Option<u16>,
     pub auth_token: String,
     pub source: WorldSourceMode,
     pub spawn_voxels: Option<[i32; 2]>,
@@ -205,14 +206,10 @@ pub fn build_automation_fixture(
         service.environment.cloud_top_metres = value;
     }
 
-    client.world.endpoint = format!(
-        "ws://127.0.0.1:{}{}",
-        overlay.backend_port, WORLD_WEBSOCKET_PATH
-    );
-    client.world.presence_endpoint = format!(
-        "ws://127.0.0.1:{}{}",
-        overlay.backend_port, PRESENCE_WEBSOCKET_PATH
-    );
+    let client_port = overlay.client_port.unwrap_or(overlay.backend_port);
+    client.world.endpoint = format!("ws://127.0.0.1:{client_port}{WORLD_WEBSOCKET_PATH}");
+    client.world.presence_endpoint =
+        format!("ws://127.0.0.1:{client_port}{PRESENCE_WEBSOCKET_PATH}");
     client.world.subprotocol = WORLD_WEBSOCKET_PROTOCOL.to_owned();
     client.world.auth_subprotocol_token = overlay.auth_token;
     if let Some(value) = overlay.cascaded_shadows {
@@ -264,6 +261,7 @@ mod tests {
             schema_version: AUTOMATION_FIXTURE_SCHEMA_VERSION,
             browser_port: 41_234,
             backend_port: 41_235,
+            client_port: None,
             auth_token: "automation-token".to_owned(),
             source: WorldSourceMode::ProceduralV16,
             spawn_voxels: Some([-12_800, 25_600]),
@@ -326,5 +324,27 @@ mod tests {
             ),
             Err(AutomationFixtureError::UnsupportedSchema { .. })
         ));
+    }
+
+    #[test]
+    fn fixture_can_route_clients_through_a_separate_transport() {
+        let mut shaped = overlay();
+        shaped.client_port = Some(41_236);
+        let fixture = build_automation_fixture(
+            include_str!("../../config/world-service.toml"),
+            include_str!("../../config/client.toml"),
+            shaped,
+        )
+        .expect("valid shaped-link fixture");
+        let client = ClientConfig::from_toml(&fixture.client_toml).expect("client round trip");
+
+        assert_eq!(
+            client.world.endpoint,
+            format!("ws://127.0.0.1:41236{WORLD_WEBSOCKET_PATH}")
+        );
+        assert_eq!(
+            client.world.presence_endpoint,
+            format!("ws://127.0.0.1:41236{PRESENCE_WEBSOCKET_PATH}")
+        );
     }
 }

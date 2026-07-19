@@ -1,9 +1,5 @@
-import { spawn, execFileSync } from "node:child_process";
-import type { ChildProcess } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { cpus, platform, release, tmpdir } from "node:os";
-import path from "node:path";
-import { connect } from "node:net";
+import { execFileSync } from "node:child_process";
+import { cpus, platform, release } from "node:os";
 import type { Page } from "playwright";
 import { BrowserCapability, type BrowserFailure, reserveEphemeralPort } from "../lib/browser.ts";
 import { ScenarioArguments } from "../lib/arguments.ts";
@@ -14,14 +10,16 @@ import {
   SNAPSHOT_SCHEMA_VERSION,
   snapshotValue,
 } from "../lib/engine.ts";
-import { rustTool } from "../../scripts/build-wasm.ts";
 import { createShapedLink, type LinkStats, type ShapedLink } from "../lib/network.ts";
 import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "../lib/protocol.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import {
-  worldServiceBuildCargoArgs,
-  worldServiceCargoArgs,
-} from "../../scripts/world-service-command.ts";
+  prepareWorldFixture,
+  routeWorldClient,
+  startWebPreview,
+  startWorldService,
+} from "../lib/world.ts";
+import type { WorldSource } from "../lib/world.ts";
 
 const RESULT_SCHEMA_VERSION = 4;
 const FIXTURE_VERSION = 2;
@@ -84,14 +82,6 @@ interface FrameState {
 interface BenchmarkActionContext {
   readonly capture: () => Promise<readonly number[]>;
   readonly markMeasurementStart: () => number;
-}
-
-function requiredTomlString(contents: string, key: string): string {
-  const match = contents.match(new RegExp(`^${key}\\s*=\\s*"([^"]+)"\\s*$`, "mu"));
-  if (match === null) throw new Error(`missing string ${key} in world-service config`);
-  const value = match[1];
-  if (value === undefined) throw new Error(`string ${key} had no capture`);
-  return value;
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -431,43 +421,6 @@ async function runScenario({
   };
 }
 
-async function waitForPort(
-  port: number,
-  child: ChildProcess,
-  logs: readonly string[],
-): Promise<void> {
-  const deadline = performance.now() + 90_000;
-  while (performance.now() < deadline) {
-    if (child.exitCode !== null) {
-      throw new Error(`world service exited with ${child.exitCode}\n${logs.join("")}`);
-    }
-    const connected = await new Promise<boolean>((resolve) => {
-      const socket = connect({ host: "127.0.0.1", port });
-      socket.once("connect", () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.once("error", () => resolve(false));
-    });
-    if (connected) return;
-    await sleep(100);
-  }
-  throw new Error(`world service did not listen on ${port}\n${logs.join("")}`);
-}
-
-function stopChild(child: ChildProcess | undefined): Promise<unknown> {
-  if (!child || child.exitCode !== null) return Promise.resolve();
-  child.kill("SIGTERM");
-  return Promise.race([
-    new Promise<void>((resolve) => {
-      child.once("exit", () => resolve());
-    }),
-    sleep(3_000).then(() => {
-      if (child.exitCode === null) child.kill("SIGKILL");
-    }),
-  ]);
-}
-
 type NetworkRun = Awaited<ReturnType<typeof runScenario>>;
 
 function aggregateRuns(runs: readonly NetworkRun[]) {
@@ -631,72 +584,37 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         minimum: 0.001,
       }) ?? DEFAULT_PROFILE.upstreamMegabitsPerSecond,
   };
+  const worldSource = options.choice(
+    "source",
+    ["procedural-v16", "terrain-diffusion-30m"] as const satisfies readonly WorldSource[],
+    "terrain-diffusion-30m",
+  );
   options.assertEmpty();
-  const temporary = await mkdtemp(path.join(tmpdir(), "voxels-network-benchmark-"));
-  const backendPort = await reserveEphemeralPort();
   const proxyPort = await reserveEphemeralPort();
   const previewPort = await reserveEphemeralPort();
-  const serviceConfigPath = path.join(temporary, "world-service.toml");
-  const clientConfigPath = path.join(temporary, "client.toml");
-  const [serviceSource, clientSource] = await Promise.all([
-    readFile("config/world-service.toml", "utf8"),
-    readFile("config/client.toml", "utf8"),
-  ]);
-  const worldSource = requiredTomlString(serviceSource, "source");
-  await writeFile(
-    serviceConfigPath,
-    serviceSource
-      .replace(/^listen = .*$/m, `listen = "127.0.0.1:${backendPort}"`)
-      .replace(
-        /^allowed_origins = .*$/m,
-        `allowed_origins = ["http://${PREVIEW_HOST}:${previewPort}"]`,
-      )
-      .replace(/^database = .*$/m, 'database = "world-state.sqlite3"'),
-  );
-  await writeFile(
-    clientConfigPath,
-    clientSource
-      .replace(/^endpoint = .*$/m, `endpoint = "ws://127.0.0.1:${proxyPort}${WORLD_PATH}"`)
-      .replace(
-        /^presence_endpoint = .*$/m,
-        `presence_endpoint = "ws://127.0.0.1:${proxyPort}${PRESENCE_PATH}"`,
-      ),
-  );
-  const previousClientConfig = process.env.VOXELS_CLIENT_CONFIG_PATH;
-  process.env.VOXELS_CLIENT_CONFIG_PATH = clientConfigPath;
-
-  let browser: BrowserCapability | undefined;
-  let previewServer: Awaited<ReturnType<(typeof import("vite-plus"))["preview"]>> | undefined;
-  let worldService: ChildProcess | undefined;
-  let link: ShapedLink | undefined;
-  const worldLogs: string[] = [];
+  const fixture = await prepareWorldFixture({
+    originPort: previewPort,
+    clientPort: proxyPort,
+    prefix: "voxels-network-benchmark-",
+    source: worldSource,
+  });
+  context.defer("network benchmark fixture", () => fixture.cleanup());
+  await startWebPreview(context, {
+    port: previewPort,
+    buildProfile: "release",
+  });
+  const service = await startWorldService(context, fixture, {
+    metal: worldSource === "terrain-diffusion-30m",
+  });
+  const link = await createShapedLink({
+    listenPort: proxyPort,
+    targetPort: fixture.backendPort,
+    profile,
+  });
+  context.defer("network benchmark shaped link", () => link.close());
+  const clientRoute = routeWorldClient(fixture);
+  const browser = await BrowserCapability.start(context, { warningPattern: FAILURE });
   try {
-    const { build, preview } = await import("vite-plus");
-    await build({ mode: "production" });
-    // Keep readiness about daemon startup rather than compilation. In particular, a feature-set
-    // change can otherwise outlive the readiness deadline and leave no benchmark result.
-    execFileSync(rustTool("cargo"), worldServiceBuildCargoArgs({ metal: true }), {
-      stdio: "inherit",
-    });
-    worldService = spawn(
-      rustTool("cargo"),
-      worldServiceCargoArgs({ metal: true, configPath: serviceConfigPath }),
-      { stdio: ["ignore", "pipe", "pipe"] },
-    );
-    for (const stream of [worldService.stdout, worldService.stderr]) {
-      if (stream === null) throw new Error("world service did not expose output pipes");
-      stream.on("data", (bytes) => {
-        worldLogs.push(bytes.toString());
-        if (worldLogs.length > 200) worldLogs.shift();
-      });
-    }
-    await waitForPort(backendPort, worldService, worldLogs);
-    link = await createShapedLink({ listenPort: proxyPort, targetPort: backendPort, profile });
-    previewServer = await preview({
-      root: process.cwd(),
-      preview: { host: PREVIEW_HOST, port: previewPort, strictPort: true },
-    });
-    browser = await BrowserCapability.start(context, { warningPattern: FAILURE });
     const runs: NetworkRun[] = [];
     for (let repetition = 0; repetition < repetitions; repetition += 1) {
       const viewport = await browser.open({
@@ -704,6 +622,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         label: `run-${repetition + 1}`,
         viewport: VIEWPORT,
         engine: false,
+        ...clientRoute,
       });
       const page = viewport.page;
       const url = `http://${PREVIEW_HOST}:${previewPort}/?player=network-bench-${repetition + 1}`;
@@ -757,6 +676,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         label: `pivot-${repetition + 1}`,
         viewport: VIEWPORT,
         engine: false,
+        ...clientRoute,
       });
       const pivotPage = pivotViewport.page;
       runs.push(
@@ -845,19 +765,11 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
     };
   } catch (error) {
     const reason = error instanceof Error ? error.stack : String(error);
-    const serviceLog = worldLogs.join("").trim();
+    const serviceLog = service.logs.join("").trim();
     throw new Error(
       `${reason}\n\nNative world-service output:\n${serviceLog || "(no output captured)"}`,
       { cause: error },
     );
-  } finally {
-    await browser?.close();
-    await previewServer?.close();
-    await link?.close();
-    await stopChild(worldService);
-    if (previousClientConfig === undefined) delete process.env.VOXELS_CLIENT_CONFIG_PATH;
-    else process.env.VOXELS_CLIENT_CONFIG_PATH = previousClientConfig;
-    await rm(temporary, { recursive: true, force: true });
   }
 }
 
