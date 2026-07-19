@@ -94,4 +94,11 @@ describe("typed engine client", () => {
     expect(snapshotValue(await engine.setSpectator(true), "spectatorActive")).toBe(1);
     expect(snapshotValue(await engine.setSpectator(false), "spectatorActive")).toBe(0);
   });
+
+  it("reports when the server does not authorize spectator mode", async () => {
+    const page = pageReturning([false]);
+    const engine = new EngineClient(page);
+
+    await expect(engine.setSpectator(true)).rejects.toThrow("engine rejected spectator mode");
+  });
 });

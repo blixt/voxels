@@ -925,7 +925,7 @@ impl MissionControlUi {
     }
 
     pub fn inventory_contains_css(&self, point: [f32; 2], viewport: Viewport) -> bool {
-        self.layout(viewport).inventory.contains(point)
+        !self.spectator_active && self.layout(viewport).inventory.contains(point)
     }
 
     pub fn hit_test_device(&self, point: [f32; 2], viewport: Viewport) -> Option<UiTarget> {
@@ -1370,7 +1370,7 @@ impl MissionControlUi {
     fn push_chrome(&self, draw: &mut UiDrawList, layout: &UiLayout) {
         // The wheel is gameplay chrome, while its selected item is already summarized in the
         // Mission Control header. Hiding it behind the modal prevents overlap on narrow screens.
-        if !self.open {
+        if !self.open && !self.spectator_active {
             self.push_inventory_wheel(draw, layout.inventory);
         }
 
@@ -2163,6 +2163,18 @@ mod tests {
     fn spectator_and_swimming_help_are_state_specific() {
         let viewport = viewport(1_280.0, 720.0);
         let mut ui = enabled(false);
+        ui.set_spectator_active(true);
+        ui.set_inventory(
+            Some("GRASS"),
+            264,
+            ["GRASS ×264".to_owned(), String::new()],
+            vec![InventoryItem {
+                label: "GRASS",
+                count: 264,
+                color: Color::new(0.2, 0.7, 0.3, 1.0),
+            }],
+            Some(0),
+        );
         ui.set_stats(LiveStats {
             navigation: NavigationTelemetry {
                 spectator: true,
@@ -2171,12 +2183,20 @@ mod tests {
             frames_per_second: 60.0,
             ..LiveStats::default()
         });
+        let spectator_draw = ui.build_draw_list(viewport);
         assert!(
-            ui.build_draw_list(viewport)
+            spectator_draw
                 .text
                 .iter()
                 .any(|run| run.text.contains("SPACE RISE") && run.text.contains("SHIFT DESCEND"))
         );
+        assert!(
+            !spectator_draw
+                .glass
+                .iter()
+                .any(|surface| surface.role == SurfaceRole::InventoryOrb)
+        );
+        assert!(!ui.inventory_contains_css(ui.layout(viewport).inventory.center(), viewport));
         ui.set_stats(LiveStats {
             swimming: true,
             water_immersion: 0.82,

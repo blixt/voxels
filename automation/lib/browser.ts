@@ -23,6 +23,7 @@ export interface OpenPageOptions {
   readonly label?: string;
   readonly viewport?: ViewportSize;
   readonly deviceScaleFactor?: number;
+  readonly storageState?: BrowserContextOptions["storageState"];
   readonly recordVideo?: boolean;
   readonly videoFilename?: string;
   readonly engine?: boolean;
@@ -117,6 +118,7 @@ export class BrowserCapability {
     const contextOptions: BrowserContextOptions = {
       viewport,
       deviceScaleFactor: options.deviceScaleFactor ?? 1,
+      ...(options.storageState === undefined ? {} : { storageState: options.storageState }),
     };
     if (options.recordVideo) {
       contextOptions.recordVideo = {
