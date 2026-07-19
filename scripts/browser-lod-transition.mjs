@@ -55,6 +55,8 @@ const VIEWPORT = { width: VIEWPORT_VALUES[0], height: VIEWPORT_VALUES[1] };
 const DEVICE_SCALE_FACTOR = Number.parseFloat(
   process.env.VOXELS_LOD_TEST_DPR ?? (BOUNDARY_COVERAGE ? "1.360930735930736" : "1"),
 );
+const CASCADED_SHADOWS = process.env.VOXELS_LOD_TEST_SHADOWS !== "0";
+const SCREEN_SPACE_AMBIENT_OCCLUSION = process.env.VOXELS_LOD_TEST_SSAO === "1";
 const RECORD_VIDEO = process.env.VOXELS_LOD_TEST_RECORD_VIDEO === "1";
 const OUTPUT_DIRECTORY = path.resolve(
   process.env.VOXELS_LOD_TEST_OUTPUT ??
@@ -395,6 +397,8 @@ async function compareScreenshots(page, before, after) {
       let sumProduct = 0;
       let sumAbsolute = 0;
       let catastrophic = 0;
+      let leftNearBlackPixels = 0;
+      let rightNearBlackPixels = 0;
       // LOD ownership intentionally changes sub-pixel grass and the exact edges of decimated
       // steps. Compare 4x4 linear-light footprints so this gate measures the low-frequency valley
       // lighting regression it was built for; the separate watertight gate owns terrain cracks.
@@ -407,6 +411,20 @@ async function compareScreenshots(page, before, after) {
           for (let offsetY = 0; offsetY < footprint && y + offsetY < roi.y1; offsetY += 1) {
             for (let offsetX = 0; offsetX < footprint && x + offsetX < roi.x1; offsetX += 1) {
               const index = (x + offsetX + (y + offsetY) * left.width) * 4;
+              if (
+                left.pixels[index] <= 2 &&
+                left.pixels[index + 1] <= 2 &&
+                left.pixels[index + 2] <= 2
+              ) {
+                leftNearBlackPixels += 1;
+              }
+              if (
+                right.pixels[index] <= 2 &&
+                right.pixels[index + 1] <= 2 &&
+                right.pixels[index + 2] <= 2
+              ) {
+                rightNearBlackPixels += 1;
+              }
               leftLuma += luma(left.pixels, index);
               rightLuma += luma(right.pixels, index);
               footprintPixels += 1;
@@ -436,11 +454,16 @@ async function compareScreenshots(page, before, after) {
       const covariance = sumProduct / count - meanLeft * meanRight;
       const c1 = 0.01 ** 2;
       const c2 = 0.03 ** 2;
+      const pixels = (roi.x1 - roi.x0) * (roi.y1 - roi.y0);
       return {
         roi,
-        pixels: (roi.x1 - roi.x0) * (roi.y1 - roi.y0),
+        pixels,
         comparisonSamples: count,
         comparisonFootprintPixels: footprint,
+        nearBlackPixelFraction: {
+          before: leftNearBlackPixels / pixels,
+          after: rightNearBlackPixels / pixels,
+        },
         meanLinearLuma: { before: meanLeft, after: meanRight },
         relativeMeanLumaDelta: Math.abs(meanRight - meanLeft) / Math.max(meanLeft, 0.001),
         meanAbsoluteLinearLumaDelta: sumAbsolute / count,
@@ -574,6 +597,7 @@ const port = await reserveEphemeralPort();
 let browser;
 let context;
 let rawVideo;
+let videoStartedAtMs;
 let server;
 let fixture;
 let worldService;
@@ -587,8 +611,8 @@ try {
     spawnVoxels: SPAWN,
     spawnPillarHeightVoxels: SPAWN_PILLAR_HEIGHT,
     spawnPillarRadiusVoxels: SPAWN_PILLAR_RADIUS,
-    cascadedShadows: true,
-    screenSpaceAmbientOcclusion: true,
+    cascadedShadows: CASCADED_SHADOWS,
+    screenSpaceAmbientOcclusion: SCREEN_SPACE_AMBIENT_OCCLUSION,
     dayLengthSeconds: 0,
     dayFractionAtUnixEpoch: 0.5,
     weatherCycleSeconds: 0,
@@ -620,6 +644,7 @@ try {
   });
   const page = await context.newPage();
   rawVideo = page.video();
+  videoStartedAtMs = Date.now();
   page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
   page.on("console", (message) => {
     if (isBrowserConsoleFailure(message.type(), message.text(), FAILURE)) {
@@ -642,6 +667,7 @@ try {
   }
   const beforePose = cameraPosition(beforeSnapshot);
   const before = await page.screenshot({ path: path.join(OUTPUT_DIRECTORY, "before.png") });
+  const beforeVideoSeconds = (Date.now() - videoStartedAtMs) / 1_000;
   if (RECORD_VIDEO && !WATERTIGHT) await page.waitForTimeout(1_500);
 
   if (WATERTIGHT) {
@@ -738,6 +764,7 @@ try {
     const afterCentres = boundaryCentres(afterSnapshot);
     const afterPose = cameraPosition(afterSnapshot);
     const after = await page.screenshot({ path: path.join(OUTPUT_DIRECTORY, "after.png") });
+    const afterVideoSeconds = (Date.now() - videoStartedAtMs) / 1_000;
     if (RECORD_VIDEO) await page.waitForTimeout(1_500);
     await sampleStablePerformance(page, timings, 2_000);
     const image = await compareScreenshots(page, before, after);
@@ -755,6 +782,9 @@ try {
       violations.push("valley mean absolute luminance delta exceeded 0.025");
     if (image.catastrophicDarkFraction > 0.01)
       violations.push("over 1% of valley pixels changed luminance by at least 2x");
+    if (image.nearBlackPixelFraction.before > 0.1 || image.nearBlackPixelFraction.after > 0.1) {
+      violations.push("over 10% of valley pixels rendered near-black");
+    }
     if (image.ssim < 0.97) violations.push("valley SSIM fell below 0.97");
     if (performance.frameP95Ms > 12) violations.push("frame p95 exceeded 12ms");
     if (performance.fractionAbove16_67Ms > 0.01)
@@ -797,6 +827,14 @@ try {
       image,
       performance,
       violations,
+      ...(RECORD_VIDEO
+        ? {
+            videoMarkers: {
+              beforeSeconds: beforeVideoSeconds,
+              afterSeconds: afterVideoSeconds,
+            },
+          }
+        : {}),
     };
     await writeFile(
       path.join(OUTPUT_DIRECTORY, "report.json"),
