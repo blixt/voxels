@@ -79,6 +79,17 @@ export class ArtifactStore {
     return this.record(label, destination, "application/json");
   }
 
+  async writeText(
+    label: string,
+    filename: string,
+    value: string,
+    mediaType = "text/plain",
+  ): Promise<string> {
+    const destination = this.resolve(filename);
+    await writeFile(destination, value);
+    return this.record(label, destination, mediaType);
+  }
+
   async copy(label: string, source: string, filename: string, mediaType?: string): Promise<string> {
     const destination = this.resolve(filename);
     await copyFile(source, destination);

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
-import { compareNetworkBenchmarks, type NetworkBenchmarkResult } from "./network-compare.ts";
+import {
+  compareNetworkBenchmarks,
+  parseNetworkBenchmarkResult,
+  type NetworkBenchmarkResult,
+} from "./network-compare.ts";
 
 function result(
   viewport: number,
@@ -42,6 +46,19 @@ function result(
 }
 
 describe("network benchmark comparison", () => {
+  it("validates untrusted JSON before comparison", () => {
+    const valid = result(1_000, 1_500, 10_000);
+    expect(parseNetworkBenchmarkResult(valid)).toMatchObject({
+      schemaVersion: 4,
+      repetitions: 5,
+    });
+    const invalid = structuredClone(valid) as unknown as {
+      summary: { cold_spawn: { viewportFullyInformedMs: { median: unknown } } };
+    };
+    invalid.summary.cold_spawn.viewportFullyInformedMs.median = "slow";
+    expect(() => parseNetworkBenchmarkResult(invalid)).toThrow(/finite number/u);
+  });
+
   it("reports signed time and byte deltas", () => {
     const comparison = compareNetworkBenchmarks(
       result(1_000, 1_500, 10_000),

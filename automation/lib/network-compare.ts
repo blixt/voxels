@@ -35,6 +35,84 @@ export interface NetworkScenarioComparison {
 
 export type NetworkBenchmarkComparison = Record<string, NetworkScenarioComparison>;
 
+function record(value: unknown, path: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${path} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function finiteNumber(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${path} must be a finite number`);
+  }
+  return value;
+}
+
+export function parseNetworkBenchmarkResult(value: unknown): NetworkBenchmarkResult {
+  const root = record(value, "network benchmark");
+  const schemaVersion = finiteNumber(root.schemaVersion, "network benchmark.schemaVersion");
+  const repetitions = finiteNumber(root.repetitions, "network benchmark.repetitions");
+  const git = record(root.git, "network benchmark.git");
+  if (typeof git.commit !== "string" || git.commit.length === 0) {
+    throw new Error("network benchmark.git.commit must be a non-empty string");
+  }
+  const rawSummary = record(root.summary, "network benchmark.summary");
+  const summary: Record<string, NetworkScenarioSummary> = {};
+  for (const [name, rawScenario] of Object.entries(rawSummary)) {
+    const scenario = record(rawScenario, `network benchmark.summary.${name}`);
+    const viewport = record(
+      scenario.viewportFullyInformedMs,
+      `network benchmark.summary.${name}.viewportFullyInformedMs`,
+    );
+    const coverage = record(
+      scenario.fullCoverageSettledMs,
+      `network benchmark.summary.${name}.fullCoverageSettledMs`,
+    );
+    const viewportBytes = record(
+      scenario.bytesAtViewportInformed,
+      `network benchmark.summary.${name}.bytesAtViewportInformed`,
+    );
+    const coverageBytes = record(
+      scenario.bytesAtFullCoverage,
+      `network benchmark.summary.${name}.bytesAtFullCoverage`,
+    );
+    summary[name] = {
+      viewportFullyInformedMs: {
+        median: finiteNumber(viewport.median, `${name}.viewportFullyInformedMs.median`),
+        max: finiteNumber(viewport.max, `${name}.viewportFullyInformedMs.max`),
+      },
+      fullCoverageSettledMs: {
+        median: finiteNumber(coverage.median, `${name}.fullCoverageSettledMs.median`),
+      },
+      bytesAtViewportInformed: {
+        medianWorldDownstream: finiteNumber(
+          viewportBytes.medianWorldDownstream,
+          `${name}.bytesAtViewportInformed.medianWorldDownstream`,
+        ),
+      },
+      bytesAtFullCoverage: {
+        medianTotal: finiteNumber(
+          coverageBytes.medianTotal,
+          `${name}.bytesAtFullCoverage.medianTotal`,
+        ),
+      },
+    };
+  }
+  return {
+    schemaVersion,
+    browserSnapshotSchema: root.browserSnapshotSchema,
+    fixture: root.fixture,
+    protocol: root.protocol,
+    link: root.link,
+    world: root.world,
+    environment: root.environment,
+    repetitions,
+    summary,
+    git: { commit: git.commit },
+  };
+}
+
 function percentage(delta: number, baseline: number): number | null {
   return baseline === 0 ? null : (delta / baseline) * 100;
 }
