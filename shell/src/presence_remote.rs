@@ -77,6 +77,7 @@ impl RemotePresenceClient {
             next_pose_sequence: Cell::new(1),
             next_ping_sequence: Cell::new(1),
             last_pose_send_ms: Cell::new(f64::NEG_INFINITY),
+            pose_schedule_ms: Cell::new(f64::NEG_INFINITY),
             last_ping_send_ms: Cell::new(f64::NEG_INFINITY),
             reconnect_after_ms: Cell::new(0.0),
             clock: Cell::new(clock),
@@ -141,7 +142,7 @@ impl RemotePresenceClient {
     /// sockets disagree about whether the local session can edit.
     pub fn send_pose_now(&self, camera: &CameraState, local_time_ms: f64) {
         if self.inner.state.get() == PresenceConnectionState::Open {
-            self.inner.send_pose(camera, local_time_ms);
+            let _ = self.inner.send_pose(camera, local_time_ms);
         }
     }
 
@@ -177,6 +178,7 @@ struct PresenceInner {
     next_pose_sequence: Cell<u64>,
     next_ping_sequence: Cell<u32>,
     last_pose_send_ms: Cell<f64>,
+    pose_schedule_ms: Cell<f64>,
     last_ping_send_ms: Cell<f64>,
     reconnect_after_ms: Cell<f64>,
     clock: Cell<ClockSync>,
@@ -385,6 +387,7 @@ impl PresenceInner {
             self.state.set(PresenceConnectionState::Open);
             self.last_ping_send_ms.set(f64::NEG_INFINITY);
             self.last_pose_send_ms.set(f64::NEG_INFINITY);
+            self.pose_schedule_ms.set(f64::NEG_INFINITY);
         } else if kind == protocol::presence_delta_kind() {
             if self.state.get() != PresenceConnectionState::Open {
                 self.disconnect(
@@ -469,20 +472,26 @@ impl PresenceInner {
     }
 
     fn maybe_send_pose(&self, camera: &CameraState, local_time_ms: f64) {
-        if local_time_ms - self.last_pose_send_ms.get()
-            < f64::from(self.config.pose_send_interval_ms)
-        {
+        let interval_ms = f64::from(self.config.pose_send_interval_ms);
+        let schedule_ms = self.pose_schedule_ms.get();
+        if local_time_ms - schedule_ms < interval_ms {
             return;
         }
-        self.send_pose(camera, local_time_ms);
+        if self.send_pose(camera, local_time_ms) {
+            self.pose_schedule_ms.set(periodic_send_marker(
+                schedule_ms,
+                local_time_ms,
+                interval_ms,
+            ));
+        }
     }
 
-    fn send_pose(&self, camera: &CameraState, local_time_ms: f64) {
+    fn send_pose(&self, camera: &CameraState, local_time_ms: f64) -> bool {
         let Some(socket) = self.socket.borrow().clone() else {
-            return;
+            return false;
         };
         if socket.buffered_amount() >= self.config.buffered_amount_high_water_bytes {
-            return;
+            return false;
         }
         let mut flags = 0;
         if camera.grounded {
@@ -516,15 +525,16 @@ impl PresenceInner {
             Ok(frame) => frame,
             Err(error) => {
                 *self.last_error.borrow_mut() = Some(error.to_string());
-                return;
+                return false;
             }
         };
         if let Err(error) = socket.send_with_u8_array(&frame) {
             self.disconnect(self.generation.get(), js_reason(error));
-            return;
+            return false;
         }
         self.next_pose_sequence.set(sequence.wrapping_add(1).max(1));
         self.last_pose_send_ms.set(local_time_ms);
+        true
     }
 
     fn maybe_send_ping(&self, local_time_ms: f64) {
@@ -642,7 +652,7 @@ impl PresenceInner {
             self.close();
             return;
         }
-        self.send_pose(camera, local_now_ms());
+        let _ = self.send_pose(camera, local_now_ms());
         let (closed, resolve) = resolvable();
         *self.close_resolver.borrow_mut() = Some(resolve);
         self.state.set(PresenceConnectionState::Closed);
@@ -669,6 +679,18 @@ impl PresenceInner {
 fn final_pose_delay_ms(local_time_ms: f64, last_pose_send_ms: f64, interval_ms: u32) -> i32 {
     let remaining = f64::from(interval_ms) - (local_time_ms - last_pose_send_ms);
     remaining.ceil().clamp(0.0, f64::from(i32::MAX)) as i32
+}
+
+fn periodic_send_marker(previous_ms: f64, local_time_ms: f64, interval_ms: f64) -> f64 {
+    if !previous_ms.is_finite()
+        || !local_time_ms.is_finite()
+        || !interval_ms.is_finite()
+        || interval_ms <= 0.0
+    {
+        return local_time_ms;
+    }
+    let elapsed_ms = (local_time_ms - previous_ms).max(0.0);
+    previous_ms + (elapsed_ms / interval_ms).floor() * interval_ms
 }
 
 fn timeout(milliseconds: i32) -> Promise {
@@ -714,13 +736,37 @@ fn js_reason(value: wasm_bindgen::JsValue) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClockSync, final_pose_delay_ms};
+    use super::{ClockSync, final_pose_delay_ms, periodic_send_marker};
 
     #[test]
     fn final_pose_waits_only_for_the_unsatisfied_send_interval() {
         assert_eq!(final_pose_delay_ms(100.0, 90.0, 33), 23);
         assert_eq!(final_pose_delay_ms(123.0, 90.0, 33), 0);
         assert_eq!(final_pose_delay_ms(150.0, f64::NEG_INFINITY, 33), 0);
+    }
+
+    #[test]
+    fn periodic_pose_cadence_retains_fractional_frame_time() {
+        let mut marker = f64::NEG_INFINITY;
+        let mut sends = Vec::new();
+        for frame in 0..=20 {
+            let now = f64::from(frame) * 25.0;
+            if now - marker >= 33.0 {
+                marker = periodic_send_marker(marker, now, 33.0);
+                sends.push(now);
+            }
+        }
+
+        assert_eq!(
+            sends,
+            vec![
+                0.0, 50.0, 75.0, 100.0, 150.0, 175.0, 200.0, 250.0, 275.0, 300.0, 350.0, 375.0,
+                400.0, 450.0, 475.0, 500.0,
+            ]
+        );
+        let mean_interval =
+            (sends.last().copied().unwrap_or_default() - sends[0]) / (sends.len() - 1) as f64;
+        assert!(mean_interval <= 34.0);
     }
 
     #[test]
