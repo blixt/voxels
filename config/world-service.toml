@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 22
+schema_version = 23
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -29,8 +29,10 @@ max_in_flight_batches = 16
 max_connections = 1024
 # Covers the worst-case negotiated request window for all 1024 admitted world connections.
 global_queue_capacity = 16384
-# Immutable encoded batches are shared across co-located clients and identical retries.
+# Immutable encoded products are shared by overlapping requests.
 product_cache_bytes = 268435456
+# Complete compressed batches are shared across co-located clients and identical retries.
+response_cache_bytes = 67108864
 generation_workers = 8
 generation_workers_per_client = 2
 # One urgent batch per client can jump queued ordinary generation; the global cap still applies.

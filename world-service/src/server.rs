@@ -54,7 +54,6 @@ pub const PRESENCE_WEBSOCKET_PATH: &str = "/v25/presence";
 pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v25";
 const DEFAULT_PLAYER_EYE_HEIGHT_METRES: f32 = 1.62;
 const PREFETCH_WORKER_DIVISOR: usize = 4;
-const RESPONSE_CACHE_BUDGET_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 
 /// Prepared server state. Source construction and spawn coverage validation happen before bind.
@@ -113,6 +112,7 @@ impl WorldServer {
             prefetch_semaphore,
             config.transport.max_frame_bytes,
             config.transport.product_cache_bytes,
+            config.transport.response_cache_bytes,
         ));
 
         let presence = PresenceHub::new(config.presence, config.gameplay)
@@ -2247,14 +2247,13 @@ async fn run_generation_dispatcher(
     prefetch_semaphore: Arc<Semaphore>,
     max_frame_bytes: usize,
     product_cache_bytes: usize,
+    response_cache_bytes: usize,
 ) {
     let (completion_tx, mut completions) = mpsc::unbounded_channel();
     let source_identity_hash = source.identity().identity_hash();
-    let response_cache_bytes = product_cache_bytes / RESPONSE_CACHE_BUDGET_DIVISOR;
-    let encoded_product_cache_bytes = product_cache_bytes.saturating_sub(response_cache_bytes);
     let mut in_flight = HashMap::<ProductFlightKey, Vec<ProductWaiter>>::new();
     let mut pending = HashMap::<u64, PendingGenerationBatch>::new();
-    let mut cache = ProductCache::new(encoded_product_cache_bytes);
+    let mut cache = ProductCache::new(product_cache_bytes);
     let response_cache = Arc::new(Mutex::new(BatchResponseCache::new(response_cache_bytes)));
     let mut next_batch_id = 1_u64;
     let mut jobs_open = true;
@@ -2953,6 +2952,7 @@ mod tests {
                 max_connections: 4,
                 global_queue_capacity: 8,
                 product_cache_bytes: 4 * 1024 * 1024,
+                response_cache_bytes: 1024 * 1024,
                 generation_workers: 4,
                 generation_workers_per_client: 2,
                 collision_generation_workers_per_client: 1,

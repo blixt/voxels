@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 22
+schema_version = 23
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -47,6 +47,7 @@ max_in_flight_batches = 16
 max_connections = 1024
 global_queue_capacity = 16384
 product_cache_bytes = 268435456
+response_cache_bytes = 67108864
 generation_workers = 8
 generation_workers_per_client = 2
 collision_generation_workers_per_client = 1
@@ -226,9 +227,11 @@ client never branches on provider selection; changing the daemon source and rest
 sufficient to switch between procedural and learned terrain. The transport bounds total accepted
 connections and queued work, and the per-client worker cap prevents one connection from occupying
 the complete local generation pool. `product_cache_bytes` bounds an LRU of validated encoded product
-items. Concurrent overlapping batches single-flight each chunk or surface tile through one CPU/Metal
-generation, then assemble their requested order into independently request-ID-keyed VXWP responses.
-Priority and batch shape affect scheduling, not cache identity.
+items. `response_cache_bytes` separately bounds complete compressed batches shared by co-located
+clients and exact retries, so retaining a dense multiplayer working set does not evict the products
+needed for responsive traversal. Concurrent overlapping batches single-flight each chunk or surface
+tile through one CPU/Metal generation, then assemble their requested order into independently
+request-ID-keyed VXWP responses. Priority and batch shape affect scheduling, not cache identity.
 
 `[edits].database` is the native authoritative world/player SQLite file. Relative paths resolve from
 the service configuration, not the process working directory. The Rust service expands
@@ -237,7 +240,7 @@ three, so changing a storage schema or any immutable world/source identity start
 and leaves the previous world untouched. This also prevents an old and new daemon from opening the
 same filename during hot reload. Paths without tokens are opened exactly as configured and remain
 strict: startup rejects another schema or a database bound to a different world/source manifest;
-there are no migrations or fallback authorities. Schema 7 owns sparse voxel edits, spherical dig
+there are no migrations or fallback authorities. Schema 10 owns sparse voxel edits, spherical dig
 operations, player material inventories, idempotent edit sessions, and authoritative resume poses.
 `change_queue_capacity` bounds each interested client's commit queue.
 

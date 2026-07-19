@@ -36,7 +36,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 22;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 23;
 pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 10;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
@@ -75,8 +75,10 @@ pub struct LoopbackTransportConfig {
     pub max_connections: u16,
     /// Bounded process-wide queue shared by all clients.
     pub global_queue_capacity: u16,
-    /// LRU budget for immutable compressed world-product batch responses.
+    /// LRU budget for immutable encoded world products shared by overlapping requests.
     pub product_cache_bytes: usize,
+    /// LRU budget for complete compressed batch responses shared by co-located clients.
+    pub response_cache_bytes: usize,
     /// Maximum blocking generation batches executing across all clients.
     pub generation_workers: u16,
     /// Fairness guard: one connection cannot occupy the whole worker pool.
@@ -106,6 +108,7 @@ impl Default for LoopbackTransportConfig {
             max_connections: 1_024,
             global_queue_capacity: 16_384,
             product_cache_bytes: 256 * 1024 * 1024,
+            response_cache_bytes: 64 * 1024 * 1024,
             generation_workers: 8,
             generation_workers_per_client: 2,
             collision_generation_workers_per_client: 1,
@@ -524,6 +527,11 @@ impl WorldServiceConfig {
         if self.transport.product_cache_bytes > 1024 * 1024 * 1024 {
             return Err(WorldServiceConfigError::InvalidConcurrency(
                 "product_cache_bytes must stay at most 1 GiB",
+            ));
+        }
+        if self.transport.response_cache_bytes > 256 * 1024 * 1024 {
+            return Err(WorldServiceConfigError::InvalidConcurrency(
+                "response_cache_bytes must stay at most 256 MiB",
             ));
         }
         if self.transport.generation_workers == 0
@@ -1036,7 +1044,7 @@ mod tests {
     use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
 
     const CONFIG_TOML: &str = r#"
-schema_version = 22
+schema_version = 23
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -1057,6 +1065,7 @@ max_in_flight_batches = 16
 max_connections = 512
 global_queue_capacity = 128
 product_cache_bytes = 268435456
+response_cache_bytes = 67108864
 generation_workers = 8
 generation_workers_per_client = 2
 collision_generation_workers_per_client = 1
@@ -1177,12 +1186,12 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 22", "schema_version = 21");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 23", "schema_version = 22");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
-                expected: 22,
-                found: 21,
+                expected: WORLD_SERVICE_CONFIG_SCHEMA_VERSION,
+                found: WORLD_SERVICE_CONFIG_SCHEMA_VERSION - 1,
             })
         );
         let unknown = format!("{CONFIG_TOML}\nunknown = true\n");
@@ -1208,6 +1217,7 @@ sea_level_voxels = 52
             "outbound_max_frame_fragment_bytes = 32768\n",
             "max_connections = 512\n",
             "product_cache_bytes = 268435456\n",
+            "response_cache_bytes = 67108864\n",
             "broadcast_interval_ms = 33\n",
             "interaction_reach_centimetres = 500\n",
             "planet_circumference_metres = 40075016.0\n",
@@ -1256,6 +1266,13 @@ sea_level_voxels = 52
         ));
 
         config.transport.collision_generation_workers_per_client = 1;
+        config.transport.response_cache_bytes = 256 * 1024 * 1024 + 1;
+        assert!(matches!(
+            config.validate(),
+            Err(WorldServiceConfigError::InvalidConcurrency(_))
+        ));
+
+        config.transport.response_cache_bytes = 64 * 1024 * 1024;
         config.transport.auth_subprotocol_token = "invalid token".to_owned();
         assert_eq!(
             config.validate(),
