@@ -31,6 +31,7 @@ const OUTPUT_DIRECTORY = path.resolve("target/harness/bots");
 const SAMPLE_INTERVAL_MS = 250;
 const OBSERVER_SAMPLE_INTERVAL_MS = 500;
 const VIEWPORT = { width: 960, height: 540 };
+const BOT_SPAWN_PILLAR_HEIGHT_VOXELS = 7;
 const BOT_SPAWN_PROTECTION_RADIUS_VOXELS = 3;
 const BROWSER_FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|websocket|presence|protocol|world service/iu;
@@ -529,6 +530,10 @@ function stageViolations(stage, browserEnabled) {
   }
   const rejected = stage.botReport.editsRejected;
   const expectedConflicts = stage.botReport.editConflicts ?? 0;
+  const editorCount = ["digger", "builder", "follower"].reduce(
+    (sum, behavior) => sum + (stage.botReport.behaviors[behavior] ?? 0),
+    0,
+  );
   const resyncs = stage.botReport.reports.reduce((sum, report) => sum + report.resyncs, 0);
   const protocolErrors = stage.botReport.reports.reduce(
     (sum, report) => sum + report.protocolErrors,
@@ -541,6 +546,12 @@ function stageViolations(stage, browserEnabled) {
     violations.push(
       `${stage.count} bots: ${rejected - expectedConflicts} unexpected edits were rejected`,
     );
+  }
+  if (editorCount > 0 && stage.botReport.editsAccepted === 0) {
+    violations.push(`${stage.count} bots: editor clients completed no accepted edits`);
+  }
+  if (editorCount > 0 && stage.botReport.mutationsCommitted === 0) {
+    violations.push(`${stage.count} bots: accepted edits produced no voxel mutations`);
   }
   if (resyncs > 0) violations.push(`${stage.count} bots: ${resyncs} clients required resync`);
   if (protocolErrors > 0) {
@@ -678,7 +689,8 @@ async function main() {
           browserPort: previewPort ?? (await reserveEphemeralPort()),
           prefix: `voxels-bots-${count}-`,
           source: options.source,
-          // Exercise edits immediately while retaining protection for the authored spawn pillar.
+          // Keep the spawn safe without lifting nearby terrain beyond ordinary interaction reach.
+          spawnPillarHeightVoxels: BOT_SPAWN_PILLAR_HEIGHT_VOXELS,
           spawnProtectionRadiusVoxels: BOT_SPAWN_PROTECTION_RADIUS_VOXELS,
         }));
       const service =

@@ -34,6 +34,7 @@ const POSE_HZ: u64 = 30;
 const PING_INTERVAL: Duration = Duration::from_secs(1);
 const SURFACE_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 const CHUNK_CACHE_CAPACITY: usize = 96;
+const MAX_DIG_SURFACE_SCAN_VOXELS: i32 = 40;
 const MAX_TOWER_COLUMN_SCAN_VOXELS: i32 = 48;
 
 #[derive(Clone, Debug, Serialize)]
@@ -1001,18 +1002,29 @@ fn first_placeable(inventory: MaterialInventory) -> Option<Material> {
 }
 
 fn prepare_edit(cache: &ChunkCache, action: EditAction) -> Option<EditAction> {
-    let EditAction::Place {
-        mut coord,
-        material,
-    } = action
-    else {
-        return Some(action);
-    };
-    for _ in 0..=MAX_TOWER_COLUMN_SCAN_VOXELS {
-        match cache.material(coord) {
-            Some(Material::Air) => return Some(EditAction::Place { coord, material }),
-            Some(_) => coord.y = coord.y.saturating_add(1),
-            None => return None,
+    match action {
+        EditAction::Dig { mut hit } => {
+            for _ in 0..=MAX_DIG_SURFACE_SCAN_VOXELS {
+                match cache.material(hit) {
+                    Some(material) if material.is_collidable() => {
+                        return Some(EditAction::Dig { hit });
+                    }
+                    Some(_) => hit.y = hit.y.saturating_sub(1),
+                    None => return None,
+                }
+            }
+        }
+        EditAction::Place {
+            mut coord,
+            material,
+        } => {
+            for _ in 0..=MAX_TOWER_COLUMN_SCAN_VOXELS {
+                match cache.material(coord) {
+                    Some(Material::Air) => return Some(EditAction::Place { coord, material }),
+                    Some(_) => coord.y = coord.y.saturating_add(1),
+                    None => return None,
+                }
+            }
         }
     }
     None
@@ -1224,6 +1236,35 @@ mod tests {
                 EditAction::Place {
                     coord: missing,
                     material: Material::Dirt,
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn dig_descends_through_cached_air_to_authoritative_ground() {
+        let mut cache = ChunkCache::new(1);
+        let mut chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Air);
+        chunk.set(2, 3, 3, Material::Stone);
+        cache.insert(chunk);
+
+        assert_eq!(
+            prepare_edit(
+                &cache,
+                EditAction::Dig {
+                    hit: VoxelCoord::new(2, 10, 3),
+                }
+            ),
+            Some(EditAction::Dig {
+                hit: VoxelCoord::new(2, 3, 3),
+            })
+        );
+        assert_eq!(
+            prepare_edit(
+                &cache,
+                EditAction::Dig {
+                    hit: VoxelCoord::new(CHUNK_EDGE as i32, 10, 3),
                 }
             ),
             None
