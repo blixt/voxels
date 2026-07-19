@@ -81,6 +81,7 @@ export interface NormalizedShapedLinkProfile {
 }
 
 export interface ShapedLink {
+  readonly port: number;
   readonly profile: NormalizedShapedLinkProfile;
   snapshot(): LinkStats;
   reset(): void;
@@ -570,6 +571,7 @@ export async function createShapedLink({
     server.listen(listenPort, "127.0.0.1", resolve);
   });
   return {
+    port: listenPort,
     profile: normalized,
     snapshot: () => clonedStats(statsRef.current),
     reset: () => {

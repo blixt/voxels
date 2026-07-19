@@ -2,6 +2,7 @@ import type { ScenarioDefinition } from "../lib/scenario.ts";
 import benchCore from "./bench-core.ts";
 import benchRuntime from "./bench-runtime.ts";
 import benchWorld from "./bench-world.ts";
+import botLoad from "./bot-load.ts";
 import networkCompare from "./network-compare.ts";
 import terrainLightingCompare from "./terrain-lighting-compare.ts";
 import worldLab from "./world-lab.ts";
@@ -10,6 +11,7 @@ const definitions = [
   benchCore,
   benchRuntime,
   benchWorld,
+  botLoad,
   networkCompare,
   terrainLightingCompare,
   worldLab,

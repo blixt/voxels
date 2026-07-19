@@ -1,35 +1,44 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
+import type { Browser, BrowserContext, Page } from "playwright";
 import { build, preview } from "vite-plus";
-import { prepareBrowserWorldFixture, startBrowserWorldService } from "../automation/lib/world.ts";
+import { prepareBrowserWorldFixture, startBrowserWorldService } from "../lib/world.ts";
 import {
-  assertSnapshotSchema,
   chromeWebGpuLaunchOptions,
-  FRAME_SAMPLE_START,
-  FRAME_SAMPLE_WIDTH,
   isBrowserConsoleFailure,
   reserveEphemeralPort,
+} from "../lib/browser.ts";
+import {
+  assertSnapshotSchema,
+  FRAME_SAMPLE_WIDTH,
   SNAPSHOT,
-} from "./browser-harness.mjs";
-import { rustTool } from "./build-wasm.ts";
+  snapshotValue,
+} from "../lib/engine.ts";
 import {
   numericSummary,
   sampleProcess,
   summarizeProcess,
-  writeHarnessReport,
-} from "../automation/lib/metrics.ts";
-import { createShapedLink } from "../automation/lib/network.ts";
-import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "../automation/lib/protocol.ts";
-import { worldServiceBuildCargoArgs } from "./world-service-command.ts";
+  type ProcessSample,
+} from "../lib/metrics.ts";
+import { createShapedLink, type ShapedLink } from "../lib/network.ts";
+import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "../lib/protocol.ts";
+import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
+import type { BrowserWorldFixture, BrowserWorldService } from "../lib/world.ts";
+import { rustTool } from "../../scripts/build-wasm.ts";
+import {
+  worldServiceBuildCargoArgs,
+  type WorldServiceCargoProfile,
+} from "../../scripts/world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
 const RESULT_SCHEMA_VERSION = 4;
-const OUTPUT_DIRECTORY = path.resolve("target/harness/bots");
 const SAMPLE_INTERVAL_MS = 250;
 const OBSERVER_SAMPLE_INTERVAL_MS = 500;
+const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 const VIEWPORT = { width: 960, height: 540 };
 const BOT_SPAWN_PILLAR_HEIGHT_VOXELS = 7;
 const BOT_SPAWN_PROTECTION_RADIUS_VOXELS = 3;
@@ -43,7 +52,85 @@ const NETWORK_PROFILE = Object.freeze({
   quantumBytes: 64 * 1_024,
 });
 
-function parseArguments(values) {
+type BotLayout = "dense" | "mixed";
+type BotLoadMode = "scale" | "growth";
+
+interface BotLoadOptions {
+  counts: number[];
+  durationSeconds: number;
+  layout: BotLayout;
+  source: string;
+  mode: BotLoadMode;
+  serviceProfile: WorldServiceCargoProfile;
+  botProfile: WorldServiceCargoProfile;
+  browser: boolean;
+}
+
+interface BotClientReport {
+  readonly chunkLatency: { readonly samples: number; readonly p95Ms: number };
+  readonly editLatency: { readonly samples: number; readonly p95Ms: number };
+  readonly maxVisiblePlayers: number;
+  readonly resyncs: number;
+  readonly protocolErrors: number;
+  readonly errorSamples: readonly string[];
+  readonly finalOutboundRateBytesPerSecond: number;
+  readonly maxOutboundRateBytesPerSecond: number;
+  readonly traffic: {
+    readonly receivedPayloadBytes: number;
+    readonly maxReceivedFrameBytes?: number;
+    readonly receivedByKind?: Readonly<Record<string, { readonly payloadBytes?: number }>>;
+  };
+}
+
+interface BotHarnessReport {
+  readonly wallTimeMs: number;
+  readonly connectionCount: number;
+  readonly maxVisiblePlayers: number;
+  readonly editsAccepted: number;
+  readonly editsRejected: number;
+  readonly editConflicts: number;
+  readonly mutationsCommitted: number;
+  readonly behaviors: Readonly<Record<string, number | undefined>>;
+  readonly reports: readonly BotClientReport[];
+}
+
+interface DatabaseFiles {
+  readonly mainBytes: number;
+  readonly walBytes: number;
+  readonly shmBytes: number;
+  readonly totalBytes: number;
+}
+
+interface MutableDone {
+  value: boolean;
+}
+
+interface Observer {
+  readonly context: BrowserContext;
+  readonly page: Page;
+  readonly errors: string[];
+}
+
+interface ObserverSample {
+  readonly atUnixMs: number;
+  readonly remoteAvatars: number;
+  readonly avatarParts: number;
+  readonly avatarDrawCalls: number;
+  readonly frameMs: number;
+  readonly cpuMs: number;
+  readonly gpuTotalMs: number;
+  readonly wasmCommittedMiB: number;
+  readonly coreGpuMiB: number;
+  readonly residentChunks: number;
+  readonly visibleChunks: number;
+  readonly drawCalls: number;
+  readonly pendingJobs: number;
+  readonly surfaceInFlight: number;
+  readonly interactiveLodsReady: boolean;
+  readonly allLodsReady: boolean;
+}
+
+function parseArguments(values: readonly string[]): BotLoadOptions {
   const options = {
     counts: [4, 8, 16, 32, 64],
     durationSeconds: 10,
@@ -109,10 +196,10 @@ function parseArguments(values) {
   if (!["worldgen", "worldgen-dev"].includes(options.botProfile)) {
     throw new Error("--bot-profile must be worldgen or worldgen-dev");
   }
-  return options;
+  return options as BotLoadOptions;
 }
 
-function executablePath(profile, binary) {
+function executablePath(profile: WorldServiceCargoProfile, binary: string): string {
   return path.resolve(
     process.env.CARGO_TARGET_DIR ?? "target",
     profile,
@@ -120,8 +207,8 @@ function executablePath(profile, binary) {
   );
 }
 
-function waitForChild(child, label, logs) {
-  return new Promise((resolve, reject) => {
+function waitForChild(child: ChildProcess, label: string, logs: readonly string[]): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
     child.once("error", reject);
     child.once("exit", (code, signal) => {
       if (code === 0) resolve();
@@ -136,16 +223,16 @@ function waitForChild(child, label, logs) {
   });
 }
 
-async function fileBytes(file) {
+async function fileBytes(file: string): Promise<number> {
   try {
     return (await stat(file)).size;
   } catch (error) {
-    if (error.code === "ENOENT") return 0;
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return 0;
     throw error;
   }
 }
 
-async function databaseFiles(databasePath) {
+async function databaseFiles(databasePath: string): Promise<DatabaseFiles> {
   const [mainBytes, walBytes, shmBytes] = await Promise.all([
     fileBytes(databasePath),
     fileBytes(`${databasePath}-wal`),
@@ -159,7 +246,7 @@ async function databaseFiles(databasePath) {
   };
 }
 
-async function databaseContents(databasePath) {
+async function databaseContents(databasePath: string): Promise<Record<string, unknown> | null> {
   if ((await fileBytes(databasePath)) === 0) return null;
   const query = `
     SELECT
@@ -176,20 +263,27 @@ async function databaseContents(databasePath) {
       (SELECT COUNT(*) FROM edit_operation_surfaces) AS operationSurfaces;
   `;
   const { stdout } = await execFileAsync("sqlite3", ["-json", databasePath, query]);
-  return JSON.parse(stdout)[0] ?? null;
+  const parsed = JSON.parse(stdout) as unknown;
+  if (!Array.isArray(parsed)) throw new Error("sqlite database summary was not an array");
+  const first = parsed[0];
+  if (first === undefined) return null;
+  if (typeof first !== "object" || first === null || Array.isArray(first)) {
+    throw new Error("sqlite database summary row was not an object");
+  }
+  return first as Record<string, unknown>;
 }
 
-function requiredConfigInteger(toml, key) {
+function requiredConfigInteger(toml: string, key: string): number {
   const match = toml.match(new RegExp(`^${key} = ([0-9]+)$`, "mu"));
   if (match === null) throw new Error(`missing integer ${key} in world-service config`);
   return Number(match[1]);
 }
 
-function messageBytes(report, kind) {
+function messageBytes(report: BotClientReport, kind: number): number {
   return report.traffic.receivedByKind?.[String(kind)]?.payloadBytes ?? 0;
 }
 
-function summarizeTrafficBudget(report, serviceConfig) {
+function summarizeTrafficBudget(report: BotHarnessReport, serviceConfig: string) {
   const floorBytesPerSecond = requiredConfigInteger(
     serviceConfig,
     "outbound_bandwidth_floor_bytes_per_second",
@@ -210,9 +304,10 @@ function summarizeTrafficBudget(report, serviceConfig) {
       Math.max(burstBytes, client.traffic.maxReceivedFrameBytes ?? 0) +
       1_024,
   );
-  const overBudgetClients = report.reports.filter(
-    (client, index) => client.traffic.receivedPayloadBytes > envelopeBytes[index],
-  ).length;
+  const overBudgetClients = report.reports.filter((client, index) => {
+    const envelope = envelopeBytes[index];
+    return envelope !== undefined && client.traffic.receivedPayloadBytes > envelope;
+  }).length;
   return {
     floorBytesPerSecond,
     ceilingBytesPerSecond,
@@ -241,10 +336,20 @@ function summarizeTrafficBudget(report, serviceConfig) {
   };
 }
 
-async function collectSamples({ servicePid, botPid, databasePath, done }) {
-  const service = [];
-  const bots = [];
-  const database = [];
+async function collectSamples({
+  servicePid,
+  botPid,
+  databasePath,
+  done,
+}: {
+  readonly servicePid: number;
+  readonly botPid: number;
+  readonly databasePath: string;
+  readonly done: MutableDone;
+}) {
+  const service: ProcessSample[] = [];
+  const bots: ProcessSample[] = [];
+  const database: ({ readonly atUnixMs: number } & DatabaseFiles)[] = [];
   while (!done.value) {
     const [serviceSample, botSample, files] = await Promise.all([
       sampleProcess(servicePid),
@@ -259,53 +364,59 @@ async function collectSamples({ servicePid, botPid, databasePath, done }) {
   return { service, bots, database };
 }
 
-async function collectObserverSamples(observer, expectedBots, started, done) {
+async function collectObserverSamples(
+  observer: Observer | null,
+  expectedBots: number,
+  started: number,
+  done: MutableDone,
+) {
   if (observer === null) return null;
-  const samples = [];
-  const frameMilliseconds = [];
-  let rosterReadyMs = null;
-  let interactiveWorldReadyMs = null;
-  let fullWorldReadyMs = null;
+  const samples: ObserverSample[] = [];
+  const frameMilliseconds: number[] = [];
+  let rosterReadyMs: number | null = null;
+  let interactiveWorldReadyMs: number | null = null;
+  let fullWorldReadyMs: number | null = null;
   while (!done.value) {
     const values = assertSnapshotSchema(
-      await observer.page.evaluate(() => globalThis.__VOXELS__.snapshot()),
+      await observer.page.evaluate(() => globalThis.__VOXELS__!.snapshot()),
     );
-    const remoteAvatars = values[SNAPSHOT.remoteAvatars];
+    const remoteAvatars = snapshotValue(values, "remoteAvatars");
     const elapsedMs = performance.now() - started;
     if (rosterReadyMs === null && remoteAvatars === expectedBots) {
       rosterReadyMs = elapsedMs;
     }
-    if (interactiveWorldReadyMs === null && values[SNAPSHOT.interactiveLodsReady] === 1) {
+    if (interactiveWorldReadyMs === null && snapshotValue(values, "interactiveLodsReady") === 1) {
       interactiveWorldReadyMs = elapsedMs;
     }
     if (
       fullWorldReadyMs === null &&
-      values[SNAPSHOT.allLodsReady] === 1 &&
-      values[SNAPSHOT.surfaceInFlight] === 0 &&
-      values[SNAPSHOT.pendingJobs] === 0
+      snapshotValue(values, "allLodsReady") === 1 &&
+      snapshotValue(values, "surfaceInFlight") === 0 &&
+      snapshotValue(values, "pendingJobs") === 0
     ) {
       fullWorldReadyMs = elapsedMs;
     }
-    for (let index = 0; index < values[SNAPSHOT.sampleCount]; index += 1) {
-      frameMilliseconds.push(values[FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH]);
+    for (let index = 0; index < snapshotValue(values, "sampleCount"); index += 1) {
+      const frame = values[FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH];
+      if (frame !== undefined) frameMilliseconds.push(frame);
     }
     samples.push({
       atUnixMs: Date.now(),
       remoteAvatars,
-      avatarParts: values[SNAPSHOT.avatarParts],
-      avatarDrawCalls: values[SNAPSHOT.avatarDrawCalls],
-      frameMs: values[SNAPSHOT.frameMs],
-      cpuMs: values[SNAPSHOT.cpuMs],
-      gpuTotalMs: values[SNAPSHOT.gpuTotalMs],
-      wasmCommittedMiB: values[SNAPSHOT.wasmCommittedMiB],
-      coreGpuMiB: values[SNAPSHOT.coreGpuMiB],
-      residentChunks: values[SNAPSHOT.residentChunks],
-      visibleChunks: values[SNAPSHOT.visibleChunks],
-      drawCalls: values[SNAPSHOT.drawCalls],
-      pendingJobs: values[SNAPSHOT.pendingJobs],
-      surfaceInFlight: values[SNAPSHOT.surfaceInFlight],
-      interactiveLodsReady: values[SNAPSHOT.interactiveLodsReady] === 1,
-      allLodsReady: values[SNAPSHOT.allLodsReady] === 1,
+      avatarParts: snapshotValue(values, "avatarParts"),
+      avatarDrawCalls: snapshotValue(values, "avatarDrawCalls"),
+      frameMs: snapshotValue(values, "frameMs"),
+      cpuMs: snapshotValue(values, "cpuMs"),
+      gpuTotalMs: snapshotValue(values, "gpuTotalMs"),
+      wasmCommittedMiB: snapshotValue(values, "wasmCommittedMiB"),
+      coreGpuMiB: snapshotValue(values, "coreGpuMiB"),
+      residentChunks: snapshotValue(values, "residentChunks"),
+      visibleChunks: snapshotValue(values, "visibleChunks"),
+      drawCalls: snapshotValue(values, "drawCalls"),
+      pendingJobs: snapshotValue(values, "pendingJobs"),
+      surfaceInFlight: snapshotValue(values, "surfaceInFlight"),
+      interactiveLodsReady: snapshotValue(values, "interactiveLodsReady") === 1,
+      allLodsReady: snapshotValue(values, "allLodsReady") === 1,
     });
     await observer.page.waitForTimeout(OBSERVER_SAMPLE_INTERVAL_MS);
   }
@@ -338,7 +449,12 @@ async function collectObserverSamples(observer, expectedBots, started, done) {
   };
 }
 
-function summarizeDatabase(samples, before, after, contents) {
+function summarizeDatabase(
+  samples: readonly ({ readonly atUnixMs: number } & DatabaseFiles)[],
+  before: DatabaseFiles,
+  after: DatabaseFiles,
+  contents: Readonly<Record<string, unknown>> | null,
+) {
   return {
     before,
     after,
@@ -362,14 +478,23 @@ async function runPopulation({
   botBinary,
   runIndex,
   observer,
+}: {
+  readonly count: number;
+  readonly options: BotLoadOptions;
+  readonly fixture: BrowserWorldFixture;
+  readonly service: BrowserWorldService;
+  readonly link: ShapedLink;
+  readonly botBinary: string;
+  readonly runIndex: number;
+  readonly observer: Observer | null;
 }) {
   const reportPath = path.join(fixture.directory, `bots-${count}-${runIndex}.json`);
   const before = await databaseFiles(fixture.databasePath);
   if (observer !== null) {
-    await observer.page.evaluate(() => globalThis.__VOXELS__.snapshot());
+    await observer.page.evaluate(() => globalThis.__VOXELS__!.snapshot());
   }
   link.reset();
-  const logs = [];
+  const logs: string[] = [];
   const bot = spawn(
     botBinary,
     [
@@ -398,6 +523,9 @@ async function runPopulation({
     });
   }
   const done = { value: false };
+  if (service.child.pid === undefined || bot.pid === undefined) {
+    throw new Error("bot load processes did not expose process IDs");
+  }
   const samplesPromise = collectSamples({
     servicePid: service.child.pid,
     botPid: bot.pid,
@@ -424,7 +552,7 @@ async function runPopulation({
   const wallTimeMs = performance.now() - started;
   const samples = await samplesPromise;
   const observerReport = await observerPromise;
-  const report = JSON.parse(await readFile(reportPath, "utf8"));
+  const report = JSON.parse(await readFile(reportPath, "utf8")) as BotHarnessReport;
   const serviceConfig = await readFile(fixture.serviceConfigPath, "utf8");
   const after = await databaseFiles(fixture.databasePath);
   const contents = await databaseContents(fixture.databasePath);
@@ -443,7 +571,23 @@ async function runPopulation({
   };
 }
 
-function markdownReport(result) {
+type BotLoadStageBase = Awaited<ReturnType<typeof runPopulation>>;
+type BotLoadStage = BotLoadStageBase & { readonly violations: readonly string[] };
+
+interface BotLoadResult {
+  readonly schemaVersion: number;
+  readonly generatedAt: string;
+  readonly host: {
+    readonly platform: string;
+    readonly architecture: string;
+    readonly node: string;
+  };
+  readonly options: BotLoadOptions;
+  readonly stages: BotLoadStage[];
+  readonly violations: string[];
+}
+
+function markdownReport(result: BotLoadResult): string {
   const lines = [
     "# Voxels bot population benchmark",
     "",
@@ -507,8 +651,8 @@ function markdownReport(result) {
   return `${lines.join("\n")}\n`;
 }
 
-function stageViolations(stage, browserEnabled) {
-  const violations = [];
+function stageViolations(stage: BotLoadStageBase, browserEnabled: boolean): string[] {
+  const violations: string[] = [];
   const expectedVisible = browserEnabled ? stage.count : stage.count - 1;
   if (stage.botReport.connectionCount !== stage.count) {
     violations.push(
@@ -580,11 +724,16 @@ function stageViolations(stage, browserEnabled) {
   return violations;
 }
 
-async function startObserver(browser, previewPort, fixture, proxyPort) {
+async function startObserver(
+  browser: Browser,
+  previewPort: number,
+  fixture: BrowserWorldFixture,
+  proxyPort: number,
+): Promise<Observer> {
   const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1 });
   const page = await context.newPage();
-  const errors = [];
-  const recordError = (message) => {
+  const errors: string[] = [];
+  const recordError = (message: string): void => {
     if (errors.length < 32 && !errors.includes(message)) errors.push(message);
   };
   page.on("pageerror", (error) => recordError(`pageerror: ${error.message}`));
@@ -611,10 +760,10 @@ async function startObserver(browser, previewPort, fixture, proxyPort) {
     timeout: 30_000,
   });
   const deadline = performance.now() + 30_000;
-  let latest = [];
+  let latest: readonly number[] = [];
   while (performance.now() < deadline) {
-    latest = assertSnapshotSchema(await page.evaluate(() => globalThis.__VOXELS__.snapshot()));
-    if (latest[SNAPSHOT.quads] > 0 && latest[SNAPSHOT.residentChunks] > 0) {
+    latest = assertSnapshotSchema(await page.evaluate(() => globalThis.__VOXELS__!.snapshot()));
+    if (snapshotValue(latest, "quads") > 0 && snapshotValue(latest, "residentChunks") > 0) {
       return { context, page, errors };
     }
     await page.waitForTimeout(100);
@@ -632,8 +781,9 @@ async function startObserver(browser, previewPort, fixture, proxyPort) {
   );
 }
 
-async function main() {
-  const options = parseArguments(process.argv.slice(2));
+async function main(context: ScenarioContext, arguments_: readonly string[]) {
+  const options = parseArguments(arguments_);
+  const outputDirectory = context.artifacts.directory;
   execFileSync(
     rustTool("cargo"),
     worldServiceBuildCargoArgs({ metal: false, profile: options.serviceProfile }),
@@ -645,7 +795,7 @@ async function main() {
     stdio: "inherit",
   });
   const botBinary = executablePath(options.botProfile, "voxels-bots");
-  const result = {
+  const result: BotLoadResult = {
     schemaVersion: RESULT_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     host: {
@@ -657,12 +807,12 @@ async function main() {
     stages: [],
     violations: [],
   };
-  let growthFixture;
-  let growthService;
-  let growthLink;
-  let browser;
-  let previewServer;
-  let previewPort;
+  let growthFixture: BrowserWorldFixture | undefined;
+  let growthService: BrowserWorldService | undefined;
+  let growthLink: ShapedLink | undefined;
+  let browser: Browser | undefined;
+  let previewServer: Awaited<ReturnType<typeof preview>> | undefined;
+  let previewPort: number | undefined;
   try {
     if (options.browser) {
       previewPort = await reserveEphemeralPort();
@@ -683,7 +833,7 @@ async function main() {
       browser = await chromium.launch(chromeWebGpuLaunchOptions());
     }
     for (const [runIndex, count] of options.counts.entries()) {
-      const fixture =
+      const fixture: BrowserWorldFixture =
         growthFixture ??
         (await prepareBrowserWorldFixture({
           browserPort: previewPort ?? (await reserveEphemeralPort()),
@@ -693,14 +843,14 @@ async function main() {
           spawnPillarHeightVoxels: BOT_SPAWN_PILLAR_HEIGHT_VOXELS,
           spawnProtectionRadiusVoxels: BOT_SPAWN_PROTECTION_RADIUS_VOXELS,
         }));
-      const service =
+      const service: BrowserWorldService =
         growthService ??
         (await startBrowserWorldService(fixture, {
           build: false,
           metal: false,
           profile: options.serviceProfile,
         }));
-      let proxy = growthLink;
+      let proxy: ShapedLink | undefined = growthLink;
       if (proxy === undefined) {
         const proxyPort = await reserveEphemeralPort();
         proxy = await createShapedLink({
@@ -708,14 +858,13 @@ async function main() {
           targetPort: fixture.backendPort,
           profile: NETWORK_PROFILE,
         });
-        proxy.port = proxyPort;
       }
       if (options.mode === "growth" && growthFixture === undefined) {
         growthFixture = fixture;
         growthService = service;
         growthLink = proxy;
       }
-      let observer = null;
+      let observer: Observer | null = null;
       try {
         observer =
           browser === undefined || previewPort === undefined
@@ -732,14 +881,15 @@ async function main() {
           observer,
         });
         const violations = stageViolations(stage, options.browser);
-        stage.violations = violations;
         result.violations.push(...violations);
-        result.stages.push(stage);
+        result.stages.push({ ...stage, violations });
         if (observer !== null && runIndex === options.counts.length - 1) {
-          await mkdir(OUTPUT_DIRECTORY, { recursive: true });
+          await mkdir(outputDirectory, { recursive: true });
+          const screenshotPath = path.join(outputDirectory, "observer.png");
           await observer.page.screenshot({
-            path: path.join(OUTPUT_DIRECTORY, "latest-observer.png"),
+            path: screenshotPath,
           });
+          context.artifacts.record("bot observer", screenshotPath, "image/png");
         }
       } finally {
         if (observer !== null) await observer.context.close();
@@ -758,11 +908,37 @@ async function main() {
     if (previewServer) await previewServer.close();
   }
   const markdown = markdownReport(result);
-  await writeHarnessReport(OUTPUT_DIRECTORY, result, markdown);
-  process.stdout.write(`${markdown}\nJSON: ${path.join(OUTPUT_DIRECTORY, "latest.json")}\n`);
+  await Promise.all([
+    context.artifacts.writeJson("bot load report", "report.json", result),
+    context.artifacts.writeText("bot load report", "report.md", markdown, "text/markdown"),
+  ]);
   if (result.violations.length > 0) {
     throw new Error(`bot load harness found ${result.violations.length} violation(s)`);
   }
+  return {
+    summary: `Completed ${result.stages.length} bot population stages.`,
+    metrics: {
+      populations: result.stages.length,
+      violations: result.violations.length,
+    },
+    details: result,
+  };
 }
 
-await main();
+export default defineScenario({
+  id: "bot-load",
+  kind: "bot-load",
+  summary: "Runs native bot populations with optional browser observation and resource accounting.",
+  uses: {
+    world: true,
+    browser: true,
+    viewport: "browser",
+    screenshots: true,
+    bots: true,
+    network: true,
+    metrics: true,
+    rust: true,
+  },
+  timeoutMs: 1_800_000,
+  run: main,
+});
