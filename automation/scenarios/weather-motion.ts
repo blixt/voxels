@@ -2,7 +2,7 @@ import type { Page } from "playwright";
 import { BrowserCapability } from "../lib/browser.ts";
 import { assertSnapshotSchema, SNAPSHOT, snapshotValue } from "../lib/engine.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
-import { startWorldPreview } from "../lib/world.ts";
+import { startWorldStack } from "../lib/world.ts";
 
 const VIEWPORT = { width: 1280, height: 720 };
 const WEATHER_CYCLE_SECONDS = 120;
@@ -613,7 +613,7 @@ async function runWeatherMotion(context: ScenarioContext, arguments_: readonly s
   const weatherFractionAtUnixEpoch = wrappedFraction(
     0.3 - currentUnixSeconds / WEATHER_CYCLE_SECONDS,
   );
-  const world = await startWorldPreview(context, {
+  const world = await startWorldStack(context, {
     fixture: {
       prefix: "voxels-weather-motion-",
       source: "procedural-v16",
@@ -634,6 +634,7 @@ async function runWeatherMotion(context: ScenarioContext, arguments_: readonly s
     url: world.url,
     label: "weather-motion",
     viewport: VIEWPORT,
+    ...world.clientRoute,
   });
   const { page } = viewport;
   const settled = await waitForEngine(page);

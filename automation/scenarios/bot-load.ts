@@ -4,7 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { build, preview } from "vite-plus";
-import { prepareBrowserWorldFixture, startBrowserWorldService } from "../lib/world.ts";
+import { prepareWorldFixture, startWorldService } from "../lib/world.ts";
 import { BrowserCapability, type BrowserViewport, reserveEphemeralPort } from "../lib/browser.ts";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import {
@@ -22,7 +22,7 @@ import {
 import { createShapedLink, type ShapedLink, VXWP_KIND } from "../lib/network.ts";
 import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "../lib/protocol.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
-import type { BrowserWorldFixture, BrowserWorldService, WorldSource } from "../lib/world.ts";
+import type { WorldFixture, WorldService, WorldSource } from "../lib/world.ts";
 import { rustTool } from "../../scripts/build-wasm.ts";
 import {
   worldServiceBuildCargoArgs,
@@ -452,8 +452,8 @@ async function runPopulation({
 }: {
   readonly count: number;
   readonly options: BotLoadOptions;
-  readonly fixture: BrowserWorldFixture;
-  readonly service: BrowserWorldService;
+  readonly fixture: WorldFixture;
+  readonly service: WorldService;
   readonly link: ShapedLink;
   readonly botBinary: string;
   readonly runIndex: number;
@@ -471,7 +471,7 @@ async function runPopulation({
     [
       `--world-url=ws://127.0.0.1:${link.port}${WORLD_PATH}`,
       `--presence-url=ws://127.0.0.1:${link.port}${PRESENCE_PATH}`,
-      `--origin=http://127.0.0.1:${fixture.browserPort}`,
+      `--origin=http://127.0.0.1:${fixture.originPort}`,
       `--subprotocol=${WORLD_SUBPROTOCOL}`,
       `--auth-token=${fixture.authToken}`,
       `--bots=${count}`,
@@ -698,7 +698,7 @@ function stageViolations(stage: BotLoadStageBase, browserEnabled: boolean): stri
 async function startObserver(
   browser: BrowserCapability,
   previewPort: number,
-  fixture: BrowserWorldFixture,
+  fixture: WorldFixture,
   proxyPort: number,
   count: number,
   recordVideo: boolean,
@@ -773,8 +773,8 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
     stages: [],
     violations: [],
   };
-  let growthFixture: BrowserWorldFixture | undefined;
-  let growthService: BrowserWorldService | undefined;
+  let growthFixture: WorldFixture | undefined;
+  let growthService: WorldService | undefined;
   let growthLink: ShapedLink | undefined;
   let browser: BrowserCapability | undefined;
   let previewServer: Awaited<ReturnType<typeof preview>> | undefined;
@@ -782,8 +782,8 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
   try {
     if (options.browser) {
       previewPort = await reserveEphemeralPort();
-      const buildFixture = await prepareBrowserWorldFixture({
-        browserPort: previewPort,
+      const buildFixture = await prepareWorldFixture({
+        originPort: previewPort,
         prefix: "voxels-bots-browser-build-",
         source: options.source,
       });
@@ -799,19 +799,19 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
       browser = await BrowserCapability.start(context, { warningPattern: BROWSER_FAILURE });
     }
     for (const [runIndex, count] of options.counts.entries()) {
-      const fixture: BrowserWorldFixture =
+      const fixture: WorldFixture =
         growthFixture ??
-        (await prepareBrowserWorldFixture({
-          browserPort: previewPort ?? (await reserveEphemeralPort()),
+        (await prepareWorldFixture({
+          originPort: previewPort ?? (await reserveEphemeralPort()),
           prefix: `voxels-bots-${count}-`,
           source: options.source,
           // Keep the spawn safe without lifting nearby terrain beyond ordinary interaction reach.
           spawnPillarHeightVoxels: BOT_SPAWN_PILLAR_HEIGHT_VOXELS,
           spawnProtectionRadiusVoxels: BOT_SPAWN_PROTECTION_RADIUS_VOXELS,
         }));
-      const service: BrowserWorldService =
+      const service: WorldService =
         growthService ??
-        (await startBrowserWorldService(fixture, {
+        (await startWorldService(context, fixture, {
           build: false,
           metal: false,
           profile: options.serviceProfile,

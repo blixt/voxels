@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { execFile, execFileSync, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -8,8 +8,11 @@ import { connect } from "node:net";
 import { promisify } from "node:util";
 import { build, preview } from "vite-plus";
 import type { PreviewServer } from "vite-plus";
+import type { BrowserContext, Page } from "playwright";
 import { reserveEphemeralPort } from "./browser.ts";
+import { runProcess, startProcess } from "./process.ts";
 import type { ScenarioContext } from "./scenario.ts";
+import type { WasmBuildProfile } from "../../scripts/build-wasm.ts";
 import { rustTool } from "../../scripts/build-wasm.ts";
 import {
   worldServiceBuildCargoArgs,
@@ -22,8 +25,8 @@ const AUTOMATION_FIXTURE_SCHEMA_VERSION = 1;
 
 export type WorldSource = "procedural-v16" | "terrain-diffusion-30m";
 
-export interface BrowserWorldFixtureOptions {
-  readonly browserPort: number;
+export interface WorldFixtureOptions {
+  readonly originPort: number;
   readonly prefix?: string;
   readonly source?: WorldSource;
   readonly spawnVoxels?: readonly [number, number];
@@ -51,10 +54,10 @@ export interface BrowserWorldFixtureOptions {
   readonly cloudTopMetres?: number;
 }
 
-export interface BrowserWorldFixture {
+export interface WorldFixture {
   readonly directory: string;
   readonly backendPort: number;
-  readonly browserPort: number;
+  readonly originPort: number;
   readonly authToken: string;
   readonly clientConfigPath: string;
   readonly serviceConfigPath: string;
@@ -85,46 +88,51 @@ export interface BrowserWorldFixture {
   cleanup(): Promise<void>;
 }
 
-export interface StartBrowserWorldServiceOptions {
+export interface StartWorldServiceOptions {
   readonly build?: boolean;
   readonly metal?: boolean;
   readonly profile?: WorldServiceCargoProfile;
 }
 
-export interface BrowserWorldService {
+export interface WorldService {
   readonly child: ChildProcess;
   readonly logs: string[];
   close(): Promise<void>;
 }
 
-export interface WorldPreviewOptions {
-  readonly fixture?: Omit<BrowserWorldFixtureOptions, "browserPort">;
-  readonly service?: StartBrowserWorldServiceOptions;
+export interface WebPreviewOptions {
+  readonly port?: number;
   readonly build?: boolean;
+  readonly buildProfile?: WasmBuildProfile;
 }
 
-export interface WorldPreview {
+export interface WebPreview {
   readonly port: number;
   readonly url: string;
-  readonly fixture: BrowserWorldFixture;
-  readonly service: BrowserWorldService;
   readonly server: PreviewServer;
 }
 
-function replaceEnvironment(name: string, value: string): () => void {
-  const previous = process.env[name];
-  process.env[name] = value;
-  return () => {
-    if (previous === undefined) delete process.env[name];
-    else process.env[name] = previous;
-  };
+export interface WorldClientRoute {
+  readonly beforeNavigate: (context: BrowserContext, page: Page) => Promise<void>;
+}
+
+export interface WorldStackOptions {
+  readonly fixture?: Omit<WorldFixtureOptions, "originPort">;
+  readonly service?: StartWorldServiceOptions;
+  readonly web?: Omit<WebPreviewOptions, "port">;
+}
+
+export interface WorldStack extends WebPreview {
+  readonly fixture: WorldFixture;
+  readonly service: WorldService;
+  readonly clientRoute: WorldClientRoute;
 }
 
 type FixtureResolved = Omit<
-  BrowserWorldFixture,
+  WorldFixture,
   | "directory"
   | "backendPort"
-  | "browserPort"
+  | "originPort"
   | "authToken"
   | "clientConfigPath"
   | "serviceConfigPath"
@@ -249,8 +257,8 @@ async function writeTypedFixture(
   return parseFixtureResponse(JSON.parse(await readFile(responsePath, "utf8")));
 }
 
-export async function prepareBrowserWorldFixture({
-  browserPort,
+export async function prepareWorldFixture({
+  originPort,
   prefix = "voxels-browser-world-",
   source = "procedural-v16",
   spawnVoxels,
@@ -276,7 +284,7 @@ export async function prepareBrowserWorldFixture({
   cloudCoverage,
   cloudBaseMetres,
   cloudTopMetres,
-}: BrowserWorldFixtureOptions): Promise<BrowserWorldFixture> {
+}: WorldFixtureOptions): Promise<WorldFixture> {
   const directory = await mkdtemp(path.join(tmpdir(), prefix));
   try {
     const backendPort = await reserveEphemeralPort();
@@ -285,7 +293,7 @@ export async function prepareBrowserWorldFixture({
     const clientConfigPath = path.join(directory, "client.toml");
     const resolved = await writeTypedFixture(directory, {
       schemaVersion: AUTOMATION_FIXTURE_SCHEMA_VERSION,
-      browserPort,
+      browserPort: originPort,
       backendPort,
       authToken,
       source,
@@ -314,17 +322,11 @@ export async function prepareBrowserWorldFixture({
       cloudTopMetres,
     });
 
-    const restoreClientConfig = replaceEnvironment("VOXELS_CLIENT_CONFIG_PATH", clientConfigPath);
-    const restoreServiceConfig = replaceEnvironment(
-      "VOXELS_WORLD_SERVICE_CONFIG_PATH",
-      serviceConfigPath,
-    );
-    const restoreExternalService = replaceEnvironment("VOXELS_EXTERNAL_WORLD_SERVICE", "1");
     let cleaned = false;
     return {
       directory,
       backendPort,
-      browserPort,
+      originPort,
       authToken,
       clientConfigPath,
       serviceConfigPath,
@@ -333,9 +335,6 @@ export async function prepareBrowserWorldFixture({
       async cleanup() {
         if (cleaned) return;
         cleaned = true;
-        restoreExternalService();
-        restoreServiceConfig();
-        restoreClientConfig();
         await rm(directory, { recursive: true, force: true });
       },
     };
@@ -360,98 +359,125 @@ function portAcceptsConnections(port: number): Promise<boolean> {
   });
 }
 
-function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  try {
-    if (process.platform !== "win32" && child.pid !== undefined) process.kill(-child.pid, signal);
-    else child.kill(signal);
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
-  }
-}
-
-async function stopProcessTree(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  const exited = new Promise<void>((resolve) => {
-    child.once("exit", () => resolve());
-  });
-  signalProcessTree(child, "SIGTERM");
-  await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 2_000))]);
-  if (child.exitCode === null && child.signalCode === null) {
-    signalProcessTree(child, "SIGKILL");
-    await exited;
-  }
-}
-
-export async function startBrowserWorldService(
-  fixture: BrowserWorldFixture,
-  { build = true, metal = false, profile = "worldgen" }: StartBrowserWorldServiceOptions = {},
-): Promise<BrowserWorldService> {
+export async function startWorldService(
+  context: ScenarioContext,
+  fixture: WorldFixture,
+  { build = true, metal = false, profile = "worldgen" }: StartWorldServiceOptions = {},
+): Promise<WorldService> {
   if (build) {
-    execFileSync(rustTool("cargo"), worldServiceBuildCargoArgs({ metal, profile }), {
+    await runProcess(context, rustTool("cargo"), worldServiceBuildCargoArgs({ metal, profile }), {
+      label: "world service build",
       cwd: process.cwd(),
       env: process.env,
       stdio: "inherit",
     });
   }
-  const child = spawn(worldServiceExecutablePath(profile), [fixture.serviceConfigPath], {
-    cwd: process.cwd(),
-    env: process.env,
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: process.platform !== "win32",
-  });
+  const process_ = startProcess(
+    context,
+    worldServiceExecutablePath(profile),
+    [fixture.serviceConfigPath],
+    {
+      label: "world service",
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  const { child } = process_;
   const logs: string[] = [];
   for (const stream of [child.stdout, child.stderr]) {
-    stream.on("data", (bytes) => {
+    stream?.on("data", (bytes) => {
       logs.push(bytes.toString());
       if (logs.length > 200) logs.shift();
     });
   }
+  void process_.completed.catch(() => {});
   const deadline = Date.now() + 300_000;
   while (Date.now() < deadline) {
+    context.throwIfAborted();
     if (child.exitCode !== null || child.signalCode !== null) {
       throw new Error(`world service exited before readiness:\n${logs.join("")}`);
     }
     if (await portAcceptsConnections(fixture.backendPort)) {
-      return { child, logs, close: () => stopProcessTree(child) };
+      return { child, logs, close: () => process_.stop() };
     }
-    await new Promise((resolve) => setTimeout(resolve, 75));
+    await context.wait(75);
   }
-  await stopProcessTree(child);
+  await process_.stop();
   throw new Error(`world service readiness timed out:\n${logs.join("")}`);
 }
 
-export async function startWorldPreview(
+export function routeWorldClient(fixture: WorldFixture): WorldClientRoute {
+  return Object.freeze({
+    async beforeNavigate(_context: BrowserContext, page: Page): Promise<void> {
+      const clientConfig = await readFile(fixture.clientConfigPath, "utf8");
+      await page.route("**/config/client.toml", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/plain; charset=utf-8",
+          headers: { "Cache-Control": "no-store" },
+          body: clientConfig,
+        }),
+      );
+    },
+  });
+}
+
+function automationBuildMode(profile: WasmBuildProfile): string {
+  return `automation-${profile}`;
+}
+
+export async function startWebPreview(
   context: ScenarioContext,
-  options: WorldPreviewOptions = {},
-): Promise<WorldPreview> {
+  options: WebPreviewOptions = {},
+): Promise<WebPreview> {
+  const port = options.port ?? (await reserveEphemeralPort());
+  const shouldBuild = options.build ?? true;
+  context.throwIfAborted();
+  if (shouldBuild) {
+    await build({
+      logLevel: "warn",
+      ...(options.buildProfile === undefined
+        ? {}
+        : { mode: automationBuildMode(options.buildProfile) }),
+    });
+  }
+  context.throwIfAborted();
+  const server = await preview({
+    logLevel: "warn",
+    preview: { host: "127.0.0.1", port, strictPort: true },
+  });
+  context.defer("web preview", () => server.close());
+  return { port, url: `http://127.0.0.1:${port}`, server };
+}
+
+export async function startWorldStack(
+  context: ScenarioContext,
+  options: WorldStackOptions = {},
+): Promise<WorldStack> {
   if (!context.definition.uses.world || context.definition.uses.viewport !== "browser") {
     throw new Error(
       `scenario ${context.definition.id} must declare a browser viewport and world service`,
     );
   }
   const port = await reserveEphemeralPort();
-  const fixture = await prepareBrowserWorldFixture({
+  const fixture = await prepareWorldFixture({
     ...options.fixture,
-    browserPort: port,
+    originPort: port,
   });
   context.defer("world fixture", () => fixture.cleanup());
-  if (options.build ?? true) await build({ logLevel: "warn" });
-  const service = await startBrowserWorldService(fixture, {
-    ...options.service,
-    build: options.service?.build ?? options.build ?? true,
-  });
-  context.defer("world service", () => service.close());
-  const server = await preview({
-    logLevel: "warn",
-    preview: { host: "127.0.0.1", port, strictPort: true },
-  });
-  context.defer("world preview", () => server.close());
-  return {
+  const web = await startWebPreview(context, {
+    ...options.web,
     port,
-    url: `http://127.0.0.1:${port}`,
+  });
+  const service = await startWorldService(context, fixture, {
+    ...options.service,
+    build: options.service?.build ?? options.web?.build ?? true,
+  });
+  return {
+    ...web,
     fixture,
     service,
-    server,
+    clientRoute: routeWorldClient(fixture),
   };
 }

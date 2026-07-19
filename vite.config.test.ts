@@ -114,4 +114,10 @@ describe("browser WASM build profile", () => {
       "expected debug, wasm-dev, or release",
     );
   });
+
+  it("selects automation profiles without mutating shared process state", () => {
+    expect(browserWasmProfile("build", undefined, "automation-debug")).toBe("debug");
+    expect(browserWasmProfile("build", undefined, "automation-wasm-dev")).toBe("wasm-dev");
+    expect(browserWasmProfile("build", undefined, "automation-release")).toBe("release");
+  });
 });

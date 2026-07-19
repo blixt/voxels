@@ -1,15 +1,17 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vite-plus/test";
-import { prepareBrowserWorldFixture } from "./world.ts";
+import { prepareWorldFixture } from "./world.ts";
 import { PRESENCE_PATH, WORLD_PATH, WORLD_SUBPROTOCOL } from "./protocol.ts";
 
 describe("isolated browser world fixture", () => {
   it("binds matching temporary configuration and preserves omitted renderer defaults", async () => {
-    const previousClient = process.env.VOXELS_CLIENT_CONFIG_PATH;
-    const previousService = process.env.VOXELS_WORLD_SERVICE_CONFIG_PATH;
-    const previousExternalService = process.env.VOXELS_EXTERNAL_WORLD_SERVICE;
-    const fixture = await prepareBrowserWorldFixture({
-      browserPort: 41_234,
+    const environmentBefore = {
+      client: process.env.VOXELS_CLIENT_CONFIG_PATH,
+      service: process.env.VOXELS_WORLD_SERVICE_CONFIG_PATH,
+      external: process.env.VOXELS_EXTERNAL_WORLD_SERVICE,
+    };
+    const fixture = await prepareWorldFixture({
+      originPort: 41_234,
       spawnVoxels: [-12_800, 25_600],
       spawnPillarHeightVoxels: 7,
       spawnPillarRadiusVoxels: 2,
@@ -58,17 +60,16 @@ describe("isolated browser world fixture", () => {
       expect(fixture.weatherFractionAtUnixEpoch).toBe(0.62);
       expect(fixture.cloudCoverage).toBe(0.31);
       expect(fixture.databasePath.startsWith(fixture.directory)).toBe(true);
-      expect(process.env.VOXELS_CLIENT_CONFIG_PATH).toBe(fixture.clientConfigPath);
-      expect(process.env.VOXELS_WORLD_SERVICE_CONFIG_PATH).toBe(fixture.serviceConfigPath);
-      expect(process.env.VOXELS_EXTERNAL_WORLD_SERVICE).toBe("1");
+      expect({
+        client: process.env.VOXELS_CLIENT_CONFIG_PATH,
+        service: process.env.VOXELS_WORLD_SERVICE_CONFIG_PATH,
+        external: process.env.VOXELS_EXTERNAL_WORLD_SERVICE,
+      }).toEqual(environmentBefore);
     } finally {
       await fixture.cleanup();
     }
-    expect(process.env.VOXELS_CLIENT_CONFIG_PATH).toBe(previousClient);
-    expect(process.env.VOXELS_WORLD_SERVICE_CONFIG_PATH).toBe(previousService);
-    expect(process.env.VOXELS_EXTERNAL_WORLD_SERVICE).toBe(previousExternalService);
 
-    const defaults = await prepareBrowserWorldFixture({ browserPort: 41_235 });
+    const defaults = await prepareWorldFixture({ originPort: 41_235 });
     try {
       const client = await readFile(defaults.clientConfigPath, "utf8");
       expect(client).toContain("cascaded_sun_shadows = true");

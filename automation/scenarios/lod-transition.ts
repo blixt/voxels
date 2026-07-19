@@ -11,9 +11,8 @@ import {
   snapshotValue,
 } from "../lib/engine.ts";
 import { percentile } from "../lib/metrics.ts";
-import { setScenarioEnvironment } from "../lib/process.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
-import { startWorldPreview } from "../lib/world.ts";
+import { startWorldStack } from "../lib/world.ts";
 import type { WorldSource } from "../lib/world.ts";
 
 const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
@@ -754,8 +753,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
   const boundaryCoverage = options.mode === "boundary-coverage";
   const watertight = options.mode !== "transition";
   const timings: LodTimings = { frameIntervals: [], gpu: new Map() };
-  setScenarioEnvironment(context, "VOXELS_BROWSER_BUILD_PROFILE", options.buildProfile);
-  const world = await startWorldPreview(context, {
+  const world = await startWorldStack(context, {
     fixture: {
       prefix: "voxels-lod-transition-",
       source: options.source,
@@ -771,6 +769,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       cloudVelocityMetresPerSecond: [0, 0],
     },
     service: { metal: options.source === "terrain-diffusion-30m" },
+    web: { buildProfile: options.buildProfile },
   });
   const browser = await BrowserCapability.start(context, {
     warningPattern: FAILURE,
@@ -783,6 +782,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     deviceScaleFactor: options.deviceScaleFactor,
     recordVideo: options.recordVideo,
     videoFilename: "transition-raw.webm",
+    ...world.clientRoute,
   });
   const { page } = viewport;
   const videoStartedAtMs = Date.now();

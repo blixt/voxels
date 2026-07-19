@@ -2,7 +2,7 @@ import type { Page } from "playwright";
 import { BrowserCapability } from "../lib/browser.ts";
 import { snapshotValue } from "../lib/engine.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
-import { startWorldPreview } from "../lib/world.ts";
+import { startWorldStack } from "../lib/world.ts";
 
 const VIEWPORT = { width: 1280, height: 720 };
 
@@ -42,7 +42,7 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
   if (arguments_.length > 0) {
     throw new Error(`world-lab takes no arguments; received ${arguments_.join(" ")}`);
   }
-  const world = await startWorldPreview(context, {
+  const world = await startWorldStack(context, {
     fixture: {
       prefix: "voxels-world-lab-",
       source: "procedural-v16",
@@ -55,7 +55,12 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     },
   });
   const browser = await BrowserCapability.start(context);
-  const viewport = await browser.open({ url: world.url, label: "world-lab", viewport: VIEWPORT });
+  const viewport = await browser.open({
+    url: world.url,
+    label: "world-lab",
+    viewport: VIEWPORT,
+    ...world.clientRoute,
+  });
   const { page } = viewport;
   const settled = await waitForSettledWorld(page);
   const expectedYearFraction = 0.5 / world.fixture.daysPerYear;

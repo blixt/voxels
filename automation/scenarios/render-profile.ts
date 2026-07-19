@@ -12,9 +12,8 @@ import {
   type RenderPhaseSummary,
   type RenderSnapshotCapture,
 } from "../lib/render-metrics.ts";
-import { setScenarioEnvironment } from "../lib/process.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
-import { startWorldPreview } from "../lib/world.ts";
+import { startWorldStack } from "../lib/world.ts";
 import type { WorldSource } from "../lib/world.ts";
 import type { WasmBuildProfile } from "../../scripts/build-wasm.ts";
 
@@ -567,10 +566,9 @@ function parseOptions(arguments_: readonly string[]): ProfileOptions {
 
 async function runRenderProfile(context: ScenarioContext, arguments_: readonly string[]) {
   const options = parseOptions(arguments_);
-  setScenarioEnvironment(context, "VOXELS_BROWSER_BUILD_PROFILE", options.buildProfile);
   const atmosphere = options.mode === "atmosphere";
   const weather = options.mode === "weather";
-  const world = await startWorldPreview(context, {
+  const world = await startWorldStack(context, {
     fixture: {
       prefix: "voxels-browser-profile-",
       source: options.worldSource,
@@ -593,6 +591,7 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
         options.fixedWeatherFraction === undefined && !weather ? undefined : [0, 0],
     },
     service: { metal: options.worldSource === "terrain-diffusion-30m" },
+    web: { buildProfile: options.buildProfile },
   });
   const browser = await BrowserCapability.start(context, {
     warningPattern: FAILURE,
@@ -604,6 +603,7 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
     label: "render-profile",
     viewport: options.viewport,
     deviceScaleFactor: options.deviceScaleFactor,
+    ...world.clientRoute,
   });
   const { page } = viewport;
   await waitForEngine(page);

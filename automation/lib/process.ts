@@ -12,19 +12,6 @@ export interface StartProcessOptions extends Omit<SpawnOptions, "signal"> {
   readonly stopSignal?: NodeJS.Signals;
 }
 
-export function setScenarioEnvironment(
-  context: ScenarioContext,
-  name: string,
-  value: string,
-): void {
-  const previous = process.env[name];
-  process.env[name] = value;
-  context.defer(`environment ${name}`, () => {
-    if (previous === undefined) delete process.env[name];
-    else process.env[name] = previous;
-  });
-}
-
 function completion(child: ChildProcess, label: string): Promise<void> {
   return new Promise((resolve, reject) => {
     child.once("error", reject);

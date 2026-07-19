@@ -41,7 +41,16 @@ export function worldServiceDevelopmentProfile(
 export function browserWasmProfile(
   command: "build" | "serve",
   configured = process.env.VOXELS_BROWSER_BUILD_PROFILE,
+  mode?: string,
 ): WasmBuildProfile {
+  const automationProfile = mode?.match(/^automation-(debug|wasm-dev|release)$/u)?.[1];
+  if (
+    automationProfile === "debug" ||
+    automationProfile === "wasm-dev" ||
+    automationProfile === "release"
+  ) {
+    return automationProfile;
+  }
   if (configured === undefined || configured === "") {
     return command === "build" ? "release" : "wasm-dev";
   }
@@ -487,7 +496,7 @@ export default defineConfig(({ command, mode }) => ({
       ? []
       : [
           clientConfig(command === "build"),
-          rustWasm(browserWasmProfile(command)),
+          rustWasm(browserWasmProfile(command, undefined, mode)),
           canvasRuntimeReload(),
           nativeWorldService(),
         ],
