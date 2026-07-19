@@ -28,7 +28,7 @@ use voxels_world::{
     WorldProductPriority,
 };
 
-const REPORT_SCHEMA_VERSION: u32 = 3;
+const REPORT_SCHEMA_VERSION: u32 = 4;
 const SIMULATION_HZ: u64 = 60;
 const POSE_HZ: u64 = 30;
 const PING_INTERVAL: Duration = Duration::from_secs(1);
@@ -186,6 +186,8 @@ pub struct BotReport {
     pub edits_accepted: u64,
     pub edits_rejected: u64,
     pub edit_conflicts: u64,
+    pub edit_authority_rejections: u64,
+    pub authority_rejection_reasons: BTreeMap<String, u64>,
     pub edits_observed: u64,
     pub no_op_edits: u64,
     pub mutations_committed: u64,
@@ -215,6 +217,8 @@ pub struct BotRunReport {
     pub edits_accepted: u64,
     pub edits_rejected: u64,
     pub edit_conflicts: u64,
+    pub edit_authority_rejections: u64,
+    pub authority_rejection_reasons: BTreeMap<String, u64>,
     pub mutations_committed: u64,
     pub copied_actions: u64,
     pub max_visible_players: u16,
@@ -364,6 +368,8 @@ struct BotReportAccumulator {
     edits_accepted: u64,
     edits_rejected: u64,
     edit_conflicts: u64,
+    edit_authority_rejections: u64,
+    authority_rejection_reasons: BTreeMap<String, u64>,
     edits_observed: u64,
     no_op_edits: u64,
     mutations_committed: u64,
@@ -794,12 +800,22 @@ impl BotRuntime {
             }
         } else if kind == error_kind() {
             let (request_id, message) = decode_error(bytes)?;
-            let mut expected_edit_conflict = false;
+            let mut expected_edit_rejection = false;
             if let Some(pending) = self.pending_edits.remove(&request_id) {
                 self.report.edits_rejected = self.report.edits_rejected.saturating_add(1);
                 if message == "placement target is occupied" {
                     self.report.edit_conflicts = self.report.edit_conflicts.saturating_add(1);
-                    expected_edit_conflict = true;
+                    expected_edit_rejection = true;
+                } else if is_authority_guard_rejection(&message) {
+                    self.report.edit_authority_rejections =
+                        self.report.edit_authority_rejections.saturating_add(1);
+                    let count = self
+                        .report
+                        .authority_rejection_reasons
+                        .entry(message.clone())
+                        .or_default();
+                    *count = count.saturating_add(1);
+                    expected_edit_rejection = true;
                 }
                 self.report
                     .edit_latency_ms
@@ -807,7 +823,7 @@ impl BotRuntime {
             }
             self.chunk_requests.finish(request_id);
             self.surface_requests.finish(request_id);
-            if !expected_edit_conflict {
+            if !expected_edit_rejection {
                 self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
                 self.record_error(format!("request {request_id}: {message}"));
             }
@@ -950,6 +966,8 @@ impl BotRuntime {
             edits_accepted: self.report.edits_accepted,
             edits_rejected: self.report.edits_rejected,
             edit_conflicts: self.report.edit_conflicts,
+            edit_authority_rejections: self.report.edit_authority_rejections,
+            authority_rejection_reasons: self.report.authority_rejection_reasons,
             edits_observed: self.report.edits_observed,
             no_op_edits: self.report.no_op_edits,
             mutations_committed: self.report.mutations_committed,
@@ -1030,6 +1048,15 @@ fn prepare_edit(cache: &ChunkCache, action: EditAction) -> Option<EditAction> {
     None
 }
 
+fn is_authority_guard_rejection(message: &str) -> bool {
+    matches!(
+        message,
+        "interaction target is out of reach"
+            | "player pose is stale"
+            | "the starting area is protected from world edits"
+    )
+}
+
 fn position_voxel(position: Vec3) -> VoxelCoord {
     VoxelCoord::new(
         (position.x / VOXEL_SIZE_METRES).floor() as i32,
@@ -1079,6 +1106,8 @@ fn aggregate_report(
     let mut edits_accepted = 0_u64;
     let mut edits_rejected = 0_u64;
     let mut edit_conflicts = 0_u64;
+    let mut edit_authority_rejections = 0_u64;
+    let mut authority_rejection_reasons = BTreeMap::<String, u64>::new();
     let mut mutations_committed = 0_u64;
     let mut copied_actions = 0_u64;
     let mut max_visible_players = 0_u16;
@@ -1096,6 +1125,12 @@ fn aggregate_report(
         edits_accepted = edits_accepted.saturating_add(report.edits_accepted);
         edits_rejected = edits_rejected.saturating_add(report.edits_rejected);
         edit_conflicts = edit_conflicts.saturating_add(report.edit_conflicts);
+        edit_authority_rejections =
+            edit_authority_rejections.saturating_add(report.edit_authority_rejections);
+        for (reason, count) in &report.authority_rejection_reasons {
+            let aggregate = authority_rejection_reasons.entry(reason.clone()).or_default();
+            *aggregate = aggregate.saturating_add(*count);
+        }
         mutations_committed = mutations_committed.saturating_add(report.mutations_committed);
         copied_actions = copied_actions.saturating_add(report.copied_actions);
         max_visible_players = max_visible_players.max(report.max_visible_players);
@@ -1114,6 +1149,8 @@ fn aggregate_report(
         edits_accepted,
         edits_rejected,
         edit_conflicts,
+        edit_authority_rejections,
+        authority_rejection_reasons,
         mutations_committed,
         copied_actions,
         max_visible_players,
@@ -1181,6 +1218,20 @@ mod tests {
         assert_eq!(summary.p95_ms, 95.0);
         assert_eq!(summary.p99_ms, 99.0);
         assert_eq!(summary.max_ms, 100.0);
+    }
+
+    #[test]
+    fn authority_guards_are_distinct_from_protocol_failures() {
+        for message in [
+            "interaction target is out of reach",
+            "player pose is stale",
+            "the starting area is protected from world edits",
+        ] {
+            assert!(is_authority_guard_rejection(message));
+        }
+        assert!(!is_authority_guard_rejection(
+            "world generator stopped unexpectedly"
+        ));
     }
 
     #[test]

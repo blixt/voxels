@@ -29,9 +29,11 @@ import {
 } from "../../scripts/world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
-const RESULT_SCHEMA_VERSION = 5;
+const RESULT_SCHEMA_VERSION = 6;
 const SAMPLE_INTERVAL_MS = 250;
 const OBSERVER_SAMPLE_INTERVAL_MS = 500;
+const MAX_AUTHORITY_REJECTION_RATE = 0.02;
+const MIN_AUTHORITY_REJECTION_ALLOWANCE = 5;
 const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 const VIEWPORT = { width: 960, height: 540 };
 const BOT_SPAWN_PILLAR_HEIGHT_VOXELS = 7;
@@ -83,8 +85,11 @@ interface BotHarnessReport {
   readonly connectionCount: number;
   readonly maxVisiblePlayers: number;
   readonly editsAccepted: number;
+  readonly editsSubmitted: number;
   readonly editsRejected: number;
   readonly editConflicts: number;
+  readonly editAuthorityRejections: number;
+  readonly authorityRejectionReasons: Readonly<Record<string, number | undefined>>;
   readonly mutationsCommitted: number;
   readonly behaviors: Readonly<Record<string, number | undefined>>;
   readonly reports: readonly BotClientReport[];
@@ -540,7 +545,7 @@ function markdownReport(result: BotLoadResult): string {
     "",
     `Mode: **${result.options.mode}** · layout: **${result.options.layout}** · duration: **${result.options.durationSeconds}s per population** · source: **${result.options.source}** · generation workers: **${result.options.generationWorkers ?? "config default"}**`,
     "",
-    "| Bots | Workers | Server CPU p95 | Server RSS peak | Bot CPU p95 | TCP down/up | VXWP down/up | DB growth | Edits accepted/conflicts | Mutations | Chunk p95 | Edit p95 | Visible | Roster ready | Observer LOD | Observer frame p95 |",
+    "| Bots | Workers | Server CPU p95 | Server RSS peak | Bot CPU p95 | TCP down/up | VXWP down/up | DB growth | Edits accepted/conflicts/guards | Mutations | Chunk p95 | Edit p95 | Visible | Roster ready | Observer LOD | Observer frame p95 |",
     "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ];
   for (const stage of result.stages) {
@@ -572,7 +577,7 @@ function markdownReport(result: BotLoadResult): string {
             ? `interactive ${stage.observer.interactiveWorldReadyMs.toFixed(0)} ms`
             : `partial ${stage.observer.finalWorld?.residentChunks ?? 0} resident`;
     lines.push(
-      `| ${stage.count} | ${stage.generationWorkers} | ${stage.process.service.cpuPercent.p95.toFixed(1)}% | ${stage.process.service.rssMiB.max.toFixed(1)} MiB | ${stage.process.bots.cpuPercent.p95.toFixed(1)}% | ${(stage.network.downstream.streamBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.streamBytes / 1_048_576).toFixed(2)} MiB | ${(stage.network.downstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} MiB | ${(stage.database.deltaBytes / 1_024).toFixed(1)} KiB | ${bot.editsAccepted}/${bot.editConflicts} | ${bot.mutationsCommitted} | ${chunkP95.toFixed(1)} ms | ${editP95.toFixed(1)} ms | ${bot.maxVisiblePlayers} | ${rosterReady} | ${observerLod} | ${observerFrame} |`,
+      `| ${stage.count} | ${stage.generationWorkers} | ${stage.process.service.cpuPercent.p95.toFixed(1)}% | ${stage.process.service.rssMiB.max.toFixed(1)} MiB | ${stage.process.bots.cpuPercent.p95.toFixed(1)}% | ${(stage.network.downstream.streamBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.streamBytes / 1_048_576).toFixed(2)} MiB | ${(stage.network.downstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} MiB | ${(stage.database.deltaBytes / 1_024).toFixed(1)} KiB | ${bot.editsAccepted}/${bot.editConflicts}/${bot.editAuthorityRejections} | ${bot.mutationsCommitted} | ${chunkP95.toFixed(1)} ms | ${editP95.toFixed(1)} ms | ${bot.maxVisiblePlayers} | ${rosterReady} | ${observerLod} | ${observerFrame} |`,
     );
   }
   lines.push(
@@ -620,7 +625,12 @@ function stageViolations(stage: BotLoadStageBase, browserEnabled: boolean): stri
     );
   }
   const rejected = stage.botReport.editsRejected;
-  const expectedConflicts = stage.botReport.editConflicts ?? 0;
+  const expectedConflicts = stage.botReport.editConflicts;
+  const authorityRejections = stage.botReport.editAuthorityRejections;
+  const authorityRejectionAllowance = Math.max(
+    MIN_AUTHORITY_REJECTION_ALLOWANCE,
+    Math.ceil(stage.botReport.editsSubmitted * MAX_AUTHORITY_REJECTION_RATE),
+  );
   const editorCount = ["digger", "builder", "follower"].reduce(
     (sum, behavior) => sum + (stage.botReport.behaviors[behavior] ?? 0),
     0,
@@ -633,9 +643,14 @@ function stageViolations(stage: BotLoadStageBase, browserEnabled: boolean): stri
   const nativeErrors = [
     ...new Set(stage.botReport.reports.flatMap((report) => report.errorSamples)),
   ];
-  if (rejected > expectedConflicts) {
+  if (rejected > expectedConflicts + authorityRejections) {
     violations.push(
-      `${stage.count} bots: ${rejected - expectedConflicts} unexpected edits were rejected`,
+      `${stage.count} bots: ${rejected - expectedConflicts - authorityRejections} unexpected edits were rejected`,
+    );
+  }
+  if (authorityRejections > authorityRejectionAllowance) {
+    violations.push(
+      `${stage.count} bots: ${authorityRejections} authority guard rejections exceeded the ${authorityRejectionAllowance}-edit allowance`,
     );
   }
   if (editorCount > 0 && stage.botReport.editsAccepted === 0) {
