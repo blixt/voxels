@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use voxels_client_config::{ClientConfig, ClientConfigError};
 
-pub const AUTOMATION_FIXTURE_SCHEMA_VERSION: u32 = 3;
+pub const AUTOMATION_FIXTURE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -28,6 +28,7 @@ pub struct AutomationFixtureOverlay {
     pub spawn_pillar_height_voxels: Option<u16>,
     pub spawn_pillar_radius_voxels: Option<u8>,
     pub spawn_protection_radius_voxels: Option<u16>,
+    pub generation_workers: Option<u16>,
     pub cascaded_shadows: Option<bool>,
     pub screen_space_ambient_occlusion: Option<bool>,
     pub day_length_seconds: Option<f32>,
@@ -56,6 +57,7 @@ pub struct AutomationFixtureResolved {
     pub spawn_pillar_height_voxels: u16,
     pub spawn_pillar_radius_voxels: u8,
     pub spawn_protection_radius_voxels: u16,
+    pub generation_workers: u16,
     pub cascaded_shadows: bool,
     pub screen_space_ambient_occlusion: bool,
     pub day_length_seconds: f32,
@@ -159,6 +161,9 @@ pub fn build_automation_fixture(
     if let Some(value) = overlay.spawn_protection_radius_voxels {
         service.spawn.protection_radius_voxels = value;
     }
+    if let Some(value) = overlay.generation_workers {
+        service.transport.generation_workers = value;
+    }
 
     if let Some(value) = overlay.day_length_seconds {
         service.environment.day_length_seconds = value;
@@ -243,6 +248,7 @@ pub fn build_automation_fixture(
         spawn_pillar_height_voxels: service.spawn.pillar_height_voxels,
         spawn_pillar_radius_voxels: service.spawn.pillar_radius_voxels,
         spawn_protection_radius_voxels: service.spawn.protection_radius_voxels,
+        generation_workers: service.transport.generation_workers,
         cascaded_shadows: client.rendering.features.cascaded_sun_shadows,
         screen_space_ambient_occlusion: client.rendering.features.screen_space_ambient_occlusion,
         day_length_seconds: service.environment.day_length_seconds,
@@ -300,6 +306,7 @@ mod tests {
             spawn_pillar_height_voxels: Some(7),
             spawn_pillar_radius_voxels: Some(2),
             spawn_protection_radius_voxels: Some(3),
+            generation_workers: Some(12),
             cascaded_shadows: Some(false),
             screen_space_ambient_occlusion: Some(false),
             day_length_seconds: None,
@@ -336,6 +343,8 @@ mod tests {
         let client = ClientConfig::from_toml(&fixture.client_toml).expect("client round trip");
         assert_eq!(service.transport.listen.port(), 41_235);
         assert_eq!(service.spawn.xz_voxels, [-12_800, 25_600]);
+        assert_eq!(service.transport.generation_workers, 12);
+        assert_eq!(fixture.resolved.generation_workers, 12);
         assert_eq!(
             client.world.endpoint,
             format!("ws://127.0.0.1:41235{WORLD_WEBSOCKET_PATH}")

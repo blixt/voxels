@@ -21,7 +21,7 @@ import {
 import type { WorldServiceCargoProfile } from "../../scripts/world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
-const AUTOMATION_FIXTURE_SCHEMA_VERSION = 3;
+const AUTOMATION_FIXTURE_SCHEMA_VERSION = 4;
 
 export type WorldSource = "procedural-v16" | "terrain-diffusion-30m";
 
@@ -34,6 +34,7 @@ export interface WorldFixtureOptions {
   readonly spawnPillarHeightVoxels?: number;
   readonly spawnPillarRadiusVoxels?: number;
   readonly spawnProtectionRadiusVoxels?: number;
+  readonly generationWorkers?: number;
   readonly cascadedShadows?: boolean;
   readonly screenSpaceAmbientOcclusion?: boolean;
   readonly dayLengthSeconds?: number;
@@ -68,6 +69,7 @@ export interface WorldFixture {
   readonly spawnPillarHeightVoxels: number;
   readonly spawnPillarRadiusVoxels: number;
   readonly spawnProtectionRadiusVoxels: number;
+  readonly generationWorkers: number;
   readonly cascadedShadows: boolean;
   readonly screenSpaceAmbientOcclusion: boolean;
   readonly dayLengthSeconds: number;
@@ -152,6 +154,7 @@ const FIXTURE_NUMBER_FIELDS = [
   "spawnPillarHeightVoxels",
   "spawnPillarRadiusVoxels",
   "spawnProtectionRadiusVoxels",
+  "generationWorkers",
   "dayLengthSeconds",
   "worldDayNumberAtUnixEpoch",
   "dayFractionAtUnixEpoch",
@@ -290,6 +293,7 @@ export async function prepareWorldFixture({
   spawnPillarHeightVoxels,
   spawnPillarRadiusVoxels,
   spawnProtectionRadiusVoxels,
+  generationWorkers,
   cascadedShadows,
   screenSpaceAmbientOcclusion,
   dayLengthSeconds,
@@ -326,6 +330,7 @@ export async function prepareWorldFixture({
       spawnPillarHeightVoxels,
       spawnPillarRadiusVoxels,
       spawnProtectionRadiusVoxels,
+      generationWorkers,
       cascadedShadows,
       screenSpaceAmbientOcclusion,
       dayLengthSeconds,

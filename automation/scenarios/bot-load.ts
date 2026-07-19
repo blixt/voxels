@@ -29,7 +29,7 @@ import {
 } from "../../scripts/world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
-const RESULT_SCHEMA_VERSION = 4;
+const RESULT_SCHEMA_VERSION = 5;
 const SAMPLE_INTERVAL_MS = 250;
 const OBSERVER_SAMPLE_INTERVAL_MS = 500;
 const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
@@ -57,6 +57,7 @@ interface BotLoadOptions {
   mode: BotLoadMode;
   serviceProfile: WorldServiceCargoProfile;
   botProfile: WorldServiceCargoProfile;
+  generationWorkers: number | undefined;
   browser: boolean;
   recordVideo: boolean;
 }
@@ -153,6 +154,10 @@ function parseArguments(values: readonly string[]): BotLoadOptions {
     mode: arguments_.flag("growth") ? "growth" : "scale",
     serviceProfile: arguments_.choice("service-profile", ["worldgen", "worldgen-dev"], "worldgen"),
     botProfile: arguments_.choice("bot-profile", ["worldgen", "worldgen-dev"], "worldgen-dev"),
+    generationWorkers: arguments_.number("generation-workers", {
+      minimum: 3,
+      maximum: 256,
+    }),
     browser,
     recordVideo,
   };
@@ -501,6 +506,7 @@ async function runPopulation({
   const contents = await databaseContents(fixture.databasePath);
   return {
     count,
+    generationWorkers: fixture.generationWorkers,
     wallTimeMs,
     botReport: report,
     trafficBudget: summarizeTrafficBudget(report, fixture),
@@ -534,10 +540,10 @@ function markdownReport(result: BotLoadResult): string {
   const lines = [
     "# Voxels bot population benchmark",
     "",
-    `Mode: **${result.options.mode}** · layout: **${result.options.layout}** · duration: **${result.options.durationSeconds}s per population** · source: **${result.options.source}**`,
+    `Mode: **${result.options.mode}** · layout: **${result.options.layout}** · duration: **${result.options.durationSeconds}s per population** · source: **${result.options.source}** · generation workers: **${result.options.generationWorkers ?? "config default"}**`,
     "",
-    "| Bots | Server CPU p95 | Server RSS peak | Bot CPU p95 | TCP down/up | VXWP down/up | DB growth | Edits accepted/conflicts | Mutations | Chunk p95 | Edit p95 | Visible | Roster ready | Observer LOD | Observer frame p95 |",
-    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| Bots | Workers | Server CPU p95 | Server RSS peak | Bot CPU p95 | TCP down/up | VXWP down/up | DB growth | Edits accepted/conflicts | Mutations | Chunk p95 | Edit p95 | Visible | Roster ready | Observer LOD | Observer frame p95 |",
+    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ];
   for (const stage of result.stages) {
     const bot = stage.botReport;
@@ -568,7 +574,7 @@ function markdownReport(result: BotLoadResult): string {
             ? `interactive ${stage.observer.interactiveWorldReadyMs.toFixed(0)} ms`
             : `partial ${stage.observer.finalWorld?.residentChunks ?? 0} resident`;
     lines.push(
-      `| ${stage.count} | ${stage.process.service.cpuPercent.p95.toFixed(1)}% | ${stage.process.service.rssMiB.max.toFixed(1)} MiB | ${stage.process.bots.cpuPercent.p95.toFixed(1)}% | ${(stage.network.downstream.streamBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.streamBytes / 1_048_576).toFixed(2)} MiB | ${(stage.network.downstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} MiB | ${(stage.database.deltaBytes / 1_024).toFixed(1)} KiB | ${bot.editsAccepted}/${bot.editConflicts} | ${bot.mutationsCommitted} | ${chunkP95.toFixed(1)} ms | ${editP95.toFixed(1)} ms | ${bot.maxVisiblePlayers} | ${rosterReady} | ${observerLod} | ${observerFrame} |`,
+      `| ${stage.count} | ${stage.generationWorkers} | ${stage.process.service.cpuPercent.p95.toFixed(1)}% | ${stage.process.service.rssMiB.max.toFixed(1)} MiB | ${stage.process.bots.cpuPercent.p95.toFixed(1)}% | ${(stage.network.downstream.streamBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.streamBytes / 1_048_576).toFixed(2)} MiB | ${(stage.network.downstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} MiB | ${(stage.database.deltaBytes / 1_024).toFixed(1)} KiB | ${bot.editsAccepted}/${bot.editConflicts} | ${bot.mutationsCommitted} | ${chunkP95.toFixed(1)} ms | ${editP95.toFixed(1)} ms | ${bot.maxVisiblePlayers} | ${rosterReady} | ${observerLod} | ${observerFrame} |`,
     );
   }
   lines.push(
@@ -754,6 +760,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
           // Keep the spawn safe without lifting nearby terrain beyond ordinary interaction reach.
           spawnPillarHeightVoxels: BOT_SPAWN_PILLAR_HEIGHT_VOXELS,
           spawnProtectionRadiusVoxels: BOT_SPAWN_PROTECTION_RADIUS_VOXELS,
+          generationWorkers: options.generationWorkers,
         });
         context.defer(`bot fixture ${count}`, () => createdFixture.cleanup());
         fixture = createdFixture;

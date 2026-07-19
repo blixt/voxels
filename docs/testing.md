@@ -89,6 +89,8 @@ vp run automation -- run bot-load --counts=64 --layout=dense
 vp run automation -- run bot-load --counts=16 --duration=10 --video
 vp run automation -- run bot-load --counts=256,512,1000 --duration=10 --no-browser \
   --service-profile=worldgen --bot-profile=worldgen
+vp run automation -- run bot-load --counts=512 --duration=10 --no-browser \
+  --service-profile=worldgen --bot-profile=worldgen --generation-workers=12
 ```
 
 Use growth mode to retain one temporary database and daemon across successive waves. Stable bot
