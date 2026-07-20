@@ -49,6 +49,7 @@ pub enum ProfileRoute {
 #[derive(Clone, Copy, Debug)]
 pub struct ProfilePose {
     pub position_xz: Vec2,
+    pub velocity_xz: Vec2,
     pub yaw: f32,
     pub pitch: f32,
 }
@@ -140,10 +141,7 @@ impl ProfileAutomation {
     }
 
     pub fn distance_metres(self) -> f32 {
-        self.elapsed_seconds().min(self.config.total_seconds())
-            * self
-                .speed_override_metres_per_second
-                .unwrap_or(self.config.speed_metres_per_second)
+        self.elapsed_seconds().min(self.config.total_seconds()) * self.speed_metres_per_second()
     }
 
     pub fn pose(self) -> Option<ProfilePose> {
@@ -153,6 +151,7 @@ impl ProfileAutomation {
         if self.route == ProfileRoute::Straight {
             return Some(ProfilePose {
                 position_xz: Vec2::new(self.origin.x, self.origin.z - self.distance_metres()),
+                velocity_xz: Vec2::new(0.0, -self.speed_metres_per_second()),
                 yaw: 0.0,
                 pitch: -0.22,
             });
@@ -167,9 +166,15 @@ impl ProfileAutomation {
         let direction = Vec2::new(angle.cos(), angle.sin());
         Some(ProfilePose {
             position_xz: Vec2::new(self.origin.x, self.origin.z) + offset,
+            velocity_xz: direction * self.speed_metres_per_second(),
             yaw: direction.x.atan2(-direction.y),
             pitch: -0.22,
         })
+    }
+
+    fn speed_metres_per_second(self) -> f32 {
+        self.speed_override_metres_per_second
+            .unwrap_or(self.config.speed_metres_per_second)
     }
 
     pub fn running(self) -> bool {
@@ -232,6 +237,7 @@ mod tests {
             panic!("rail should still be active");
         };
         assert_eq!(left.position_xz, right.position_xz);
+        assert_eq!(left.velocity_xz, right.velocity_xz);
         assert_eq!(left.yaw, right.yaw);
     }
 
@@ -259,6 +265,7 @@ mod tests {
         }
         let pose = moving.pose().expect("straight route is still moving");
         assert_eq!(pose.position_xz, Vec2::new(2.0, -28.0));
+        assert_eq!(pose.velocity_xz, Vec2::new(0.0, -8.0));
         assert_eq!(pose.yaw, 0.0);
     }
 
@@ -278,5 +285,12 @@ mod tests {
         assert_eq!(profile.phase(), ProfilePhase::Measured);
         assert!((profile.elapsed_seconds() - 3.0).abs() < 0.01);
         assert!((profile.distance_metres() - 21.0).abs() < 0.01);
+        assert_eq!(
+            profile
+                .pose()
+                .expect("profile remains in motion")
+                .velocity_xz,
+            Vec2::new(0.0, -7.0)
+        );
     }
 }

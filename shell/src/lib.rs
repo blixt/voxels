@@ -725,6 +725,12 @@ mod web {
             }
             self.simulation_accumulator.set(accumulator);
             drop(chunks);
+            if profiling {
+                // The provider-neutral rail bypasses gameplay integration, so carry its exact
+                // motion intent explicitly through the production velocity-lookahead path. Drain
+                // is stationary and therefore clears the last route velocity.
+                camera.velocity = Vec3::ZERO;
+            }
             if profiling && let Some(pose) = self.profile.borrow().pose() {
                 let voxel_x = (pose.position_xz.x / VOXEL_SIZE_METRES).floor() as i32;
                 let voxel_z = (pose.position_xz.y / VOXEL_SIZE_METRES).floor() as i32;
@@ -742,6 +748,7 @@ mod web {
                             pose.position_xz.y,
                         );
                         *camera = CameraState::spawn(position);
+                        camera.velocity = Vec3::new(pose.velocity_xz.x, 0.0, pose.velocity_xz.y);
                         camera.yaw = pose.yaw;
                         camera.pitch = pose.pitch;
                     }
@@ -775,7 +782,11 @@ mod web {
                 simulation_ms,
             ));
             let stream_start = performance_now(performance.as_ref());
-            let streaming_velocity = camera.streaming_velocity(&self.input.borrow());
+            let streaming_velocity = if profiling {
+                camera.velocity
+            } else {
+                camera.streaming_velocity(&self.input.borrow())
+            };
             self.stream_world(&camera, streaming_velocity);
             if let Some(opened) = self.remote.world_opened() {
                 self.presence.ensure_session(&opened, time);
