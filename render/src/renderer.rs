@@ -86,6 +86,7 @@ const LOD_PLAN_REBUILD_CANONICAL_COLUMNS: u32 = 1 << 1;
 const LOD_PLAN_REBUILD_CANONICAL_PROFILE: u32 = 1 << 2;
 const LOD_PLAN_REBUILD_SURFACE_RESIDENCY: u32 = 1 << 3;
 const LOD_PLAN_REBUILD_SURFACE_PROFILE: u32 = 1 << 4;
+const LOD_PLAN_REBUILD_ENCLOSED_VIEW: u32 = 1 << 5;
 const GPU_QUERY_COUNT: u32 = 24;
 const PRECIPITATION_INSTANCE_COUNT: u32 = 48 * 48 * 2;
 const GPU_QUERY_BUFFER_BYTES: u64 = GPU_QUERY_COUNT as u64 * size_of::<u64>() as u64;
@@ -379,6 +380,7 @@ fn pack_surface_horizon_ao(macro_normal: u32, horizon_profile: u16) -> u32 {
 struct LodDrawPlan {
     patches: SurfacePatchSelection,
     canonical_columns: HashSet<(i32, i32)>,
+    enclosed_view_chunks: HashSet<(i32, i32, i32)>,
     exact_transition_edges: HashSet<(SurfacePatchId, u8)>,
     incomplete_transition_edges: u32,
 }
@@ -390,6 +392,10 @@ impl LodDrawPlan {
 
     fn owns_canonical_column(&self, chunk_x: i32, chunk_z: i32) -> bool {
         self.canonical_columns.contains(&(chunk_x, chunk_z))
+    }
+
+    fn owns_enclosed_view_chunk(&self, key: &MeshKey) -> bool {
+        key.0 == 0 && self.enclosed_view_chunks.contains(&(key.1, key.2, key.3))
     }
 
     fn owns_source_edge(&self, patch: SurfacePatchId, edge: SurfacePatchEdge) -> bool {
@@ -441,6 +447,7 @@ pub enum ChunkActivationReason {
     Portal = 2,
     Interaction = 4,
     Surface = 8,
+    EnclosedView = 16,
 }
 
 impl ChunkMesh {
@@ -1072,6 +1079,7 @@ pub struct Renderer {
     surface_patch_residency: HashSet<SurfacePatchId>,
     surface_incomplete_parents: HashSet<SurfacePatchId>,
     canonical_ready_chunks: HashSet<(i32, i32, i32)>,
+    enclosed_view_ready_chunks: HashSet<(i32, i32, i32)>,
     surface_patch_residency_revision: u64,
     lod_draw_plan: LodDrawPlan,
     lod_draw_plan_focus: Option<GeometricLodFocus>,
@@ -1861,6 +1869,7 @@ impl Renderer {
             surface_patch_residency: HashSet::new(),
             surface_incomplete_parents: HashSet::new(),
             canonical_ready_chunks: HashSet::new(),
+            enclosed_view_ready_chunks: HashSet::new(),
             surface_patch_residency_revision: 0,
             lod_draw_plan: LodDrawPlan::default(),
             lod_draw_plan_focus: None,
@@ -2133,6 +2142,37 @@ impl Renderer {
     /// ownership while its previous uploaded mesh is still the correct transactional fallback.
     pub fn canonical_chunk_owned(&self, coord: ChunkCoord) -> bool {
         self.canonical_ready_chunks
+            .contains(&(coord.x, coord.y, coord.z))
+    }
+
+    /// Replaces the exact underground chunks selected through visible tunnel apertures.
+    ///
+    /// These chunks supplement the height-surface hierarchy in three dimensions. They deliberately
+    /// do not claim the whole X/Z column, so the far terrain surface remains selected above them.
+    pub fn set_enclosed_view_ready_chunks(
+        &mut self,
+        chunks: impl IntoIterator<Item = (i32, i32, i32)>,
+    ) {
+        let replacement = chunks.into_iter().collect::<HashSet<_>>();
+        if replacement == self.enclosed_view_ready_chunks {
+            return;
+        }
+        let changed = self
+            .enclosed_view_ready_chunks
+            .symmetric_difference(&replacement)
+            .copied()
+            .collect::<HashSet<_>>();
+        self.enclosed_view_ready_chunks = replacement;
+        for (x, y, z) in changed {
+            if let Some(mesh) = self.chunks.get_mut(&(0, x, y, z)) {
+                mesh.lod_ownership_stale = true;
+            }
+        }
+        self.invalidate_lod_draw_plan(LOD_PLAN_REBUILD_ENCLOSED_VIEW);
+    }
+
+    pub fn enclosed_view_chunk_owned(&self, coord: ChunkCoord) -> bool {
+        self.enclosed_view_ready_chunks
             .contains(&(coord.x, coord.y, coord.z))
     }
 
@@ -2799,6 +2839,7 @@ impl Renderer {
         self.lod_draw_plan = LodDrawPlan {
             patches,
             canonical_columns,
+            enclosed_view_chunks: self.enclosed_view_ready_chunks.clone(),
             exact_transition_edges,
             incomplete_transition_edges,
         };
@@ -4631,8 +4672,9 @@ fn slice_owned_by_lod(
         return true;
     }
     if key.0 == 0 {
-        return focus.owns_canonical_chunk(key.1, key.3)
-            && plan.owns_canonical_column(key.1, key.3);
+        return plan.owns_enclosed_view_chunk(key)
+            || (focus.owns_canonical_chunk(key.1, key.3)
+                && plan.owns_canonical_column(key.1, key.3));
     }
     let Some(level) = SurfaceLodLevel::ALL.get(usize::from(key.0 - 1)).copied() else {
         return false;
@@ -5452,6 +5494,7 @@ mod tests {
         let plan = LodDrawPlan {
             patches: selection,
             canonical_columns: HashSet::new(),
+            enclosed_view_chunks: HashSet::new(),
             exact_transition_edges: transitions.exact_edges,
             incomplete_transition_edges: transitions.incomplete_edges,
         };
@@ -5509,6 +5552,7 @@ mod tests {
         let incomplete_plan = LodDrawPlan {
             patches: selection,
             canonical_columns: HashSet::new(),
+            enclosed_view_chunks: HashSet::new(),
             exact_transition_edges: incomplete.exact_edges,
             incomplete_transition_edges: incomplete.incomplete_edges,
         };
@@ -5548,6 +5592,7 @@ mod tests {
         let complete_plan = LodDrawPlan {
             patches: complete_selection,
             canonical_columns: HashSet::from([(131, 191)]),
+            enclosed_view_chunks: HashSet::new(),
             exact_transition_edges: complete.exact_edges,
             incomplete_transition_edges: complete.incomplete_edges,
         };
@@ -6542,15 +6587,23 @@ mod tests {
             &(0, 7, 0, 0),
             &test_slice()
         ));
+        plan.enclosed_view_chunks.insert((7, 0, 0));
+        assert!(
+            slice_owned_by_lod(Some(focus), Some(&plan), &(0, 7, 0, 0), &test_slice()),
+            "an exact tunnel chunk remains visible outside the surface handoff"
+        );
 
         let mut stride_two_patch = test_slice();
         stride_two_patch.surface_patch_id = Some(patch_id);
-        assert!(slice_owned_by_lod(
-            Some(focus),
-            Some(&plan),
-            &(SurfaceLodLevel::Stride2.index() + 1, 1, 0, 0),
-            &stride_two_patch
-        ));
+        assert!(
+            slice_owned_by_lod(
+                Some(focus),
+                Some(&plan),
+                &(SurfaceLodLevel::Stride2.index() + 1, 1, 0, 0),
+                &stride_two_patch
+            ),
+            "enclosed volume must not suppress the far surface above it"
+        );
         assert!(!slice_owned_by_lod(
             Some(focus),
             Some(&plan),

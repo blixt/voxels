@@ -666,6 +666,7 @@ mod web {
         radial_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         portal_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         interaction_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
+        enclosed_view_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         surface_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         touch_inventory_drag: Cell<Option<[f32; 2]>>,
         profile: RefCell<ProfileAutomation>,
@@ -1168,8 +1169,11 @@ mod web {
                 streaming_velocity,
                 self.config.stream_collision_lookahead_seconds,
             );
+            let enclosed_view_interest = self.enclosed_view_stream_interest(camera);
             let surface_interest = self.surface_stream_interest(focus, &collision_interest);
-            let mut interest = collision_interest.clone();
+            let mut urgent_interest = collision_interest.clone();
+            urgent_interest.extend(enclosed_view_interest.iter().copied());
+            let mut interest = urgent_interest.clone();
             interest.extend(surface_interest.iter().copied());
             let priority_hint = directional_stream_priority(
                 camera,
@@ -1186,21 +1190,21 @@ mod web {
                     scheduler.schedule_frame_prioritized_with_urgency(
                         self.config.stream_frame_budget,
                         priority_hint,
-                        &collision_interest,
+                        &urgent_interest,
                     ),
                 )
             };
             let mut uploaded = false;
 
-            let collision_interest_keys: BTreeSet<_> =
-                collision_interest.iter().copied().map(coord_key).collect();
+            let urgent_interest_keys: BTreeSet<_> =
+                urgent_interest.iter().copied().map(coord_key).collect();
             let mut collision_generation = Vec::new();
             let mut background_generation = Vec::new();
             for ticket in work.generation {
                 let dx = i64::from(ticket.coord.x) - i64::from(focus.x);
                 let dz = i64::from(ticket.coord.z) - i64::from(focus.z);
                 let radius = i64::from(self.config.startup_ready_radius_chunks);
-                if collision_interest_keys.contains(&coord_key(ticket.coord))
+                if urgent_interest_keys.contains(&coord_key(ticket.coord))
                     || (!self.startup_ready.get() && dx * dx + dz * dz <= radius * radius)
                 {
                     collision_generation.push(ticket);
@@ -1286,7 +1290,12 @@ mod web {
                 }
             }
             if focus_changed || uploaded || evicted {
-                self.reconcile_chunk_activation(focus, &collision_interest, &surface_interest);
+                self.reconcile_chunk_activation(
+                    focus,
+                    &collision_interest,
+                    &enclosed_view_interest,
+                    &surface_interest,
+                );
             }
             self.stream_surface_lods(camera.position);
         }
@@ -1328,6 +1337,23 @@ mod web {
                 .collect::<BTreeSet<_>>();
             interest.extend(self.surface_hint_stream_interest(&columns));
             interest.into_iter().collect()
+        }
+
+        fn enclosed_view_stream_interest(&self, camera: &CameraState) -> Vec<ChunkCoord> {
+            if self.enclosure.get().enclosure < self.config.stream_enclosed_view_threshold {
+                return Vec::new();
+            }
+            let chunks = self.chunks.borrow();
+            crate::enclosed_view_stream_interest(
+                camera,
+                self.config.stream_enclosed_view_distance_metres,
+                self.config.stream_enclosed_view_ray_radius_metres,
+                |x, y, z| {
+                    resident_material(&chunks, VoxelCoord::new(x, y, z))
+                        .unwrap_or(Material::Stone)
+                        .occludes_ambient()
+                },
+            )
         }
 
         fn surface_stream_interest(
@@ -1582,6 +1608,7 @@ mod web {
             &self,
             focus: ChunkCoord,
             collision_interest: &[ChunkCoord],
+            enclosed_view_interest: &[ChunkCoord],
             surface_interest: &[ChunkCoord],
         ) {
             let scheduler = self.scheduler.borrow();
@@ -1650,6 +1677,7 @@ mod web {
                 complete
             };
             let interaction = complete_interest(collision_interest);
+            let enclosed_view = complete_interest(enclosed_view_interest);
             let surface = complete_interest(surface_interest);
             canonical_ready_chunks.extend(surface.iter().copied());
             drop(scheduler);
@@ -1664,13 +1692,18 @@ mod web {
                 ChunkActivationReason::Interaction,
             );
             self.reconcile_activation_reason(
+                &self.enclosed_view_active_chunks,
+                enclosed_view.clone(),
+                ChunkActivationReason::EnclosedView,
+            );
+            self.reconcile_activation_reason(
                 &self.surface_active_chunks,
                 surface,
                 ChunkActivationReason::Surface,
             );
-            self.renderer
-                .borrow_mut()
-                .set_canonical_ready_chunks(canonical_ready_chunks);
+            let mut renderer = self.renderer.borrow_mut();
+            renderer.set_canonical_ready_chunks(canonical_ready_chunks);
+            renderer.set_enclosed_view_ready_chunks(enclosed_view);
         }
 
         fn reconcile_activation_reason(
@@ -3316,6 +3349,7 @@ mod web {
             radial_active_chunks: RefCell::new(BTreeSet::new()),
             portal_active_chunks: RefCell::new(BTreeSet::new()),
             interaction_active_chunks: RefCell::new(BTreeSet::new()),
+            enclosed_view_active_chunks: RefCell::new(BTreeSet::new()),
             surface_active_chunks: RefCell::new(BTreeSet::new()),
             touch_inventory_drag: Cell::new(None),
             profile: RefCell::new(ProfileAutomation::with_config(ProfileConfig {
