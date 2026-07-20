@@ -556,6 +556,7 @@ struct DrawListBuilder {
     mesh_count: u32,
     quad_count: u32,
     fingerprint: u64,
+    fingerprint_enabled: bool,
     tested_slices: u32,
     selected_slices: u32,
 }
@@ -567,6 +568,7 @@ impl Default for DrawListBuilder {
             mesh_count: 0,
             quad_count: 0,
             fingerprint: FINGERPRINT_OFFSET,
+            fingerprint_enabled: true,
             tested_slices: 0,
             selected_slices: 0,
         }
@@ -574,6 +576,13 @@ impl Default for DrawListBuilder {
 }
 
 impl DrawListBuilder {
+    fn without_fingerprint() -> Self {
+        Self {
+            fingerprint_enabled: false,
+            ..Self::default()
+        }
+    }
+
     fn test_slice(&mut self) {
         self.tested_slices = self.tested_slices.saturating_add(1);
     }
@@ -587,25 +596,35 @@ impl DrawListBuilder {
             size: slice.size,
             quad_count: slice.quad_count,
         });
-        self.fingerprint = fingerprint_value(self.fingerprint, u64::from(chunk.allocation.page));
-        self.fingerprint = fingerprint_value(self.fingerprint, u64::from(offset));
-        self.fingerprint = fingerprint_value(self.fingerprint, u64::from(slice.size));
-        self.fingerprint = fingerprint_value(self.fingerprint, u64::from(slice.quad_count));
         self.quad_count = self.quad_count.saturating_add(slice.quad_count);
     }
 
     fn select_mesh(&mut self, key: MeshKey, chunk: &ChunkMesh) {
         self.mesh_count = self.mesh_count.saturating_add(1);
-        self.fingerprint = fingerprint_value(self.fingerprint, u64::from(key.0));
-        self.fingerprint = fingerprint_value(self.fingerprint, key.1 as u32 as u64);
-        self.fingerprint = fingerprint_value(self.fingerprint, key.2 as u32 as u64);
-        self.fingerprint = fingerprint_value(self.fingerprint, key.3 as u32 as u64);
-        self.fingerprint = fingerprint_value(self.fingerprint, chunk.content_fingerprint);
+        if self.fingerprint_enabled {
+            self.fingerprint = fingerprint_value(self.fingerprint, u64::from(key.0));
+            self.fingerprint = fingerprint_value(self.fingerprint, key.1 as u32 as u64);
+            self.fingerprint = fingerprint_value(self.fingerprint, key.2 as u32 as u64);
+            self.fingerprint = fingerprint_value(self.fingerprint, key.3 as u32 as u64);
+            self.fingerprint = fingerprint_value(self.fingerprint, chunk.content_fingerprint);
+        }
     }
 
-    fn finish(self) -> DrawList {
+    fn finish(mut self) -> DrawList {
+        let spans = coalesce_draw_items(self.items);
+        if self.fingerprint_enabled {
+            // Hash the actual coalesced GPU ranges rather than every selected source slice. This
+            // describes the same presented geometry with hundreds of inputs instead of tens of
+            // thousands on a distant viewport.
+            for span in &spans {
+                self.fingerprint = fingerprint_value(self.fingerprint, u64::from(span.page));
+                self.fingerprint = fingerprint_value(self.fingerprint, u64::from(span.offset));
+                self.fingerprint = fingerprint_value(self.fingerprint, u64::from(span.size));
+                self.fingerprint = fingerprint_value(self.fingerprint, u64::from(span.quad_count));
+            }
+        }
         DrawList {
-            spans: coalesce_draw_items(self.items),
+            spans,
             mesh_count: self.mesh_count,
             quad_count: self.quad_count,
             fingerprint: self.fingerprint,
@@ -3461,7 +3480,8 @@ impl Renderer {
 ///
 /// Geometric LOD ownership is independent of clip volume. Computing it once per opaque slice avoids
 /// repeating the most expensive culling predicate for the camera and every shadow cascade while
-/// preserving each list's independent clip tests, diagnostics, ordering, and fingerprint.
+/// preserving each list's independent clip tests, diagnostics, and ordering. Only the camera list
+/// computes a presentation fingerprint; shadow fingerprints are never consumed.
 #[allow(
     clippy::too_many_arguments,
     reason = "one traversal needs the independent camera, shadow, residency, and feature inputs"
@@ -3476,7 +3496,8 @@ fn collect_opaque_draw_lists(
     view_clip: AabbClipVolume,
     shadow_clips: [AabbClipVolume; CASCADE_COUNT],
 ) -> ([DrawList; CASCADE_COUNT], DrawList) {
-    let mut shadow_builders: [DrawListBuilder; CASCADE_COUNT] = Default::default();
+    let mut shadow_builders: [DrawListBuilder; CASCADE_COUNT] =
+        std::array::from_fn(|_| DrawListBuilder::without_fingerprint());
     let mut world_builder = DrawListBuilder::default();
 
     for (key, chunk) in chunks {
@@ -5953,7 +5974,7 @@ mod tests {
             },
         );
         let expected_shadows = std::array::from_fn(|cascade_index| {
-            reference_draw_list(
+            let mut draw_list = reference_draw_list(
                 &chunks,
                 |key, chunk| {
                     mesh_casts_directional_shadow(key)
@@ -5966,7 +5987,9 @@ mod tests {
                         && shadow_clips[cascade_index]
                             .contains_aabb(slice.bounds_min, slice.bounds_max)
                 },
-            )
+            );
+            draw_list.fingerprint = FINGERPRINT_OFFSET;
+            draw_list
         });
         assert_eq!(actual_world, expected_world);
         assert_eq!(actual_shadows, expected_shadows);
