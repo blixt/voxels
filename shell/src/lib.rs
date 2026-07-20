@@ -364,6 +364,8 @@ mod web {
     }
 
     type FrameCallback = Closure<dyn FnMut(f64)>;
+    type SurfaceChunkColumnHints = BTreeMap<(i32, i32), BTreeSet<i32>>;
+    type SurfaceChunkHintIndex = BTreeMap<SurfaceTileCoord, SurfaceChunkColumnHints>;
 
     fn resident_material(
         chunks: &BTreeMap<(i32, i32, i32), Chunk>,
@@ -554,8 +556,7 @@ mod web {
         pending_meshes: RefCell<BTreeMap<(i32, i32, i32), MeshedChunk>>,
         surface_focus: Cell<Option<[SurfaceTileCoord; SURFACE_LOD_LEVEL_COUNT]>>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
-        surface_chunk_hints:
-            RefCell<BTreeMap<SurfaceTileCoord, BTreeMap<(i32, i32), BTreeSet<i32>>>>,
+        surface_chunk_hints: RefCell<SurfaceChunkHintIndex>,
         surface_revisions: RefCell<SurfaceRevisionCache>,
         surface_accepted_edit_revisions: RefCell<BTreeMap<SurfaceTileCoord, u64>>,
         surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
