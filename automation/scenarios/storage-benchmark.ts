@@ -8,7 +8,7 @@ import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { rustTool } from "../../scripts/build-wasm.ts";
 
 const execFileAsync = promisify(execFile);
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const BINARY = "voxels-storage-benchmark";
 
 type Profile = "clustered" | "frontier";
@@ -30,6 +30,12 @@ interface BenchmarkResult {
     readonly p99: number;
     readonly maximum: number;
   };
+  readonly operationLatencyProgressQuartilesMicros: readonly {
+    readonly median: number;
+    readonly p95: number;
+    readonly p99: number;
+    readonly maximum: number;
+  }[];
   readonly playerInitializationMs: number;
   readonly checkpointMs: number;
   readonly restartMs: number;
@@ -116,7 +122,13 @@ function markdownReport(results: readonly BenchmarkResult[]): string {
   const rows = results.map((result) => {
     const disk = result.databaseAfterCheckpoint.mainBytes;
     const bytesPerMutation = disk / result.mutations;
-    return `| ${result.profile} | ${result.operations.toLocaleString()} | ${result.mutations.toLocaleString()} | ${result.operationLatencyMicros.median} / ${result.operationLatencyMicros.p95} / ${result.operationLatencyMicros.p99} | ${result.restartMs.toFixed(1)} | ${result.checkpointMs.toFixed(1)} | ${mebibytes(result.databaseBeforeCheckpoint.walBytes)} | ${mebibytes(disk)} | ${bytesPerMutation.toFixed(1)} |`;
+    const first = result.operationLatencyProgressQuartilesMicros.at(0);
+    const last = result.operationLatencyProgressQuartilesMicros.at(-1);
+    if (first === undefined || last === undefined) {
+      throw new Error("native storage benchmark omitted operation-order latency");
+    }
+    const progressRatio = first.median === 0 ? 0 : last.median / first.median;
+    return `| ${result.profile} | ${result.operations.toLocaleString()} | ${result.mutations.toLocaleString()} | ${result.operationLatencyMicros.median} / ${result.operationLatencyMicros.p95} / ${result.operationLatencyMicros.p99} | ${first.median} → ${last.median} (${progressRatio.toFixed(2)}×) | ${result.restartMs.toFixed(1)} | ${result.checkpointMs.toFixed(1)} | ${mebibytes(result.databaseBeforeCheckpoint.walBytes)} | ${mebibytes(disk)} | ${bytesPerMutation.toFixed(1)} |`;
   });
   const tableRows = results.flatMap((result) =>
     Object.entries(result.tables).map(
@@ -128,11 +140,13 @@ function markdownReport(results: readonly BenchmarkResult[]): string {
 
 The native fixture executes the production edit planner and SQLite transaction path, checkpoints
 the WAL, reopens the database, verifies its revision, and retries one durable operation per player.
-The clustered corpus models dense collaborative construction/excavation; frontier models long-lived
-exploration spread across many spatial regions.
+It deliberately excludes sockets, request queues, broadcasts, client work, and rendering; those
+belong to the protocol and browser scenarios. The clustered corpus models dense collaborative
+construction/excavation; frontier models long-lived exploration spread across many spatial regions.
+Operation-order quartiles expose latency that grows as the durable edit journal fills.
 
-| Profile | Operations | Mutations | Commit median / p95 / p99 (µs) | Restart (ms) | Checkpoint (ms) | Peak WAL MiB | Durable MiB | Bytes / mutation |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Profile | Operations | Mutations | Commit median / p95 / p99 (µs) | First → last quartile median | Restart (ms) | Checkpoint (ms) | Peak WAL MiB | Durable MiB | Bytes / mutation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 ${rows.join("\n")}
 
 | Profile | SQLite b-tree | Rows | Storage MiB | Payload MiB | Unused MiB |

@@ -20,7 +20,7 @@ use voxels_world::{
     WorldProductBatch, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
 };
 
-pub const STORAGE_BENCHMARK_SCHEMA_VERSION: u32 = 1;
+pub const STORAGE_BENCHMARK_SCHEMA_VERSION: u32 = 2;
 const BENCHMARK_SEED: u64 = 0x5e6a_2d49_7b10_c3f1;
 const EDIT_QUEUE_CAPACITY: u16 = 8;
 
@@ -53,6 +53,7 @@ pub struct StorageBenchmarkResponse {
     pub changed_operations: u32,
     pub mutations: u64,
     pub operation_latency_micros: LatencySummary,
+    pub operation_latency_progress_quartiles_micros: Vec<LatencySummary>,
     pub player_initialization_ms: f64,
     pub checkpoint_ms: f64,
     pub restart_ms: f64,
@@ -216,7 +217,10 @@ pub fn run_storage_benchmark(
         operations: request.operations,
         changed_operations,
         mutations,
-        operation_latency_micros: summarize_latencies(&mut operation_latencies),
+        operation_latency_progress_quartiles_micros: progress_latency_summaries(
+            &operation_latencies,
+        ),
+        operation_latency_micros: summarize_latencies(&operation_latencies),
         player_initialization_ms,
         checkpoint_ms,
         restart_ms,
@@ -482,17 +486,29 @@ fn ensure_database_absent(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn summarize_latencies(values: &mut [u64]) -> LatencySummary {
-    values.sort_unstable();
-    let total = values.iter().copied().map(u128::from).sum::<u128>();
+fn summarize_latencies(values: &[u64]) -> LatencySummary {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let total = sorted.iter().copied().map(u128::from).sum::<u128>();
     LatencySummary {
-        minimum: values[0],
-        median: percentile(values, 50),
-        p95: percentile(values, 95),
-        p99: percentile(values, 99),
-        maximum: values[values.len() - 1],
-        mean: total as f64 / values.len() as f64,
+        minimum: sorted[0],
+        median: percentile(&sorted, 50),
+        p95: percentile(&sorted, 95),
+        p99: percentile(&sorted, 99),
+        maximum: sorted[sorted.len() - 1],
+        mean: total as f64 / sorted.len() as f64,
     }
+}
+
+fn progress_latency_summaries(values: &[u64]) -> Vec<LatencySummary> {
+    let bucket_count = values.len().min(4);
+    (0..bucket_count)
+        .map(|bucket| {
+            let start = values.len() * bucket / bucket_count;
+            let end = values.len() * (bucket + 1) / bucket_count;
+            summarize_latencies(&values[start..end])
+        })
+        .collect()
 }
 
 fn percentile(values: &[u64], percentile: usize) -> u64 {
@@ -530,14 +546,29 @@ mod tests {
 
     #[test]
     fn latency_summary_uses_stable_nearest_rank_indices() {
-        let mut values = (1..=100).collect::<Vec<_>>();
-        let summary = summarize_latencies(&mut values);
+        let values = (1..=100).collect::<Vec<_>>();
+        let summary = summarize_latencies(&values);
         assert_eq!(summary.minimum, 1);
         assert_eq!(summary.median, 50);
         assert_eq!(summary.p95, 95);
         assert_eq!(summary.p99, 99);
         assert_eq!(summary.maximum, 100);
         assert_eq!(summary.mean, 50.5);
+    }
+
+    #[test]
+    fn progress_latency_quartiles_preserve_operation_order() {
+        let values = [8, 7, 6, 5, 40, 30, 20, 10];
+        let summaries = progress_latency_summaries(&values);
+        assert_eq!(summaries.len(), 4);
+        assert_eq!(summaries[0].median, 7);
+        assert_eq!(summaries[1].median, 5);
+        assert_eq!(summaries[2].median, 30);
+        assert_eq!(summaries[3].median, 10);
+
+        let singleton = progress_latency_summaries(&[9]);
+        assert_eq!(singleton.len(), 1);
+        assert_eq!(singleton[0].median, 9);
     }
 
     #[test]
