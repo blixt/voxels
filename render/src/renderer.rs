@@ -2089,6 +2089,15 @@ impl Renderer {
             self.surface_patch_residency_revision.wrapping_add(1);
     }
 
+    /// Whether an exact canonical chunk currently owns its LOD cells.
+    ///
+    /// Automation uses this to verify that an edit replacement never relinquishes render
+    /// ownership while its previous uploaded mesh is still the correct transactional fallback.
+    pub fn canonical_chunk_owned(&self, coord: ChunkCoord) -> bool {
+        self.canonical_ready_chunks
+            .contains(&(coord.x, coord.y, coord.z))
+    }
+
     pub const fn ui_open(&self) -> bool {
         self.ui.open()
     }

@@ -320,7 +320,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 2;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 34;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 35;
     const FRAME_SAMPLE_WIDTH: u32 = 11;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -338,7 +338,7 @@ mod web {
         "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
         "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
         "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,canonicalSurfaceCellsResident,canonicalSurfaceCellsRequired,",
-        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,schemaVersion,sampleCount,",
+        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,schemaVersion,sampleCount,",
         "droppedSamples",
     );
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
@@ -2627,6 +2627,32 @@ mod web {
                         scheduler.interest_readiness(&collision_lookahead_interest),
                     )
                 };
+                let edit_canonical_coords = engine
+                    .edit_trackers
+                    .borrow()
+                    .iter()
+                    .flat_map(|tracker| {
+                        tracker
+                            .requirements
+                            .canonical
+                            .iter()
+                            .map(|requirement| requirement.coord)
+                    })
+                    .collect::<BTreeSet<_>>();
+                let edit_canonical_renderable = {
+                    let scheduler = engine.scheduler.borrow();
+                    edit_canonical_coords
+                        .iter()
+                        .filter(|coord| scheduler.desired_chunk_renderable(**coord))
+                        .count()
+                };
+                let edit_canonical_owned = {
+                    let renderer = engine.renderer.borrow();
+                    edit_canonical_coords
+                        .iter()
+                        .filter(|coord| renderer.canonical_chunk_owned(**coord))
+                        .count()
+                };
                 let lod_focus_lag_voxels = i64::from(camera_voxel_x)
                     .abs_diff(i64::from(render.lod_boundary_centres[0][0]))
                     .max(
@@ -2906,6 +2932,9 @@ mod web {
                     collision_lookahead.resident as f32,
                     collision_lookahead.required as f32,
                     collision_lookahead_seconds,
+                    edit_canonical_coords.len() as f32,
+                    edit_canonical_renderable as f32,
+                    edit_canonical_owned as f32,
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
