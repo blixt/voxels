@@ -42,6 +42,7 @@ automation/
     scenario.ts           definition, registry contract, runner, cleanup
     artifacts.ts          run directories, JSON, screenshots, video, manifests
     browser.ts            Chromium lifecycle, pages, errors, screenshots, video
+    criterion.ts          strict Criterion options and per-run report ownership
     engine.ts             typed Rust automation API and snapshot decoding
     world.ts              isolated service/client configs and daemon lifecycle
     metrics.ts            summaries and process sampling
@@ -106,6 +107,11 @@ Every run has one `target/automation/<scenario>/<run-id>/` directory containing 
 scenario outputs. `target/automation/<scenario>/latest.json` points to the last completed run while
 timestamped results remain comparison-safe. Screenshots, raw video, browser traces, logs, and metric
 reports all use the same artifact API.
+
+Criterion scenarios use the same ownership. Their shared runner accepts `--filter=<text>`,
+`--quick`, `--sample-size=<n>`, and `--measurement-seconds=<seconds>`, rejects unknown or conflicting
+options, and stores the complete HTML report below the scenario run instead of a shared mutable
+`target/criterion` directory.
 
 A browser viewport, recorder, shaped link, service, and bot army are independent mechanisms. A
 scenario may therefore launch bots behind a shaped link while a browser observes and records the

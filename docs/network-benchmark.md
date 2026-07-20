@@ -55,8 +55,10 @@ and render-submission time so a byte win cannot hide WASM decode stalls.
 Scenarios are:
 
 - `cold_spawn`: fresh browser storage, navigation through full viewport and background convergence;
-- `resident_walk`: a fixed 2 m inside the already loaded spawn chunk, a zero-world-byte control;
-- `cached_turn_180`: exact 180° look change after full radial coverage;
+- `short_walk`: a fixed 2 m movement after cold coverage, exercising collision/view-corridor
+  scheduling without conflating it with the longer streaming traversal;
+- `cached_turn_180`: exact 180° look change after full radial coverage and the zero-world-byte
+  control;
 - `streaming_walk`: a fixed 35 m sprint followed by post-stop convergence;
 - `turn_during_spawn`: exact 180° pivot as soon as first geometry appears, exposing view-priority and
   obsolete-work behavior during a cold load.
@@ -78,6 +80,8 @@ vp run automation -- run network-compare target/automation/before/report.json \
 The runner also records peak user-space queue delay after removing propagation and one pacing
 quantum's own serialization, peak queued bytes, and every time its bounded queue pauses the TCP
 source. These distinguish useful throughput from a faster sender that merely creates bufferbloat.
+Any server control-error frame fails the run; rejected requests are neither useful throughput nor a
+valid way to make a client appear settled.
 The comparison command refuses different result schemas, browser snapshot schemas, fixtures,
 protocols, link profiles, world sources, repetition counts, or execution environments. It reports
 signed median, max, full-coverage, viewport-byte, and full-coverage-byte deltas; negative is an

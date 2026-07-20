@@ -24,7 +24,7 @@ const VIEWPORT = { width: 1280, height: 720 };
 const SAMPLE_INTERVAL_MS = 16;
 const READY_STABLE_SAMPLES = 3;
 const SCENARIO_TIMEOUT_MS = 90_000;
-const RESIDENT_WALK_METRES = 2;
+const SHORT_WALK_METRES = 2;
 const STREAMING_WALK_METRES = 35;
 const MOVEMENT_PROGRESS_EPSILON_METRES = 0.025;
 const MAX_MOVEMENT_NO_PROGRESS_MS = 150;
@@ -796,14 +796,14 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
       );
       runs.push(
         await runScenario({
-          name: "resident_walk",
+          name: "short_walk",
           engine,
           link,
           errors: viewport.failures,
-          // Spawn faces -Z from the exact chunk boundary. Walking backward stays inside the
-          // already-resident spawn chunk and is the control for unexpected world traffic.
-          action: (context) =>
-            walkDistance(page, RESIDENT_WALK_METRES, { ...context, key: "KeyS" }),
+          // Spawn faces -Z from the exact chunk boundary. Walking backward remains a short,
+          // repeatable movement case while the collision and view corridors may legitimately
+          // fetch adjacent products.
+          action: (context) => walkDistance(page, SHORT_WALK_METRES, { ...context, key: "KeyS" }),
         }),
       );
       runs.push(
@@ -890,7 +890,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         viewport: VIEWPORT,
         sampleIntervalMs: SAMPLE_INTERVAL_MS,
         readyStableSamples: READY_STABLE_SAMPLES,
-        residentWalkMetres: RESIDENT_WALK_METRES,
+        shortWalkMetres: SHORT_WALK_METRES,
         streamingWalkMetres: STREAMING_WALK_METRES,
         movementProgressEpsilonMetres: MOVEMENT_PROGRESS_EPSILON_METRES,
         maximumMovementNoProgressMs: MAX_MOVEMENT_NO_PROGRESS_MS,
@@ -905,7 +905,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
       repetitions,
       scenarios: [
         "cold_spawn",
-        "resident_walk",
+        "short_walk",
         "cached_turn_180",
         "streaming_walk",
         "turn_during_spawn",
@@ -935,7 +935,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
       throw new Error(`streaming guards failed:\n${guardViolations.join("\n")}`);
     }
     return {
-      summary: `Completed ${runs.length} network benchmark runs.`,
+      summary: `Completed ${runs.length} network scenario samples across ${repetitions} repetition${repetitions === 1 ? "" : "s"}.`,
       metrics: result.summary,
       details: result,
     };

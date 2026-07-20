@@ -686,9 +686,10 @@ dropped samples or browser errors in isolated headless Chrome.
 ## 2026-07-13: local world-source Phase 0 baseline
 
 Measured on an Apple M3 Max running macOS 26.5.2 with Rust 1.97.0. The working tree was based on
-commit `75c7140`; Criterion used 100 samples after its standard warm-up. The benchmark commands write
-only ignored artifacts under `target/criterion`; the browser profile uses a preview server on a
-reserved ephemeral port and does not open or reset an existing browser origin:
+commit `75c7140`; Criterion used 100 samples after its standard warm-up. Current benchmark commands
+write ignored, immutable run artifacts under `target/automation/bench-*/<run-id>/criterion/`; the
+browser profile uses a preview server on a reserved ephemeral port and does not open or reset an
+existing browser origin:
 
 ```sh
 vp run automation -- run bench-world
