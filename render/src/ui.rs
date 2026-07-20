@@ -1735,7 +1735,7 @@ impl MissionControlUi {
             ];
             if card_count > 6 {
                 cards.push((
-                    "LOD TILES 0 → 5",
+                    "LOD TILES 0 → 7",
                     stats
                         .lod_tiles
                         .map(u64::from)
@@ -1870,7 +1870,7 @@ impl MissionControlUi {
         );
         let _ = writeln!(
             report,
-            "LOD tiles 0..5: {}",
+            "LOD tiles 0..7: {}",
             stats.lod_tiles.map(|count| count.to_string()).join(", "),
         );
 
@@ -2294,6 +2294,26 @@ mod tests {
         assert!(report.contains("Time authority: local debug override"));
         assert!(report.contains("Weather authority: local debug override"));
         assert!(!report.contains("RENDER FEATURES"));
+    }
+
+    #[test]
+    fn world_lab_labels_every_surface_lod_level() {
+        let mut ui = enabled(true);
+        ui.set_stats(LiveStats {
+            lod_tiles: [1, 2, 3, 4, 5, 6, 7, 8],
+            ..LiveStats::default()
+        });
+
+        assert!(
+            ui.card_data(false, 8)
+                .iter()
+                .any(|(label, value)| *label == "LOD TILES 0 → 7"
+                    && value == "1 · 2 · 3 · 4 · 5 · 6 · 7 · 8")
+        );
+        assert!(
+            ui.diagnostics_report()
+                .contains("LOD tiles 0..7: 1, 2, 3, 4, 5, 6, 7, 8")
+        );
     }
 
     #[test]
