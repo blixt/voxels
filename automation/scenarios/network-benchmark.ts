@@ -3,13 +3,8 @@ import { cpus, platform, release } from "node:os";
 import type { Page } from "playwright";
 import { BrowserCapability, type BrowserFailure, reserveEphemeralPort } from "../lib/browser.ts";
 import { ScenarioArguments } from "../lib/arguments.ts";
-import {
-  type EngineClient,
-  FRAME_SAMPLE_WIDTH,
-  SNAPSHOT,
-  SNAPSHOT_SCHEMA_VERSION,
-  snapshotValue,
-} from "../lib/engine.ts";
+import { type EngineClient, SNAPSHOT_SCHEMA_VERSION, snapshotValue } from "../lib/engine.ts";
+import { frameSamples, type FrameSample } from "../lib/render-metrics.ts";
 import { createShapedLink, type LinkStats, type ShapedLink } from "../lib/network.ts";
 import { percentileOrNull as percentile, rounded } from "../lib/metrics.ts";
 import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "../lib/protocol.ts";
@@ -27,7 +22,6 @@ const FIXTURE_VERSION = 3;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
 const SAMPLE_INTERVAL_MS = 16;
-const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 const READY_STABLE_SAMPLES = 3;
 const SCENARIO_TIMEOUT_MS = 90_000;
 const RESIDENT_WALK_METRES = 2;
@@ -82,7 +76,7 @@ interface ViewportSample {
 }
 
 interface FrameState {
-  samples: number[][];
+  samples: FrameSample[];
   droppedSamples: number;
 }
 
@@ -104,13 +98,8 @@ function numericSummary(values: readonly number[]): NumberSummary {
   };
 }
 
-function frameTimingSummary(samples: readonly number[][], droppedSamples: number) {
-  const column = (index: number): number[] =>
-    samples.flatMap((sample) => {
-      const value = sample[index];
-      return value === undefined ? [] : [value];
-    });
-  const frameMs = column(0);
+function frameTimingSummary(samples: readonly FrameSample[], droppedSamples: number) {
+  const frameMs = samples.map((sample) => sample.intervalMs);
   return {
     samples: samples.length,
     droppedSamples,
@@ -118,8 +107,8 @@ function frameTimingSummary(samples: readonly number[][], droppedSamples: number
       ...numericSummary(frameMs),
       above33_33ms: frameMs.filter((value) => value > 33.33).length,
     },
-    cpuMs: numericSummary(column(1)),
-    streamingMs: numericSummary(column(3)),
+    cpuMs: numericSummary(samples.map((sample) => sample.cpuMs)),
+    streamingMs: numericSummary(samples.map((sample) => sample.streamingMs)),
   };
 }
 
@@ -157,11 +146,11 @@ function worldProductPriorityFrames(stats: LinkStats): Record<string, number> {
 
 function viewportSignature(snapshot: readonly number[]): string {
   return [
-    snapshot[SNAPSHOT.viewportFingerprintLow24],
-    snapshot[SNAPSHOT.viewportFingerprintHigh24],
-    snapshot[SNAPSHOT.visibleChunks],
-    snapshot[SNAPSHOT.quads],
-    snapshot[SNAPSHOT.waterQuads],
+    snapshotValue(snapshot, "viewportFingerprintLow24"),
+    snapshotValue(snapshot, "viewportFingerprintHigh24"),
+    snapshotValue(snapshot, "visibleChunks"),
+    snapshotValue(snapshot, "quads"),
+    snapshotValue(snapshot, "waterQuads"),
   ].join(":");
 }
 
@@ -197,11 +186,7 @@ async function captureSnapshot(
   frameState: FrameState,
 ): Promise<readonly number[]> {
   const current = await engine.snapshot();
-  const count = snapshotValue(current, "sampleCount");
-  for (let index = 0; index < count; index += 1) {
-    const start = FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH;
-    frameState.samples.push(current.slice(start, start + FRAME_SAMPLE_WIDTH));
-  }
+  frameState.samples.push(...frameSamples(current));
   frameState.droppedSamples += snapshotValue(current, "droppedSamples");
   return current;
 }

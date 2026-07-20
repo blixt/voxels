@@ -10,7 +10,8 @@ import {
 } from "../lib/world.ts";
 import { BrowserCapability, type BrowserViewport, reserveEphemeralPort } from "../lib/browser.ts";
 import { ScenarioArguments } from "../lib/arguments.ts";
-import { FRAME_SAMPLE_WIDTH, SNAPSHOT, snapshotValue } from "../lib/engine.ts";
+import { snapshotValue } from "../lib/engine.ts";
+import { frameSamples } from "../lib/render-metrics.ts";
 import {
   numericSummary,
   sampleProcess,
@@ -34,7 +35,6 @@ const SAMPLE_INTERVAL_MS = 250;
 const OBSERVER_SAMPLE_INTERVAL_MS = 500;
 const MAX_AUTHORITY_REJECTION_RATE = 0.02;
 const MIN_AUTHORITY_REJECTION_ALLOWANCE = 5;
-const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 const VIEWPORT = { width: 960, height: 540 };
 const BOT_SPAWN_PILLAR_HEIGHT_VOXELS = 7;
 const BOT_SPAWN_PROTECTION_RADIUS_VOXELS = 3;
@@ -345,10 +345,7 @@ async function collectObserverSamples(
     ) {
       fullWorldReadyMs = elapsedMs;
     }
-    for (let index = 0; index < snapshotValue(values, "sampleCount"); index += 1) {
-      const frame = values[FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH];
-      if (frame !== undefined) frameMilliseconds.push(frame);
-    }
+    frameMilliseconds.push(...frameSamples(values).map((sample) => sample.intervalMs));
     samples.push({
       atUnixMs: Date.now(),
       remoteAvatars,

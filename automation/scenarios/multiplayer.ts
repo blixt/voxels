@@ -7,12 +7,11 @@ import {
 } from "../lib/browser.ts";
 import {
   type EngineClient,
-  FRAME_SAMPLE_WIDTH,
-  SNAPSHOT,
   SNAPSHOT_SCHEMA_VERSION,
   snapshotValue,
   type SurfaceEditState,
 } from "../lib/engine.ts";
+import { frameSamples } from "../lib/render-metrics.ts";
 import { createShapedLink, type LinkStats, type ShapedLink } from "../lib/network.ts";
 import { percentileOrNull as percentile, rounded } from "../lib/metrics.ts";
 import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "../lib/protocol.ts";
@@ -35,7 +34,6 @@ const OBSERVER_WALK_METRES = 120;
 const PLAYER_EYE_HEIGHT_METRES = 1.62;
 const BUILDER_DIG_SPACING_VOXELS = 8;
 const VIEWPORT = { width: 960, height: 540 };
-const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 // Six unthrottled WebGPU clients intentionally contend on one local GPU and worker pool. This gate
 // catches a severe stall while leaving the exact p95 visible; the far observer renders materially
 // more clipmap geometry than the five near builders, so this is not a per-device frame-rate target.
@@ -100,10 +98,7 @@ function required<T>(values: readonly T[], index: number, label: string): T {
 }
 
 function frameTimingSummary(values: readonly number[]): FrameTimingSummary {
-  const frameMs: number[] = [];
-  for (let index = 0; index < snapshotValue(values, "sampleCount"); index += 1) {
-    frameMs.push(required(values, FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH, "frame sample"));
-  }
+  const frameMs = frameSamples(values).map((sample) => sample.intervalMs);
   const p95Ms = percentile(frameMs, 0.95);
   return {
     samples: frameMs.length,

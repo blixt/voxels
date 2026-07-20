@@ -2,20 +2,13 @@ import { execFileSync } from "node:child_process";
 import type { Page } from "playwright";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import { BrowserCapability, chromeWebGpuLaunchOptions } from "../lib/browser.ts";
-import {
-  type EngineClient,
-  FRAME_SAMPLE_WIDTH,
-  gpuSampleStart,
-  GPU_SAMPLE_WIDTH,
-  SNAPSHOT,
-  snapshotValue,
-} from "../lib/engine.ts";
+import { type EngineClient, SNAPSHOT, snapshotValue } from "../lib/engine.ts";
+import { frameSamples, gpuFrameSamples } from "../lib/render-metrics.ts";
 import { percentile } from "../lib/metrics.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { startWorldStack } from "../lib/world.ts";
 import type { WorldSource } from "../lib/world.ts";
 
-const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed/i;
 type Vector2 = readonly [number, number];
@@ -71,18 +64,11 @@ function spatialDistance(left: Vector3, right: Vector3): number {
 }
 
 function collectTiming(snapshot: readonly number[], timings: LodTimings): void {
-  const sampleCount = snapshotValue(snapshot, "sampleCount");
-  for (let index = 0; index < sampleCount; index += 1) {
-    const start = FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH;
-    timings.frameIntervals.push(required(snapshot, start, "frame timing"));
-  }
-  const start = gpuSampleStart(snapshot);
-  const gpuCount = snapshot[start] ?? 0;
-  for (let index = 0; index < gpuCount; index += 1) {
-    const sample = start + 2 + index * GPU_SAMPLE_WIDTH;
-    timings.gpu.set(required(snapshot, sample, "GPU timing"), {
-      total: required(snapshot, sample + 1, "GPU timing"),
-      world: required(snapshot, sample + 8, "GPU timing"),
+  timings.frameIntervals.push(...frameSamples(snapshot).map((sample) => sample.intervalMs));
+  for (const sample of gpuFrameSamples(snapshot).samples) {
+    timings.gpu.set(sample.frameId, {
+      total: sample.total,
+      world: sample.world,
     });
   }
 }

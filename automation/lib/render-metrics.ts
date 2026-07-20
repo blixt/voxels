@@ -10,6 +10,20 @@ import { percentile } from "./metrics.ts";
 
 const FRAME_SAMPLE_START = SNAPSHOT.droppedSamples + 1;
 
+export interface FrameSample {
+  readonly intervalMs: number;
+  readonly cpuMs: number;
+  readonly simulationMs: number;
+  readonly streamingMs: number;
+  readonly renderSubmissionMs: number;
+  readonly frameId: number;
+  readonly renderCullMs: number;
+  readonly renderEncodeMs: number;
+  readonly renderSubmitMs: number;
+  readonly testedSlices: number;
+  readonly selectedSlices: number;
+}
+
 export interface GpuFrameSample {
   readonly frameId: number;
   readonly total: number;
@@ -28,7 +42,7 @@ export interface GpuFrameSample {
 
 export interface RenderSnapshotCapture {
   readonly snapshot: readonly number[];
-  readonly samples: readonly (readonly number[])[];
+  readonly samples: readonly FrameSample[];
   readonly dropped: number;
   readonly gpuSamples: readonly GpuFrameSample[];
   readonly gpuDropped: number;
@@ -56,14 +70,32 @@ function summary(values: readonly number[]): DistributionSummary {
   };
 }
 
-export async function captureRenderSnapshot(engine: EngineClient): Promise<RenderSnapshotCapture> {
-  const snapshot = await engine.snapshot();
-  const samples: number[][] = [];
+export function frameSamples(snapshot: readonly number[]): FrameSample[] {
+  const samples: FrameSample[] = [];
   const count = snapshotValue(snapshot, "sampleCount");
   for (let index = 0; index < count; index += 1) {
     const start = FRAME_SAMPLE_START + index * FRAME_SAMPLE_WIDTH;
-    samples.push(snapshot.slice(start, start + FRAME_SAMPLE_WIDTH));
+    samples.push({
+      intervalMs: required(snapshot, start, "frame sample"),
+      cpuMs: required(snapshot, start + 1, "frame sample"),
+      simulationMs: required(snapshot, start + 2, "frame sample"),
+      streamingMs: required(snapshot, start + 3, "frame sample"),
+      renderSubmissionMs: required(snapshot, start + 4, "frame sample"),
+      frameId: required(snapshot, start + 5, "frame sample"),
+      renderCullMs: required(snapshot, start + 6, "frame sample"),
+      renderEncodeMs: required(snapshot, start + 7, "frame sample"),
+      renderSubmitMs: required(snapshot, start + 8, "frame sample"),
+      testedSlices: required(snapshot, start + 9, "frame sample"),
+      selectedSlices: required(snapshot, start + 10, "frame sample"),
+    });
   }
+  return samples;
+}
+
+export function gpuFrameSamples(snapshot: readonly number[]): {
+  readonly samples: readonly GpuFrameSample[];
+  readonly dropped: number;
+} {
   const gpuStart = gpuSampleStart(snapshot);
   const gpuCount = required(snapshot, gpuStart, "GPU sample header");
   const gpuDropped = required(snapshot, gpuStart + 1, "GPU sample header");
@@ -87,12 +119,19 @@ export async function captureRenderSnapshot(engine: EngineClient): Promise<Rende
       ui: required(values, 12, "GPU sample"),
     });
   }
+  return { samples: gpuSamples, dropped: gpuDropped };
+}
+
+export async function captureRenderSnapshot(engine: EngineClient): Promise<RenderSnapshotCapture> {
+  const snapshot = await engine.snapshot();
+  const samples = frameSamples(snapshot);
+  const gpu = gpuFrameSamples(snapshot);
   return {
     snapshot,
     samples,
     dropped: snapshotValue(snapshot, "droppedSamples"),
-    gpuSamples,
-    gpuDropped,
+    gpuSamples: gpu.samples,
+    gpuDropped: gpu.dropped,
   };
 }
 
@@ -119,24 +158,19 @@ export function summarizeRenderPhase(captures: readonly RenderSnapshotCapture[])
       captures.flatMap((capture) => capture.gpuSamples).map((sample) => [sample.frameId, sample]),
     ).values(),
   ];
-  const column = (index: number): number[] =>
-    samples.map((sample) => required(sample, index, "frame sample"));
-  const frameIntervals = column(0);
-  const frameIds = new Set(samples.map((sample) => required(sample, 5, "frame sample")));
+  const frameIntervals = samples.map((sample) => sample.intervalMs);
+  const frameIds = new Set(samples.map((sample) => sample.frameId));
   const coveredGpuSamples = gpuSamples.filter((sample) => frameIds.has(sample.frameId));
   const unattributedCpu = samples.map((sample) =>
     Math.max(
       0,
-      required(sample, 1, "frame sample") -
-        required(sample, 2, "frame sample") -
-        required(sample, 3, "frame sample") -
-        required(sample, 4, "frame sample"),
+      sample.cpuMs - sample.simulationMs - sample.streamingMs - sample.renderSubmissionMs,
     ),
   );
   const gpuColumn = (key: keyof Omit<GpuFrameSample, "frameId">): number[] =>
-    gpuSamples.map((sample) => sample[key]);
+    coveredGpuSamples.map((sample) => sample[key]);
   const gpuSummary = (key: keyof Omit<GpuFrameSample, "frameId">) =>
-    gpuSamples.length > 0 ? summary(gpuColumn(key)) : null;
+    coveredGpuSamples.length > 0 ? summary(gpuColumn(key)) : null;
   return {
     samples: samples.length,
     droppedSamples: captures.reduce((total, capture) => total + capture.dropped, 0),
@@ -145,27 +179,27 @@ export function summarizeRenderPhase(captures: readonly RenderSnapshotCapture[])
       above16_67ms: frameIntervals.filter((value) => value > 16.67).length,
       above33_33ms: frameIntervals.filter((value) => value > 33.33).length,
     },
-    cpuMs: summary(column(1)),
-    simulationMs: summary(column(2)),
-    streamingMs: summary(column(3)),
-    renderSubmissionMs: summary(column(4)),
+    cpuMs: summary(samples.map((sample) => sample.cpuMs)),
+    simulationMs: summary(samples.map((sample) => sample.simulationMs)),
+    streamingMs: summary(samples.map((sample) => sample.streamingMs)),
+    renderSubmissionMs: summary(samples.map((sample) => sample.renderSubmissionMs)),
     unattributedCpuMs: summary(unattributedCpu),
     renderCpu: {
-      cullMs: summary(column(6)),
-      encodeMs: summary(column(7)),
-      submitMs: summary(column(8)),
-      testedSlices: summary(column(9)),
-      selectedSlices: summary(column(10)),
+      cullMs: summary(samples.map((sample) => sample.renderCullMs)),
+      encodeMs: summary(samples.map((sample) => sample.renderEncodeMs)),
+      submitMs: summary(samples.map((sample) => sample.renderSubmitMs)),
+      testedSlices: summary(samples.map((sample) => sample.testedSlices)),
+      selectedSlices: summary(samples.map((sample) => sample.selectedSlices)),
     },
     gpu: {
-      available: gpuSamples.length > 0,
-      samples: gpuSamples.length,
+      available: coveredGpuSamples.length > 0,
+      samples: coveredGpuSamples.length,
       droppedSamples: captures.reduce((total, capture) => total + capture.gpuDropped, 0),
       frameCoverage: frameIds.size > 0 ? coveredGpuSamples.length / frameIds.size : 0,
       totalMs: gpuSummary("total"),
       shadowMs: gpuSummary("shadow"),
       shadowCascadeMs:
-        gpuSamples.length > 0
+        coveredGpuSamples.length > 0
           ? [
               summary(gpuColumn("shadowCascade0")),
               summary(gpuColumn("shadowCascade1")),
