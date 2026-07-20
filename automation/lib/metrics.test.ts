@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
-import { numericSummary, percentile, percentileOrNull, rounded } from "./metrics.ts";
+import {
+  externalProcessCpuPercent,
+  numericSummary,
+  percentile,
+  percentileOrNull,
+  rounded,
+} from "./metrics.ts";
 
 describe("shared harness metrics", () => {
   it("uses nearest-rank percentiles consistently", () => {
@@ -27,5 +33,20 @@ describe("shared harness metrics", () => {
     expect(() => percentile([1], 1.1)).toThrow("between zero and one");
     expect(() => rounded(Number.NaN)).toThrow("must be finite");
     expect(() => rounded(1, 13)).toThrow("between zero and twelve");
+  });
+
+  it("excludes the complete benchmark process tree from host contention", () => {
+    expect(
+      externalProcessCpuPercent(
+        [
+          { pid: 10, parentPid: 1, cpuPercent: 4 },
+          { pid: 20, parentPid: 10, cpuPercent: 90 },
+          { pid: 21, parentPid: 20, cpuPercent: 120 },
+          { pid: 30, parentPid: 1, cpuPercent: 350 },
+          { pid: 31, parentPid: 30, cpuPercent: 50 },
+        ],
+        10,
+      ),
+    ).toBe(400);
   });
 });

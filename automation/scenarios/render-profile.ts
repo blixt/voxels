@@ -13,6 +13,11 @@ import {
   type RenderPhaseSummary,
   type RenderSnapshotCapture,
 } from "../lib/render-metrics.ts";
+import {
+  sampleHostContention,
+  summarizeHostContention,
+  type HostContentionSample,
+} from "../lib/metrics.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { startWorldStack } from "../lib/world.ts";
 import type { WorldSource } from "../lib/world.ts";
@@ -20,6 +25,7 @@ import type { WasmBuildProfile } from "../../scripts/build-wasm.ts";
 
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed/i;
+const MAX_EXTERNAL_HOST_CAPACITY_PERCENT = 30;
 
 function missed120HzFrameGate(phase: RenderPhaseSummary): boolean {
   // Use sustained percentiles for the display-paced gate while still rejecting
@@ -370,15 +376,23 @@ async function sustainedProfile(
   engine: EngineClient,
   route: "loop" | "directional" = "loop",
   expectedDurationSeconds = 90,
+  initialHostContention: readonly HostContentionSample[] = [],
 ) {
   const profileId = route === "directional" ? 2 : 1;
   await engine.snapshot();
   await engine.startProfile(profileId);
   const captures: RenderSnapshotCapture[] = [];
+  const hostContentionSamples = [...initialHostContention];
+  let nextHostContentionSampleAt = Date.now() + 5_000;
   const deadline = Date.now() + (expectedDurationSeconds + 60) * 1_000;
   while (Date.now() < deadline) {
     const next = await captureRenderSnapshot(engine);
     captures.push(next);
+    if (Date.now() >= nextHostContentionSampleAt) {
+      const sample = await sampleHostContention();
+      if (sample !== null) hostContentionSamples.push(sample);
+      nextHostContentionSampleAt = Date.now() + 5_000;
+    }
     if (
       snapshotValue(next.snapshot, "profileComplete") === 1 &&
       snapshotValue(next.snapshot, "pendingJobs") === 0 &&
@@ -465,6 +479,10 @@ async function sustainedProfile(
   const range = (values: readonly number[]): number =>
     values.length === 0 ? 0 : Math.max(...values) - Math.min(...values);
   const performanceCaptures = route === "directional" ? moving : measured;
+  const hostContention = summarizeHostContention(hostContentionSamples);
+  const timingValid =
+    hostContention.samples > 0 &&
+    hostContention.externalCapacityPercent.p95 <= MAX_EXTERNAL_HOST_CAPACITY_PERCENT;
   const result = {
     measured: summarizeRenderPhase(performanceCaptures),
     streaming: summarizeStreamingPressure(moving),
@@ -529,6 +547,11 @@ async function sustainedProfile(
               0,
             ),
     },
+    hostContention: {
+      ...hostContention,
+      timingValid,
+      maximumExternalCapacityPercent: MAX_EXTERNAL_HOST_CAPACITY_PERCENT,
+    },
     final: {
       pendingJobs: snapshotValue(latest, "pendingJobs"),
       pendingMeshMiB: snapshotValue(latest, "pendingMeshMiB"),
@@ -549,11 +572,17 @@ async function sustainedProfile(
   if (result.highWater.pendingMeshes > 3) violations.push("pending mesh bound exceeded");
   if (result.final.pendingJobs !== 0) violations.push("queues did not drain");
   if (result.final.pendingMeshMiB !== 0) violations.push("pending mesh payload did not drain");
-  if (result.measured.frameMs.p95 > 12) violations.push("frame p95 above 12ms");
-  if (result.measured.frameMs.p99 > 16.67) violations.push("frame p99 above 16.67ms");
-  if (result.measured.cpuMs.p95 > 7.5) violations.push("worker CPU p95 above 7.5ms");
-  if (result.measured.streamingMs.p95 > 4.5) violations.push("streaming p95 above 4.5ms");
-  if (result.measured.frameMs.above33_33ms > 0) violations.push("frame exceeded 33.33ms");
+  if (!timingValid) {
+    violations.push(
+      `external host CPU p95 ${hostContention.externalCapacityPercent.p95.toFixed(1)}% exceeded ${MAX_EXTERNAL_HOST_CAPACITY_PERCENT}%`,
+    );
+  } else {
+    if (result.measured.frameMs.p95 > 12) violations.push("frame p95 above 12ms");
+    if (result.measured.frameMs.p99 > 16.67) violations.push("frame p99 above 16.67ms");
+    if (result.measured.cpuMs.p95 > 7.5) violations.push("worker CPU p95 above 7.5ms");
+    if (result.measured.streamingMs.p95 > 4.5) violations.push("streaming p95 above 4.5ms");
+    if (result.measured.frameMs.above33_33ms > 0) violations.push("frame exceeded 33.33ms");
+  }
   if (result.measured.droppedSamples > 0) violations.push("frame samples were dropped");
   if (route === "loop" && result.finalTwentySeconds.wasmCommittedRangeMiB > 1) {
     violations.push("WASM committed memory did not plateau");
@@ -582,18 +611,20 @@ async function sustainedProfile(
     }
     for (const epoch of result.epochs) {
       const label = `${epoch.startSeconds}-${epoch.endSeconds}s`;
-      if (epoch.performance.frameMs.p95 > 12) violations.push(`${label} frame p95 above 12ms`);
-      if (epoch.performance.frameMs.p99 > 16.67) {
-        violations.push(`${label} frame p99 above 16.67ms`);
-      }
-      if (epoch.performance.frameMs.above33_33ms > 0) {
-        violations.push(`${label} frame exceeded 33.33ms`);
-      }
-      if (epoch.performance.cpuMs.p95 > 7.5) {
-        violations.push(`${label} worker CPU p95 above 7.5ms`);
-      }
-      if (epoch.performance.streamingMs.p95 > 4.5) {
-        violations.push(`${label} streaming p95 above 4.5ms`);
+      if (timingValid) {
+        if (epoch.performance.frameMs.p95 > 12) violations.push(`${label} frame p95 above 12ms`);
+        if (epoch.performance.frameMs.p99 > 16.67) {
+          violations.push(`${label} frame p99 above 16.67ms`);
+        }
+        if (epoch.performance.frameMs.above33_33ms > 0) {
+          violations.push(`${label} frame exceeded 33.33ms`);
+        }
+        if (epoch.performance.cpuMs.p95 > 7.5) {
+          violations.push(`${label} worker CPU p95 above 7.5ms`);
+        }
+        if (epoch.performance.streamingMs.p95 > 4.5) {
+          violations.push(`${label} streaming p95 above 4.5ms`);
+        }
       }
       if (epoch.streaming.readiness.canonicalPresentationRatio !== 1) {
         violations.push(`${label} did not present canonical terrain continuously`);
@@ -771,6 +802,21 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
     await engine.setCameraLook(options.cameraLook[0], options.cameraLook[1]);
   }
   const settledMilliseconds = performance.now() - navigationStarted;
+  const hostContentionPreflight = await sampleHostContention();
+  if (
+    hostContentionPreflight !== null &&
+    hostContentionPreflight.externalCapacityPercent > MAX_EXTERNAL_HOST_CAPACITY_PERCENT
+  ) {
+    await context.artifacts.writeJson(
+      "host contention preflight",
+      "host-contention.json",
+      hostContentionPreflight,
+    );
+    throw new Error(
+      `render profile host is busy: external CPU ${hostContentionPreflight.externalCapacityPercent.toFixed(1)}% exceeds ${MAX_EXTERNAL_HOST_CAPACITY_PERCENT}% of machine capacity`,
+    );
+  }
+  const initialHostContention = hostContentionPreflight === null ? [] : [hostContentionPreflight];
   let traceSession = options.trace ? await startChromiumTrace(page.context(), page) : undefined;
   let traceMetrics: Record<string, number> | undefined;
   context.defer("unfinished Chromium trace", async () => {
@@ -788,11 +834,16 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
       steady: summarizeRenderPhase(await sampleRenderSnapshots(engine, 4_000)),
     };
   } else if (options.mode === "sustained") {
-    const outcome = await sustainedProfile(engine);
+    const outcome = await sustainedProfile(engine, "loop", 90, initialHostContention);
     scenarios = { sustained: outcome.result };
     scenarioViolations.push(...outcome.violations);
   } else if (options.mode === "directional") {
-    const outcome = await sustainedProfile(engine, "directional", options.exploreSeconds);
+    const outcome = await sustainedProfile(
+      engine,
+      "directional",
+      options.exploreSeconds,
+      initialHostContention,
+    );
     scenarios = { directional: outcome.result };
     scenarioViolations.push(...outcome.violations);
   } else if (options.mode === "materials") {
@@ -833,7 +884,7 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
   }
   const result = {
     ok: scenarioViolations.length === 0,
-    schemaVersion: 4,
+    schemaVersion: 5,
     commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
     dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "",
     build: options.buildProfile,
@@ -857,6 +908,7 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
     viewport: { ...options.viewport, deviceScaleFactor: options.deviceScaleFactor },
     browser: { version: browser.version },
     startup: { settledMilliseconds },
+    hostContentionPreflight,
     ...scenarios,
     trace: options.trace ? { performanceMetrics: traceMetrics } : null,
     violations: scenarioViolations,
