@@ -431,6 +431,21 @@ fn edited_far_surface(criterion: &mut Criterion) {
             bencher.iter(|| generate_edited_surface_tile_mesh(generator, &edits, coord));
         },
     );
+
+    let mut same_x_edits = EditMap::default();
+    for index in 0..10_000 {
+        same_x_edits.insert_override(
+            VoxelCoord::new(0, 80, 1_000_000 + index * CHUNK_EDGE as i32),
+            Material::Stone,
+        );
+    }
+    let local = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0);
+    criterion.bench_function(
+        "snapshot surface tile with 10k same-X distant edits",
+        |bencher| {
+            bencher.iter(|| same_x_edits.snapshot_for_surface_tiles(black_box(&[local])));
+        },
+    );
 }
 
 criterion_group!(

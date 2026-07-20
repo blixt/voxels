@@ -8,6 +8,28 @@ Performance changes must keep a reproducible before/after number beside the arch
 the change. Native Criterion results are stable microbenchmarks for portable Rust algorithms; browser
 Mission Control and `window.__VOXELS__.snapshot()` cover integrated frame pacing and residency.
 
+## 2026-07-20: spatially bounded edit snapshots
+
+`EditMap` stores chunk keys in X/Z/Y order, but surface snapshots previously bounded their tree range
+only by X. A local tile therefore scanned every distant edit sharing its X strip before filtering by
+Z. The range now selects the requested chunk-Z interval separately for each chunk X while retaining
+all vertical chunks needed to reconstruct edited surfaces.
+
+On the same Apple M3 Max, Criterion used 50 samples and a two-second measurement window:
+
+```sh
+vp run automation -- run bench-world \
+  --filter='snapshot surface tile with 10k same-X distant edits' \
+  --sample-size=50 --measurement-seconds=2
+```
+
+| Operation                                           |  Before |    After | Change |
+| --------------------------------------------------- | ------: | -------: | -----: |
+| Snapshot a local tile with 10k same-X distant edits | 52.0 µs | 0.182 µs | -99.7% |
+
+The benchmark result remains empty on both sides; host tests also cover negative coordinates and both
+signed world boundaries. The improvement changes lookup locality only, not snapshot contents.
+
 ## 2026-07-11: streamed chunk preparation
 
 Measured on an Apple M3 Max with Rust 1.97.0 using the release-profile command below. Criterion used

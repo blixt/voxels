@@ -369,8 +369,17 @@ impl EditMap {
         let max_chunk_x = (max_x - 1)
             .div_euclid(CHUNK_EDGE as i64)
             .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-        self.chunks
-            .range((min_chunk_x, i32::MIN, i32::MIN)..=(max_chunk_x, i32::MAX, i32::MAX))
+        let min_chunk_z = min_z
+            .div_euclid(CHUNK_EDGE as i64)
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        let max_chunk_z = (max_z - 1)
+            .div_euclid(CHUNK_EDGE as i64)
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        (min_chunk_x..=max_chunk_x)
+            .flat_map(move |chunk_x| {
+                self.chunks
+                    .range((chunk_x, min_chunk_z, i32::MIN)..=(chunk_x, max_chunk_z, i32::MAX))
+            })
             .flat_map(move |(&(chunk_x, chunk_z, chunk_y), chunk)| {
                 let origin = ChunkCoord::new(chunk_x, chunk_y, chunk_z).world_origin();
                 chunk
@@ -1141,8 +1150,10 @@ mod tests {
     }
 
     #[test]
-    fn surface_snapshots_include_positive_world_boundary_edits() {
+    fn surface_snapshots_include_world_boundary_edits() {
         for coord in [
+            VoxelCoord::new(i32::MIN, 17, 7),
+            VoxelCoord::new(7, 17, i32::MIN),
             VoxelCoord::new(i32::MAX, 17, 7),
             VoxelCoord::new(7, 17, i32::MAX),
         ] {
@@ -1155,6 +1166,22 @@ mod tests {
 
             assert_eq!(snapshot.override_at(coord), Some(Material::Basalt));
         }
+    }
+
+    #[test]
+    fn surface_snapshots_ignore_distant_edits_in_the_same_x_strip() {
+        let local = VoxelCoord::new(7, -800, -9);
+        let distant = VoxelCoord::new(7, 900, 1_000_000);
+        let mut edits = EditMap::default();
+        edits.insert_override(local, Material::Stone);
+        edits.insert_override(distant, Material::Wood);
+        let tile = SurfaceTileCoord::containing(crate::SurfaceLodLevel::Stride2, local.x, local.z);
+
+        let snapshot = edits.snapshot_for_surface_tiles(&[tile]);
+
+        assert_eq!(snapshot.override_at(local), Some(Material::Stone));
+        assert_eq!(snapshot.override_at(distant), None);
+        assert_eq!(snapshot.len(), 1);
     }
 
     #[test]
