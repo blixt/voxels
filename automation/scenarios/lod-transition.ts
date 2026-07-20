@@ -3,6 +3,7 @@ import type { Page } from "playwright";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import { BrowserCapability, chromeWebGpuLaunchOptions } from "../lib/browser.ts";
 import { type EngineClient, SNAPSHOT, snapshotValue } from "../lib/engine.ts";
+import { analyzeDiagnosticSky } from "../lib/image.ts";
 import { frameSamples, gpuFrameSamples } from "../lib/render-metrics.ts";
 import { percentile } from "../lib/metrics.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
@@ -348,39 +349,6 @@ async function compareScreenshots(page: Page, before: Buffer, after: Buffer) {
         0.2126 * linear(at(pixels, index)) +
         0.7152 * linear(at(pixels, index + 1)) +
         0.0722 * linear(at(pixels, index + 2));
-      const isolatedSkyExposures = (pixels: Uint8ClampedArray) => {
-        // Stay below the irregular tree-lined horizon: this measures pale sky samples fully
-        // enclosed by the valley terrain, the one-pixel signature of an uncovered far-LOD
-        // T-junction. Keep a few coordinates so a failure is immediately reproducible.
-        const crackRoi = { ...roi, y0: Math.max(roi.y0, Math.floor(left.height * 0.3)) };
-        const skyLike = (x: number, y: number): boolean => {
-          const index = (x + y * left.width) * 4;
-          const red = at(pixels, index);
-          const green = at(pixels, index + 1);
-          const blue = at(pixels, index + 2);
-          return red > 150 && green > 160 && blue > 180 && blue > red * 1.05;
-        };
-        let count = 0;
-        const coordinates: Vector2[] = [];
-        for (let y = crackRoi.y0 + 1; y < crackRoi.y1 - 1; y += 1) {
-          for (let x = crackRoi.x0 + 1; x < crackRoi.x1 - 1; x += 1) {
-            if (!skyLike(x, y)) continue;
-            let skyNeighbours = 0;
-            for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
-              for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
-                if ((offsetX !== 0 || offsetY !== 0) && skyLike(x + offsetX, y + offsetY)) {
-                  skyNeighbours += 1;
-                }
-              }
-            }
-            if (skyNeighbours === 0) {
-              count += 1;
-              if (coordinates.length < 16) coordinates.push([x, y]);
-            }
-          }
-        }
-        return { count, coordinates, roi: crackRoi };
-      };
       let count = 0;
       let sumLeft = 0;
       let sumRight = 0;
@@ -447,16 +415,11 @@ async function compareScreenshots(page: Page, before: Buffer, after: Buffer) {
       const c1 = 0.01 ** 2;
       const c2 = 0.03 ** 2;
       const pixels = (roi.x1 - roi.x0) * (roi.y1 - roi.y0);
-      const isolatedSkyExposurePixels = {
-        before: isolatedSkyExposures(left.pixels),
-        after: isolatedSkyExposures(right.pixels),
-      };
       return {
         roi,
         pixels,
         comparisonSamples: count,
         comparisonFootprintPixels: footprint,
-        isolatedSkyExposurePixels,
         nearBlackPixelFraction: {
           before: leftNearBlackPixels / pixels,
           after: rightNearBlackPixels / pixels,
@@ -476,116 +439,14 @@ async function compareScreenshots(page: Page, before: Buffer, after: Buffer) {
 }
 
 async function analyzeWatertightTerrain(page: Page, screenshot: Buffer) {
-  return page.evaluate(async (base64: string) => {
-    const at = (values: ArrayLike<number>, index: number): number => {
-      const value = values[index];
-      if (value === undefined) throw new Error(`watertight analysis omitted value ${index}`);
-      return value;
-    };
-    const response = await fetch(`data:image/png;base64,${base64}`);
-    const bitmap = await createImageBitmap(await response.blob());
-    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-    const context = canvas.getContext("2d", { willReadFrequently: true });
-    if (context === null) throw new Error("watertight analysis canvas is unavailable");
-    context.drawImage(bitmap, 0, 0);
-    const pixels = context.getImageData(0, 0, bitmap.width, bitmap.height).data;
-    // This fixed camera looks down onto uninterrupted terrain here. The historical crack exposed
-    // the red/brown sky in one large triangle; terrain at this fixture is green or neutral.
-    const roi = {
-      x0: Math.floor(bitmap.width * 0.4),
-      x1: Math.ceil(bitmap.width * 0.88),
-      y0: Math.floor(bitmap.height * 0.52),
-      y1: Math.ceil(bitmap.height * 0.605),
-    };
-    const width = roi.x1 - roi.x0;
-    const height = roi.y1 - roi.y0;
-    const skyLike = new Uint8Array(width * height);
-    const coolExposure = new Uint8Array(width * height);
-    let skyLikePixels = 0;
-    let coolExposurePixels = 0;
-    for (let y = roi.y0; y < roi.y1; y += 1) {
-      for (let x = roi.x0; x < roi.x1; x += 1) {
-        const source = (x + y * bitmap.width) * 4;
-        const red = at(pixels, source);
-        const green = at(pixels, source + 1);
-        const blue = at(pixels, source + 2);
-        const target = x - roi.x0 + (y - roi.y0) * width;
-        const exposedSky = red > 25 && red > green * 1.35 && red > blue * 1.08;
-        if (exposedSky) {
-          skyLike[target] = 1;
-          skyLikePixels += 1;
-        }
-        // The reported boundary crack exposed a cool, bright cloud/sky layer rather than the
-        // reddish horizon covered by the original gate. Grass is green-dominant in this fixed
-        // fixture, so this also remains insensitive to normal terrain lighting changes.
-        const exposedCoolSky = (red + green + blue) / 3 > 61 && green < Math.max(red, blue) * 1.18;
-        if (exposedCoolSky) {
-          coolExposure[target] = 1;
-          coolExposurePixels += 1;
-        }
-      }
-    }
-    const connectedComponentSummary = (mask: Uint8Array) => {
-      const visited = new Uint8Array(mask.length);
-      let largest = 0;
-      let largestBroad = 0;
-      for (let start = 0; start < mask.length; start += 1) {
-        if (mask[start] === 0 || visited[start] !== 0) continue;
-        const stack: number[] = [start];
-        visited[start] = 1;
-        let component = 0;
-        let minX = width;
-        let maxX = 0;
-        let minY = height;
-        let maxY = 0;
-        while (stack.length > 0) {
-          const current = stack.pop();
-          if (current === undefined) break;
-          component += 1;
-          const x = current % width;
-          const y = Math.floor(current / width);
-          minX = Math.min(minX, x);
-          maxX = Math.max(maxX, x);
-          minY = Math.min(minY, y);
-          maxY = Math.max(maxY, y);
-          const neighbors = [
-            x > 0 ? current - 1 : -1,
-            x + 1 < width ? current + 1 : -1,
-            y > 0 ? current - width : -1,
-            y + 1 < height ? current + width : -1,
-          ];
-          for (const neighbor of neighbors) {
-            if (neighbor < 0 || mask[neighbor] === 0 || visited[neighbor] !== 0) continue;
-            visited[neighbor] = 1;
-            stack.push(neighbor);
-          }
-        }
-        largest = Math.max(largest, component);
-        // Red/brown tree trunks share the original horizon-color predicate, but are narrow and
-        // vertical. The regression this fixture owns is a broad triangular terrain opening.
-        if (maxX - minX + 1 >= 32 && maxY - minY + 1 >= 4) {
-          largestBroad = Math.max(largestBroad, component);
-        }
-      }
-      return { largest, largestBroad };
-    };
-    const skyLikeComponents = connectedComponentSummary(skyLike);
-    const coolExposureComponents = connectedComponentSummary(coolExposure);
-    const sampledPixels = skyLike.length;
-    return {
-      roi,
-      sampledPixels,
-      skyLikePixels,
-      skyLikeFraction: skyLikePixels / sampledPixels,
-      largestSkyLikeComponent: skyLikeComponents.largest,
-      largestBroadSkyLikeComponent: skyLikeComponents.largestBroad,
-      largestBroadSkyLikeFraction: skyLikeComponents.largestBroad / sampledPixels,
-      coolExposurePixels,
-      coolExposureFraction: coolExposurePixels / sampledPixels,
-      largestCoolExposureComponent: coolExposureComponents.largest,
-      largestCoolExposureFraction: coolExposureComponents.largest / sampledPixels,
-    };
-  }, screenshot.toString("base64"));
+  // This fixed camera looks down onto uninterrupted terrain. With the diagnostic fixture active,
+  // any magenta sample in this band is the actual atmospheric background leaking through geometry.
+  return analyzeDiagnosticSky(page, screenshot, {
+    x0: 0.4,
+    x1: 0.88,
+    y0: 0.52,
+    y1: 0.605,
+  });
 }
 
 function summarizePerformance(timings: LodTimings) {
@@ -727,6 +588,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       spawnPillarRadiusVoxels: options.pillarRadius,
       cascadedShadows: options.cascadedShadows,
       screenSpaceAmbientOcclusion: options.screenSpaceAmbientOcclusion,
+      diagnosticSkyRgb: [255, 0, 255],
       dayLengthSeconds: 0,
       dayFractionAtUnixEpoch: 0.5,
       weatherCycleSeconds: 0,
@@ -805,19 +667,13 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     await sampleStablePerformance(page, engine, timings, 2_000);
     const image = headingSamples.reduce(
       (worst, sample) =>
-        sample.image.largestCoolExposureComponent > worst.largestCoolExposureComponent
-          ? sample.image
-          : worst,
+        sample.image.largestComponentPixels > worst.largestComponentPixels ? sample.image : worst,
       headingSamples[0]?.image ?? (await analyzeWatertightTerrain(page, before)),
     );
     const performance = summarizePerformance(timings);
     const violations: string[] = [];
-    if (!boundaryCoverage) {
-      if (image.largestBroadSkyLikeComponent > 32)
-        violations.push("terrain-only ROI contains a connected sky-colored crack");
-    }
-    if (image.largestCoolExposureComponent > 256)
-      violations.push("terrain-only ROI contains a connected cool sky/cloud exposure");
+    if (image.diagnosticSkyPixels > 0)
+      violations.push("terrain-only ROI exposes the diagnostic magenta sky");
     if (performance.frameP95Ms > 12) violations.push("frame p95 exceeded 12ms");
     if (performance.fractionAbove16_67Ms > 0.01)
       violations.push("over 1% of measured frames exceeded 16.67ms");
@@ -884,7 +740,18 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     const afterVideoSeconds = (Date.now() - videoStartedAtMs) / 1_000;
     if (options.recordVideo) await page.waitForTimeout(1_500);
     await sampleStablePerformance(page, engine, timings, 2_000);
-    const image = await compareScreenshots(page, before, after);
+    const [comparison, beforeSkyExposure, afterSkyExposure] = await Promise.all([
+      compareScreenshots(page, before, after),
+      analyzeDiagnosticSky(page, before, { x0: 0.02, x1: 0.46, y0: 0.3, y1: 0.58 }),
+      analyzeDiagnosticSky(page, after, { x0: 0.02, x1: 0.46, y0: 0.3, y1: 0.58 }),
+    ]);
+    const image = {
+      ...comparison,
+      diagnosticSkyExposure: {
+        before: beforeSkyExposure,
+        after: afterSkyExposure,
+      },
+    };
     const performance = summarizePerformance(timings);
     const planarPoseErrorMetres = planarDistance(beforePose, afterPose);
     const poseErrorMetres = spatialDistance(beforePose, afterPose);
@@ -903,10 +770,10 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       violations.push("over 10% of valley pixels rendered near-black");
     }
     if (
-      image.isolatedSkyExposurePixels.before.count > 0 ||
-      image.isolatedSkyExposurePixels.after.count > 0
+      image.diagnosticSkyExposure.before.diagnosticSkyPixels > 0 ||
+      image.diagnosticSkyExposure.after.diagnosticSkyPixels > 0
     ) {
-      violations.push("valley terrain contains isolated sky-exposure pixels");
+      violations.push("valley terrain exposes the diagnostic magenta sky");
     }
     if (image.ssim < 0.97) violations.push("valley SSIM fell below 0.97");
     if (performance.frameP95Ms > 12) violations.push("frame p95 exceeded 12ms");
