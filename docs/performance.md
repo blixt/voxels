@@ -6,7 +6,7 @@ surfaces, is [Testing and performance](testing.md).
 
 Performance changes must keep a reproducible before/after number beside the architectural reason for
 the change. Native Criterion results are stable microbenchmarks for portable Rust algorithms; browser
-Mission Control and `window.__VOXELS__.snapshot()` cover integrated frame pacing and residency.
+World Lab and `window.__VOXELS__.snapshot()` cover integrated frame pacing and residency.
 
 ## 2026-07-20: spatially bounded edit snapshots
 

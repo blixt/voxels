@@ -103,11 +103,11 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 - `web/`: the single body canvas, normalized input transport, pointer lock, and worker boot only. All
   visible HUD, status, crosshair, controls, menus, and text are composed by Rust/WGPU.
 
-The canonical world is generator identity plus sparse edits. Near meshes and six streamed surface LOD
-rings are derived caches; the rings sample at 0.2, 0.4, 0.8, 1.6, 3.2, and 6.4 m while the editable
-near field retains authoritative 10 cm voxels. The two horizon-only rings are capped background
-prefetches and extend default coverage to 1 km without delaying the four interactive rings. The current
-generator shares one regional surface sample across canonical
+The canonical world is generator identity plus sparse edits. Near meshes and eight streamed surface
+LOD rings are derived caches; the rings sample at 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, and 25.6 m
+while the editable near field retains authoritative 10 cm voxels. The four horizon-only rings are
+capped background prefetches and extend default coverage to 2.4 km without delaying the four
+interactive rings. The current generator shares one regional surface sample across canonical
 chunks and every LOD, blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
 Grid-aligned Rust draw ownership selects whole surface patches, closes resolution boundaries with
 exact connectors built from the resident coarse and fine height profiles, and activates a newly
@@ -123,7 +123,7 @@ distance-stable mip chain, without changing geometry, draw ownership, or durable
 The 753 m First Pilgrim Road is a stable Rust polyline graded through those same canonical columns.
 Its 10 cm paving, shoulders, 26 cairns/waystones/arches, five named chapters, and alpine Needle Gate
 destination remain editable, collidable, and continuous through every interactive LOD rather than
-becoming renderer-only decals. Mission Control derives chapter and progress status from the Rust atlas.
+becoming renderer-only decals. World Lab derives chapter and progress status from the Rust atlas.
 See [docs/architecture.md](docs/architecture.md) for format, authority, and research decisions.
 
 ## Controls
@@ -158,9 +158,9 @@ repeating spherical observer frame while the editable terrain itself remains inf
 `window.__VOXELS__.snapshot()` returns a versioned numeric telemetry stream for browser automation.
 It contains camera, renderer, streaming, memory, water, GPU, sustained-profile, frame-history, and
 edit-convergence records. It is intentionally an automation hook rather than a second JavaScript game
-model; the browser owns no simulation or UI state. `submitEdit(...)` and `surfaceEditState(...)`
-exercise the production server-edit path and expose only bounded convergence state for multiplayer
-regression tests.
+model; the browser owns no simulation or UI state. `submitPlace(...)`, `submitDig(...)`, and
+`surfaceEditState(...)` exercise the production server-edit path and expose only bounded convergence
+state for multiplayer regression tests.
 
 The same typed boundary can operate a product-facing observer without granting edit authority:
 

@@ -56,9 +56,9 @@ Rust enum layout and Serde output are not wire formats.
    vicinity, then reorders ordinary queued chunks every frame by the configured camera cone and
    velocity-predicted focus. Surface work stays spatially ordered because each level activates
    atomically; it starts with stride-16, stride-8, stride-4, then stride-2 coverage. Once that complete
-   set and exact near chunks are ready, stride-64 and stride-32 horizon batches run as `Prefetch`
-   work. The server caps global prefetch workers, so kilometre silhouettes cannot consume all
-   generation capacity.
+   set and exact near chunks are ready, stride-32, stride-64, stride-128, and stride-256 horizon
+   batches run as `Prefetch` work. The server caps global prefetch workers, so kilometre silhouettes
+   cannot consume all generation capacity.
 4. The browser concurrently submits exact chunk-coordinate batches in that priority order. VXWP
    preserves the ordered coordinates, request ID, and coordinate keys; every decoded product is
    checked against the negotiated source identity. Directional priority changes no cache key,

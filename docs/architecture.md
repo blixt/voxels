@@ -68,14 +68,14 @@ handles underside refraction and total internal reflection. Simulation values re
 unsmoothed. Rust/WGPU chrome reports immersion/depth and re-opens a Rust-rendered swim-help toast on
 entry. Disabling animated water changes rendering only, never authoritative fluid physics.
 
-Six independently streamable surface levels derive from the same generator and sparse edit overlay at
-0.2, 0.4, 0.8, 1.6, 3.2, and 6.4 m sampling strides. The first four are interactive rings; the two
-coarsest are horizon-only prefetches. Each tile covers 32 samples per side and emits a top plus
-vertical boundary faces down to lower neighbors, including samples across tile boundaries, so
-separately generated tiles form a closed shell. The outer levels extend beyond the 220 m shadow/fog
-detail range to the configured 1 km view distance; missing finer levels temporarily reveal complete
-coarse parents instead of a hole. All surface meshes remain disposable derivatives: the generator,
-10 cm voxels, and sparse edits stay authoritative.
+Eight independently streamable surface levels derive from the same generator and sparse edit overlay
+at 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, and 25.6 m sampling strides. The first four are interactive
+rings; the four coarsest are horizon-only prefetches. Each tile covers 32 samples per side and emits a
+top plus vertical boundary faces down to lower neighbors, including samples across tile boundaries,
+so separately generated tiles form a closed shell. The outer levels extend beyond the 220 m
+shadow/fog detail range to the configured 2.4 km view distance; missing finer levels temporarily
+reveal complete coarse parents instead of a hole. All surface meshes remain disposable derivatives:
+the generator, 10 cm voxels, and sparse edits stay authoritative.
 
 Each surface level also derives an edit-aware, 2D-greedy water mask at the exact canonical sea Y.
 Water patches use the same CPU ownership bounds as terrain, but never inherit the lowered crack-hiding
@@ -186,7 +186,7 @@ Atlas schema v1 adds append-only Rust discriminants for six destinations and fiv
 schema v2 appends the Cinder Vault cave-system identity and its authored atlas definition.
 Each destination freezes its canonical X/Z and route station, with tests reconstructing the authored
 point to within one 10 cm voxel. The shell projects the camera onto the same route index, chooses the
-chapter, and forwards only that Rust state to the renderer. Mission Control draws the chapter and
+chapter, and forwards only that Rust state to the renderer. World Lab draws the chapter and
 whole-route percentage into its WGPU header; the browser receives no place names or UI model.
 
 Authored routes are compiled once into immutable Rust segment records containing squared length,
@@ -223,7 +223,7 @@ depth-aware 3x3 denoise preserves discontinuities, and the opaque color pass per
 upsample while loading the exact prepass depth. The combined AO attenuates only sky and ground bounce,
 never direct sunlight or dielectric highlights. There is deliberately no temporal history, so edits,
 teleports, and LOD replacement cannot leave ghost occlusion. The two half-resolution targets occupy
-1,843,200 bytes at 1280x720 and remain resident across the Rust Mission Control A/B toggle.
+1,843,200 bytes at 1280x720 and remain resident across the Rust World Lab A/B toggle.
 
 Directional sunlight uses three stable cascaded shadow maps in a portable `Depth32Float` texture
 array. Practical logarithmic/uniform splits prioritize the editable near field; each frustum slice is
@@ -332,7 +332,7 @@ cell, exact camera-to-source DDA remains authoritative. Across cells, the open g
 inside the light's finite selection range; disconnected or overly long routes are reported separately
 from rock-occluded and budget-clipped candidates. This permits legitimate around-corner tunnel light
 without allowing a nearby Euclidean source to cross the cave shell.
-Mission Control renders active/candidate lights, rock and path rejections, open portal count, and
+World Lab renders active/candidate lights, rock and path rejections, open portal count, and
 topology revision in its WGPU statistics card; these values are not a browser overlay.
 
 The portal probe voxel API is canonical world data rather than a browser fixture. Host Rust tests
