@@ -1,3 +1,9 @@
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "invalid deterministic benchmark fixtures must fail instead of silently skipping samples"
+)]
+
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use voxels_world::codec::{decode_chunk, encode_chunk};

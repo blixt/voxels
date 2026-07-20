@@ -1,3 +1,8 @@
+#![allow(
+    clippy::expect_used,
+    reason = "invalid deterministic benchmark fixtures must fail instead of silently measuring a no-op"
+)]
+
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use voxels_runtime::{
