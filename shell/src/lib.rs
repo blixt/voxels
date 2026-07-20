@@ -572,6 +572,7 @@ mod web {
         surface_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         touch_inventory_drag: Cell<Option<[f32; 2]>>,
         profile: RefCell<ProfileAutomation>,
+        profile_restore_camera: Cell<Option<CameraState>>,
         profile_tracked_high: Cell<usize>,
         profile_surface_high: Cell<usize>,
         profile_pending_high: Cell<usize>,
@@ -633,7 +634,9 @@ mod web {
 
         fn start_stream_profile(&self, route: ProfileRoute) -> bool {
             self.input.borrow_mut().clear();
-            let position = self.camera.borrow().position;
+            let camera = *self.camera.borrow();
+            let position = camera.position;
+            self.profile_restore_camera.set(Some(camera));
             self.profile.borrow_mut().start_route_at_speed(
                 position,
                 route,
@@ -669,6 +672,13 @@ mod web {
             let spectator_available = self.spectator_available();
             let gliding_available = self.gliding_available();
             let mut camera = self.camera.borrow_mut();
+            if self.profile.borrow().phase() == ProfilePhase::Complete
+                && let Some(restore) = self.profile_restore_camera.take()
+            {
+                *camera = restore;
+                self.input.borrow_mut().clear();
+                self.simulation_accumulator.set(0.0);
+            }
             camera.set_gliding_available(gliding_available);
             if !spectator_available && camera.locomotion() == LocomotionMode::Spectator {
                 if let Some(body) = self.spectator_body.take() {
@@ -1748,6 +1758,9 @@ mod web {
         }
 
         fn prepare_stop(&self) {
+            if let Some(restore) = self.profile_restore_camera.take() {
+                *self.camera.borrow_mut() = restore;
+            }
             self.stopped.set(true);
             let id = self.frame_id.replace(0);
             if id != 0 {
@@ -3066,6 +3079,7 @@ mod web {
                 warmup_seconds: profiling.warmup_seconds,
                 measure_seconds: profiling.measure_seconds,
             })),
+            profile_restore_camera: Cell::new(None),
             profile_tracked_high: Cell::new(0),
             profile_surface_high: Cell::new(0),
             profile_pending_high: Cell::new(0),
