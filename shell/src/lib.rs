@@ -320,8 +320,8 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 3;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 35;
-    const FRAME_SAMPLE_WIDTH: u32 = 11;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 36;
+    const FRAME_SAMPLE_WIDTH: u32 = 14;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
         "cameraX,cameraY,cameraZ,yaw,pitch,grounded,quads,edits,residentChunks,trackedChunks,visibleChunks,drawCalls,",
@@ -427,8 +427,11 @@ mod web {
         render_ms: f32,
         frame_id: u32,
         render_cull_ms: f32,
+        render_lod_plan_ms: f32,
+        lod_plan_rebuild_reason: u32,
         render_encode_ms: f32,
         render_submit_ms: f32,
+        lod_ownership_refreshes: u32,
         tested_slices: u32,
         selected_slices: u32,
     }
@@ -474,8 +477,11 @@ mod web {
                     sample.render_ms,
                     sample.frame_id as f32,
                     sample.render_cull_ms,
+                    sample.render_lod_plan_ms,
+                    sample.lod_plan_rebuild_reason as f32,
                     sample.render_encode_ms,
                     sample.render_submit_ms,
+                    sample.lod_ownership_refreshes as f32,
                     sample.tested_slices as f32,
                     sample.selected_slices as f32,
                 ]);
@@ -1070,8 +1076,11 @@ mod web {
                 render_ms,
                 frame_id: frame_sequence,
                 render_cull_ms: rendered.cpu_cull_ms,
+                render_lod_plan_ms: rendered.cpu_lod_plan_ms,
+                lod_plan_rebuild_reason: rendered.lod_plan_rebuild_reason,
                 render_encode_ms: rendered.cpu_encode_ms,
                 render_submit_ms: rendered.cpu_submit_ms,
+                lod_ownership_refreshes: rendered.lod_ownership_refreshes,
                 tested_slices: rendered.draw_list_tested_slices,
                 selected_slices: rendered.draw_list_selected_slices,
             });

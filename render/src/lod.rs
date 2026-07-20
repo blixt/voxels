@@ -147,6 +147,22 @@ pub fn surface_patch_is_selected(
     canonical_ready_columns: &HashSet<(i32, i32)>,
     patch: SurfacePatchId,
 ) -> bool {
+    surface_patch_is_selected_with_incomplete_parents(
+        focus,
+        resident,
+        canonical_ready_columns,
+        &incomplete_resident_parents(resident),
+        patch,
+    )
+}
+
+fn surface_patch_is_selected_with_incomplete_parents(
+    focus: GeometricLodFocus,
+    resident: &HashSet<SurfacePatchId>,
+    canonical_ready_columns: &HashSet<(i32, i32)>,
+    incomplete_parents: &HashSet<SurfacePatchId>,
+    patch: SurfacePatchId,
+) -> bool {
     if !resident.contains(&patch) {
         return false;
     }
@@ -162,7 +178,7 @@ pub fn surface_patch_is_selected(
         if canonical_ready_columns.contains(&column) {
             return false;
         }
-        if refinement_blocked_by_ancestor(resident, patch) {
+        if refinement_blocked_by_ancestor(incomplete_parents, patch) {
             return false;
         }
         return patch.level == SurfaceLodLevel::Stride2
@@ -174,7 +190,9 @@ pub fn surface_patch_is_selected(
         unreachable!();
     };
     let ordering = patch.level.index().cmp(&target_level.index());
-    if ordering == std::cmp::Ordering::Less || refinement_blocked_by_ancestor(resident, patch) {
+    if ordering == std::cmp::Ordering::Less
+        || refinement_blocked_by_ancestor(incomplete_parents, patch)
+    {
         return false;
     }
     match ordering {
@@ -202,7 +220,7 @@ pub fn surface_patch_transition_is_candidate(
 /// construction then performs only constant-time membership checks instead of repeating ancestor
 /// walks for every patch. Transition candidates are geometric adjacencies only: the renderer must
 /// prove and install their complete connector geometry before suppressing either source edge.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub struct SurfacePatchSelection {
     patches: HashSet<SurfacePatchId>,
     transition_candidates: HashSet<(SurfacePatchId, u8)>,
@@ -215,11 +233,33 @@ impl SurfacePatchSelection {
         resident: &HashSet<SurfacePatchId>,
         canonical_ready_columns: &HashSet<(i32, i32)>,
     ) {
+        let incomplete_parents = incomplete_resident_parents(resident);
+        self.rebuild_with_incomplete_parents(
+            focus,
+            resident,
+            canonical_ready_columns,
+            &incomplete_parents,
+        );
+    }
+
+    pub(crate) fn rebuild_with_incomplete_parents(
+        &mut self,
+        focus: GeometricLodFocus,
+        resident: &HashSet<SurfacePatchId>,
+        canonical_ready_columns: &HashSet<(i32, i32)>,
+        incomplete_parents: &HashSet<SurfacePatchId>,
+    ) {
         self.patches.clear();
         self.transition_candidates.clear();
         self.patches
             .extend(resident.iter().copied().filter(|patch| {
-                surface_patch_is_selected(focus, resident, canonical_ready_columns, *patch)
+                surface_patch_is_selected_with_incomplete_parents(
+                    focus,
+                    resident,
+                    canonical_ready_columns,
+                    incomplete_parents,
+                    *patch,
+                )
             }));
         for patch in self.patches.iter().copied() {
             for edge in SurfacePatchEdge::ALL {
@@ -263,6 +303,10 @@ impl SurfacePatchSelection {
 
     pub fn patch_count(&self) -> usize {
         self.patches.len()
+    }
+
+    pub fn owned_patches(&self) -> impl Iterator<Item = SurfacePatchId> + '_ {
+        self.patches.iter().copied()
     }
 
     pub fn transition_candidates(
@@ -323,19 +367,29 @@ fn selected_surface_patch_at(
     })
 }
 
-fn refinement_blocked_by_ancestor(
+pub(crate) fn incomplete_resident_parents(
     resident: &HashSet<SurfacePatchId>,
-    patch: SurfacePatchId,
-) -> bool {
-    let mut descendant = patch;
-    while let Some(parent) = descendant.parent() {
-        if resident.contains(&parent)
-            && parent.children().is_some_and(|siblings| {
+) -> HashSet<SurfacePatchId> {
+    resident
+        .iter()
+        .copied()
+        .filter(|parent| {
+            parent.children().is_some_and(|siblings| {
                 siblings
                     .into_iter()
                     .any(|sibling| !resident.contains(&sibling))
             })
-        {
+        })
+        .collect()
+}
+
+fn refinement_blocked_by_ancestor(
+    incomplete_parents: &HashSet<SurfacePatchId>,
+    patch: SurfacePatchId,
+) -> bool {
+    let mut descendant = patch;
+    while let Some(parent) = descendant.parent() {
+        if incomplete_parents.contains(&parent) {
             return true;
         }
         descendant = parent;

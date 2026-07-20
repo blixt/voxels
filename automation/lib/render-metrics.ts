@@ -18,8 +18,11 @@ export interface FrameSample {
   readonly renderSubmissionMs: number;
   readonly frameId: number;
   readonly renderCullMs: number;
+  readonly renderLodPlanMs: number;
+  readonly lodPlanRebuildReason: number;
   readonly renderEncodeMs: number;
   readonly renderSubmitMs: number;
+  readonly lodOwnershipRefreshes: number;
   readonly testedSlices: number;
   readonly selectedSlices: number;
 }
@@ -84,10 +87,13 @@ export function frameSamples(snapshot: readonly number[]): FrameSample[] {
       renderSubmissionMs: required(snapshot, start + 4, "frame sample"),
       frameId: required(snapshot, start + 5, "frame sample"),
       renderCullMs: required(snapshot, start + 6, "frame sample"),
-      renderEncodeMs: required(snapshot, start + 7, "frame sample"),
-      renderSubmitMs: required(snapshot, start + 8, "frame sample"),
-      testedSlices: required(snapshot, start + 9, "frame sample"),
-      selectedSlices: required(snapshot, start + 10, "frame sample"),
+      renderLodPlanMs: required(snapshot, start + 7, "frame sample"),
+      lodPlanRebuildReason: required(snapshot, start + 8, "frame sample"),
+      renderEncodeMs: required(snapshot, start + 9, "frame sample"),
+      renderSubmitMs: required(snapshot, start + 10, "frame sample"),
+      lodOwnershipRefreshes: required(snapshot, start + 11, "frame sample"),
+      testedSlices: required(snapshot, start + 12, "frame sample"),
+      selectedSlices: required(snapshot, start + 13, "frame sample"),
     });
   }
   return samples;
@@ -313,8 +319,22 @@ export function summarizeRenderPhase(captures: readonly RenderSnapshotCapture[])
     unattributedCpuMs: summary(unattributedCpu),
     renderCpu: {
       cullMs: summary(samples.map((sample) => sample.renderCullMs)),
+      lodPlanMs: summary(samples.map((sample) => sample.renderLodPlanMs)),
+      lodPlanRebuilds: {
+        frames: samples.filter((sample) => sample.lodPlanRebuildReason !== 0).length,
+        focus: samples.filter((sample) => (sample.lodPlanRebuildReason & 1) !== 0).length,
+        canonicalColumns: samples.filter((sample) => (sample.lodPlanRebuildReason & 2) !== 0)
+          .length,
+        canonicalProfiles: samples.filter((sample) => (sample.lodPlanRebuildReason & 4) !== 0)
+          .length,
+        surfaceResidency: samples.filter((sample) => (sample.lodPlanRebuildReason & 8) !== 0)
+          .length,
+        surfaceProfiles: samples.filter((sample) => (sample.lodPlanRebuildReason & 16) !== 0)
+          .length,
+      },
       encodeMs: summary(samples.map((sample) => sample.renderEncodeMs)),
       submitMs: summary(samples.map((sample) => sample.renderSubmitMs)),
+      lodOwnershipRefreshes: summary(samples.map((sample) => sample.lodOwnershipRefreshes)),
       testedSlices: summary(samples.map((sample) => sample.testedSlices)),
       selectedSlices: summary(samples.map((sample) => sample.selectedSlices)),
     },

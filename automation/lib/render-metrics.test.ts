@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { SNAPSHOT } from "./engine.ts";
+import { FRAME_SAMPLE_WIDTH, SNAPSHOT } from "./engine.ts";
 import {
   frameSamples,
   summarizeRenderPhase,
@@ -24,8 +24,11 @@ describe("render metrics", () => {
           renderSubmissionMs: 1,
           frameId: 42,
           renderCullMs: 0.2,
+          renderLodPlanMs: 0.05,
+          lodPlanRebuildReason: 2,
           renderEncodeMs: 0.3,
           renderSubmitMs: 0.1,
+          lodOwnershipRefreshes: 2,
           testedSlices: 20,
           selectedSlices: 10,
         },
@@ -75,8 +78,11 @@ describe("render metrics", () => {
           renderSubmissionMs: 0.5,
           frameId: 8,
           renderCullMs: 0.1,
+          renderLodPlanMs: 0,
+          lodPlanRebuildReason: 0,
           renderEncodeMs: 0.2,
           renderSubmitMs: 0.1,
+          lodOwnershipRefreshes: 0,
           testedSlices: 20,
           selectedSlices: 10,
         },
@@ -124,7 +130,10 @@ describe("render metrics", () => {
   });
 
   it("decodes the Rust-owned frame sample layout once for every scenario", () => {
-    const snapshot = Array.from({ length: SNAPSHOT.droppedSamples + 1 + 11 }, () => 0);
+    const snapshot = Array.from(
+      { length: SNAPSHOT.droppedSamples + 1 + FRAME_SAMPLE_WIDTH },
+      () => 0,
+    );
     snapshot[SNAPSHOT.sampleCount] = 1;
     snapshot[SNAPSHOT.droppedSamples + 1] = 8.25;
     snapshot[SNAPSHOT.droppedSamples + 6] = 123;
