@@ -280,8 +280,8 @@ mod web {
     use std::rc::Rc;
     use voxels_client_config::ClientConfig;
     use voxels_core::{
-        CameraState, EnclosureSample, InputState, LocomotionMode, ProfileAutomation, ProfileConfig,
-        PLAYER_EYE_HEIGHT_METRES, PLAYER_HEIGHT_METRES, PLAYER_RADIUS_METRES, ProfilePhase,
+        CameraState, EnclosureSample, InputState, LocomotionMode, PLAYER_EYE_HEIGHT_METRES,
+        PLAYER_HEIGHT_METRES, PLAYER_RADIUS_METRES, ProfileAutomation, ProfileConfig, ProfilePhase,
         VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels, voxel_segment_is_clear,
     };
     use voxels_render::renderer::{
@@ -296,10 +296,9 @@ mod web {
         revision_satisfies,
     };
     use voxels_world::protocol::{
-        BrowserUserId, EDIT_CUBE_EDGE_VOXELS, EDIT_CUBE_VOLUME_VOXELS,
-        EDIT_SPHERE_RADIUS_VOXELS, EDIT_SPHERE_VOLUME_VOXELS, EditAction, EditShape, EditVolume,
-        MaterialInventory, PlayerId, PlayerIdentity, VoxelMutation, WorldCapabilities,
-        WorldEnvironmentSnapshot,
+        BrowserUserId, EDIT_CUBE_EDGE_VOXELS, EDIT_CUBE_VOLUME_VOXELS, EDIT_SPHERE_RADIUS_VOXELS,
+        EDIT_SPHERE_VOLUME_VOXELS, EditAction, EditShape, EditVolume, MaterialInventory, PlayerId,
+        PlayerIdentity, VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
     };
     use voxels_world::{
         AtmosphereSample, CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT_PORTAL_COUNT,
@@ -2341,14 +2340,7 @@ mod web {
 
         /// Deterministic browser-harness seam that submits through the same server-authoritative
         /// path as pointer input. It does not mutate local world state optimistically.
-        pub fn submit_place(
-            &self,
-            x: i32,
-            y: i32,
-            z: i32,
-            material_id: u16,
-            shape_id: u8,
-        ) -> bool {
+        pub fn submit_place(&self, x: i32, y: i32, z: i32, material_id: u16, shape_id: u8) -> bool {
             let Some(engine) = self.engine.as_ref() else {
                 return false;
             };

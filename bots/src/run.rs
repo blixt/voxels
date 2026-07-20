@@ -16,14 +16,14 @@ use voxels_core::{CameraState, InputState};
 #[cfg(test)]
 use voxels_world::protocol::EditShape;
 use voxels_world::protocol::{
-    BrowserUserId, ChunkBatchRequest, EditAction, EditCommand, FrameReassembler, MaterialInventory,
-    PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING, PlayerId, PlayerIdentity, PlayerPoseUpdate,
-    PresencePing, SurfaceTileBatchRequest, chunk_batch_result_kind, decode_chunk_batch_result,
-    decode_edit_commit, decode_error, decode_presence_delta, decode_presence_pong,
-    decode_resync_required, decode_surface_tile_batch_result, edit_commit_kind, encode_chunk_batch,
-    encode_edit_command, encode_player_pose, encode_presence_ping, encode_surface_tile_batch,
-    error_kind, message_kind, presence_delta_kind, presence_pong_kind, resync_required_kind,
-    surface_tile_batch_result_kind,
+    BrowserUserId, ChunkBatchRequest, EDIT_CUBE_VOLUME_VOXELS, EditAction, EditCommand, EditVolume,
+    FrameReassembler, MaterialInventory, PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING, PlayerId,
+    PlayerIdentity, PlayerPoseUpdate, PresencePing, SurfaceTileBatchRequest,
+    chunk_batch_result_kind, decode_chunk_batch_result, decode_edit_commit, decode_error,
+    decode_presence_delta, decode_presence_pong, decode_resync_required,
+    decode_surface_tile_batch_result, edit_commit_kind, encode_chunk_batch, encode_edit_command,
+    encode_player_pose, encode_presence_ping, encode_surface_tile_batch, error_kind, message_kind,
+    presence_delta_kind, presence_pong_kind, resync_required_kind, surface_tile_batch_result_kind,
 };
 use voxels_world::{
     ChunkCoord, Material, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
@@ -1017,7 +1017,8 @@ fn follower_leader(index: usize) -> Option<usize> {
 
 fn first_placeable(inventory: MaterialInventory) -> Option<Material> {
     Material::ALL.into_iter().find(|material| {
-        !matches!(material, Material::Air | Material::Water) && inventory.count(*material) > 0
+        !matches!(material, Material::Air | Material::Water)
+            && inventory.count(*material) >= EDIT_CUBE_VOLUME_VOXELS as u64
     })
 }
 
@@ -1040,17 +1041,23 @@ fn prepare_edit(cache: &ChunkCache, action: EditAction) -> Option<EditAction> {
             shape,
         } => {
             for _ in 0..=MAX_TOWER_COLUMN_SCAN_VOXELS {
-                match cache.material(coord) {
-                    Some(Material::Air) => {
-                        return Some(EditAction::Place {
-                            coord,
-                            material,
-                            shape,
-                        });
+                let volume = EditVolume::for_hit(coord, shape)?;
+                let mut empty = true;
+                for target in volume.coordinates() {
+                    match cache.material(target) {
+                        Some(Material::Air) => {}
+                        Some(_) => empty = false,
+                        None => return None,
                     }
-                    Some(_) => coord.y = coord.y.saturating_add(1),
-                    None => return None,
                 }
+                if empty {
+                    return Some(EditAction::Place {
+                        coord,
+                        material,
+                        shape,
+                    });
+                }
+                coord.y = coord.y.saturating_add(1);
             }
         }
     }
@@ -1270,16 +1277,17 @@ mod tests {
 
     #[test]
     fn placement_advances_to_the_first_authoritative_empty_voxel() {
-        let mut cache = ChunkCache::new(1);
+        let mut cache = ChunkCache::new(2);
+        cache.insert(Chunk::filled(ChunkCoord::new(0, -1, 0), Material::Air));
         let mut chunk = Chunk::filled(ChunkCoord::new(0, 0, 0), Material::Air);
         for y in 0..4 {
-            chunk.set(2, y, 3, Material::Stone);
+            chunk.set(10, y, 10, Material::Stone);
         }
         cache.insert(chunk);
         let prepared = prepare_edit(
             &cache,
             EditAction::Place {
-                coord: VoxelCoord::new(2, 0, 3),
+                coord: VoxelCoord::new(10, 0, 10),
                 material: Material::Dirt,
                 shape: EditShape::Cube,
             },
@@ -1287,7 +1295,7 @@ mod tests {
         assert_eq!(
             prepared,
             Some(EditAction::Place {
-                coord: VoxelCoord::new(2, 4, 3),
+                coord: VoxelCoord::new(10, 8, 10),
                 material: Material::Dirt,
                 shape: EditShape::Cube,
             })
