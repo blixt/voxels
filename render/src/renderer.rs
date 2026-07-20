@@ -1101,6 +1101,7 @@ pub struct Renderer {
     underwater_blend: f32,
     interior: InteriorEnvironment,
     interior_target: InteriorEnvironment,
+    directional_light_occluded: bool,
     placement_inventory: PlacementInventory,
     runtime_config: RendererConfig,
 }
@@ -1143,6 +1144,7 @@ struct FrameState {
     celestial_observation: CelestialObservation,
     underwater_blend: f32,
     interior: InteriorEnvironment,
+    direct_light_visibility: f32,
 }
 
 impl From<RendererFeatureConfig> for RenderOptions {
@@ -1461,6 +1463,7 @@ impl Renderer {
                 celestial_observation,
                 underwater_blend: 0.0,
                 interior: InteriorEnvironment::default(),
+                direct_light_visibility: 1.0,
             },
             &shadow_cascades,
             None,
@@ -1885,6 +1888,7 @@ impl Renderer {
             underwater_blend: 0.0,
             interior: InteriorEnvironment::default(),
             interior_target: InteriorEnvironment::default(),
+            directional_light_occluded: false,
             placement_inventory,
             runtime_config,
         })
@@ -2020,8 +2024,14 @@ impl Renderer {
         self.ui.set_route_status(chapter_label, progress_percent);
     }
 
-    pub fn set_enclosure(&mut self, sample: EnclosureSample) {
+    pub fn set_enclosure(&mut self, sample: EnclosureSample, directional_light_occluded: bool) {
         self.interior_target = InteriorEnvironment::for_enclosure(sample);
+        self.directional_light_occluded = directional_light_occluded;
+    }
+
+    /// Current surface-to-key-light direction used by the host's resident-voxel visibility ray.
+    pub fn key_light_direction(&self) -> glam::Vec3 {
+        self.environment.key_light_direction
     }
 
     pub const fn daylight_phase(&self) -> DaylightPhase {
@@ -2844,9 +2854,6 @@ impl Renderer {
         if !self.refresh_effective_environment() {
             return false;
         }
-        let shadows_active = self.options.shadows && self.environment.shadow_strength > 0.01;
-        let mut frame_options = self.options;
-        frame_options.shadows = shadows_active;
         let target_underwater = f32::from(camera.fluid_state().eyes_submerged);
         let response_seconds = if target_underwater > self.underwater_blend {
             0.12
@@ -2874,6 +2881,15 @@ impl Renderer {
         self.interior =
             self.interior
                 .lerp(self.interior_target, interior_response, exposure_response);
+        let direct_light_visibility = interior_direct_light_visibility(
+            self.interior.enclosure,
+            self.directional_light_occluded,
+        );
+        let shadows_active = self.options.shadows
+            && self.environment.shadow_strength > 0.01
+            && direct_light_visibility > 0.01;
+        let mut frame_options = self.options;
+        frame_options.shadows = shadows_active;
         if self
             .shadow_direction
             .update(-self.environment.key_light_direction)
@@ -2921,6 +2937,7 @@ impl Renderer {
                 celestial_observation: self.celestial_observation,
                 underwater_blend: self.underwater_blend,
                 interior: self.interior,
+                direct_light_visibility,
             },
             &shadow_cascades,
             self.geometric_lod_focus,
@@ -4564,6 +4581,7 @@ fn frame_uniform(
         celestial_observation,
         underwater_blend,
         interior,
+        direct_light_visibility,
     } = state;
     let view_projection = view_projection(config, camera, renderer_config.view_distance_metres);
     let camera_forward = camera.forward();
@@ -4642,7 +4660,10 @@ fn frame_uniform(
         shadow_view_projection: std::array::from_fn(|index| {
             shadows.cascades[index].clip_from_world.to_cols_array_2d()
         }),
-        key_light_direction: environment.key_light_direction.extend(0.0).to_array(),
+        key_light_direction: environment
+            .key_light_direction
+            .extend(direct_light_visibility)
+            .to_array(),
         key_light_radiance: environment
             .key_light_radiance
             .extend(environment.shadow_strength)
@@ -4768,6 +4789,20 @@ fn bounded_frame_delta(dt: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+fn interior_direct_light_visibility(enclosure: f32, directional_light_occluded: bool) -> f32 {
+    let enclosure = enclosure.clamp(0.0, 1.0);
+    let existing_interior_attenuation = 1.0 - enclosure * 0.9;
+    if !directional_light_occluded {
+        return existing_interior_attenuation;
+    }
+    // Nine upper-hemisphere rays make 8/9 the highest sampled enclosure that still has a known
+    // opening. Only fade the final directional contribution after every one is blocked and an
+    // independent ray toward the live key light also hits resident canonical terrain.
+    let transition = ((enclosure - 8.0 / 9.0) / (0.98 - 8.0 / 9.0)).clamp(0.0, 1.0);
+    let sealed = transition * transition * (3.0 - 2.0 * transition);
+    existing_interior_attenuation * (1.0 - sealed)
 }
 
 fn valid_dpr(dpr: f32) -> f32 {
@@ -5658,6 +5693,18 @@ mod tests {
         assert_eq!(bounded_frame_delta(0.0), 0.0);
         assert_eq!(bounded_frame_delta(0.025), 0.025);
         assert_eq!(bounded_frame_delta(0.25), 0.1);
+    }
+
+    #[test]
+    fn directional_shadows_remain_until_a_fully_enclosed_key_light_ray_is_blocked() {
+        assert_eq!(interior_direct_light_visibility(0.0, false), 1.0);
+        assert!(interior_direct_light_visibility(0.95, false) > 0.1);
+        assert!(
+            interior_direct_light_visibility(8.0 / 9.0, true) > 0.19,
+            "one known sky opening must retain directional lighting and its shadow map"
+        );
+        assert_eq!(interior_direct_light_visibility(0.98, true), 0.0);
+        assert_eq!(interior_direct_light_visibility(1.0, true), 0.0);
     }
 
     #[test]

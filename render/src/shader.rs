@@ -99,6 +99,13 @@ mod tests {
         );
         assert!(include_str!("shaders/voxels.wgsl").contains("evaluate_direct_dielectric_f0("));
         assert!(include_str!("shaders/avatar.wgsl").contains("evaluate_direct_dielectric("));
+        for shader in [
+            include_str!("shaders/voxels.wgsl"),
+            include_str!("shaders/avatar.wgsl"),
+        ] {
+            assert!(shader.contains("* frame.key_light_direction.w"));
+            assert!(!shader.contains("* mix(1.0, 0.10, frame.interior.x)"));
+        }
     }
 
     #[test]

@@ -690,7 +690,7 @@ fn distant_surface_radiance(
     * frame.key_light_radiance.rgb
     * max(dot(normal, sun), 0.0)
     * key_visibility
-    * mix(1.0, 0.10, frame.interior.x)
+    * frame.key_light_direction.w
     * 0.197;
   // Full microfacet, local-light, grain, six-metre macro tint, cloud-shadow, and SSAO evaluation
   // cannot contribute stable information at this distance. Sampling their prefiltered material
@@ -837,7 +837,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
       sun,
     )
     * shadow
-    * mix(1.0, 0.10, frame.interior.x)
+    * frame.key_light_direction.w
     * 0.62;
   var color = ambient_diffuse + ambient_specular + direct;
   for (var light_index = 0u; light_index < 16u; light_index += 1u) {

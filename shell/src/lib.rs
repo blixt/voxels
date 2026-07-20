@@ -581,6 +581,7 @@ mod web {
         edit_trackers: RefCell<VecDeque<EditTracker>>,
         edit_last_ms: Cell<f32>,
         enclosure: Cell<EnclosureSample>,
+        directional_light_occluded: Cell<bool>,
         last_enclosure_probe: Cell<f64>,
         enclosure_probe_microseconds: Cell<f32>,
         cinder_portal_state: Cell<PortalState>,
@@ -779,8 +780,9 @@ mod web {
             }
             if time - self.last_enclosure_probe.get() >= self.config.enclosure_probe_interval_ms {
                 let probe_start = performance_now(performance.as_ref());
+                let key_light_direction = self.renderer.borrow().key_light_direction();
                 let chunks = self.chunks.borrow();
-                self.enclosure.set(probe_enclosure(
+                let enclosure = probe_enclosure(
                     camera.position,
                     self.config.enclosure_probe_distance_metres,
                     VOXEL_SIZE_METRES,
@@ -791,7 +793,22 @@ mod web {
                         resident_material(&chunks, VoxelCoord::new(x, y, z))
                             .is_some_and(Material::occludes_ambient)
                     },
-                ));
+                );
+                let directional_light_occluded = enclosure.escaped_rays == 0
+                    && raycast_voxels(
+                        camera.position,
+                        key_light_direction,
+                        self.config.enclosure_probe_distance_metres,
+                        VOXEL_SIZE_METRES,
+                        |x, y, z| {
+                            resident_material(&chunks, VoxelCoord::new(x, y, z))
+                                .is_some_and(Material::occludes_ambient)
+                        },
+                    )
+                    .is_some();
+                self.enclosure.set(enclosure);
+                self.directional_light_occluded
+                    .set(directional_light_occluded);
                 self.last_enclosure_probe.set(time);
                 self.enclosure_probe_microseconds
                     .set(((performance_now(performance.as_ref()) - probe_start) * 1_000.0) as f32);
@@ -841,7 +858,7 @@ mod web {
             let (atmosphere, region) = self.remote_environment;
             renderer.set_atmosphere(atmosphere, region);
             let enclosure = self.enclosure.get();
-            renderer.set_enclosure(enclosure);
+            renderer.set_enclosure(enclosure, self.directional_light_occluded.get());
             renderer.set_route_status("NATIVE WORLD", 0);
             let stream = self.scheduler.borrow().diagnostics();
             let render = renderer.diagnostics();
@@ -3206,6 +3223,7 @@ mod web {
             edit_trackers: RefCell::new(VecDeque::new()),
             edit_last_ms: Cell::new(0.0),
             enclosure: Cell::new(EnclosureSample::OPEN),
+            directional_light_occluded: Cell::new(false),
             last_enclosure_probe: Cell::new(f64::NEG_INFINITY),
             enclosure_probe_microseconds: Cell::new(0.0),
             cinder_portal_state: Cell::new(PortalState::default()),

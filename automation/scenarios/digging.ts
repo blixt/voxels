@@ -440,6 +440,8 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
     violations.push("underground rendering produced frames slower than 60 Hz");
   if ((undergroundPerformance.gpu.totalMs?.p95 ?? 0) > 7.5)
     violations.push("underground total GPU p95 exceeded 7.5ms");
+  if (undergroundPerformance.shadowCascades !== 0)
+    violations.push("fully enclosed tunnel still rendered directional shadow cascades");
   if (undergroundPerformance.droppedSamples > 0)
     violations.push("underground frame telemetry dropped samples");
 

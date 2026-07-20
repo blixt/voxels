@@ -140,7 +140,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let direct = frame.key_light_radiance.rgb
     * evaluate_direct_dielectric(albedo, roughness, input.normal, view_direction, sun)
     * shadow
-    * mix(1.0, 0.10, frame.interior.x)
+    * frame.key_light_direction.w
     * 0.60;
   var color = ambient_diffuse + ambient_specular + direct;
   let camera_to_surface = input.world - frame.camera_time.xyz;
