@@ -588,7 +588,6 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       spawnPillarRadiusVoxels: options.pillarRadius,
       cascadedShadows: options.cascadedShadows,
       screenSpaceAmbientOcclusion: options.screenSpaceAmbientOcclusion,
-      diagnosticSkyRgb: [255, 0, 255],
       dayLengthSeconds: 0,
       dayFractionAtUnixEpoch: 0.5,
       weatherCycleSeconds: 0,
@@ -626,6 +625,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     await page.keyboard.press("F3");
     beforeSnapshot = await waitForStableFrame(page, engine, initialCentres, timings);
   }
+  await engine.setDiagnosticSky([255, 0, 255]);
   const beforePose = cameraPosition(beforeSnapshot);
   const before = await page.screenshot();
   await context.artifacts.write("LOD before", "before.png", before, "image/png");
@@ -664,6 +664,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
         });
       }
     }
+    await engine.setDiagnosticSky(null);
     await sampleStablePerformance(page, engine, timings, 2_000);
     const image = headingSamples.reduce(
       (worst, sample) =>
@@ -739,6 +740,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     await context.artifacts.write("LOD after", "after.png", after, "image/png");
     const afterVideoSeconds = (Date.now() - videoStartedAtMs) / 1_000;
     if (options.recordVideo) await page.waitForTimeout(1_500);
+    await engine.setDiagnosticSky(null);
     await sampleStablePerformance(page, engine, timings, 2_000);
     const [comparison, beforeSkyExposure, afterSkyExposure] = await Promise.all([
       compareScreenshots(page, before, after),
