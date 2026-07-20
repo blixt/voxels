@@ -154,10 +154,7 @@ describe("render metrics", () => {
     settled[SNAPSHOT.acceptedCompletions] = 25;
     settled[SNAPSHOT.canonicalImmediateResident] = 15;
     settled[SNAPSHOT.presentedLodStrideVoxels] = 1;
-    const capture = (
-      capturedAtMs: number,
-      values: readonly number[],
-    ): RenderSnapshotCapture => ({
+    const capture = (capturedAtMs: number, values: readonly number[]): RenderSnapshotCapture => ({
       capturedAtMs,
       snapshot: values,
       samples: [],
