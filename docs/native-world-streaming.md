@@ -181,12 +181,12 @@ Streaming direction is deployment-tunable without changing the wire format:
 
 ```toml
 [streaming.priority]
-collision_lookahead_seconds = 2.0
+collision_lookahead_seconds = 2.5
 velocity_lookahead_seconds = 1.5
 view_cone_half_angle_degrees = 55.0
 ```
 
-The current body and support, its intended two-second swept path, and the independent view/edit
+The current body and support, its intended 2.5-second swept path, and the independent view/edit
 corridor are collision-critical. They preempt ordinary generation, meshing, upload, and world-service
 traffic, including after conservative unloaded-space collision has stopped actual velocity. The
 server gives each connection one bounded collision-generation lane and wakes collision work before

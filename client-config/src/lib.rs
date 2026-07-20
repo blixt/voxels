@@ -726,7 +726,7 @@ mod tests {
                 max_tracked_chunks: 320,
                 max_secondary_interest_chunks: 192,
                 priority: StreamingPriorityConfig {
-                    collision_lookahead_seconds: 2.0,
+                    collision_lookahead_seconds: 2.5,
                     velocity_lookahead_seconds: 1.5,
                     view_cone_half_angle_degrees: 55.0,
                 },

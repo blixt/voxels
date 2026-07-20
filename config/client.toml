@@ -53,7 +53,7 @@ max_secondary_interest_chunks = 192
 [streaming.priority]
 # Give the swept player body and its current support a hard priority through generation, meshing,
 # upload, and server traffic. This remains bounded secondary interest rather than extra residency.
-collision_lookahead_seconds = 2.0
+collision_lookahead_seconds = 2.5
 # Keep the immediate 3x3 canonical-chunk vicinity first, then favor this forward cone and predicted
 # position for ordinary work. Complete surface-LOD levels stay spatially ordered because they
 # activate atomically.

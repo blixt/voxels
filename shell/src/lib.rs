@@ -8,7 +8,7 @@ const INTERACTION_REACH_METRES: f32 = 5.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const INTERACTION_STREAM_MARGIN_METRES: f32 = 0.7;
 #[cfg(target_arch = "wasm32")]
-const COLLISION_READINESS_RESERVE_SECONDS: f32 = 0.5;
+const COLLISION_READINESS_RESERVE_SECONDS: f32 = 1.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const INVENTORY_SWIPE_THRESHOLD_CSS_PIXELS: f32 = 34.0;
 
