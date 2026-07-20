@@ -463,6 +463,10 @@ async function sustainedProfile(
           canonicalImmediateRequired: snapshotValue(snapshot, "canonicalImmediateRequired"),
           canonicalSurfaceCellsResident: snapshotValue(snapshot, "canonicalSurfaceCellsResident"),
           canonicalSurfaceCellsRequired: snapshotValue(snapshot, "canonicalSurfaceCellsRequired"),
+          collisionImmediateResident: snapshotValue(snapshot, "collisionImmediateResident"),
+          collisionImmediateRequired: snapshotValue(snapshot, "collisionImmediateRequired"),
+          collisionLookaheadResident: snapshotValue(snapshot, "collisionLookaheadResident"),
+          collisionLookaheadRequired: snapshotValue(snapshot, "collisionLookaheadRequired"),
           pendingJobs: snapshotValue(snapshot, "pendingJobs"),
         },
       ];
@@ -546,6 +550,18 @@ async function sustainedProfile(
           snapshotValue(capture.snapshot, "canonicalImmediateResident") ===
             snapshotValue(capture.snapshot, "canonicalImmediateRequired"),
       ).length,
+      collisionImmediateReadySamples: moving.filter(
+        (capture) =>
+          snapshotValue(capture.snapshot, "collisionImmediateRequired") > 0 &&
+          snapshotValue(capture.snapshot, "collisionImmediateResident") ===
+            snapshotValue(capture.snapshot, "collisionImmediateRequired"),
+      ).length,
+      collisionLookaheadReadySamples: moving.filter(
+        (capture) =>
+          snapshotValue(capture.snapshot, "collisionLookaheadRequired") > 0 &&
+          snapshotValue(capture.snapshot, "collisionLookaheadResident") ===
+            snapshotValue(capture.snapshot, "collisionLookaheadRequired"),
+      ).length,
     },
     drain: {
       // Drain can complete between the harness's 250 ms captures, leaving no phase-3 sample.
@@ -622,7 +638,8 @@ async function sustainedProfile(
         Math.abs(checkpoint.elapsedSeconds - Number.parseInt(label, 10)) > 0.5 ||
         checkpoint.actualDisplacementMetres < checkpoint.distanceMetres - 2 ||
         checkpoint.presentedStrideVoxels !== 1 ||
-        checkpoint.canonicalSurfaceCellsResident !== checkpoint.canonicalSurfaceCellsRequired
+        checkpoint.canonicalSurfaceCellsResident !== checkpoint.canonicalSurfaceCellsRequired ||
+        checkpoint.collisionImmediateResident !== checkpoint.collisionImmediateRequired
       ) {
         violations.push(`${label} immediate terrain was not fully canonical`);
       }
@@ -647,8 +664,11 @@ async function sustainedProfile(
       if (epoch.streaming.readiness.canonicalPresentationRatio !== 1) {
         violations.push(`${label} did not present canonical terrain continuously`);
       }
-      if (epoch.streaming.readiness.canonicalImmediateRatio < 0.97) {
-        violations.push(`${label} immediate collision readiness fell below 97%`);
+      if (epoch.streaming.readiness.collisionImmediateRatio !== 1) {
+        violations.push(`${label} current/front collision corridor was not continuously ready`);
+      }
+      if (epoch.streaming.readiness.collisionLookaheadRatio < 0.97) {
+        violations.push(`${label} predictive collision corridor readiness fell below 97%`);
       }
     }
     if (result.drain.settleMilliseconds === null || result.drain.settleMilliseconds > 15_000) {
@@ -902,7 +922,7 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
   }
   const result = {
     ok: scenarioViolations.length === 0,
-    schemaVersion: 5,
+    schemaVersion: 6,
     commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
     dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "",
     build: options.buildProfile,

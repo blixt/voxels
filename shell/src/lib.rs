@@ -301,7 +301,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 2;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 32;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 33;
     const FRAME_SAMPLE_WIDTH: u32 = 11;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -319,7 +319,7 @@ mod web {
         "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
         "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
         "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,canonicalSurfaceCellsResident,canonicalSurfaceCellsRequired,",
-        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,schemaVersion,sampleCount,",
+        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,schemaVersion,sampleCount,",
         "droppedSamples",
     );
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
@@ -2530,6 +2530,7 @@ mod web {
                 let camera = engine.camera.borrow();
                 let fluid = camera.fluid_state();
                 let diagnostics = engine.scheduler.borrow().diagnostics();
+                let profile = *engine.profile.borrow();
                 let camera_voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
                 let camera_voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
                 let (render, target, presented_lod_stride_voxels, canonical_surface_coverage) = {
@@ -2541,7 +2542,26 @@ mod web {
                         renderer.canonical_surface_coverage_at(camera_voxel_x, camera_voxel_z),
                     )
                 };
-                let canonical_immediate = engine.scheduler.borrow().vicinity_readiness(1);
+                let streaming_velocity = if profile.running() {
+                    camera.velocity
+                } else {
+                    camera.streaming_velocity(&engine.input.borrow())
+                };
+                let collision_immediate_interest =
+                    crate::urgent_stream_interest(&camera, streaming_velocity, 0.1);
+                let collision_lookahead_interest = crate::urgent_stream_interest(
+                    &camera,
+                    streaming_velocity,
+                    engine.config.stream_collision_lookahead_seconds,
+                );
+                let (canonical_immediate, collision_immediate, collision_lookahead) = {
+                    let scheduler = engine.scheduler.borrow();
+                    (
+                        scheduler.vicinity_readiness(1),
+                        scheduler.interest_readiness(&collision_immediate_interest),
+                        scheduler.interest_readiness(&collision_lookahead_interest),
+                    )
+                };
                 let lod_focus_lag_voxels = i64::from(camera_voxel_x)
                     .abs_diff(i64::from(render.lod_boundary_centres[0][0]))
                     .max(
@@ -2569,7 +2589,6 @@ mod web {
                     .map(MeshedChunk::retained_bytes)
                     .sum::<usize>();
                 let edit_logical_bytes = engine.edits.borrow().logical_bytes();
-                let profile = *engine.profile.borrow();
                 let stream_interest = engine.cinder_stream_interest.get();
                 let stream_interest_keys: BTreeSet<_> = stream_interest
                     .as_slice()
@@ -2817,6 +2836,10 @@ mod web {
                     diagnostics.initial_residency_latency.completed as f32,
                     diagnostics.initial_residency_latency.in_flight as f32,
                     diagnostics.accepted_completions as f32,
+                    collision_immediate.resident as f32,
+                    collision_immediate.required as f32,
+                    collision_lookahead.resident as f32,
+                    collision_lookahead.required as f32,
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);

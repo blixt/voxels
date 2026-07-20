@@ -142,6 +142,10 @@ describe("render metrics", () => {
     snapshot[SNAPSHOT.acceptedCompletions] = 20;
     snapshot[SNAPSHOT.canonicalImmediateRequired] = 15;
     snapshot[SNAPSHOT.canonicalImmediateResident] = 14;
+    snapshot[SNAPSHOT.collisionImmediateRequired] = 8;
+    snapshot[SNAPSHOT.collisionImmediateResident] = 8;
+    snapshot[SNAPSHOT.collisionLookaheadRequired] = 20;
+    snapshot[SNAPSHOT.collisionLookaheadResident] = 19;
     snapshot[SNAPSHOT.canonicalSurfaceCellsRequired] = 1_024;
     snapshot[SNAPSHOT.canonicalSurfaceCellsResident] = 1_024;
     snapshot[SNAPSHOT.presentedLodStrideVoxels] = 2;
@@ -153,6 +157,7 @@ describe("render metrics", () => {
     settled[SNAPSHOT.loadCompleted] = 13;
     settled[SNAPSHOT.acceptedCompletions] = 25;
     settled[SNAPSHOT.canonicalImmediateResident] = 15;
+    settled[SNAPSHOT.collisionLookaheadResident] = 20;
     settled[SNAPSHOT.presentedLodStrideVoxels] = 1;
     const capture = (capturedAtMs: number, values: readonly number[]): RenderSnapshotCapture => ({
       capturedAtMs,
@@ -175,6 +180,8 @@ describe("render metrics", () => {
     expect(pressure.completions.accepted).toBe(5);
     expect(pressure.readiness.canonicalImmediateRatio).toBeCloseTo(1 / 3);
     expect(pressure.readiness.canonicalPresentationRatio).toBeCloseTo(1 / 3);
+    expect(pressure.readiness.collisionImmediateRatio).toBe(1);
+    expect(pressure.readiness.collisionLookaheadRatio).toBeCloseTo(1 / 3);
     expect(pressure.readiness.longestDegradedPresentationMs).toBe(250);
   });
 });

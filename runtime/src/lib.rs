@@ -876,6 +876,26 @@ impl StreamScheduler {
         readiness
     }
 
+    /// Reports uploaded canonical products for an exact collision/view corridor.
+    ///
+    /// Callers provide a deduplicated interest set from their movement sweep. Unlike cylindrical
+    /// startup readiness, this answers whether the chunks that can block the current trajectory
+    /// have completed every asynchronous stage.
+    pub fn interest_readiness(&self, coords: &[ChunkCoord]) -> VicinityReadiness {
+        let mut readiness = VicinityReadiness::default();
+        for &coord in coords {
+            if !coord.is_world_representable() {
+                continue;
+            }
+            readiness.required += 1;
+            readiness.resident += usize::from(
+                self.status(coord)
+                    .is_some_and(|status| status.desired && status.state == ChunkState::Resident),
+            );
+        }
+        readiness
+    }
+
     pub fn drain_evictions(&mut self) -> Vec<EvictedChunk> {
         std::mem::take(&mut self.evictions)
     }
@@ -1273,6 +1293,13 @@ mod tests {
             VicinityReadiness {
                 resident: 3,
                 required: 15,
+            }
+        );
+        assert_eq!(
+            scheduler.interest_readiness(&[focus, ChunkCoord::new(focus.x + 1, focus.y, focus.z),]),
+            VicinityReadiness {
+                resident: 1,
+                required: 2,
             }
         );
         assert!(!scheduler.vicinity_readiness(1).is_ready());

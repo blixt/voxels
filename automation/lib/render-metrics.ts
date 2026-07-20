@@ -214,6 +214,20 @@ export function summarizeStreamingPressure(captures: readonly RenderSnapshotCapt
         captures,
         (snapshot) => snapshotValue(snapshot, "presentedLodStrideVoxels") === 1,
       ),
+      collisionImmediateRatio: readinessRatio(
+        captures,
+        (snapshot) =>
+          snapshotValue(snapshot, "collisionImmediateRequired") > 0 &&
+          snapshotValue(snapshot, "collisionImmediateResident") ===
+            snapshotValue(snapshot, "collisionImmediateRequired"),
+      ),
+      collisionLookaheadRatio: readinessRatio(
+        captures,
+        (snapshot) =>
+          snapshotValue(snapshot, "collisionLookaheadRequired") > 0 &&
+          snapshotValue(snapshot, "collisionLookaheadResident") ===
+            snapshotValue(snapshot, "collisionLookaheadRequired"),
+      ),
       longestDegradedPresentationMs: maximumContinuousMilliseconds(
         captures,
         (snapshot) => snapshotValue(snapshot, "presentedLodStrideVoxels") !== 1,
