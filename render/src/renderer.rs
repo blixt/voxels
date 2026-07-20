@@ -2098,6 +2098,15 @@ impl Renderer {
             .contains(&(coord.x, coord.y, coord.z))
     }
 
+    /// Overrides the atmospheric background for deterministic geometry-coverage diagnostics.
+    ///
+    /// This is runtime-mutable so automation can measure ordinary weather first, then suppress it
+    /// for an unambiguous sky-leak capture.
+    pub fn set_diagnostic_sky_color(&mut self, color: Option<[f32; 3]>) {
+        self.runtime_config.diagnostic_sky_color =
+            color.map(|value| value.map(|channel| channel.clamp(0.0, 1.0)));
+    }
+
     pub const fn ui_open(&self) -> bool {
         self.ui.open()
     }

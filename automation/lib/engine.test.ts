@@ -91,4 +91,12 @@ describe("typed engine client", () => {
 
     await expect(engine.setSpectator(true)).rejects.toThrow("engine rejected spectator mode");
   });
+
+  it("validates and applies diagnostic sky colors through the Rust boundary", async () => {
+    const engine = new EngineClient(pageReturning([true, true]));
+
+    await engine.setDiagnosticSky([255, 0, 255]);
+    await engine.setDiagnosticSky(null);
+    await expect(engine.setDiagnosticSky([256, 0, 255])).rejects.toThrow("diagnostic sky channels");
+  });
 });

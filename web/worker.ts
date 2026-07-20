@@ -116,6 +116,15 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
         active: handle?.set_spectator(message.active) ?? false,
       });
       break;
+    case "diagnosticSky":
+      scope.postMessage({
+        kind: "diagnosticSky",
+        requestId: message.requestId,
+        active:
+          handle?.set_diagnostic_sky(message.enabled, message.red, message.green, message.blue) ??
+          false,
+      });
+      break;
     case "snapshot":
       scope.postMessage({
         kind: "snapshot",

@@ -168,6 +168,21 @@ export class EngineClient {
     );
   }
 
+  async setDiagnosticSky(rgb: readonly [number, number, number] | null): Promise<void> {
+    if (
+      rgb !== null &&
+      rgb.some((channel) => !Number.isSafeInteger(channel) || channel < 0 || channel > 0xff)
+    ) {
+      throw new Error("diagnostic sky channels must be unsigned bytes");
+    }
+    const accepted = await this.#page.evaluate(
+      (color) => globalThis.__VOXELS__!.diagnosticSky(color),
+      rgb,
+    );
+    if (!accepted) throw new Error("engine rejected the diagnostic sky override");
+    await this.#page.waitForTimeout(50);
+  }
+
   async submitPlace(
     x: number,
     y: number,

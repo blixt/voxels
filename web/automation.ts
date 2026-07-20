@@ -1,6 +1,6 @@
 import type { BrowserPlayerSession } from "./local-player.ts";
 
-export const AUTOMATION_CONTRACT_VERSION = 2;
+export const AUTOMATION_CONTRACT_VERSION = 3;
 export const SNAPSHOT_SCHEMA_VERSION = 35;
 export const FRAME_SAMPLE_WIDTH = 11;
 export const GPU_SAMPLE_WIDTH = 13;
@@ -236,6 +236,7 @@ export interface EngineAutomationApi {
   snapshot(): Promise<number[]>;
   profile(profileId: number): void;
   spectator(active: boolean): Promise<boolean>;
+  diagnosticSky(rgb: readonly [number, number, number] | null): Promise<boolean>;
   look(deltaX: number, deltaY: number): void;
   submitPlace(
     x: number,

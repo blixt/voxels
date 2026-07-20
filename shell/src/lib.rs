@@ -319,7 +319,7 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const AUTOMATION_CONTRACT_VERSION: u32 = 2;
+    const AUTOMATION_CONTRACT_VERSION: u32 = 3;
     const SNAPSHOT_SCHEMA_VERSION: u32 = 35;
     const FRAME_SAMPLE_WIDTH: u32 = 11;
     const GPU_SAMPLE_WIDTH: u32 = 13;
@@ -2478,6 +2478,16 @@ mod web {
                     .borrow_mut()
                     .set_reduced_motion(reduced_motion);
             }
+        }
+
+        pub fn set_diagnostic_sky(&self, enabled: bool, red: u8, green: u8, blue: u8) -> bool {
+            let Some(engine) = self.engine.as_ref() else {
+                return false;
+            };
+            let color = enabled
+                .then(|| [red, green, blue].map(|channel| f32::from(channel) / f32::from(u8::MAX)));
+            engine.renderer.borrow_mut().set_diagnostic_sky_color(color);
+            true
         }
 
         /// `[resident, required, playable]` for the browser's canvas-only startup surface.

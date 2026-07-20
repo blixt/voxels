@@ -60,6 +60,14 @@ export type ToWorker =
   | { kind: "missionControlCopyResult"; copied: boolean }
   | { kind: "profile"; profileId: number }
   | { kind: "spectator"; requestId: number; active: boolean }
+  | {
+      kind: "diagnosticSky";
+      requestId: number;
+      enabled: boolean;
+      red: number;
+      green: number;
+      blue: number;
+    }
   | { kind: "snapshot"; requestId: number }
   | {
       kind: "submitPlace";
@@ -90,6 +98,7 @@ export type FromWorker =
   | { kind: "automationContract"; requestId: number; value: string }
   | { kind: "snapshot"; requestId: number; values: number[] }
   | { kind: "spectator"; requestId: number; active: boolean }
+  | { kind: "diagnosticSky"; requestId: number; active: boolean }
   | { kind: "submitPlace"; requestId: number; submitted: boolean }
   | { kind: "submitDig"; requestId: number; submitted: boolean }
   | { kind: "inventory"; requestId: number; values: number[] }
