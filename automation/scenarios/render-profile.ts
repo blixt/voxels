@@ -467,6 +467,7 @@ async function sustainedProfile(
           collisionImmediateRequired: snapshotValue(snapshot, "collisionImmediateRequired"),
           collisionLookaheadResident: snapshotValue(snapshot, "collisionLookaheadResident"),
           collisionLookaheadRequired: snapshotValue(snapshot, "collisionLookaheadRequired"),
+          collisionLookaheadSeconds: snapshotValue(snapshot, "collisionLookaheadSeconds"),
           pendingJobs: snapshotValue(snapshot, "pendingJobs"),
         },
       ];
@@ -665,10 +666,12 @@ async function sustainedProfile(
         violations.push(`${label} did not present canonical terrain continuously`);
       }
       if (epoch.streaming.readiness.collisionImmediateRatio !== 1) {
-        violations.push(`${label} current/front collision corridor was not continuously ready`);
+        violations.push(`${label} current player-body corridor was not continuously ready`);
       }
-      if (epoch.streaming.readiness.collisionLookaheadRatio < 0.97) {
-        violations.push(`${label} predictive collision corridor readiness fell below 97%`);
+      if (epoch.streaming.readiness.collisionLookaheadRatio !== 1) {
+        violations.push(
+          `${label} reserved predictive collision corridor was not continuously ready`,
+        );
       }
     }
     if (result.drain.settleMilliseconds === null || result.drain.settleMilliseconds > 15_000) {
