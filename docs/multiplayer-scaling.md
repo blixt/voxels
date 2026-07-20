@@ -1,6 +1,6 @@
 # Multiplayer scaling envelope
 
-VXWP v27 supports one unsharded authoritative world with up to 1,024 admitted player sessions. Spatial
+VXWP v28 supports one unsharded authoritative world with up to 1,024 admitted player sessions. Spatial
 interest management is an internal replication index, not a gameplay shard: every player inside the
 same location's 256 m interest radius can discover every other player there. Players beyond that
 radius contribute no entity records or bytes to one another's presence streams.
@@ -98,7 +98,7 @@ and six independent ephemeral BrowserContexts. Each context has separate local s
 receives an independently shaped 40 ms RTT, 50/10 Mbit/s link, and must negotiate a distinct browser
 user and player identity. Five builders and one observer start together. The observer then travels at
 least 120 m from the builders, beyond the configured 96 m mid-presence tier, and all six clients must
-still render the other five articulated avatars. Per-player `/v27/world` and `/v27/presence` stream and
+still render the other five articulated avatars. Per-player `/v28/world` and `/v28/presence` stream and
 VXWP byte counts and screenshots are written to the isolated
 `target/automation/multiplayer/<run-id>/` directory. The stable
 `target/automation/multiplayer/latest.json` pointer identifies the newest run; its far-observer
@@ -176,10 +176,12 @@ horizontal/vertical movement credit; a client discontinuity bit cannot authorize
 require a fresh same-connection pose and bounded reach. A WAN game still needs server-owned input and
 collision simulation plus authenticated identity.
 
-Voxel edits and per-material inventories are native server authority: strict SQLite schema 10 is bound
-to the world/source manifest, operations are idempotent per player/edit-session, and commits carry
-connection identity and global order, while local chunk/surface revisions prevent unrelated cache
-invalidation. The presence spatial index
+Voxel edits and per-material inventories are native server authority: strict SQLite schema 13 is bound
+to the world/source manifest, sparse overrides are stored once in compact chunk blobs, and each
+player retains a bounded 64-operation exact-retry window. Edits take sorted locks for every touched
+25.6 m horizontal region, so overlapping columns serialize while unrelated source and LOD planning
+runs concurrently. Commits carry connection identity and global order, while local chunk/surface
+revisions prevent unrelated cache invalidation. The presence spatial index
 also acts as the inverse edit-interest subscription, so a player 1 km away receives zero commit bytes.
 Bounded per-client queues fail into an explicit full-product resync instead of silently dropping state.
 

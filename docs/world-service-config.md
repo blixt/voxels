@@ -240,8 +240,9 @@ three, so changing a storage schema or any immutable world/source identity start
 and leaves the previous world untouched. This also prevents an old and new daemon from opening the
 same filename during hot reload. Paths without tokens are opened exactly as configured and remain
 strict: startup rejects another schema or a database bound to a different world/source manifest;
-there are no migrations or fallback authorities. Schema 10 owns sparse voxel edits, spherical dig
-operations, player material inventories, idempotent edit sessions, and authoritative resume poses.
+there are no migrations or fallback authorities. Schema 13 owns compact per-chunk sparse edit blobs,
+player material inventories, a bounded exact-retry window for edit sessions, product revisions, and
+authoritative resume poses.
 `change_queue_capacity` bounds each interested client's commit queue.
 
 The presence section controls the independent low-latency delta stream. `spatial_cell_metres`,

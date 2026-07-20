@@ -26,6 +26,9 @@ see [Automation scenarios](docs/automation.md) for the authoring API and composi
 stream codecs, meshing, and far surfaces. Each ignored
 `target/automation/bench-world/<run-id>/criterion/` directory retains the full report.
 `vp run automation -- run bench-core` compares 120 dry and submerged fixed simulation steps.
+`vp run automation -- run storage-benchmark` measures production edit latency, compact overlay RAM,
+SQLite/WAL growth, restart/retry behavior, encoded commit bytes, and sequential versus concurrent
+disjoint-region throughput; see [World edit data plane](docs/20260720-world-edit-data-plane.md).
 `vp run automation -- run network-benchmark` owns a temporary native world service, deterministic
 bidirectional WAN shaper, release preview, and isolated Chrome contexts; it reports
 viewport/full-coverage settling, stream bytes, message attribution, and offline compression
@@ -132,10 +135,10 @@ See [docs/architecture.md](docs/architecture.md) for format, authority, and rese
 - In deep water, use <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to swim along the view direction,
   <kbd>Space</kbd> to ascend, and <kbd>Shift</kbd> to dive.
 - Look with the mouse; <kbd>Esc</kbd> releases pointer lock.
-- Excavate a 0.5 m-wide sphere around the targeted voxel with the left mouse button; place the
-  Rust-selected material with the right mouse button. Cycle stocked materials with the mouse wheel
-  or inventory wheel. Sparse edits are committed transactionally by the native
-  world service and streamed to every interested browser.
+- Excavate a one-cubic-metre sphere or cube around the targeted voxel with the left mouse button;
+  place the selected shape with the right mouse button. Cycle stocked materials with the mouse wheel
+  or inventory wheel. Compact sparse edits are committed transactionally by the native world service
+  and streamed to every interested browser.
 - Press <kbd>F3</kbd> for the Rust-rendered World Lab. It keeps the useful navigation and performance
   readout, copies a complete diagnostic report, and—when developer controls are enabled—can preview
   time-of-day and weather locally without mutating the shared server clock. Spectator mode leaves
