@@ -1,6 +1,8 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
-use voxels_runtime::{FrameBudget, MAX_SECONDARY_INTEREST_CHUNKS, StreamConfig, StreamScheduler};
+use voxels_runtime::{
+    CompletionStatus, FrameBudget, MAX_SECONDARY_INTEREST_CHUNKS, StreamConfig, StreamScheduler,
+};
 use voxels_world::ChunkCoord;
 
 const CONFIG: StreamConfig = StreamConfig {
@@ -20,12 +22,11 @@ const FOCUS: ChunkCoord = ChunkCoord::new(0, 1, 0);
 fn frame_admission(criterion: &mut Criterion) {
     criterion.bench_function("populate 243-chunk cold interest set", |bencher| {
         bencher.iter_batched(
-            || StreamScheduler::new(CONFIG),
-            |scheduler| {
-                let Ok(mut scheduler) = scheduler else {
-                    return;
-                };
+            || StreamScheduler::new(CONFIG).expect("benchmark stream config must remain valid"),
+            |mut scheduler| {
                 scheduler.update_focus(FOCUS);
+                assert_eq!(scheduler.diagnostics().tracked, 243);
+                black_box(scheduler);
             },
             BatchSize::SmallInput,
         );
@@ -34,9 +35,8 @@ fn frame_admission(criterion: &mut Criterion) {
     criterion.bench_function("admit one bounded streaming frame", |bencher| {
         bencher.iter_batched(
             || {
-                let Ok(mut scheduler) = StreamScheduler::new(CONFIG) else {
-                    return None;
-                };
+                let mut scheduler = StreamScheduler::new(CONFIG)
+                    .expect("benchmark stream config must remain valid");
                 scheduler.update_focus(FOCUS);
                 let generation = scheduler.schedule_frame(FrameBudget {
                     generation: 5,
@@ -44,7 +44,7 @@ fn frame_admission(criterion: &mut Criterion) {
                 });
                 assert_eq!(generation.generation.len(), 5);
                 for ticket in generation.generation {
-                    let _ = scheduler.complete(ticket);
+                    assert_eq!(scheduler.complete(ticket), CompletionStatus::Accepted);
                 }
                 let meshing = scheduler.schedule_frame(FrameBudget {
                     meshing: 3,
@@ -52,19 +52,17 @@ fn frame_admission(criterion: &mut Criterion) {
                 });
                 assert_eq!(meshing.meshing.len(), 3);
                 for ticket in meshing.meshing {
-                    let _ = scheduler.complete(ticket);
+                    assert_eq!(scheduler.complete(ticket), CompletionStatus::Accepted);
                 }
-                Some(scheduler)
+                scheduler
             },
-            |scheduler| {
-                if let Some(mut scheduler) = scheduler {
-                    let work = scheduler.schedule_frame(BUDGET);
-                    assert_eq!(
-                        [work.generation.len(), work.meshing.len(), work.upload.len()],
-                        [2, 1, 3]
-                    );
-                    black_box(work);
-                }
+            |mut scheduler| {
+                let work = scheduler.schedule_frame(BUDGET);
+                assert_eq!(
+                    [work.generation.len(), work.meshing.len(), work.upload.len()],
+                    [2, 1, 3]
+                );
+                black_box(work);
             },
             BatchSize::SmallInput,
         );

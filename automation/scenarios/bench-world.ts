@@ -1,5 +1,4 @@
-import { rustTool } from "../../scripts/build-wasm.ts";
-import { runProcess } from "../lib/process.ts";
+import { runCriterionBenchmark } from "../lib/criterion.ts";
 import { defineScenario } from "../lib/scenario.ts";
 
 export default defineScenario({
@@ -7,10 +6,10 @@ export default defineScenario({
   kind: "benchmark",
   summary: "Criterion generation, codec, and meshing benchmarks for the portable world crate.",
   uses: { metrics: true, rust: true },
-  async run(context) {
-    await runProcess(context, rustTool("cargo"), ["bench", "-p", "voxels-world"], {
-      label: "world benchmarks",
-      stdio: "inherit",
+  run(context, arguments_) {
+    return runCriterionBenchmark(context, arguments_, {
+      packageName: "voxels-world",
+      benchName: "world",
     });
   },
 });

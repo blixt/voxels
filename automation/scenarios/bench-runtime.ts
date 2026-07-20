@@ -1,5 +1,4 @@
-import { rustTool } from "../../scripts/build-wasm.ts";
-import { runProcess } from "../lib/process.ts";
+import { runCriterionBenchmark } from "../lib/criterion.ts";
 import { defineScenario } from "../lib/scenario.ts";
 
 export default defineScenario({
@@ -7,12 +6,10 @@ export default defineScenario({
   kind: "benchmark",
   summary: "Criterion streaming-scheduler benchmarks for the portable runtime crate.",
   uses: { metrics: true, rust: true },
-  async run(context) {
-    await runProcess(
-      context,
-      rustTool("cargo"),
-      ["bench", "-p", "voxels-runtime", "--bench", "streaming"],
-      { label: "runtime benchmarks", stdio: "inherit" },
-    );
+  run(context, arguments_) {
+    return runCriterionBenchmark(context, arguments_, {
+      packageName: "voxels-runtime",
+      benchName: "streaming",
+    });
   },
 });

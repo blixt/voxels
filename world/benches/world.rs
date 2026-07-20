@@ -28,9 +28,8 @@ fn generation(criterion: &mut Criterion) {
     });
 
     let road_length = first_pilgrim_road_length_voxels();
-    let Some((road, _)) = first_pilgrim_road_point_at_distance(road_length * 0.5) else {
-        return;
-    };
+    let (road, _) = first_pilgrim_road_point_at_distance(road_length * 0.5)
+        .expect("the fixed pilgrim-road benchmark distance must remain valid");
     let road_x = road[0].round() as i32;
     let road_z = road[1].round() as i32;
     let road_y = generator.surface_height(road_x, road_z);
@@ -83,9 +82,8 @@ fn route_surface_lod(criterion: &mut Criterion) {
     let generator = Generator::new(SEED);
     let edits = EditMap::default();
     let road_length = first_pilgrim_road_length_voxels();
-    let Some((road, _)) = first_pilgrim_road_point_at_distance(road_length * 0.5) else {
-        return;
-    };
+    let (road, _) = first_pilgrim_road_point_at_distance(road_length * 0.5)
+        .expect("the fixed pilgrim-road benchmark distance must remain valid");
     let road = [road[0].round() as i32, road[1].round() as i32];
     let mut group = criterion.benchmark_group("pilgrim-road surface LOD");
     for level in [SurfaceLodLevel::Stride2, SurfaceLodLevel::Stride16] {
@@ -102,11 +100,9 @@ fn route_surface_lod(criterion: &mut Criterion) {
 
 fn semantic_hero_generation(criterion: &mut Criterion) {
     let generator = Generator::new(SEED);
-    let Some(hero) =
-        generator.nearest_prominent_skyline_feature(0, 0, SkylineFeatureKind::ElderCanopy, 192)
-    else {
-        return;
-    };
+    let hero = generator
+        .nearest_prominent_skyline_feature(0, 0, SkylineFeatureKind::ElderCanopy, 192)
+        .expect("the fixed benchmark seed must retain its elder-canopy fixture");
     let hero_chunk = VoxelCoord::new(hero.anchor[0], hero.trunk_top, hero.anchor[2]).chunk();
     criterion.bench_function("generate 32^3 elder-canopy hero chunk", |bencher| {
         bencher.iter(|| generator.generate_chunk(hero_chunk));
@@ -195,17 +191,20 @@ fn codec(criterion: &mut Criterion) {
     });
     group.finish();
 
-    let Ok(batch) = source.generate_batch(WorldProductBatch {
-        priority: WorldProductPriority::VisibleChunk,
-        requests: vec![WorldProductRequest::ChunkWithHalo(COORD)],
-    }) else {
-        return;
-    };
-    let Some(item) = batch.items.into_iter().next() else {
-        return;
-    };
-    let Ok(WorldProduct::Chunk(snapshot)) = item.result else {
-        return;
+    let batch = source
+        .generate_batch(WorldProductBatch {
+            priority: WorldProductPriority::VisibleChunk,
+            requests: vec![WorldProductRequest::ChunkWithHalo(COORD)],
+        })
+        .expect("fixed chunk benchmark product must generate");
+    let item = batch
+        .items
+        .into_iter()
+        .next()
+        .expect("fixed chunk benchmark batch must contain its request");
+    let snapshot = match item.result {
+        Ok(WorldProduct::Chunk(snapshot)) => snapshot,
+        result => panic!("fixed chunk benchmark returned {result:?}"),
     };
     let response = ChunkBatchResult {
         request_id: 1,
@@ -216,9 +215,8 @@ fn codec(criterion: &mut Criterion) {
             result: Ok(snapshot),
         }],
     };
-    let Ok(wire) = encode_chunk_batch_result(&response) else {
-        return;
-    };
+    let wire =
+        encode_chunk_batch_result(&response).expect("fixed chunk benchmark response must encode");
     let mut group = criterion.benchmark_group("VXWP chunk + halo envelope");
     group.throughput(criterion::Throughput::Bytes(wire.len() as u64));
     group.bench_function("encode", |bencher| {
@@ -244,16 +242,16 @@ fn streaming_codec(criterion: &mut Criterion) {
             })
         })
         .collect::<Vec<_>>();
-    let Ok(chunk_products) = source.generate_batch(WorldProductBatch {
-        priority: WorldProductPriority::VisibleChunk,
-        requests: chunk_coords
-            .iter()
-            .copied()
-            .map(WorldProductRequest::ChunkWithHalo)
-            .collect(),
-    }) else {
-        return;
-    };
+    let chunk_products = source
+        .generate_batch(WorldProductBatch {
+            priority: WorldProductPriority::VisibleChunk,
+            requests: chunk_coords
+                .iter()
+                .copied()
+                .map(WorldProductRequest::ChunkWithHalo)
+                .collect(),
+        })
+        .expect("fixed 3x3 chunk stream must generate");
     let chunk_response = ChunkBatchResult {
         request_id: 2,
         source_identity_hash: identity,
@@ -272,12 +270,9 @@ fn streaming_codec(criterion: &mut Criterion) {
             })
             .collect(),
     };
-    if chunk_response.items.len() != chunk_coords.len() {
-        return;
-    }
-    let Ok(chunk_wire) = encode_chunk_batch_result(&chunk_response) else {
-        return;
-    };
+    assert_eq!(chunk_response.items.len(), chunk_coords.len());
+    let chunk_wire =
+        encode_chunk_batch_result(&chunk_response).expect("fixed 3x3 chunk stream must encode");
     let mut group = criterion.benchmark_group(format!(
         "VXWP 3x3 chunk stream ({} wire bytes)",
         chunk_wire.len()
@@ -303,16 +298,16 @@ fn streaming_codec(criterion: &mut Criterion) {
             ]
         })
         .collect::<Vec<_>>();
-    let Ok(surface_products) = source.generate_batch(WorldProductBatch {
-        priority: WorldProductPriority::VisibleSurface,
-        requests: surface_coords
-            .iter()
-            .copied()
-            .map(WorldProductRequest::SurfaceTile)
-            .collect(),
-    }) else {
-        return;
-    };
+    let surface_products = source
+        .generate_batch(WorldProductBatch {
+            priority: WorldProductPriority::VisibleSurface,
+            requests: surface_coords
+                .iter()
+                .copied()
+                .map(WorldProductRequest::SurfaceTile)
+                .collect(),
+        })
+        .expect("fixed horizon surface stream must generate");
     let surface_response = SurfaceTileBatchResult {
         request_id: 3,
         source_identity_hash: identity,
@@ -332,12 +327,9 @@ fn streaming_codec(criterion: &mut Criterion) {
             })
             .collect(),
     };
-    if surface_response.items.len() != surface_coords.len() {
-        return;
-    }
-    let Ok(surface_wire) = encode_surface_tile_batch_result(&surface_response) else {
-        return;
-    };
+    assert_eq!(surface_response.items.len(), surface_coords.len());
+    let surface_wire = encode_surface_tile_batch_result(&surface_response)
+        .expect("fixed horizon surface stream must encode");
     let mut group = criterion.benchmark_group(format!(
         "VXWP 16-tile horizon stream ({} wire bytes)",
         surface_wire.len()
