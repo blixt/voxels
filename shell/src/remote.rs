@@ -113,7 +113,7 @@ pub struct RemoteSurfaceCompletion {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RemoteEditEvent {
-    Commit(EditCommit),
+    Commit(Box<EditCommit>),
     ResyncRequired { revision: u64 },
     Rejected { operation_id: u64, message: String },
 }
@@ -757,7 +757,7 @@ impl RemoteInner {
         }
         self.edit_events
             .borrow_mut()
-            .push_back(RemoteEditEvent::Commit(commit));
+            .push_back(RemoteEditEvent::Commit(Box::new(commit)));
     }
 
     fn handle_resync_required(self: &Rc<Self>, generation: u64, bytes: &[u8]) {

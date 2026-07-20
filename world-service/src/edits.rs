@@ -571,6 +571,7 @@ impl EditAuthority {
         self.lock().revision
     }
 
+    #[cfg(feature = "automation-fixture")]
     pub(crate) fn logical_edit_bytes(&self) -> usize {
         self.lock().edits.logical_bytes()
     }

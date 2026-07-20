@@ -826,8 +826,9 @@ const fn chunk_key(coord: ChunkCoord) -> (i32, i32, i32) {
 
 fn local_index([x, y, z]: [usize; 3]) -> u16 {
     debug_assert!(x < CHUNK_EDGE && y < CHUNK_EDGE && z < CHUNK_EDGE);
-    u16::try_from(y + z * CHUNK_EDGE + x * CHUNK_EDGE * CHUNK_EDGE)
-        .expect("chunk-local index fits u16")
+    let index = y + z * CHUNK_EDGE + x * CHUNK_EDGE * CHUNK_EDGE;
+    debug_assert!(u16::try_from(index).is_ok());
+    index as u16
 }
 
 fn local_coord(index: u16) -> [usize; 3] {

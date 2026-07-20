@@ -26,16 +26,16 @@ restart hydration, exact retry path, chunk codec, and public/editor wire encoder
 are from the same Apple development machine; they are comparison evidence, not portable performance
 budgets.
 
-| Measure | Previous | Current |
-| --- | ---: | ---: |
-| Clustered logical edit RAM | 61.6 B/mutation | 4.0 B/mutation |
-| Frontier logical edit RAM | 63.0 B/mutation | 4.2 B/mutation |
-| Clustered public commit wire | 4.38 B/mutation | 0.84 B/mutation |
-| Frontier public commit wire | 4.23 B/mutation | 0.47 B/mutation |
-| Clustered median commit | 3.23 ms | 2.55 ms |
-| Frontier median commit | 5.24 ms | 4.77 ms |
-| Clustered restart | 88.4 ms at 1,000 operations | 3.4 ms at 2,000 operations |
-| Eight-worker disjoint edit probe | 182.2 ms sequential | 52.9 ms concurrent (3.45x) |
+| Measure                          |                    Previous |                    Current |
+| -------------------------------- | --------------------------: | -------------------------: |
+| Clustered logical edit RAM       |             61.6 B/mutation |             4.0 B/mutation |
+| Frontier logical edit RAM        |             63.0 B/mutation |             4.2 B/mutation |
+| Clustered public commit wire     |             4.38 B/mutation |            0.84 B/mutation |
+| Frontier public commit wire      |             4.23 B/mutation |            0.47 B/mutation |
+| Clustered median commit          |                     3.23 ms |                    2.55 ms |
+| Frontier median commit           |                     5.24 ms |                    4.77 ms |
+| Clustered restart                | 88.4 ms at 1,000 operations | 3.4 ms at 2,000 operations |
+| Eight-worker disjoint edit probe |         182.2 ms sequential | 52.9 ms concurrent (3.45x) |
 
 The 16-player cap-exercising run retained exactly 1,024 operation receipts after 2,000 operations.
 Its clustered database was 7.46 MiB instead of the 12.0 MiB 100-player run whose 20 receipts per

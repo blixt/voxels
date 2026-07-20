@@ -1645,9 +1645,11 @@ fn encode_edit_ordinals(ordinals: &[usize]) -> Vec<u8> {
     encoded
 }
 
-fn encode_edit_mutations(commit: &EditCommit) -> (u8, Vec<u8>) {
+fn encode_edit_mutations(commit: &EditCommit) -> Result<(u8, Vec<u8>), ProtocolError> {
     let candidates = edit_action_volume(commit.action)
-        .expect("validated edit action")
+        .ok_or(ProtocolError::InvalidPayload(
+            "edit action volume exceeds world coordinates",
+        ))?
         .coordinates()
         .collect::<Vec<_>>();
     let mut bitset = vec![0_u8; candidates.len().div_ceil(8)];
@@ -1667,9 +1669,9 @@ fn encode_edit_mutations(commit: &EditCommit) -> (u8, Vec<u8>) {
     debug_assert_eq!(mutation_index, commit.mutations.len());
     let ordinal_bytes = encode_edit_ordinals(&ordinals);
     if bitset.len() < ordinal_bytes.len() {
-        (EDIT_MUTATIONS_BITSET, bitset)
+        Ok((EDIT_MUTATIONS_BITSET, bitset))
     } else {
-        (EDIT_MUTATIONS_ORDINALS, ordinal_bytes)
+        Ok((EDIT_MUTATIONS_ORDINALS, ordinal_bytes))
     }
 }
 
@@ -1764,7 +1766,7 @@ fn decode_edit_mutations(
 pub fn encode_edit_commit(commit: &EditCommit) -> Result<Vec<u8>, ProtocolError> {
     validate_edit_commit(commit)?;
     let (action_kind, shape, material, target) = encode_edit_action(commit.action)?;
-    let (mutation_encoding, encoded_mutations) = encode_edit_mutations(commit);
+    let (mutation_encoding, encoded_mutations) = encode_edit_mutations(commit)?;
     let mut payload = Vec::with_capacity(
         60 + encoded_mutations.len()
             + commit.affected_surface_tiles.len() * 12
