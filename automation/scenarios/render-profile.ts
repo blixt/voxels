@@ -458,9 +458,7 @@ async function sustainedProfile(
           };
         })
       : [];
-  const drainStarted = captures.find(
-    (capture) => snapshotValue(capture.snapshot, "profilePhase") === 3,
-  );
+  const movementEnded = moving.at(-1);
   const completed = captures.find(
     (capture) => snapshotValue(capture.snapshot, "profileComplete") === 1,
   );
@@ -514,16 +512,19 @@ async function sustainedProfile(
       ).length,
     },
     drain: {
+      // Drain can complete between the harness's 250 ms captures, leaving no phase-3 sample.
+      // Measuring from the final movement sample is a conservative upper bound that remains
+      // observable even when the renderer settles immediately.
       settleMilliseconds:
-        drainStarted === undefined || completed === undefined
+        movementEnded === undefined || completed === undefined
           ? null
-          : completed.capturedAtMs - drainStarted.capturedAtMs,
+          : completed.capturedAtMs - movementEnded.capturedAtMs,
       peakPendingJobs:
-        drainStarted === undefined
+        movementEnded === undefined
           ? null
           : Math.max(
               ...captures
-                .filter((capture) => capture.capturedAtMs >= drainStarted.capturedAtMs)
+                .filter((capture) => capture.capturedAtMs >= movementEnded.capturedAtMs)
                 .map((capture) => snapshotValue(capture.snapshot, "pendingJobs")),
               0,
             ),
