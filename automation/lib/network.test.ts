@@ -122,7 +122,7 @@ describe("network benchmark link", () => {
     let now = 100;
     const stats = testInternals.blankStats();
     const inspector = new testInternals.ConnectionInspector({ current: stats }, () => now);
-    inspector.path = "/v26/presence";
+    inspector.path = "/v27/presence";
     inspector.onMessage("upstream", 0x2, vxwpFrame(13, 40, 7), 40, 1);
     now = 112.25;
     inspector.onMessage("downstream", 0x2, vxwpFrame(14, 56, 7), 56, 1);
@@ -146,7 +146,7 @@ describe("network benchmark link", () => {
   it("retains control-error reasons instead of reporting opaque error-frame counts", () => {
     const stats = testInternals.blankStats();
     const inspector = new testInternals.ConnectionInspector({ current: stats });
-    inspector.path = "/v26/world";
+    inspector.path = "/v27/world";
     inspector.onMessage("downstream", 0x2, vxwpError("world generator is busy"), 49, 1);
     inspector.onMessage("downstream", 0x2, vxwpError("world generator is busy"), 49, 1);
 

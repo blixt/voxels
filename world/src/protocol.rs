@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 26;
+pub const PROTOCOL_VERSION: u16 = 27;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -2156,7 +2156,7 @@ impl FrameReassembler {
             ))?
             .bytes;
         let frame = decode_frame(&completed)?;
-        if frame.kind == KIND_FRAME_FRAGMENT || frame.request_id != transfer_id {
+        if frame.kind == KIND_FRAME_FRAGMENT {
             return Err(ProtocolError::InvalidPayload(
                 "fragmented frame identity mismatch",
             ));
@@ -4187,10 +4187,13 @@ mod tests {
     fn fragmented_frames_reassemble_strictly_across_interleaved_transfers() {
         let first = encode_frame(KIND_ERROR, 71, &vec![0x71; 9_000]);
         let second = encode_frame(KIND_ERROR, 72, &vec![0x72; 5_000]);
-        let first_a = encode_frame_fragment(71, first.len(), 0, &first[..3_000]).unwrap();
-        let first_b = encode_frame_fragment(71, first.len(), 3_000, &first[3_000..]).unwrap();
-        let second_a = encode_frame_fragment(72, second.len(), 0, &second[..2_000]).unwrap();
-        let second_b = encode_frame_fragment(72, second.len(), 2_000, &second[2_000..]).unwrap();
+        // Transfer IDs belong to this connection and deliberately do not reuse the embedded
+        // request IDs. Unsolicited multiplayer edit commits originate in independent operation-ID
+        // namespaces, so their request IDs are not unique at a receiving client.
+        let first_a = encode_frame_fragment(101, first.len(), 0, &first[..3_000]).unwrap();
+        let first_b = encode_frame_fragment(101, first.len(), 3_000, &first[3_000..]).unwrap();
+        let second_a = encode_frame_fragment(102, second.len(), 0, &second[..2_000]).unwrap();
+        let second_b = encode_frame_fragment(102, second.len(), 2_000, &second[2_000..]).unwrap();
         let mut reassembler = FrameReassembler::default();
         assert_eq!(reassembler.accept(&first_a), Ok(None));
         assert_eq!(reassembler.accept(&second_a), Ok(None));

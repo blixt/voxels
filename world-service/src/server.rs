@@ -50,9 +50,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v26/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v26/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v26";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v27/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v27/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v27";
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 
@@ -813,6 +813,7 @@ impl TrackedRequest {
 struct OutboundFrame {
     bytes: Vec<u8>,
     offset: usize,
+    fragment_transfer_id: Option<u64>,
     priority: TrafficPriority,
     tracked: Option<TrackedRequest>,
     _byte_permit: Option<OwnedSemaphorePermit>,
@@ -840,11 +841,16 @@ impl OutboundFrame {
     fn take_next_wire(
         &mut self,
         fragment_bytes: Option<usize>,
+        next_fragment_transfer_id: &mut u64,
     ) -> Result<(Vec<u8>, bool), voxels_world::protocol::ProtocolError> {
         let Some(fragment_bytes) = fragment_bytes else {
             return Ok((std::mem::take(&mut self.bytes), true));
         };
-        let transfer_id = message_request_id(&self.bytes)?;
+        let transfer_id = *self.fragment_transfer_id.get_or_insert_with(|| {
+            let transfer_id = *next_fragment_transfer_id;
+            *next_fragment_transfer_id = next_fragment_transfer_id.wrapping_add(1).max(1);
+            transfer_id
+        });
         let end = self
             .offset
             .saturating_add(fragment_bytes)
@@ -1350,6 +1356,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
         .send(OutboundFrame {
             bytes: encode_world_opened(&opened),
             offset: 0,
+            fragment_transfer_id: None,
             priority: TrafficPriority::Critical,
             tracked: None,
             _byte_permit: None,
@@ -2000,6 +2007,7 @@ async fn send_control_error(
         .send(OutboundFrame {
             bytes: encode_error(request_id, message),
             offset: 0,
+            fragment_transfer_id: None,
             priority: TrafficPriority::Critical,
             tracked: None,
             _byte_permit: None,
@@ -2016,6 +2024,7 @@ async fn send_frame(
         .send(OutboundFrame {
             bytes,
             offset: 0,
+            fragment_transfer_id: None,
             priority,
             tracked: None,
             _byte_permit: None,
@@ -2031,6 +2040,7 @@ async fn write_frames(
 ) {
     let mut queues: [VecDeque<OutboundFrame>; TrafficPriority::COUNT] =
         std::array::from_fn(|_| VecDeque::new());
+    let mut next_fragment_transfer_id = 1_u64;
     let mut outbound_open = true;
     'writer: loop {
         while let Ok(frame) = outbound.try_recv() {
@@ -2095,7 +2105,10 @@ async fn write_frames(
                         }
                         continue 'writer;
                     }
-                    let (wire, complete) = match frame.take_next_wire(permit.fragment_bytes) {
+                    let (wire, complete) = match frame.take_next_wire(
+                        permit.fragment_bytes,
+                        &mut next_fragment_transfer_id,
+                    ) {
                         Ok(next) => next,
                         Err(_) => {
                             if let Some(tracked) = frame.tracked {
@@ -2695,6 +2708,7 @@ async fn deliver_generation_job(
     let frame = OutboundFrame {
         bytes,
         offset: 0,
+        fragment_transfer_id: None,
         priority: traffic_priority(job.request.priority()),
         tracked: Some(job.tracked),
         _byte_permit: Some(byte_permit),
@@ -2860,16 +2874,79 @@ mod tests {
         BrowserUserId, ChunkBatchRequest, EditCommand, EditCommit, FrameReassembler, OpenPresence,
         OpenWorld, PLAYER_POSE_GROUNDED, PlayerId, PlayerIdentity, PlayerPoseUpdate, PresenceDelta,
         PresenceOpened, PresenceSessionId, SurfaceTileBatchRequest, decode_chunk_batch_result,
-        decode_edit_commit, decode_error, decode_presence_delta, decode_presence_opened,
-        decode_surface_tile_batch_result, decode_world_opened, edit_commit_kind,
-        encode_chunk_batch, encode_edit_command, encode_open_presence, encode_open_world,
-        encode_player_pose, encode_surface_tile_batch, error_kind, frame_fragment_kind,
-        presence_delta_kind,
+        decode_edit_commit, decode_error, decode_frame_fragment, decode_presence_delta,
+        decode_presence_opened, decode_surface_tile_batch_result, decode_world_opened,
+        edit_commit_kind, encode_chunk_batch, encode_edit_command, encode_open_presence,
+        encode_open_world, encode_player_pose, encode_surface_tile_batch, error_kind,
+        frame_fragment_kind, presence_delta_kind,
     };
     use voxels_world::{
         ChunkCoord, ProceduralWorldSource, SurfaceLodLevel, SurfaceTileCoord, VoxelCoord,
         WorldProductPriority,
     };
+
+    #[test]
+    fn fragmented_outbound_frames_do_not_reuse_embedded_request_ids() {
+        let first_bytes = encode_error(1, &"a".repeat(256));
+        let second_bytes = encode_error(1, &"b".repeat(256));
+        let mut first = OutboundFrame {
+            bytes: first_bytes.clone(),
+            offset: 0,
+            fragment_transfer_id: None,
+            priority: TrafficPriority::WorldChange,
+            tracked: None,
+            _byte_permit: None,
+        };
+        let mut second = OutboundFrame {
+            bytes: second_bytes.clone(),
+            offset: 0,
+            fragment_transfer_id: None,
+            priority: TrafficPriority::Critical,
+            tracked: None,
+            _byte_permit: None,
+        };
+        let mut next_transfer_id = 1;
+        let mut reassembler = FrameReassembler::default();
+
+        let (first_wire, mut first_complete) = first
+            .take_next_wire(Some(64), &mut next_transfer_id)
+            .unwrap();
+        let (second_wire, mut second_complete) = second
+            .take_next_wire(Some(64), &mut next_transfer_id)
+            .unwrap();
+        let first_transfer = decode_frame_fragment(&first_wire).unwrap().transfer_id;
+        let second_transfer = decode_frame_fragment(&second_wire).unwrap().transfer_id;
+        assert_ne!(first_transfer, second_transfer);
+        assert_eq!(reassembler.accept(&first_wire).unwrap(), None);
+        assert_eq!(reassembler.accept(&second_wire).unwrap(), None);
+        let mut first_reassembled = false;
+        let mut second_reassembled = false;
+
+        while !first_complete || !second_complete {
+            if !first_complete {
+                let (wire, complete) = first
+                    .take_next_wire(Some(64), &mut next_transfer_id)
+                    .unwrap();
+                first_complete = complete;
+                if let Some(frame) = reassembler.accept(&wire).unwrap() {
+                    assert_eq!(frame, first_bytes);
+                    first_reassembled = true;
+                }
+            }
+            if !second_complete {
+                let (wire, complete) = second
+                    .take_next_wire(Some(64), &mut next_transfer_id)
+                    .unwrap();
+                second_complete = complete;
+                if let Some(frame) = reassembler.accept(&wire).unwrap() {
+                    assert_eq!(frame, second_bytes);
+                    second_reassembled = true;
+                }
+            }
+        }
+        assert!(first_reassembled);
+        assert!(second_reassembled);
+    }
 
     struct CountingSource {
         inner: ProceduralWorldSource,
@@ -3332,7 +3409,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v26, test-local-token"),
+            HeaderValue::from_static("voxels.world.v27, test-local-token"),
         );
         let (socket, response) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -4365,7 +4442,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v26, test-local-token"),
+            HeaderValue::from_static("voxels.world.v27, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -4399,7 +4476,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v26, test-local-token"),
+            HeaderValue::from_static("voxels.world.v27, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
