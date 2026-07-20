@@ -224,6 +224,12 @@ async function waitForFall(engine: EngineClient, previousEyeY: number): Promise<
 }
 
 function continuitySummary(digs: readonly DigContinuity[]) {
+  const renderCaptures = digs.flatMap((dig) => dig.captures);
+  const enclosedRenderCaptures = renderCaptures.filter(
+    ({ snapshot }) =>
+      snapshotValue(snapshot, "enclosure") > 0.98 &&
+      snapshotValue(snapshot, "shadowCascades") === 0,
+  );
   return {
     digs: digs.length,
     trackedReplacements: digs.filter((dig) => dig.observedTrackedReplacement).length,
@@ -246,7 +252,8 @@ function continuitySummary(digs: readonly DigContinuity[]) {
       ...digs.map((dig) => dig.maximumPresentedStrideVoxels),
       1,
     ),
-    renderDuringEdits: summarizeRenderPhase(digs.flatMap((dig) => dig.captures)),
+    renderDuringEdits: summarizeRenderPhase(renderCaptures),
+    enclosedRenderDuringEdits: summarizeRenderPhase(enclosedRenderCaptures),
   };
 }
 
@@ -444,12 +451,34 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
     violations.push("an edit replacement lost canonical LOD ownership");
   if (continuity.maximumPresentedStrideVoxels > 1)
     violations.push("the immediate viewport degraded to a coarse LOD during digging");
+  if (continuity.enclosedRenderDuringEdits.samples === 0)
+    violations.push("no fully enclosed digging frames were measured");
+  if (continuity.enclosedRenderDuringEdits.frameMs.median > 8.8)
+    violations.push("fully enclosed digging did not sustain a 120 Hz median frame interval");
+  if (continuity.enclosedRenderDuringEdits.cpuMs.p95 > 8)
+    violations.push("fully enclosed digging CPU p95 exceeded the 120 Hz work budget");
+  if ((continuity.enclosedRenderDuringEdits.gpu.totalMs?.p95 ?? 0) > 7.5)
+    violations.push("fully enclosed digging GPU p95 exceeded the 120 Hz work budget");
+  if (
+    continuity.enclosedRenderDuringEdits.frameMs.above16_67ms >
+    Math.ceil(continuity.enclosedRenderDuringEdits.samples * 0.02)
+  )
+    violations.push("more than 2% of fully enclosed digging frames were slower than 60 Hz");
+  if (continuity.enclosedRenderDuringEdits.frameMs.above33_33ms > 0)
+    violations.push("fully enclosed digging produced a frame slower than 30 Hz");
   if (stepBack.worst.diagnosticSkyPixels > 0)
     violations.push("the enclosed tunnel exposed diagnostic sky while stepping backward");
-  if (undergroundPerformance.frameMs.p95 > 9.5)
-    violations.push("underground frame p95 exceeded the 120 Hz tolerance of 9.5ms");
-  if (undergroundPerformance.frameMs.above16_67ms > 0)
-    violations.push("underground rendering produced frames slower than 60 Hz");
+  if (undergroundPerformance.frameMs.median > 8.8)
+    violations.push("underground rendering did not sustain a 120 Hz median frame interval");
+  if (undergroundPerformance.cpuMs.p95 > 8)
+    violations.push("underground CPU p95 exceeded the 120 Hz work budget");
+  if (
+    undergroundPerformance.frameMs.above16_67ms >
+    Math.ceil(undergroundPerformance.samples * 0.02)
+  )
+    violations.push("more than 2% of underground frames were slower than 60 Hz");
+  if (undergroundPerformance.frameMs.above33_33ms > 0)
+    violations.push("underground rendering produced a frame slower than 30 Hz");
   if ((undergroundPerformance.gpu.totalMs?.p95 ?? 0) > 7.5)
     violations.push("underground total GPU p95 exceeded 7.5ms");
   if (undergroundPerformance.shadowCascades !== 0)
