@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, mpsc, watch};
-use voxels_core::PLAYER_EYE_HEIGHT_METRES;
+use voxels_core::{PLAYER_EYE_HEIGHT_METRES, PLAYER_RADIUS_METRES};
 #[cfg(test)]
 use voxels_world::protocol::EditShape;
 use voxels_world::protocol::{
@@ -374,6 +374,7 @@ fn prepare_world(
     Ok(WorldBootstrap {
         manifest,
         capabilities,
+        pillar_radius_voxels: config.spawn.pillar_radius_voxels,
         spawn: SpawnPoint {
             x: config.spawn.xz_voxels[0],
             z: config.spawn.xz_voxels[1],
@@ -397,6 +398,7 @@ fn prepare_world(
 struct WorldBootstrap {
     manifest: WorldManifest,
     capabilities: WorldCapabilities,
+    pillar_radius_voxels: u8,
     spawn: SpawnPoint,
     protected_spawn: ProtectedSpawn,
 }
@@ -444,6 +446,24 @@ impl WorldBootstrap {
             look_yaw_radians: 0.0,
             look_pitch_radians: 0.0,
         }
+    }
+
+    fn unobstructed_player_resume(&self, mut resume: PlayerResume) -> PlayerResume {
+        let spawn = self.default_player_resume();
+        let center_x = (self.spawn.x as f32 + 0.5) * voxels_world::VOXEL_SIZE_METRES;
+        let center_z = (self.spawn.z as f32 + 0.5) * voxels_world::VOXEL_SIZE_METRES;
+        let collision_radius = f32::from(self.pillar_radius_voxels)
+            * voxels_world::VOXEL_SIZE_METRES
+            + PLAYER_RADIUS_METRES;
+        let dx = resume.eye_position_metres[0] - center_x;
+        let dz = resume.eye_position_metres[2] - center_z;
+        let feet_y = resume.eye_position_metres[1] - PLAYER_EYE_HEIGHT_METRES;
+        let platform_top_y = (self.spawn.height + 1) as f32 * voxels_world::VOXEL_SIZE_METRES;
+        if dx.mul_add(dx, dz * dz) <= collision_radius * collision_radius && feet_y < platform_top_y
+        {
+            resume.eye_position_metres = spawn.eye_position_metres;
+        }
+        resume
     }
 }
 
@@ -1293,7 +1313,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
             return;
         }
     };
-    let loaded_player = match state
+    let mut loaded_player = match state
         .edits
         .load_player(open.identity.player_id, state.world.default_player_resume())
     {
@@ -1307,6 +1327,7 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
             return;
         }
     };
+    loaded_player.resume = state.world.unobstructed_player_resume(loaded_player.resume);
     let Some(player_claim) = state.presence.join(&open.identity, loaded_player.resume) else {
         let _ = socket
             .send(Message::Binary(
@@ -2946,6 +2967,84 @@ mod tests {
         }
         assert!(first_reassembled);
         assert!(second_reassembled);
+    }
+
+    #[test]
+    fn default_spawn_bootstrap_builds_the_full_raised_platform() {
+        let config = WorldServiceConfig::default();
+        let source = ProceduralWorldSource::new(config.world_seed);
+        let bootstrap = prepare_world(&config, &source).expect("default spawn bootstrap");
+        let expected_spawn = bootstrap.default_player_resume();
+        let obstructed = PlayerResume {
+            revision: 42,
+            eye_position_metres: [
+                expected_spawn.eye_position_metres[0],
+                expected_spawn.eye_position_metres[1] - 1.0,
+                expected_spawn.eye_position_metres[2],
+            ],
+            look_yaw_radians: 0.75,
+            look_pitch_radians: -0.25,
+        };
+        let recovered = bootstrap.unobstructed_player_resume(obstructed);
+        assert_eq!(
+            recovered.eye_position_metres,
+            expected_spawn.eye_position_metres
+        );
+        assert_eq!(recovered.revision, obstructed.revision);
+        assert_eq!(recovered.look_yaw_radians, obstructed.look_yaw_radians);
+        assert_eq!(recovered.look_pitch_radians, obstructed.look_pitch_radians);
+        let clear = PlayerResume {
+            eye_position_metres: [
+                expected_spawn.eye_position_metres[0] + 3.0,
+                expected_spawn.eye_position_metres[1] - 1.0,
+                expected_spawn.eye_position_metres[2],
+            ],
+            ..obstructed
+        };
+        assert_eq!(bootstrap.unobstructed_player_resume(clear), clear);
+        let above = PlayerResume {
+            eye_position_metres: [
+                expected_spawn.eye_position_metres[0],
+                expected_spawn.eye_position_metres[1] + 1.0,
+                expected_spawn.eye_position_metres[2],
+            ],
+            ..obstructed
+        };
+        assert_eq!(bootstrap.unobstructed_player_resume(above), above);
+
+        let authority = EditAuthority::in_memory(
+            bootstrap.manifest.world_id,
+            &source,
+            config.edits.change_queue_capacity,
+        )
+        .expect("spawn edit authority");
+        authority.install_protected_spawn(bootstrap.protected_spawn);
+
+        let radius = i32::from(config.spawn.pillar_radius_voxels);
+        let center = VoxelCoord::new(
+            config.spawn.xz_voxels[0],
+            bootstrap.spawn.height,
+            config.spawn.xz_voxels[1],
+        );
+        let rim = VoxelCoord::new(center.x + radius, center.y, center.z);
+        let outside = VoxelCoord::new(center.x + radius + 1, center.y, center.z);
+        let corner = VoxelCoord::new(center.x + radius, center.y, center.z + radius);
+        let snapshot = authority.snapshot_chunks(&[
+            center.chunk(),
+            rim.chunk(),
+            outside.chunk(),
+            corner.chunk(),
+        ]);
+        assert_eq!(
+            snapshot.edits.override_at(center),
+            Some(config.spawn.pillar_material)
+        );
+        assert_eq!(
+            snapshot.edits.override_at(rim),
+            Some(config.spawn.pillar_material)
+        );
+        assert_eq!(snapshot.edits.override_at(outside), None);
+        assert_eq!(snapshot.edits.override_at(corner), None);
     }
 
     struct CountingSource {

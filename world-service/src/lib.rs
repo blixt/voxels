@@ -230,8 +230,8 @@ impl Default for SpawnConfig {
     fn default() -> Self {
         Self {
             xz_voxels: [0, 0],
-            pillar_height_voxels: 40,
-            pillar_radius_voxels: 3,
+            pillar_height_voxels: 50,
+            pillar_radius_voxels: 25,
             protection_radius_voxels: 64,
             pillar_material: Material::Stone,
         }
@@ -1041,7 +1041,10 @@ fn default_terrain_model_cache() -> Result<PathBuf, WorldServiceSourceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use voxels_world::{MacroBlockBatch, MacroBlockRequest, WorldProductPriority, WorldSourceKind};
+    use voxels_world::{
+        MacroBlockBatch, MacroBlockRequest, VOXEL_SIZE_METRES, WorldProductPriority,
+        WorldSourceKind,
+    };
 
     const CONFIG_TOML: &str = r#"
 schema_version = 23
@@ -1125,8 +1128,8 @@ change_queue_capacity = 1024
 
 [spawn]
 xz_voxels = [0, 0]
-pillar_height_voxels = 40
-pillar_radius_voxels = 3
+pillar_height_voxels = 50
+pillar_radius_voxels = 25
 protection_radius_voxels = 64
 pillar_material = "Stone"
 
@@ -1164,6 +1167,24 @@ sea_level_voxels = 52
     fn checked_in_world_service_config_is_strict_and_valid() {
         let config = WorldServiceConfig::from_toml(include_str!("../../config/world-service.toml"));
         assert!(config.is_ok());
+    }
+
+    #[test]
+    fn default_spawn_is_a_five_metre_raised_platform() {
+        let spawn = SpawnConfig::default();
+        let checked_in =
+            WorldServiceConfig::from_toml(include_str!("../../config/world-service.toml"))
+                .expect("checked-in config");
+        assert_eq!(checked_in.spawn, spawn);
+        assert_eq!(spawn.pillar_height_voxels, 50);
+        assert_eq!(spawn.pillar_radius_voxels, 25);
+
+        let height_metres = f32::from(spawn.pillar_height_voxels) * VOXEL_SIZE_METRES;
+        let diameter_metres =
+            f32::from(spawn.pillar_radius_voxels) * 2.0 * VOXEL_SIZE_METRES + VOXEL_SIZE_METRES;
+        assert!((height_metres - 5.0).abs() < f32::EPSILON);
+        assert!((diameter_metres - 5.0).abs() <= VOXEL_SIZE_METRES + f32::EPSILON);
+        assert!(spawn.protection_radius_voxels > u16::from(spawn.pillar_radius_voxels));
     }
 
     #[test]

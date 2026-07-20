@@ -115,10 +115,11 @@ change_queue_capacity = 1024
 
 [spawn]
 # Must lie inside the selected source's valid coverage. New players begin on a server-authored
-# 4-metre stone pillar whose footprint appears in canonical chunks and far-surface products.
+# approximately 5-metre-wide stone platform, raised 5 metres above the highest source surface
+# under its footprint. The complete pillar appears in canonical chunks and far-surface products.
 xz_voxels = [0, 0]
-pillar_height_voxels = 40
-pillar_radius_voxels = 3
+pillar_height_voxels = 50
+pillar_radius_voxels = 25
 # Protect 6.4 metres around the pillar from both digging and placement.
 protection_radius_voxels = 64
 pillar_material = "Stone"
