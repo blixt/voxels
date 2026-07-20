@@ -301,7 +301,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 2;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 31;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 32;
     const FRAME_SAMPLE_WIDTH: u32 = 11;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -318,7 +318,8 @@ mod web {
         "lodBoundary1Z,lodBoundary2X,lodBoundary2Z,lodBoundary3X,lodBoundary3Z,lodBoundary4X,lodBoundary4Z,lodBoundary5X,lodBoundary5Z,lodBoundary6X,lodBoundary6Z,lodBoundary7X,lodBoundary7Z,dayFraction,localSolarDayFraction,yearFraction,",
         "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
         "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
-        "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,canonicalSurfaceCellsResident,canonicalSurfaceCellsRequired,schemaVersion,sampleCount,",
+        "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,canonicalSurfaceCellsResident,canonicalSurfaceCellsRequired,",
+        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,schemaVersion,sampleCount,",
         "droppedSamples",
     );
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
@@ -961,9 +962,13 @@ mod web {
             self.update_edit_convergence(time, submitted);
             if self.profile.borrow().phase() != ProfilePhase::Idle {
                 let pending = stream.generation.queued
+                    + stream.generation.in_flight
                     + stream.meshing.queued
+                    + stream.meshing.in_flight
                     + stream.upload.queued
+                    + stream.upload.in_flight
                     + self.surface_queue.borrow().len()
+                    + self.surface_in_flight.borrow().len()
                     + self.surface_dirty.borrow().len();
                 self.profile_tracked_high
                     .set(self.profile_tracked_high.get().max(stream.tracked));
@@ -2777,6 +2782,17 @@ mod web {
                     canonical_immediate.required as f32,
                     f32::from(canonical_surface_coverage.0),
                     f32::from(canonical_surface_coverage.1),
+                    diagnostics.generation.queued as f32,
+                    diagnostics.generation.in_flight as f32,
+                    diagnostics.meshing.queued as f32,
+                    diagnostics.meshing.in_flight as f32,
+                    diagnostics.upload.queued as f32,
+                    diagnostics.upload.in_flight as f32,
+                    engine.surface_queue.borrow().len() as f32,
+                    engine.surface_dirty.borrow().len() as f32,
+                    diagnostics.initial_residency_latency.completed as f32,
+                    diagnostics.initial_residency_latency.in_flight as f32,
+                    diagnostics.accepted_completions as f32,
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);

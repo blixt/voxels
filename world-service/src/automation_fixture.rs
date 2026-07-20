@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use voxels_client_config::{ClientConfig, ClientConfigError};
 
-pub const AUTOMATION_FIXTURE_SCHEMA_VERSION: u32 = 4;
+pub const AUTOMATION_FIXTURE_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -31,6 +31,8 @@ pub struct AutomationFixtureOverlay {
     pub generation_workers: Option<u16>,
     pub cascaded_shadows: Option<bool>,
     pub screen_space_ambient_occlusion: Option<bool>,
+    pub profiling_warmup_seconds: Option<f32>,
+    pub profiling_measure_seconds: Option<f32>,
     pub day_length_seconds: Option<f32>,
     pub world_day_number_at_unix_epoch: Option<i64>,
     pub day_fraction_at_unix_epoch: Option<f32>,
@@ -60,6 +62,8 @@ pub struct AutomationFixtureResolved {
     pub generation_workers: u16,
     pub cascaded_shadows: bool,
     pub screen_space_ambient_occlusion: bool,
+    pub profiling_warmup_seconds: f32,
+    pub profiling_measure_seconds: f32,
     pub day_length_seconds: f32,
     pub world_day_number_at_unix_epoch: i64,
     pub day_fraction_at_unix_epoch: f32,
@@ -226,6 +230,19 @@ pub fn build_automation_fixture(
             .auth_subprotocol_token
             .clone_from(&overlay.auth_token);
     };
+    configure_client(&mut client, overlay.backend_port);
+    if let Some(value) = overlay.cascaded_shadows {
+        client.rendering.features.cascaded_sun_shadows = value;
+    }
+    if let Some(value) = overlay.screen_space_ambient_occlusion {
+        client.rendering.features.screen_space_ambient_occlusion = value;
+    }
+    if let Some(value) = overlay.profiling_warmup_seconds {
+        client.profiling.warmup_seconds = value;
+    }
+    if let Some(value) = overlay.profiling_measure_seconds {
+        client.profiling.measure_seconds = value;
+    }
     let routed_clients = overlay
         .client_ports
         .iter()
@@ -235,13 +252,6 @@ pub fn build_automation_fixture(
             routed
         })
         .collect::<Vec<_>>();
-    configure_client(&mut client, overlay.backend_port);
-    if let Some(value) = overlay.cascaded_shadows {
-        client.rendering.features.cascaded_sun_shadows = value;
-    }
-    if let Some(value) = overlay.screen_space_ambient_occlusion {
-        client.rendering.features.screen_space_ambient_occlusion = value;
-    }
 
     let resolved = AutomationFixtureResolved {
         spawn_voxels: service.spawn.xz_voxels,
@@ -251,6 +261,8 @@ pub fn build_automation_fixture(
         generation_workers: service.transport.generation_workers,
         cascaded_shadows: client.rendering.features.cascaded_sun_shadows,
         screen_space_ambient_occlusion: client.rendering.features.screen_space_ambient_occlusion,
+        profiling_warmup_seconds: client.profiling.warmup_seconds,
+        profiling_measure_seconds: client.profiling.measure_seconds,
         day_length_seconds: service.environment.day_length_seconds,
         world_day_number_at_unix_epoch: service.environment.world_day_number_at_unix_epoch,
         day_fraction_at_unix_epoch: service.environment.day_fraction_at_unix_epoch,
@@ -309,6 +321,8 @@ mod tests {
             generation_workers: Some(12),
             cascaded_shadows: Some(false),
             screen_space_ambient_occlusion: Some(false),
+            profiling_warmup_seconds: Some(40.0),
+            profiling_measure_seconds: Some(80.0),
             day_length_seconds: None,
             world_day_number_at_unix_epoch: None,
             day_fraction_at_unix_epoch: None,
@@ -350,6 +364,8 @@ mod tests {
             format!("ws://127.0.0.1:41235{WORLD_WEBSOCKET_PATH}")
         );
         assert!(!fixture.resolved.cascaded_shadows);
+        assert_eq!(client.profiling.warmup_seconds, 40.0);
+        assert_eq!(client.profiling.measure_seconds, 80.0);
         assert_eq!(fixture.resolved.cloud_top_metres, 1_400.0);
         assert_eq!(
             fixture.resolved.outbound_bandwidth_ceiling_bytes_per_second,

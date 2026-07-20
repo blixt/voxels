@@ -3,6 +3,7 @@ import { SNAPSHOT } from "./engine.ts";
 import {
   frameSamples,
   summarizeRenderPhase,
+  summarizeStreamingPressure,
   type RenderSnapshotCapture,
 } from "./render-metrics.ts";
 
@@ -12,6 +13,7 @@ describe("render metrics", () => {
     snapshot[SNAPSHOT.residentChunks] = 12;
     snapshot[SNAPSHOT.quads] = 345;
     const capture: RenderSnapshotCapture = {
+      capturedAtMs: 10,
       snapshot,
       samples: [
         {
@@ -62,6 +64,7 @@ describe("render metrics", () => {
   it("attributes delayed GPU timings only to frames captured in the measured phase", () => {
     const snapshot = Array.from({ length: SNAPSHOT.droppedSamples + 1 }, () => 0);
     const capture: RenderSnapshotCapture = {
+      capturedAtMs: 10,
       snapshot,
       samples: [
         {
@@ -127,5 +130,54 @@ describe("render metrics", () => {
     snapshot[SNAPSHOT.droppedSamples + 6] = 123;
 
     expect(frameSamples(snapshot)).toMatchObject([{ intervalMs: 8.25, frameId: 123 }]);
+  });
+
+  it("reports stage pressure and continuous presentation degradation", () => {
+    const snapshot = Array.from({ length: SNAPSHOT.droppedSamples + 1 }, () => 0);
+    snapshot[SNAPSHOT.pendingJobs] = 7;
+    snapshot[SNAPSHOT.generationQueued] = 3;
+    snapshot[SNAPSHOT.generationInFlight] = 2;
+    snapshot[SNAPSHOT.surfaceInFlight] = 2;
+    snapshot[SNAPSHOT.loadCompleted] = 10;
+    snapshot[SNAPSHOT.acceptedCompletions] = 20;
+    snapshot[SNAPSHOT.canonicalImmediateRequired] = 15;
+    snapshot[SNAPSHOT.canonicalImmediateResident] = 14;
+    snapshot[SNAPSHOT.canonicalSurfaceCellsRequired] = 1_024;
+    snapshot[SNAPSHOT.canonicalSurfaceCellsResident] = 1_024;
+    snapshot[SNAPSHOT.presentedLodStrideVoxels] = 2;
+    const settled = [...snapshot];
+    settled[SNAPSHOT.pendingJobs] = 0;
+    settled[SNAPSHOT.generationQueued] = 0;
+    settled[SNAPSHOT.generationInFlight] = 0;
+    settled[SNAPSHOT.surfaceInFlight] = 0;
+    settled[SNAPSHOT.loadCompleted] = 13;
+    settled[SNAPSHOT.acceptedCompletions] = 25;
+    settled[SNAPSHOT.canonicalImmediateResident] = 15;
+    settled[SNAPSHOT.presentedLodStrideVoxels] = 1;
+    const capture = (
+      capturedAtMs: number,
+      values: readonly number[],
+    ): RenderSnapshotCapture => ({
+      capturedAtMs,
+      snapshot: values,
+      samples: [],
+      dropped: 0,
+      gpuSamples: [],
+      gpuDropped: 0,
+    });
+
+    const pressure = summarizeStreamingPressure([
+      capture(10, snapshot),
+      capture(260, snapshot),
+      capture(510, settled),
+    ]);
+    expect(pressure.pendingJobs.max).toBe(7);
+    expect(pressure.generation.queued.max).toBe(3);
+    expect(pressure.surface.inFlight.max).toBe(2);
+    expect(pressure.completions.initialLoads).toBe(3);
+    expect(pressure.completions.accepted).toBe(5);
+    expect(pressure.readiness.canonicalImmediateRatio).toBeCloseTo(1 / 3);
+    expect(pressure.readiness.canonicalPresentationRatio).toBeCloseTo(1 / 3);
+    expect(pressure.readiness.longestDegradedPresentationMs).toBe(250);
   });
 });

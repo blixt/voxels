@@ -21,7 +21,7 @@ import {
 import type { WorldServiceCargoProfile } from "../../scripts/world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
-const AUTOMATION_FIXTURE_SCHEMA_VERSION = 4;
+const AUTOMATION_FIXTURE_SCHEMA_VERSION = 5;
 
 export type WorldSource = "procedural-v16" | "terrain-diffusion-30m";
 
@@ -37,6 +37,8 @@ export interface WorldFixtureOptions {
   readonly generationWorkers?: number;
   readonly cascadedShadows?: boolean;
   readonly screenSpaceAmbientOcclusion?: boolean;
+  readonly profilingWarmupSeconds?: number;
+  readonly profilingMeasureSeconds?: number;
   readonly dayLengthSeconds?: number;
   readonly worldDayNumberAtUnixEpoch?: number;
   readonly dayFractionAtUnixEpoch?: number;
@@ -72,6 +74,8 @@ export interface WorldFixture {
   readonly generationWorkers: number;
   readonly cascadedShadows: boolean;
   readonly screenSpaceAmbientOcclusion: boolean;
+  readonly profilingWarmupSeconds: number;
+  readonly profilingMeasureSeconds: number;
   readonly dayLengthSeconds: number;
   readonly worldDayNumberAtUnixEpoch: number;
   readonly dayFractionAtUnixEpoch: number;
@@ -155,6 +159,8 @@ const FIXTURE_NUMBER_FIELDS = [
   "spawnPillarRadiusVoxels",
   "spawnProtectionRadiusVoxels",
   "generationWorkers",
+  "profilingWarmupSeconds",
+  "profilingMeasureSeconds",
   "dayLengthSeconds",
   "worldDayNumberAtUnixEpoch",
   "dayFractionAtUnixEpoch",
@@ -296,6 +302,8 @@ export async function prepareWorldFixture({
   generationWorkers,
   cascadedShadows,
   screenSpaceAmbientOcclusion,
+  profilingWarmupSeconds,
+  profilingMeasureSeconds,
   dayLengthSeconds,
   worldDayNumberAtUnixEpoch,
   dayFractionAtUnixEpoch,
@@ -333,6 +341,8 @@ export async function prepareWorldFixture({
       generationWorkers,
       cascadedShadows,
       screenSpaceAmbientOcclusion,
+      profilingWarmupSeconds,
+      profilingMeasureSeconds,
       dayLengthSeconds,
       worldDayNumberAtUnixEpoch,
       dayFractionAtUnixEpoch,

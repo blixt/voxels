@@ -41,6 +41,7 @@ export interface GpuFrameSample {
 }
 
 export interface RenderSnapshotCapture {
+  readonly capturedAtMs: number;
   readonly snapshot: readonly number[];
   readonly samples: readonly FrameSample[];
   readonly dropped: number;
@@ -127,11 +128,105 @@ export async function captureRenderSnapshot(engine: EngineClient): Promise<Rende
   const samples = frameSamples(snapshot);
   const gpu = gpuFrameSamples(snapshot);
   return {
+    capturedAtMs: performance.now(),
     snapshot,
     samples,
     dropped: snapshotValue(snapshot, "droppedSamples"),
     gpuSamples: gpu.samples,
     gpuDropped: gpu.dropped,
+  };
+}
+
+function readinessRatio(
+  captures: readonly RenderSnapshotCapture[],
+  predicate: (snapshot: readonly number[]) => boolean,
+): number {
+  if (captures.length === 0) return 0;
+  return captures.filter((capture) => predicate(capture.snapshot)).length / captures.length;
+}
+
+function maximumContinuousMilliseconds(
+  captures: readonly RenderSnapshotCapture[],
+  predicate: (snapshot: readonly number[]) => boolean,
+): number {
+  let startedAt: number | undefined;
+  let maximum = 0;
+  for (const capture of captures) {
+    if (predicate(capture.snapshot)) {
+      startedAt ??= capture.capturedAtMs;
+      maximum = Math.max(maximum, capture.capturedAtMs - startedAt);
+    } else {
+      startedAt = undefined;
+    }
+  }
+  return maximum;
+}
+
+export function summarizeStreamingPressure(captures: readonly RenderSnapshotCapture[]) {
+  const first = captures[0]?.snapshot;
+  const latest = captures.at(-1)?.snapshot;
+  if (first === undefined || latest === undefined) {
+    throw new Error("streaming pressure did not capture any samples");
+  }
+  const values = (field: Parameters<typeof snapshotValue>[1]): number[] =>
+    captures.map((capture) => snapshotValue(capture.snapshot, field));
+  const stages = (
+    queued: Parameters<typeof snapshotValue>[1],
+    inFlight: Parameters<typeof snapshotValue>[1],
+  ) => ({
+    queued: summary(values(queued)),
+    inFlight: summary(values(inFlight)),
+  });
+  return {
+    pendingJobs: summary(values("pendingJobs")),
+    generation: stages("generationQueued", "generationInFlight"),
+    meshing: stages("meshingQueued", "meshingInFlight"),
+    upload: stages("uploadQueued", "uploadInFlight"),
+    surface: {
+      queued: summary(values("surfaceQueued")),
+      inFlight: summary(values("surfaceInFlight")),
+      dirty: summary(values("surfaceDirty")),
+    },
+    completions: {
+      accepted:
+        snapshotValue(latest, "acceptedCompletions") - snapshotValue(first, "acceptedCompletions"),
+      initialLoads: snapshotValue(latest, "loadCompleted") - snapshotValue(first, "loadCompleted"),
+      initialLoadsInFlightMax: Math.max(...values("loadInFlight"), 0),
+      p95Frames: snapshotValue(latest, "loadP95Frames"),
+      maxFrames: snapshotValue(latest, "loadMaxFrames"),
+    },
+    readiness: {
+      canonicalImmediateRatio: readinessRatio(
+        captures,
+        (snapshot) =>
+          snapshotValue(snapshot, "canonicalImmediateRequired") > 0 &&
+          snapshotValue(snapshot, "canonicalImmediateResident") ===
+            snapshotValue(snapshot, "canonicalImmediateRequired"),
+      ),
+      canonicalSurfaceRatio: readinessRatio(
+        captures,
+        (snapshot) =>
+          snapshotValue(snapshot, "canonicalSurfaceCellsRequired") > 0 &&
+          snapshotValue(snapshot, "canonicalSurfaceCellsResident") ===
+            snapshotValue(snapshot, "canonicalSurfaceCellsRequired"),
+      ),
+      canonicalPresentationRatio: readinessRatio(
+        captures,
+        (snapshot) => snapshotValue(snapshot, "presentedLodStrideVoxels") === 1,
+      ),
+      longestDegradedPresentationMs: maximumContinuousMilliseconds(
+        captures,
+        (snapshot) => snapshotValue(snapshot, "presentedLodStrideVoxels") !== 1,
+      ),
+      interactiveLodsRatio: readinessRatio(
+        captures,
+        (snapshot) => snapshotValue(snapshot, "interactiveLodsReady") === 1,
+      ),
+      allLodsRatio: readinessRatio(
+        captures,
+        (snapshot) => snapshotValue(snapshot, "allLodsReady") === 1,
+      ),
+    },
   };
 }
 

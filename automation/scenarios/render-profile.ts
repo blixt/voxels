@@ -9,6 +9,7 @@ import {
   captureRenderSnapshot,
   sampleRenderSnapshots,
   summarizeRenderPhase,
+  summarizeStreamingPressure,
   type RenderPhaseSummary,
   type RenderSnapshotCapture,
 } from "../lib/render-metrics.ts";
@@ -349,11 +350,32 @@ async function weatherProfile(page: Page, engine: EngineClient, context: Scenari
   return phases;
 }
 
-async function sustainedProfile(engine: EngineClient, route: "loop" | "directional" = "loop") {
+function closestProfileCapture(
+  captures: readonly RenderSnapshotCapture[],
+  elapsedSeconds: number,
+): RenderSnapshotCapture | undefined {
+  return captures.reduce<RenderSnapshotCapture | undefined>((closest, capture) => {
+    if (closest === undefined) return capture;
+    const error = Math.abs(
+      snapshotValue(capture.snapshot, "profileElapsedSeconds") - elapsedSeconds,
+    );
+    const closestError = Math.abs(
+      snapshotValue(closest.snapshot, "profileElapsedSeconds") - elapsedSeconds,
+    );
+    return error < closestError ? capture : closest;
+  }, undefined);
+}
+
+async function sustainedProfile(
+  engine: EngineClient,
+  route: "loop" | "directional" = "loop",
+  expectedDurationSeconds = 90,
+) {
   const profileId = route === "directional" ? 2 : 1;
+  await engine.snapshot();
   await engine.startProfile(profileId);
   const captures: RenderSnapshotCapture[] = [];
-  const deadline = Date.now() + 150_000;
+  const deadline = Date.now() + (expectedDurationSeconds + 60) * 1_000;
   while (Date.now() < deadline) {
     const next = await captureRenderSnapshot(engine);
     captures.push(next);
@@ -376,23 +398,80 @@ async function sustainedProfile(engine: EngineClient, route: "loop" | "direction
     (capture) => snapshotValue(capture.snapshot, "profilePhase") === 2,
   );
   const finalTwenty = measured.filter(
-    (capture) => snapshotValue(capture.snapshot, "profileElapsedSeconds") >= 70,
+    (capture) =>
+      snapshotValue(capture.snapshot, "profileElapsedSeconds") >= expectedDurationSeconds - 20,
   );
   const moving = captures.filter((capture) => {
     const phase = snapshotValue(capture.snapshot, "profilePhase");
     return phase === 1 || phase === 2;
   });
-  const atSixtySeconds = moving.reduce<RenderSnapshotCapture | undefined>((closest, capture) => {
-    if (closest === undefined) return capture;
-    const error = Math.abs(snapshotValue(capture.snapshot, "profileElapsedSeconds") - 60);
-    const closestError = Math.abs(snapshotValue(closest.snapshot, "profileElapsedSeconds") - 60);
-    return error < closestError ? capture : closest;
-  }, undefined);
   const movementOrigin = moving[0];
+  const checkpointSeconds = [
+    60,
+    ...(expectedDurationSeconds === 60 ? [] : [expectedDurationSeconds]),
+  ];
+  const checkpoints = Object.fromEntries(
+    checkpointSeconds.map((seconds) => {
+      const capture = closestProfileCapture(moving, seconds);
+      if (capture === undefined) return [`${seconds}s`, null];
+      const snapshot = capture.snapshot;
+      return [
+        `${seconds}s`,
+        {
+          elapsedSeconds: snapshotValue(snapshot, "profileElapsedSeconds"),
+          distanceMetres: snapshotValue(snapshot, "profileDistanceMetres"),
+          actualDisplacementMetres:
+            movementOrigin === undefined
+              ? 0
+              : Math.hypot(
+                  snapshotValue(snapshot, "cameraX") -
+                    snapshotValue(movementOrigin.snapshot, "cameraX"),
+                  snapshotValue(snapshot, "cameraZ") -
+                    snapshotValue(movementOrigin.snapshot, "cameraZ"),
+                ),
+          presentedStrideVoxels: snapshotValue(snapshot, "presentedLodStrideVoxels"),
+          focusLagVoxels: snapshotValue(snapshot, "lodFocusLagVoxels"),
+          canonicalImmediateResident: snapshotValue(snapshot, "canonicalImmediateResident"),
+          canonicalImmediateRequired: snapshotValue(snapshot, "canonicalImmediateRequired"),
+          canonicalSurfaceCellsResident: snapshotValue(snapshot, "canonicalSurfaceCellsResident"),
+          canonicalSurfaceCellsRequired: snapshotValue(snapshot, "canonicalSurfaceCellsRequired"),
+          pendingJobs: snapshotValue(snapshot, "pendingJobs"),
+        },
+      ];
+    }),
+  );
+  const epochSeconds = 30;
+  const epochs =
+    route === "directional"
+      ? Array.from({ length: Math.ceil(expectedDurationSeconds / epochSeconds) }, (_, index) => {
+          const startSeconds = index * epochSeconds;
+          const endSeconds = Math.min(expectedDurationSeconds, startSeconds + epochSeconds);
+          const epochCaptures = moving.filter((capture) => {
+            const elapsed = snapshotValue(capture.snapshot, "profileElapsedSeconds");
+            return elapsed >= startSeconds && elapsed < endSeconds;
+          });
+          return {
+            startSeconds,
+            endSeconds,
+            performance: summarizeRenderPhase(epochCaptures),
+            streaming: summarizeStreamingPressure(epochCaptures),
+          };
+        })
+      : [];
+  const drainStarted = captures.find(
+    (capture) => snapshotValue(capture.snapshot, "profilePhase") === 3,
+  );
+  const completed = captures.find(
+    (capture) => snapshotValue(capture.snapshot, "profileComplete") === 1,
+  );
   const range = (values: readonly number[]): number =>
     values.length === 0 ? 0 : Math.max(...values) - Math.min(...values);
+  const performanceCaptures = route === "directional" ? moving : measured;
   const result = {
-    measured: summarizeRenderPhase(measured),
+    measured: summarizeRenderPhase(performanceCaptures),
+    streaming: summarizeStreamingPressure(moving),
+    epochs,
+    checkpoints,
     distanceMetres: snapshotValue(latest, "profileDistanceMetres"),
     evictions: snapshotValue(latest, "profileEvictions"),
     highWater: {
@@ -433,44 +512,21 @@ async function sustainedProfile(engine: EngineClient, route: "loop" | "direction
           snapshotValue(capture.snapshot, "canonicalImmediateResident") ===
             snapshotValue(capture.snapshot, "canonicalImmediateRequired"),
       ).length,
-      atSixtySeconds:
-        atSixtySeconds === undefined
+    },
+    drain: {
+      settleMilliseconds:
+        drainStarted === undefined || completed === undefined
           ? null
-          : {
-              elapsedSeconds: snapshotValue(atSixtySeconds.snapshot, "profileElapsedSeconds"),
-              distanceMetres: snapshotValue(atSixtySeconds.snapshot, "profileDistanceMetres"),
-              actualDisplacementMetres:
-                movementOrigin === undefined
-                  ? 0
-                  : Math.hypot(
-                      snapshotValue(atSixtySeconds.snapshot, "cameraX") -
-                        snapshotValue(movementOrigin.snapshot, "cameraX"),
-                      snapshotValue(atSixtySeconds.snapshot, "cameraZ") -
-                        snapshotValue(movementOrigin.snapshot, "cameraZ"),
-                    ),
-              presentedStrideVoxels: snapshotValue(
-                atSixtySeconds.snapshot,
-                "presentedLodStrideVoxels",
-              ),
-              focusLagVoxels: snapshotValue(atSixtySeconds.snapshot, "lodFocusLagVoxels"),
-              canonicalImmediateResident: snapshotValue(
-                atSixtySeconds.snapshot,
-                "canonicalImmediateResident",
-              ),
-              canonicalImmediateRequired: snapshotValue(
-                atSixtySeconds.snapshot,
-                "canonicalImmediateRequired",
-              ),
-              canonicalSurfaceCellsResident: snapshotValue(
-                atSixtySeconds.snapshot,
-                "canonicalSurfaceCellsResident",
-              ),
-              canonicalSurfaceCellsRequired: snapshotValue(
-                atSixtySeconds.snapshot,
-                "canonicalSurfaceCellsRequired",
-              ),
-              pendingJobs: snapshotValue(atSixtySeconds.snapshot, "pendingJobs"),
-            },
+          : completed.capturedAtMs - drainStarted.capturedAtMs,
+      peakPendingJobs:
+        drainStarted === undefined
+          ? null
+          : Math.max(
+              ...captures
+                .filter((capture) => capture.capturedAtMs >= drainStarted.capturedAtMs)
+                .map((capture) => snapshotValue(capture.snapshot, "pendingJobs")),
+              0,
+            ),
     },
     final: {
       pendingJobs: snapshotValue(latest, "pendingJobs"),
@@ -481,8 +537,8 @@ async function sustainedProfile(engine: EngineClient, route: "loop" | "direction
   };
   const violations: string[] = [];
   if (route === "loop" && result.distanceMetres < 1_000) violations.push("distance below 1km");
-  if (route === "directional" && result.distanceMetres < 600) {
-    violations.push("directional distance below 600m");
+  if (route === "directional" && result.distanceMetres < expectedDurationSeconds * 7) {
+    violations.push("directional distance did not sustain sprint speed");
   }
   if (route === "loop" && result.evictions < 500) {
     violations.push("fewer than 500 canonical evictions");
@@ -512,22 +568,44 @@ async function sustainedProfile(engine: EngineClient, route: "loop" | "direction
     if (result.lod.maximumFocusLagVoxels > 20) {
       violations.push("near LOD focus lag exceeded its 16-voxel snap plus hysteresis");
     }
-    if (
-      result.lod.atSixtySeconds === null ||
-      result.lod.atSixtySeconds.actualDisplacementMetres < 400 ||
-      result.lod.atSixtySeconds.presentedStrideVoxels !== 1 ||
-      result.lod.atSixtySeconds.canonicalSurfaceCellsResident !==
-        result.lod.atSixtySeconds.canonicalSurfaceCellsRequired
-    ) {
-      violations.push("one-minute immediate terrain was not fully canonical");
+    for (const [label, checkpoint] of Object.entries(result.checkpoints)) {
+      if (
+        checkpoint === null ||
+        Math.abs(checkpoint.elapsedSeconds - Number.parseInt(label, 10)) > 0.5 ||
+        checkpoint.actualDisplacementMetres < checkpoint.distanceMetres - 2 ||
+        checkpoint.presentedStrideVoxels !== 1 ||
+        checkpoint.canonicalSurfaceCellsResident !== checkpoint.canonicalSurfaceCellsRequired
+      ) {
+        violations.push(`${label} immediate terrain was not fully canonical`);
+      }
+    }
+    for (const epoch of result.epochs) {
+      const label = `${epoch.startSeconds}-${epoch.endSeconds}s`;
+      if (epoch.performance.frameMs.p95 > 12) violations.push(`${label} frame p95 above 12ms`);
+      if (epoch.performance.frameMs.p99 > 16.67) {
+        violations.push(`${label} frame p99 above 16.67ms`);
+      }
+      if (epoch.performance.frameMs.above33_33ms > 0) {
+        violations.push(`${label} frame exceeded 33.33ms`);
+      }
+      if (epoch.performance.cpuMs.p95 > 7.5) {
+        violations.push(`${label} worker CPU p95 above 7.5ms`);
+      }
+      if (epoch.performance.streamingMs.p95 > 4.5) {
+        violations.push(`${label} streaming p95 above 4.5ms`);
+      }
+      if (epoch.streaming.readiness.canonicalPresentationRatio !== 1) {
+        violations.push(`${label} did not present canonical terrain continuously`);
+      }
+      if (epoch.streaming.readiness.canonicalImmediateRatio < 0.97) {
+        violations.push(`${label} immediate collision readiness fell below 97%`);
+      }
+    }
+    if (result.drain.settleMilliseconds === null || result.drain.settleMilliseconds > 15_000) {
+      violations.push("post-exploration queues took longer than 15s to settle");
     }
   }
-  if (violations.length > 0) {
-    throw new Error(
-      `sustained profile violations: ${violations.join(", ")}; ${JSON.stringify(result)}`,
-    );
-  }
-  return result;
+  return { result, violations };
 }
 
 async function waitForEngine(engine: EngineClient): Promise<readonly number[]> {
@@ -563,6 +641,7 @@ interface ProfileOptions {
   readonly fixedDayFraction?: number;
   readonly fixedWeatherFraction?: number;
   readonly buildProfile: WasmBuildProfile;
+  readonly exploreSeconds: number;
 }
 
 function parseOptions(arguments_: readonly string[]): ProfileOptions {
@@ -609,6 +688,13 @@ function parseOptions(arguments_: readonly string[]): ProfileOptions {
     minimum: 0,
     maximum: 0.999_999,
   });
+  const exploreSeconds =
+    argumentsReader.number("explore-seconds", {
+      fallback: 120,
+      minimum: 60,
+      maximum: 600,
+      integer: true,
+    }) ?? 120;
   const options: ProfileOptions = {
     mode,
     trace: argumentsReader.flag("trace"),
@@ -632,6 +718,7 @@ function parseOptions(arguments_: readonly string[]): ProfileOptions {
       ["debug", "wasm-dev", "release"] as const,
       "release",
     ),
+    exploreSeconds,
   };
   argumentsReader.assertEmpty();
   return options;
@@ -641,6 +728,9 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
   const options = parseOptions(arguments_);
   const atmosphere = options.mode === "atmosphere";
   const weather = options.mode === "weather";
+  const directional = options.mode === "directional";
+  const fixedDayFraction = options.fixedDayFraction ?? (directional ? 0.5 : undefined);
+  const fixedWeatherFraction = options.fixedWeatherFraction ?? (directional ? 0.08 : undefined);
   const world = await startWorldStack(context, {
     fixture: {
       prefix: "voxels-browser-profile-",
@@ -648,20 +738,16 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
       spawnVoxels: options.spawnVoxels,
       cascadedShadows: options.cascadedShadows,
       screenSpaceAmbientOcclusion: options.screenSpaceAmbientOcclusion,
+      profilingWarmupSeconds: directional ? 30 : undefined,
+      profilingMeasureSeconds: directional ? options.exploreSeconds - 30 : undefined,
       dayLengthSeconds:
-        options.fixedDayFraction === undefined ? (atmosphere ? 48 : weather ? 0 : undefined) : 0,
-      dayFractionAtUnixEpoch: options.fixedDayFraction ?? (weather ? 0.5 : undefined),
+        fixedDayFraction === undefined ? (atmosphere ? 48 : weather ? 0 : undefined) : 0,
+      dayFractionAtUnixEpoch: fixedDayFraction ?? (weather ? 0.5 : undefined),
       weatherCycleSeconds:
-        options.fixedWeatherFraction === undefined
-          ? weather
-            ? 36
-            : atmosphere
-              ? 0
-              : undefined
-          : 0,
-      weatherFractionAtUnixEpoch: options.fixedWeatherFraction ?? (atmosphere ? 0.08 : undefined),
+        fixedWeatherFraction === undefined ? (weather ? 36 : atmosphere ? 0 : undefined) : 0,
+      weatherFractionAtUnixEpoch: fixedWeatherFraction ?? (atmosphere ? 0.08 : undefined),
       cloudVelocityMetresPerSecond:
-        options.fixedWeatherFraction === undefined && !weather ? undefined : [0, 0],
+        fixedWeatherFraction === undefined && !weather ? undefined : [0, 0],
     },
     service: { metal: options.worldSource === "terrain-diffusion-30m" },
     web: { buildProfile: options.buildProfile },
@@ -695,14 +781,19 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
   });
 
   let scenarios: Readonly<Record<string, unknown>>;
+  const scenarioViolations: string[] = [];
   if (options.mode === "stationary") {
     scenarios = {
       steady: summarizeRenderPhase(await sampleRenderSnapshots(engine, 4_000)),
     };
   } else if (options.mode === "sustained") {
-    scenarios = { sustained: await sustainedProfile(engine) };
+    const outcome = await sustainedProfile(engine);
+    scenarios = { sustained: outcome.result };
+    scenarioViolations.push(...outcome.violations);
   } else if (options.mode === "directional") {
-    scenarios = { directional: await sustainedProfile(engine, "directional") };
+    const outcome = await sustainedProfile(engine, "directional", options.exploreSeconds);
+    scenarios = { directional: outcome.result };
+    scenarioViolations.push(...outcome.violations);
   } else if (options.mode === "materials") {
     scenarios = {
       materials: await materialDetailProfile(page, engine, options.viewport.width),
@@ -740,8 +831,8 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
     traceSession = undefined;
   }
   const result = {
-    ok: true,
-    schemaVersion: 3,
+    ok: scenarioViolations.length === 0,
+    schemaVersion: 4,
     commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
     dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "",
     build: options.buildProfile,
@@ -752,6 +843,9 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
     screenSpaceAmbientOcclusion: options.screenSpaceAmbientOcclusion,
     fixedDayFraction: options.fixedDayFraction ?? null,
     fixedWeatherFraction: options.fixedWeatherFraction ?? null,
+    effectiveDayFraction: fixedDayFraction ?? null,
+    effectiveWeatherFraction: fixedWeatherFraction ?? null,
+    explorationSeconds: options.mode === "directional" ? options.exploreSeconds : null,
     finalPose: {
       x: snapshotValue(finalSnapshot, "cameraX"),
       y: snapshotValue(finalSnapshot, "cameraY"),
@@ -764,9 +858,15 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
     startup: { settledMilliseconds },
     ...scenarios,
     trace: options.trace ? { performanceMetrics: traceMetrics } : null,
+    violations: scenarioViolations,
     errors: 0,
   };
   await context.artifacts.writeJson("render profile report", "report.json", result);
+  if (scenarioViolations.length > 0) {
+    throw new Error(
+      `render profile violations:\n${scenarioViolations.map((violation) => `- ${violation}`).join("\n")}`,
+    );
+  }
   return {
     summary: `Render profile ${options.mode} completed.`,
     metrics: {
