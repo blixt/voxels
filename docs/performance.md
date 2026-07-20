@@ -8,6 +8,75 @@ Performance changes must keep a reproducible before/after number beside the arch
 the change. Native Criterion results are stable microbenchmarks for portable Rust algorithms; browser
 World Lab and `window.__VOXELS__.snapshot()` cover integrated frame pacing and residency.
 
+## 2026-07-20: two-minute cold-frontier exploration
+
+The directional browser profile now runs for a configurable 60–600 seconds, with 120 seconds as the
+default. Unlike the circular allocation rail, this route continuously enters cold world regions. It
+uses the real Rust profile velocity in the production cone/lookahead scheduler, locks noon and clear
+weather, records 30-second epochs, and samples external host pressure so unrelated work cannot make a
+timing regression look like an engine result.
+
+Snapshot schema 34 distinguishes the swept player body from the independent five-metre edit/view
+ray. It reports exact current-body residency and a protected forward corridor rather than treating a
+broad nearby cylinder as collision evidence. Production requests 2.5 seconds of movement; the gate
+requires the first 1.5 seconds to be resident at least 97% of sampled time, rejects a predictive gap
+over one second, and still requires the current body/support and canonical stride-1 presentation at
+every sample. Surface-height hints inside the movement corridor now receive the same
+collision-critical generation, transport, meshing, and upload priority as its geometric camera band.
+This prevents a slope from entering ordinary priority merely because its support crosses a canonical
+chunk-Y boundary.
+
+The renderer optimization measured during this work classifies a complete chunk AABB once for each
+camera or shadow volume. A chunk entirely inside the volume bypasses redundant per-slice clip tests;
+intersecting chunks retain exact slice tests. Draw-span hashing also runs after coalescing instead of
+once for every source slice. Two comparable procedural runs with 13% external host CPU p95 measured:
+
+| Procedural 120-second traversal |       Before |        After |        Change |
+| ------------------------------- | -----------: | -----------: | ------------: |
+| Culling median / p95            | 4.6 / 4.9 ms | 4.4 / 4.8 ms | -4.3% / -2.0% |
+| Worker CPU median / p95         | 6.8 / 7.9 ms | 6.7 / 7.7 ms | -1.5% / -2.5% |
+| Frames over 16.67 ms            |          247 |          179 |        -27.5% |
+
+The final clean-tree runs used Chromium 150, 1280×720 at DPR 1, `wasm-dev`, an 8 m/s route, and about
+14,000 raw frame samples each. External host CPU p95 was 22.4% for Terrain Diffusion and 25.1% for
+procedural generation, below the 30% timing-rejection threshold.
+
+```sh
+vp run automation -- run render-profile --mode=directional --explore-seconds=120 \
+  --source=terrain-diffusion-30m --build=wasm-dev --screenshot
+vp run automation -- run render-profile --mode=directional --explore-seconds=120 \
+  --source=procedural-v16 --build=wasm-dev --screenshot
+```
+
+| Two-minute, 856 m measurement   |              Procedural v16 |             Terrain Diffusion |
+| ------------------------------- | --------------------------: | ----------------------------: |
+| Startup to settled              |                     7.754 s |                       9.370 s |
+| Frame median / p95 / p99        |         8.3 / 9.0 / 16.7 ms |           8.3 / 9.2 / 16.7 ms |
+| Worker CPU median / p95         |                6.8 / 7.7 ms |                  7.1 / 8.0 ms |
+| Streaming median / p95          |                1.9 / 2.5 ms |                  2.0 / 2.7 ms |
+| Culling median / p95            |                4.4 / 4.8 ms |                  4.6 / 4.9 ms |
+| GPU median / p95                |            3.867 / 5.702 ms |              4.784 / 5.571 ms |
+| Pending jobs median / p95 / max |               14 / 52 / 126 |                30 / 121 / 224 |
+| Post-route queue drain          |                      256 ms |                        771 ms |
+| Canonical stride-1 presentation |                   466 / 466 |                     464 / 464 |
+| Current body/support ready      |                   466 / 466 |                     464 / 464 |
+| Protected 1.5 s corridor ready  | 466 / 466, longest gap 0 ms | 460 / 464, longest gap 259 ms |
+| Frames over 16.67 / 33.33 ms    |                     178 / 0 |                       280 / 0 |
+
+The streaming and fidelity gates pass for both sources: there was no nearby LOD degradation, missing
+terrain, or current collision hole after one or two minutes. The Terrain Diffusion run also kept its
+brief future-edge misses well inside the reserve before they reached the player. The complete
+scenario still exits nonzero on both sources because the stricter 120 Hz timing gates are not yet
+met: CPU p95 exceeds 7.5 ms by 0.2–0.5 ms and frame p99 rounds to 16.7 ms rather than staying below
+16.67 ms. No frame exceeded 33.33 ms. The next renderer target remains hierarchical/GPU-assisted draw
+selection: culling is the dominant worker cost at 4.4–4.6 ms, while streaming itself is 1.9–2.0 ms
+median.
+
+The retained reports and screenshots are:
+
+- `target/automation/render-profile/2026-07-20T12-55-28-170Z-912b1c21/` for Terrain Diffusion.
+- `target/automation/render-profile/2026-07-20T12-58-31-188Z-161ed8c9/` for procedural v16.
+
 ## 2026-07-20: spatially bounded edit snapshots
 
 `EditMap` stores chunk keys in X/Z/Y order, but surface snapshots previously bounded their tree range

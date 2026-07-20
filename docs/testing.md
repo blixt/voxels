@@ -21,6 +21,10 @@ vp run automation -- run bot-load
 # Streaming, scheduling, compression, or remote-link change
 vp run automation -- run network-benchmark
 
+# One player sprinting into cold terrain for two minutes
+vp run automation -- run render-profile --mode=directional --explore-seconds=120 \
+  --source=terrain-diffusion-30m --build=wasm-dev --screenshot
+
 # Durable edit layout, write latency, checkpointing, or restart change
 vp run automation -- run storage-benchmark
 ```
@@ -40,6 +44,7 @@ behavioral, visual, resource, or transport evidence that the general gate cannot
 | Bot population/load | `vp run automation -- run bot-load`                                                                     | Mixed real-protocol bots plus a real browser observer, process resources, disk, and wire         |
 | Six browser users   | `vp run automation -- run multiplayer`                                                                  | Six isolated Chrome contexts, shaped links, avatars, authority edits, and far-LOD convergence    |
 | Remote streaming    | `vp run automation -- run network-benchmark`                                                            | Real Chrome and daemon over a shaped socket: spawn, short/long walks, turns, bytes, and queues   |
+| Directional explore | `vp run automation -- run render-profile --mode=directional --explore-seconds=120`                      | Two-minute cold frontier: exact visual/collision readiness, queue drain, frame pacing, host load |
 | Network comparison  | `vp run automation -- run network-compare before.json after.json`                                       | Only schema-, fixture-, source-, protocol-, link-, repetition-, and environment-equal runs       |
 | Durable world store | `vp run automation -- run storage-benchmark`                                                            | Production planner/SQLite authority, ordered latency, checkpoint, retry, and restart; no sockets |
 | LOD transition      | `vp run automation -- run lod-transition`                                                               | Same-pose real-browser handoff and image evidence                                                |
@@ -61,6 +66,19 @@ behavioral, visual, resource, or transport evidence that the general gate cannot
 
 Every scenario writes to `target/automation/<scenario>/<run-id>/`; its
 `target/automation/<scenario>/latest.json` points to the last completed run.
+
+The directional renderer profile locks noon and clear weather and follows a straight 8 m/s route for
+the requested duration. The first 30-second epoch is the profile warm-up; every epoch is still
+reported and gated, with explicit 60-second and final checkpoints. Canonical terrain must remain
+presented at stride 1 and the current swept player body/support must be fully resident at every
+sample. The default client requests collision data 2.5 seconds ahead; the benchmark requires a fully
+resident 1.5-second corridor, at least 97% of the time, with no predictive gap longer than one second.
+This leaves one second for generation, transport, meshing, and upload before a missing frontier can
+affect movement.
+
+Renderer timing is accepted only when unrelated process-tree CPU stays below 30% of total host
+capacity at p95. A busy machine still produces an artifact, but its timing conclusions are rejected.
+Visual and residency failures remain failures even when host load invalidates timing.
 
 [Remote world streaming benchmarks](network-benchmark.md), [multiplayer scaling](multiplayer-scaling.md),
 and [recorded renderer baselines](performance.md) explain the corresponding metrics and historical
