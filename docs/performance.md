@@ -66,9 +66,9 @@ frames maximum, roughly 983/1,033 ms at 120 Hz. Mission Control renders load and
 counters and all four ring populations directly through Rust/WGPU; the scheduler uses fixed,
 allocation-free histograms so collecting them does not add per-frame heap work.
 
-These numbers are a decision record, not universal hardware targets. Criterion's stored baselines in
-`target/criterion/` remain ignored and local; repeat the command on target hardware before changing
-per-frame admission budgets.
+These numbers are a decision record, not universal hardware targets. Criterion reports under
+`target/automation/bench-*/<run-id>/criterion/` remain ignored and local; repeat the command on
+target hardware before changing per-frame admission budgets.
 
 ## 2026-07-12: regional surface ecology
 

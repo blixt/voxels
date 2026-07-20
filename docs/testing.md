@@ -161,9 +161,10 @@ It drives the production edit planner and SQLite transaction path, forces a WAL 
 per-table page and payload sizes through SQLite `dbstat`, reopens the database cold, and verifies an
 old operation retries to the exact original outcome. Ordered latency quartiles expose costs that
 grow with world history instead of hiding them in one sorted aggregate. It does not open sockets,
-enter the async generation queue, broadcast to other players, or render. The harness creates its own
-temporary database. The native runner fails closed if a requested main, WAL, or SHM path already
-exists; it never deletes or reuses a developer world.
+enter the async generation queue, broadcast to other players, render, or include Terrain Diffusion
+provider cost; its deterministic source is `procedural-v16`. The harness creates its own temporary
+database. The native runner fails closed if a requested main, WAL, or SHM path already exists; it
+never deletes or reuses a developer world.
 
 ## Reproducibility rules
 

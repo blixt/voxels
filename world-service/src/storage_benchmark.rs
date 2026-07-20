@@ -20,7 +20,7 @@ use voxels_world::{
     WorldProductBatch, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
 };
 
-pub const STORAGE_BENCHMARK_SCHEMA_VERSION: u32 = 2;
+pub const STORAGE_BENCHMARK_SCHEMA_VERSION: u32 = 3;
 const BENCHMARK_SEED: u64 = 0x5e6a_2d49_7b10_c3f1;
 const EDIT_QUEUE_CAPACITY: u16 = 8;
 
@@ -47,6 +47,7 @@ pub struct StorageBenchmarkResponse {
     pub schema_version: u32,
     pub edit_database_schema_version: i64,
     pub sqlite_version: String,
+    pub world_source: &'static str,
     pub profile: &'static str,
     pub players: u16,
     pub operations: u32,
@@ -209,6 +210,7 @@ pub fn run_storage_benchmark(
         schema_version: STORAGE_BENCHMARK_SCHEMA_VERSION,
         edit_database_schema_version: EDIT_DATABASE_SCHEMA_VERSION,
         sqlite_version: database.sqlite_version,
+        world_source: "procedural-v16",
         profile: match request.profile {
             StorageBenchmarkProfile::Clustered => "clustered",
             StorageBenchmarkProfile::Frontier => "frontier",

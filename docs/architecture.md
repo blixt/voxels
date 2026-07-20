@@ -335,11 +335,12 @@ without allowing a nearby Euclidean source to cross the cave shell.
 Mission Control renders active/candidate lights, rock and path rejections, open portal count, and
 topology revision in its WGPU statistics card; these values are not a browser overlay.
 
-The portal probe voxel API is canonical world data rather than a browser fixture. The isolated
-`profile:portal-edits` harness asks the Rust worker to place or revert the 25 mouth-plane overrides;
-the browser layer only opens an observer tab, requests snapshots, and reloads. Both tabs derive the
-same mask from ordinary remote edits, and a fresh worker reconstructs it from SQLite/OPFS without a
-separate persisted topology cache.
+The portal probe voxel API is canonical world data rather than a browser fixture. Host Rust tests
+place and revert the 25 mouth-plane overrides through ordinary edit-map operations, verify unrelated
+edits leave topology unchanged, and reconstruct the mask without a separately persisted topology
+cache. There is currently no dedicated portal browser benchmark; use `multiplayer` for remote edit
+convergence and `render-profile` for integrated rendering performance rather than treating the host
+tests as browser evidence.
 
 Portal-directed streaming remains secondary to the proven radial cylinder. Near Cinder Vault, the
 world crate derives conservative chunk AABBs (including a meshing halo) for every reachable node and

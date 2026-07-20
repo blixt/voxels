@@ -8,7 +8,7 @@ import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { rustTool } from "../../scripts/build-wasm.ts";
 
 const execFileAsync = promisify(execFile);
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const BINARY = "voxels-storage-benchmark";
 
 type Profile = "clustered" | "frontier";
@@ -21,6 +21,7 @@ interface StorageBenchmarkOptions {
 
 interface BenchmarkResult {
   readonly schemaVersion: number;
+  readonly worldSource: "procedural-v16";
   readonly profile: Profile;
   readonly operations: number;
   readonly mutations: number;
@@ -105,7 +106,9 @@ function assertBenchmarkResult(value: unknown): asserts value is BenchmarkResult
     typeof value !== "object" ||
     value === null ||
     !("schemaVersion" in value) ||
-    value.schemaVersion !== SCHEMA_VERSION
+    value.schemaVersion !== SCHEMA_VERSION ||
+    !("worldSource" in value) ||
+    value.worldSource !== "procedural-v16"
   ) {
     throw new Error("native storage benchmark returned an incompatible result");
   }
@@ -138,12 +141,14 @@ function markdownReport(results: readonly BenchmarkResult[]): string {
   );
   return `# Durable world storage benchmark
 
-The native fixture executes the production edit planner and SQLite transaction path, checkpoints
-the WAL, reopens the database, verifies its revision, and retries one durable operation per player.
-It deliberately excludes sockets, request queues, broadcasts, client work, and rendering; those
-belong to the protocol and browser scenarios. The clustered corpus models dense collaborative
-construction/excavation; frontier models long-lived exploration spread across many spatial regions.
-Operation-order quartiles expose latency that grows as the durable edit journal fills.
+The native fixture executes the production edit planner and SQLite transaction path against the
+deterministic \`${results[0]?.worldSource ?? "unknown"}\` source, checkpoints the WAL, reopens the
+database, verifies its revision, and retries one durable operation per player. It deliberately
+excludes sockets, request queues, broadcasts, client work, rendering, and Terrain Diffusion provider
+cost; those belong to the protocol, provider, and browser scenarios. The clustered corpus models
+dense collaborative construction/excavation; frontier models long-lived exploration spread across
+many spatial regions. Operation-order quartiles expose latency that grows as the durable edit
+journal fills.
 
 | Profile | Operations | Mutations | Commit median / p95 / p99 (µs) | First → last quartile median | Restart (ms) | Checkpoint (ms) | Peak WAL MiB | Durable MiB | Bytes / mutation |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -227,7 +232,7 @@ async function main(context: ScenarioContext, values: readonly string[]) {
     ),
   ]);
   return {
-    summary: `Completed ${results.length} native durable-world storage profiles.`,
+    summary: `Completed ${results.length} native durable-world storage profile${results.length === 1 ? "" : "s"}.`,
     metrics: {
       profiles: results.length,
       operations: options.operations,
