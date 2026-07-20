@@ -7,6 +7,16 @@ use voxels_core::CameraState;
 const INTERACTION_REACH_METRES: f32 = 5.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const INTERACTION_STREAM_MARGIN_METRES: f32 = 0.7;
+#[cfg(any(target_arch = "wasm32", test))]
+const ENCLOSED_VIEW_CLEARANCE_METRES: f32 = 8.0;
+#[cfg(any(target_arch = "wasm32", test))]
+const ENCLOSED_VIEW_RAY_OFFSETS: [[f32; 2]; 5] = [
+    [0.0, 0.0],
+    [-0.18, 0.0],
+    [0.18, 0.0],
+    [0.0, -0.14],
+    [0.0, 0.14],
+];
 #[cfg(target_arch = "wasm32")]
 const COLLISION_READINESS_RESERVE_SECONDS: f32 = 1.0;
 #[cfg(any(target_arch = "wasm32", test))]
@@ -132,6 +142,63 @@ fn urgent_stream_interest(
         camera.position.min(view_end) - glam::Vec3::splat(INTERACTION_STREAM_MARGIN_METRES),
         camera.position.max(view_end) + glam::Vec3::splat(INTERACTION_STREAM_MARGIN_METRES),
     );
+    chunks.into_iter().collect()
+}
+
+/// Sparse exact-volume interest through visible tunnel apertures.
+///
+/// The ordinary distant representation is a height surface and therefore cannot represent a
+/// player-made tunnel terminator. Nearby canonical occupancy rejects rays that already hit a wall;
+/// only openings receive a narrow full-resolution corridor. Five deterministic rays cover the
+/// central tunnel aperture without paying for an outdoor full-frustum volume.
+#[cfg(any(target_arch = "wasm32", test))]
+fn enclosed_view_stream_interest(
+    camera: &CameraState,
+    distance_metres: f32,
+    ray_radius_metres: f32,
+    mut is_opaque: impl FnMut(i32, i32, i32) -> bool,
+) -> Vec<voxels_world::ChunkCoord> {
+    use std::collections::BTreeSet;
+    use voxels_core::raycast_voxels;
+    use voxels_world::{CHUNK_EDGE, VOXEL_SIZE_METRES};
+
+    if !distance_metres.is_finite()
+        || distance_metres <= 0.0
+        || !ray_radius_metres.is_finite()
+        || ray_radius_metres <= 0.0
+    {
+        return Vec::new();
+    }
+    let forward = camera.forward();
+    let right = forward.cross(glam::Vec3::Y).normalize_or(glam::Vec3::X);
+    let up = right.cross(forward).normalize_or(glam::Vec3::Y);
+    let clearance = distance_metres.min(ENCLOSED_VIEW_CLEARANCE_METRES);
+    let chunk_size = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
+    let steps = (distance_metres / (chunk_size * 0.5)).ceil().max(1.0) as u32;
+    let mut chunks = BTreeSet::new();
+    for [horizontal, vertical] in ENCLOSED_VIEW_RAY_OFFSETS {
+        let direction = (forward + right * horizontal + up * vertical).normalize_or(forward);
+        if raycast_voxels(
+            camera.position,
+            direction,
+            clearance,
+            VOXEL_SIZE_METRES,
+            &mut is_opaque,
+        )
+        .is_some()
+        {
+            continue;
+        }
+        for step in 0..=steps {
+            let distance = distance_metres * step as f32 / steps as f32;
+            let centre = camera.position + direction * distance;
+            insert_chunk_aabb(
+                &mut chunks,
+                centre - glam::Vec3::splat(ray_radius_metres),
+                centre + glam::Vec3::splat(ray_radius_metres),
+            );
+        }
+    }
     chunks.into_iter().collect()
 }
 
@@ -357,6 +424,9 @@ mod web {
         stream_collision_lookahead_seconds: f32,
         stream_velocity_lookahead_seconds: f32,
         stream_view_cone_half_angle_degrees: f32,
+        stream_enclosed_view_distance_metres: f32,
+        stream_enclosed_view_ray_radius_metres: f32,
+        stream_enclosed_view_threshold: f32,
         surface_load_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
         surface_retain_margin_tiles: i32,
         enclosure_probe_interval_ms: f64,
@@ -3077,6 +3147,11 @@ mod web {
             stream_collision_lookahead_seconds: streaming.priority.collision_lookahead_seconds,
             stream_velocity_lookahead_seconds: streaming.priority.velocity_lookahead_seconds,
             stream_view_cone_half_angle_degrees: streaming.priority.view_cone_half_angle_degrees,
+            stream_enclosed_view_distance_metres: streaming.priority.enclosed_view_distance_metres,
+            stream_enclosed_view_ray_radius_metres: streaming
+                .priority
+                .enclosed_view_ray_radius_metres,
+            stream_enclosed_view_threshold: streaming.priority.enclosed_view_threshold,
             surface_load_radius_tiles: streaming
                 .surface
                 .load_radius_tiles
@@ -3436,6 +3511,36 @@ mod tests {
         assert!(movement.iter().any(|coord| coord.x >= 4));
         assert!(urgent.iter().any(|coord| coord.z < 0));
         assert!(movement.iter().all(|coord| urgent.contains(coord)));
+    }
+
+    #[test]
+    fn enclosed_view_interest_reaches_beyond_the_surface_handoff() {
+        let camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
+        let interest = enclosed_view_stream_interest(&camera, 32.0, 0.8, |_, _, _| false);
+
+        assert!(
+            interest.iter().any(|coord| coord.z <= -4),
+            "the exact corridor must cross the 9.6m canonical-to-surface handoff"
+        );
+        assert!(
+            interest.iter().any(|coord| coord.z <= -9),
+            "the configured corridor must retain a terminator near 32m"
+        );
+        assert!(
+            interest.len() <= 96,
+            "sparse aperture rays must stay below the secondary-interest budget"
+        );
+    }
+
+    #[test]
+    fn enclosed_view_interest_stops_at_nearby_canonical_walls() {
+        let camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
+        let interest = enclosed_view_stream_interest(&camera, 32.0, 0.8, |_, _, z| z <= -16);
+
+        assert!(
+            interest.is_empty(),
+            "a wall inside the canonical clearance span needs no distant volume"
+        );
     }
 
     #[test]
