@@ -27,7 +27,7 @@ export class EngineHandle {
     startup_progress(): Uint32Array;
     /**
      * Deterministic browser-harness seam for the exact gameplay dig action. The server, not
-     * this API, expands the hit voxel into the fixed half-metre sphere and validates reach.
+     * this API, expands the hit voxel into the one-cubic-metre sphere and validates reach.
      */
     submit_dig(x: number, y: number, z: number): boolean;
     /**
