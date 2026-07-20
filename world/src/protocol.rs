@@ -18,14 +18,14 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 27;
+pub const PROTOCOL_VERSION: u16 = 28;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
 pub const MAX_SURFACE_TILES_PER_BATCH: usize = 32;
 pub const MAX_PLAYERS_PER_PRESENCE_DELTA: usize = 1_024;
 pub const MAX_PLAYER_NAME_BYTES: usize = 32;
-pub const MAX_EDIT_MUTATIONS: usize = 1_024;
+pub const MAX_EDIT_MUTATIONS: usize = EDIT_MAX_VOLUME_VOXELS;
 pub const MAX_EDIT_AFFECTED_CHUNKS: usize = 27;
 pub const MAX_EDIT_AFFECTED_SURFACE_TILES: usize = 128;
 pub const FRAME_FRAGMENT_OVERHEAD_BYTES: usize = FRAME_HEADER_BYTES + 8;
@@ -63,6 +63,8 @@ const BROTLI_BUFFER_BYTES: usize = 4 * 1024;
 const BROTLI_QUALITY: u32 = 2;
 const BROTLI_WINDOW_BITS: u32 = 20;
 const HALO_HASH_DOMAIN: &[u8] = b"voxels-wire-halo-v1\0";
+const EDIT_MUTATIONS_ORDINALS: u8 = 0;
+const EDIT_MUTATIONS_BITSET: u8 = 1;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WorldCapabilities(u64);
@@ -709,6 +711,8 @@ pub struct EditCommit {
     /// Connection that submitted this operation. Operation IDs are scoped to `edit_session_id`.
     pub editor_connection_id: u64,
     pub revision: u64,
+    /// Semantic operation whose candidate stencil bounds the compact mutation mask.
+    pub action: EditAction,
     /// Strictly coordinate-sorted, unique final voxel values committed at `revision`.
     pub mutations: Vec<VoxelMutation>,
     pub affected_chunks: Vec<ChunkCoord>,
@@ -1509,22 +1513,7 @@ pub fn encode_edit_command(command: EditCommand) -> Result<Vec<u8>, ProtocolErro
     if command.edit_session_id.is_nil() {
         return Err(ProtocolError::InvalidPayload("edit session id is nil"));
     }
-    let (kind, argument, coord, material_id) = match command.action {
-        EditAction::Dig { hit, shape } => (1, shape.id(), hit, 0),
-        EditAction::Place {
-            coord,
-            material,
-            shape,
-        } => {
-            if material == Material::Air {
-                return Err(ProtocolError::InvalidPayload(
-                    "cannot place air; use the dig action",
-                ));
-            }
-            (2, shape.id(), coord, material.id())
-        }
-    };
-    validate_voxel_coord(coord)?;
+    let (kind, argument, material_id, coord) = encode_edit_action(command.action)?;
     let mut payload = Vec::with_capacity(32);
     payload.extend_from_slice(command.edit_session_id.as_bytes());
     payload.push(kind);
@@ -1556,24 +1545,56 @@ pub fn decode_edit_command(bytes: &[u8]) -> Result<EditCommand, ProtocolError> {
     let material_id = cursor.u16()?;
     let coord = decode_voxel_coord(&mut cursor)?;
     cursor.finish()?;
-    let action = match kind {
-        1 if material_id == 0 => {
-            let shape = EditShape::from_id(argument).ok_or(ProtocolError::UnknownEnum(
-                "edit shape",
-                u64::from(argument),
-            ))?;
-            EditAction::Dig { hit: coord, shape }
+    let action = decode_edit_action(kind, argument, material_id, coord)?;
+    Ok(EditCommand {
+        operation_id: frame.request_id,
+        edit_session_id,
+        action,
+    })
+}
+
+fn encode_edit_action(action: EditAction) -> Result<(u8, u8, u16, VoxelCoord), ProtocolError> {
+    let encoded = match action {
+        EditAction::Dig { hit, shape } => (1, shape.id(), 0, hit),
+        EditAction::Place {
+            coord,
+            material,
+            shape,
+        } => {
+            if material == Material::Air {
+                return Err(ProtocolError::InvalidPayload(
+                    "cannot place air; use the dig action",
+                ));
+            }
+            (2, shape.id(), material.id(), coord)
         }
+    };
+    validate_voxel_coord(encoded.3)?;
+    if edit_action_volume(action).is_none() {
+        return Err(ProtocolError::InvalidPayload(
+            "edit action volume exceeds world coordinates",
+        ));
+    }
+    Ok(encoded)
+}
+
+fn decode_edit_action(
+    kind: u8,
+    shape: u8,
+    material_id: u16,
+    coord: VoxelCoord,
+) -> Result<EditAction, ProtocolError> {
+    validate_voxel_coord(coord)?;
+    let shape = EditShape::from_id(shape)
+        .ok_or(ProtocolError::UnknownEnum("edit shape", u64::from(shape)))?;
+    let action = match kind {
+        1 if material_id == 0 => EditAction::Dig { hit: coord, shape },
         1 => {
             return Err(ProtocolError::InvalidPayload(
                 "dig action has a nonzero material",
             ));
         }
         2 => {
-            let shape = EditShape::from_id(argument).ok_or(ProtocolError::UnknownEnum(
-                "edit shape",
-                u64::from(argument),
-            ))?;
             let material = Material::from_id(material_id).ok_or(ProtocolError::UnknownEnum(
                 "material",
                 u64::from(material_id),
@@ -1591,45 +1612,179 @@ pub fn decode_edit_command(bytes: &[u8]) -> Result<EditCommand, ProtocolError> {
         }
         _ => return Err(ProtocolError::UnknownEnum("edit action", u64::from(kind))),
     };
-    Ok(EditCommand {
-        operation_id: frame.request_id,
-        edit_session_id,
-        action,
-    })
+    if edit_action_volume(action).is_none() {
+        return Err(ProtocolError::InvalidPayload(
+            "edit action volume exceeds world coordinates",
+        ));
+    }
+    Ok(action)
+}
+
+fn edit_action_volume(action: EditAction) -> Option<EditVolume> {
+    match action {
+        EditAction::Dig { hit, shape } => EditVolume::for_hit(hit, shape),
+        EditAction::Place { coord, shape, .. } => EditVolume::for_hit(coord, shape),
+    }
+}
+
+fn edit_action_material(action: EditAction) -> Material {
+    match action {
+        EditAction::Dig { .. } => Material::Air,
+        EditAction::Place { material, .. } => material,
+    }
+}
+
+fn encode_edit_ordinals(ordinals: &[usize]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(ordinals.len() * 2);
+    let mut previous = None;
+    for &ordinal in ordinals {
+        let value = previous.map_or(ordinal, |prior| ordinal - prior);
+        push_var_u64(&mut encoded, value as u64);
+        previous = Some(ordinal);
+    }
+    encoded
+}
+
+fn encode_edit_mutations(commit: &EditCommit) -> (u8, Vec<u8>) {
+    let candidates = edit_action_volume(commit.action)
+        .expect("validated edit action")
+        .coordinates()
+        .collect::<Vec<_>>();
+    let mut bitset = vec![0_u8; candidates.len().div_ceil(8)];
+    let mut ordinals = Vec::with_capacity(commit.mutations.len());
+    let mut mutation_index = 0;
+    for (ordinal, coord) in candidates.iter().enumerate() {
+        if commit
+            .mutations
+            .get(mutation_index)
+            .is_some_and(|mutation| mutation.coord == *coord)
+        {
+            bitset[ordinal / 8] |= 1 << (ordinal % 8);
+            ordinals.push(ordinal);
+            mutation_index += 1;
+        }
+    }
+    debug_assert_eq!(mutation_index, commit.mutations.len());
+    let ordinal_bytes = encode_edit_ordinals(&ordinals);
+    if bitset.len() < ordinal_bytes.len() {
+        (EDIT_MUTATIONS_BITSET, bitset)
+    } else {
+        (EDIT_MUTATIONS_ORDINALS, ordinal_bytes)
+    }
+}
+
+fn decode_edit_mutations(
+    cursor: &mut Cursor<'_>,
+    action: EditAction,
+    mutation_count: usize,
+    encoding: u8,
+) -> Result<Vec<VoxelMutation>, ProtocolError> {
+    let candidates = edit_action_volume(action)
+        .ok_or(ProtocolError::InvalidPayload(
+            "edit action volume exceeds world coordinates",
+        ))?
+        .coordinates()
+        .collect::<Vec<_>>();
+    let mut ordinals = Vec::with_capacity(mutation_count);
+    match encoding {
+        EDIT_MUTATIONS_ORDINALS => {
+            let mut previous: Option<usize> = None;
+            for _ in 0..mutation_count {
+                let encoded = usize::try_from(decode_var_u64(cursor, 3)?)
+                    .map_err(|_| ProtocolError::InvalidPayload("edit ordinal exceeds usize"))?;
+                let ordinal = match previous {
+                    None => encoded,
+                    Some(prior) if encoded != 0 => prior
+                        .checked_add(encoded)
+                        .ok_or(ProtocolError::InvalidPayload("edit ordinal overflowed"))?,
+                    Some(_) => {
+                        return Err(ProtocolError::InvalidPayload(
+                            "edit ordinals are not strictly increasing",
+                        ));
+                    }
+                };
+                if ordinal >= candidates.len() {
+                    return Err(ProtocolError::InvalidPayload(
+                        "edit ordinal exceeds its action stencil",
+                    ));
+                }
+                ordinals.push(ordinal);
+                previous = Some(ordinal);
+            }
+        }
+        EDIT_MUTATIONS_BITSET => {
+            let bytes = cursor.bytes(candidates.len().div_ceil(8))?;
+            if let Some(&last) = bytes.last() {
+                let used_bits = candidates.len() % 8;
+                if used_bits != 0 && last & !((1_u8 << used_bits) - 1) != 0 {
+                    return Err(ProtocolError::InvalidPayload(
+                        "edit mutation bitset has nonzero padding",
+                    ));
+                }
+            }
+            for ordinal in 0..candidates.len() {
+                if bytes[ordinal / 8] & (1 << (ordinal % 8)) != 0 {
+                    ordinals.push(ordinal);
+                }
+            }
+            if ordinals.len() != mutation_count {
+                return Err(ProtocolError::InvalidPayload(
+                    "edit mutation bitset count mismatch",
+                ));
+            }
+        }
+        _ => {
+            return Err(ProtocolError::UnknownEnum(
+                "edit mutation encoding",
+                u64::from(encoding),
+            ));
+        }
+    }
+    let ordinal_bytes = encode_edit_ordinals(&ordinals);
+    let canonical_encoding = if candidates.len().div_ceil(8) < ordinal_bytes.len() {
+        EDIT_MUTATIONS_BITSET
+    } else {
+        EDIT_MUTATIONS_ORDINALS
+    };
+    if encoding != canonical_encoding {
+        return Err(ProtocolError::InvalidPayload(
+            "edit mutation encoding is not canonical",
+        ));
+    }
+    let material = edit_action_material(action);
+    Ok(ordinals
+        .into_iter()
+        .map(|ordinal| VoxelMutation {
+            coord: candidates[ordinal],
+            material,
+        })
+        .collect())
 }
 
 pub fn encode_edit_commit(commit: &EditCommit) -> Result<Vec<u8>, ProtocolError> {
     validate_edit_commit(commit)?;
+    let (action_kind, shape, material, target) = encode_edit_action(commit.action)?;
+    let (mutation_encoding, encoded_mutations) = encode_edit_mutations(commit);
     let mut payload = Vec::with_capacity(
-        40 + commit.mutations.len() * 16
-            + commit.affected_chunks.len() * 12
+        60 + encoded_mutations.len()
             + commit.affected_surface_tiles.len() * 12
             + commit.editor_inventory.is_some() as usize * (8 + MATERIAL_INVENTORY_SLOTS * 8),
     );
     payload.extend_from_slice(commit.edit_session_id.as_bytes());
     push_u64(&mut payload, commit.editor_connection_id);
     push_u64(&mut payload, commit.revision);
+    payload.push(action_kind);
+    payload.push(shape);
+    payload.push(mutation_encoding);
+    payload.push(0);
+    push_u16(&mut payload, material);
+    push_u16(&mut payload, 0);
+    encode_voxel_coord(&mut payload, target);
     push_u16(&mut payload, commit.mutations.len() as u16);
-    push_u16(&mut payload, commit.affected_chunks.len() as u16);
     push_u16(&mut payload, commit.affected_surface_tiles.len() as u16);
     push_u16(&mut payload, u16::from(commit.editor_inventory.is_some()));
-    let mut previous_voxel = [0_i64; 3];
-    for mutation in &commit.mutations {
-        encode_delta_coord(
-            &mut payload,
-            [mutation.coord.x, mutation.coord.y, mutation.coord.z],
-            &mut previous_voxel,
-        );
-        push_var_u64(&mut payload, u64::from(mutation.material.id()));
-    }
-    let mut previous_chunk = [0_i64; 3];
-    for coord in &commit.affected_chunks {
-        encode_delta_coord(
-            &mut payload,
-            [coord.x, coord.y, coord.z],
-            &mut previous_chunk,
-        );
-    }
+    push_u16(&mut payload, 0);
+    payload.extend_from_slice(&encoded_mutations);
     let mut previous_surface = [0_i64; 2];
     for coord in &commit.affected_surface_tiles {
         payload.push(coord.level.index());
@@ -1660,15 +1815,32 @@ pub fn decode_edit_commit(bytes: &[u8]) -> Result<EditCommit, ProtocolError> {
     }
     let editor_connection_id = cursor.u64()?;
     let revision = cursor.u64()?;
+    let action_kind = cursor.u8()?;
+    let shape = cursor.u8()?;
+    let mutation_encoding = cursor.u8()?;
+    if cursor.u8()? != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved edit mutation byte is nonzero",
+        ));
+    }
+    let material = cursor.u16()?;
+    if cursor.u16()? != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved edit action field is nonzero",
+        ));
+    }
+    let target = decode_voxel_coord(&mut cursor)?;
+    let action = decode_edit_action(action_kind, shape, material, target)?;
     let mutation_count = usize::from(cursor.u16()?);
-    let chunk_count = usize::from(cursor.u16()?);
     let surface_count = usize::from(cursor.u16()?);
     let inventory_present = cursor.u16()?;
+    if cursor.u16()? != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved edit commit field is nonzero",
+        ));
+    }
     if mutation_count > MAX_EDIT_MUTATIONS {
         return Err(ProtocolError::LimitExceeded("edit mutations"));
-    }
-    if chunk_count > MAX_EDIT_AFFECTED_CHUNKS {
-        return Err(ProtocolError::LimitExceeded("edit affected chunks"));
     }
     if surface_count > MAX_EDIT_AFFECTED_SURFACE_TILES {
         return Err(ProtocolError::LimitExceeded("edit affected surface tiles"));
@@ -1678,31 +1850,13 @@ pub fn decode_edit_commit(bytes: &[u8]) -> Result<EditCommit, ProtocolError> {
             "invalid edit inventory presence flag",
         ));
     }
-    let mut mutations = Vec::with_capacity(mutation_count);
-    let mut previous_voxel = [0_i64; 3];
-    for _ in 0..mutation_count {
-        let [x, y, z] = decode_delta_coord(&mut cursor, &mut previous_voxel)?;
-        let coord = VoxelCoord::new(x, y, z);
-        validate_voxel_coord(coord)?;
-        let material_value = decode_var_u64(&mut cursor, 3)?;
-        let material_id = u16::try_from(material_value)
-            .map_err(|_| ProtocolError::UnknownEnum("material", material_value))?;
-        let material = Material::from_id(material_id).ok_or(ProtocolError::UnknownEnum(
-            "material",
-            u64::from(material_id),
-        ))?;
-        mutations.push(VoxelMutation { coord, material });
-    }
-    let mut affected_chunks = Vec::with_capacity(chunk_count);
-    let mut previous_chunk = [0_i64; 3];
-    for _ in 0..chunk_count {
-        let [x, y, z] = decode_delta_coord(&mut cursor, &mut previous_chunk)?;
-        let coord = ChunkCoord::new(x, y, z);
-        if !coord.is_world_representable() {
-            return Err(ProtocolError::InvalidPayload("invalid chunk coordinate"));
-        }
-        affected_chunks.push(coord);
-    }
+    let mutations = decode_edit_mutations(&mut cursor, action, mutation_count, mutation_encoding)?;
+    let affected_chunks = mutations
+        .iter()
+        .flat_map(|mutation| crate::EditMap::affected_chunks(mutation.coord))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     let mut affected_surface_tiles = Vec::with_capacity(surface_count);
     let mut previous_surface = [0_i64; 2];
     for _ in 0..surface_count {
@@ -1725,6 +1879,7 @@ pub fn decode_edit_commit(bytes: &[u8]) -> Result<EditCommit, ProtocolError> {
         edit_session_id,
         editor_connection_id,
         revision,
+        action,
         mutations,
         affected_chunks,
         affected_surface_tiles,
@@ -2554,6 +2709,7 @@ fn validate_edit_commit(commit: &EditCommit) -> Result<(), ProtocolError> {
     if commit.edit_session_id.is_nil() {
         return Err(ProtocolError::InvalidPayload("edit session id is nil"));
     }
+    encode_edit_action(commit.action)?;
     if commit.mutations.len() > MAX_EDIT_MUTATIONS {
         return Err(ProtocolError::LimitExceeded("edit mutations"));
     }
@@ -2572,6 +2728,26 @@ fn validate_edit_commit(commit: &EditCommit) -> Result<(), ProtocolError> {
         .any(|mutation| validate_voxel_coord(mutation.coord).is_err())
     {
         return Err(ProtocolError::InvalidPayload("invalid voxel coordinate"));
+    }
+    let volume = edit_action_volume(commit.action).ok_or(ProtocolError::InvalidPayload(
+        "edit action volume exceeds world coordinates",
+    ))?;
+    let expected_material = edit_action_material(commit.action);
+    if commit
+        .mutations
+        .iter()
+        .any(|mutation| !volume.contains(mutation.coord) || mutation.material != expected_material)
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "edit mutations do not match their semantic action",
+        ));
+    }
+    if matches!(commit.action, EditAction::Place { .. })
+        && commit.mutations.len() != volume.coordinates().count()
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "placed stencil is not complete",
+        ));
     }
     if commit.affected_chunks.len() > MAX_EDIT_AFFECTED_CHUNKS {
         return Err(ProtocolError::LimitExceeded("edit affected chunks"));
@@ -2592,23 +2768,16 @@ fn validate_edit_commit(commit: &EditCommit) -> Result<(), ProtocolError> {
             "edit affected chunks are not strictly sorted",
         ));
     }
-    if commit
-        .mutations
-        .iter()
-        .any(|mutation| !commit.affected_chunks.contains(&mutation.coord.chunk()))
-    {
-        return Err(ProtocolError::InvalidPayload(
-            "edit affected chunks omit a mutated chunk",
-        ));
-    }
-    if commit
+    let expected_chunks = commit
         .mutations
         .iter()
         .flat_map(|mutation| crate::EditMap::affected_chunks(mutation.coord))
-        .any(|coord| !commit.affected_chunks.contains(&coord))
-    {
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if commit.affected_chunks != expected_chunks {
         return Err(ProtocolError::InvalidPayload(
-            "edit affected chunks omit a mutation halo",
+            "edit affected chunks do not match mutation halos",
         ));
     }
     if commit
@@ -4524,11 +4693,11 @@ mod tests {
         let mutations = vec![
             VoxelMutation {
                 coord,
-                material: Material::Basalt,
+                material: Material::Air,
             },
             VoxelMutation {
                 coord: VoxelCoord::new(32, 64, -33),
-                material: Material::Basalt,
+                material: Material::Air,
             },
         ];
         let affected_chunks = mutations
@@ -4542,6 +4711,7 @@ mod tests {
             edit_session_id,
             editor_connection_id: 77,
             revision: 9,
+            action: dig.action,
             mutations,
             affected_chunks,
             affected_surface_tiles: vec![
@@ -4554,9 +4724,13 @@ mod tests {
             }),
         };
         let encoded_commit = encode_edit_commit(&commit).expect("encode edit commit");
+        assert_eq!(
+            encoded_commit[FRAME_HEADER_BYTES + 34],
+            EDIT_MUTATIONS_ORDINALS
+        );
         assert_eq!(message_kind(&encoded_commit), Ok(edit_commit_kind()));
         assert_eq!(decode_edit_commit(&encoded_commit), Ok(commit.clone()));
-        let mutation_offset = FRAME_HEADER_BYTES + 40;
+        let mutation_offset = FRAME_HEADER_BYTES + 60;
         let mut overlong_delta = encoded_commit.clone();
         overlong_delta[mutation_offset..mutation_offset + 5].fill(0x80);
         assert_eq!(
@@ -4637,7 +4811,7 @@ mod tests {
         assert_eq!(
             encode_edit_commit(&omitted_owner),
             Err(ProtocolError::InvalidPayload(
-                "edit affected chunks omit a mutated chunk"
+                "edit affected chunks do not match mutation halos"
             ))
         );
 
@@ -4659,7 +4833,7 @@ mod tests {
         assert_eq!(
             encode_edit_commit(&incomplete_halo),
             Err(ProtocolError::InvalidPayload(
-                "edit affected chunks omit a mutation halo"
+                "edit affected chunks do not match mutation halos"
             ))
         );
 
@@ -4704,17 +4878,18 @@ mod tests {
 
     #[test]
     fn maximum_atomic_commit_round_trips_at_protocol_limits() {
-        let mut mutations = Vec::with_capacity(MAX_EDIT_MUTATIONS);
-        for x in 4..12 {
-            for y in 4..12 {
-                for z in 4..20 {
-                    mutations.push(VoxelMutation {
-                        coord: VoxelCoord::new(x, y, z),
-                        material: Material::Air,
-                    });
-                }
-            }
-        }
+        let action = EditAction::Dig {
+            hit: VoxelCoord::new(12, 12, 12),
+            shape: EditShape::Sphere,
+        };
+        let mutations = edit_action_volume(action)
+            .unwrap()
+            .coordinates()
+            .map(|coord| VoxelMutation {
+                coord,
+                material: Material::Air,
+            })
+            .collect::<Vec<_>>();
         assert_eq!(mutations.len(), MAX_EDIT_MUTATIONS);
         let affected_chunks = mutations
             .iter()
@@ -4728,17 +4903,28 @@ mod tests {
             edit_session_id: EditSessionId::from_bytes([21; 16]),
             editor_connection_id: 7,
             revision: 12,
+            action,
             mutations,
             affected_chunks,
             affected_surface_tiles: Vec::new(),
             editor_inventory: None,
         };
         let encoded = encode_edit_commit(&commit).expect("encode maximum commit");
+        assert_eq!(encoded[FRAME_HEADER_BYTES + 34], EDIT_MUTATIONS_BITSET);
         assert!(
-            encoded.len() < 5_000,
+            encoded.len() < 1_000,
             "maximum edit commit should stay compact"
         );
         assert_eq!(decode_edit_commit(&encoded), Ok(commit.clone()));
+        let mut nonzero_padding = encoded;
+        let bitset_last = FRAME_HEADER_BYTES + 60 + MAX_EDIT_MUTATIONS.div_ceil(8) - 1;
+        nonzero_padding[bitset_last] |= 0x80;
+        assert_eq!(
+            decode_edit_commit(&nonzero_padding),
+            Err(ProtocolError::InvalidPayload(
+                "edit mutation bitset has nonzero padding"
+            ))
+        );
 
         let mut oversized = commit;
         oversized.mutations.push(VoxelMutation {
