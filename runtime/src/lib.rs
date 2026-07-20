@@ -17,8 +17,10 @@ pub use surface::{SurfaceFocusAction, SurfaceRevisionCache, SurfaceRevisionStatu
 /// Physical edge length of a full-resolution chunk.
 pub const CHUNK_EDGE_METRES: f32 = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
 
-const MAX_LOAD_RADIUS_CHUNKS: i32 = 64;
-const MAX_VERTICAL_RADIUS_CHUNKS: i32 = 32;
+/// Hard ceiling for the canonical load radius, including its retention margin.
+pub const MAX_LOAD_RADIUS_CHUNKS: i32 = 64;
+/// Hard ceiling for canonical vertical interest.
+pub const MAX_VERTICAL_RADIUS_CHUNKS: i32 = 32;
 /// Compile-time safety ceiling for secondary-interest normalization. Runtime configuration may
 /// choose a smaller active limit but cannot allocate beyond this bound.
 pub const MAX_SECONDARY_INTEREST_CHUNKS: usize = 192;

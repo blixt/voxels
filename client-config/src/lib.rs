@@ -7,13 +7,15 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use voxels_runtime::{
+    MAX_LOAD_RADIUS_CHUNKS, MAX_SECONDARY_INTEREST_CHUNKS, MAX_VERTICAL_RADIUS_CHUNKS,
+};
 
 pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 25;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
 const MAX_EDIT_TRACKERS: u32 = 65_536;
-const MAX_SIGNED_RUNTIME_INTEGER: u32 = i32::MAX as u32;
 const MAX_TRACKED_CHUNKS: u32 = 1_048_576;
 const MAX_SURFACE_RADIUS_TILES: u32 = 64;
 const MAX_FRAME_STAGE_BUDGET: u32 = 65_536;
@@ -246,13 +248,13 @@ impl ClientConfig {
             self.streaming.load_radius_chunks,
             "streaming.load_radius_chunks",
             0,
-            MAX_SIGNED_RUNTIME_INTEGER,
+            MAX_LOAD_RADIUS_CHUNKS as u32,
         )?;
         ensure_integer_range(
             self.streaming.vertical_radius_chunks,
             "streaming.vertical_radius_chunks",
             0,
-            MAX_SIGNED_RUNTIME_INTEGER,
+            MAX_VERTICAL_RADIUS_CHUNKS as u32,
         )?;
         ensure_integer_range(
             self.streaming.startup_ready_radius_chunks,
@@ -264,7 +266,7 @@ impl ClientConfig {
             self.streaming.retention_margin_chunks,
             "streaming.retention_margin_chunks",
             0,
-            MAX_SIGNED_RUNTIME_INTEGER,
+            (MAX_LOAD_RADIUS_CHUNKS as u32) - self.streaming.load_radius_chunks,
         )?;
         ensure_integer_range(
             self.streaming.max_tracked_chunks,
@@ -276,7 +278,9 @@ impl ClientConfig {
             self.streaming.max_secondary_interest_chunks,
             "streaming.max_secondary_interest_chunks",
             0,
-            self.streaming.max_tracked_chunks,
+            self.streaming
+                .max_tracked_chunks
+                .min(MAX_SECONDARY_INTEREST_CHUNKS as u32),
         )?;
         ensure_finite_range(
             self.streaming.priority.collision_lookahead_seconds,
@@ -852,8 +856,12 @@ mod tests {
         assert_invalid_field(&config, "runtime.max_steps_per_frame");
 
         let mut config = valid_config();
-        config.streaming.load_radius_chunks = MAX_SIGNED_RUNTIME_INTEGER + 1;
+        config.streaming.load_radius_chunks = MAX_LOAD_RADIUS_CHUNKS as u32 + 1;
         assert_invalid_field(&config, "streaming.load_radius_chunks");
+
+        let mut config = valid_config();
+        config.streaming.vertical_radius_chunks = MAX_VERTICAL_RADIUS_CHUNKS as u32 + 1;
+        assert_invalid_field(&config, "streaming.vertical_radius_chunks");
 
         let mut config = valid_config();
         config.streaming.startup_ready_radius_chunks =
@@ -861,8 +869,17 @@ mod tests {
         assert_invalid_field(&config, "streaming.startup_ready_radius_chunks");
 
         let mut config = valid_config();
+        config.streaming.retention_margin_chunks =
+            MAX_LOAD_RADIUS_CHUNKS as u32 - config.streaming.load_radius_chunks + 1;
+        assert_invalid_field(&config, "streaming.retention_margin_chunks");
+
+        let mut config = valid_config();
         config.streaming.max_tracked_chunks = 1;
         config.streaming.max_secondary_interest_chunks = 2;
+        assert_invalid_field(&config, "streaming.max_secondary_interest_chunks");
+
+        let mut config = valid_config();
+        config.streaming.max_secondary_interest_chunks = MAX_SECONDARY_INTEREST_CHUNKS as u32 + 1;
         assert_invalid_field(&config, "streaming.max_secondary_interest_chunks");
 
         let mut config = valid_config();
