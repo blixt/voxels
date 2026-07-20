@@ -150,6 +150,13 @@ pub struct AabbClipVolume {
     planes: [Vec4; 6],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AabbClipClassification {
+    Outside,
+    Intersecting,
+    Inside,
+}
+
 impl AabbClipVolume {
     pub fn new(clip_from_world: Mat4) -> Self {
         let x = clip_from_world.row(0);
@@ -173,6 +180,32 @@ impl AabbClipVolume {
             );
             plane.truncate().dot(positive) + plane.w >= 0.0
         })
+    }
+
+    pub fn classify_aabb(self, minimum: Vec3, maximum: Vec3) -> AabbClipClassification {
+        if !minimum.is_finite() || !maximum.is_finite() || minimum.cmpgt(maximum).any() {
+            return AabbClipClassification::Outside;
+        }
+        let mut classification = AabbClipClassification::Inside;
+        for plane in self.planes {
+            let positive = Vec3::new(
+                if plane.x >= 0.0 { maximum.x } else { minimum.x },
+                if plane.y >= 0.0 { maximum.y } else { minimum.y },
+                if plane.z >= 0.0 { maximum.z } else { minimum.z },
+            );
+            if plane.truncate().dot(positive) + plane.w < 0.0 {
+                return AabbClipClassification::Outside;
+            }
+            let negative = Vec3::new(
+                if plane.x >= 0.0 { minimum.x } else { maximum.x },
+                if plane.y >= 0.0 { minimum.y } else { maximum.y },
+                if plane.z >= 0.0 { minimum.z } else { maximum.z },
+            );
+            if plane.truncate().dot(negative) + plane.w < 0.0 {
+                classification = AabbClipClassification::Intersecting;
+            }
+        }
+        classification
     }
 }
 
@@ -605,6 +638,23 @@ mod tests {
             Vec3::splat(10_001.0),
         ));
         Ok(())
+    }
+
+    #[test]
+    fn clip_volume_distinguishes_contained_boundary_and_rejected_bounds() {
+        let volume = AabbClipVolume::new(Mat4::IDENTITY);
+        assert_eq!(
+            volume.classify_aabb(Vec3::new(-0.5, -0.5, 0.1), Vec3::new(0.5, 0.5, 0.9)),
+            AabbClipClassification::Inside
+        );
+        assert_eq!(
+            volume.classify_aabb(Vec3::new(0.5, -0.5, 0.1), Vec3::new(1.5, 0.5, 0.9)),
+            AabbClipClassification::Intersecting
+        );
+        assert_eq!(
+            volume.classify_aabb(Vec3::new(1.5, -0.5, 0.1), Vec3::new(2.0, 0.5, 0.9)),
+            AabbClipClassification::Outside
+        );
     }
 
     #[test]

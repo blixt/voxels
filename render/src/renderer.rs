@@ -10,8 +10,9 @@ use crate::environment::{
 use crate::lod::{GeometricLodFocus, LodOwner, SurfacePatchSelection};
 use crate::material_detail::MaterialDetailGpu;
 use crate::shadow::{
-    AabbClipVolume, CASCADE_COUNT, DirectionalShadowBasis, DirectionalShadowCascades,
-    DirectionalShadowConfig, ShadowDirectionTracker, build_directional_shadow_cascades,
+    AabbClipClassification, AabbClipVolume, CASCADE_COUNT, DirectionalShadowBasis,
+    DirectionalShadowCascades, DirectionalShadowConfig, ShadowDirectionTracker,
+    build_directional_shadow_cascades,
 };
 use crate::ui::{Color, InventoryItem, LiveStats, MissionControlUi, UiAction, UiKey, Viewport};
 pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
@@ -3504,12 +3505,18 @@ fn collect_opaque_draw_lists(
         if !chunk.active() || (key.0 != 0 && !far_terrain) {
             continue;
         }
-        let world_chunk_visible = view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max);
-        let shadow_chunk_visible: [bool; CASCADE_COUNT] = std::array::from_fn(|cascade_index| {
-            shadows
-                && mesh_casts_directional_shadow(key)
-                && shadow_clips[cascade_index].contains_aabb(chunk.bounds_min, chunk.bounds_max)
-        });
+        let world_chunk_clip = view_clip.classify_aabb(chunk.bounds_min, chunk.bounds_max);
+        let world_chunk_visible = world_chunk_clip != AabbClipClassification::Outside;
+        let shadow_chunk_clip: [AabbClipClassification; CASCADE_COUNT] =
+            std::array::from_fn(|cascade_index| {
+                if shadows && mesh_casts_directional_shadow(key) {
+                    shadow_clips[cascade_index].classify_aabb(chunk.bounds_min, chunk.bounds_max)
+                } else {
+                    AabbClipClassification::Outside
+                }
+            });
+        let shadow_chunk_visible = shadow_chunk_clip
+            .map(|classification| classification != AabbClipClassification::Outside);
         if !world_chunk_visible && !shadow_chunk_visible.into_iter().any(|visible| visible) {
             continue;
         }
@@ -3531,13 +3538,18 @@ fn collect_opaque_draw_lists(
             {
                 continue;
             }
-            if world_chunk_visible && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max) {
+            if world_chunk_visible
+                && (world_chunk_clip == AabbClipClassification::Inside
+                    || view_clip.contains_aabb(slice.bounds_min, slice.bounds_max))
+            {
                 world_builder.select_slice(chunk, slice);
                 world_mesh_selected = true;
             }
             for cascade_index in 0..CASCADE_COUNT {
                 if shadow_chunk_visible[cascade_index]
-                    && shadow_clips[cascade_index].contains_aabb(slice.bounds_min, slice.bounds_max)
+                    && (shadow_chunk_clip[cascade_index] == AabbClipClassification::Inside
+                        || shadow_clips[cascade_index]
+                            .contains_aabb(slice.bounds_min, slice.bounds_max))
                 {
                     shadow_builders[cascade_index].select_slice(chunk, slice);
                     shadow_mesh_selected[cascade_index] = true;
