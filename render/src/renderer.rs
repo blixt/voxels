@@ -2618,10 +2618,7 @@ impl Renderer {
         {
             return;
         }
-        let canonical_columns = complete_canonical_surface_columns(
-            &self.canonical_ready_chunks,
-            &self.canonical_surface_profiles,
-        );
+        let canonical_columns = canonical_ready_columns(&self.canonical_ready_chunks);
         let mut patches = SurfacePatchSelection::default();
         if let Some(focus) = focus {
             patches.rebuild(focus, &self.surface_patch_residency, &canonical_columns);
@@ -2703,18 +2700,16 @@ impl Renderer {
             .presented_stride_at(self.lod_draw_plan_focus, voxel_x, voxel_z)
     }
 
-    /// Number of horizontal cells whose exact surface is represented by the currently active
-    /// canonical vertical band at one chunk column.
+    /// Number of horizontal cells owned by the currently active exact canonical vertical band.
+    ///
+    /// Ownership follows transactional chunk readiness, not the presence of a top-surface sample:
+    /// a dug shaft is valid empty canonical space and must not resurrect its surface parent.
     pub fn canonical_surface_coverage_at(&self, voxel_x: i32, voxel_z: i32) -> (u16, u16) {
         let column = (
             voxel_x.div_euclid(CHUNK_EDGE as i32),
             voxel_z.div_euclid(CHUNK_EDGE as i32),
         );
-        let covered = canonical_surface_cell_coverage(
-            column,
-            &self.canonical_ready_chunks,
-            &self.canonical_surface_profiles,
-        );
+        let covered = canonical_surface_cell_coverage(column, &self.canonical_ready_chunks);
         (covered as u16, (CHUNK_EDGE * CHUNK_EDGE) as u16)
     }
 
@@ -4045,46 +4040,19 @@ const fn material_belongs_to_surface_heightfield(material: Material) -> bool {
     )
 }
 
-fn complete_canonical_surface_columns(
-    ready_chunks: &HashSet<(i32, i32, i32)>,
-    profiles: &CanonicalColumnProfiles,
-) -> HashSet<(i32, i32)> {
-    let columns = ready_chunks
-        .iter()
-        .map(|&(x, _, z)| (x, z))
-        .collect::<HashSet<_>>();
-    columns
-        .into_iter()
-        .filter(|&column| {
-            canonical_surface_cell_coverage(column, ready_chunks, profiles)
-                == CHUNK_EDGE * CHUNK_EDGE
-        })
-        .collect()
+fn canonical_ready_columns(ready_chunks: &HashSet<(i32, i32, i32)>) -> HashSet<(i32, i32)> {
+    ready_chunks.iter().map(|&(x, _, z)| (x, z)).collect()
 }
 
 fn canonical_surface_cell_coverage(
     column: (i32, i32),
     ready_chunks: &HashSet<(i32, i32, i32)>,
-    profiles: &CanonicalColumnProfiles,
 ) -> usize {
-    let Some(column_profiles) = profiles.get(&column) else {
-        return 0;
-    };
-    let ready_profiles = column_profiles
+    ready_chunks
         .iter()
-        .filter_map(|(&y, profile)| {
-            ready_chunks
-                .contains(&(column.0, y, column.1))
-                .then_some(profile)
-        })
-        .collect::<Vec<_>>();
-    (0..CHUNK_EDGE * CHUNK_EDGE)
-        .filter(|&cell| {
-            ready_profiles
-                .iter()
-                .any(|profile| profile.cells[cell].is_some())
-        })
-        .count()
+        .any(|&(x, _, z)| (x, z) == column)
+        .then_some(CHUNK_EDGE * CHUNK_EDGE)
+        .unwrap_or(0)
 }
 
 fn canonical_surface_sample(
@@ -5243,63 +5211,24 @@ mod tests {
     }
 
     #[test]
-    fn canonical_surface_ownership_ignores_profiles_outside_the_exact_ready_band() {
+    fn canonical_surface_ownership_follows_exact_ready_bands_even_when_the_surface_is_empty() {
         let column = (50, 9);
-        let surface = SurfaceCell {
-            height: 1_333,
-            material: Material::Grass,
-            macro_normal: 0xff,
-            horizon_profile: 0,
-        };
         let cell_count = CHUNK_EDGE * CHUNK_EDGE;
-        let mut lower_cells = vec![None; cell_count];
-        let mut upper_cells = vec![None; cell_count];
-        lower_cells[..cell_count / 2].fill(Some(surface));
-        upper_cells[cell_count / 2..].fill(Some(surface));
-        let profiles = HashMap::from([(
-            column,
-            BTreeMap::from([
-                (
-                    40,
-                    CanonicalChunkProfile {
-                        cells: vec![Some(surface); cell_count],
-                    },
-                ),
-                (41, CanonicalChunkProfile { cells: lower_cells }),
-                (42, CanonicalChunkProfile { cells: upper_cells }),
-            ]),
-        )]);
-
-        let incomplete = complete_canonical_surface_columns(
-            &HashSet::from([(column.0, 41, column.1)]),
-            &profiles,
-        );
+        let inactive_profiles_only = HashSet::new();
         assert_eq!(
-            canonical_surface_cell_coverage(
-                column,
-                &HashSet::from([(column.0, 41, column.1)]),
-                &profiles,
-            ),
-            cell_count / 2
+            canonical_surface_cell_coverage(column, &inactive_profiles_only),
+            0
         );
         assert!(
-            !incomplete.contains(&column),
+            !canonical_ready_columns(&inactive_profiles_only).contains(&column),
             "an inactive retained profile must not suppress the surface fallback"
         );
 
-        let complete = complete_canonical_surface_columns(
-            &HashSet::from([(column.0, 41, column.1), (column.0, 42, column.1)]),
-            &profiles,
-        );
-        assert!(complete.contains(&column));
-        assert_eq!(
-            canonical_surface_cell_coverage(
-                column,
-                &HashSet::from([(column.0, 41, column.1), (column.0, 42, column.1)]),
-                &profiles,
-            ),
-            cell_count
-        );
+        // The shell only publishes complete exact vertical bands. Once it does, empty cells are
+        // legitimate canonical air (for example a dug shaft), not missing surface coverage.
+        let ready = HashSet::from([(column.0, 41, column.1), (column.0, 42, column.1)]);
+        assert!(canonical_ready_columns(&ready).contains(&column));
+        assert_eq!(canonical_surface_cell_coverage(column, &ready), cell_count);
     }
 
     #[test]
