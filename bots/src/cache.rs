@@ -37,6 +37,11 @@ impl ChunkCache {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.chunks.clear();
+        self.insertion_order.clear();
+    }
+
     pub fn contains(&self, coord: ChunkCoord) -> bool {
         self.chunks.contains_key(&coord)
     }
@@ -73,5 +78,8 @@ mod tests {
         assert!(cache.physics(changed).collidable);
         assert_eq!(cache.material(changed), None);
         assert_eq!(cache.chunks.len(), 1);
+        cache.clear();
+        assert!(cache.chunks.is_empty());
+        assert!(cache.insertion_order.is_empty());
     }
 }

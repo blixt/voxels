@@ -13,12 +13,13 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use voxels_core::{CameraState, InputState};
+use voxels_runtime::{AuthoritativeEditRevisions, revision_satisfies};
 #[cfg(test)]
 use voxels_world::protocol::EditShape;
 use voxels_world::protocol::{
     BrowserUserId, ChunkBatchRequest, EDIT_CUBE_VOLUME_VOXELS, EditAction, EditCommand, EditVolume,
     FrameReassembler, MaterialInventory, PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING, PlayerId,
-    PlayerIdentity, PlayerPoseUpdate, PresencePing, SurfaceTileBatchRequest,
+    PlayerIdentity, PlayerPoseUpdate, PresencePing, SurfaceTileBatchRequest, VoxelMutation,
     chunk_batch_result_kind, decode_chunk_batch_result, decode_edit_commit, decode_error,
     decode_presence_delta, decode_presence_pong, decode_resync_required,
     decode_surface_tile_batch_result, edit_commit_kind, encode_chunk_batch, encode_edit_command,
@@ -274,6 +275,11 @@ impl ChunkRequests {
         Some(pending)
     }
 
+    fn reset_after_resync(&mut self) {
+        self.in_flight.clear();
+        self.pending.clear();
+    }
+
     fn unique_count(&self) -> usize {
         self.requested.len()
     }
@@ -309,6 +315,18 @@ impl SurfaceRequests {
         self.completed.insert(coord);
     }
 
+    fn invalidate(&mut self, coords: &[SurfaceTileCoord]) {
+        for coord in coords {
+            self.completed.remove(coord);
+        }
+    }
+
+    fn reset_after_resync(&mut self) {
+        self.completed.clear();
+        self.in_flight.clear();
+        self.pending.clear();
+    }
+
     fn unique_count(&self) -> usize {
         self.requested.len()
     }
@@ -327,6 +345,7 @@ struct BotRuntime {
     inventory: MaterialInventory,
     traffic: TrafficCounters,
     cache: ChunkCache,
+    edit_revisions: AuthoritativeEditRevisions,
     frame_reassembler: FrameReassembler,
     chunk_requests: ChunkRequests,
     surface_requests: SurfaceRequests,
@@ -481,6 +500,7 @@ impl BotRuntime {
             inventory: connection.opened.inventory,
             traffic: connection.traffic,
             cache: ChunkCache::new(CHUNK_CACHE_CAPACITY),
+            edit_revisions: AuthoritativeEditRevisions::default(),
             frame_reassembler: FrameReassembler::default(),
             chunk_requests: ChunkRequests::default(),
             surface_requests: SurfaceRequests::default(),
@@ -744,12 +764,30 @@ impl BotRuntime {
                 self.report
                     .chunk_latency_ms
                     .push(pending.submitted.elapsed().as_secs_f64() * 1_000.0);
-            }
-            for item in result.items {
-                self.report.chunk_results = self.report.chunk_results.saturating_add(1);
-                match item.result {
-                    Ok(snapshot) => self.cache.insert(snapshot.chunk),
-                    Err(error) => self.record_error(format!("chunk {:?}: {error}", item.coord)),
+                for item in result.items {
+                    if !pending.coords.contains(&item.coord) {
+                        self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
+                        self.record_error(format!(
+                            "request {} returned unrequested chunk {:?}",
+                            result.request_id, item.coord
+                        ));
+                        continue;
+                    }
+                    self.report.chunk_results = self.report.chunk_results.saturating_add(1);
+                    match item.result {
+                        Ok(snapshot)
+                            if chunk_result_is_current(
+                                &pending,
+                                item.coord,
+                                item.edit_revision,
+                                &self.edit_revisions,
+                            ) =>
+                        {
+                            self.cache.insert(snapshot.chunk);
+                        }
+                        Ok(_) => {}
+                        Err(error) => self.record_error(format!("chunk {:?}: {error}", item.coord)),
+                    }
                 }
             }
         } else if kind == surface_tile_batch_result_kind() {
@@ -758,19 +796,46 @@ impl BotRuntime {
                 self.report
                     .surface_latency_ms
                     .push(pending.submitted.elapsed().as_secs_f64() * 1_000.0);
-            }
-            for item in result.items {
-                self.report.surface_results = self.report.surface_results.saturating_add(1);
-                match item.result {
-                    Ok(_) => self.surface_requests.complete(item.coord),
-                    Err(error) => self.record_error(format!("surface {:?}: {error}", item.coord)),
+                for item in result.items {
+                    if item.coord != pending.coord {
+                        self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
+                        self.record_error(format!(
+                            "request {} returned unrequested surface {:?}",
+                            result.request_id, item.coord
+                        ));
+                        continue;
+                    }
+                    self.report.surface_results = self.report.surface_results.saturating_add(1);
+                    match item.result {
+                        Ok(_)
+                            if surface_result_is_current(
+                                &pending,
+                                item.coord,
+                                item.edit_revision,
+                                &self.edit_revisions,
+                            ) =>
+                        {
+                            self.surface_requests.complete(item.coord);
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            self.record_error(format!("surface {:?}: {error}", item.coord))
+                        }
+                    }
                 }
             }
         } else if kind == edit_commit_kind() {
             let commit = decode_edit_commit(bytes)?;
-            for mutation in &commit.mutations {
-                self.cache.apply(mutation.coord, mutation.material);
-            }
+            apply_authoritative_mutations(
+                &mut self.cache,
+                &mut self.edit_revisions,
+                commit.revision,
+                &commit.mutations,
+                &commit.affected_chunks,
+                &commit.affected_surface_tiles,
+            );
+            self.surface_requests
+                .invalidate(&commit.affected_surface_tiles);
             self.report.edits_observed = self.report.edits_observed.saturating_add(1);
             if commit.editor_connection_id == self.connection_id {
                 self.report.edits_accepted = self.report.edits_accepted.saturating_add(1);
@@ -831,6 +896,10 @@ impl BotRuntime {
             }
         } else if kind == resync_required_kind() {
             let _ = decode_resync_required(bytes)?;
+            self.cache.clear();
+            self.edit_revisions.clear();
+            self.chunk_requests.reset_after_resync();
+            self.surface_requests.reset_after_resync();
             self.report.resyncs = self.report.resyncs.saturating_add(1);
         } else {
             self.record_error(format!("unexpected world message kind {kind}"));
@@ -1084,6 +1153,46 @@ fn position_voxel(position: Vec3) -> VoxelCoord {
 fn elapsed_milliseconds(start: Instant) -> u64 {
     let value = start.elapsed().as_millis();
     u64::try_from(value).unwrap_or(u64::MAX).max(1)
+}
+
+fn apply_authoritative_mutations(
+    cache: &mut ChunkCache,
+    revisions: &mut AuthoritativeEditRevisions,
+    revision: u64,
+    mutations: &[VoxelMutation],
+    affected_chunks: &[ChunkCoord],
+    affected_surfaces: &[SurfaceTileCoord],
+) {
+    let coords = mutations
+        .iter()
+        .map(|mutation| mutation.coord)
+        .collect::<Vec<_>>();
+    let apply_values =
+        revisions.observe_commit_batch(&coords, revision, affected_chunks, affected_surfaces);
+    for (mutation, apply) in mutations.iter().zip(apply_values) {
+        if apply {
+            cache.apply(mutation.coord, mutation.material);
+        }
+    }
+}
+
+fn chunk_result_is_current(
+    pending: &PendingChunkBatch,
+    coord: ChunkCoord,
+    edit_revision: u64,
+    revisions: &AuthoritativeEditRevisions,
+) -> bool {
+    pending.coords.contains(&coord)
+        && revision_satisfies(edit_revision, revisions.chunk_floor(coord))
+}
+
+fn surface_result_is_current(
+    pending: &PendingSurfaceTile,
+    coord: SurfaceTileCoord,
+    edit_revision: u64,
+    revisions: &AuthoritativeEditRevisions,
+) -> bool {
+    pending.coord == coord && revision_satisfies(edit_revision, revisions.surface_floor(coord))
 }
 
 fn summarize_latencies(values: &[f64]) -> LatencySummary {
@@ -1390,5 +1499,95 @@ mod tests {
         requests.complete(coord);
         assert!(!requests.needs(coord));
         assert_eq!(requests.unique_count(), 1);
+    }
+
+    #[test]
+    fn authoritative_products_and_voxels_never_regress_after_newer_commits() {
+        let coord = VoxelCoord::new(4, 5, 6);
+        let chunk = coord.chunk();
+        let surface = SurfaceTileCoord::containing(SurfaceLodLevel::Stride16, coord.x, coord.z);
+        let mut cache = ChunkCache::new(1);
+        cache.insert(Chunk::filled(chunk, Material::Dirt));
+        let mut revisions = AuthoritativeEditRevisions::default();
+        let mutation = |material| VoxelMutation { coord, material };
+
+        apply_authoritative_mutations(
+            &mut cache,
+            &mut revisions,
+            12,
+            &[mutation(Material::Wood)],
+            &[chunk],
+            &[surface],
+        );
+        apply_authoritative_mutations(
+            &mut cache,
+            &mut revisions,
+            11,
+            &[mutation(Material::Stone)],
+            &[chunk],
+            &[surface],
+        );
+
+        assert_eq!(cache.material(coord), Some(Material::Wood));
+        let chunk_request = PendingChunkBatch {
+            submitted: Instant::now(),
+            coords: vec![chunk],
+        };
+        let surface_request = PendingSurfaceTile {
+            submitted: Instant::now(),
+            coord: surface,
+        };
+        assert!(!chunk_result_is_current(
+            &chunk_request,
+            chunk,
+            11,
+            &revisions
+        ));
+        assert!(chunk_result_is_current(
+            &chunk_request,
+            chunk,
+            12,
+            &revisions
+        ));
+        assert!(!surface_result_is_current(
+            &surface_request,
+            surface,
+            11,
+            &revisions
+        ));
+        assert!(surface_result_is_current(
+            &surface_request,
+            surface,
+            12,
+            &revisions
+        ));
+    }
+
+    #[test]
+    fn resync_retires_in_flight_products_and_makes_completed_tiles_retryable() {
+        let chunk = ChunkCoord::new(1, 2, 3);
+        let surface = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 4, 5);
+        let cache = ChunkCache::new(1);
+        let mut chunks = ChunkRequests::default();
+        let mut surfaces = SurfaceRequests::default();
+
+        chunks.begin(7, vec![chunk], Instant::now());
+        surfaces.begin(8, surface, Instant::now());
+        surfaces.finish(8);
+        surfaces.complete(surface);
+        assert!(!surfaces.needs(surface));
+        surfaces.invalidate(&[surface]);
+        assert!(surfaces.needs(surface));
+        surfaces.begin(9, surface, Instant::now());
+        surfaces.finish(9);
+        surfaces.complete(surface);
+        chunks.reset_after_resync();
+        surfaces.reset_after_resync();
+
+        assert!(chunks.finish(7).is_none());
+        assert!(chunks.needs(&cache, chunk));
+        assert!(surfaces.needs(surface));
+        assert_eq!(chunks.unique_count(), 1);
+        assert_eq!(surfaces.unique_count(), 1);
     }
 }

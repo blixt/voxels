@@ -3589,6 +3589,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "voxels-core",
+ "voxels-runtime",
  "voxels-world",
 ]
 
