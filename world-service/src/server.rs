@@ -749,7 +749,11 @@ impl SessionRequests {
         if in_flight.contains_key(&request_id) {
             return Err(RequestAdmissionError::Duplicate);
         }
-        if in_flight.len() >= self.max_in_flight {
+        let active = in_flight
+            .values()
+            .filter(|cancelled| !cancelled.load(Ordering::Acquire))
+            .count();
+        if active >= self.max_in_flight {
             return Err(RequestAdmissionError::WindowFull);
         }
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -3129,7 +3133,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_keeps_request_id_stale_until_the_worker_finishes() {
+    fn cancellation_releases_capacity_but_keeps_the_request_id_stale() {
         let session = SessionRequests::new(1, 1, 1, 1024);
         let cancelled = session.insert(7).ok();
         assert!(cancelled.is_some());
@@ -3138,10 +3142,19 @@ mod tests {
             session.insert(7),
             Err(RequestAdmissionError::Duplicate)
         ));
+        let replacement = session
+            .insert(8)
+            .ok()
+            .expect("ordered cancellation must release negotiated capacity");
         if let Some(cancelled) = cancelled {
             assert!(cancelled.load(Ordering::Acquire));
             session.finish(7, &cancelled);
         }
+        assert!(matches!(
+            session.insert(7),
+            Err(RequestAdmissionError::WindowFull)
+        ));
+        session.finish(8, &replacement);
         assert!(session.insert(7).is_ok());
     }
 

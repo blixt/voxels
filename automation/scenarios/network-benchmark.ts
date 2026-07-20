@@ -17,7 +17,7 @@ import {
 } from "../lib/world.ts";
 import type { WorldSource } from "../lib/world.ts";
 
-const RESULT_SCHEMA_VERSION = 6;
+const RESULT_SCHEMA_VERSION = 7;
 const FIXTURE_VERSION = 3;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
@@ -604,7 +604,14 @@ function streamingGuardViolations(
   runs: readonly NetworkRun[],
   configuredRoundTripMs: number,
 ): string[] {
-  return runs
+  const controlErrors = runs.flatMap((run) =>
+    Object.entries(run.messages).flatMap(([key, message]) =>
+      Object.entries(message.controlErrors ?? {}).map(
+        ([reason, count]) => `${run.name}: ${key} reported ${count} control errors: ${reason}`,
+      ),
+    ),
+  );
+  const streaming = runs
     .filter((run) => run.name === "streaming_walk")
     .flatMap((run, index) => {
       const label = `streaming_walk run ${index + 1}`;
@@ -649,6 +656,7 @@ function streamingGuardViolations(
       }
       return violations;
     });
+  return [...controlErrors, ...streaming];
 }
 
 interface NetworkMarkdownReport {
@@ -912,6 +920,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
           maximumRoundTripOverConfiguredLinkMs: MAX_STREAMING_RTT_OVER_LINK_MS,
           requireCollisionCriticalRequests: true,
           requireNoPresenceUpstreamBackpressure: true,
+          requireNoControlErrors: true,
         },
       },
       summary: aggregateRuns(runs),
