@@ -8,7 +8,7 @@ import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { rustTool } from "../../scripts/build-wasm.ts";
 
 const execFileAsync = promisify(execFile);
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const BINARY = "voxels-storage-benchmark";
 
 type Profile = "clustered" | "frontier";
@@ -25,6 +25,9 @@ interface BenchmarkResult {
   readonly profile: Profile;
   readonly operations: number;
   readonly mutations: number;
+  readonly editMapLogicalBytes: number;
+  readonly editorCommitBytes: number;
+  readonly publicCommitBytes: number;
   readonly operationLatencyMicros: {
     readonly median: number;
     readonly p95: number;
@@ -125,13 +128,15 @@ function markdownReport(results: readonly BenchmarkResult[]): string {
   const rows = results.map((result) => {
     const disk = result.databaseAfterCheckpoint.mainBytes;
     const bytesPerMutation = disk / result.mutations;
+    const memoryBytesPerMutation = result.editMapLogicalBytes / result.mutations;
+    const publicWireBytesPerMutation = result.publicCommitBytes / result.mutations;
     const first = result.operationLatencyProgressQuartilesMicros.at(0);
     const last = result.operationLatencyProgressQuartilesMicros.at(-1);
     if (first === undefined || last === undefined) {
       throw new Error("native storage benchmark omitted operation-order latency");
     }
     const progressRatio = first.median === 0 ? 0 : last.median / first.median;
-    return `| ${result.profile} | ${result.operations.toLocaleString()} | ${result.mutations.toLocaleString()} | ${result.operationLatencyMicros.median} / ${result.operationLatencyMicros.p95} / ${result.operationLatencyMicros.p99} | ${first.median} → ${last.median} (${progressRatio.toFixed(2)}×) | ${result.restartMs.toFixed(1)} | ${result.checkpointMs.toFixed(1)} | ${mebibytes(result.databaseBeforeCheckpoint.walBytes)} | ${mebibytes(disk)} | ${bytesPerMutation.toFixed(1)} |`;
+    return `| ${result.profile} | ${result.operations.toLocaleString()} | ${result.mutations.toLocaleString()} | ${result.operationLatencyMicros.median} / ${result.operationLatencyMicros.p95} / ${result.operationLatencyMicros.p99} | ${first.median} → ${last.median} (${progressRatio.toFixed(2)}×) | ${result.restartMs.toFixed(1)} | ${result.checkpointMs.toFixed(1)} | ${mebibytes(result.databaseBeforeCheckpoint.walBytes)} | ${mebibytes(disk)} | ${bytesPerMutation.toFixed(1)} | ${memoryBytesPerMutation.toFixed(1)} | ${publicWireBytesPerMutation.toFixed(1)} |`;
   });
   const tableRows = results.flatMap((result) =>
     Object.entries(result.tables).map(
@@ -150,8 +155,8 @@ dense collaborative construction/excavation; frontier models long-lived explorat
 many spatial regions. Operation-order quartiles expose latency that grows as the durable edit
 journal fills.
 
-| Profile | Operations | Mutations | Commit median / p95 / p99 (µs) | First → last quartile median | Restart (ms) | Checkpoint (ms) | Peak WAL MiB | Durable MiB | Bytes / mutation |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Profile | Operations | Mutations | Commit median / p95 / p99 (µs) | First → last quartile median | Restart (ms) | Checkpoint (ms) | Peak WAL MiB | Durable MiB | Disk B / mutation | Logical RAM B / mutation | Public wire B / mutation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 ${rows.join("\n")}
 
 | Profile | SQLite b-tree | Rows | Storage MiB | Payload MiB | Unused MiB |

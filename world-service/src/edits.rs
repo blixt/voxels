@@ -481,6 +481,10 @@ impl EditAuthority {
         self.lock().revision
     }
 
+    pub(crate) fn logical_edit_bytes(&self) -> usize {
+        self.lock().edits.logical_bytes()
+    }
+
     pub(crate) fn snapshot_chunks(&self, coords: &[ChunkCoord]) -> ChunkEditSnapshot {
         let state = self.lock();
         ChunkEditSnapshot {

@@ -13,14 +13,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use voxels_world::protocol::{
-    EditAction, EditCommand, EditSessionId, EditShape, PlayerId, PlayerResume,
+    EditAction, EditCommand, EditSessionId, EditShape, PlayerId, PlayerResume, encode_edit_commit,
 };
 use voxels_world::{
     ProceduralWorldSource, SurfaceSampleBlockRequest, VoxelCoord, WorldId, WorldProduct,
     WorldProductBatch, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
 };
 
-pub const STORAGE_BENCHMARK_SCHEMA_VERSION: u32 = 3;
+pub const STORAGE_BENCHMARK_SCHEMA_VERSION: u32 = 4;
 const BENCHMARK_SEED: u64 = 0x5e6a_2d49_7b10_c3f1;
 const EDIT_QUEUE_CAPACITY: u16 = 8;
 
@@ -53,6 +53,9 @@ pub struct StorageBenchmarkResponse {
     pub operations: u32,
     pub changed_operations: u32,
     pub mutations: u64,
+    pub edit_map_logical_bytes: u64,
+    pub editor_commit_bytes: u64,
+    pub public_commit_bytes: u64,
     pub operation_latency_micros: LatencySummary,
     pub operation_latency_progress_quartiles_micros: Vec<LatencySummary>,
     pub player_initialization_ms: f64,
@@ -134,6 +137,8 @@ pub fn run_storage_benchmark(
     let mut operation_latencies = Vec::with_capacity(request.operations as usize);
     let mut changed_operations = 0_u32;
     let mut mutations = 0_u64;
+    let mut editor_commit_bytes = 0_u64;
+    let mut public_commit_bytes = 0_u64;
     let mut first_commands = vec![None; players.len()];
     for operation_index in 0..request.operations {
         let player_index = operation_index as usize % players.len();
@@ -162,6 +167,14 @@ pub fn run_storage_benchmark(
             changed_operations += 1;
             mutations += applied.commit.mutations.len() as u64;
         }
+        editor_commit_bytes = editor_commit_bytes.saturating_add(
+            u64::try_from(encode_edit_commit(&applied.commit)?.len()).unwrap_or(u64::MAX),
+        );
+        let mut public_commit = applied.commit.clone();
+        public_commit.editor_inventory = None;
+        public_commit_bytes = public_commit_bytes.saturating_add(
+            u64::try_from(encode_edit_commit(&public_commit)?.len()).unwrap_or(u64::MAX),
+        );
     }
     if changed_operations != request.operations {
         return Err(format!(
@@ -170,6 +183,7 @@ pub fn run_storage_benchmark(
         )
         .into());
     }
+    let edit_map_logical_bytes = u64::try_from(authority.logical_edit_bytes()).unwrap_or(u64::MAX);
     let revision_before_restart = authority.revision();
     let database_before_checkpoint = database_files(&request.database_path)?;
 
@@ -219,6 +233,9 @@ pub fn run_storage_benchmark(
         operations: request.operations,
         changed_operations,
         mutations,
+        edit_map_logical_bytes,
+        editor_commit_bytes,
+        public_commit_bytes,
         operation_latency_progress_quartiles_micros: progress_latency_summaries(
             &operation_latencies,
         ),
