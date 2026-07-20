@@ -154,10 +154,14 @@ function maximumContinuousMilliseconds(
   for (const capture of captures) {
     if (predicate(capture.snapshot)) {
       startedAt ??= capture.capturedAtMs;
+    } else if (startedAt !== undefined) {
       maximum = Math.max(maximum, capture.capturedAtMs - startedAt);
-    } else {
       startedAt = undefined;
     }
+  }
+  const last = captures.at(-1);
+  if (startedAt !== undefined && last !== undefined) {
+    maximum = Math.max(maximum, last.capturedAtMs - startedAt);
   }
   return maximum;
 }
@@ -231,6 +235,20 @@ export function summarizeStreamingPressure(captures: readonly RenderSnapshotCapt
       longestDegradedPresentationMs: maximumContinuousMilliseconds(
         captures,
         (snapshot) => snapshotValue(snapshot, "presentedLodStrideVoxels") !== 1,
+      ),
+      longestCollisionImmediateGapMs: maximumContinuousMilliseconds(
+        captures,
+        (snapshot) =>
+          snapshotValue(snapshot, "collisionImmediateRequired") === 0 ||
+          snapshotValue(snapshot, "collisionImmediateResident") !==
+            snapshotValue(snapshot, "collisionImmediateRequired"),
+      ),
+      longestCollisionLookaheadGapMs: maximumContinuousMilliseconds(
+        captures,
+        (snapshot) =>
+          snapshotValue(snapshot, "collisionLookaheadRequired") === 0 ||
+          snapshotValue(snapshot, "collisionLookaheadResident") !==
+            snapshotValue(snapshot, "collisionLookaheadRequired"),
       ),
       interactiveLodsRatio: readinessRatio(
         captures,

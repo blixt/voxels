@@ -182,6 +182,8 @@ describe("render metrics", () => {
     expect(pressure.readiness.canonicalPresentationRatio).toBeCloseTo(1 / 3);
     expect(pressure.readiness.collisionImmediateRatio).toBe(1);
     expect(pressure.readiness.collisionLookaheadRatio).toBeCloseTo(1 / 3);
-    expect(pressure.readiness.longestDegradedPresentationMs).toBe(250);
+    expect(pressure.readiness.longestDegradedPresentationMs).toBe(500);
+    expect(pressure.readiness.longestCollisionImmediateGapMs).toBe(0);
+    expect(pressure.readiness.longestCollisionLookaheadGapMs).toBe(500);
   });
 });

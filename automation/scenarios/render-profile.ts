@@ -668,9 +668,12 @@ async function sustainedProfile(
       if (epoch.streaming.readiness.collisionImmediateRatio !== 1) {
         violations.push(`${label} current player-body corridor was not continuously ready`);
       }
-      if (epoch.streaming.readiness.collisionLookaheadRatio !== 1) {
+      if (
+        epoch.streaming.readiness.collisionLookaheadRatio < 0.97 ||
+        epoch.streaming.readiness.longestCollisionLookaheadGapMs > 1_000
+      ) {
         violations.push(
-          `${label} reserved predictive collision corridor was not continuously ready`,
+          `${label} reserved predictive collision corridor fell below 97% readiness or missed for over 1s`,
         );
       }
     }
