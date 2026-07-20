@@ -126,19 +126,6 @@ fn camera_from_resume_values(values: [f32; 5]) -> CameraState {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-fn advance_surface_focus(
-    active: Option<[voxels_world::SurfaceTileCoord; voxels_world::SURFACE_LOD_LEVEL_COUNT]>,
-    target: Option<[voxels_world::SurfaceTileCoord; voxels_world::SURFACE_LOD_LEVEL_COUNT]>,
-    ready_level_count: usize,
-) -> Option<[voxels_world::SurfaceTileCoord; voxels_world::SURFACE_LOD_LEVEL_COUNT]> {
-    assert!(ready_level_count <= voxels_world::SURFACE_LOD_LEVEL_COUNT);
-    let target = target?;
-    let mut next = active.unwrap_or(target);
-    next[..ready_level_count].copy_from_slice(&target[..ready_level_count]);
-    Some(next)
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const ATMOSPHERE_MOTION_PERIOD_SECONDS: f64 = 4_096.0;
@@ -272,7 +259,7 @@ mod web {
         RemoteChunkCompletion, RemoteEditEvent, RemoteSurfaceCompletion, RemoteSurfaceTicket,
         RemoteWorldClient, RemoteWorldError,
     };
-    use crate::{advance_surface_focus, world_environment_at};
+    use crate::world_environment_at;
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
     use std::cell::{Cell, RefCell};
@@ -281,9 +268,9 @@ mod web {
     use voxels_client_config::ClientConfig;
     use voxels_core::{
         CameraState, EnclosureSample, InputState, LocomotionMode, PLAYER_EYE_HEIGHT_METRES,
-        PLAYER_HEIGHT_METRES, PLAYER_RADIUS_METRES, ProfileAutomation, ProfileConfig, ProfilePhase,
-        ProfileRoute, VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels,
-        voxel_segment_is_clear,
+        PLAYER_HEIGHT_METRES, PLAYER_RADIUS_METRES, PLAYER_SPRINT_SPEED_METRES_PER_SECOND,
+        ProfileAutomation, ProfileConfig, ProfilePhase, ProfileRoute, VoxelHit, VoxelPhysics,
+        probe_enclosure, raycast_voxels, voxel_segment_is_clear,
     };
     use voxels_render::renderer::{
         ChunkActivationReason, HostUiAction, LocalLightVisibility, MissionControlConfig, Renderer,
@@ -314,7 +301,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 2;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 30;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 31;
     const FRAME_SAMPLE_WIDTH: u32 = 11;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -331,10 +318,14 @@ mod web {
         "lodBoundary1Z,lodBoundary2X,lodBoundary2Z,lodBoundary3X,lodBoundary3Z,lodBoundary4X,lodBoundary4Z,lodBoundary5X,lodBoundary5Z,lodBoundary6X,lodBoundary6Z,lodBoundary7X,lodBoundary7Z,dayFraction,localSolarDayFraction,yearFraction,",
         "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
         "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
-        "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,schemaVersion,sampleCount,",
+        "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,canonicalSurfaceCellsResident,canonicalSurfaceCellsRequired,schemaVersion,sampleCount,",
         "droppedSamples",
     );
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
+    const SURFACE_HINT_VERTICAL_MARGIN_CHUNKS: i32 = 1;
+    const INTERACTIVE_SURFACE_BATCH: usize = 4;
+    const BACKGROUND_SURFACE_BATCH: usize = 2;
+    const BACKGROUND_SURFACE_BATCHES_IN_FLIGHT: usize = 4;
     #[derive(Clone, Copy, Debug)]
     struct EngineConfig {
         developer_controls_enabled: bool,
@@ -542,8 +533,9 @@ mod web {
         chunk_halos: RefCell<BTreeMap<(i32, i32, i32), MeshingHalo>>,
         pending_meshes: RefCell<BTreeMap<(i32, i32, i32), MeshedChunk>>,
         surface_focus: Cell<Option<[SurfaceTileCoord; SURFACE_LOD_LEVEL_COUNT]>>,
-        surface_active_focus: Cell<Option<[SurfaceTileCoord; SURFACE_LOD_LEVEL_COUNT]>>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
+        surface_chunk_hints:
+            RefCell<BTreeMap<SurfaceTileCoord, BTreeMap<(i32, i32), BTreeSet<i32>>>>,
         surface_revisions: RefCell<SurfaceRevisionCache>,
         surface_accepted_edit_revisions: RefCell<BTreeMap<SurfaceTileCoord, u64>>,
         surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
@@ -576,6 +568,7 @@ mod web {
         radial_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         portal_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         interaction_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
+        surface_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         touch_inventory_drag: Cell<Option<[f32; 2]>>,
         profile: RefCell<ProfileAutomation>,
         profile_tracked_high: Cell<usize>,
@@ -640,7 +633,11 @@ mod web {
         fn start_stream_profile(&self, route: ProfileRoute) -> bool {
             self.input.borrow_mut().clear();
             let position = self.camera.borrow().position;
-            self.profile.borrow_mut().start_route(position, route);
+            self.profile.borrow_mut().start_route_at_speed(
+                position,
+                route,
+                (route == ProfileRoute::Straight).then_some(PLAYER_SPRINT_SPEED_METRES_PER_SECOND),
+            );
             self.profile_tracked_high.set(0);
             self.profile_surface_high.set(0);
             self.profile_pending_high.set(0);
@@ -813,34 +810,41 @@ mod web {
                 && stream.meshing.in_flight == 0
                 && stream.upload.queued == 0
                 && stream.upload.in_flight == 0;
-            let ready_surface_levels = self.ready_surface_level_prefix(fine_coverage_ready);
-            let interactive_lods_ready = ready_surface_levels >= INTERACTIVE_SURFACE_LOD_LEVELS;
-            let all_lods_ready = ready_surface_levels == SURFACE_LOD_LEVEL_COUNT;
+            // Coverage controls startup readiness, not runtime geometric ownership. After the
+            // hierarchy has initialized, its boundaries follow the camera continuously and each
+            // missing child independently keeps its best resident parent. Holding an older,
+            // whole-ring focus until every replacement settles cannot converge while moving.
+            let ready_surface_levels = self.ready_surface_level_prefix();
+            let interactive_lods_ready =
+                fine_coverage_ready && ready_surface_levels >= INTERACTIVE_SURFACE_LOD_LEVELS;
+            let all_lods_ready =
+                fine_coverage_ready && ready_surface_levels == SURFACE_LOD_LEVEL_COUNT;
             self.all_lods_ready.set(all_lods_ready);
             self.interactive_lods_ready.set(interactive_lods_ready);
             debug_assert!(
                 !all_lods_ready || self.surface_coverage_current(),
                 "surface coverage became ready with missing or stale revisions"
             );
-            if ready_surface_levels > 0 {
-                let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
-                let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
-                let active_surface_levels = if self.full_lods_initialized.get() || all_lods_ready {
-                    SURFACE_LOD_LEVEL_COUNT
-                } else {
-                    ready_surface_levels
-                };
+            let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
+            let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
+            if self.full_lods_initialized.get() {
+                renderer.advance_geometric_lod_focus(
+                    voxel_x,
+                    voxel_z,
+                    SURFACE_LOD_LEVEL_COUNT,
+                    SURFACE_LOD_LEVEL_COUNT,
+                );
+            } else if ready_surface_levels > 0 {
                 renderer.advance_geometric_lod_focus(
                     voxel_x,
                     voxel_z,
                     ready_surface_levels,
-                    active_surface_levels,
+                    if all_lods_ready {
+                        SURFACE_LOD_LEVEL_COUNT
+                    } else {
+                        ready_surface_levels
+                    },
                 );
-                self.surface_active_focus.set(advance_surface_focus(
-                    self.surface_active_focus.get(),
-                    self.surface_focus.get(),
-                    ready_surface_levels,
-                ));
                 if all_lods_ready {
                     self.full_lods_initialized.set(true);
                 }
@@ -1017,11 +1021,14 @@ mod web {
         fn stream_world(&self, camera: &CameraState, streaming_velocity: Vec3) {
             self.drain_remote_generation();
             let focus = world_to_chunk(camera.position);
-            let interest = crate::urgent_stream_interest(
+            let collision_interest = crate::urgent_stream_interest(
                 camera,
                 streaming_velocity,
                 self.config.stream_collision_lookahead_seconds,
             );
+            let surface_interest = self.surface_stream_interest(focus, &collision_interest);
+            let mut interest = collision_interest.clone();
+            interest.extend(surface_interest.iter().copied());
             let priority_hint = directional_stream_priority(
                 camera,
                 streaming_velocity,
@@ -1037,20 +1044,21 @@ mod web {
                     scheduler.schedule_frame_prioritized_with_urgency(
                         self.config.stream_frame_budget,
                         priority_hint,
-                        &interest,
+                        &collision_interest,
                     ),
                 )
             };
             let mut uploaded = false;
 
-            let interest_keys: BTreeSet<_> = interest.iter().copied().map(coord_key).collect();
+            let collision_interest_keys: BTreeSet<_> =
+                collision_interest.iter().copied().map(coord_key).collect();
             let mut collision_generation = Vec::new();
             let mut background_generation = Vec::new();
             for ticket in work.generation {
                 let dx = i64::from(ticket.coord.x) - i64::from(focus.x);
                 let dz = i64::from(ticket.coord.z) - i64::from(focus.z);
                 let radius = i64::from(self.config.startup_ready_radius_chunks);
-                if interest_keys.contains(&coord_key(ticket.coord))
+                if collision_interest_keys.contains(&coord_key(ticket.coord))
                     || (!self.startup_ready.get() && dx * dx + dz * dz <= radius * radius)
                 {
                     collision_generation.push(ticket);
@@ -1136,9 +1144,57 @@ mod web {
                 }
             }
             if focus_changed || uploaded || evicted {
-                self.reconcile_chunk_activation(focus, &interest);
+                self.reconcile_chunk_activation(focus, &collision_interest, &surface_interest);
             }
             self.stream_surface_lods(camera.position);
+        }
+
+        fn surface_stream_interest(
+            &self,
+            focus: ChunkCoord,
+            collision_interest: &[ChunkCoord],
+        ) -> Vec<ChunkCoord> {
+            let mut columns = collision_interest
+                .iter()
+                .map(|coord| (coord.x, coord.z))
+                .collect::<BTreeSet<_>>();
+            let radius = self.config.startup_ready_radius_chunks;
+            for dz in -radius..=radius {
+                for dx in -radius..=radius {
+                    if i64::from(dx) * i64::from(dx) + i64::from(dz) * i64::from(dz)
+                        > i64::from(radius) * i64::from(radius)
+                    {
+                        continue;
+                    }
+                    if let (Some(x), Some(z)) = (focus.x.checked_add(dx), focus.z.checked_add(dz)) {
+                        columns.insert((x, z));
+                    }
+                }
+            }
+
+            let hints = self.surface_chunk_hints.borrow();
+            let mut interest = BTreeSet::new();
+            for (chunk_x, chunk_z) in columns {
+                let tile = SurfaceTileCoord::new(
+                    SurfaceLodLevel::Stride2,
+                    chunk_x.div_euclid(2),
+                    chunk_z.div_euclid(2),
+                );
+                let Some(chunk_ys) = hints
+                    .get(&tile)
+                    .and_then(|tile_hints| tile_hints.get(&(chunk_x, chunk_z)))
+                else {
+                    continue;
+                };
+                interest.extend(
+                    chunk_ys
+                        .iter()
+                        .copied()
+                        .map(|chunk_y| ChunkCoord::new(chunk_x, chunk_y, chunk_z))
+                        .filter(|coord| coord.is_world_representable()),
+                );
+            }
+            interest.into_iter().collect()
         }
 
         fn submit_generation_batch(
@@ -1262,12 +1318,22 @@ mod web {
                     self.enqueue_surface_front(ticket.coord);
                     continue;
                 }
+                let canonical_hints = (ticket.coord.level == SurfaceLodLevel::Stride2).then(|| {
+                    snapshot
+                        .terrain
+                        .canonical_surface_chunk_hints(SURFACE_HINT_VERTICAL_MARGIN_CHUNKS)
+                });
                 if self
                     .renderer
                     .borrow_mut()
                     .upload_surface_tile_meshes(&snapshot.terrain, &snapshot.water)
                 {
                     self.surface_resident.borrow_mut().insert(ticket.coord);
+                    if let Some(hints) = canonical_hints {
+                        self.surface_chunk_hints
+                            .borrow_mut()
+                            .insert(ticket.coord, hints);
+                    }
                     let committed = self
                         .surface_revisions
                         .borrow_mut()
@@ -1327,7 +1393,12 @@ mod web {
                 .insert(coord_key(ticket.coord), snapshot.meshing_halo);
         }
 
-        fn reconcile_chunk_activation(&self, focus: ChunkCoord, interest: &[ChunkCoord]) {
+        fn reconcile_chunk_activation(
+            &self,
+            focus: ChunkCoord,
+            collision_interest: &[ChunkCoord],
+            surface_interest: &[ChunkCoord],
+        ) {
             let scheduler = self.scheduler.borrow();
             let config = scheduler.config();
             let mut radial = BTreeSet::new();
@@ -1358,9 +1429,9 @@ mod web {
                     }
                 }
             }
-            // Preserve the exact complete current 3D set. The renderer must not use an inactive
+            // Preserve only exact, complete, active 3D sets. The renderer must not use an inactive
             // retained Y profile to suppress a surface parent for a different vertical band.
-            let radial_ready_chunks = radial.clone();
+            let mut canonical_ready_chunks = radial.clone();
             // Preserve the old radial reason for retained resident meshes until the scheduler
             // actually evicts them. This carries visible coverage across small focus moves while
             // new columns become atomically ready, matching the retention hysteresis contract.
@@ -1373,28 +1444,31 @@ mod web {
                 }
             }
 
-            let mut interaction_columns = BTreeMap::<(i32, i32), Vec<ChunkCoord>>::new();
-            for coord in interest {
-                if scheduler
-                    .status(*coord)
-                    .is_some_and(|status| status.desired)
-                {
-                    interaction_columns
-                        .entry((coord.x, coord.z))
-                        .or_default()
-                        .push(*coord);
-                }
-            }
-            let mut interaction = BTreeSet::new();
-            for coords in interaction_columns.values() {
-                if coords.iter().all(|coord| {
-                    scheduler
+            let complete_interest = |interest: &[ChunkCoord]| {
+                let mut columns = BTreeMap::<(i32, i32), Vec<ChunkCoord>>::new();
+                for coord in interest {
+                    if scheduler
                         .status(*coord)
-                        .is_some_and(|status| status.state == ChunkState::Resident)
-                }) {
-                    interaction.extend(coords.iter().copied().map(coord_key));
+                        .is_some_and(|status| status.desired)
+                    {
+                        columns.entry((coord.x, coord.z)).or_default().push(*coord);
+                    }
                 }
-            }
+                let mut complete = BTreeSet::new();
+                for coords in columns.values() {
+                    if coords.iter().all(|coord| {
+                        scheduler
+                            .status(*coord)
+                            .is_some_and(|status| status.state == ChunkState::Resident)
+                    }) {
+                        complete.extend(coords.iter().copied().map(coord_key));
+                    }
+                }
+                complete
+            };
+            let interaction = complete_interest(collision_interest);
+            let surface = complete_interest(surface_interest);
+            canonical_ready_chunks.extend(surface.iter().copied());
             drop(scheduler);
             self.reconcile_activation_reason(
                 &self.radial_active_chunks,
@@ -1406,9 +1480,14 @@ mod web {
                 interaction,
                 ChunkActivationReason::Interaction,
             );
+            self.reconcile_activation_reason(
+                &self.surface_active_chunks,
+                surface,
+                ChunkActivationReason::Surface,
+            );
             self.renderer
                 .borrow_mut()
-                .set_canonical_ready_chunks(radial_ready_chunks);
+                .set_canonical_ready_chunks(canonical_ready_chunks);
         }
 
         fn reconcile_activation_reason(
@@ -1477,15 +1556,7 @@ mod web {
                             + self.config.surface_retain_margin_tiles;
                         let dx = coord.x - focus[index].x;
                         let dz = coord.z - focus[index].z;
-                        let outside_pending = dx.abs().max(dz.abs()) > retain;
-                        let outside_active = self.surface_active_focus.get().is_none_or(|active| {
-                            let dx = coord.x - active[index].x;
-                            let dz = coord.z - active[index].z;
-                            dx.abs().max(dz.abs())
-                                > self.config.surface_load_radius_tiles[index]
-                                    + self.config.surface_retain_margin_tiles
-                        });
-                        outside_pending && outside_active
+                        dx.abs().max(dz.abs()) > retain
                     })
                     .collect();
                 if !evicted.is_empty() {
@@ -1496,6 +1567,7 @@ mod web {
                     let mut renderer = self.renderer.borrow_mut();
                     for coord in evicted {
                         resident.remove(&coord);
+                        self.surface_chunk_hints.borrow_mut().remove(&coord);
                         revisions.evict(coord);
                         accepted.remove(&coord);
                         dirty.remove(&coord);
@@ -1536,16 +1608,17 @@ mod web {
                 drop(dirty);
                 drop(revisions);
                 drop(resident);
+                let initializing_hierarchy = !self.full_lods_initialized.get();
                 candidates.sort_by_key(|coord| {
                     let index = coord.level.index() as usize;
                     let dx = i128::from(coord.x) - i128::from(focus[index].x);
                     let dz = i128::from(coord.z) - i128::from(focus[index].z);
                     let background = index >= INTERACTIVE_SURFACE_LOD_LEVELS;
-                    // Interactive startup keeps its broad parent cover first. Once gameplay is
-                    // ready, complete each background level from fine to coarse so the renderer
-                    // can extend its exact hierarchy one ring at a time instead of waiting for the
-                    // entire horizon set before showing any additional distance.
-                    let level_order = if background {
+                    // Startup establishes broad parent cover before refining it. During traversal,
+                    // the hierarchy already has retained parents, so finest visible replacements
+                    // must win; repeatedly loading each newly exposed coarse strip first otherwise
+                    // starves near detail forever at sustained speed.
+                    let level_order = if background || !initializing_hierarchy {
                         coord.level.index()
                     } else {
                         u8::MAX - coord.level.index()
@@ -1557,21 +1630,60 @@ mod web {
                 queue.extend(candidates);
             }
 
-            const INTERACTIVE_SURFACE_BATCH: usize = 4;
-            const BACKGROUND_SURFACE_BATCH: usize = 2;
-            const BACKGROUND_SURFACE_BATCHES_IN_FLIGHT: usize = 4;
-            let mut tickets = Vec::with_capacity(BACKGROUND_SURFACE_BATCH);
-            let mut priority = WorldProductPriority::VisibleSurface;
-            loop {
-                let batch_limit = if priority == WorldProductPriority::Prefetch {
-                    BACKGROUND_SURFACE_BATCH
-                } else {
-                    INTERACTIVE_SURFACE_BATCH
-                };
-                if tickets.len() >= batch_limit {
+            self.submit_surface_lane(
+                WorldProductPriority::VisibleSurface,
+                INTERACTIVE_SURFACE_BATCH,
+            );
+            let bootstrap_ready_for_background = if self.full_lods_initialized.get() {
+                true
+            } else {
+                let diagnostics = self.scheduler.borrow().diagnostics();
+                let fine_current = diagnostics.generation.queued == 0
+                    && diagnostics.generation.in_flight == 0
+                    && diagnostics.meshing.queued == 0
+                    && diagnostics.meshing.in_flight == 0
+                    && diagnostics.upload.queued == 0
+                    && diagnostics.upload.in_flight == 0;
+                fine_current
+                    && self.surface_coverage_current_through(INTERACTIVE_SURFACE_LOD_LEVELS)
+                    && !self.surface_dirty.borrow().iter().any(|coord| {
+                        usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
+                    })
+                    && !self.surface_in_flight.borrow().iter().any(|coord| {
+                        usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
+                    })
+            };
+            if bootstrap_ready_for_background {
+                self.submit_surface_lane(WorldProductPriority::Prefetch, BACKGROUND_SURFACE_BATCH);
+            }
+        }
+
+        fn submit_surface_lane(&self, priority: WorldProductPriority, batch_limit: usize) {
+            let background = priority == WorldProductPriority::Prefetch;
+            if background
+                && self
+                    .surface_in_flight
+                    .borrow()
+                    .iter()
+                    .filter(|coord| {
+                        usize::from(coord.level.index()) >= INTERACTIVE_SURFACE_LOD_LEVELS
+                    })
+                    .count()
+                    >= BACKGROUND_SURFACE_BATCH * BACKGROUND_SURFACE_BATCHES_IN_FLIGHT
+            {
+                return;
+            }
+
+            let mut tickets = Vec::with_capacity(batch_limit);
+            while tickets.len() < batch_limit {
+                let position = self.surface_queue.borrow().iter().position(|coord| {
+                    (usize::from(coord.level.index()) >= INTERACTIVE_SURFACE_LOD_LEVELS)
+                        == background
+                });
+                let Some(position) = position else {
                     break;
-                }
-                let Some(coord) = self.surface_queue.borrow_mut().pop_front() else {
+                };
+                let Some(coord) = self.surface_queue.borrow_mut().remove(position) else {
                     break;
                 };
                 if self.surface_in_flight.borrow().contains(&coord)
@@ -1579,42 +1691,6 @@ mod web {
                         && !self.surface_dirty.borrow().contains(&coord))
                 {
                     continue;
-                }
-                let background = usize::from(coord.level.index()) >= INTERACTIVE_SURFACE_LOD_LEVELS;
-                if background {
-                    let background_at_capacity = self
-                        .surface_in_flight
-                        .borrow()
-                        .iter()
-                        .filter(|coord| {
-                            usize::from(coord.level.index()) >= INTERACTIVE_SURFACE_LOD_LEVELS
-                        })
-                        .count()
-                        >= BACKGROUND_SURFACE_BATCH * BACKGROUND_SURFACE_BATCHES_IN_FLIGHT;
-                    let diagnostics = self.scheduler.borrow().diagnostics();
-                    let fine_current = diagnostics.generation.queued == 0
-                        && diagnostics.generation.in_flight == 0
-                        && diagnostics.meshing.queued == 0
-                        && diagnostics.meshing.in_flight == 0
-                        && diagnostics.upload.queued == 0
-                        && diagnostics.upload.in_flight == 0;
-                    let interactive_current = self
-                        .surface_coverage_current_through(INTERACTIVE_SURFACE_LOD_LEVELS)
-                        && !self.surface_dirty.borrow().iter().any(|coord| {
-                            usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
-                        })
-                        && !self.surface_in_flight.borrow().iter().any(|coord| {
-                            usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
-                        });
-                    if (!tickets.is_empty() && priority != WorldProductPriority::Prefetch)
-                        || background_at_capacity
-                        || !fine_current
-                        || !interactive_current
-                    {
-                        self.surface_queue.borrow_mut().push_front(coord);
-                        break;
-                    }
-                    priority = WorldProductPriority::Prefetch;
                 }
                 let revision = {
                     let revisions = self.surface_revisions.borrow();
@@ -2089,25 +2165,18 @@ mod web {
 
         fn surface_tile_relevant(&self, coord: SurfaceTileCoord) -> bool {
             coord.is_world_representable()
-                && (surface_tile_in_coverage(
+                && surface_tile_in_coverage(
                     coord,
                     self.surface_focus.get(),
                     self.config.surface_load_radius_tiles,
-                ) || surface_tile_in_coverage(
-                    coord,
-                    self.surface_active_focus.get(),
-                    self.config.surface_load_radius_tiles,
-                ))
+                )
         }
 
         fn surface_coverage_current(&self) -> bool {
             self.surface_coverage_current_through(SURFACE_LOD_LEVEL_COUNT)
         }
 
-        fn ready_surface_level_prefix(&self, fine_coverage_ready: bool) -> usize {
-            if !fine_coverage_ready {
-                return 0;
-            }
+        fn ready_surface_level_prefix(&self) -> usize {
             let queue = self.surface_queue.borrow();
             let in_flight = self.surface_in_flight.borrow();
             let dirty = self.surface_dirty.borrow();
@@ -2125,31 +2194,26 @@ mod web {
         }
 
         fn surface_coverage_current_through(&self, level_count: usize) -> bool {
-            if self.surface_focus.get().is_none() {
+            let Some(focus) = self.surface_focus.get() else {
                 return false;
-            }
+            };
             let resident = self.surface_resident.borrow();
             let revisions = self.surface_revisions.borrow();
-            for focus in [self.surface_focus.get(), self.surface_active_focus.get()]
+            for (index, level) in SurfaceLodLevel::ALL
                 .into_iter()
-                .flatten()
+                .take(level_count)
+                .enumerate()
             {
-                for (index, level) in SurfaceLodLevel::ALL
-                    .into_iter()
-                    .take(level_count)
-                    .enumerate()
-                {
-                    let center = focus[index];
-                    let radius = self.config.surface_load_radius_tiles[index];
-                    for dz in -radius..=radius {
-                        for dx in -radius..=radius {
-                            let coord = SurfaceTileCoord::new(level, center.x + dx, center.z + dz);
-                            if !coord.is_world_representable() {
-                                continue;
-                            }
-                            if !resident.contains(&coord) || !revisions.is_current(coord) {
-                                return false;
-                            }
+                let center = focus[index];
+                let radius = self.config.surface_load_radius_tiles[index];
+                for dz in -radius..=radius {
+                    for dx in -radius..=radius {
+                        let coord = SurfaceTileCoord::new(level, center.x + dx, center.z + dz);
+                        if !coord.is_world_representable() {
+                            continue;
+                        }
+                        if !resident.contains(&coord) || !revisions.is_current(coord) {
+                            return false;
                         }
                     }
                 }
@@ -2439,12 +2503,13 @@ mod web {
                 let diagnostics = engine.scheduler.borrow().diagnostics();
                 let camera_voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
                 let camera_voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
-                let (render, target, presented_lod_stride_voxels) = {
+                let (render, target, presented_lod_stride_voxels, canonical_surface_coverage) = {
                     let renderer = engine.renderer.borrow();
                     (
                         renderer.diagnostics(),
                         renderer.target_voxel(),
                         renderer.presented_lod_stride_voxels(camera_voxel_x, camera_voxel_z),
+                        renderer.canonical_surface_coverage_at(camera_voxel_x, camera_voxel_z),
                     )
                 };
                 let canonical_immediate = engine.scheduler.borrow().vicinity_readiness(1);
@@ -2710,6 +2775,8 @@ mod web {
                     lod_focus_lag_voxels as f32,
                     canonical_immediate.resident as f32,
                     canonical_immediate.required as f32,
+                    f32::from(canonical_surface_coverage.0),
+                    f32::from(canonical_surface_coverage.1),
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
@@ -2941,8 +3008,8 @@ mod web {
             chunk_halos: RefCell::new(BTreeMap::new()),
             pending_meshes: RefCell::new(BTreeMap::new()),
             surface_focus: Cell::new(None),
-            surface_active_focus: Cell::new(None),
             surface_resident: RefCell::new(BTreeSet::new()),
+            surface_chunk_hints: RefCell::new(BTreeMap::new()),
             surface_revisions: RefCell::new(SurfaceRevisionCache::new()),
             surface_accepted_edit_revisions: RefCell::new(BTreeMap::new()),
             surface_queue: RefCell::new(VecDeque::new()),
@@ -2975,6 +3042,7 @@ mod web {
             radial_active_chunks: RefCell::new(BTreeSet::new()),
             portal_active_chunks: RefCell::new(BTreeSet::new()),
             interaction_active_chunks: RefCell::new(BTreeSet::new()),
+            surface_active_chunks: RefCell::new(BTreeSet::new()),
             touch_inventory_drag: Cell::new(None),
             profile: RefCell::new(ProfileAutomation::with_config(ProfileConfig {
                 fixed_step_seconds: engine_config.fixed_step_seconds,
@@ -3106,25 +3174,6 @@ mod tests {
             assert!(camera.yaw.is_finite());
             assert!(camera.pitch.is_finite());
         }
-    }
-
-    #[test]
-    fn surface_focus_advances_only_the_resident_level_prefix() {
-        let focus = |offset: i32| {
-            std::array::from_fn(|index| {
-                voxels_world::SurfaceTileCoord::new(
-                    voxels_world::SurfaceLodLevel::ALL[index],
-                    offset + index as i32,
-                    offset - index as i32,
-                )
-            })
-        };
-        let active = focus(0);
-        let target = focus(100);
-        let advanced = advance_surface_focus(Some(active), Some(target), 4).expect("target focus");
-        assert_eq!(&advanced[..4], &target[..4]);
-        assert_eq!(&advanced[4..], &active[4..]);
-        assert_eq!(advance_surface_focus(Some(active), None, 4), None);
     }
 
     #[test]

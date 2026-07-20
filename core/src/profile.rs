@@ -60,6 +60,7 @@ pub struct ProfileAutomation {
     ticks: u64,
     phase: ProfilePhase,
     route: ProfileRoute,
+    speed_override_metres_per_second: Option<f32>,
 }
 
 impl Default for ProfileAutomation {
@@ -70,6 +71,7 @@ impl Default for ProfileAutomation {
             ticks: 0,
             phase: ProfilePhase::Idle,
             route: ProfileRoute::Loop,
+            speed_override_metres_per_second: None,
         }
     }
 }
@@ -92,10 +94,21 @@ impl ProfileAutomation {
     }
 
     pub fn start_route(&mut self, origin: Vec3, route: ProfileRoute) {
+        self.start_route_at_speed(origin, route, None);
+    }
+
+    pub fn start_route_at_speed(
+        &mut self,
+        origin: Vec3,
+        route: ProfileRoute,
+        speed_metres_per_second: Option<f32>,
+    ) {
+        debug_assert!(speed_metres_per_second.is_none_or(|speed| speed.is_finite() && speed > 0.0));
         self.origin = origin;
         self.ticks = 0;
         self.phase = ProfilePhase::Warmup;
         self.route = route;
+        self.speed_override_metres_per_second = speed_metres_per_second;
     }
 
     pub fn advance_fixed_step(&mut self) {
@@ -128,7 +141,9 @@ impl ProfileAutomation {
 
     pub fn distance_metres(self) -> f32 {
         self.elapsed_seconds().min(self.config.total_seconds())
-            * self.config.speed_metres_per_second
+            * self
+                .speed_override_metres_per_second
+                .unwrap_or(self.config.speed_metres_per_second)
     }
 
     pub fn pose(self) -> Option<ProfilePose> {
@@ -245,5 +260,23 @@ mod tests {
         let pose = moving.pose().expect("straight route is still moving");
         assert_eq!(pose.position_xz, Vec2::new(2.0, -28.0));
         assert_eq!(pose.yaw, 0.0);
+    }
+
+    #[test]
+    fn route_speed_override_preserves_profile_timing() {
+        let config = ProfileConfig {
+            fixed_step_seconds: 0.25,
+            speed_metres_per_second: 12.0,
+            warmup_seconds: 2.0,
+            measure_seconds: 4.0,
+        };
+        let mut profile = ProfileAutomation::with_config(config);
+        profile.start_route_at_speed(Vec3::ZERO, ProfileRoute::Straight, Some(7.0));
+        for _ in 0..12 {
+            profile.advance_fixed_step();
+        }
+        assert_eq!(profile.phase(), ProfilePhase::Measured);
+        assert!((profile.elapsed_seconds() - 3.0).abs() < 0.01);
+        assert!((profile.distance_metres() - 21.0).abs() < 0.01);
     }
 }

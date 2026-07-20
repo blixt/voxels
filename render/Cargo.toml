@@ -16,5 +16,6 @@ voxels-core = { path = "../core" }
 voxels-world = { path = "../world" }
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }
+hashbrown = "0.16"
 wgpu = { version = "=30.0.0", default-features = false, features = ["wgsl"] }
 wgpu_text = "=30.0.0"

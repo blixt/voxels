@@ -3616,6 +3616,7 @@ version = "0.0.0"
 dependencies = [
  "bytemuck",
  "glam",
+ "hashbrown 0.16.1",
  "voxels-core",
  "voxels-world",
  "wgpu",

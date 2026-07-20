@@ -349,14 +349,21 @@ async function weatherProfile(page: Page, engine: EngineClient, context: Scenari
   return phases;
 }
 
-async function sustainedProfile(engine: EngineClient, profileId = 1) {
+async function sustainedProfile(engine: EngineClient, route: "loop" | "directional" = "loop") {
+  const profileId = route === "directional" ? 2 : 1;
   await engine.startProfile(profileId);
   const captures: RenderSnapshotCapture[] = [];
-  const deadline = Date.now() + 120_000;
+  const deadline = Date.now() + 150_000;
   while (Date.now() < deadline) {
     const next = await captureRenderSnapshot(engine);
     captures.push(next);
-    if (snapshotValue(next.snapshot, "profileComplete") === 1) break;
+    if (
+      snapshotValue(next.snapshot, "profileComplete") === 1 &&
+      snapshotValue(next.snapshot, "pendingJobs") === 0 &&
+      snapshotValue(next.snapshot, "pendingMeshMiB") === 0
+    ) {
+      break;
+    }
     await engine.wait(250);
   }
   const latest = captures.at(-1)?.snapshot;
@@ -381,6 +388,7 @@ async function sustainedProfile(engine: EngineClient, profileId = 1) {
     const closestError = Math.abs(snapshotValue(closest.snapshot, "profileElapsedSeconds") - 60);
     return error < closestError ? capture : closest;
   }, undefined);
+  const movementOrigin = moving[0];
   const range = (values: readonly number[]): number =>
     values.length === 0 ? 0 : Math.max(...values) - Math.min(...values);
   const result = {
@@ -431,6 +439,15 @@ async function sustainedProfile(engine: EngineClient, profileId = 1) {
           : {
               elapsedSeconds: snapshotValue(atSixtySeconds.snapshot, "profileElapsedSeconds"),
               distanceMetres: snapshotValue(atSixtySeconds.snapshot, "profileDistanceMetres"),
+              actualDisplacementMetres:
+                movementOrigin === undefined
+                  ? 0
+                  : Math.hypot(
+                      snapshotValue(atSixtySeconds.snapshot, "cameraX") -
+                        snapshotValue(movementOrigin.snapshot, "cameraX"),
+                      snapshotValue(atSixtySeconds.snapshot, "cameraZ") -
+                        snapshotValue(movementOrigin.snapshot, "cameraZ"),
+                    ),
               presentedStrideVoxels: snapshotValue(
                 atSixtySeconds.snapshot,
                 "presentedLodStrideVoxels",
@@ -444,6 +461,14 @@ async function sustainedProfile(engine: EngineClient, profileId = 1) {
                 atSixtySeconds.snapshot,
                 "canonicalImmediateRequired",
               ),
+              canonicalSurfaceCellsResident: snapshotValue(
+                atSixtySeconds.snapshot,
+                "canonicalSurfaceCellsResident",
+              ),
+              canonicalSurfaceCellsRequired: snapshotValue(
+                atSixtySeconds.snapshot,
+                "canonicalSurfaceCellsRequired",
+              ),
               pendingJobs: snapshotValue(atSixtySeconds.snapshot, "pendingJobs"),
             },
     },
@@ -455,8 +480,13 @@ async function sustainedProfile(engine: EngineClient, profileId = 1) {
     },
   };
   const violations: string[] = [];
-  if (result.distanceMetres < 1_000) violations.push("distance below 1km");
-  if (result.evictions < 500) violations.push("fewer than 500 canonical evictions");
+  if (route === "loop" && result.distanceMetres < 1_000) violations.push("distance below 1km");
+  if (route === "directional" && result.distanceMetres < 600) {
+    violations.push("directional distance below 600m");
+  }
+  if (route === "loop" && result.evictions < 500) {
+    violations.push("fewer than 500 canonical evictions");
+  }
   if (result.highWater.trackedChunks > 320) violations.push("tracked chunk bound exceeded");
   if (result.highWater.surfaceTiles > 896) violations.push("surface residency bound exceeded");
   if (result.highWater.pendingMeshes > 3) violations.push("pending mesh bound exceeded");
@@ -468,11 +498,29 @@ async function sustainedProfile(engine: EngineClient, profileId = 1) {
   if (result.measured.streamingMs.p95 > 4.5) violations.push("streaming p95 above 4.5ms");
   if (result.measured.frameMs.above33_33ms > 0) violations.push("frame exceeded 33.33ms");
   if (result.measured.droppedSamples > 0) violations.push("frame samples were dropped");
-  if (result.finalTwentySeconds.wasmCommittedRangeMiB > 1) {
+  if (route === "loop" && result.finalTwentySeconds.wasmCommittedRangeMiB > 1) {
     violations.push("WASM committed memory did not plateau");
   }
-  if (result.finalTwentySeconds.arenaCapacityRangeMiB > 4) {
+  if (route === "loop" && result.finalTwentySeconds.arenaCapacityRangeMiB > 4) {
     violations.push("mesh arena capacity did not plateau");
+  }
+  if (route === "directional") {
+    if (result.lod.missingSamples > 0) violations.push("moving camera crossed missing terrain");
+    if (result.lod.degradedSamples > 0) {
+      violations.push("moving camera fell back from canonical terrain");
+    }
+    if (result.lod.maximumFocusLagVoxels > 20) {
+      violations.push("near LOD focus lag exceeded its 16-voxel snap plus hysteresis");
+    }
+    if (
+      result.lod.atSixtySeconds === null ||
+      result.lod.atSixtySeconds.actualDisplacementMetres < 400 ||
+      result.lod.atSixtySeconds.presentedStrideVoxels !== 1 ||
+      result.lod.atSixtySeconds.canonicalSurfaceCellsResident !==
+        result.lod.atSixtySeconds.canonicalSurfaceCellsRequired
+    ) {
+      violations.push("one-minute immediate terrain was not fully canonical");
+    }
   }
   if (violations.length > 0) {
     throw new Error(
@@ -654,7 +702,7 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
   } else if (options.mode === "sustained") {
     scenarios = { sustained: await sustainedProfile(engine) };
   } else if (options.mode === "directional") {
-    scenarios = { directional: await sustainedProfile(engine, 2) };
+    scenarios = { directional: await sustainedProfile(engine, "directional") };
   } else if (options.mode === "materials") {
     scenarios = {
       materials: await materialDetailProfile(page, engine, options.viewport.width),

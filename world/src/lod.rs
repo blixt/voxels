@@ -1,9 +1,9 @@
 use crate::mesh::{FACE_NEG_X, FACE_NEG_Y, FACE_NEG_Z, FACE_POS_X, FACE_POS_Y, FACE_POS_Z};
 use crate::{
-    EditMap, FEATURE_MAX_RADIUS_VOXELS, Generator, Material, SEA_LEVEL_VOXELS, SkylineFeature,
-    SkylineFeatureKind, TreeSpecies, VoxelCoord,
+    CHUNK_EDGE, EditMap, FEATURE_MAX_RADIUS_VOXELS, Generator, Material, SEA_LEVEL_VOXELS,
+    SkylineFeature, SkylineFeatureKind, TreeSpecies, VoxelCoord,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 
 /// Every surface LOD tile contains the same number of cells. Increasing the level therefore
@@ -339,6 +339,50 @@ pub struct SurfaceTileMesh {
     /// LOD boundaries. `heights` retains the tile's one-cell halo; `parent_heights` covers the
     /// same footprint on the next-coarser lattice and is empty only for the outermost level.
     pub shading: SurfaceShading,
+}
+
+impl SurfaceTileMesh {
+    /// Predicts the canonical Y chunks that contain this coarse surface.
+    ///
+    /// The stride-two surface is available before every exact chunk in a moving viewport. Using
+    /// its top faces as a bounded hint lets the client request the terrain-following vertical band
+    /// for each nearby X/Z chunk instead of centering every column on the player's eye height.
+    /// A caller-supplied margin covers fine relief hidden inside a coarse cell.
+    pub fn canonical_surface_chunk_hints(
+        &self,
+        vertical_margin_chunks: i32,
+    ) -> BTreeMap<(i32, i32), BTreeSet<i32>> {
+        let margin = vertical_margin_chunks.max(0);
+        let chunk_edge = CHUNK_EDGE as i32;
+        let mut hints = BTreeMap::<(i32, i32), BTreeSet<i32>>::new();
+        for quad in &self.quads {
+            if quad.face != FACE_POS_Y || quad.extent.contains(&0) {
+                continue;
+            }
+            let min_chunk_x = quad.origin[0].div_euclid(chunk_edge);
+            let min_chunk_z = quad.origin[2].div_euclid(chunk_edge);
+            let max_chunk_x = quad.origin[0]
+                .saturating_add(i32::from(quad.extent[0]))
+                .saturating_sub(1)
+                .div_euclid(chunk_edge);
+            let max_chunk_z = quad.origin[2]
+                .saturating_add(i32::from(quad.extent[1]))
+                .saturating_sub(1)
+                .div_euclid(chunk_edge);
+            let surface_chunk_y = quad.origin[1].div_euclid(chunk_edge);
+            for chunk_z in min_chunk_z..=max_chunk_z {
+                for chunk_x in min_chunk_x..=max_chunk_x {
+                    let ys = hints.entry((chunk_x, chunk_z)).or_default();
+                    for delta_y in -margin..=margin {
+                        if let Some(chunk_y) = surface_chunk_y.checked_add(delta_y) {
+                            ys.insert(chunk_y);
+                        }
+                    }
+                }
+            }
+        }
+        hints
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2129,6 +2173,30 @@ mod tests {
             Some(SurfaceLodLevel::Stride8)
         );
         assert_eq!(SurfaceLodLevel::from_stride_voxels(3), None);
+    }
+
+    #[test]
+    fn stride_two_surface_predicts_terrain_following_canonical_bands() {
+        let tile = generate_surface_tile_mesh(
+            Generator::new(0x5eed_cafe),
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
+        );
+        let hints = tile.canonical_surface_chunk_hints(1);
+        assert_eq!(
+            hints.keys().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([(0, 0), (0, 1), (1, 0), (1, 1)])
+        );
+        for quad in tile.quads.iter().filter(|quad| quad.face == FACE_POS_Y) {
+            let column = (
+                quad.origin[0].div_euclid(CHUNK_EDGE as i32),
+                quad.origin[2].div_euclid(CHUNK_EDGE as i32),
+            );
+            let surface_y = quad.origin[1].div_euclid(CHUNK_EDGE as i32);
+            let ys = &hints[&column];
+            assert!(ys.contains(&surface_y.saturating_sub(1)));
+            assert!(ys.contains(&surface_y));
+            assert!(ys.contains(&surface_y.saturating_add(1)));
+        }
     }
 
     #[test]

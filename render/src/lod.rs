@@ -1,6 +1,6 @@
 //! Pure geometric ownership for nested block-surface LOD rings.
 
-use std::collections::HashSet;
+use hashbrown::HashSet;
 #[cfg(test)]
 use voxels_world::SurfaceBounds;
 use voxels_world::{CHUNK_EDGE, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId};
@@ -223,6 +223,15 @@ impl SurfacePatchSelection {
             }));
         for patch in self.patches.iter().copied() {
             for edge in SurfacePatchEdge::ALL {
+                let neighbor = match edge {
+                    SurfacePatchEdge::NegativeX => patch.neighbor(-1, 0),
+                    SurfacePatchEdge::PositiveX => patch.neighbor(1, 0),
+                    SurfacePatchEdge::NegativeZ => patch.neighbor(0, -1),
+                    SurfacePatchEdge::PositiveZ => patch.neighbor(0, 1),
+                };
+                if neighbor.is_some_and(|neighbor| self.patches.contains(&neighbor)) {
+                    continue;
+                }
                 let Some(neighbor_points) = points_across_patch_edge(patch, edge) else {
                     continue;
                 };

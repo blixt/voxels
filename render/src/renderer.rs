@@ -17,7 +17,8 @@ use crate::ui::{Color, InventoryItem, LiveStats, MissionControlUi, UiAction, UiK
 pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
 use crate::ui_gpu::{SCENE_FORMAT, UiGpu, texture_sampler_layout};
 use bytemuck::{Pod, Zeroable};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use hashbrown::{HashMap, HashSet};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use voxels_core::{CameraState, EnclosureSample, RemoteAvatarPose};
@@ -427,6 +428,7 @@ pub enum ChunkActivationReason {
     Radial = 1,
     Portal = 2,
     Interaction = 4,
+    Surface = 8,
 }
 
 impl ChunkMesh {
@@ -2659,6 +2661,21 @@ impl Renderer {
             .presented_stride_at(self.lod_draw_plan_focus, voxel_x, voxel_z)
     }
 
+    /// Number of horizontal cells whose exact surface is represented by the currently active
+    /// canonical vertical band at one chunk column.
+    pub fn canonical_surface_coverage_at(&self, voxel_x: i32, voxel_z: i32) -> (u16, u16) {
+        let column = (
+            voxel_x.div_euclid(CHUNK_EDGE as i32),
+            voxel_z.div_euclid(CHUNK_EDGE as i32),
+        );
+        let covered = canonical_surface_cell_coverage(
+            column,
+            &self.canonical_ready_chunks,
+            &self.canonical_surface_profiles,
+        );
+        (covered as u16, (CHUNK_EDGE * CHUNK_EDGE) as u16)
+    }
+
     fn remove_mesh(&mut self, key: MeshKey) {
         self.remove_opaque_mesh(key);
         self.remove_water_mesh(key);
@@ -3976,25 +3993,42 @@ fn complete_canonical_surface_columns(
     ready_chunks: &HashSet<(i32, i32, i32)>,
     profiles: &CanonicalColumnProfiles,
 ) -> HashSet<(i32, i32)> {
-    let mut ready_profiles = HashMap::<(i32, i32), Vec<&CanonicalChunkProfile>>::new();
-    for &(x, y, z) in ready_chunks {
-        let column = (x, z);
-        let Some(profile) = profiles
-            .get(&column)
-            .and_then(|column_profiles| column_profiles.get(&y))
-        else {
-            continue;
-        };
-        ready_profiles.entry(column).or_default().push(profile);
-    }
-    ready_profiles
+    let columns = ready_chunks
+        .iter()
+        .map(|&(x, _, z)| (x, z))
+        .collect::<HashSet<_>>();
+    columns
         .into_iter()
-        .filter_map(|(column, profiles)| {
-            (0..CHUNK_EDGE * CHUNK_EDGE)
-                .all(|cell| profiles.iter().any(|profile| profile.cells[cell].is_some()))
-                .then_some(column)
+        .filter(|&column| {
+            canonical_surface_cell_coverage(column, ready_chunks, profiles)
+                == CHUNK_EDGE * CHUNK_EDGE
         })
         .collect()
+}
+
+fn canonical_surface_cell_coverage(
+    column: (i32, i32),
+    ready_chunks: &HashSet<(i32, i32, i32)>,
+    profiles: &CanonicalColumnProfiles,
+) -> usize {
+    let Some(column_profiles) = profiles.get(&column) else {
+        return 0;
+    };
+    let ready_profiles = column_profiles
+        .iter()
+        .filter_map(|(&y, profile)| {
+            ready_chunks
+                .contains(&(column.0, y, column.1))
+                .then_some(profile)
+        })
+        .collect::<Vec<_>>();
+    (0..CHUNK_EDGE * CHUNK_EDGE)
+        .filter(|&cell| {
+            ready_profiles
+                .iter()
+                .any(|profile| profile.cells[cell].is_some())
+        })
+        .count()
 }
 
 fn canonical_surface_sample(
@@ -5181,6 +5215,14 @@ mod tests {
             &HashSet::from([(column.0, 41, column.1)]),
             &profiles,
         );
+        assert_eq!(
+            canonical_surface_cell_coverage(
+                column,
+                &HashSet::from([(column.0, 41, column.1)]),
+                &profiles,
+            ),
+            cell_count / 2
+        );
         assert!(
             !incomplete.contains(&column),
             "an inactive retained profile must not suppress the surface fallback"
@@ -5191,6 +5233,14 @@ mod tests {
             &profiles,
         );
         assert!(complete.contains(&column));
+        assert_eq!(
+            canonical_surface_cell_coverage(
+                column,
+                &HashSet::from([(column.0, 41, column.1), (column.0, 42, column.1)]),
+                &profiles,
+            ),
+            cell_count
+        );
     }
 
     #[test]

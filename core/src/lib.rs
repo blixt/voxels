@@ -17,6 +17,7 @@ pub const PLAYER_HEIGHT_METRES: f32 = 1.70;
 pub const PLAYER_EYE_HEIGHT_METRES: f32 = 1.54;
 const WALK_SPEED: f32 = 4.6;
 const SPRINT_MULTIPLIER: f32 = 1.55;
+pub const PLAYER_SPRINT_SPEED_METRES_PER_SECOND: f32 = WALK_SPEED * SPRINT_MULTIPLIER;
 const SPECTATOR_SPEED: f32 = 8.0;
 const SPECTATOR_RESPONSE: f32 = 10.0;
 const GLIDER_FORWARD_SPEED: f32 = 8.4;
@@ -471,7 +472,11 @@ impl CameraState {
             );
         }
 
-        let speed = WALK_SPEED * if input.sprint { SPRINT_MULTIPLIER } else { 1.0 };
+        let speed = if input.sprint {
+            PLAYER_SPRINT_SPEED_METRES_PER_SECOND
+        } else {
+            WALK_SPEED
+        };
         let horizontal = horizontal_wish.normalize_or_zero() * speed;
         Vec3::new(horizontal.x, self.velocity.y, horizontal.z)
     }
@@ -662,9 +667,11 @@ impl CameraState {
                     1.0
                 };
                 self.assisted_step_seconds = (self.assisted_step_seconds - dt).max(0.0);
-                let speed = WALK_SPEED
-                    * if input.sprint { SPRINT_MULTIPLIER } else { 1.0 }
-                    * assisted_scale;
+                let speed = if input.sprint {
+                    PLAYER_SPRINT_SPEED_METRES_PER_SECOND
+                } else {
+                    WALK_SPEED
+                } * assisted_scale;
                 let target = wish.normalize_or_zero() * speed;
                 let response = 1.0 - (-(if self.grounded { 18.0 } else { 5.0 }) * dt).exp();
                 self.velocity.x += (target.x - self.velocity.x) * response;
