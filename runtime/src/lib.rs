@@ -1003,6 +1003,18 @@ impl StreamScheduler {
         found
     }
 
+    /// Whether the currently desired chunk has an uploaded mesh that remains safe to draw.
+    ///
+    /// A resident chunk keeps owning its previous mesh while an edit replacement is generated,
+    /// meshed, and uploaded. This is intentionally weaker than [`Self::interest_readiness`]:
+    /// callers that need current collision or voxel data must still wait for `Resident`, while
+    /// render ownership can preserve continuous coverage during the transactional replacement.
+    pub fn desired_chunk_renderable(&self, coord: ChunkCoord) -> bool {
+        self.entries
+            .get(&coord_key(coord))
+            .is_some_and(|entry| entry.desired && entry.ever_resident)
+    }
+
     /// Whether a column still owns at least one uploaded mesh, including a stale mesh retained
     /// transactionally while a replacement is queued.
     pub fn column_has_renderable_chunk(&self, x: i32, z: i32) -> bool {
@@ -1707,6 +1719,41 @@ mod tests {
         }
         assert!(scheduler.desired_column_ready(8, 0));
         assert!(!scheduler.desired_column_ready(7, 0));
+    }
+
+    #[test]
+    fn edited_chunk_remains_renderable_until_its_replacement_is_current() {
+        let coord = ChunkCoord::new(0, 0, 0);
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 0,
+            max_tracked_chunks: 1,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
+        });
+        scheduler.update_focus(coord);
+
+        assert!(!scheduler.desired_chunk_renderable(coord));
+        advance_to_resident(&mut scheduler, coord);
+        assert!(scheduler.desired_chunk_renderable(coord));
+
+        scheduler.mark_voxel_edited(VoxelCoord::new(4, 4, 4));
+        assert_eq!(
+            scheduler.status(coord).map(|status| status.state),
+            Some(ChunkState::QueuedMeshing)
+        );
+        assert!(
+            scheduler.desired_chunk_renderable(coord),
+            "the previous uploaded mesh must retain render ownership during remeshing"
+        );
+        assert_eq!(
+            scheduler.interest_readiness(&[coord]),
+            VicinityReadiness {
+                required: 1,
+                resident: 0,
+            },
+            "render continuity must not claim that collision data is current"
+        );
     }
 
     #[test]

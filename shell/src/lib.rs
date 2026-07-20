@@ -1509,11 +1509,10 @@ mod web {
                         ..=config.vertical_radius_chunks)
                         .filter_map(|dy| focus.y.checked_add(dy).map(|y| ChunkCoord::new(x, y, z)))
                         .collect();
-                    if column.iter().all(|coord| {
-                        scheduler.status(*coord).is_some_and(|status| {
-                            status.desired && status.state == ChunkState::Resident
-                        })
-                    }) {
+                    if column
+                        .iter()
+                        .all(|coord| scheduler.desired_chunk_renderable(*coord))
+                    {
                         radial.extend(column.into_iter().map(coord_key));
                     }
                 }
@@ -1545,11 +1544,10 @@ mod web {
                 }
                 let mut complete = BTreeSet::new();
                 for coords in columns.values() {
-                    if coords.iter().all(|coord| {
-                        scheduler
-                            .status(*coord)
-                            .is_some_and(|status| status.state == ChunkState::Resident)
-                    }) {
+                    if coords
+                        .iter()
+                        .all(|coord| scheduler.desired_chunk_renderable(*coord))
+                    {
                         complete.extend(coords.iter().copied().map(coord_key));
                     }
                 }
