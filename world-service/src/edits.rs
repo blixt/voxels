@@ -587,12 +587,29 @@ impl EditAuthority {
             player.inventory
         };
 
-        let mut next_edits = state.edits.clone();
+        let mut affected = if changed {
+            AffectedProducts::from_state(source, &state.edits, &mutations)
+        } else {
+            AffectedProducts::default()
+        };
+        let previous_overrides = mutations
+            .iter()
+            .map(|mutation| state.edits.override_at(mutation.coord))
+            .collect::<Vec<_>>();
         for (mutation, durable_override) in mutations.iter().zip(&durable_overrides) {
-            next_edits.replace_durable_override(mutation.coord, *durable_override);
+            state
+                .edits
+                .replace_durable_override(mutation.coord, *durable_override);
         }
         let (affected_chunks, affected_surface_tiles) = if changed {
-            affected_products(source, &state.edits, &next_edits, &mutations)?
+            affected.extend_surfaces(source, &state.edits, &mutations);
+            match affected.finish(&mutations) {
+                Ok(products) => products,
+                Err(error) => {
+                    restore_overrides(&mut state.edits, &mutations, &previous_overrides);
+                    return Err(error);
+                }
+            }
         } else {
             (Vec::new(), Vec::new())
         };
@@ -607,7 +624,7 @@ impl EditAuthority {
             editor_inventory: Some(inventory),
         };
 
-        persist_action(
+        if let Err(error) = persist_action(
             &mut state.connection,
             player_id,
             command,
@@ -618,9 +635,11 @@ impl EditAuthority {
             &durable_overrides,
             &affected_chunks,
             &affected_surface_tiles,
-        )?;
+        ) {
+            restore_overrides(&mut state.edits, &mutations, &previous_overrides);
+            return Err(error);
+        }
         if changed {
-            state.edits = next_edits;
             state.revision = revision;
             for coord in &affected_chunks {
                 state.chunk_revisions.insert(*coord, revision);
@@ -1130,33 +1149,75 @@ fn source_voxel_block(
     }
 }
 
-fn affected_products(
-    source: &dyn WorldSourceEngine,
-    before: &EditMap,
-    after: &EditMap,
-    mutations: &[VoxelMutation],
-) -> Result<(Vec<ChunkCoord>, Vec<SurfaceTileCoord>), EditAuthorityError> {
-    let mut chunks = BTreeSet::new();
-    let mut surfaces = BTreeSet::new();
-    for mutation in mutations {
-        chunks.extend(EditMap::affected_chunks(mutation.coord));
-        for level in SurfaceLodLevel::ALL {
-            surfaces.extend(source.surface_tiles_affected_by_voxel(before, level, mutation.coord));
-            surfaces.extend(source.surface_tiles_affected_by_voxel(after, level, mutation.coord));
+#[derive(Default)]
+struct AffectedProducts {
+    chunks: BTreeSet<ChunkCoord>,
+    surfaces: BTreeSet<SurfaceTileCoord>,
+}
+
+impl AffectedProducts {
+    fn from_state(
+        source: &dyn WorldSourceEngine,
+        edits: &EditMap,
+        mutations: &[VoxelMutation],
+    ) -> Self {
+        let mut affected = Self::default();
+        for mutation in mutations {
+            affected
+                .chunks
+                .extend(EditMap::affected_chunks(mutation.coord));
+        }
+        affected.extend_surfaces(source, edits, mutations);
+        affected
+    }
+
+    fn extend_surfaces(
+        &mut self,
+        source: &dyn WorldSourceEngine,
+        edits: &EditMap,
+        mutations: &[VoxelMutation],
+    ) {
+        for mutation in mutations {
+            for level in SurfaceLodLevel::ALL {
+                self.surfaces.extend(source.surface_tiles_affected_by_voxel(
+                    edits,
+                    level,
+                    mutation.coord,
+                ));
+            }
         }
     }
-    if mutations.len() > MAX_EDIT_MUTATIONS
-        || chunks.len() > MAX_EDIT_AFFECTED_CHUNKS
-        || surfaces.len() > MAX_EDIT_AFFECTED_SURFACE_TILES
-    {
-        return Err(EditAuthorityError(format!(
-            "edit outcome exceeds protocol bounds: {} mutations, {} chunks, {} surface tiles",
-            mutations.len(),
-            chunks.len(),
-            surfaces.len(),
-        )));
+
+    fn finish(
+        self,
+        mutations: &[VoxelMutation],
+    ) -> Result<(Vec<ChunkCoord>, Vec<SurfaceTileCoord>), EditAuthorityError> {
+        if mutations.len() > MAX_EDIT_MUTATIONS
+            || self.chunks.len() > MAX_EDIT_AFFECTED_CHUNKS
+            || self.surfaces.len() > MAX_EDIT_AFFECTED_SURFACE_TILES
+        {
+            return Err(EditAuthorityError(format!(
+                "edit outcome exceeds protocol bounds: {} mutations, {} chunks, {} surface tiles",
+                mutations.len(),
+                self.chunks.len(),
+                self.surfaces.len(),
+            )));
+        }
+        Ok((
+            self.chunks.into_iter().collect(),
+            self.surfaces.into_iter().collect(),
+        ))
     }
-    Ok((chunks.into_iter().collect(), surfaces.into_iter().collect()))
+}
+
+fn restore_overrides(
+    edits: &mut EditMap,
+    mutations: &[VoxelMutation],
+    previous_overrides: &[Option<Material>],
+) {
+    for (mutation, previous) in mutations.iter().zip(previous_overrides) {
+        edits.replace_durable_override(mutation.coord, *previous);
+    }
 }
 
 #[allow(
@@ -2143,6 +2204,58 @@ mod tests {
                 params![coord.x, coord.y, coord.z],
                 |row| row.get(0),
             )
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn persistence_failure_rolls_back_the_in_memory_edit_batch() {
+        let source = ProceduralWorldSource::new(44);
+        let authority = EditAuthority::in_memory_with_inventory(
+            world_id(32),
+            &source,
+            8,
+            EDIT_CUBE_VOLUME_VOXELS as u32,
+        )
+        .unwrap();
+        let player = player_id(32);
+        let (opened, session) = admit_player(&authority, player, resume(1));
+        let revision = authority.revision();
+        authority
+            .lock()
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER reject_voxel_edits
+                 BEFORE INSERT ON voxel_edits
+                 BEGIN
+                   SELECT RAISE(ABORT, 'forced persistence failure');
+                 END;",
+            )
+            .unwrap();
+
+        let error = authority
+            .apply(
+                &source,
+                player,
+                32,
+                place(1, session, VoxelCoord::new(0, 300, 0), Material::Stone),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("persist voxel mutation"));
+
+        let state = authority.lock();
+        assert!(state.edits.is_empty());
+        assert_eq!(state.revision, revision);
+        assert_eq!(
+            load_durable_player(&state.connection, player)
+                .unwrap()
+                .unwrap()
+                .inventory,
+            opened.inventory
+        );
+        let rows: i64 = state
+            .connection
+            .query_row("SELECT COUNT(*) FROM voxel_edits", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 0);
     }
