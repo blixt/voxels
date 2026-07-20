@@ -2106,9 +2106,9 @@ impl Renderer {
 
     pub fn report_diagnostics_copy_result(&mut self, copied: bool) {
         self.ui.show_gameplay_toast(if copied {
-            "MISSION CONTROL COPIED"
+            "WORLD LAB COPIED"
         } else {
-            "COULD NOT COPY MISSION CONTROL"
+            "COULD NOT COPY WORLD LAB"
         });
     }
 

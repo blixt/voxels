@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import { writeClipboardText } from "./clipboard.ts";
 
-describe("mission control clipboard", () => {
+describe("World Lab clipboard", () => {
   it("writes the complete report and confirms success", async () => {
     const writes: string[] = [];
     const copied = await writeClipboardText(
@@ -10,12 +10,12 @@ describe("mission control clipboard", () => {
           writes.push(text);
         },
       },
-      "VOXELS / MISSION CONTROL\nEye position (m): X 1.000, Y 2.000, Z 3.000",
+      "VOXELS / WORLD LAB\nEye position (m): X 1.000, Y 2.000, Z 3.000",
     );
 
     expect(copied).toBe(true);
     expect(writes).toEqual([
-      "VOXELS / MISSION CONTROL\nEye position (m): X 1.000, Y 2.000, Z 3.000",
+      "VOXELS / WORLD LAB\nEye position (m): X 1.000, Y 2.000, Z 3.000",
     ]);
   });
 
