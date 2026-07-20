@@ -473,8 +473,7 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
   if (undergroundPerformance.cpuMs.p95 > 8)
     violations.push("underground CPU p95 exceeded the 120 Hz work budget");
   if (
-    undergroundPerformance.frameMs.above16_67ms >
-    Math.ceil(undergroundPerformance.samples * 0.02)
+    undergroundPerformance.frameMs.above16_67ms > Math.ceil(undergroundPerformance.samples * 0.02)
   )
     violations.push("more than 2% of underground frames were slower than 60 Hz");
   if (undergroundPerformance.frameMs.above33_33ms > 0)
