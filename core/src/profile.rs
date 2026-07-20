@@ -39,6 +39,13 @@ pub enum ProfilePhase {
     Complete = 4,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ProfileRoute {
+    #[default]
+    Loop,
+    Straight,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ProfilePose {
     pub position_xz: Vec2,
@@ -52,6 +59,7 @@ pub struct ProfileAutomation {
     origin: Vec3,
     ticks: u64,
     phase: ProfilePhase,
+    route: ProfileRoute,
 }
 
 impl Default for ProfileAutomation {
@@ -61,6 +69,7 @@ impl Default for ProfileAutomation {
             origin: Vec3::ZERO,
             ticks: 0,
             phase: ProfilePhase::Idle,
+            route: ProfileRoute::Loop,
         }
     }
 }
@@ -79,9 +88,14 @@ impl ProfileAutomation {
     }
 
     pub fn start(&mut self, origin: Vec3) {
+        self.start_route(origin, ProfileRoute::Loop);
+    }
+
+    pub fn start_route(&mut self, origin: Vec3, route: ProfileRoute) {
         self.origin = origin;
         self.ticks = 0;
         self.phase = ProfilePhase::Warmup;
+        self.route = route;
     }
 
     pub fn advance_fixed_step(&mut self) {
@@ -120,6 +134,13 @@ impl ProfileAutomation {
     pub fn pose(self) -> Option<ProfilePose> {
         if !matches!(self.phase, ProfilePhase::Warmup | ProfilePhase::Measured) {
             return None;
+        }
+        if self.route == ProfileRoute::Straight {
+            return Some(ProfilePose {
+                position_xz: Vec2::new(self.origin.x, self.origin.z - self.distance_metres()),
+                yaw: 0.0,
+                pitch: -0.22,
+            });
         }
         // Warm the exact route measured by the allocator gate. The configured warmup completes one
         // lap and discovers its geometry; measurement then revisits the same canonical/LOD working
@@ -197,5 +218,32 @@ mod tests {
         };
         assert_eq!(left.position_xz, right.position_xz);
         assert_eq!(left.yaw, right.yaw);
+    }
+
+    #[test]
+    fn straight_route_never_revisits_streamed_world() {
+        let config = ProfileConfig {
+            fixed_step_seconds: 0.25,
+            speed_metres_per_second: 8.0,
+            warmup_seconds: 2.0,
+            measure_seconds: 4.0,
+        };
+        let mut profile = ProfileAutomation::with_config(config);
+        profile.start_route(Vec3::new(2.0, 3.0, -4.0), ProfileRoute::Straight);
+        for _ in 0..24 {
+            profile.advance_fixed_step();
+        }
+        assert_eq!(profile.phase(), ProfilePhase::Drain);
+        assert!((profile.distance_metres() - 48.0).abs() < 0.01);
+        assert!(profile.pose().is_none());
+
+        let mut moving = ProfileAutomation::with_config(config);
+        moving.start_route(Vec3::new(2.0, 3.0, -4.0), ProfileRoute::Straight);
+        for _ in 0..12 {
+            moving.advance_fixed_step();
+        }
+        let pose = moving.pose().expect("straight route is still moving");
+        assert_eq!(pose.position_xz, Vec2::new(2.0, -28.0));
+        assert_eq!(pose.yaw, 0.0);
     }
 }

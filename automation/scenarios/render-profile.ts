@@ -349,8 +349,8 @@ async function weatherProfile(page: Page, engine: EngineClient, context: Scenari
   return phases;
 }
 
-async function sustainedProfile(engine: EngineClient) {
-  await engine.startProfile(1);
+async function sustainedProfile(engine: EngineClient, profileId = 1) {
+  await engine.startProfile(profileId);
   const captures: RenderSnapshotCapture[] = [];
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
@@ -371,6 +371,16 @@ async function sustainedProfile(engine: EngineClient) {
   const finalTwenty = measured.filter(
     (capture) => snapshotValue(capture.snapshot, "profileElapsedSeconds") >= 70,
   );
+  const moving = captures.filter((capture) => {
+    const phase = snapshotValue(capture.snapshot, "profilePhase");
+    return phase === 1 || phase === 2;
+  });
+  const atSixtySeconds = moving.reduce<RenderSnapshotCapture | undefined>((closest, capture) => {
+    if (closest === undefined) return capture;
+    const error = Math.abs(snapshotValue(capture.snapshot, "profileElapsedSeconds") - 60);
+    const closestError = Math.abs(snapshotValue(closest.snapshot, "profileElapsedSeconds") - 60);
+    return error < closestError ? capture : closest;
+  }, undefined);
   const range = (values: readonly number[]): number =>
     values.length === 0 ? 0 : Math.max(...values) - Math.min(...values);
   const result = {
@@ -392,6 +402,50 @@ async function sustainedProfile(engine: EngineClient) {
       arenaCapacityRangeMiB: range(
         finalTwenty.map((capture) => snapshotValue(capture.snapshot, "arenaCapacityMiB")),
       ),
+    },
+    lod: {
+      samples: moving.length,
+      degradedSamples: moving.filter(
+        (capture) => snapshotValue(capture.snapshot, "presentedLodStrideVoxels") > 1,
+      ).length,
+      missingSamples: moving.filter(
+        (capture) => snapshotValue(capture.snapshot, "presentedLodStrideVoxels") === 0,
+      ).length,
+      maximumStrideVoxels: Math.max(
+        0,
+        ...moving.map((capture) => snapshotValue(capture.snapshot, "presentedLodStrideVoxels")),
+      ),
+      maximumFocusLagVoxels: Math.max(
+        0,
+        ...moving.map((capture) => snapshotValue(capture.snapshot, "lodFocusLagVoxels")),
+      ),
+      canonicalImmediateReadySamples: moving.filter(
+        (capture) =>
+          snapshotValue(capture.snapshot, "canonicalImmediateRequired") > 0 &&
+          snapshotValue(capture.snapshot, "canonicalImmediateResident") ===
+            snapshotValue(capture.snapshot, "canonicalImmediateRequired"),
+      ).length,
+      atSixtySeconds:
+        atSixtySeconds === undefined
+          ? null
+          : {
+              elapsedSeconds: snapshotValue(atSixtySeconds.snapshot, "profileElapsedSeconds"),
+              distanceMetres: snapshotValue(atSixtySeconds.snapshot, "profileDistanceMetres"),
+              presentedStrideVoxels: snapshotValue(
+                atSixtySeconds.snapshot,
+                "presentedLodStrideVoxels",
+              ),
+              focusLagVoxels: snapshotValue(atSixtySeconds.snapshot, "lodFocusLagVoxels"),
+              canonicalImmediateResident: snapshotValue(
+                atSixtySeconds.snapshot,
+                "canonicalImmediateResident",
+              ),
+              canonicalImmediateRequired: snapshotValue(
+                atSixtySeconds.snapshot,
+                "canonicalImmediateRequired",
+              ),
+              pendingJobs: snapshotValue(atSixtySeconds.snapshot, "pendingJobs"),
+            },
     },
     final: {
       pendingJobs: snapshotValue(latest, "pendingJobs"),
@@ -438,7 +492,14 @@ async function waitForEngine(engine: EngineClient): Promise<readonly number[]> {
   );
 }
 
-type ProfileMode = "standard" | "stationary" | "sustained" | "materials" | "atmosphere" | "weather";
+type ProfileMode =
+  | "standard"
+  | "stationary"
+  | "sustained"
+  | "directional"
+  | "materials"
+  | "atmosphere"
+  | "weather";
 
 interface ProfileOptions {
   readonly mode: ProfileMode;
@@ -460,7 +521,15 @@ function parseOptions(arguments_: readonly string[]): ProfileOptions {
   const argumentsReader = new ScenarioArguments(arguments_);
   const mode = argumentsReader.choice(
     "mode",
-    ["standard", "stationary", "sustained", "materials", "atmosphere", "weather"] as const,
+    [
+      "standard",
+      "stationary",
+      "sustained",
+      "directional",
+      "materials",
+      "atmosphere",
+      "weather",
+    ] as const,
     "standard",
   );
   const viewportValues = argumentsReader.pair("viewport", {
@@ -584,6 +653,8 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
     };
   } else if (options.mode === "sustained") {
     scenarios = { sustained: await sustainedProfile(engine) };
+  } else if (options.mode === "directional") {
+    scenarios = { directional: await sustainedProfile(engine, 2) };
   } else if (options.mode === "materials") {
     scenarios = {
       materials: await materialDetailProfile(page, engine, options.viewport.width),

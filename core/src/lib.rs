@@ -8,7 +8,7 @@ pub use presence::{
     REMOTE_POSE_GLIDING, RemoteAvatarPose, RemotePlayerId, RemotePoseSample, RemotePoseUpdate,
     RemotePresenceDelta, RemotePresenceTimeline,
 };
-pub use profile::{ProfileAutomation, ProfileConfig, ProfilePhase, ProfilePose};
+pub use profile::{ProfileAutomation, ProfileConfig, ProfilePhase, ProfilePose, ProfileRoute};
 
 use glam::{Vec2, Vec3};
 

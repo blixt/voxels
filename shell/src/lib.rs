@@ -282,7 +282,8 @@ mod web {
     use voxels_core::{
         CameraState, EnclosureSample, InputState, LocomotionMode, PLAYER_EYE_HEIGHT_METRES,
         PLAYER_HEIGHT_METRES, PLAYER_RADIUS_METRES, ProfileAutomation, ProfileConfig, ProfilePhase,
-        VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels, voxel_segment_is_clear,
+        ProfileRoute, VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels,
+        voxel_segment_is_clear,
     };
     use voxels_render::renderer::{
         ChunkActivationReason, HostUiAction, LocalLightVisibility, MissionControlConfig, Renderer,
@@ -313,7 +314,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 2;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 29;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 30;
     const FRAME_SAMPLE_WIDTH: u32 = 11;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -330,7 +331,7 @@ mod web {
         "lodBoundary1Z,lodBoundary2X,lodBoundary2Z,lodBoundary3X,lodBoundary3Z,lodBoundary4X,lodBoundary4Z,lodBoundary5X,lodBoundary5Z,lodBoundary6X,lodBoundary6Z,lodBoundary7X,lodBoundary7Z,dayFraction,localSolarDayFraction,yearFraction,",
         "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
         "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
-        "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,schemaVersion,sampleCount,",
+        "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,schemaVersion,sampleCount,",
         "droppedSamples",
     );
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
@@ -627,18 +628,19 @@ mod web {
 
         fn start_profile(&self, profile_id: u32) -> bool {
             match profile_id {
-                1 => self.start_stream_profile(),
+                1 => self.start_stream_profile(ProfileRoute::Loop),
+                2 => self.start_stream_profile(ProfileRoute::Straight),
                 _ => {
-                    log_gpu_error("only the provider-neutral streaming profile is available");
+                    log_gpu_error("unknown provider-neutral streaming profile");
                     false
                 }
             }
         }
 
-        fn start_stream_profile(&self) -> bool {
+        fn start_stream_profile(&self, route: ProfileRoute) -> bool {
             self.input.borrow_mut().clear();
             let position = self.camera.borrow().position;
-            self.profile.borrow_mut().start(position);
+            self.profile.borrow_mut().start_route(position, route);
             self.profile_tracked_high.set(0);
             self.profile_surface_high.set(0);
             self.profile_pending_high.set(0);
@@ -2435,8 +2437,23 @@ mod web {
                 let camera = engine.camera.borrow();
                 let fluid = camera.fluid_state();
                 let diagnostics = engine.scheduler.borrow().diagnostics();
-                let render = engine.renderer.borrow().diagnostics();
-                let target = engine.renderer.borrow().target_voxel();
+                let camera_voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
+                let camera_voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
+                let (render, target, presented_lod_stride_voxels) = {
+                    let renderer = engine.renderer.borrow();
+                    (
+                        renderer.diagnostics(),
+                        renderer.target_voxel(),
+                        renderer.presented_lod_stride_voxels(camera_voxel_x, camera_voxel_z),
+                    )
+                };
+                let canonical_immediate = engine.scheduler.borrow().vicinity_readiness(1);
+                let lod_focus_lag_voxels = i64::from(camera_voxel_x)
+                    .abs_diff(i64::from(render.lod_boundary_centres[0][0]))
+                    .max(
+                        i64::from(camera_voxel_z)
+                            .abs_diff(i64::from(render.lod_boundary_centres[0][1])),
+                    );
                 let lod_tiles = engine.surface_lod_counts();
                 let canonical_voxel_bytes = engine
                     .chunks
@@ -2689,6 +2706,10 @@ mod web {
                     } else {
                         0.0
                     },
+                    f32::from(presented_lod_stride_voxels),
+                    lod_focus_lag_voxels as f32,
+                    canonical_immediate.resident as f32,
+                    canonical_immediate.required as f32,
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);

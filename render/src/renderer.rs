@@ -7,7 +7,7 @@ use crate::environment::{
     DaylightPhase, DebugEnvironmentOverride, InteriorEnvironment, OutdoorEnvironment,
     WorldEnvironmentState, surface_region_label,
 };
-use crate::lod::{GeometricLodFocus, SurfacePatchSelection};
+use crate::lod::{GeometricLodFocus, LodOwner, SurfacePatchSelection};
 use crate::material_detail::MaterialDetailGpu;
 use crate::shadow::{
     AabbClipVolume, CASCADE_COUNT, DirectionalShadowBasis, DirectionalShadowCascades,
@@ -384,6 +384,27 @@ impl LodDrawPlan {
             && !self
                 .exact_transition_edges
                 .contains(&(patch, edge.index() as u8))
+    }
+
+    fn presented_stride_at(
+        &self,
+        focus: Option<GeometricLodFocus>,
+        voxel_x: i32,
+        voxel_z: i32,
+    ) -> u16 {
+        if let Some(patch) = self.patches.selected_patch_at([voxel_x, voxel_z]) {
+            return patch.level.stride_voxels() as u16;
+        }
+        let chunk_x = voxel_x.div_euclid(CHUNK_EDGE as i32);
+        let chunk_z = voxel_z.div_euclid(CHUNK_EDGE as i32);
+        if focus.is_some_and(|focus| {
+            focus.owner_at(voxel_x, voxel_z) == LodOwner::Canonical
+                && self.owns_canonical_column(chunk_x, chunk_z)
+        }) {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -2629,6 +2650,13 @@ impl Renderer {
                     mesh.activation_mask,
                 )
             })
+    }
+
+    /// Exact geometric representation selected at one horizontal world coordinate in the most
+    /// recently built draw plan. Zero means no selected owner and is therefore a coverage bug.
+    pub fn presented_lod_stride_voxels(&self, voxel_x: i32, voxel_z: i32) -> u16 {
+        self.lod_draw_plan
+            .presented_stride_at(self.lod_draw_plan_focus, voxel_x, voxel_z)
     }
 
     fn remove_mesh(&mut self, key: MeshKey) {
@@ -5163,6 +5191,31 @@ mod tests {
             &profiles,
         );
         assert!(complete.contains(&column));
+    }
+
+    #[test]
+    fn presented_stride_reports_the_actual_canonical_or_fallback_owner() {
+        let focus = GeometricLodFocus::snapped(0, 0);
+        let stride_two = SurfacePatchId::new(SurfaceLodLevel::Stride2, 0, 0);
+        let resident = HashSet::from([stride_two]);
+        let mut fallback = SurfacePatchSelection::default();
+        fallback.rebuild(focus, &resident, &HashSet::new());
+        let fallback_plan = LodDrawPlan {
+            patches: fallback,
+            canonical_columns: HashSet::new(),
+            ..LodDrawPlan::default()
+        };
+        assert_eq!(fallback_plan.presented_stride_at(Some(focus), 1, 1), 2);
+
+        let mut canonical = SurfacePatchSelection::default();
+        canonical.rebuild(focus, &resident, &HashSet::from([(0, 0)]));
+        let canonical_plan = LodDrawPlan {
+            patches: canonical,
+            canonical_columns: HashSet::from([(0, 0)]),
+            ..LodDrawPlan::default()
+        };
+        assert_eq!(canonical_plan.presented_stride_at(Some(focus), 1, 1), 1);
+        assert_eq!(canonical_plan.presented_stride_at(None, 1, 1), 0);
     }
 
     #[test]
