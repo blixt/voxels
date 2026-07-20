@@ -75,6 +75,7 @@ mod tests {
                 "cloud_layer",
                 "medium",
                 "interior",
+                "diagnostic_sky",
             ]
         );
     }

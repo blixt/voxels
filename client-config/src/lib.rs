@@ -137,7 +137,16 @@ pub struct RenderingConfig {
     pub shadows: ShadowConfig,
     pub volumetric_clouds: VolumetricCloudConfig,
     pub features: RendererFeatureConfig,
+    pub diagnostics: RenderingDiagnosticsConfig,
     pub mission_control: MissionControlConfig,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenderingDiagnosticsConfig {
+    /// Replaces the atmospheric background and suppresses weather layers. Automation uses
+    /// diagnostic magenta so uncovered terrain pixels are exact and easy to count.
+    pub sky_override_rgb: Option<[u8; 3]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -770,6 +779,9 @@ mod tests {
                     material_surface_detail: true,
                     cave_headlamp: true,
                     voxel_emissive_lights: true,
+                },
+                diagnostics: RenderingDiagnosticsConfig {
+                    sky_override_rgb: None,
                 },
                 mission_control: MissionControlConfig { open: false },
             },

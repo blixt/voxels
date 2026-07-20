@@ -198,6 +198,7 @@ pub struct RendererConfig {
     pub view_distance_metres: f32,
     pub directional_shadows: DirectionalShadowConfig,
     pub volumetric_clouds: VolumetricCloudConfig,
+    pub diagnostic_sky_color: Option<[f32; 3]>,
 }
 
 impl Default for RendererConfig {
@@ -208,6 +209,7 @@ impl Default for RendererConfig {
             view_distance_metres: 2_400.0,
             directional_shadows: DirectionalShadowConfig::default(),
             volumetric_clouds: VolumetricCloudConfig::default(),
+            diagnostic_sky_color: None,
         }
     }
 }
@@ -245,13 +247,15 @@ struct FrameUniform {
     cloud_layer: [f32; 4],
     medium: [f32; 4],
     interior: [f32; 4],
+    diagnostic_sky: [f32; 4],
 }
 
-const _: () = assert!(size_of::<FrameUniform>() == 800);
+const _: () = assert!(size_of::<FrameUniform>() == 816);
 const _: () = assert!(std::mem::offset_of!(FrameUniform, weather) == 736);
 const _: () = assert!(std::mem::offset_of!(FrameUniform, cloud_layer) == 752);
 const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 768);
 const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 784);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, diagnostic_sky) == 800);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
@@ -2946,8 +2950,9 @@ impl Renderer {
         let avatar_instances = self.avatar_gpu.instance_count();
         let has_avatars = avatar_instances != 0;
         let refract_water = !water_draw_list.spans.is_empty();
-        let clouds_active = self.volumetric_cloud_gpu.enabled();
-        let weather_active = self.environment.precipitation > 0.002;
+        let diagnostic_sky = self.runtime_config.diagnostic_sky_color.is_some();
+        let clouds_active = self.volumetric_cloud_gpu.enabled() && !diagnostic_sky;
+        let weather_active = self.environment.precipitation > 0.002 && !diagnostic_sky;
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
         self.volumetric_cloud_gpu
@@ -4723,6 +4728,9 @@ fn frame_uniform(
                 0.0
             },
         ],
+        diagnostic_sky: renderer_config
+            .diagnostic_sky_color
+            .map_or([0.0; 4], |color| [color[0], color[1], color[2], 1.0]),
     }
 }
 

@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use voxels_client_config::{ClientConfig, ClientConfigError};
 
-pub const AUTOMATION_FIXTURE_SCHEMA_VERSION: u32 = 5;
+pub const AUTOMATION_FIXTURE_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -31,6 +31,7 @@ pub struct AutomationFixtureOverlay {
     pub generation_workers: Option<u16>,
     pub cascaded_shadows: Option<bool>,
     pub screen_space_ambient_occlusion: Option<bool>,
+    pub diagnostic_sky_rgb: Option<[u8; 3]>,
     pub profiling_warmup_seconds: Option<f32>,
     pub profiling_measure_seconds: Option<f32>,
     pub day_length_seconds: Option<f32>,
@@ -237,6 +238,9 @@ pub fn build_automation_fixture(
     if let Some(value) = overlay.screen_space_ambient_occlusion {
         client.rendering.features.screen_space_ambient_occlusion = value;
     }
+    if let Some(value) = overlay.diagnostic_sky_rgb {
+        client.rendering.diagnostics.sky_override_rgb = Some(value);
+    }
     if let Some(value) = overlay.profiling_warmup_seconds {
         client.profiling.warmup_seconds = value;
     }
@@ -321,6 +325,7 @@ mod tests {
             generation_workers: Some(12),
             cascaded_shadows: Some(false),
             screen_space_ambient_occlusion: Some(false),
+            diagnostic_sky_rgb: Some([255, 0, 255]),
             profiling_warmup_seconds: Some(40.0),
             profiling_measure_seconds: Some(80.0),
             day_length_seconds: None,
@@ -364,6 +369,10 @@ mod tests {
             format!("ws://127.0.0.1:41235{WORLD_WEBSOCKET_PATH}")
         );
         assert!(!fixture.resolved.cascaded_shadows);
+        assert_eq!(
+            client.rendering.diagnostics.sky_override_rgb,
+            Some([255, 0, 255])
+        );
         assert_eq!(client.profiling.warmup_seconds, 40.0);
         assert_eq!(client.profiling.measure_seconds, 80.0);
         assert_eq!(fixture.resolved.cloud_top_metres, 1_400.0);

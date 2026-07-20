@@ -120,6 +120,9 @@ fn celestial_star_radiance(ray: vec3<f32>, moon_disc: f32) -> vec3<f32> {
 
 @fragment
 fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+  if frame.diagnostic_sky.w > 0.5 {
+    return vec4<f32>(frame.diagnostic_sky.rgb, 1.0);
+  }
   let uv = position.xy / frame.viewport_voxel.xy;
   let ndc = vec2<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0);
   // The sky is infinitely distant, so its view ray must depend on camera rotation but never camera

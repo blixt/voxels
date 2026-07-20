@@ -3059,6 +3059,10 @@ mod web {
                 max_distance_metres: rendering.volumetric_clouds.max_distance_metres,
                 extinction: rendering.volumetric_clouds.extinction,
             },
+            diagnostic_sky_color: rendering
+                .diagnostics
+                .sky_override_rgb
+                .map(|color| color.map(|channel| f32::from(channel) / 255.0)),
         };
         let width = (css_width * dpr).round().max(1.0) as u32;
         let height = (css_height * dpr).round().max(1.0) as u32;

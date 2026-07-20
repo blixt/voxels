@@ -21,7 +21,7 @@ import {
 import type { WorldServiceCargoProfile } from "../../scripts/world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
-const AUTOMATION_FIXTURE_SCHEMA_VERSION = 5;
+const AUTOMATION_FIXTURE_SCHEMA_VERSION = 6;
 
 export type WorldSource = "procedural-v16" | "terrain-diffusion-30m";
 
@@ -37,6 +37,7 @@ export interface WorldFixtureOptions {
   readonly generationWorkers?: number;
   readonly cascadedShadows?: boolean;
   readonly screenSpaceAmbientOcclusion?: boolean;
+  readonly diagnosticSkyRgb?: readonly [number, number, number];
   readonly profilingWarmupSeconds?: number;
   readonly profilingMeasureSeconds?: number;
   readonly dayLengthSeconds?: number;
@@ -302,6 +303,7 @@ export async function prepareWorldFixture({
   generationWorkers,
   cascadedShadows,
   screenSpaceAmbientOcclusion,
+  diagnosticSkyRgb,
   profilingWarmupSeconds,
   profilingMeasureSeconds,
   dayLengthSeconds,
@@ -341,6 +343,7 @@ export async function prepareWorldFixture({
       generationWorkers,
       cascadedShadows,
       screenSpaceAmbientOcclusion,
+      diagnosticSkyRgb,
       profilingWarmupSeconds,
       profilingMeasureSeconds,
       dayLengthSeconds,

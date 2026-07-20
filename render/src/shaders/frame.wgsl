@@ -29,6 +29,7 @@ struct Frame {
   cloud_layer: vec4<f32>,
   medium: vec4<f32>,
   interior: vec4<f32>,
+  diagnostic_sky: vec4<f32>,
 };
 
 // Shared by the sky and world shaders so visible clouds and their terrain attenuation cannot

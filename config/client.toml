@@ -109,6 +109,11 @@ material_surface_detail = true
 cave_headlamp = true
 voxel_emissive_lights = true
 
+[rendering.diagnostics]
+# Uncomment for terrain-coverage debugging. Atmospheric sky, clouds, celestial objects, and
+# precipitation are replaced by one unmistakable background color.
+# sky_override_rgb = [255, 0, 255]
+
 [rendering.mission_control]
 open = false
 
