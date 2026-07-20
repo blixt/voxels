@@ -4312,11 +4312,11 @@ fn canonical_surface_cell_coverage(
     column: (i32, i32),
     ready_chunks: &HashSet<(i32, i32, i32)>,
 ) -> usize {
-    ready_chunks
-        .iter()
-        .any(|&(x, _, z)| (x, z) == column)
-        .then_some(CHUNK_EDGE * CHUNK_EDGE)
-        .unwrap_or(0)
+    if ready_chunks.iter().any(|&(x, _, z)| (x, z) == column) {
+        CHUNK_EDGE * CHUNK_EDGE
+    } else {
+        0
+    }
 }
 
 fn resolved_canonical_column_profile(
