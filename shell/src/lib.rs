@@ -281,8 +281,8 @@ mod web {
     use voxels_client_config::ClientConfig;
     use voxels_core::{
         CameraState, EnclosureSample, InputState, LocomotionMode, ProfileAutomation, ProfileConfig,
-        ProfilePhase, VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels,
-        voxel_segment_is_clear,
+        PLAYER_EYE_HEIGHT_METRES, PLAYER_HEIGHT_METRES, PLAYER_RADIUS_METRES, ProfilePhase,
+        VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels, voxel_segment_is_clear,
     };
     use voxels_render::renderer::{
         ChunkActivationReason, HostUiAction, LocalLightVisibility, MissionControlConfig, Renderer,
@@ -296,8 +296,10 @@ mod web {
         revision_satisfies,
     };
     use voxels_world::protocol::{
-        BrowserUserId, EditAction, EditShape, EditVolume, MaterialInventory, PlayerId,
-        PlayerIdentity, VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
+        BrowserUserId, EDIT_CUBE_EDGE_VOXELS, EDIT_CUBE_VOLUME_VOXELS,
+        EDIT_SPHERE_RADIUS_VOXELS, EDIT_SPHERE_VOLUME_VOXELS, EditAction, EditShape, EditVolume,
+        MaterialInventory, PlayerId, PlayerIdentity, VoxelMutation, WorldCapabilities,
+        WorldEnvironmentSnapshot,
     };
     use voxels_world::{
         AtmosphereSample, CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT_PORTAL_COUNT,
@@ -311,7 +313,7 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const AUTOMATION_CONTRACT_VERSION: u32 = 1;
+    const AUTOMATION_CONTRACT_VERSION: u32 = 2;
     const SNAPSHOT_SCHEMA_VERSION: u32 = 29;
     const FRAME_SAMPLE_WIDTH: u32 = 11;
     const GPU_SAMPLE_WIDTH: u32 = 13;
@@ -2253,7 +2255,11 @@ mod web {
         pub fn automation_contract(&self) -> String {
             format!(
                 "{AUTOMATION_CONTRACT_VERSION}\n{SNAPSHOT_SCHEMA_VERSION}\n\
-                 {FRAME_SAMPLE_WIDTH}\n{GPU_SAMPLE_WIDTH}\n{SNAPSHOT_FIELD_NAMES}"
+                 {FRAME_SAMPLE_WIDTH}\n{GPU_SAMPLE_WIDTH}\n\
+                 {PLAYER_EYE_HEIGHT_METRES},{PLAYER_HEIGHT_METRES},{PLAYER_RADIUS_METRES},\
+                 {EDIT_CUBE_EDGE_VOXELS},{EDIT_CUBE_VOLUME_VOXELS},\
+                 {EDIT_SPHERE_RADIUS_VOXELS},{EDIT_SPHERE_VOLUME_VOXELS}\n\
+                 {SNAPSHOT_FIELD_NAMES}"
             )
         }
 
@@ -2335,28 +2341,42 @@ mod web {
 
         /// Deterministic browser-harness seam that submits through the same server-authoritative
         /// path as pointer input. It does not mutate local world state optimistically.
-        pub fn submit_edit(&self, x: i32, y: i32, z: i32, material_id: u16) -> bool {
+        pub fn submit_place(
+            &self,
+            x: i32,
+            y: i32,
+            z: i32,
+            material_id: u16,
+            shape_id: u8,
+        ) -> bool {
             let Some(engine) = self.engine.as_ref() else {
                 return false;
             };
             let Some(material) = Material::from_id(material_id) else {
                 return false;
             };
+            let Some(shape) = automation_edit_shape(shape_id) else {
+                return false;
+            };
             engine.submit_local_edit(EditAction::Place {
                 coord: VoxelCoord::new(x, y, z),
                 material,
-                shape: EditShape::Cube,
+                shape,
             })[0]
                 == 1
         }
 
         /// Deterministic browser-harness seam for the exact gameplay dig action. The server, not
-        /// this API, expands the hit voxel into the one-cubic-metre sphere and validates reach.
-        pub fn submit_dig(&self, x: i32, y: i32, z: i32) -> bool {
+        /// this API, expands the hit voxel into the selected one-cubic-metre brush and validates
+        /// reach.
+        pub fn submit_dig(&self, x: i32, y: i32, z: i32, shape_id: u8) -> bool {
             self.engine.as_ref().is_some_and(|engine| {
+                let Some(shape) = automation_edit_shape(shape_id) else {
+                    return false;
+                };
                 engine.submit_local_edit(EditAction::Dig {
                     hit: VoxelCoord::new(x, y, z),
-                    shape: EditShape::Sphere,
+                    shape,
                 })[0]
                     == 1
             })
@@ -2706,6 +2726,14 @@ mod web {
             if let Some(engine) = self.engine.take() {
                 engine.stop().await;
             }
+        }
+    }
+
+    const fn automation_edit_shape(shape_id: u8) -> Option<EditShape> {
+        match shape_id {
+            0 => Some(EditShape::Sphere),
+            1 => Some(EditShape::Cube),
+            _ => None,
         }
     }
 

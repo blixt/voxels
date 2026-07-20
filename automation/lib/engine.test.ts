@@ -26,22 +26,28 @@ function pageReturning(values: unknown[]): Page {
   } as unknown as Page;
 }
 
+const contract = {
+  version: AUTOMATION_CONTRACT_VERSION,
+  snapshotVersion: SNAPSHOT_SCHEMA_VERSION,
+  frameSampleWidth: FRAME_SAMPLE_WIDTH,
+  gpuSampleWidth: GPU_SAMPLE_WIDTH,
+  semantics: {
+    playerEyeHeightMetres: 1.54,
+    playerHeightMetres: 1.7,
+    playerRadiusMetres: 0.2,
+    editCubeEdgeVoxels: 10,
+    editCubeVolumeVoxels: 1_000,
+    editSphereRadiusVoxels: 6.203_505,
+    editSphereVolumeVoxels: 1_021,
+  },
+  snapshotFields: SNAPSHOT_FIELD_NAMES,
+};
+
 describe("typed engine client", () => {
   it("validates the contract and centralizes camera convergence", async () => {
     const initial = snapshot({ yaw: 0.1, pitch: 0.2 });
     const settled = snapshot({ yaw: 0.4, pitch: -0.1 });
-    const page = pageReturning([
-      {
-        version: AUTOMATION_CONTRACT_VERSION,
-        snapshotVersion: SNAPSHOT_SCHEMA_VERSION,
-        frameSampleWidth: FRAME_SAMPLE_WIDTH,
-        gpuSampleWidth: GPU_SAMPLE_WIDTH,
-        snapshotFields: SNAPSHOT_FIELD_NAMES,
-      },
-      initial,
-      undefined,
-      settled,
-    ]);
+    const page = pageReturning([contract, initial, undefined, settled]);
     const engine = new EngineClient(page);
 
     const result = await engine.setCameraLook(0.4, -0.1);
@@ -52,16 +58,7 @@ describe("typed engine client", () => {
 
   it("reports named convergence failures", async () => {
     const latest = snapshot({ pendingJobs: 3 });
-    const page = pageReturning([
-      {
-        version: AUTOMATION_CONTRACT_VERSION,
-        snapshotVersion: SNAPSHOT_SCHEMA_VERSION,
-        frameSampleWidth: FRAME_SAMPLE_WIDTH,
-        gpuSampleWidth: GPU_SAMPLE_WIDTH,
-        snapshotFields: SNAPSHOT_FIELD_NAMES,
-      },
-      latest,
-    ]);
+    const page = pageReturning([contract, latest]);
     const engine = new EngineClient(page);
 
     await expect(
@@ -74,13 +71,6 @@ describe("typed engine client", () => {
   });
 
   it("enters spectator mode through the typed Rust boundary", async () => {
-    const contract = {
-      version: AUTOMATION_CONTRACT_VERSION,
-      snapshotVersion: SNAPSHOT_SCHEMA_VERSION,
-      frameSampleWidth: FRAME_SAMPLE_WIDTH,
-      gpuSampleWidth: GPU_SAMPLE_WIDTH,
-      snapshotFields: SNAPSHOT_FIELD_NAMES,
-    };
     const page = pageReturning([
       contract,
       true,

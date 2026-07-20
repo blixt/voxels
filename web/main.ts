@@ -192,19 +192,34 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
       ]);
       worker.postMessage({ kind: "input", buffer }, [buffer]);
     },
-    submitEdit: (x, y, z, materialId) =>
+    submitPlace: (x, y, z, materialId, shape) =>
       new Promise<boolean>((resolve, reject) => {
         const requestId = nextSnapshotRequest;
         nextSnapshotRequest += 1;
         editResolvers.set(requestId, { resolve, reject });
-        worker.postMessage({ kind: "submitEdit", requestId, x, y, z, materialId });
+        worker.postMessage({
+          kind: "submitPlace",
+          requestId,
+          x,
+          y,
+          z,
+          materialId,
+          shapeId: shape === "sphere" ? 0 : 1,
+        });
       }),
-    submitDig: (x, y, z) =>
+    submitDig: (x, y, z, shape) =>
       new Promise<boolean>((resolve, reject) => {
         const requestId = nextSnapshotRequest;
         nextSnapshotRequest += 1;
         editResolvers.set(requestId, { resolve, reject });
-        worker.postMessage({ kind: "submitDig", requestId, x, y, z });
+        worker.postMessage({
+          kind: "submitDig",
+          requestId,
+          x,
+          y,
+          z,
+          shapeId: shape === "sphere" ? 0 : 1,
+        });
       }),
     inventory: () =>
       new Promise<number[]>((resolve, reject) => {
@@ -276,7 +291,7 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     } else if (event.data.kind === "spectator") {
       spectatorResolvers.get(event.data.requestId)?.resolve(event.data.active);
       spectatorResolvers.delete(event.data.requestId);
-    } else if (event.data.kind === "submitEdit") {
+    } else if (event.data.kind === "submitPlace") {
       editResolvers.get(event.data.requestId)?.resolve(event.data.submitted);
       editResolvers.delete(event.data.requestId);
     } else if (event.data.kind === "submitDig") {

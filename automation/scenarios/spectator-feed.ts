@@ -139,8 +139,8 @@ async function runSpectatorFeed(context: ScenarioContext, arguments_: readonly s
   const bodyPosition = position(settled);
   const spectating = await viewport.engine.setSpectator(true);
   if (
-    (await viewport.engine.submitEdit(0, 0, 0, 1)) ||
-    (await viewport.engine.submitDig(0, 0, 0))
+    (await viewport.engine.submitPlace(0, 0, 0, 1, "cube")) ||
+    (await viewport.engine.submitDig(0, 0, 0, "sphere"))
   ) {
     throw new Error("spectator feed retained a world-edit path");
   }

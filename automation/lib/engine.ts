@@ -7,6 +7,7 @@ import {
   SNAPSHOT_SCHEMA_VERSION,
   assertAutomationContract,
   assertSnapshotSchema,
+  type AutomationEditShape,
   type EngineAutomationContract,
   type SnapshotField,
 } from "../../web/automation.ts";
@@ -18,6 +19,7 @@ export {
   SNAPSHOT_SCHEMA_VERSION,
   assertSnapshotSchema,
   type EngineAutomationContract,
+  type AutomationEditShape,
   type SnapshotField,
 };
 
@@ -166,18 +168,25 @@ export class EngineClient {
     );
   }
 
-  async submitEdit(x: number, y: number, z: number, materialId: number): Promise<boolean> {
+  async submitPlace(
+    x: number,
+    y: number,
+    z: number,
+    materialId: number,
+    shape: AutomationEditShape,
+  ): Promise<boolean> {
     return this.#page.evaluate(
-      ([voxelX, voxelY, voxelZ, material]) =>
-        globalThis.__VOXELS__!.submitEdit(voxelX, voxelY, voxelZ, material),
-      [x, y, z, materialId] as const,
+      ([voxelX, voxelY, voxelZ, material, editShape]) =>
+        globalThis.__VOXELS__!.submitPlace(voxelX, voxelY, voxelZ, material, editShape),
+      [x, y, z, materialId, shape] as const,
     );
   }
 
-  async submitDig(x: number, y: number, z: number): Promise<boolean> {
+  async submitDig(x: number, y: number, z: number, shape: AutomationEditShape): Promise<boolean> {
     return this.#page.evaluate(
-      ([voxelX, voxelY, voxelZ]) => globalThis.__VOXELS__!.submitDig(voxelX, voxelY, voxelZ),
-      [x, y, z] as const,
+      ([voxelX, voxelY, voxelZ, editShape]) =>
+        globalThis.__VOXELS__!.submitDig(voxelX, voxelY, voxelZ, editShape),
+      [x, y, z, shape] as const,
     );
   }
 

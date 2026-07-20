@@ -123,19 +123,25 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
         values: Array.from(handle?.snapshot() ?? []),
       });
       break;
-    case "submitEdit":
+    case "submitPlace":
       scope.postMessage({
-        kind: "submitEdit",
+        kind: "submitPlace",
         requestId: message.requestId,
         submitted:
-          handle?.submit_edit(message.x, message.y, message.z, message.materialId) ?? false,
+          handle?.submit_place(
+            message.x,
+            message.y,
+            message.z,
+            message.materialId,
+            message.shapeId,
+          ) ?? false,
       });
       break;
     case "submitDig":
       scope.postMessage({
         kind: "submitDig",
         requestId: message.requestId,
-        submitted: handle?.submit_dig(message.x, message.y, message.z) ?? false,
+        submitted: handle?.submit_dig(message.x, message.y, message.z, message.shapeId) ?? false,
       });
       break;
     case "inventory":

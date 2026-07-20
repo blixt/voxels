@@ -28,6 +28,7 @@ describe("engine automation contract", () => {
         SNAPSHOT_SCHEMA_VERSION,
         FRAME_SAMPLE_WIDTH,
         GPU_SAMPLE_WIDTH,
+        "1.54,1.7,0.2,10,1000,6.203505,1021",
         SNAPSHOT_FIELD_NAMES.join(","),
       ].join("\n"),
     );
@@ -40,6 +41,15 @@ describe("engine automation contract", () => {
       snapshotVersion: SNAPSHOT_SCHEMA_VERSION,
       frameSampleWidth: FRAME_SAMPLE_WIDTH,
       gpuSampleWidth: GPU_SAMPLE_WIDTH,
+      semantics: {
+        playerEyeHeightMetres: 1.54,
+        playerHeightMetres: 1.7,
+        playerRadiusMetres: 0.2,
+        editCubeEdgeVoxels: 10,
+        editCubeVolumeVoxels: 1_000,
+        editSphereRadiusVoxels: 6.203_505,
+        editSphereVolumeVoxels: 1_021,
+      },
       snapshotFields: SNAPSHOT_FIELD_NAMES,
     };
     expect(() => assertAutomationContract({ ...valid, version: valid.version + 1 })).toThrow();

@@ -7,6 +7,7 @@ import {
 } from "../lib/browser.ts";
 import {
   type EngineClient,
+  type EngineAutomationContract,
   SNAPSHOT_SCHEMA_VERSION,
   snapshotValue,
   type SurfaceEditState,
@@ -23,16 +24,14 @@ import {
   startWorldService,
 } from "../lib/world.ts";
 
-const RESULT_SCHEMA_VERSION = 4;
-const FIXTURE_VERSION = 6;
+const RESULT_SCHEMA_VERSION = 5;
+const FIXTURE_VERSION = 7;
 const EXPECTED_PLAYERS = 6;
 const EXPECTED_REMOTE_PLAYERS = EXPECTED_PLAYERS - 1;
 const BUILDER_COUNT = EXPECTED_REMOTE_PLAYERS;
 const EXPECTED_PARTS_PER_AVATAR = 13;
 const FAR_TIER_MINIMUM_METRES = 105;
 const OBSERVER_WALK_METRES = 120;
-const PLAYER_EYE_HEIGHT_METRES = 1.62;
-const BUILDER_DIG_SPACING_VOXELS = 8;
 const VIEWPORT = { width: 960, height: 540 };
 // Six unthrottled WebGPU clients intentionally contend on one local GPU and worker pool. This gate
 // catches a severe stall while leaving the exact p95 visible; the far observer renders materially
@@ -61,6 +60,7 @@ interface MultiplayerPlayer {
   readonly link: ShapedLink;
   readonly initial: readonly number[];
   readonly identity: PlayerIdentity;
+  readonly contract: EngineAutomationContract;
   readonly startupMs: number;
 }
 
@@ -232,6 +232,27 @@ async function waitForEarnedInventory(
   throw new Error(`${label} did not receive earned inventory: ${JSON.stringify(latest)}`);
 }
 
+async function waitForInventoryUnits(
+  engine: EngineClient,
+  label: string,
+  previousRevision: number,
+  minimumUnits: number,
+  timeoutMs = 30_000,
+): Promise<readonly number[]> {
+  const inventory = await waitForEarnedInventory(engine, label, previousRevision, timeoutMs);
+  if (Math.max(...inventory.slice(2)) >= minimumUnits) return inventory;
+  const deadline = performance.now() + timeoutMs;
+  let latest = inventory;
+  while (performance.now() < deadline) {
+    latest = await engine.inventory();
+    if (Math.max(...latest.slice(2)) >= minimumUnits) return latest;
+    await engine.wait(50);
+  }
+  throw new Error(
+    `${label} did not earn ${minimumUnits} units of one material: ${JSON.stringify(latest)}`,
+  );
+}
+
 async function waitForSurfaceEditConvergence(
   engine: EngineClient,
   stride: number,
@@ -362,6 +383,10 @@ function pathBytes(stats: LinkStats, endpoint: string) {
   };
 }
 
+function protocolControlErrors(stats: LinkStats): Readonly<Record<string, number>> {
+  return stats.messages["downstream:error"]?.controlErrors ?? {};
+}
+
 function playerSummary(
   player: MultiplayerPlayer,
   current: readonly number[],
@@ -383,6 +408,7 @@ function playerSummary(
     frameTiming,
     world: pathBytes(network, WORLD_PATH),
     presence: pathBytes(network, PRESENCE_PATH),
+    protocolControlErrors: protocolControlErrors(network),
     messages: network.messages,
   };
 }
@@ -401,6 +427,11 @@ interface MultiplayerReport {
   readonly players: readonly MultiplayerReportPlayer[];
   readonly observer: { readonly distanceFromBuildersMetres: number };
   readonly collaborativeTower: { readonly status: string; readonly reason: string };
+  readonly errors: {
+    readonly browser: number;
+    readonly protocolControlFrames: number;
+    readonly protocolControlReasons: Readonly<Record<string, number>>;
+  };
 }
 
 function markdownReport(result: MultiplayerReport): string {
@@ -408,7 +439,13 @@ function markdownReport(result: MultiplayerReport): string {
     const p95 = player.frameTiming.p95Ms;
     return `| ${player.name} | ${player.remoteAvatars} | ${player.distanceFromSpawnMetres.toFixed(1)} | ${p95 === null ? "n/a" : p95.toFixed(1)} | ${player.world.downstream.toLocaleString("en-US")} | ${player.presence.upstream.toLocaleString("en-US")} | ${player.presence.downstream.toLocaleString("en-US")} |`;
   });
-  return `# Six-user multiplayer browser smoke\n\nGenerated ${result.generatedAt}. Six isolated BrowserContexts used independent browser identities and shaped 40 ms RTT links to one native world service.\n\n| Player | Remote avatars | Travel (m) | Frame p95 (ms) | World down (bytes) | Presence up (bytes) | Presence down (bytes) |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\nAll five builders remained visible to the observer after the observer moved ${result.observer.distanceFromBuildersMetres.toFixed(1)} m away, inside the configured far presence tier.\n\nCollaborative tower gate: **${result.collaborativeTower.status}**. ${result.collaborativeTower.reason}\n`;
+  const controlReasons =
+    Object.keys(result.errors.protocolControlReasons).length === 0
+      ? "none"
+      : Object.entries(result.errors.protocolControlReasons)
+          .map(([reason, count]) => `${reason}: ${count}`)
+          .join("; ");
+  return `# Six-user multiplayer browser smoke\n\nGenerated ${result.generatedAt}. Six isolated BrowserContexts used independent browser identities and shaped 40 ms RTT links to one native world service.\n\n| Player | Remote avatars | Travel (m) | Frame p95 (ms) | World down (bytes) | Presence up (bytes) | Presence down (bytes) |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\nAll five builders remained visible to the observer after the observer moved ${result.observer.distanceFromBuildersMetres.toFixed(1)} m away, inside the configured far presence tier.\n\nCollaborative tower gate: **${result.collaborativeTower.status}**. ${result.collaborativeTower.reason}\n\nProtocol control errors: ${result.errors.protocolControlFrames} frames (${controlReasons}). These are server backpressure/rejection responses observed on the real wire, separate from browser/runtime failures.\n`;
 }
 
 async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
@@ -466,6 +503,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
         });
         const page = viewport.page;
         const { engine } = viewport;
+        const contract = await engine.ready();
         const initial = await waitForEngine(engine, name);
         const identity = await engine.playerSession();
         return {
@@ -475,6 +513,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
           link: required(links, index, `${name} shaped link`),
           initial,
           identity,
+          contract,
           startupMs: performance.now() - navigationStarted,
         };
       }),
@@ -494,6 +533,14 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
 
     const builders = players.slice(1);
     const observer = required(players, 0, "observer");
+    const semantics = observer.contract.semantics;
+    if (
+      players.some(
+        (player) => JSON.stringify(player.contract.semantics) !== JSON.stringify(semantics),
+      )
+    ) {
+      throw new Error("browser clients negotiated different gameplay semantics");
+    }
     // Keep the builders together while moving beyond the protected 6.4 m starting area. The later
     // dig and tower remain ordinary reach-checked player actions at this editable worksite.
     const builderWalks = builders.map(({ engine, page }) => walkDistance(page, engine, 10));
@@ -587,14 +634,21 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     }
 
     const inventoryBeforeDig = await Promise.all(builders.map(({ engine }) => engine.inventory()));
+    const sphereSeparationVoxels = Math.ceil(semantics.editSphereRadiusVoxels) * 2;
     const digSubmissions = await Promise.all(
-      builders.map((builder, index) => {
+      builders.flatMap((builder, index) => {
         const position = required(builderAfterMovement, index, "builder dig position");
-        const lateralOffset = (index - Math.floor(BUILDER_COUNT / 2)) * BUILDER_DIG_SPACING_VOXELS;
-        return builder.engine.submitDig(
-          Math.floor(snapshotValue(position, "cameraX") * 10) + lateralOffset,
-          Math.round((snapshotValue(position, "cameraY") - PLAYER_EYE_HEIGHT_METRES) * 10 - 1),
-          Math.floor(snapshotValue(position, "cameraZ") * 10),
+        const lateralOffset = (index - Math.floor(BUILDER_COUNT / 2)) * sphereSeparationVoxels;
+        const feetYMetres = snapshotValue(position, "cameraY") - semantics.playerEyeHeightMetres;
+        const digY = Math.floor(feetYMetres * 10) - Math.ceil(semantics.editSphereRadiusVoxels);
+        return [-1, 1].map((row) =>
+          builder.engine.submitDig(
+            Math.floor(snapshotValue(position, "cameraX") * 10) + lateralOffset,
+            digY,
+            Math.floor(snapshotValue(position, "cameraZ") * 10) +
+              row * Math.ceil(semantics.editSphereRadiusVoxels),
+            "sphere",
+          ),
         );
       }),
     );
@@ -603,7 +657,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     }
     const earnedInventories = await Promise.all(
       builders.map((builder, index) =>
-        waitForEarnedInventory(
+        waitForInventoryUnits(
           builder.engine,
           `${builder.name} dig`,
           required(
@@ -611,32 +665,26 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
             0,
             "inventory revision",
           ),
+          semantics.editCubeVolumeVoxels,
         ),
       ),
     );
 
-    // A 4.5 m column with a 1.7 m crossbar remains inside every builder's authoritative reach
-    // envelope while producing a legible far-LOD silhouette from ordinary mined material.
+    // Five adjacent one-metre cubes exercise the exact current placement brush. Every builder
+    // contributes one inventory-backed layer; no test-only single-voxel placement exists.
     const builderOrigin = required(builderAfterMovement, 0, "tower builder origin");
-    const towerX = Math.floor(snapshotValue(builderOrigin, "cameraX") * 10);
+    const towerX = Math.floor(snapshotValue(builderOrigin, "cameraX") * 10) + 20;
     const towerZ = Math.floor(snapshotValue(builderOrigin, "cameraZ") * 10);
     const towerBaseY = Math.round(
-      (snapshotValue(builderOrigin, "cameraY") - PLAYER_EYE_HEIGHT_METRES) * 10,
+      (snapshotValue(builderOrigin, "cameraY") - semantics.playerEyeHeightMetres) * 10 +
+        semantics.editCubeEdgeVoxels / 2,
     );
-    const towerHeightVoxels = 45;
-    const towerTopY = towerBaseY + towerHeightVoxels - 1;
-    const towerVoxels = Array.from({ length: towerHeightVoxels }, (_unused, offset) => ({
+    const towerCentres = Array.from({ length: BUILDER_COUNT }, (_unused, layer) => ({
       x: towerX,
-      y: towerBaseY + offset,
+      y: towerBaseY + layer * semantics.editCubeEdgeVoxels,
       z: towerZ,
     }));
-    for (let offset = -8; offset <= 8; offset += 1) {
-      if (offset === 0) continue;
-      towerVoxels.push({ x: towerX + offset, y: towerTopY, z: towerZ });
-      towerVoxels.push({ x: towerX, y: towerTopY, z: towerZ + offset });
-    }
-    const towerVoxelCount = towerVoxels.length;
-    const placementsPerBuilder = Math.ceil(towerVoxelCount / BUILDER_COUNT);
+    const towerVoxelCount = towerCentres.length * semantics.editCubeVolumeVoxels;
     const firstEarnedInventory = required(earnedInventories, 0, "earned inventory");
     const towerMaterialId = Array.from(
       { length: firstEarnedInventory.length - 2 },
@@ -645,7 +693,8 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
       .filter((materialId) =>
         earnedInventories.every(
           (earnedInventory) =>
-            required(earnedInventory, materialId + 1, "material inventory") >= placementsPerBuilder,
+            required(earnedInventory, materialId + 1, "material inventory") >=
+            semantics.editCubeVolumeVoxels,
         ),
       )
       .sort(
@@ -676,9 +725,22 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
         ),
       ),
     );
+    // Clear the exact placement stencils first so an incidental generated branch cannot turn a
+    // multiplayer/protocol benchmark into a tree-distribution lottery.
+    const clearanceBuilder = required(builders, 0, "tower clearance builder");
+    for (const centre of towerCentres) {
+      if (!(await clearanceBuilder.engine.submitDig(centre.x, centre.y, centre.z, "cube"))) {
+        throw new Error("tower clearance was backpressured or rejected");
+      }
+      await clearanceBuilder.engine.wait(100);
+    }
+    await observer.engine.wait(1_000);
+    await Promise.all(players.map(waitForSettledWorld));
+    const beforePlacement = await observer.engine.snapshot();
+    const editsBeforePlacement = snapshotValue(beforePlacement, "edits");
     await aimAt(observer.engine, {
       x: towerX / 10,
-      y: (towerBaseY + towerHeightVoxels / 2) / 10,
+      y: (towerBaseY + (towerCentres.length - 1) * semantics.editCubeEdgeVoxels * 0.5) / 10,
       z: towerZ / 10,
     });
     const beforeTowerPath = scenario.artifacts.resolve("observer-far-tower-before.png");
@@ -690,11 +752,10 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     const beforeTowerSurfaceState = await observer.engine.surfaceEditState(16, towerX, towerZ);
     const towerStarted = performance.now();
     const submissions = await Promise.all(
-      builders.flatMap((builder, builderIndex) =>
-        towerVoxels
-          .filter((_voxel, index) => index % BUILDER_COUNT === builderIndex)
-          .map((voxel) => builder.engine.submitEdit(voxel.x, voxel.y, voxel.z, towerMaterialId)),
-      ),
+      builders.map((builder, index) => {
+        const centre = required(towerCentres, index, "tower layer");
+        return builder.engine.submitPlace(centre.x, centre.y, centre.z, towerMaterialId, "cube");
+      }),
     );
     if (submissions.some((submitted) => !submitted)) {
       throw new Error("one or more production edit submissions were backpressured or rejected");
@@ -704,7 +765,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
         waitFor(
           player.engine,
           `${player.name} authoritative tower edits`,
-          (next) => snapshotValue(next, "edits") === dugVoxelCount + towerVoxelCount,
+          (next) => snapshotValue(next, "edits") === editsBeforePlacement + towerVoxelCount,
           30_000,
         ),
       ),
@@ -757,11 +818,11 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     });
     const collaborativeTower = {
       status: "passed",
-      reason: `Five builders dug their own material, placed ${towerVoxelCount} authoritative voxels, and every client applied them; the observer accepted the revised stride-16 surface ${distanceFromBuildersMetres.toFixed(1)} m away in ${towerConvergenceMs.toFixed(1)} ms.`,
+      reason: `Five builders dug their own material, placed five current one-cubic-metre brushes (${towerVoxelCount} authoritative voxels), and every client applied them; the observer accepted the revised stride-16 surface ${distanceFromBuildersMetres.toFixed(1)} m away in ${towerConvergenceMs.toFixed(1)} ms.`,
       voxelCount: towerVoxelCount,
       materialId: towerMaterialId,
       dugVoxelCount,
-      heightMetres: towerHeightVoxels / 10,
+      heightMetres: towerCentres.length * (semantics.editCubeEdgeVoxels / 10),
       builders: BUILDER_COUNT,
       distanceMetres: rounded(distanceFromBuildersMetres, 3),
       convergenceMs: rounded(towerConvergenceMs),
@@ -774,11 +835,26 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
         snapshotValue(afterTowerSnapshot, "viewportFingerprintHigh24") !==
           beforeViewportFingerprint[1],
       allClientsAppliedEdits: convergedClients.every(
-        (next) => snapshotValue(next, "edits") === dugVoxelCount + towerVoxelCount,
+        (next) => snapshotValue(next, "edits") === editsBeforePlacement + towerVoxelCount,
       ),
       visualEvidence,
       traffic: towerTraffic,
     };
+    browser.assertHealthy();
+    const playerReports = players.map((player, index) => ({
+      ...playerSummary(
+        player,
+        required(steadySnapshots, index, "steady snapshot"),
+        required(frameTimings, index, "frame timing"),
+      ),
+      startupMs: rounded(player.startupMs),
+    }));
+    const protocolControlReasons: Record<string, number> = {};
+    for (const player of playerReports) {
+      for (const [reason, count] of Object.entries(player.protocolControlErrors)) {
+        protocolControlReasons[reason] = (protocolControlReasons[reason] ?? 0) + count;
+      }
+    }
     const result = {
       schemaVersion: RESULT_SCHEMA_VERSION,
       generatedAt: new Date().toISOString(),
@@ -800,6 +876,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
         localMultiClientFrameP95LimitMs: LOCAL_MULTI_CLIENT_FRAME_P95_LIMIT_MS,
         localMultiClientFrameMaxLimitMs: LOCAL_MULTI_CLIENT_FRAME_MAX_LIMIT_MS,
         storage: "independent ephemeral BrowserContext localStorage",
+        gameplaySemantics: semantics,
       },
       initialRosterMs: rounded(initialRosterMs),
       observer: {
@@ -810,16 +887,16 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
       builders: {
         travelMetres: builderTravelMetres.map((distance) => rounded(distance, 3)),
       },
-      players: players.map((player, index) => ({
-        ...playerSummary(
-          player,
-          required(steadySnapshots, index, "steady snapshot"),
-          required(frameTimings, index, "frame timing"),
-        ),
-        startupMs: rounded(player.startupMs),
-      })),
+      players: playerReports,
       collaborativeTower,
-      errors: 0,
+      errors: {
+        browser: browser.failures.length,
+        protocolControlFrames: Object.values(protocolControlReasons).reduce(
+          (total, count) => total + count,
+          0,
+        ),
+        protocolControlReasons,
+      },
     };
     const report = markdownReport(result);
     await Promise.all([

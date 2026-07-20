@@ -27,14 +27,15 @@ export class EngineHandle {
     startup_progress(): Uint32Array;
     /**
      * Deterministic browser-harness seam for the exact gameplay dig action. The server, not
-     * this API, expands the hit voxel into the one-cubic-metre sphere and validates reach.
+     * this API, expands the hit voxel into the selected one-cubic-metre brush and validates
+     * reach.
      */
-    submit_dig(x: number, y: number, z: number): boolean;
+    submit_dig(x: number, y: number, z: number, shape_id: number): boolean;
     /**
      * Deterministic browser-harness seam that submits through the same server-authoritative
      * path as pointer input. It does not mutate local world state optimistically.
      */
-    submit_edit(x: number, y: number, z: number, material_id: number): boolean;
+    submit_place(x: number, y: number, z: number, material_id: number, shape_id: number): boolean;
     /**
      * Returns `[tile_x, tile_z, required_server_revision, accepted_server_revision,
      * resident, dirty, fingerprint_low32, fingerprint_high32, quad_count, activation_mask]`
@@ -72,8 +73,8 @@ export interface InitOutput {
     readonly enginehandle_snapshot: (a: number) => [number, number];
     readonly enginehandle_start_profile: (a: number, b: number) => number;
     readonly enginehandle_startup_progress: (a: number) => [number, number];
-    readonly enginehandle_submit_dig: (a: number, b: number, c: number, d: number) => number;
-    readonly enginehandle_submit_edit: (a: number, b: number, c: number, d: number, e: number) => number;
+    readonly enginehandle_submit_dig: (a: number, b: number, c: number, d: number, e: number) => number;
+    readonly enginehandle_submit_place: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
     readonly enginehandle_surface_edit_state: (a: number, b: number, c: number, d: number) => [number, number];
     readonly enginehandle_take_mission_control_copy: (a: number) => [number, number];
     readonly enginehandle_ui_open: (a: number) => number;

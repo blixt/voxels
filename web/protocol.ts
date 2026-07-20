@@ -62,14 +62,15 @@ export type ToWorker =
   | { kind: "spectator"; requestId: number; active: boolean }
   | { kind: "snapshot"; requestId: number }
   | {
-      kind: "submitEdit";
+      kind: "submitPlace";
       requestId: number;
       x: number;
       y: number;
       z: number;
       materialId: number;
+      shapeId: number;
     }
-  | { kind: "submitDig"; requestId: number; x: number; y: number; z: number }
+  | { kind: "submitDig"; requestId: number; x: number; y: number; z: number; shapeId: number }
   | { kind: "inventory"; requestId: number }
   | { kind: "surfaceEditState"; requestId: number; stride: number; x: number; z: number }
   | { kind: "destroy" };
@@ -89,7 +90,7 @@ export type FromWorker =
   | { kind: "automationContract"; requestId: number; value: string }
   | { kind: "snapshot"; requestId: number; values: number[] }
   | { kind: "spectator"; requestId: number; active: boolean }
-  | { kind: "submitEdit"; requestId: number; submitted: boolean }
+  | { kind: "submitPlace"; requestId: number; submitted: boolean }
   | { kind: "submitDig"; requestId: number; submitted: boolean }
   | { kind: "inventory"; requestId: number; values: number[] }
   | { kind: "surfaceEditState"; requestId: number; values: number[] };
