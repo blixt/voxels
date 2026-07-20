@@ -14,9 +14,7 @@ describe("World Lab clipboard", () => {
     );
 
     expect(copied).toBe(true);
-    expect(writes).toEqual([
-      "VOXELS / WORLD LAB\nEye position (m): X 1.000, Y 2.000, Z 3.000",
-    ]);
+    expect(writes).toEqual(["VOXELS / WORLD LAB\nEye position (m): X 1.000, Y 2.000, Z 3.000"]);
   });
 
   it("reports unavailable and rejected clipboard writes", async () => {
