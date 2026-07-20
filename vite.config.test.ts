@@ -92,6 +92,8 @@ listen = "127.0.0.1:9777"
   it("matches watched inputs without confusing sibling path prefixes", () => {
     expect(pathBelongsTo("/repo/world/src/lib.rs", "/repo/world/src")).toBe(true);
     expect(pathBelongsTo("/repo/world/src-old/lib.rs", "/repo/world/src")).toBe(false);
+    expect(isNativeWorldServiceInput("core/src/lib.rs")).toBe(true);
+    expect(isNativeWorldServiceInput("core/Cargo.toml")).toBe(true);
     expect(isNativeWorldServiceInput("world/src/source.rs")).toBe(true);
     expect(isNativeWorldServiceInput("world-terrain-diffusion/fixtures/pipeline-data.json")).toBe(
       true,

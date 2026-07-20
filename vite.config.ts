@@ -65,6 +65,7 @@ export function browserWasmProfile(
 const NATIVE_WORLD_SERVICE_SOURCE_DIRS = [
   "world-service/src",
   "world-terrain-diffusion/src",
+  "core/src",
   "world/src",
 ].map((source) => path.resolve(source));
 const NATIVE_WORLD_SERVICE_INPUT_FILES = [
@@ -74,6 +75,7 @@ const NATIVE_WORLD_SERVICE_INPUT_FILES = [
   "world-service/Cargo.toml",
   "world-terrain-diffusion/Cargo.toml",
   "world-terrain-diffusion/fixtures/pipeline-data.json",
+  "core/Cargo.toml",
   "world/Cargo.toml",
   WORLD_SERVICE_CONFIG_SOURCE,
 ].map((source) => path.resolve(source));
