@@ -2,7 +2,14 @@ use crate::{
     CHUNK_EDGE, Chunk, ChunkCoord, FEATURE_MAX_RADIUS_VOXELS, Generator, Material, MeshingHalo,
     SkylineFeature, SurfaceTileCoord,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+
+const EDIT_CHUNK_MAGIC: &[u8; 4] = b"VXED";
+const EDIT_CHUNK_VERSION: u16 = 1;
+const EDIT_CHUNK_HEADER_BYTES: usize = 60;
+const EDIT_CHUNK_ENTRY_BYTES: usize = 4;
+const EDIT_CHUNK_HASH_DOMAIN: &[u8] = b"voxels-edit-chunk-v1\0";
 
 /// Integer address of one canonical 10 cm voxel.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -40,27 +47,114 @@ impl VoxelCoord {
     }
 }
 
-/// Sparse, deterministic overlay on top of procedural terrain. Only values that differ from the
-/// generator are retained, making the edit set suitable for an append journal and compact SQLite
-/// snapshots without copying untouched chunks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EditChunkCodecError {
+    Truncated,
+    InvalidMagic,
+    UnsupportedVersion(u16),
+    InvalidHeader(&'static str),
+    CoordinateMismatch,
+    UnknownMaterial(u16),
+    CorruptHash,
+}
+
+impl fmt::Display for EditChunkCodecError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Truncated => formatter.write_str("truncated VXED edit chunk"),
+            Self::InvalidMagic => formatter.write_str("invalid VXED edit chunk magic"),
+            Self::UnsupportedVersion(version) => {
+                write!(formatter, "unsupported VXED edit chunk version {version}")
+            }
+            Self::InvalidHeader(reason) => write!(formatter, "invalid VXED header: {reason}"),
+            Self::CoordinateMismatch => {
+                formatter.write_str("VXED edit chunk coordinate does not match its key")
+            }
+            Self::UnknownMaterial(id) => write!(formatter, "unknown VXED material id {id}"),
+            Self::CorruptHash => formatter.write_str("VXED edit chunk content hash mismatch"),
+        }
+    }
+}
+
+impl std::error::Error for EditChunkCodecError {}
+
+/// Sparse, deterministic overlay on top of procedural terrain. Overrides are owned once by their
+/// canonical chunk and packed behind sorted 15-bit local indices. Spatial queries reconstruct
+/// world coordinates from those compact owners instead of retaining duplicate global, chunk, and
+/// column B-trees for every edited voxel.
 #[derive(Clone, Debug, Default)]
 pub struct EditMap {
-    overrides: BTreeMap<VoxelCoord, Material>,
-    chunk_overrides: BTreeMap<(i32, i32, i32), BTreeMap<[usize; 3], Material>>,
-    column_overrides: BTreeMap<(i32, i32), BTreeMap<i32, Material>>,
+    // X/Z/Y ordering keeps every vertical chunk column contiguous while still supporting bounded
+    // horizontal range scans. Exact chunk lookups remain logarithmic.
+    chunks: BTreeMap<(i32, i32, i32), EditedChunk>,
+    override_count: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct EditedChunk {
+    // Sorted with Y contiguous, then Z, then X so all overrides in one surface column form a
+    // directly searchable slice.
+    overrides: Vec<(u16, Material)>,
+}
+
+impl EditedChunk {
+    fn get(&self, local: u16) -> Option<Material> {
+        self.overrides
+            .binary_search_by_key(&local, |&(index, _)| index)
+            .ok()
+            .map(|index| self.overrides[index].1)
+    }
+
+    fn replace(&mut self, local: u16, material: Option<Material>) -> bool {
+        match self
+            .overrides
+            .binary_search_by_key(&local, |&(index, _)| index)
+        {
+            Ok(index) => {
+                let Some(material) = material else {
+                    self.overrides.remove(index);
+                    return true;
+                };
+                if self.overrides[index].1 == material {
+                    return false;
+                }
+                self.overrides[index].1 = material;
+                false
+            }
+            Err(index) => {
+                let Some(material) = material else {
+                    return false;
+                };
+                self.overrides.insert(index, (local, material));
+                true
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.overrides.is_empty()
+    }
+
+    fn column(&self, x: usize, z: usize) -> &[(u16, Material)] {
+        let start = local_index([x, 0, z]);
+        let end = local_index([x, CHUNK_EDGE - 1, z]);
+        let first = self.overrides.partition_point(|&(index, _)| index < start);
+        let after = self.overrides.partition_point(|&(index, _)| index <= end);
+        &self.overrides[first..after]
+    }
 }
 
 impl EditMap {
-    /// Known logical B-tree payload. This deliberately excludes allocator/node overhead while
-    /// counting the authoritative row and both lookup-index rows retained for every edit.
+    /// Known logical payload. This deliberately excludes allocator/B-tree node overhead while
+    /// counting allocated compact chunk entries.
     pub fn logical_bytes(&self) -> usize {
         size_of::<Self>()
-            + self.overrides.len() * size_of::<(VoxelCoord, Material)>()
-            + self.chunk_overrides.len()
-                * size_of::<((i32, i32, i32), BTreeMap<[usize; 3], Material>)>()
-            + self.overrides.len() * size_of::<([usize; 3], Material)>()
-            + self.column_overrides.len() * size_of::<((i32, i32), BTreeMap<i32, Material>)>()
-            + self.overrides.len() * size_of::<(i32, Material)>()
+            + self.chunks.len() * size_of::<((i32, i32, i32), EditedChunk)>()
+            + self
+                .chunks
+                .values()
+                .map(|chunk| chunk.overrides.capacity() * size_of::<(u16, Material)>())
+                .sum::<usize>()
     }
     pub fn sample(&self, generator: Generator, coord: VoxelCoord) -> Material {
         self.resolve_generated(coord, generator.sample(coord.x, coord.y, coord.z))
@@ -74,7 +168,7 @@ impl EditMap {
     /// transport-safe form: callers can supply a value from a chunk, halo, or bounded sample block
     /// without giving the edit journal a concrete generator.
     pub fn resolve_generated(&self, coord: VoxelCoord, generated: Material) -> Material {
-        self.overrides.get(&coord).copied().unwrap_or(generated)
+        self.override_at(coord).unwrap_or(generated)
     }
 
     /// Stores only values that differ from an already obtained authoritative source value.
@@ -102,23 +196,52 @@ impl EditMap {
         self.replace_override(coord, material);
     }
 
+    /// Applies a validated mutation batch by merging each touched chunk once. This keeps metre-scale
+    /// tools linear in the existing and changed entries instead of shifting a sorted vector for
+    /// every individual voxel.
+    pub fn replace_durable_overrides(&mut self, changes: &[(VoxelCoord, Option<Material>)]) {
+        let mut chunks = BTreeMap::<(i32, i32, i32), Vec<(u16, Option<Material>)>>::new();
+        for &(coord, material) in changes {
+            chunks
+                .entry(chunk_key(coord.chunk()))
+                .or_default()
+                .push((local_index(coord.local()), material));
+        }
+        for (key, mut changes) in chunks {
+            changes.sort_unstable_by_key(|&(index, _)| index);
+            debug_assert!(
+                changes.windows(2).all(|pair| pair[0].0 != pair[1].0),
+                "durable edit batch contains duplicate voxel coordinates"
+            );
+            let previous = self.chunks.remove(&key).unwrap_or_default();
+            self.override_count -= previous.overrides.len();
+            let merged = merge_chunk_overrides(previous.overrides, &changes);
+            self.override_count += merged.len();
+            if !merged.is_empty() {
+                self.chunks.insert(key, EditedChunk { overrides: merged });
+            }
+        }
+    }
+
     pub fn override_at(&self, coord: VoxelCoord) -> Option<Material> {
-        self.overrides.get(&coord).copied()
+        self.chunks
+            .get(&chunk_key(coord.chunk()))
+            .and_then(|chunk| chunk.get(local_index(coord.local())))
     }
 
     pub fn len(&self) -> usize {
-        self.overrides.len()
+        self.override_count
     }
 
     pub fn is_empty(&self) -> bool {
-        self.overrides.is_empty()
+        self.override_count == 0
     }
 
     /// Copies only edits that can affect the requested chunk cores or their one-voxel meshing
     /// shells. Native generation workers use this bounded snapshot so unrelated regions never make
     /// a hot chunk request clone the global edit journal.
     pub fn snapshot_for_chunks(&self, coords: &[ChunkCoord]) -> Self {
-        let mut snapshot = Self::default();
+        let mut changes = Vec::new();
         for coord in coords {
             let requested_origin = coord.world_origin();
             for dz in -1..=1 {
@@ -133,12 +256,13 @@ impl EditMap {
                         let Some(z) = coord.z.checked_add(dz) else {
                             continue;
                         };
-                        let key = (x, y, z);
-                        let Some(overrides) = self.chunk_overrides.get(&key) else {
+                        let key = (x, z, y);
+                        let Some(chunk) = self.chunks.get(&key) else {
                             continue;
                         };
                         let origin = ChunkCoord::new(x, y, z).world_origin();
-                        for (&local, &material) in overrides {
+                        for &(index, material) in &chunk.overrides {
+                            let local = local_coord(index);
                             let voxel = VoxelCoord::new(
                                 origin[0] + local[0] as i32,
                                 origin[1] + local[1] as i32,
@@ -151,20 +275,24 @@ impl EditMap {
                                 && voxel.z >= requested_origin[2].saturating_sub(1)
                                 && voxel.z <= requested_origin[2].saturating_add(CHUNK_EDGE as i32)
                             {
-                                snapshot.insert_override(voxel, material);
+                                changes.push((voxel, Some(material)));
                             }
                         }
                     }
                 }
             }
         }
+        changes.sort_unstable_by_key(|&(coord, _)| coord);
+        changes.dedup_by_key(|change| change.0);
+        let mut snapshot = Self::default();
+        snapshot.replace_durable_overrides(&changes);
         snapshot
     }
 
     /// Copies the bounded horizontal edit neighborhood needed by surface tiles, including their
     /// sampling shell and analytic skyline-feature radius.
     pub fn snapshot_for_surface_tiles(&self, coords: &[SurfaceTileCoord]) -> Self {
-        let mut snapshot = Self::default();
+        let mut changes = Vec::new();
         for coord in coords {
             let [origin_x, origin_z] = coord.voxel_origin();
             let span = i64::from(coord.voxel_span());
@@ -173,37 +301,225 @@ impl EditMap {
             let min_z = i64::from(origin_z) - margin;
             let max_x = i64::from(origin_x) + span + margin;
             let max_z = i64::from(origin_z) + span + margin;
-            let range_min_x = min_x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-            for (&(x, z), column) in self.column_overrides.range((range_min_x, i32::MIN)..) {
-                if i64::from(x) >= max_x {
-                    break;
-                }
-                if i64::from(z) < min_z || i64::from(z) >= max_z {
-                    continue;
-                }
-                for (&y, &material) in column {
-                    snapshot.insert_override(VoxelCoord::new(x, y, z), material);
-                }
+            for (voxel, material) in self.overrides_in_horizontal_bounds(min_x, min_z, max_x, max_z)
+            {
+                changes.push((voxel, Some(material)));
             }
         }
+        changes.sort_unstable_by_key(|&(coord, _)| coord);
+        changes.dedup_by_key(|change| change.0);
+        let mut snapshot = Self::default();
+        snapshot.replace_durable_overrides(&changes);
         snapshot
+    }
+
+    fn overrides_in_horizontal_bounds(
+        &self,
+        min_x: i64,
+        min_z: i64,
+        max_x: i64,
+        max_z: i64,
+    ) -> impl Iterator<Item = (VoxelCoord, Material)> + '_ {
+        let min_chunk_x = min_x
+            .div_euclid(CHUNK_EDGE as i64)
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        let max_chunk_x = (max_x - 1)
+            .div_euclid(CHUNK_EDGE as i64)
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        self.chunks
+            .range((min_chunk_x, i32::MIN, i32::MIN)..=(max_chunk_x, i32::MAX, i32::MAX))
+            .flat_map(move |(&(chunk_x, chunk_z, chunk_y), chunk)| {
+                let origin = ChunkCoord::new(chunk_x, chunk_y, chunk_z).world_origin();
+                chunk
+                    .overrides
+                    .iter()
+                    .copied()
+                    .filter_map(move |(index, material)| {
+                        let local = local_coord(index);
+                        let voxel = VoxelCoord::new(
+                            origin[0] + local[0] as i32,
+                            origin[1] + local[1] as i32,
+                            origin[2] + local[2] as i32,
+                        );
+                        (i64::from(voxel.x) >= min_x
+                            && i64::from(voxel.x) < max_x
+                            && i64::from(voxel.z) >= min_z
+                            && i64::from(voxel.z) < max_z)
+                            .then_some((voxel, material))
+                    })
+            })
+    }
+
+    fn edited_columns_in(&self, bounds: [[i32; 2]; 2]) -> BTreeSet<(i32, i32)> {
+        let [[min_x, min_z], [max_x, max_z]] = bounds;
+        self.overrides_in_horizontal_bounds(
+            i64::from(min_x),
+            i64::from(min_z),
+            i64::from(max_x),
+            i64::from(max_z),
+        )
+        .map(|(coord, _)| (coord.x, coord.z))
+        .collect()
+    }
+
+    /// Returns all durable overrides in one canonical chunk in deterministic local-index order.
+    pub fn chunk_overrides(&self, coord: ChunkCoord) -> Vec<(VoxelCoord, Material)> {
+        let Some(chunk) = self.chunks.get(&chunk_key(coord)) else {
+            return Vec::new();
+        };
+        let origin = coord.world_origin();
+        chunk
+            .overrides
+            .iter()
+            .map(|&(index, material)| {
+                let local = local_coord(index);
+                (
+                    VoxelCoord::new(
+                        origin[0] + local[0] as i32,
+                        origin[1] + local[1] as i32,
+                        origin[2] + local[2] as i32,
+                    ),
+                    material,
+                )
+            })
+            .collect()
+    }
+
+    /// Returns the edited canonical chunks in deterministic X/Z/Y order.
+    pub fn edited_chunks(&self) -> Vec<ChunkCoord> {
+        self.chunks
+            .keys()
+            .map(|&(x, z, y)| ChunkCoord::new(x, y, z))
+            .collect()
+    }
+
+    /// Encodes one independently checksummed durable edit chunk. Pristine chunks have no record.
+    pub fn encode_chunk_overrides(&self, coord: ChunkCoord) -> Option<Vec<u8>> {
+        let chunk = self.chunks.get(&chunk_key(coord))?;
+        let count = u32::try_from(chunk.overrides.len()).ok()?;
+        let mut entries = Vec::with_capacity(chunk.overrides.len() * EDIT_CHUNK_ENTRY_BYTES);
+        for &(index, material) in &chunk.overrides {
+            entries.extend_from_slice(&index.to_le_bytes());
+            entries.extend_from_slice(&material.id().to_le_bytes());
+        }
+        let hash = edit_chunk_hash(coord, &entries);
+        let mut encoded = Vec::with_capacity(EDIT_CHUNK_HEADER_BYTES + entries.len());
+        encoded.extend_from_slice(EDIT_CHUNK_MAGIC);
+        encoded.extend_from_slice(&EDIT_CHUNK_VERSION.to_le_bytes());
+        encoded.extend_from_slice(&(EDIT_CHUNK_HEADER_BYTES as u16).to_le_bytes());
+        encoded.extend_from_slice(&Material::SCHEMA_VERSION.to_le_bytes());
+        encoded.extend_from_slice(&0_u16.to_le_bytes());
+        encoded.extend_from_slice(&count.to_le_bytes());
+        encoded.extend_from_slice(&coord.x.to_le_bytes());
+        encoded.extend_from_slice(&coord.y.to_le_bytes());
+        encoded.extend_from_slice(&coord.z.to_le_bytes());
+        encoded.extend_from_slice(hash.as_bytes());
+        debug_assert_eq!(encoded.len(), EDIT_CHUNK_HEADER_BYTES);
+        encoded.extend_from_slice(&entries);
+        Some(encoded)
+    }
+
+    /// Hydrates one durable edit chunk after strict coordinate, ordering, schema, and hash checks.
+    pub fn decode_chunk_overrides(
+        &mut self,
+        coord: ChunkCoord,
+        bytes: &[u8],
+    ) -> Result<(), EditChunkCodecError> {
+        if bytes.len() < 8 {
+            return Err(EditChunkCodecError::Truncated);
+        }
+        if &bytes[..4] != EDIT_CHUNK_MAGIC {
+            return Err(EditChunkCodecError::InvalidMagic);
+        }
+        let version = read_edit_u16(bytes, 4)?;
+        if version != EDIT_CHUNK_VERSION {
+            return Err(EditChunkCodecError::UnsupportedVersion(version));
+        }
+        if bytes.len() < EDIT_CHUNK_HEADER_BYTES {
+            return Err(EditChunkCodecError::Truncated);
+        }
+        if usize::from(read_edit_u16(bytes, 6)?) != EDIT_CHUNK_HEADER_BYTES {
+            return Err(EditChunkCodecError::InvalidHeader(
+                "unexpected header length",
+            ));
+        }
+        if read_edit_u16(bytes, 8)? != Material::SCHEMA_VERSION {
+            return Err(EditChunkCodecError::InvalidHeader(
+                "material schema mismatch",
+            ));
+        }
+        if read_edit_u16(bytes, 10)? != 0 {
+            return Err(EditChunkCodecError::InvalidHeader(
+                "reserved field is nonzero",
+            ));
+        }
+        let count = usize::try_from(read_edit_u32(bytes, 12)?)
+            .map_err(|_| EditChunkCodecError::InvalidHeader("entry count overflow"))?;
+        if count == 0 || count > crate::CHUNK_VOLUME {
+            return Err(EditChunkCodecError::InvalidHeader(
+                "entry count is out of bounds",
+            ));
+        }
+        let encoded_coord = ChunkCoord::new(
+            read_edit_i32(bytes, 16)?,
+            read_edit_i32(bytes, 20)?,
+            read_edit_i32(bytes, 24)?,
+        );
+        if encoded_coord != coord {
+            return Err(EditChunkCodecError::CoordinateMismatch);
+        }
+        let expected_len = EDIT_CHUNK_HEADER_BYTES
+            .checked_add(
+                count
+                    .checked_mul(EDIT_CHUNK_ENTRY_BYTES)
+                    .ok_or(EditChunkCodecError::InvalidHeader("entry length overflow"))?,
+            )
+            .ok_or(EditChunkCodecError::InvalidHeader(
+                "payload length overflow",
+            ))?;
+        if bytes.len() < expected_len {
+            return Err(EditChunkCodecError::Truncated);
+        }
+        if bytes.len() != expected_len {
+            return Err(EditChunkCodecError::InvalidHeader("trailing bytes"));
+        }
+        let entries = &bytes[EDIT_CHUNK_HEADER_BYTES..];
+        if edit_chunk_hash(coord, entries).as_bytes() != &bytes[28..60] {
+            return Err(EditChunkCodecError::CorruptHash);
+        }
+        if self.chunks.contains_key(&chunk_key(coord)) {
+            return Err(EditChunkCodecError::InvalidHeader(
+                "duplicate chunk during hydration",
+            ));
+        }
+        let mut decoded = Vec::with_capacity(count);
+        let mut previous = None;
+        for entry in entries.chunks_exact(EDIT_CHUNK_ENTRY_BYTES) {
+            let index = u16::from_le_bytes([entry[0], entry[1]]);
+            if usize::from(index) >= crate::CHUNK_VOLUME
+                || previous.is_some_and(|previous| previous >= index)
+            {
+                return Err(EditChunkCodecError::InvalidHeader(
+                    "local indices are not strictly ordered",
+                ));
+            }
+            let material_id = u16::from_le_bytes([entry[2], entry[3]]);
+            let material = Material::from_id(material_id)
+                .ok_or(EditChunkCodecError::UnknownMaterial(material_id))?;
+            decoded.push((index, material));
+            previous = Some(index);
+        }
+        self.override_count += decoded.len();
+        self.chunks
+            .insert(chunk_key(coord), EditedChunk { overrides: decoded });
+        Ok(())
     }
 
     /// Returns edited X/Z columns inside half-open bounds in deterministic order. Source-neutral
     /// far-LOD composers use this sparse index to sample only columns that could need promotion to
     /// a coarse cell instead of scanning the full tile at canonical resolution.
     pub(crate) fn edited_column_coordinates_in(&self, bounds: [[i32; 2]; 2]) -> Vec<(i32, i32)> {
-        let [[min_x, min_z], [max_x, max_z]] = bounds;
-        let mut coordinates = Vec::new();
-        for (&(x, z), _) in self.column_overrides.range((min_x, i32::MIN)..) {
-            if x >= max_x {
-                break;
-            }
-            if (min_z..max_z).contains(&z) {
-                coordinates.push((x, z));
-            }
-        }
-        coordinates
+        self.edited_columns_in(bounds).into_iter().collect()
     }
 
     /// Conservative far-LOD additions within half-open X/Z bounds. Excavations remain represented
@@ -214,15 +530,8 @@ impl EditMap {
         generator: Generator,
         bounds: [[i32; 2]; 2],
     ) -> Vec<(i32, i32, i32, Material)> {
-        let [[min_x, min_z], [max_x, max_z]] = bounds;
         let mut columns = Vec::new();
-        for (&(x, z), _) in self.column_overrides.range((min_x, i32::MIN)..) {
-            if x >= max_x {
-                break;
-            }
-            if z < min_z || z >= max_z {
-                continue;
-            }
+        for (x, z) in self.edited_columns_in(bounds) {
             let (height, material) = self.surface_sample(generator, x, z);
             if material.is_collidable()
                 && self.override_at(VoxelCoord::new(x, height, z)) == Some(material)
@@ -235,11 +544,11 @@ impl EditMap {
 
     pub fn apply_to_chunk(&self, chunk: &mut Chunk) {
         let coord = chunk.coord();
-        let key = (coord.x, coord.y, coord.z);
-        let Some(overrides) = self.chunk_overrides.get(&key) else {
+        let Some(overrides) = self.chunks.get(&chunk_key(coord)) else {
             return;
         };
-        for (&[x, y, z], &material) in overrides {
+        for &(index, material) in &overrides.overrides {
+            let [x, y, z] = local_coord(index);
             chunk.set(x, y, z, material);
         }
     }
@@ -249,13 +558,15 @@ impl EditMap {
     /// full pristine chunk cache or issuing a point source request later.
     pub fn source_values_for_overrides(&self, chunk: &Chunk) -> Vec<(VoxelCoord, Material)> {
         let coord = chunk.coord();
-        let Some(overrides) = self.chunk_overrides.get(&(coord.x, coord.y, coord.z)) else {
+        let Some(overrides) = self.chunks.get(&chunk_key(coord)) else {
             return Vec::new();
         };
         let origin = coord.world_origin();
         overrides
-            .keys()
-            .map(|local| {
+            .overrides
+            .iter()
+            .map(|&(index, _)| {
+                let local = local_coord(index);
                 (
                     VoxelCoord::new(
                         origin[0] + local[0] as i32,
@@ -287,7 +598,7 @@ impl EditMap {
         feature: SkylineFeature,
         mut generated_at: impl FnMut(VoxelCoord) -> Material,
     ) -> bool {
-        if self.overrides.is_empty() {
+        if self.is_empty() {
             return true;
         }
         let [min, max] = feature.bounds();
@@ -296,12 +607,12 @@ impl EditMap {
         for chunk_z in chunk_min.z..=chunk_max.z {
             for chunk_y in chunk_min.y..=chunk_max.y {
                 for chunk_x in chunk_min.x..=chunk_max.x {
-                    let Some(overrides) = self.chunk_overrides.get(&(chunk_x, chunk_y, chunk_z))
-                    else {
+                    let Some(overrides) = self.chunks.get(&(chunk_x, chunk_z, chunk_y)) else {
                         continue;
                     };
                     let origin = ChunkCoord::new(chunk_x, chunk_y, chunk_z).world_origin();
-                    for (&[local_x, local_y, local_z], &override_material) in overrides {
+                    for &(index, override_material) in &overrides.overrides {
+                        let [local_x, local_y, local_z] = local_coord(index);
                         let coord = VoxelCoord::new(
                             origin[0] + local_x as i32,
                             origin[1] + local_y as i32,
@@ -355,14 +666,30 @@ impl EditMap {
         generated_min_y: i32,
         mut generated_at: impl FnMut(VoxelCoord) -> Material,
     ) -> (i32, Material) {
-        let Some(column) = self.column_overrides.get(&(x, z)) else {
+        let chunk_x = x.div_euclid(CHUNK_EDGE as i32);
+        let chunk_z = z.div_euclid(CHUNK_EDGE as i32);
+        let local_x = x.rem_euclid(CHUNK_EDGE as i32) as usize;
+        let local_z = z.rem_euclid(CHUNK_EDGE as i32) as usize;
+        let mut saw_override = false;
+        let mut highest_override = None;
+        for (&(_, _, chunk_y), chunk) in self
+            .chunks
+            .range((chunk_x, chunk_z, i32::MIN)..=(chunk_x, chunk_z, i32::MAX))
+        {
+            let origin_y = chunk_y * CHUNK_EDGE as i32;
+            for &(index, material) in chunk.column(local_x, local_z) {
+                let entry_y = local_coord(index)[1];
+                saw_override = true;
+                if material.is_collidable() {
+                    let y = origin_y + entry_y as i32;
+                    highest_override =
+                        Some(highest_override.map_or(y, |highest: i32| highest.max(y)));
+                }
+            }
+        }
+        if !saw_override {
             return generated_surface;
-        };
-        let highest_override = column
-            .iter()
-            .rev()
-            .find(|(_, material)| material.is_collidable())
-            .map(|(&y, _)| y);
+        }
         let mut y =
             highest_override.map_or(generated_surface.0, |value| value.max(generated_surface.0));
         loop {
@@ -378,46 +705,32 @@ impl EditMap {
     }
 
     fn replace_override(&mut self, coord: VoxelCoord, material: Option<Material>) {
-        if self.overrides.get(&coord).copied() == material {
+        let previous = self.override_at(coord);
+        if previous == material {
             return;
         }
         let chunk = coord.chunk();
-        let chunk_key = (chunk.x, chunk.y, chunk.z);
-        let column_key = (coord.x, coord.z);
+        let key = chunk_key(chunk);
+        let local = local_index(coord.local());
         if let Some(material) = material {
-            self.overrides.insert(coord, material);
-            self.chunk_overrides
-                .entry(chunk_key)
+            self.chunks
+                .entry(key)
                 .or_default()
-                .insert(coord.local(), material);
-            self.column_overrides
-                .entry(column_key)
-                .or_default()
-                .insert(coord.y, material);
+                .replace(local, Some(material));
+            if previous.is_none() {
+                self.override_count += 1;
+            }
             return;
         }
 
-        self.overrides.remove(&coord);
-        let remove_chunk = self
-            .chunk_overrides
-            .get_mut(&chunk_key)
-            .is_some_and(|chunk| {
-                chunk.remove(&coord.local());
-                chunk.is_empty()
-            });
+        let remove_chunk = self.chunks.get_mut(&key).is_some_and(|chunk| {
+            chunk.replace(local, None);
+            chunk.is_empty()
+        });
         if remove_chunk {
-            self.chunk_overrides.remove(&chunk_key);
+            self.chunks.remove(&key);
         }
-        let remove_column = self
-            .column_overrides
-            .get_mut(&column_key)
-            .is_some_and(|column| {
-                column.remove(&coord.y);
-                column.is_empty()
-            });
-        if remove_column {
-            self.column_overrides.remove(&column_key);
-        }
+        self.override_count -= 1;
     }
 
     /// Chunks whose meshes can change after this voxel changes. The mesher samples a full one-voxel
@@ -464,6 +777,98 @@ impl EditMap {
     }
 }
 
+const fn chunk_key(coord: ChunkCoord) -> (i32, i32, i32) {
+    (coord.x, coord.z, coord.y)
+}
+
+fn local_index([x, y, z]: [usize; 3]) -> u16 {
+    debug_assert!(x < CHUNK_EDGE && y < CHUNK_EDGE && z < CHUNK_EDGE);
+    u16::try_from(y + z * CHUNK_EDGE + x * CHUNK_EDGE * CHUNK_EDGE)
+        .expect("chunk-local index fits u16")
+}
+
+fn local_coord(index: u16) -> [usize; 3] {
+    let index = usize::from(index);
+    let x = index / (CHUNK_EDGE * CHUNK_EDGE);
+    let within_column_plane = index % (CHUNK_EDGE * CHUNK_EDGE);
+    let z = within_column_plane / CHUNK_EDGE;
+    let y = within_column_plane % CHUNK_EDGE;
+    [x, y, z]
+}
+
+fn merge_chunk_overrides(
+    existing: Vec<(u16, Material)>,
+    changes: &[(u16, Option<Material>)],
+) -> Vec<(u16, Material)> {
+    let mut merged = Vec::with_capacity(existing.len() + changes.len());
+    let mut old = existing.into_iter().peekable();
+    let mut new = changes.iter().copied().peekable();
+    while old.peek().is_some() || new.peek().is_some() {
+        match (old.peek().copied(), new.peek().copied()) {
+            (Some((old_index, old_material)), Some((new_index, new_material))) => {
+                if old_index < new_index {
+                    merged.push((old_index, old_material));
+                    old.next();
+                } else if new_index < old_index {
+                    if let Some(material) = new_material {
+                        merged.push((new_index, material));
+                    }
+                    new.next();
+                } else {
+                    if let Some(material) = new_material {
+                        merged.push((new_index, material));
+                    }
+                    old.next();
+                    new.next();
+                }
+            }
+            (Some(value), None) => {
+                merged.push(value);
+                old.next();
+            }
+            (None, Some((index, material))) => {
+                if let Some(material) = material {
+                    merged.push((index, material));
+                }
+                new.next();
+            }
+            (None, None) => break,
+        }
+    }
+    merged
+}
+
+fn edit_chunk_hash(coord: ChunkCoord, entries: &[u8]) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(EDIT_CHUNK_HASH_DOMAIN);
+    hasher.update(&coord.x.to_le_bytes());
+    hasher.update(&coord.y.to_le_bytes());
+    hasher.update(&coord.z.to_le_bytes());
+    hasher.update(entries);
+    hasher.finalize()
+}
+
+fn read_edit_u16(bytes: &[u8], offset: usize) -> Result<u16, EditChunkCodecError> {
+    let value = bytes
+        .get(offset..offset + 2)
+        .ok_or(EditChunkCodecError::Truncated)?;
+    Ok(u16::from_le_bytes([value[0], value[1]]))
+}
+
+fn read_edit_u32(bytes: &[u8], offset: usize) -> Result<u32, EditChunkCodecError> {
+    let value = bytes
+        .get(offset..offset + 4)
+        .ok_or(EditChunkCodecError::Truncated)?;
+    Ok(u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
+}
+
+fn read_edit_i32(bytes: &[u8], offset: usize) -> Result<i32, EditChunkCodecError> {
+    let value = bytes
+        .get(offset..offset + 4)
+        .ok_or(EditChunkCodecError::Truncated)?;
+    Ok(i32::from_le_bytes([value[0], value[1], value[2], value[3]]))
+}
+
 /// Applies an authoritative mutation batch to already resident canonical chunks and mesh halos.
 ///
 /// A commit already contains final voxel values, so patching the bounded resident cache is both
@@ -496,6 +901,60 @@ pub fn apply_resident_mutations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_edit_chunk_round_trips_compactly_and_binds_its_coordinate() {
+        let coord = ChunkCoord::new(-3, 2, 7);
+        let origin = coord.world_origin();
+        let overrides = [
+            (
+                VoxelCoord::new(origin[0], origin[1], origin[2]),
+                Material::Air,
+            ),
+            (
+                VoxelCoord::new(origin[0] + 9, origin[1] + 4, origin[2] + 2),
+                Material::Clay,
+            ),
+            (
+                VoxelCoord::new(origin[0] + 31, origin[1] + 31, origin[2] + 31),
+                Material::GlowCrystal,
+            ),
+        ];
+        let mut edits = EditMap::default();
+        for (voxel, material) in overrides {
+            edits.insert_override(voxel, material);
+        }
+
+        let encoded = edits
+            .encode_chunk_overrides(coord)
+            .expect("edited chunk encoding");
+        assert_eq!(
+            encoded.len(),
+            EDIT_CHUNK_HEADER_BYTES + overrides.len() * EDIT_CHUNK_ENTRY_BYTES
+        );
+        let mut decoded = EditMap::default();
+        decoded
+            .decode_chunk_overrides(coord, &encoded)
+            .expect("valid edit chunk");
+        for (voxel, material) in overrides {
+            assert_eq!(decoded.override_at(voxel), Some(material));
+        }
+        assert_eq!(
+            EditMap::default()
+                .decode_chunk_overrides(ChunkCoord::new(-3, 2, 8), &encoded)
+                .expect_err("coordinate substitution must fail"),
+            EditChunkCodecError::CoordinateMismatch
+        );
+
+        let mut corrupt = encoded;
+        *corrupt.last_mut().expect("encoded entry") ^= 1;
+        assert_eq!(
+            EditMap::default()
+                .decode_chunk_overrides(coord, &corrupt)
+                .expect_err("corruption must fail"),
+            EditChunkCodecError::CorruptHash
+        );
+    }
 
     #[test]
     fn reverting_to_generated_value_removes_override() {
@@ -697,7 +1156,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_and_column_indices_follow_override_replacement() {
+    fn compact_chunk_index_follows_override_replacement() {
         let generator = Generator::new(19);
         let coord = VoxelCoord::new(-33, 65, 31);
         let mut edits = EditMap::default();
@@ -718,8 +1177,7 @@ mod tests {
             generator.sample(coord.x, coord.y, coord.z),
         );
         assert!(edits.is_empty());
-        assert!(edits.chunk_overrides.is_empty());
-        assert!(edits.column_overrides.is_empty());
+        assert!(edits.chunks.is_empty());
     }
 
     #[test]
@@ -730,8 +1188,7 @@ mod tests {
         assert_eq!(edits.override_at(coord), Some(Material::Clay));
         edits.replace_durable_override(coord, None);
         assert_eq!(edits.override_at(coord), None);
-        assert!(edits.chunk_overrides.is_empty());
-        assert!(edits.column_overrides.is_empty());
+        assert!(edits.chunks.is_empty());
     }
 
     #[test]

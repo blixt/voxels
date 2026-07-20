@@ -289,11 +289,12 @@ impl EditAuthority {
     pub(crate) fn install_protected_spawn(&self, spawn: ProtectedSpawn) {
         {
             let mut state = self.lock();
-            for mutation in &spawn.overrides {
-                state
-                    .edits
-                    .insert_override(mutation.coord, mutation.material);
-            }
+            let changes = spawn
+                .overrides
+                .iter()
+                .map(|mutation| (mutation.coord, Some(mutation.material)))
+                .collect::<Vec<_>>();
+            state.edits.replace_durable_overrides(&changes);
         }
         *self.lock_protected_spawn() = Some(spawn);
     }
@@ -600,11 +601,12 @@ impl EditAuthority {
             .iter()
             .map(|mutation| state.edits.override_at(mutation.coord))
             .collect::<Vec<_>>();
-        for (mutation, durable_override) in mutations.iter().zip(&durable_overrides) {
-            state
-                .edits
-                .replace_durable_override(mutation.coord, *durable_override);
-        }
+        let durable_changes = mutations
+            .iter()
+            .zip(&durable_overrides)
+            .map(|(mutation, durable_override)| (mutation.coord, *durable_override))
+            .collect::<Vec<_>>();
+        state.edits.replace_durable_overrides(&durable_changes);
         let (affected_chunks, affected_surface_tiles) = if changed {
             affected.extend_surfaces(source, &state.edits, &mutations);
             match affected.finish(&mutations) {
@@ -627,6 +629,7 @@ impl EditAuthority {
             affected_surface_tiles: affected_surface_tiles.clone(),
             editor_inventory: Some(inventory),
         };
+        let durable_chunks = encode_durable_chunks(&state.edits, &mutations);
 
         if let Err(error) = persist_action(
             &mut state.connection,
@@ -636,7 +639,7 @@ impl EditAuthority {
             player.inventory,
             inventory,
             &mutations,
-            &durable_overrides,
+            &durable_chunks,
             &affected_chunks,
             &affected_surface_tiles,
         ) {
@@ -710,11 +713,11 @@ fn initialize_schema(
                     source_hash BLOB NOT NULL CHECK(length(source_hash) = 32),
                     revision INTEGER NOT NULL CHECK(revision >= 1)
                  );
-                 CREATE TABLE voxel_edits (
+                 CREATE TABLE edit_chunks (
                     x INTEGER NOT NULL,
                     y INTEGER NOT NULL,
                     z INTEGER NOT NULL,
-                    material INTEGER NOT NULL,
+                    payload BLOB NOT NULL,
                     PRIMARY KEY (x, y, z)
                  ) WITHOUT ROWID;
                  CREATE TABLE chunk_revisions (
@@ -815,21 +818,24 @@ fn load_edits(connection: &Connection) -> Result<(EditMap, u64), EditAuthorityEr
         .map_err(sql_error("read edit revision"))?;
     let revision = positive_u64(revision, "edit revision")?;
     let mut statement = connection
-        .prepare("SELECT x, y, z, material FROM voxel_edits ORDER BY x, y, z")
+        .prepare("SELECT x,y,z,payload FROM edit_chunks ORDER BY x,z,y")
         .map_err(sql_error("prepare edit load"))?;
     let rows = statement
         .query_map([], |row| {
             Ok((
-                VoxelCoord::new(row.get(0)?, row.get(1)?, row.get(2)?),
-                row.get::<_, u16>(3)?,
+                ChunkCoord::new(row.get(0)?, row.get(1)?, row.get(2)?),
+                row.get::<_, Vec<u8>>(3)?,
             ))
         })
         .map_err(sql_error("load edits"))?;
     let mut edits = EditMap::default();
     for row in rows {
-        let (coord, material_id) = row.map_err(sql_error("decode edit row"))?;
-        let material = decode_material(material_id, "durable edit")?;
-        edits.insert_override(coord, material);
+        let (coord, payload) = row.map_err(sql_error("decode edit chunk row"))?;
+        edits
+            .decode_chunk_overrides(coord, &payload)
+            .map_err(|error| {
+                EditAuthorityError(format!("decode durable edit chunk {coord:?}: {error}"))
+            })?;
     }
     Ok((edits, revision))
 }
@@ -1219,9 +1225,25 @@ fn restore_overrides(
     mutations: &[VoxelMutation],
     previous_overrides: &[Option<Material>],
 ) {
-    for (mutation, previous) in mutations.iter().zip(previous_overrides) {
-        edits.replace_durable_override(mutation.coord, *previous);
-    }
+    let changes = mutations
+        .iter()
+        .zip(previous_overrides)
+        .map(|(mutation, previous)| (mutation.coord, *previous))
+        .collect::<Vec<_>>();
+    edits.replace_durable_overrides(&changes);
+}
+
+fn encode_durable_chunks(
+    edits: &EditMap,
+    mutations: &[VoxelMutation],
+) -> Vec<(ChunkCoord, Option<Vec<u8>>)> {
+    mutations
+        .iter()
+        .map(|mutation| mutation.coord.chunk())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|coord| (coord, edits.encode_chunk_overrides(coord)))
+        .collect()
 }
 
 #[allow(
@@ -1236,7 +1258,7 @@ fn persist_action(
     previous_inventory: MaterialInventory,
     inventory: MaterialInventory,
     mutations: &[VoxelMutation],
-    durable_overrides: &[Option<Material>],
+    durable_chunks: &[(ChunkCoord, Option<Vec<u8>>)],
     affected_chunks: &[ChunkCoord],
     affected_surface_tiles: &[SurfaceTileCoord],
 ) -> Result<(), EditAuthorityError> {
@@ -1248,32 +1270,22 @@ fn persist_action(
         {
             let mut upsert = transaction
                 .prepare_cached(
-                    "INSERT INTO voxel_edits(x,y,z,material) VALUES(?1,?2,?3,?4)
-                         ON CONFLICT(x,y,z) DO UPDATE SET
-                            material=excluded.material",
+                    "INSERT INTO edit_chunks(x,y,z,payload) VALUES(?1,?2,?3,?4)
+                     ON CONFLICT(x,y,z) DO UPDATE SET payload=excluded.payload",
                 )
-                .map_err(sql_error("prepare voxel mutation"))?;
+                .map_err(sql_error("prepare edit chunk"))?;
             let mut delete = transaction
-                .prepare_cached("DELETE FROM voxel_edits WHERE x=?1 AND y=?2 AND z=?3")
-                .map_err(sql_error("prepare pristine voxel mutation"))?;
-            for (mutation, durable_override) in mutations.iter().zip(durable_overrides) {
-                if let Some(material) = durable_override {
+                .prepare_cached("DELETE FROM edit_chunks WHERE x=?1 AND y=?2 AND z=?3")
+                .map_err(sql_error("prepare pristine edit chunk"))?;
+            for (coord, payload) in durable_chunks {
+                if let Some(payload) = payload {
                     upsert
-                        .execute(params![
-                            mutation.coord.x,
-                            mutation.coord.y,
-                            mutation.coord.z,
-                            material.id(),
-                        ])
-                        .map_err(sql_error("persist voxel mutation"))?;
+                        .execute(params![coord.x, coord.y, coord.z, payload])
+                        .map_err(sql_error("persist edit chunk"))?;
                 } else {
                     delete
-                        .execute(params![
-                            mutation.coord.x,
-                            mutation.coord.y,
-                            mutation.coord.z
-                        ])
-                        .map_err(sql_error("delete pristine voxel mutation"))?;
+                        .execute(params![coord.x, coord.y, coord.z])
+                        .map_err(sql_error("delete pristine edit chunk"))?;
                 }
             }
         }
@@ -2204,8 +2216,8 @@ mod tests {
         let rows: i64 = state
             .connection
             .query_row(
-                "SELECT COUNT(*) FROM voxel_edits WHERE x=?1 AND y=?2 AND z=?3",
-                params![coord.x, coord.y, coord.z],
+                "SELECT COUNT(*) FROM edit_chunks WHERE x=?1 AND y=?2 AND z=?3",
+                params![coord.chunk().x, coord.chunk().y, coord.chunk().z],
                 |row| row.get(0),
             )
             .unwrap();
@@ -2229,8 +2241,8 @@ mod tests {
             .lock()
             .connection
             .execute_batch(
-                "CREATE TEMP TRIGGER reject_voxel_edits
-                 BEFORE INSERT ON voxel_edits
+                "CREATE TEMP TRIGGER reject_edit_chunks
+                 BEFORE INSERT ON edit_chunks
                  BEGIN
                    SELECT RAISE(ABORT, 'forced persistence failure');
                  END;",
@@ -2245,7 +2257,7 @@ mod tests {
                 place(1, session, VoxelCoord::new(0, 300, 0), Material::Stone),
             )
             .unwrap_err();
-        assert!(error.to_string().contains("persist voxel mutation"));
+        assert!(error.to_string().contains("persist edit chunk"));
 
         let state = authority.lock();
         assert!(state.edits.is_empty());
@@ -2259,7 +2271,7 @@ mod tests {
         );
         let rows: i64 = state
             .connection
-            .query_row("SELECT COUNT(*) FROM voxel_edits", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM edit_chunks", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 0);
     }
@@ -2880,7 +2892,9 @@ mod tests {
         let error = EditAuthority::from_connection(connection, world_id(6), &source, 4, None)
             .err()
             .unwrap();
-        assert!(error.to_string().contains("schema 6; expected 11"));
+        assert!(error.to_string().contains(&format!(
+            "schema 6; expected {EDIT_DATABASE_SCHEMA_VERSION}"
+        )));
         assert!(
             error
                 .to_string()

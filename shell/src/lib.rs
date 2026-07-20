@@ -1988,9 +1988,11 @@ mod web {
                 .collect::<Vec<_>>();
             {
                 let mut edits = self.edits.borrow_mut();
-                for mutation in &accepted_mutations {
-                    edits.replace_durable_override(mutation.coord, Some(mutation.material));
-                }
+                let changes = accepted_mutations
+                    .iter()
+                    .map(|mutation| (mutation.coord, Some(mutation.material)))
+                    .collect::<Vec<_>>();
+                edits.replace_durable_overrides(&changes);
             }
             voxels_world::apply_resident_mutations(
                 &mut self.chunks.borrow_mut(),

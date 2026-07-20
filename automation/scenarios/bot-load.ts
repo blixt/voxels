@@ -212,7 +212,7 @@ async function databaseContents(databasePath: string): Promise<Record<string, un
       (SELECT revision FROM metadata WHERE singleton = 1) AS revision,
       (SELECT COUNT(*) FROM players) AS players,
       (SELECT COUNT(*) FROM player_inventory) AS inventoryRows,
-      (SELECT COUNT(*) FROM voxel_edits) AS voxelEdits,
+      (SELECT COUNT(*) FROM edit_chunks) AS editedChunks,
       (SELECT COUNT(*) FROM edit_operations) AS editOperations,
       (SELECT COALESCE(SUM(length(outcome)), 0) FROM edit_operations) AS operationOutcomeBytes;
   `;

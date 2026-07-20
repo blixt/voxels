@@ -405,7 +405,7 @@ fn inspect_database(path: &Path) -> Result<DatabaseInspection, Box<dyn std::erro
     let mut tables = BTreeMap::new();
     for table in [
         "metadata",
-        "voxel_edits",
+        "edit_chunks",
         "chunk_revisions",
         "surface_revisions",
         "players",
