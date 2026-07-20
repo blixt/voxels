@@ -36,6 +36,7 @@ interface Options {
   readonly buildProfile: "debug" | "wasm-dev" | "release";
   readonly shaftDigs: number;
   readonly tunnelSteps: number;
+  readonly stepBackDistanceMetres: number;
   readonly performanceSeconds: number;
   readonly viewport: { readonly width: number; readonly height: number };
   readonly deviceScaleFactor: number;
@@ -51,6 +52,13 @@ function parseOptions(arguments_: readonly string[]): Options {
     minimum: 240,
   });
   if (viewport === undefined) throw new Error("viewport default is missing");
+  const tunnelSteps =
+    reader.number("tunnel-steps", {
+      fallback: 48,
+      integer: true,
+      minimum: 4,
+      maximum: 64,
+    }) ?? 48;
   const options: Options = {
     source: reader.choice(
       "source",
@@ -65,13 +73,13 @@ function parseOptions(arguments_: readonly string[]): Options {
         minimum: 2,
         maximum: 12,
       }) ?? 4,
-    tunnelSteps:
-      reader.number("tunnel-steps", {
-        fallback: 32,
-        integer: true,
-        minimum: 4,
-        maximum: 48,
-      }) ?? 32,
+    tunnelSteps,
+    stepBackDistanceMetres:
+      reader.number("step-back-distance", {
+        fallback: Math.min(12, tunnelSteps * 0.25),
+        minimum: 1,
+        maximum: 16,
+      }) ?? Math.min(12, tunnelSteps * 0.25),
     performanceSeconds:
       reader.number("performance-seconds", {
         fallback: 5,
@@ -413,6 +421,14 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
       description: "finished tunnel did not become a sealed interior",
     },
   );
+  if (snapshotValue(enclosed, "targetPresent") !== 1) {
+    throw new Error("the close camera could not prove a solid tunnel terminator");
+  }
+  const terminatorVoxel = [
+    snapshotValue(enclosed, "targetVoxelX"),
+    snapshotValue(enclosed, "targetVoxelY"),
+    snapshotValue(enclosed, "targetVoxelZ"),
+  ] as const;
 
   // Drain edit and movement history before measuring ordinary rendering with the real atmosphere.
   await engine.snapshot();
@@ -431,7 +447,23 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
   );
 
   await engine.setDiagnosticSky([255, 0, 255]);
-  const stepBack = await captureStepBackCoverage(page, engine, 5);
+  const stepBack = await captureStepBackCoverage(page, engine, options.stepBackDistanceMetres);
+  const enclosedView = await engine.waitForSnapshot(
+    (snapshot) => {
+      const required = snapshotValue(snapshot, "enclosedViewRequired");
+      return (
+        required > 0 &&
+        snapshotValue(snapshot, "enclosedViewResident") === required &&
+        snapshotValue(snapshot, "enclosedViewRenderable") === required &&
+        snapshotValue(snapshot, "enclosedViewOwned") === required
+      );
+    },
+    {
+      timeoutMs: 30_000,
+      intervalMs: 25,
+      description: "the distant tunnel terminator did not gain exact-volume ownership",
+    },
+  );
   await context.artifacts.write(
     "Worst tunnel diagnostic coverage",
     "tunnel-worst-coverage.png",
@@ -503,6 +535,13 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
       distanceMetres: stepBack.distanceMetres,
       samples: stepBack.samples,
       worst: stepBack.worst,
+      terminatorVoxel,
+      exactView: {
+        resident: snapshotValue(enclosedView, "enclosedViewResident"),
+        required: snapshotValue(enclosedView, "enclosedViewRequired"),
+        renderable: snapshotValue(enclosedView, "enclosedViewRenderable"),
+        owned: snapshotValue(enclosedView, "enclosedViewOwned"),
+      },
     },
     violations,
   };

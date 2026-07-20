@@ -387,7 +387,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 3;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 36;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 37;
     const FRAME_SAMPLE_WIDTH: u32 = 14;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -405,7 +405,7 @@ mod web {
         "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
         "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
         "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,canonicalSurfaceCellsResident,canonicalSurfaceCellsRequired,",
-        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,schemaVersion,sampleCount,",
+        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,schemaVersion,sampleCount,",
         "droppedSamples",
     );
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
@@ -2758,13 +2758,32 @@ mod web {
                     streaming_velocity,
                     collision_lookahead_seconds,
                 );
-                let (canonical_immediate, collision_immediate, collision_lookahead) = {
+                let enclosed_view_interest = engine.enclosed_view_stream_interest(&camera);
+                let (
+                    canonical_immediate,
+                    collision_immediate,
+                    collision_lookahead,
+                    enclosed_view,
+                    enclosed_view_renderable,
+                ) = {
                     let scheduler = engine.scheduler.borrow();
                     (
                         scheduler.vicinity_readiness(1),
                         scheduler.interest_readiness(&collision_immediate_interest),
                         scheduler.interest_readiness(&collision_lookahead_interest),
+                        scheduler.interest_readiness(&enclosed_view_interest),
+                        enclosed_view_interest
+                            .iter()
+                            .filter(|coord| scheduler.desired_chunk_renderable(**coord))
+                            .count(),
                     )
+                };
+                let enclosed_view_owned = {
+                    let renderer = engine.renderer.borrow();
+                    enclosed_view_interest
+                        .iter()
+                        .filter(|coord| renderer.enclosed_view_chunk_owned(**coord))
+                        .count()
                 };
                 let edit_canonical_coords = engine
                     .edit_trackers
@@ -3074,6 +3093,10 @@ mod web {
                     edit_canonical_coords.len() as f32,
                     edit_canonical_renderable as f32,
                     edit_canonical_owned as f32,
+                    enclosed_view.resident as f32,
+                    enclosed_view.required as f32,
+                    enclosed_view_renderable as f32,
+                    enclosed_view_owned as f32,
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
