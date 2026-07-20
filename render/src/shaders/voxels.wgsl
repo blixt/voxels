@@ -181,9 +181,12 @@ fn conservative_surface_clip(
   face: u32,
   uv: vec2<i32>,
   material: u32,
+  ao: u32,
 ) -> vec4<f32> {
   var clip = frame.view_projection * vec4<f32>(world, 1.0);
-  if (material & 0x80000000u) == 0u {
+  let far_surface = (material & 0x80000000u) != 0u;
+  let canonical_opaque = (ao & 0x00800000u) != 0u;
+  if !far_surface && !canonical_opaque {
     return clip;
   }
   var axis_u = vec3<f32>(1.0, 0.0, 0.0);
@@ -261,7 +264,7 @@ fn vs_main(
     terrain_lighting = mix(vec2<f32>(1.0), resolved_horizon_lighting, horizon_strength);
   }
   var out: VertexOut;
-  out.position = conservative_surface_clip(world, face, uv, material);
+  out.position = conservative_surface_clip(world, face, uv, material, ao);
   out.world = world;
   out.normal = normal;
   out.material = material;

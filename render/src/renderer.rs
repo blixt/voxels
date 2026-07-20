@@ -64,6 +64,7 @@ const FAR_MATERIAL_FLAG: u32 = 1 << 31;
 const SURFACE_LOD_SHIFT: u32 = 27;
 const GPU_FACE_SHIFT: u32 = 16;
 const GPU_FACE_MASK: u32 = 0b111 << GPU_FACE_SHIFT;
+const CANONICAL_RASTER_COVERAGE_FLAG: u32 = 1 << 23;
 const SURFACE_MACRO_NORMAL_FLAG: u32 = 1 << 24;
 // Surface quads retain their 24-byte GPU layout. Sixteen horizon bits occupy otherwise unused
 // material and AO bits: eight cardinal 2-bit angles (own + parent LOD). Keeping the parent profile
@@ -2273,7 +2274,7 @@ impl Renderer {
             return true;
         }
         let origin = coord.world_origin();
-        let convert = |quad: &Quad| GpuQuad {
+        let convert = |quad: &Quad, conservative_coverage: bool| GpuQuad {
             origin: [
                 origin[0] + i32::from(quad.origin[0]),
                 origin[1] + i32::from(quad.origin[1]),
@@ -2281,10 +2282,22 @@ impl Renderer {
             ],
             extent_voxels: quad.extent.map(u16::from),
             material_face: pack_gpu_material_face(u32::from(quad.material), quad.face),
-            ao: u32::from(quad.ao),
+            ao: u32::from(quad.ao)
+                | if conservative_coverage {
+                    CANONICAL_RASTER_COVERAGE_FLAG
+                } else {
+                    0
+                },
         };
-        let opaque_quads: Vec<_> = mesh.opaque.iter().map(convert).collect();
-        let water_quads: Vec<_> = mesh.translucent.iter().map(convert).collect();
+        // Greedy canonical terrain has intentional T-junctions where one long quad meets several
+        // shorter neighbors. Mark only its opaque faces for subpixel conservative coverage; water
+        // remains translucent and must not overlap its own alpha edges.
+        let opaque_quads: Vec<_> = mesh.opaque.iter().map(|quad| convert(quad, true)).collect();
+        let water_quads: Vec<_> = mesh
+            .translucent
+            .iter()
+            .map(|quad| convert(quad, false))
+            .collect();
         let min = glam::Vec3::from_array(origin.map(|value| value as f32 * VOXEL_SIZE_METRES));
         let max = min + glam::Vec3::splat(CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
         let quad_bytes = size_of::<GpuQuad>() as u32;
