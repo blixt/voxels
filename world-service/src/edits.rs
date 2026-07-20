@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 #[cfg(test)]
@@ -25,6 +25,7 @@ use voxels_world::{
 use crate::EDIT_DATABASE_SCHEMA_VERSION;
 
 const INITIAL_REVISION: u64 = 1;
+const EDIT_REGION_EDGE_VOXELS: i32 = 256;
 pub(crate) const RETAINED_OPERATION_OUTCOMES_PER_PLAYER: i64 = 64;
 const OPERATION_OUTCOME_MAGIC: &[u8; 4] = b"VXEO";
 const OPERATION_OUTCOME_VERSION: u8 = 1;
@@ -34,11 +35,85 @@ const DIG_MAX_MUTATIONS: usize = EDIT_MAX_VOLUME_VOXELS;
 
 pub(crate) struct EditAuthority {
     inner: Mutex<EditState>,
+    player_edit_locks: KeyedLocks<PlayerId>,
+    region_edit_locks: KeyedLocks<EditRegion>,
     protected_spawn: Mutex<Option<ProtectedSpawn>>,
     subscribers: Mutex<HashMap<u64, EditSubscriber>>,
     queue_capacity: usize,
     #[cfg(test)]
     test_starting_units_per_material: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct EditRegion {
+    x: i32,
+    z: i32,
+}
+
+struct KeyedLocks<K> {
+    slots: Mutex<BTreeMap<K, Weak<Mutex<()>>>>,
+}
+
+impl<K> Default for KeyedLocks<K> {
+    fn default() -> Self {
+        Self {
+            slots: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl<K: Clone + Ord> KeyedLocks<K> {
+    fn acquire(&self, keys: impl IntoIterator<Item = K>) -> Vec<Arc<Mutex<()>>> {
+        let mut slots = match self.slots.lock() {
+            Ok(slots) => slots,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        slots.retain(|_, slot| slot.strong_count() != 0);
+        keys.into_iter()
+            .map(|key| {
+                if let Some(lock) = slots.get(&key).and_then(Weak::upgrade) {
+                    return lock;
+                }
+                let lock = Arc::new(Mutex::new(()));
+                slots.insert(key, Arc::downgrade(&lock));
+                lock
+            })
+            .collect()
+    }
+}
+
+fn lock_spatial_key(lock: &Arc<Mutex<()>>) -> MutexGuard<'_, ()> {
+    match lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn edit_volume(action: EditAction) -> Result<EditVolume, EditAuthorityError> {
+    let volume = match action {
+        EditAction::Dig { hit, shape } => EditVolume::for_hit(hit, shape),
+        EditAction::Place { coord, shape, .. } => EditVolume::for_hit(coord, shape),
+    };
+    volume.ok_or_else(|| EditAuthorityError("edit volume exceeds world coordinates".to_owned()))
+}
+
+fn edit_regions(action: EditAction) -> Result<BTreeSet<EditRegion>, EditAuthorityError> {
+    let volume = edit_volume(action)?;
+    let minimum = EditRegion {
+        x: volume.min.x.div_euclid(EDIT_REGION_EDGE_VOXELS),
+        z: volume.min.z.div_euclid(EDIT_REGION_EDGE_VOXELS),
+    };
+    let maximum = EditRegion {
+        x: volume.max.x.div_euclid(EDIT_REGION_EDGE_VOXELS),
+        z: volume.max.z.div_euclid(EDIT_REGION_EDGE_VOXELS),
+    };
+    let mut regions = BTreeSet::new();
+    for x in minimum.x..=maximum.x {
+        for z in minimum.z..=maximum.z {
+            regions.insert(EditRegion { x, z });
+        }
+    }
+    Ok(regions)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -255,6 +330,8 @@ impl EditAuthority {
                 chunk_revisions,
                 surface_revisions,
             }),
+            player_edit_locks: KeyedLocks::default(),
+            region_edit_locks: KeyedLocks::default(),
             protected_spawn: Mutex::new(None),
             subscribers: Mutex::new(HashMap::new()),
             queue_capacity: usize::from(queue_capacity),
@@ -359,6 +436,8 @@ impl EditAuthority {
         &self,
         player_id: PlayerId,
     ) -> Result<EditSessionId, EditAuthorityError> {
+        let player_locks = self.player_edit_locks.acquire([player_id]);
+        let _player_guard = lock_spatial_key(&player_locks[0]);
         let edit_session_id = new_edit_session_id();
         let mut state = self.lock();
         let transaction = state
@@ -546,60 +625,71 @@ impl EditAuthority {
                 "the starting area is protected from world edits".to_owned(),
             ));
         }
-        let mut state = self.lock();
-        if let Some(stored) = load_operation(
-            &state.connection,
-            player_id,
-            command.edit_session_id,
-            command.operation_id,
-        )? {
-            if stored.action != command.action {
-                return Err(EditAuthorityError(
-                    "edit operation id was reused with a different command".to_owned(),
-                ));
+        let regions = edit_regions(command.action)?;
+        let player_locks = self.player_edit_locks.acquire([player_id]);
+        let _player_guard = lock_spatial_key(&player_locks[0]);
+        let region_locks = self.region_edit_locks.acquire(regions);
+        let _region_guards = region_locks
+            .iter()
+            .map(|lock| lock_spatial_key(lock))
+            .collect::<Vec<_>>();
+
+        let (player, planning_edits) = {
+            let state = self.lock();
+            if let Some(stored) = load_operation(
+                &state.connection,
+                player_id,
+                command.edit_session_id,
+                command.operation_id,
+            )? {
+                if stored.action != command.action {
+                    return Err(EditAuthorityError(
+                        "edit operation id was reused with a different command".to_owned(),
+                    ));
+                }
+                let player = load_durable_player(&state.connection, player_id)?
+                    .ok_or_else(|| EditAuthorityError("edit player does not exist".to_owned()))?;
+                return Ok(AppliedEdit {
+                    commit: stored.commit(command, editor_connection_id, Some(player.inventory)),
+                    changed: false,
+                });
             }
+
             let player = load_durable_player(&state.connection, player_id)?
                 .ok_or_else(|| EditAuthorityError("edit player does not exist".to_owned()))?;
-            return Ok(AppliedEdit {
-                commit: stored.commit(command, editor_connection_id, Some(player.inventory)),
-                changed: false,
-            });
-        }
-
-        let player = load_durable_player(&state.connection, player_id)?
-            .ok_or_else(|| EditAuthorityError("edit player does not exist".to_owned()))?;
-        if player.current_edit_session != Some(command.edit_session_id) {
-            return Err(EditAuthorityError(EDIT_SESSION_NOT_CURRENT.to_owned()));
-        }
-        if player
-            .max_operation_id
-            .is_some_and(|maximum| command.operation_id <= maximum)
-        {
-            return Err(EditAuthorityError(
-                "edit operation is older than the bounded retry window or arrived out of order"
-                    .to_owned(),
-            ));
-        }
+            if player.current_edit_session != Some(command.edit_session_id) {
+                return Err(EditAuthorityError(EDIT_SESSION_NOT_CURRENT.to_owned()));
+            }
+            if player
+                .max_operation_id
+                .is_some_and(|maximum| command.operation_id <= maximum)
+            {
+                return Err(EditAuthorityError(
+                    "edit operation is older than the bounded retry window or arrived out of order"
+                        .to_owned(),
+                ));
+            }
+            let volume = edit_volume(command.action)?;
+            let planning_edits = state.edits.snapshot_for_voxel_columns(
+                volume.min.x,
+                volume.max.x,
+                volume.min.z,
+                volume.max.z,
+            );
+            (player, planning_edits)
+        };
 
         let PlannedAction {
             mutations,
             durable_overrides,
             inventory,
-        } = plan_action(source, &state.edits, player.inventory, command.action)?;
+        } = plan_action(source, &planning_edits, player.inventory, command.action)?;
         if mutations.len() != durable_overrides.len() {
             return Err(EditAuthorityError(
                 "edit plan has mismatched durable outcomes".to_owned(),
             ));
         }
         let changed = !mutations.is_empty();
-        let revision = if changed {
-            state
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| EditAuthorityError("edit revision overflowed".to_owned()))?
-        } else {
-            state.revision
-        };
         let inventory = if changed {
             MaterialInventory {
                 revision: player.inventory.revision.checked_add(1).ok_or_else(|| {
@@ -611,10 +701,28 @@ impl EditAuthority {
             player.inventory
         };
 
-        let mut affected = if changed {
-            AffectedProducts::from_state(source, &state.edits, &mutations)
+        let (affected_chunks, affected_surface_tiles) = if changed {
+            let mut affected = AffectedProducts::from_state(source, &planning_edits, &mutations);
+            let mut edited_planning = planning_edits;
+            let planning_changes = mutations
+                .iter()
+                .zip(&durable_overrides)
+                .map(|(mutation, durable_override)| (mutation.coord, *durable_override))
+                .collect::<Vec<_>>();
+            edited_planning.replace_durable_overrides(&planning_changes);
+            affected.extend_surfaces(source, &edited_planning, &mutations);
+            affected.finish(&mutations)?
         } else {
-            AffectedProducts::default()
+            (Vec::new(), Vec::new())
+        };
+        let mut state = self.lock();
+        let revision = if changed {
+            state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| EditAuthorityError("edit revision overflowed".to_owned()))?
+        } else {
+            state.revision
         };
         let previous_overrides = mutations
             .iter()
@@ -626,18 +734,6 @@ impl EditAuthority {
             .map(|(mutation, durable_override)| (mutation.coord, *durable_override))
             .collect::<Vec<_>>();
         state.edits.replace_durable_overrides(&durable_changes);
-        let (affected_chunks, affected_surface_tiles) = if changed {
-            affected.extend_surfaces(source, &state.edits, &mutations);
-            match affected.finish(&mutations) {
-                Ok(products) => products,
-                Err(error) => {
-                    restore_overrides(&mut state.edits, &mutations, &previous_overrides);
-                    return Err(error);
-                }
-            }
-        } else {
-            (Vec::new(), Vec::new())
-        };
         let commit = EditCommit {
             operation_id: command.operation_id,
             edit_session_id: command.edit_session_id,
@@ -1930,8 +2026,112 @@ fn sql_error(context: &'static str) -> impl FnOnce(rusqlite::Error) -> EditAutho
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Condvar;
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
     use voxels_world::ProceduralWorldSource;
+
+    struct ConcurrentProbeSource {
+        inner: ProceduralWorldSource,
+        entered: Mutex<u8>,
+        ready: Condvar,
+    }
+
+    impl ConcurrentProbeSource {
+        fn new(seed: u64) -> Self {
+            Self {
+                inner: ProceduralWorldSource::new(seed),
+                entered: Mutex::new(0),
+                ready: Condvar::new(),
+            }
+        }
+    }
+
+    impl WorldSourceEngine for ConcurrentProbeSource {
+        fn identity(&self) -> &voxels_world::WorldSourceIdentity {
+            self.inner.identity()
+        }
+
+        fn generate_batch(
+            &self,
+            request: WorldProductBatch,
+        ) -> Result<voxels_world::WorldProductBatchResult, voxels_world::WorldSourceError> {
+            let mut entered = self.entered.lock().unwrap();
+            *entered += 1;
+            self.ready.notify_all();
+            if *entered < 2 {
+                let (next, timeout) = self
+                    .ready
+                    .wait_timeout_while(entered, Duration::from_secs(1), |entered| *entered < 2)
+                    .unwrap();
+                entered = next;
+                if timeout.timed_out() && *entered < 2 {
+                    return Err(voxels_world::WorldSourceError::SourceCoverageUnavailable);
+                }
+            }
+            drop(entered);
+            self.inner.generate_batch(request)
+        }
+
+        fn generate_edited_surface_tile(
+            &self,
+            edits: &EditMap,
+            coord: SurfaceTileCoord,
+        ) -> Result<voxels_world::SurfaceTileSnapshot, voxels_world::WorldSourceError> {
+            self.inner.generate_edited_surface_tile(edits, coord)
+        }
+
+        fn surface_tiles_affected_by_voxel(
+            &self,
+            edits: &EditMap,
+            level: SurfaceLodLevel,
+            coord: VoxelCoord,
+        ) -> Vec<SurfaceTileCoord> {
+            self.inner
+                .surface_tiles_affected_by_voxel(edits, level, coord)
+        }
+
+        fn atmosphere_sample(
+            &self,
+            x: i32,
+            z: i32,
+        ) -> (voxels_world::AtmosphereSample, voxels_world::SurfaceRegion) {
+            self.inner.atmosphere_sample(x, z)
+        }
+
+        fn skyline_features_anchored_in(
+            &self,
+            bounds: [[i32; 2]; 2],
+        ) -> Vec<voxels_world::SkylineFeature> {
+            self.inner.skyline_features_anchored_in(bounds)
+        }
+
+        fn skyline_features_at(&self, coord: VoxelCoord) -> Vec<voxels_world::SkylineFeature> {
+            self.inner.skyline_features_at(coord)
+        }
+
+        fn nearest_skyline_feature(
+            &self,
+            x: i32,
+            z: i32,
+            kind: voxels_world::SkylineFeatureKind,
+            max_radius_cells: i32,
+        ) -> Option<voxels_world::SkylineFeature> {
+            self.inner
+                .nearest_skyline_feature(x, z, kind, max_radius_cells)
+        }
+
+        fn nearest_prominent_skyline_feature(
+            &self,
+            x: i32,
+            z: i32,
+            kind: voxels_world::SkylineFeatureKind,
+            max_radius_cells: i32,
+        ) -> Option<voxels_world::SkylineFeature> {
+            self.inner
+                .nearest_prominent_skyline_feature(x, z, kind, max_radius_cells)
+        }
+    }
 
     fn world_id(seed: u8) -> WorldId {
         WorldId::from_bytes([seed; 16])
@@ -2675,6 +2875,41 @@ mod tests {
             .map(|material| inventory.count(material) - opened.inventory.count(material))
             .sum::<u64>();
         assert_eq!(gained as usize, first_coords.len() + second_coords.len());
+    }
+
+    #[test]
+    fn unrelated_regions_plan_source_samples_concurrently() {
+        let source = ConcurrentProbeSource::new(0x7711);
+        let authority = EditAuthority::in_memory(world_id(33), &source, 8).unwrap();
+        let (_, first_session) = admit_player(&authority, player_id(33), resume(1));
+        let (_, second_session) = admit_player(&authority, player_id(34), resume(1));
+
+        let results = std::thread::scope(|scope| {
+            let first_authority = Arc::clone(&authority);
+            let first_source = &source;
+            let first = scope.spawn(move || {
+                first_authority.apply(
+                    first_source,
+                    player_id(33),
+                    33,
+                    dig(1, first_session, VoxelCoord::new(-1_000, -100, -1_000)),
+                )
+            });
+            let second_authority = Arc::clone(&authority);
+            let second_source = &source;
+            let second = scope.spawn(move || {
+                second_authority.apply(
+                    second_source,
+                    player_id(34),
+                    34,
+                    dig(1, second_session, VoxelCoord::new(1_000, -100, 1_000)),
+                )
+            });
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+
+        assert!(results.into_iter().all(|result| result.unwrap().changed));
+        assert_eq!(authority.revision(), INITIAL_REVISION + 2);
     }
 
     #[test]

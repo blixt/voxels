@@ -5,12 +5,13 @@
 //! restart hydration without reimplementing their semantics in scripts.
 
 use crate::EDIT_DATABASE_SCHEMA_VERSION;
-use crate::edits::{EditAuthority, RETAINED_OPERATION_OUTCOMES_PER_PLAYER};
+use crate::edits::{EditAuthority, EditAuthorityError, RETAINED_OPERATION_OUTCOMES_PER_PLAYER};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 use voxels_world::protocol::{
     EditAction, EditCommand, EditSessionId, EditShape, PlayerId, PlayerResume, encode_edit_commit,
@@ -20,7 +21,7 @@ use voxels_world::{
     WorldProductBatch, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
 };
 
-pub const STORAGE_BENCHMARK_SCHEMA_VERSION: u32 = 4;
+pub const STORAGE_BENCHMARK_SCHEMA_VERSION: u32 = 5;
 const BENCHMARK_SEED: u64 = 0x5e6a_2d49_7b10_c3f1;
 const EDIT_QUEUE_CAPACITY: u16 = 8;
 
@@ -62,6 +63,7 @@ pub struct StorageBenchmarkResponse {
     pub checkpoint_ms: f64,
     pub restart_ms: f64,
     pub retry_verification_ms: f64,
+    pub edit_concurrency: EditConcurrencyProbe,
     pub database_before_checkpoint: DatabaseFiles,
     pub database_after_checkpoint: DatabaseFiles,
     pub tables: BTreeMap<String, TableStats>,
@@ -70,6 +72,16 @@ pub struct StorageBenchmarkResponse {
     pub freelist_pages: u64,
     pub revision_before_restart: u64,
     pub revision_after_restart: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditConcurrencyProbe {
+    pub workers: u16,
+    pub operations: u32,
+    pub sequential_ms: f64,
+    pub concurrent_ms: f64,
+    pub speedup: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -133,6 +145,7 @@ pub fn run_storage_benchmark(
     let players = initialize_players(&authority, request.players)?;
     let player_initialization_ms = elapsed_millis(player_initialization_started.elapsed());
     let hits = benchmark_hits(&source, request.profile, request.operations)?;
+    let edit_concurrency = benchmark_disjoint_edit_concurrency(&source)?;
 
     let mut operation_latencies = Vec::with_capacity(request.operations as usize);
     let mut changed_operations = 0_u32;
@@ -265,6 +278,7 @@ pub fn run_storage_benchmark(
         checkpoint_ms,
         restart_ms,
         retry_verification_ms,
+        edit_concurrency,
         database_before_checkpoint,
         database_after_checkpoint,
         tables: database.tables,
@@ -273,6 +287,98 @@ pub fn run_storage_benchmark(
         freelist_pages: database.freelist_pages,
         revision_before_restart,
         revision_after_restart,
+    })
+}
+
+fn benchmark_disjoint_edit_concurrency(
+    source: &dyn WorldSourceEngine,
+) -> Result<EditConcurrencyProbe, Box<dyn std::error::Error>> {
+    const MAX_WORKERS: usize = 8;
+    const OPERATIONS_PER_WORKER: usize = 4;
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(MAX_WORKERS);
+    let operation_count = workers * OPERATIONS_PER_WORKER;
+    let hits = (0..operation_count)
+        .map(|index| benchmark_hit(source, index as i32 * 2_048 + 500_000, -500_000))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let sequential = EditAuthority::in_memory(
+        WorldId::from_bytes(benchmark_uuid_bytes(0x61, 1)),
+        source,
+        EDIT_QUEUE_CAPACITY,
+    )?;
+    let sequential_players = initialize_players(&sequential, workers as u16)?;
+    let sequential_started = Instant::now();
+    for (index, &hit) in hits.iter().enumerate() {
+        let player_index = index % workers;
+        sequential.apply(
+            source,
+            sequential_players[player_index].id,
+            player_index as u64 + 1,
+            EditCommand {
+                operation_id: (index / workers) as u64 + 1,
+                edit_session_id: sequential_players[player_index].session,
+                action: EditAction::Dig {
+                    hit,
+                    shape: EditShape::Sphere,
+                },
+            },
+        )?;
+    }
+    let sequential_ms = elapsed_millis(sequential_started.elapsed());
+
+    let concurrent = EditAuthority::in_memory(
+        WorldId::from_bytes(benchmark_uuid_bytes(0x61, 2)),
+        source,
+        EDIT_QUEUE_CAPACITY,
+    )?;
+    let concurrent_players = initialize_players(&concurrent, workers as u16)?;
+    let ready = Arc::new(Barrier::new(workers));
+    let concurrent_started = Instant::now();
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let handles = (0..workers)
+            .map(|player_index| {
+                let authority = Arc::clone(&concurrent);
+                let ready = Arc::clone(&ready);
+                let player = &concurrent_players[player_index];
+                let hits = &hits;
+                scope.spawn(move || -> Result<(), EditAuthorityError> {
+                    ready.wait();
+                    for operation_index in 0..OPERATIONS_PER_WORKER {
+                        let hit = hits[operation_index * workers + player_index];
+                        authority.apply(
+                            source,
+                            player.id,
+                            player_index as u64 + 1,
+                            EditCommand {
+                                operation_id: operation_index as u64 + 1,
+                                edit_session_id: player.session,
+                                action: EditAction::Dig {
+                                    hit,
+                                    shape: EditShape::Sphere,
+                                },
+                            },
+                        )?;
+                    }
+                    Ok(())
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| "disjoint edit concurrency worker panicked")??;
+        }
+        Ok(())
+    })?;
+    let concurrent_ms = elapsed_millis(concurrent_started.elapsed());
+    Ok(EditConcurrencyProbe {
+        workers: workers as u16,
+        operations: operation_count as u32,
+        sequential_ms,
+        concurrent_ms,
+        speedup: sequential_ms / concurrent_ms,
     })
 }
 

@@ -313,6 +313,49 @@ impl EditMap {
         snapshot
     }
 
+    /// Copies every vertical override in an exact horizontal voxel rectangle. Edit planning uses
+    /// this column-complete view because a below-ground mutation can become the new visible surface
+    /// after another voxel in the same column is removed.
+    pub fn snapshot_for_voxel_columns(
+        &self,
+        min_x: i32,
+        max_x: i32,
+        min_z: i32,
+        max_z: i32,
+    ) -> Self {
+        if min_x > max_x || min_z > max_z {
+            return Self::default();
+        }
+        let minimum_chunk = VoxelCoord::new(min_x, 0, min_z).chunk();
+        let maximum_chunk = VoxelCoord::new(max_x, 0, max_z).chunk();
+        let mut changes = Vec::new();
+        for chunk_x in minimum_chunk.x..=maximum_chunk.x {
+            for chunk_z in minimum_chunk.z..=maximum_chunk.z {
+                for (&key, chunk) in self
+                    .chunks
+                    .range((chunk_x, chunk_z, i32::MIN)..=(chunk_x, chunk_z, i32::MAX))
+                {
+                    let origin = ChunkCoord::new(key.0, key.2, key.1).world_origin();
+                    for &(index, material) in &chunk.overrides {
+                        let local = local_coord(index);
+                        let coord = VoxelCoord::new(
+                            origin[0] + local[0] as i32,
+                            origin[1] + local[1] as i32,
+                            origin[2] + local[2] as i32,
+                        );
+                        if (min_x..=max_x).contains(&coord.x) && (min_z..=max_z).contains(&coord.z)
+                        {
+                            changes.push((coord, Some(material)));
+                        }
+                    }
+                }
+            }
+        }
+        let mut snapshot = Self::default();
+        snapshot.replace_durable_overrides(&changes);
+        snapshot
+    }
+
     fn overrides_in_horizontal_bounds(
         &self,
         min_x: i64,
@@ -954,6 +997,25 @@ mod tests {
                 .expect_err("corruption must fail"),
             EditChunkCodecError::CorruptHash
         );
+    }
+
+    #[test]
+    fn column_snapshot_keeps_all_heights_but_only_requested_horizontal_cells() {
+        let mut edits = EditMap::default();
+        let requested_low = VoxelCoord::new(-33, -500, 31);
+        let requested_high = VoxelCoord::new(-33, 900, 31);
+        let adjacent = VoxelCoord::new(-32, 900, 31);
+        edits.replace_durable_overrides(&[
+            (requested_low, Some(Material::Stone)),
+            (requested_high, Some(Material::Wood)),
+            (adjacent, Some(Material::Basalt)),
+        ]);
+
+        let snapshot = edits.snapshot_for_voxel_columns(-33, -33, 31, 31);
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot.override_at(requested_low), Some(Material::Stone));
+        assert_eq!(snapshot.override_at(requested_high), Some(Material::Wood));
+        assert_eq!(snapshot.override_at(adjacent), None);
     }
 
     #[test]

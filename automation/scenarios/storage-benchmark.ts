@@ -8,7 +8,7 @@ import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { rustTool } from "../../scripts/build-wasm.ts";
 
 const execFileAsync = promisify(execFile);
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const BINARY = "voxels-storage-benchmark";
 
 type Profile = "clustered" | "frontier";
@@ -44,6 +44,13 @@ interface BenchmarkResult {
   readonly checkpointMs: number;
   readonly restartMs: number;
   readonly retryVerificationMs: number;
+  readonly editConcurrency: {
+    readonly workers: number;
+    readonly operations: number;
+    readonly sequentialMs: number;
+    readonly concurrentMs: number;
+    readonly speedup: number;
+  };
   readonly databaseBeforeCheckpoint: {
     readonly mainBytes: number;
     readonly walBytes: number;
@@ -144,6 +151,10 @@ function markdownReport(results: readonly BenchmarkResult[]): string {
         `| ${result.profile} | ${table} | ${stats.rows.toLocaleString()} | ${mebibytes(stats.storageBytes)} | ${mebibytes(stats.payloadBytes)} | ${mebibytes(stats.unusedBytes)} |`,
     ),
   );
+  const concurrencyRows = results.map(
+    (result) =>
+      `| ${result.profile} | ${result.editConcurrency.workers} | ${result.editConcurrency.operations} | ${result.editConcurrency.sequentialMs.toFixed(1)} | ${result.editConcurrency.concurrentMs.toFixed(1)} | ${result.editConcurrency.speedup.toFixed(2)}× |`,
+  );
   return `# Durable world storage benchmark
 
 The native fixture executes the production edit planner and SQLite transaction path against the
@@ -158,6 +169,14 @@ journal fills.
 | Profile | Operations | Mutations | Commit median / p95 / p99 (µs) | First → last quartile median | Restart (ms) | Checkpoint (ms) | Peak WAL MiB | Durable MiB | Disk B / mutation | Logical RAM B / mutation | Public wire B / mutation |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 ${rows.join("\n")}
+
+The concurrency probe sends independent real edit commands through the same planner, in-memory
+authority, SQLite transaction path, and procedural source. Its sequential and concurrent runs use
+separate clean authorities and exclude setup and hit discovery.
+
+| Profile | Workers | Operations | Sequential (ms) | Concurrent (ms) | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+${concurrencyRows.join("\n")}
 
 | Profile | SQLite b-tree | Rows | Storage MiB | Payload MiB | Unused MiB |
 | --- | --- | ---: | ---: | ---: | ---: |
