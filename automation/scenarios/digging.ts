@@ -37,11 +37,20 @@ interface Options {
   readonly shaftDigs: number;
   readonly tunnelSteps: number;
   readonly performanceSeconds: number;
+  readonly viewport: { readonly width: number; readonly height: number };
+  readonly deviceScaleFactor: number;
   readonly recordVideo: boolean;
 }
 
 function parseOptions(arguments_: readonly string[]): Options {
   const reader = new ScenarioArguments(arguments_);
+  const viewport = reader.pair("viewport", {
+    fallback: [1280, 720],
+    separator: "x",
+    integer: true,
+    minimum: 240,
+  });
+  if (viewport === undefined) throw new Error("viewport default is missing");
   const options: Options = {
     source: reader.choice(
       "source",
@@ -69,6 +78,8 @@ function parseOptions(arguments_: readonly string[]): Options {
         minimum: 2,
         maximum: 30,
       }) ?? 5,
+    viewport: { width: viewport[0], height: viewport[1] },
+    deviceScaleFactor: reader.number("dpr", { fallback: 1, minimum: 0.5, maximum: 4 }) ?? 1,
     recordVideo: reader.flag("video"),
   };
   reader.assertEmpty();
@@ -331,7 +342,8 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
   const viewport = await browser.open({
     url: world.url,
     label: "digging",
-    viewport: { width: 1280, height: 720 },
+    viewport: options.viewport,
+    deviceScaleFactor: options.deviceScaleFactor,
     recordVideo: options.recordVideo,
     videoFilename: "digging.webm",
     ...world.clientRoute,
