@@ -37,6 +37,7 @@ const MAX_AUTHORITY_REJECTION_RATE = 0.02;
 const MIN_AUTHORITY_REJECTION_ALLOWANCE = 5;
 const VIEWPORT = { width: 960, height: 540 };
 const BOT_SPAWN_PILLAR_HEIGHT_VOXELS = 7;
+const BOT_SPAWN_PILLAR_RADIUS_VOXELS = 2;
 const BOT_SPAWN_PROTECTION_RADIUS_VOXELS = 3;
 const BROWSER_FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|websocket|presence|protocol|world service/iu;
@@ -788,6 +789,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
           source: options.source,
           // Keep the spawn safe without lifting nearby terrain beyond ordinary interaction reach.
           spawnPillarHeightVoxels: BOT_SPAWN_PILLAR_HEIGHT_VOXELS,
+          spawnPillarRadiusVoxels: BOT_SPAWN_PILLAR_RADIUS_VOXELS,
           spawnProtectionRadiusVoxels: BOT_SPAWN_PROTECTION_RADIUS_VOXELS,
           generationWorkers: options.generationWorkers,
         });
