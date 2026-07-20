@@ -25,6 +25,7 @@ use voxels_world::{
 use crate::EDIT_DATABASE_SCHEMA_VERSION;
 
 const INITIAL_REVISION: u64 = 1;
+pub(crate) const RETAINED_OPERATION_OUTCOMES_PER_PLAYER: i64 = 64;
 const OPERATION_OUTCOME_MAGIC: &[u8; 4] = b"VXEO";
 const OPERATION_OUTCOME_VERSION: u8 = 1;
 const OPERATION_OUTCOME_HEADER_BYTES: usize = 12;
@@ -321,9 +322,9 @@ impl EditAuthority {
         transaction
             .execute(
                 "INSERT INTO players(
-                    player_id,current_edit_session,inventory_revision,resume_revision,
+                    player_id,current_edit_session,max_operation_id,inventory_revision,resume_revision,
                     eye_x,eye_y,eye_z,look_yaw,look_pitch
-                 ) VALUES(?1,NULL,1,?2,?3,?4,?5,?6,?7)",
+                 ) VALUES(?1,NULL,NULL,1,?2,?3,?4,?5,?6,?7)",
                 params![
                     player_id.as_bytes().as_slice(),
                     to_sql_i64(default_resume.revision, "player resume revision")?,
@@ -351,18 +352,24 @@ impl EditAuthority {
         })
     }
 
-    /// Rotates the namespace for newly admitted edit operations. Stored operations from earlier
-    /// sessions remain queryable for exact retries, but cannot be extended with new IDs.
+    /// Rotates the namespace for newly admitted edit operations. Exact receipts from previous
+    /// sessions remain in the player's bounded retry window so reconnecting after an ambiguous
+    /// acknowledgement cannot apply the same edit twice.
     pub(crate) fn begin_player_session(
         &self,
         player_id: PlayerId,
     ) -> Result<EditSessionId, EditAuthorityError> {
         let edit_session_id = new_edit_session_id();
-        let state = self.lock();
-        let updated = state
+        let mut state = self.lock();
+        let transaction = state
             .connection
+            .transaction()
+            .map_err(sql_error("begin player edit session transaction"))?;
+        let updated = transaction
             .execute(
-                "UPDATE players SET current_edit_session=?1 WHERE player_id=?2",
+                "UPDATE players
+                 SET current_edit_session=?1,max_operation_id=NULL
+                 WHERE player_id=?2",
                 params![
                     edit_session_id.as_bytes().as_slice(),
                     player_id.as_bytes().as_slice()
@@ -374,6 +381,9 @@ impl EditAuthority {
                 "cannot begin an edit session for an unloaded player".to_owned(),
             ));
         }
+        transaction
+            .commit()
+            .map_err(sql_error("commit player edit session transaction"))?;
         Ok(edit_session_id)
     }
 
@@ -561,6 +571,15 @@ impl EditAuthority {
         if player.current_edit_session != Some(command.edit_session_id) {
             return Err(EditAuthorityError(EDIT_SESSION_NOT_CURRENT.to_owned()));
         }
+        if player
+            .max_operation_id
+            .is_some_and(|maximum| command.operation_id <= maximum)
+        {
+            return Err(EditAuthorityError(
+                "edit operation is older than the bounded retry window or arrived out of order"
+                    .to_owned(),
+            ));
+        }
 
         let PlannedAction {
             mutations,
@@ -661,6 +680,7 @@ impl EditAuthority {
 
 struct DurablePlayer {
     current_edit_session: Option<EditSessionId>,
+    max_operation_id: Option<u64>,
     inventory: MaterialInventory,
     resume: PlayerResume,
 }
@@ -739,6 +759,9 @@ fn initialize_schema(
                     current_edit_session BLOB CHECK(
                         current_edit_session IS NULL OR length(current_edit_session) = 16
                     ),
+                    max_operation_id BLOB CHECK(
+                        max_operation_id IS NULL OR length(max_operation_id) = 8
+                    ),
                     inventory_revision INTEGER NOT NULL CHECK(inventory_revision >= 1),
                     resume_revision INTEGER NOT NULL CHECK(resume_revision >= 1),
                     eye_x REAL NOT NULL,
@@ -758,6 +781,7 @@ fn initialize_schema(
                     player_id BLOB NOT NULL,
                     edit_session_id BLOB NOT NULL CHECK(length(edit_session_id) = 16),
                     operation_id BLOB NOT NULL CHECK(length(operation_id) = 8),
+                    receipt_order INTEGER NOT NULL CHECK(receipt_order >= 1),
                     action INTEGER NOT NULL,
                     x INTEGER NOT NULL,
                     y INTEGER NOT NULL,
@@ -906,26 +930,29 @@ fn load_durable_player(
 ) -> Result<Option<DurablePlayer>, EditAuthorityError> {
     let row = connection
         .query_row(
-            "SELECT current_edit_session,inventory_revision,resume_revision,
+            "SELECT current_edit_session,max_operation_id,inventory_revision,resume_revision,
                     eye_x,eye_y,eye_z,look_yaw,look_pitch
              FROM players WHERE player_id=?1",
             [player_id.as_bytes().as_slice()],
             |row| {
                 Ok((
                     row.get::<_, Option<Vec<u8>>>(0)?,
-                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
                     row.get::<_, i64>(2)?,
-                    row.get::<_, f32>(3)?,
+                    row.get::<_, i64>(3)?,
                     row.get::<_, f32>(4)?,
                     row.get::<_, f32>(5)?,
                     row.get::<_, f32>(6)?,
                     row.get::<_, f32>(7)?,
+                    row.get::<_, f32>(8)?,
                 ))
             },
         )
         .optional()
         .map_err(sql_error("load player"))?;
-    let Some((session, inventory_revision, resume_revision, x, y, z, yaw, pitch)) = row else {
+    let Some((session, max_operation_id, inventory_revision, resume_revision, x, y, z, yaw, pitch)) =
+        row
+    else {
         return Ok(None);
     };
     let current_edit_session = session
@@ -938,6 +965,14 @@ fn load_durable_player(
                 ));
             }
             Ok(session)
+        })
+        .transpose()?;
+    let max_operation_id = max_operation_id
+        .map(|operation| {
+            Ok(u64::from_be_bytes(decode_fixed_bytes(
+                &operation,
+                "player maximum operation id",
+            )?))
         })
         .transpose()?;
     let mut counts = [0; MATERIAL_INVENTORY_SLOTS];
@@ -979,6 +1014,7 @@ fn load_durable_player(
     validate_resume(resume)?;
     Ok(Some(DurablePlayer {
         current_edit_session,
+        max_operation_id,
         inventory,
         resume,
     }))
@@ -1412,15 +1448,25 @@ fn persist_operation(
 ) -> Result<(), EditAuthorityError> {
     let (action, coord, argument) = encode_action(command.action);
     let outcome = encode_operation_outcome(mutations, affected_chunks, affected_surface_tiles)?;
+    let receipt_order = transaction
+        .query_row(
+            "SELECT coalesce(max(receipt_order),0) + 1
+             FROM edit_operations WHERE player_id=?1",
+            [player_id.as_bytes().as_slice()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(sql_error("allocate player operation receipt order"))?;
     transaction
         .execute(
             "INSERT INTO edit_operations(
-                player_id,edit_session_id,operation_id,action,x,y,z,argument,revision,outcome
-             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                player_id,edit_session_id,operation_id,receipt_order,
+                action,x,y,z,argument,revision,outcome
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 player_id.as_bytes().as_slice(),
                 command.edit_session_id.as_bytes().as_slice(),
-                command.operation_id.to_le_bytes().as_slice(),
+                command.operation_id.to_be_bytes().as_slice(),
+                receipt_order,
                 action,
                 coord.x,
                 coord.y,
@@ -1431,6 +1477,32 @@ fn persist_operation(
             ],
         )
         .map_err(sql_error("persist edit operation"))?;
+    transaction
+        .execute(
+            "UPDATE players SET max_operation_id=?1 WHERE player_id=?2",
+            params![
+                command.operation_id.to_be_bytes().as_slice(),
+                player_id.as_bytes().as_slice()
+            ],
+        )
+        .map_err(sql_error("advance player operation watermark"))?;
+    transaction
+        .execute(
+            "DELETE FROM edit_operations
+             WHERE player_id=?1
+               AND receipt_order NOT IN (
+                 SELECT receipt_order
+                 FROM edit_operations
+                 WHERE player_id=?1
+                 ORDER BY receipt_order DESC
+                 LIMIT ?2
+               )",
+            params![
+                player_id.as_bytes().as_slice(),
+                RETAINED_OPERATION_OUTCOMES_PER_PLAYER,
+            ],
+        )
+        .map_err(sql_error("prune player operation receipts"))?;
     Ok(())
 }
 
@@ -1806,7 +1878,7 @@ impl OperationKey {
         Self {
             player: *player_id.as_bytes(),
             session: *edit_session_id.as_bytes(),
-            operation: operation_id.to_le_bytes(),
+            operation: operation_id.to_be_bytes(),
         }
     }
 
@@ -2144,12 +2216,13 @@ mod tests {
         let materials = [Material::Stone, Material::Wood, Material::Water];
         for (index, material) in materials.into_iter().enumerate() {
             let coord = VoxelCoord::new(sky.x + index as i32 * 20, sky.y, sky.z);
+            let operation_id = 10 + index as u64 * 2;
             authority
                 .apply(
                     &source,
                     player_id(2),
                     22,
-                    place(10 + index as u64, edit_session_id, coord, material),
+                    place(operation_id, edit_session_id, coord, material),
                 )
                 .unwrap();
             let before = load_durable_player(&authority.lock().connection, player_id(2))
@@ -2161,7 +2234,7 @@ mod tests {
                     &source,
                     player_id(2),
                     22,
-                    dig(20 + index as u64, edit_session_id, coord),
+                    dig(operation_id + 1, edit_session_id, coord),
                 )
                 .unwrap();
             assert_eq!(removed.commit.mutations.len(), EDIT_CUBE_VOLUME_VOXELS);
@@ -2801,6 +2874,45 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("different command")
+        );
+    }
+
+    #[test]
+    fn operation_receipts_are_bounded_without_reapplying_evicted_ids() {
+        let source = ProceduralWorldSource::new(12);
+        let authority = EditAuthority::in_memory(world_id(12), &source, 8).unwrap();
+        let (_player, session) = admit_player(&authority, player_id(12), resume(1));
+        let first = dig(1, session, VoxelCoord::new(0, 300, 0));
+        for operation_id in 1..=u64::try_from(RETAINED_OPERATION_OUTCOMES_PER_PLAYER).unwrap() + 1 {
+            authority
+                .apply(
+                    &source,
+                    player_id(12),
+                    12,
+                    dig(operation_id, session, VoxelCoord::new(0, 300, 0)),
+                )
+                .unwrap();
+        }
+
+        let state = authority.lock();
+        let receipts: i64 = state
+            .connection
+            .query_row(
+                "SELECT count(*) FROM edit_operations WHERE player_id=?1",
+                [player_id(12).as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipts, RETAINED_OPERATION_OUTCOMES_PER_PLAYER);
+        drop(state);
+
+        let error = authority
+            .apply(&source, player_id(12), 12, first)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("older than the bounded retry window")
         );
     }
 

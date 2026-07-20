@@ -5,7 +5,7 @@
 //! restart hydration without reimplementing their semantics in scripts.
 
 use crate::EDIT_DATABASE_SCHEMA_VERSION;
-use crate::edits::EditAuthority;
+use crate::edits::{EditAuthority, RETAINED_OPERATION_OUTCOMES_PER_PLAYER};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -140,6 +140,7 @@ pub fn run_storage_benchmark(
     let mut editor_commit_bytes = 0_u64;
     let mut public_commit_bytes = 0_u64;
     let mut first_commands = vec![None; players.len()];
+    let mut last_commands = vec![None; players.len()];
     for operation_index in 0..request.operations {
         let player_index = operation_index as usize % players.len();
         let player = &players[player_index];
@@ -155,6 +156,7 @@ pub fn run_storage_benchmark(
         if first_commands[player_index].is_none() {
             first_commands[player_index] = Some(command);
         }
+        last_commands[player_index] = Some(command);
         let started = Instant::now();
         let applied = authority.apply(
             &source,
@@ -211,11 +213,30 @@ pub fn run_storage_benchmark(
     }
 
     let retry_started = Instant::now();
-    for (index, (player, command)) in players.iter().zip(first_commands).enumerate() {
+    for (index, (player, command)) in players.iter().zip(&last_commands).enumerate() {
         let command = command.ok_or("player received no benchmark operation")?;
         let retried = reopened.apply(&source, player.id, u64::from(index as u32 + 1), command)?;
         if retried.changed {
             return Err("durable operation retry changed the world after restart".into());
+        }
+    }
+    for (index, (player, command)) in players.iter().zip(first_commands).enumerate() {
+        let operation_count =
+            (request.operations - 1 - index as u32) / u32::from(request.players) + 1;
+        if i64::from(operation_count) <= RETAINED_OPERATION_OUTCOMES_PER_PLAYER {
+            continue;
+        }
+        let command = command.ok_or("player received no benchmark operation")?;
+        let error = reopened
+            .apply(&source, player.id, u64::from(index as u32 + 1), command)
+            .expect_err("an evicted operation receipt must not be reapplied");
+        if !error
+            .to_string()
+            .contains("older than the bounded retry window")
+        {
+            return Err(
+                format!("evicted operation retry failed for the wrong reason: {error}").into(),
+            );
         }
     }
     let retry_verification_ms = elapsed_millis(retry_started.elapsed());

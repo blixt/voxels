@@ -37,7 +37,7 @@ pub use server::{
 };
 
 pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 23;
-pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 12;
+pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 13;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
     0x76, 0x6f, 0x78, 0x65, 0x6c, 0x73, 0x40, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x01,
