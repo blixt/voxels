@@ -372,6 +372,20 @@ function closestProfileCapture(
   }, undefined);
 }
 
+function summarizeHostContentionForCaptures(
+  samples: readonly HostContentionSample[],
+  captures: readonly RenderSnapshotCapture[],
+) {
+  const first = captures[0];
+  const latest = captures.at(-1);
+  if (first === undefined || latest === undefined) return summarizeHostContention([]);
+  const firstUnixMs = performance.timeOrigin + first.capturedAtMs - 1_000;
+  const latestUnixMs = performance.timeOrigin + latest.capturedAtMs + 1_000;
+  return summarizeHostContention(
+    samples.filter((sample) => sample.atUnixMs >= firstUnixMs && sample.atUnixMs <= latestUnixMs),
+  );
+}
+
 async function sustainedProfile(
   engine: EngineClient,
   route: "loop" | "directional" = "loop",
@@ -469,6 +483,10 @@ async function sustainedProfile(
             endSeconds,
             performance: summarizeRenderPhase(epochCaptures),
             streaming: summarizeStreamingPressure(epochCaptures),
+            hostContention: summarizeHostContentionForCaptures(
+              hostContentionSamples,
+              epochCaptures,
+            ),
           };
         })
       : [];
