@@ -77,6 +77,7 @@ export interface LinkMessageStats {
   lastOutboundRateBytesPerSecond?: number;
   maxOutboundRateBytesPerSecond?: number;
   worldProductPriorityFrames?: Record<string, number>;
+  controlErrors?: Record<string, number>;
 }
 
 export interface LinkLatencyStats {
@@ -203,6 +204,14 @@ function worldProductPriorityName(payload: Buffer): string | null {
     default:
       return null;
   }
+}
+
+function controlErrorMessage(payload: Buffer): string | null {
+  if (payload.length < VXWP_HEADER_BYTES + 2) return null;
+  const length = payload.readUInt16LE(VXWP_HEADER_BYTES);
+  const start = VXWP_HEADER_BYTES + 2;
+  if (start + length !== payload.length) return null;
+  return payload.subarray(start).toString("utf8");
 }
 
 class WebSocketFrameParser {
@@ -416,6 +425,12 @@ class ConnectionInspector {
           (stats.messages[key].worldProductPriorityFrames[priority] ?? 0) + 1;
       }
     }
+    if (direction === "downstream" && kind === VXWP_KIND.error) {
+      const message = controlErrorMessage(payload) ?? "malformed error frame";
+      stats.messages[key].controlErrors ??= {};
+      stats.messages[key].controlErrors[message] =
+        (stats.messages[key].controlErrors[message] ?? 0) + 1;
+    }
     if (direction === "upstream" && kind === VXWP_KIND.presencePing && payload.length === 40) {
       this.pendingPresencePings.set(payload.readUInt32LE(24), this.now());
       const roundTripMs = payload.readUInt32LE(28);
@@ -628,6 +643,7 @@ function clonedStats(stats: MutableLinkStats): LinkStats {
             value.worldProductPriorityFrames === undefined
               ? undefined
               : { ...value.worldProductPriorityFrames },
+          controlErrors: value.controlErrors === undefined ? undefined : { ...value.controlErrors },
         },
       ]),
     ),

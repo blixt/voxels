@@ -40,6 +40,16 @@ function vxwpFrame(kind: number, bytes: number, sequence: number): Buffer {
   return frame;
 }
 
+function vxwpError(message: string): Buffer {
+  const text = Buffer.from(message);
+  const frame = Buffer.alloc(26 + text.length);
+  frame.write("VXWP");
+  frame.writeUInt16LE(6, 6);
+  frame.writeUInt16LE(text.length, 24);
+  text.copy(frame, 26);
+  return frame;
+}
+
 describe("network benchmark link", () => {
   it("models decimal megabit serialization independently of propagation", () => {
     expect(serializationMilliseconds(1_250_000, 10)).toBe(1_000);
@@ -131,6 +141,18 @@ describe("network benchmark link", () => {
     now = 140;
     inspector.onMessage("downstream", 0x2, vxwpFrame(14, 56, 8), 56, 1);
     expect(testInternals.clonedStats(stats).presenceProxyRoundTrip.samples).toBe(1);
+  });
+
+  it("retains control-error reasons instead of reporting opaque error-frame counts", () => {
+    const stats = testInternals.blankStats();
+    const inspector = new testInternals.ConnectionInspector({ current: stats });
+    inspector.path = "/v26/world";
+    inspector.onMessage("downstream", 0x2, vxwpError("world generator is busy"), 49, 1);
+    inspector.onMessage("downstream", 0x2, vxwpError("world generator is busy"), 49, 1);
+
+    expect(testInternals.clonedStats(stats).messages["downstream:error"]?.controlErrors).toEqual({
+      "world generator is busy": 2,
+    });
   });
 
   it("delivers artificially delayed bytes before forwarding TCP EOF", async () => {
