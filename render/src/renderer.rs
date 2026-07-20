@@ -6566,7 +6566,7 @@ mod tests {
     }
 
     #[test]
-    fn geometric_lod_selects_canonical_chunks_and_surface_patches_exclusively() {
+    fn exact_view_volume_supplements_the_surface_lod_without_claiming_its_column() {
         let focus = GeometricLodFocus::snapped(0, 0);
         let patch_id = SurfacePatchId::new(SurfaceLodLevel::Stride2, 3, 0);
         let resident = HashSet::from([patch_id]);
@@ -6587,10 +6587,17 @@ mod tests {
             &(0, 7, 0, 0),
             &test_slice()
         ));
-        plan.enclosed_view_chunks.insert((7, 0, 0));
+        plan.enclosed_view_chunks
+            .extend([(7, -3, 0), (7, -2, 0), (7, -1, 0)]);
+        for y in -3..=-1 {
+            assert!(
+                slice_owned_by_lod(Some(focus), Some(&plan), &(0, 7, y, 0), &test_slice()),
+                "every selected vertical chunk remains available for tunnels, caverns, and overhangs"
+            );
+        }
         assert!(
-            slice_owned_by_lod(Some(focus), Some(&plan), &(0, 7, 0, 0), &test_slice()),
-            "an exact tunnel chunk remains visible outside the surface handoff"
+            !slice_owned_by_lod(Some(focus), Some(&plan), &(0, 7, 0, 0), &test_slice()),
+            "exact-volume ownership is three-dimensional, not an accidental whole-column claim"
         );
 
         let mut stride_two_patch = test_slice();
