@@ -51,11 +51,11 @@ Native diagnostic runs use the `worldgen` Cargo profile (`opt-level = 3`, LTO, o
 FP16 model tensors by default. `vp dev` uses the incremental `worldgen-dev` profile while retaining
 optimized third-party numerical kernels. FP32 remains available as a diagnostic precision.
 
-`terrain:counterproof` verifies numerically that every learned stage responds to changed image
-conditioning. `terrain:smoke` runs the authentic 20-step coarse path on a 64x64 tile.
-`terrain:detail` loads all three models and runs a finite coarse -> two-pass base -> decoder chain,
-producing 512x512 elevation at the model's native 30 m spacing. `terrain:base` stops after the first
-two stages for independent attention-path validation. `terrain:survey` compares coordinate-stable
+The `counterproof` mode verifies numerically that every learned stage responds to changed image
+conditioning. The default `full` mode runs the authentic 20-step coarse path on a 64x64 tile. The
+`detail` mode loads all three models and runs a finite coarse -> two-pass base -> decoder chain,
+producing 512x512 elevation at the model's native 30 m spacing. The `base` mode stops after the first
+two stages for independent attention-path validation. The `survey` mode compares coordinate-stable
 latent windows without changing the runtime selection. The 512-pixel decoder window matches the
 paper and upstream streaming runtime and consumes the complete 64x64 latent result instead of a
 hand-selected 16x16 crop. Overlap-aware neighboring windows can be added behind the same API.
@@ -122,9 +122,10 @@ client.
   altitude, slope, and coherent geology choose biome surfaces and shallow/deep strata. Chunks,
   collision blocks, edited surfaces, and far LODs all use the same composition function.
 
-`terrain:survey` compares coordinate-stable latent windows without changing runtime selection. The
-checked-in `[-2, -1]` window for seed `1592642302` is 88% land after decoding, places the centered
-spawn at roughly 132 m, and contains rugged fjord and plateau structure with about 115 m median
-relief per 960 m diagnostic block. `world:source-smoke` samples the configured tile and reports its
-height, climate, ridge, region, and material ranges. These are regression diagnostics rather than
-promises that every seed has the same histogram.
+`vp run automation -- run terrain-diffusion --mode=survey` compares coordinate-stable latent windows
+without changing runtime selection. The checked-in `[-2, -1]` window for seed `1592642302` is 88%
+land after decoding, places the centered spawn at roughly 132 m, and contains rugged fjord and
+plateau structure with about 115 m median relief per 960 m diagnostic block.
+`vp run automation -- run world-source` samples the configured tile and reports its height, climate,
+ridge, region, and material ranges. These are regression diagnostics rather than promises that every
+seed has the same histogram.
