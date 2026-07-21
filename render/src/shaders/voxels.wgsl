@@ -43,8 +43,9 @@ const CORNERS = array<vec2<i32>, 4>(
   vec2<i32>(1, 1),
   vec2<i32>(0, 1),
 );
-const STANDARD_DIAGONAL = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
-const FLIPPED_DIAGONAL = array<u32, 6>(0u, 1u, 3u, 1u, 2u, 3u);
+const STANDARD_STRIP = array<u32, 4>(1u, 2u, 0u, 3u);
+const FLIPPED_STRIP = array<u32, 4>(0u, 1u, 3u, 2u);
+const CONSERVATIVE_EXPANSION_PIXELS: f32 = 0.75;
 
 fn corner_ao(packed: u32, corner: u32) -> f32 {
   return f32((packed >> (corner * 2u)) & 3u) / 3.0;
@@ -177,6 +178,35 @@ fn surface_wall_macro_blend(world: vec3<f32>) -> f32 {
   return smoothstep(0.0, 48.0, distance_from_near_field) * 0.82;
 }
 
+fn quad_local(face: u32, uv: vec2<i32>, extent: vec2<i32>) -> vec3<i32> {
+  switch face {
+    case 0u: { return vec3<i32>(1, uv.y * extent.y, uv.x * extent.x); }
+    case 1u: { return vec3<i32>(0, uv.y * extent.y, uv.x * extent.x); }
+    case 2u: { return vec3<i32>(uv.x * extent.x, 1, uv.y * extent.y); }
+    case 3u: { return vec3<i32>(uv.x * extent.x, 0, uv.y * extent.y); }
+    case 4u: { return vec3<i32>(uv.x * extent.x, uv.y * extent.y, 1); }
+    default: { return vec3<i32>(uv.x * extent.x, uv.y * extent.y, 0); }
+  }
+}
+
+fn quad_world(
+  origin: vec3<i32>,
+  face: u32,
+  uv: vec2<i32>,
+  extent: vec2<i32>,
+  material: u32,
+  ao: u32,
+  morph_heights: u32,
+) -> vec3<f32> {
+  var world = vec3<f32>(origin + quad_local(face, uv, extent)) * frame.viewport_voxel.z;
+  if (ao & 0x01000000u) != 0u {
+    world.y += surface_morph_delta(morph_heights, uv.y)
+      * frame.viewport_voxel.z
+      * surface_parent_normal_blend(world, material);
+  }
+  return world;
+}
+
 fn conservative_axis_offset(clip: vec4<f32>, axis: vec3<f32>, direction: f32) -> vec2<f32> {
   let endpoint = clip + frame.view_projection * vec4<f32>(axis, 0.0);
   if clip.w <= 0.00001 || endpoint.w <= 0.00001 {
@@ -188,10 +218,10 @@ fn conservative_axis_offset(clip: vec4<f32>, axis: vec3<f32>, direction: f32) ->
   if pixel_length <= 0.00001 {
     return vec2<f32>(0.0);
   }
-  // WebGPU does not expose conservative rasterization. Expanding each streamed surface face by
-  // three quarters of a physical framebuffer pixel gives shared edges a deterministic overlap,
-  // independent of camera distance or LOD stride, while canonical world attributes stay exact.
-  return pixel_delta / pixel_length * direction * 1.5 / frame.viewport_voxel.xy;
+  return pixel_delta / pixel_length
+    * direction
+    * (CONSERVATIVE_EXPANSION_PIXELS * 2.0)
+    / frame.viewport_voxel.xy;
 }
 
 fn conservative_surface_clip(
@@ -243,26 +273,24 @@ fn vs_main(
   let material = material_face & 0xfff8ffffu;
   let extent = vec2<i32>(extent_voxels);
   let flip = corner_ao(ao, 0u) + corner_ao(ao, 2u) > corner_ao(ao, 1u) + corner_ao(ao, 3u);
-  let corner = select(STANDARD_DIAGONAL[vertex_index], FLIPPED_DIAGONAL[vertex_index], flip);
+  let corner = select(STANDARD_STRIP[vertex_index], FLIPPED_STRIP[vertex_index], flip);
   let uv = CORNERS[corner];
-  var local = vec3<i32>(0);
   var normal = vec3<f32>(0.0);
   switch face {
-    case 0u: { local = vec3<i32>(1, uv.y * extent.y, uv.x * extent.x); normal.x = 1.0; }
-    case 1u: { local = vec3<i32>(0, uv.y * extent.y, uv.x * extent.x); normal.x = -1.0; }
-    case 2u: { local = vec3<i32>(uv.x * extent.x, 1, uv.y * extent.y); normal.y = 1.0; }
-    case 3u: { local = vec3<i32>(uv.x * extent.x, 0, uv.y * extent.y); normal.y = -1.0; }
-    case 4u: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 1); normal.z = 1.0; }
-    default: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 0); normal.z = -1.0; }
+    case 0u: { normal.x = 1.0; }
+    case 1u: { normal.x = -1.0; }
+    case 2u: { normal.y = 1.0; }
+    case 3u: { normal.y = -1.0; }
+    case 4u: { normal.z = 1.0; }
+    default: { normal.z = -1.0; }
   }
-  var world = vec3<f32>(origin + local) * frame.viewport_voxel.z;
+  let world = quad_world(origin, face, uv, extent, material, ao, morph_heights);
   let surface_macro_normal = (ao & 0x01000000u) != 0u;
   var terrain_lighting = vec2<f32>(1.0);
   if surface_macro_normal {
     let own_normal = unpack_surface_macro_normal(ao, false);
     let parent_normal = unpack_surface_macro_normal(ao, true);
     let parent_blend = surface_parent_normal_blend(world, material);
-    world.y += surface_morph_delta(morph_heights, uv.y) * frame.viewport_voxel.z * parent_blend;
     let terrain_normal = normalize(
       mix(own_normal, parent_normal, parent_blend),
     );

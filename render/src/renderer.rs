@@ -89,6 +89,7 @@ const LOD_PLAN_REBUILD_SURFACE_PROFILE: u32 = 1 << 4;
 const LOD_PLAN_REBUILD_ENCLOSED_VIEW: u32 = 1 << 5;
 const GPU_QUERY_COUNT: u32 = 24;
 const PRECIPITATION_INSTANCE_COUNT: u32 = 48 * 48 * 2;
+const QUAD_VERTEX_COUNT: u32 = 4;
 const GPU_QUERY_BUFFER_BYTES: u64 = GPU_QUERY_COUNT as u64 * size_of::<u64>() as u64;
 const GPU_RESOLVE_BUFFER_BYTES: u64 = 256;
 const GPU_READBACK_SLOTS: usize = 4;
@@ -298,9 +299,13 @@ const _: () = assert!(std::mem::offset_of!(LocalLightUniform, lights) == 16);
 struct ShadowFrameUniform {
     clip_from_world: [[f32; 4]; 4],
     camera_voxel: [f32; 4],
+    lod_options: [f32; 4],
+    lod_boundary_centres: [[f32; 4]; 4],
 }
 
-const _: () = assert!(size_of::<ShadowFrameUniform>() == 80);
+const _: () = assert!(size_of::<ShadowFrameUniform>() == 160);
+const _: () = assert!(std::mem::offset_of!(ShadowFrameUniform, lod_options) == 80);
+const _: () = assert!(std::mem::offset_of!(ShadowFrameUniform, lod_boundary_centres) == 96);
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -1326,7 +1331,7 @@ impl ShadowGpu {
             }],
         });
         let initial_uniforms: [ShadowFrameUniform; CASCADE_COUNT] =
-            std::array::from_fn(|index| shadow_frame_uniform(&cascades, index, camera));
+            std::array::from_fn(|index| shadow_frame_uniform(&cascades, index, camera, None));
         let uniform_buffers = std::array::from_fn(|index| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("shadow caster frame uniform"),
@@ -1360,7 +1365,7 @@ impl ShadowGpu {
                 compilation_options: Default::default(),
             },
             fragment: None,
-            primitive: wgpu::PrimitiveState::default(),
+            primitive: quad_primitive_state(),
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
@@ -1393,9 +1398,10 @@ impl ShadowGpu {
         queue: &Queue,
         cascades: &DirectionalShadowCascades,
         camera: &CameraState,
+        lod_focus: Option<GeometricLodFocus>,
     ) {
         for index in 0..CASCADE_COUNT {
-            let uniform = shadow_frame_uniform(cascades, index, camera);
+            let uniform = shadow_frame_uniform(cascades, index, camera, lod_focus);
             queue.write_buffer(
                 &self.uniform_buffers[index],
                 0,
@@ -3433,8 +3439,12 @@ impl Renderer {
         self.volumetric_cloud_gpu
             .update(&self.queue, self.world_environment, self.environment);
         if shadows_active {
-            self.shadow_gpu
-                .write_cascades(&self.queue, &shadow_cascades, camera);
+            self.shadow_gpu.write_cascades(
+                &self.queue,
+                &shadow_cascades,
+                camera,
+                geometric_lod_focus,
+            );
         }
         let frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -3495,7 +3505,7 @@ impl Renderer {
                     let start = u64::from(span.offset);
                     let end = start + u64::from(span.size);
                     pass.set_vertex_buffer(0, buffer.slice(start..end));
-                    pass.draw(0..6, 0..span.quad_count);
+                    pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
                     shadow_draw_calls += 1;
                 }
                 if has_avatars {
@@ -3689,7 +3699,7 @@ impl Renderer {
                 let start = u64::from(span.offset);
                 let end = start + u64::from(span.size);
                 pass.set_vertex_buffer(0, buffer.slice(start..end));
-                pass.draw(0..6, 0..span.quad_count);
+                pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
             }
         }
         if weather_active {
@@ -3991,7 +4001,7 @@ fn draw_spans<'pass>(
         let start = u64::from(span.offset);
         let end = start + u64::from(span.size);
         pass.set_vertex_buffer(0, buffer.slice(start..end));
-        pass.draw(0..6, 0..span.quad_count);
+        pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
         draws = draws.saturating_add(1);
     }
     draws
@@ -5374,7 +5384,6 @@ fn frame_uniform(
     let view_projection = view_projection(config, camera, renderer_config.view_distance_metres);
     let camera_forward = camera.forward();
     let fluid = camera.fluid_state();
-    let boundary_centres = lod_focus.map_or([[0; 2]; 8], GeometricLodFocus::boundary_centres);
     FrameUniform {
         view_projection: view_projection.to_cols_array_2d(),
         inverse_view_projection: view_projection.inverse().to_cols_array_2d(),
@@ -5413,16 +5422,7 @@ fn frame_uniform(
             if options.target_outline { 1.0 } else { 0.0 },
         ],
         lod_options: [0.0, 0.0, 0.0, if lod_focus.is_some() { 1.0 } else { 0.0 }],
-        lod_boundary_centres: std::array::from_fn(|pair| {
-            let first = boundary_centres[pair * 2];
-            let second = boundary_centres[pair * 2 + 1];
-            [
-                first[0] as f32 * VOXEL_SIZE_METRES,
-                first[1] as f32 * VOXEL_SIZE_METRES,
-                second[0] as f32 * VOXEL_SIZE_METRES,
-                second[1] as f32 * VOXEL_SIZE_METRES,
-            ]
-        }),
+        lod_boundary_centres: lod_boundary_centres_uniform(lod_focus),
         camera_forward: [
             camera_forward.x,
             camera_forward.y,
@@ -5546,6 +5546,7 @@ fn shadow_frame_uniform(
     shadows: &DirectionalShadowCascades,
     cascade_index: usize,
     camera: &CameraState,
+    lod_focus: Option<GeometricLodFocus>,
 ) -> ShadowFrameUniform {
     ShadowFrameUniform {
         clip_from_world: shadows.cascades[cascade_index]
@@ -5557,7 +5558,23 @@ fn shadow_frame_uniform(
             camera.position.z,
             VOXEL_SIZE_METRES,
         ],
+        lod_options: [0.0, 0.0, 0.0, if lod_focus.is_some() { 1.0 } else { 0.0 }],
+        lod_boundary_centres: lod_boundary_centres_uniform(lod_focus),
     }
+}
+
+fn lod_boundary_centres_uniform(lod_focus: Option<GeometricLodFocus>) -> [[f32; 4]; 4] {
+    let boundary_centres = lod_focus.map_or([[0; 2]; 8], GeometricLodFocus::boundary_centres);
+    std::array::from_fn(|pair| {
+        let first = boundary_centres[pair * 2];
+        let second = boundary_centres[pair * 2 + 1];
+        [
+            first[0] as f32 * VOXEL_SIZE_METRES,
+            first[1] as f32 * VOXEL_SIZE_METRES,
+            second[0] as f32 * VOXEL_SIZE_METRES,
+            second[1] as f32 * VOXEL_SIZE_METRES,
+        ]
+    })
 }
 
 fn directional_shadow_cascades(
@@ -5679,7 +5696,7 @@ fn pipeline(
                 ..Default::default()
             },
         }),
-        primitive: wgpu::PrimitiveState::default(),
+        primitive: quad_primitive_state(),
         depth_stencil: options.depth_stencil,
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
@@ -5703,7 +5720,7 @@ fn fragmentless_depth_pipeline(
             compilation_options: Default::default(),
         },
         fragment: None,
-        primitive: wgpu::PrimitiveState::default(),
+        primitive: quad_primitive_state(),
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: Some(true),
@@ -5738,7 +5755,7 @@ fn transition_depth_pipeline(
             targets: &[],
             compilation_options: Default::default(),
         }),
-        primitive: wgpu::PrimitiveState::default(),
+        primitive: quad_primitive_state(),
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: Some(true),
@@ -5764,6 +5781,13 @@ fn quad_layout() -> wgpu::VertexBufferLayout<'static> {
         array_stride: size_of::<GpuQuad>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &ATTRIBUTES,
+    }
+}
+
+fn quad_primitive_state() -> wgpu::PrimitiveState {
+    wgpu::PrimitiveState {
+        topology: wgpu::PrimitiveTopology::TriangleStrip,
+        ..Default::default()
     }
 }
 
@@ -5884,6 +5908,28 @@ mod tests {
         };
         assert_eq!(resolved_height([0, 1, 0]), 2);
         assert_eq!(resolved_height([2, 3, 0]), 2);
+    }
+
+    #[test]
+    fn visible_and_shadow_passes_share_exact_lod_boundary_centres() {
+        let focus = GeometricLodFocus::snapped(1_614, 294);
+        let packed = lod_boundary_centres_uniform(Some(focus));
+        for (index, expected) in focus.boundary_centres().into_iter().enumerate() {
+            let pair = packed[index / 2];
+            let actual = if index % 2 == 0 {
+                [pair[0], pair[1]]
+            } else {
+                [pair[2], pair[3]]
+            };
+            assert_eq!(
+                actual,
+                [
+                    expected[0] as f32 * VOXEL_SIZE_METRES,
+                    expected[1] as f32 * VOXEL_SIZE_METRES,
+                ]
+            );
+        }
+        assert_eq!(lod_boundary_centres_uniform(None), [[0.0; 4]; 4]);
     }
 
     #[test]
