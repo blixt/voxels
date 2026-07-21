@@ -440,6 +440,15 @@ struct ChunkMesh {
     activation_mask: u8,
 }
 
+struct PreparedCanonicalChunkUpload {
+    coord: ChunkCoord,
+    key: MeshKey,
+    surface_profile: CanonicalChunkProfile,
+    opaque: Option<ChunkMesh>,
+    translucent: Option<ChunkMesh>,
+    local_lights: Vec<GpuLocalLight>,
+}
+
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChunkActivationReason {
@@ -2303,14 +2312,43 @@ impl Renderer {
     }
 
     pub fn upload_chunk(&mut self, chunk: &Chunk, mesh: &MeshedChunk) -> bool {
+        self.upload_chunks_atomic(std::iter::once((chunk, mesh)))
+    }
+
+    /// Publishes one complete canonical edit cut.
+    ///
+    /// All replacement allocations and queue writes are prepared before any resident directory
+    /// entry changes. Allocation failure therefore leaves the previous complete cut visible; a
+    /// successful call switches every opaque/translucent chunk and its derived lighting/profile
+    /// metadata in one CPU transaction before the next command encoder is built.
+    pub fn upload_chunks_atomic<'a>(
+        &mut self,
+        chunks: impl IntoIterator<Item = (&'a Chunk, &'a MeshedChunk)>,
+    ) -> bool {
+        let mut prepared = Vec::new();
+        for (chunk, mesh) in chunks {
+            let Some(upload) = self.prepare_canonical_chunk_upload(chunk, mesh) else {
+                for upload in prepared {
+                    self.discard_canonical_chunk_upload(upload);
+                }
+                return false;
+            };
+            prepared.push(upload);
+        }
+        for upload in prepared {
+            self.commit_canonical_chunk_upload(upload);
+        }
+        true
+    }
+
+    fn prepare_canonical_chunk_upload(
+        &mut self,
+        chunk: &Chunk,
+        mesh: &MeshedChunk,
+    ) -> Option<PreparedCanonicalChunkUpload> {
         let coord = chunk.coord();
         let key = (0, coord.x, coord.y, coord.z);
         let surface_profile = canonical_chunk_profile(chunk);
-        if mesh.is_empty() {
-            self.replace_canonical_surface_profile(coord, surface_profile);
-            self.remove_chunk_mesh(key);
-            return true;
-        }
         let origin = coord.world_origin();
         let convert = |quad: &Quad, conservative_coverage: bool| GpuQuad {
             origin: [
@@ -2357,7 +2395,7 @@ impl Renderer {
                     render_layer: RenderLayer::Opaque,
                 }],
             ) else {
-                return false;
+                return None;
             };
             Some(prepared)
         };
@@ -2380,25 +2418,40 @@ impl Renderer {
                 }],
             ) else {
                 discard_prepared_mesh(&mut self.arena, opaque_update);
-                return false;
+                return None;
             };
             Some(prepared)
         };
-        commit_prepared_mesh(&mut self.arena, &mut self.chunks, key, opaque_update);
+        Some(PreparedCanonicalChunkUpload {
+            coord,
+            key,
+            surface_profile,
+            opaque: opaque_update,
+            translucent: water_update,
+            local_lights: local_lights_for_mesh(origin, mesh),
+        })
+    }
+
+    fn discard_canonical_chunk_upload(&mut self, upload: PreparedCanonicalChunkUpload) {
+        discard_prepared_mesh(&mut self.arena, upload.opaque);
+        discard_prepared_mesh(&mut self.water_arena, upload.translucent);
+    }
+
+    fn commit_canonical_chunk_upload(&mut self, upload: PreparedCanonicalChunkUpload) {
+        commit_prepared_mesh(&mut self.arena, &mut self.chunks, upload.key, upload.opaque);
         commit_prepared_mesh(
             &mut self.water_arena,
             &mut self.water_chunks,
-            key,
-            water_update,
+            upload.key,
+            upload.translucent,
         );
-        self.replace_canonical_surface_profile(coord, surface_profile);
-        let lights = local_lights_for_mesh(origin, mesh);
-        if lights.is_empty() {
-            self.local_light_candidates.remove(&key);
+        self.replace_canonical_surface_profile(upload.coord, upload.surface_profile);
+        if upload.local_lights.is_empty() {
+            self.local_light_candidates.remove(&upload.key);
         } else {
-            self.local_light_candidates.insert(key, lights);
+            self.local_light_candidates
+                .insert(upload.key, upload.local_lights);
         }
-        true
     }
 
     pub fn upload_surface_tile_meshes(
