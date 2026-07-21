@@ -43,6 +43,17 @@ fn corner_ao(packed: u32, corner: u32) -> f32 {
   return f32((packed >> (corner * 2u)) & 3u) / 3.0;
 }
 
+fn unpack_signed_i16(value: u32) -> f32 {
+  let bits = value & 65535u;
+  return f32(select(i32(bits), i32(bits) - 65536, bits >= 32768u));
+}
+
+fn surface_morph_delta(morph_heights: u32, vertical_corner: i32) -> f32 {
+  let bottom = unpack_signed_i16(morph_heights);
+  let top = unpack_signed_i16(morph_heights >> 16u);
+  return select(bottom, top, vertical_corner != 0);
+}
+
 fn unpack_surface_macro_normal(packed: u32, parent: bool) -> vec3<f32> {
   let shift = select(vec2<u32>(0u, 6u), vec2<u32>(12u, 18u), parent);
   let x = f32((packed >> shift.x) & 63u) * (2.0 / 63.0) - 1.0;
@@ -219,6 +230,7 @@ fn vs_main(
   @location(1) extent_voxels: vec2<u32>,
   @location(2) material_face: u32,
   @location(3) ao: u32,
+  @location(4) morph_heights: u32,
 ) -> VertexOut {
   let face = (material_face >> 16u) & 7u;
   let material = material_face & 0xfff8ffffu;
@@ -236,13 +248,14 @@ fn vs_main(
     case 4u: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 1); normal.z = 1.0; }
     default: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 0); normal.z = -1.0; }
   }
-  let world = vec3<f32>(origin + local) * frame.viewport_voxel.z;
+  var world = vec3<f32>(origin + local) * frame.viewport_voxel.z;
   let surface_macro_normal = (ao & 0x01000000u) != 0u;
   var terrain_lighting = vec2<f32>(1.0);
   if surface_macro_normal {
     let own_normal = unpack_surface_macro_normal(ao, false);
     let parent_normal = unpack_surface_macro_normal(ao, true);
     let parent_blend = surface_parent_normal_blend(world, material);
+    world.y += surface_morph_delta(morph_heights, uv.y) * frame.viewport_voxel.z * parent_blend;
     let terrain_normal = normalize(
       mix(own_normal, parent_normal, parent_blend),
     );

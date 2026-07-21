@@ -309,6 +309,9 @@ struct GpuQuad {
     extent_voxels: [u16; 2],
     material_face: u32,
     ao: u32,
+    /// Signed bottom/top Y deltas to the next-coarser surface, packed as two i16 values.
+    /// Canonical geometry and standalone surface features keep this zero.
+    morph_heights: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -354,10 +357,11 @@ struct CanonicalChunkProfile {
 
 type CanonicalColumnProfiles = HashMap<(i32, i32), BTreeMap<i32, CanonicalChunkProfile>>;
 
-const _: () = assert!(size_of::<GpuQuad>() == 24);
+const _: () = assert!(size_of::<GpuQuad>() == 28);
 const _: () = assert!(std::mem::offset_of!(GpuQuad, extent_voxels) == 12);
 const _: () = assert!(std::mem::offset_of!(GpuQuad, material_face) == 16);
 const _: () = assert!(std::mem::offset_of!(GpuQuad, ao) == 20);
+const _: () = assert!(std::mem::offset_of!(GpuQuad, morph_heights) == 24);
 
 fn pack_gpu_material_face(material: u32, face: u8) -> u32 {
     debug_assert_eq!(material & GPU_FACE_MASK, 0);
@@ -2364,6 +2368,7 @@ impl Renderer {
                 } else {
                     0
                 },
+            morph_heights: 0,
         };
         // Greedy canonical terrain has intentional T-junctions where one long quad meets several
         // shorter neighbors. Mark only its opaque faces for subpixel conservative coverage; water
@@ -2478,26 +2483,31 @@ impl Renderer {
             .collect::<HashSet<_>>();
         let macro_normals = surface_macro_normals(tile);
         let horizon_profiles = surface_horizon_profiles(tile);
+        let geometry_morphs = surface_geometry_morphs(tile, &macro_normals);
         let patch_profiles = surface_patch_profiles(tile, &macro_normals, &horizon_profiles);
         let gpu_quads: Vec<_> = tile
             .quads
             .iter()
             .zip(macro_normals)
             .zip(horizon_profiles)
-            .map(|((quad, macro_normal), horizon_profile)| GpuQuad {
-                origin: quad.origin,
-                extent_voxels: quad.extent,
-                material_face: pack_surface_horizon_material(
-                    pack_gpu_material_face(
-                        u32::from(quad.material.id())
-                            | FAR_MATERIAL_FLAG
-                            | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
-                        quad.face,
+            .zip(geometry_morphs)
+            .map(
+                |(((quad, macro_normal), horizon_profile), morph_heights)| GpuQuad {
+                    origin: quad.origin,
+                    extent_voxels: quad.extent,
+                    material_face: pack_surface_horizon_material(
+                        pack_gpu_material_face(
+                            u32::from(quad.material.id())
+                                | FAR_MATERIAL_FLAG
+                                | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
+                            quad.face,
+                        ),
+                        horizon_profile,
                     ),
-                    horizon_profile,
-                ),
-                ao: pack_surface_horizon_ao(macro_normal, horizon_profile),
-            })
+                    ao: pack_surface_horizon_ao(macro_normal, horizon_profile),
+                    morph_heights,
+                },
+            )
             .collect();
         let water_gpu_quads: Vec<_> = water
             .quads
@@ -2512,6 +2522,7 @@ impl Renderer {
                     quad.face,
                 ),
                 ao: 0xff,
+                morph_heights: 0,
             })
             .collect();
         if gpu_quads_match_resident(self.chunks.get(&key), &gpu_quads)
@@ -4073,6 +4084,84 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
     packed
 }
 
+fn pack_surface_morph_heights(bottom_delta: i32, top_delta: i32) -> u32 {
+    let (Ok(bottom), Ok(top)) = (i16::try_from(bottom_delta), i16::try_from(top_delta)) else {
+        // A pathological height discontinuity must remain exact rather than wrap into unrelated
+        // geometry. Normal generated terrain is several orders of magnitude inside this range.
+        return 0;
+    };
+    u32::from(bottom as u16) | (u32::from(top as u16) << 16)
+}
+
+fn surface_parent_height(tile: &SurfaceTileMesh, x: i32, z: i32) -> Option<i32> {
+    if tile.shading.parent_heights.is_empty() {
+        return None;
+    }
+    let [origin_x, origin_z] = tile.coord.voxel_origin();
+    let parent_stride = tile.coord.stride_voxels().checked_mul(2)?;
+    let sample_x = (i64::from(x) - i64::from(origin_x)).div_euclid(i64::from(parent_stride)) + 1;
+    let sample_z = (i64::from(z) - i64::from(origin_z)).div_euclid(i64::from(parent_stride)) + 1;
+    let edge = voxels_world::SURFACE_PARENT_SHADING_EDGE_SAMPLES as i64;
+    if !(0..edge).contains(&sample_x) || !(0..edge).contains(&sample_z) {
+        return None;
+    }
+    tile.shading
+        .parent_heights
+        .get((sample_x + sample_z * edge) as usize)
+        .copied()
+}
+
+/// Resolves the exact parent-height endpoints for generated terrain body faces. Top faces move as
+/// a unit; vertical faces move their lower and upper edges independently, so adjacent cells retain
+/// a closed shell throughout the transition. Skyline proxies and outermost tiles intentionally do
+/// not morph.
+fn surface_geometry_morphs(tile: &SurfaceTileMesh, macro_normals: &[u32]) -> Vec<u32> {
+    let stride = tile.coord.stride_voxels();
+    tile.quads
+        .iter()
+        .zip(macro_normals)
+        .map(|(quad, &macro_normal)| {
+            if macro_normal & SURFACE_MACRO_NORMAL_FLAG == 0 {
+                return 0;
+            }
+            if quad.face == 2 {
+                let Some(parent_height) =
+                    surface_parent_height(tile, quad.origin[0], quad.origin[2])
+                else {
+                    return 0;
+                };
+                let delta = parent_height.saturating_sub(quad.origin[1]);
+                return pack_surface_morph_heights(delta, delta);
+            }
+            if !matches!(quad.face, 0 | 1 | 4 | 5) {
+                return 0;
+            }
+            let own_x = quad.origin[0] - if quad.face == 0 { stride - 1 } else { 0 };
+            let own_z = quad.origin[2] - if quad.face == 4 { stride - 1 } else { 0 };
+            let (neighbor_x, neighbor_z) = match quad.face {
+                0 => (own_x.saturating_add(stride), own_z),
+                1 => (own_x.saturating_sub(stride), own_z),
+                4 => (own_x, own_z.saturating_add(stride)),
+                _ => (own_x, own_z.saturating_sub(stride)),
+            };
+            let (Some(parent_own), Some(parent_neighbor)) = (
+                surface_parent_height(tile, own_x, own_z),
+                surface_parent_height(tile, neighbor_x, neighbor_z),
+            ) else {
+                return 0;
+            };
+            let child_neighbor = quad.origin[1].saturating_sub(1);
+            let child_own = quad.origin[1]
+                .saturating_add(i32::from(quad.extent[1]))
+                .saturating_sub(1);
+            pack_surface_morph_heights(
+                parent_neighbor.saturating_sub(child_neighbor),
+                parent_own.saturating_sub(child_own),
+            )
+        })
+        .collect()
+}
+
 fn sampled_shading_normal(
     heights: &[i32],
     edge: usize,
@@ -4492,6 +4581,28 @@ fn append_lod_transition(
         };
         let mut remaining = i64::from(upper) - i64::from(lower);
         let mut y = lower.saturating_add(1);
+        let fine_level = SurfaceLodLevel::from_stride_voxels(fine_stride);
+        let (encoded_level, transition_normal, transition_horizon, morph_heights) =
+            if let Some(fine_level) = fine_level {
+                let (bottom_delta, top_delta) = if coarse_cell.height > fine_cell.height {
+                    (coarse_cell.height.saturating_sub(fine_cell.height), 0)
+                } else {
+                    (0, coarse_cell.height.saturating_sub(fine_cell.height))
+                };
+                (
+                    fine_level,
+                    fine_cell.macro_normal,
+                    fine_cell.horizon_profile,
+                    pack_surface_morph_heights(bottom_delta, top_delta),
+                )
+            } else {
+                (
+                    patch.level,
+                    coarse_cell.macro_normal,
+                    coarse_cell.horizon_profile,
+                    0,
+                )
+            };
         while remaining > 0 {
             let vertical_extent = remaining.min(i64::from(u16::MAX)) as u16;
             let origin_voxels = match face {
@@ -4508,16 +4619,16 @@ fn append_lod_transition(
                     pack_gpu_material_face(
                         u32::from(surface.material.id())
                             | FAR_MATERIAL_FLAG
-                            | (u32::from(patch.level.index()) << SURFACE_LOD_SHIFT),
+                            | (u32::from(encoded_level.index()) << SURFACE_LOD_SHIFT),
                         face,
                     ),
-                    coarse_cell.horizon_profile,
+                    transition_horizon,
                 ),
-                // The connector belongs to the coarse patch and meets the finer surface at the
-                // exact point where the finer parent normal equals this coarse normal. It is a
-                // proxy for unresolved terrain between the two sampling lattices, so lighting it
-                // with the shared terrain normal avoids exposing an artificial vertical wall.
-                ao: pack_surface_horizon_ao(coarse_cell.macro_normal, coarse_cell.horizon_profile),
+                // Between surface levels the connector follows the fine level's parent blend and
+                // collapses exactly as that shell reaches the coarse height. The canonical seam
+                // remains exact and static because canonical geometry has no coarser morph field.
+                ao: pack_surface_horizon_ao(transition_normal, transition_horizon),
+                morph_heights,
             });
             remaining -= i64::from(vertical_extent);
             y = y.saturating_add(i32::from(vertical_extent));
@@ -5285,8 +5396,13 @@ fn fragmentless_depth_pipeline(
 }
 
 fn quad_layout() -> wgpu::VertexBufferLayout<'static> {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
-        wgpu::vertex_attr_array![0 => Sint32x3, 1 => Uint16x2, 2 => Uint32, 3 => Uint32];
+    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+        0 => Sint32x3,
+        1 => Uint16x2,
+        2 => Uint32,
+        3 => Uint32,
+        4 => Uint32
+    ];
     wgpu::VertexBufferLayout {
         array_stride: size_of::<GpuQuad>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
@@ -5389,7 +5505,28 @@ mod tests {
             packed[side_index], value,
             "terrain wall shares its cell's macro normal"
         );
-        assert_eq!(size_of::<GpuQuad>(), 24);
+        assert_eq!(size_of::<GpuQuad>(), 28);
+    }
+
+    #[test]
+    fn adjacent_surface_cells_morph_to_the_exact_same_parent_height() {
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0);
+        let tile =
+            voxels_world::generate_surface_tile_mesh_with(coord, |x, _| (x, Material::Grass));
+        let macro_normals = surface_macro_normals(&tile);
+        let morphs = surface_geometry_morphs(&tile, &macro_normals);
+        let resolved_height = |origin: [i32; 3]| {
+            let index = tile
+                .quads
+                .iter()
+                .position(|quad| quad.origin == origin && quad.face == 2)
+                .expect("terrain top exists");
+            let packed = morphs[index];
+            let bits = (packed & 0xffff) as u16;
+            tile.quads[index].origin[1] + i32::from(bits as i16)
+        };
+        assert_eq!(resolved_height([0, 1, 0]), 2);
+        assert_eq!(resolved_height([2, 3, 0]), 2);
     }
 
     #[test]
@@ -5428,7 +5565,7 @@ mod tests {
     }
 
     #[test]
-    fn surface_horizon_bits_round_trip_without_growing_gpu_quads() {
+    fn surface_horizon_bits_round_trip_alongside_geometry_morphs() {
         let base_material = u32::from(Material::Stone.id())
             | FAR_MATERIAL_FLAG
             | (u32::from(SurfaceLodLevel::Stride16.index()) << SURFACE_LOD_SHIFT);
@@ -5448,7 +5585,7 @@ mod tests {
             assert_eq!((material_face >> SURFACE_LOD_SHIFT) & 7, 3);
             assert_ne!(ao & SURFACE_MACRO_NORMAL_FLAG, 0);
         }
-        assert_eq!(size_of::<GpuQuad>(), 24);
+        assert_eq!(size_of::<GpuQuad>(), 28);
     }
 
     #[test]
@@ -5843,9 +5980,10 @@ mod tests {
             extent_voxels: [u16::MAX, 1],
             material_face: pack_gpu_material_face(materials[3], 5),
             ao: u32::MAX,
+            morph_heights: u32::MAX,
         };
         let bytes = bytemuck::bytes_of(&quad);
-        assert_eq!(bytes.len(), 24);
+        assert_eq!(bytes.len(), 28);
         assert_eq!(quad.extent_voxels, [u16::MAX, 1]);
     }
 
@@ -5856,6 +5994,7 @@ mod tests {
             extent_voxels: [8, 5],
             material_face: pack_gpu_material_face(u32::from(Material::Grass.id()), 2),
             ao: 0xff,
+            morph_heights: 0,
         };
         let quads = [quad];
         let fingerprint = fingerprint_bytes(bytemuck::cast_slice(&quads));
@@ -5917,6 +6056,7 @@ mod tests {
                     extent_voxels: [extent, 1],
                     material_face: pack_gpu_material_face(u32::from(Material::Grass.id()), 2),
                     ao: 0,
+                    morph_heights: 0,
                 };
                 let right = GpuQuad {
                     origin: [origin + i32::from(extent), -31, 47],
