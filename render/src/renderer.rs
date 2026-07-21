@@ -5640,21 +5640,31 @@ fn append_lod_transition(
             return false;
         };
         let fine_point = [fine_x, fine_z];
-        let fine_cell = if let Some(fine_patch) = selection.selected_patch_at(fine_point) {
-            if fine_patch.level.next_coarser() != Some(patch.level) {
+        let (fine_cell, fine_parent_height) =
+            if let Some(fine_patch) = selection.selected_patch_at(fine_point) {
+                if fine_patch.level.next_coarser() != Some(patch.level) {
+                    return false;
+                }
+                let fine_cell = surface_profiles
+                    .get(&fine_patch)
+                    .and_then(|profile| profile.sample_world(fine_x, fine_z));
+                let fine_parent = fine_patch
+                    .parent()
+                    .and_then(|parent| surface_profiles.get(&parent))
+                    .and_then(|profile| profile.sample_world(fine_x, fine_z));
+                let (Some(fine_cell), Some(fine_parent)) = (fine_cell, fine_parent) else {
+                    return false;
+                };
+                (fine_cell, Some(fine_parent.height))
+            } else if patch.level == SurfaceLodLevel::Stride2 {
+                let Some(fine_cell) = canonical_surface_sample(canonical_profiles, fine_x, fine_z)
+                else {
+                    return false;
+                };
+                (fine_cell, None)
+            } else {
                 return false;
-            }
-            surface_profiles
-                .get(&fine_patch)
-                .and_then(|profile| profile.sample_world(fine_x, fine_z))
-        } else if patch.level == SurfaceLodLevel::Stride2 {
-            canonical_surface_sample(canonical_profiles, fine_x, fine_z)
-        } else {
-            None
-        };
-        let Some(fine_cell) = fine_cell else {
-            return false;
-        };
+            };
         if coarse_cell.height == fine_cell.height {
             continue;
         }
@@ -5671,27 +5681,36 @@ fn append_lod_transition(
         let mut remaining = i64::from(upper) - i64::from(lower);
         let mut y = lower.saturating_add(1);
         let fine_level = SurfaceLodLevel::from_stride_voxels(fine_stride);
-        let (encoded_level, transition_normal, transition_horizon, morph_heights) =
-            if let Some(fine_level) = fine_level {
-                let (bottom_delta, top_delta) = if coarse_cell.height > fine_cell.height {
-                    (coarse_cell.height.saturating_sub(fine_cell.height), 0)
-                } else {
-                    (0, coarse_cell.height.saturating_sub(fine_cell.height))
-                };
-                (
-                    fine_level,
-                    fine_cell.macro_normal,
-                    fine_cell.horizon_profile,
-                    pack_surface_morph_heights(bottom_delta, top_delta),
-                )
+        let (encoded_level, transition_normal, transition_horizon, morph_heights) = if let (
+            Some(fine_level),
+            Some(fine_parent_height),
+        ) =
+            (fine_level, fine_parent_height)
+        {
+            // The fine endpoint morphs to the hidden parent sample on its own side of the
+            // boundary, not to the selected coarse sample across the boundary. Adjacent
+            // parent cells may have different heights; collapsing to the latter opened a
+            // crack whenever Terrain Diffusion produced relief along an LOD cut.
+            let fine_parent_delta = fine_parent_height.saturating_sub(fine_cell.height);
+            let (bottom_delta, top_delta) = if coarse_cell.height > fine_cell.height {
+                (fine_parent_delta, 0)
             } else {
-                (
-                    patch.level,
-                    coarse_cell.macro_normal,
-                    coarse_cell.horizon_profile,
-                    0,
-                )
+                (0, fine_parent_delta)
             };
+            (
+                fine_level,
+                fine_cell.macro_normal,
+                fine_cell.horizon_profile,
+                pack_surface_morph_heights(bottom_delta, top_delta),
+            )
+        } else {
+            (
+                patch.level,
+                coarse_cell.macro_normal,
+                coarse_cell.horizon_profile,
+                0,
+            )
+        };
         while remaining > 0 {
             let vertical_extent = remaining.min(i64::from(u16::MAX)) as u16;
             let origin_voxels = match face {
@@ -7093,6 +7112,8 @@ mod tests {
         let coarse = SurfacePatchId::new(SurfaceLodLevel::Stride4, 8, 0);
         let fine_low = SurfacePatchId::new(SurfaceLodLevel::Stride2, 15, 0);
         let fine_high = SurfacePatchId::new(SurfaceLodLevel::Stride2, 15, 1);
+        let fine_parent = fine_low.parent().unwrap();
+        assert_eq!(fine_high.parent(), Some(fine_parent));
         let resident = HashSet::from([coarse, fine_low, fine_high]);
         let mut selection = SurfacePatchSelection::default();
         selection.rebuild(focus, &resident, &HashSet::new());
@@ -7102,18 +7123,28 @@ mod tests {
             (coarse, flat_patch_profile(coarse, 10)),
             (fine_low, flat_patch_profile(fine_low, 20)),
             (fine_high, flat_patch_profile(fine_high, 20)),
+            (fine_parent, flat_patch_profile(fine_parent, 12)),
         ]);
         let transitions = build_lod_transitions(&selection, &profiles, &HashMap::new());
         assert_eq!(transitions.incomplete_edges, 0);
         assert_eq!(transitions.exact_edges.len(), 1);
         assert_eq!(transitions.quads.len(), 16);
-        for quad in &transitions.quads {
+        for (quad, &morph_heights) in transitions.quads.iter().zip(&transitions.morph_heights) {
             assert_eq!(quad.extent_voxels, [2, 10]);
             assert_eq!(quad.origin[0], 255);
             assert_eq!(quad.origin[1], 11);
             assert_eq!(quad.material_face >> GPU_FACE_SHIFT & 7, 0);
             assert_ne!(quad.ao & SURFACE_MACRO_NORMAL_FLAG, 0);
             assert_eq!(quad.origin[1] + i32::from(quad.extent_voxels[1]), 21,);
+            assert_eq!((morph_heights as u16) as i16, 0);
+            assert_eq!(((morph_heights >> 16) as u16) as i16, -8);
+            assert_eq!(
+                quad.origin[1]
+                    + i32::from(quad.extent_voxels[1])
+                    + i32::from(((morph_heights >> 16) as u16) as i16),
+                13,
+                "the fine endpoint must meet its own hidden parent at height 12"
+            );
         }
 
         let main = MeshSlice {
@@ -7151,6 +7182,7 @@ mod tests {
         let coarse = SurfacePatchId::new(SurfaceLodLevel::Stride4, 8, 0);
         let fine_low = SurfacePatchId::new(SurfaceLodLevel::Stride2, 15, 0);
         let fine_high = SurfacePatchId::new(SurfaceLodLevel::Stride2, 15, 1);
+        let fine_parent = fine_low.parent().unwrap();
         let resident = HashSet::from([coarse, fine_low, fine_high]);
         let mut selection = SurfacePatchSelection::default();
         selection.rebuild(focus, &resident, &HashSet::new());
@@ -7158,6 +7190,7 @@ mod tests {
             (coarse, flat_patch_profile(coarse, 0)),
             (fine_low, flat_patch_profile(fine_low, 131_071)),
             (fine_high, flat_patch_profile(fine_high, 131_071)),
+            (fine_parent, flat_patch_profile(fine_parent, 131_071)),
         ]);
         let transitions = build_lod_transitions(&selection, &profiles, &HashMap::new());
         assert_eq!(transitions.incomplete_edges, 0);
