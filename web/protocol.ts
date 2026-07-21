@@ -68,6 +68,7 @@ export type ToWorker =
       green: number;
       blue: number;
     }
+  | { kind: "materialDetail"; requestId: number; enabled: boolean }
   | { kind: "snapshot"; requestId: number }
   | {
       kind: "submitPlace";
@@ -99,6 +100,7 @@ export type FromWorker =
   | { kind: "snapshot"; requestId: number; values: number[] }
   | { kind: "spectator"; requestId: number; active: boolean }
   | { kind: "diagnosticSky"; requestId: number; active: boolean }
+  | { kind: "materialDetail"; requestId: number; accepted: boolean }
   | { kind: "submitPlace"; requestId: number; submitted: boolean }
   | { kind: "submitDig"; requestId: number; submitted: boolean }
   | { kind: "inventory"; requestId: number; values: number[] }

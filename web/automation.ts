@@ -241,6 +241,7 @@ export interface EngineAutomationApi {
   profile(profileId: number): void;
   spectator(active: boolean): Promise<boolean>;
   diagnosticSky(rgb: readonly [number, number, number] | null): Promise<boolean>;
+  materialDetail(enabled: boolean): Promise<boolean>;
   look(deltaX: number, deltaY: number): void;
   submitPlace(
     x: number,

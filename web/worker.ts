@@ -125,6 +125,13 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
           false,
       });
       break;
+    case "materialDetail":
+      scope.postMessage({
+        kind: "materialDetail",
+        requestId: message.requestId,
+        accepted: handle?.set_material_detail(message.enabled) ?? false,
+      });
+      break;
     case "snapshot":
       scope.postMessage({
         kind: "snapshot",

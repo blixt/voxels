@@ -2840,6 +2840,17 @@ mod web {
             true
         }
 
+        pub fn set_material_detail(&self, enabled: bool) -> bool {
+            let Some(engine) = self.engine.as_ref() else {
+                return false;
+            };
+            engine
+                .renderer
+                .borrow_mut()
+                .set_material_detail_enabled(enabled);
+            true
+        }
+
         /// `[resident, required, playable]` for the browser's canvas-only startup surface.
         pub fn startup_progress(&self) -> Vec<u32> {
             let Some(engine) = self.engine.as_ref() else {

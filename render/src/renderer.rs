@@ -2500,6 +2500,12 @@ impl Renderer {
             color.map(|value| value.map(|channel| channel.clamp(0.0, 1.0)));
     }
 
+    /// Selects the material-detail pipeline for deterministic profiling without adding a
+    /// developer-only control to the player-facing World Lab.
+    pub fn set_material_detail_enabled(&mut self, enabled: bool) {
+        self.options.material_detail = enabled;
+    }
+
     pub const fn ui_open(&self) -> bool {
         self.ui.open()
     }

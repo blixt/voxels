@@ -183,6 +183,18 @@ export class EngineClient {
     await this.#page.waitForTimeout(50);
   }
 
+  async setMaterialDetail(enabled: boolean): Promise<readonly number[]> {
+    const accepted = await this.#page.evaluate(
+      (active) => globalThis.__VOXELS__!.materialDetail(active),
+      enabled,
+    );
+    if (!accepted) throw new Error("engine rejected the material-detail override");
+    return this.waitForSnapshot(
+      (snapshot) => snapshotValue(snapshot, "materialDetail") === Number(enabled),
+      { description: `material detail did not become ${enabled ? "enabled" : "disabled"}` },
+    );
+  }
+
   async submitPlace(
     x: number,
     y: number,
