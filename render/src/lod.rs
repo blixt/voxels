@@ -7,9 +7,9 @@ use voxels_world::{CHUNK_EDGE, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId
 
 /// Half extents in canonical 10 cm voxels. Every boundary is a multiple of the patch span on both
 /// sides, so whole patches can change owner without overlap, holes, or fragment clipping.
-pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 8] = [96, 256, 512, 1_024, 2_048, 4_096, 8_192, 16_384];
+pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 8] = [128, 320, 640, 1_280, 2_560, 4_096, 8_192, 16_384];
 // Snap only as coarsely as both adjacent representations require. In particular, the near handoff
-// moves in one 3.2 m chunk rather than a 9.6 m feature cell, cutting its worst visible replacement
+// moves in one 3.2 m chunk rather than a 12.8 m feature cell, cutting its worst visible replacement
 // strip by two thirds while preserving whole-chunk and whole-patch ownership.
 const LOD_BOUNDARY_SNAP: [i32; 8] = [32, 32, 64, 128, 256, 512, 1_024, 2_048];
 const LOD_SNAP_HYSTERESIS_DIVISOR: i32 = 8;
@@ -622,17 +622,18 @@ mod tests {
     #[test]
     fn every_world_point_has_exactly_one_ordered_owner() {
         let focus = GeometricLodFocus::snapped(117, -73);
-        let probes = [
-            ([128, -64], LodOwner::Canonical),
-            ([224, -64], LodOwner::Surface(SurfaceLodLevel::Stride2)),
-            ([384, -64], LodOwner::Surface(SurfaceLodLevel::Stride4)),
-            ([704, -64], LodOwner::Surface(SurfaceLodLevel::Stride8)),
-            ([1_280, -64], LodOwner::Surface(SurfaceLodLevel::Stride16)),
-            ([2_560, -64], LodOwner::Surface(SurfaceLodLevel::Stride32)),
-            ([5_120, -64], LodOwner::Surface(SurfaceLodLevel::Stride64)),
-            ([10_240, -64], LodOwner::Surface(SurfaceLodLevel::Stride128)),
-            ([20_480, -64], LodOwner::Surface(SurfaceLodLevel::Stride256)),
-        ];
+        let centres = focus.boundary_centres();
+        let probes = std::iter::once(([128, -64], LodOwner::Canonical)).chain(
+            LOD_BOUNDARY_HALF_EXTENTS
+                .into_iter()
+                .enumerate()
+                .map(|(index, half_extent)| {
+                    (
+                        [centres[index][0] + half_extent, -64],
+                        LodOwner::Surface(SurfaceLodLevel::ALL[index]),
+                    )
+                }),
+        );
         for (point, expected) in probes {
             assert_eq!(focus.owner_at(point[0], point[1]), expected);
         }
@@ -753,8 +754,8 @@ mod tests {
     fn transitions_are_owned_only_on_resolution_boundaries() {
         let focus = GeometricLodFocus::snapped(0, 0);
         let interior = SurfaceBounds {
-            min: [112, -64, 0],
-            max: [128, 128, 16],
+            min: [144, -64, 0],
+            max: [160, 128, 16],
         };
         assert!(!focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,
@@ -763,8 +764,8 @@ mod tests {
         ));
 
         let canonical_boundary = SurfaceBounds {
-            min: [96, -64, 0],
-            max: [112, 128, 16],
+            min: [128, -64, 0],
+            max: [144, 128, 16],
         };
         assert!(focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,
@@ -778,8 +779,8 @@ mod tests {
         ));
 
         let wrong_level = SurfaceBounds {
-            min: [256, -64, 0],
-            max: [288, 128, 32],
+            min: [320, -64, 0],
+            max: [352, 128, 32],
         };
         assert!(!focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,

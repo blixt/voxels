@@ -219,7 +219,7 @@ impl Default for RendererConfig {
         Self {
             features: RendererFeatureConfig::default(),
             mission_control: MissionControlConfig::default(),
-            view_distance_metres: 2_400.0,
+            view_distance_metres: 3_200.0,
             directional_shadows: DirectionalShadowConfig::default(),
             volumetric_clouds: VolumetricCloudConfig::default(),
             diagnostic_sky_color: None,
@@ -239,6 +239,7 @@ struct FrameUniform {
     render_options: [f32; 4],
     lod_options: [f32; 4],
     lod_boundary_centres: [[f32; 4]; 4],
+    lod_boundary_half_extents: [[f32; 4]; 2],
     camera_forward: [f32; 4],
     shadow_splits: [f32; 4],
     shadow_texel_sizes: [f32; 4],
@@ -263,12 +264,12 @@ struct FrameUniform {
     diagnostic_sky: [f32; 4],
 }
 
-const _: () = assert!(size_of::<FrameUniform>() == 816);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, weather) == 736);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, cloud_layer) == 752);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 768);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 784);
-const _: () = assert!(std::mem::offset_of!(FrameUniform, diagnostic_sky) == 800);
+const _: () = assert!(size_of::<FrameUniform>() == 848);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, weather) == 768);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, cloud_layer) == 784);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, medium) == 800);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, interior) == 816);
+const _: () = assert!(std::mem::offset_of!(FrameUniform, diagnostic_sky) == 832);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
@@ -305,11 +306,13 @@ struct ShadowFrameUniform {
     camera_voxel: [f32; 4],
     lod_options: [f32; 4],
     lod_boundary_centres: [[f32; 4]; 4],
+    lod_boundary_half_extents: [[f32; 4]; 2],
 }
 
-const _: () = assert!(size_of::<ShadowFrameUniform>() == 160);
+const _: () = assert!(size_of::<ShadowFrameUniform>() == 192);
 const _: () = assert!(std::mem::offset_of!(ShadowFrameUniform, lod_options) == 80);
 const _: () = assert!(std::mem::offset_of!(ShadowFrameUniform, lod_boundary_centres) == 96);
+const _: () = assert!(std::mem::offset_of!(ShadowFrameUniform, lod_boundary_half_extents) == 160);
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -6039,6 +6042,7 @@ fn frame_uniform(
         ],
         lod_options: [0.0, 0.0, 0.0, if lod_focus.is_some() { 1.0 } else { 0.0 }],
         lod_boundary_centres: lod_boundary_centres_uniform(lod_focus),
+        lod_boundary_half_extents: lod_boundary_half_extents_uniform(),
         camera_forward: [
             camera_forward.x,
             camera_forward.y,
@@ -6176,6 +6180,7 @@ fn shadow_frame_uniform(
         ],
         lod_options: [0.0, 0.0, 0.0, if lod_focus.is_some() { 1.0 } else { 0.0 }],
         lod_boundary_centres: lod_boundary_centres_uniform(lod_focus),
+        lod_boundary_half_extents: lod_boundary_half_extents_uniform(),
     }
 }
 
@@ -6190,6 +6195,14 @@ fn lod_boundary_centres_uniform(lod_focus: Option<GeometricLodFocus>) -> [[f32; 
             second[0] as f32 * VOXEL_SIZE_METRES,
             second[1] as f32 * VOXEL_SIZE_METRES,
         ]
+    })
+}
+
+fn lod_boundary_half_extents_uniform() -> [[f32; 4]; 2] {
+    std::array::from_fn(|group| {
+        std::array::from_fn(|index| {
+            LOD_BOUNDARY_HALF_EXTENTS[group * 4 + index] as f32 * VOXEL_SIZE_METRES
+        })
     })
 }
 
@@ -6736,7 +6749,7 @@ mod tests {
     fn collapsed_parent_step_quads_are_drawn_only_inside_the_morph_band() {
         let focus = GeometricLodFocus::snapped(0, 0);
         let inner = SurfacePatchId::new(SurfaceLodLevel::Stride2, 4, 0);
-        let boundary = SurfacePatchId::new(SurfaceLodLevel::Stride2, 14, 0);
+        let boundary = SurfacePatchId::new(SurfaceLodLevel::Stride2, 18, 0);
         let outermost = SurfacePatchId::new(SurfaceLodLevel::Stride256, 0, 0);
         assert!(!surface_patch_intersects_morph_band(focus, inner));
         assert!(surface_patch_intersects_morph_band(focus, boundary));
@@ -6744,7 +6757,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_and_shadow_passes_share_exact_lod_boundary_centres() {
+    fn visible_and_shadow_passes_share_exact_lod_boundaries() {
         let focus = GeometricLodFocus::snapped(1_614, 294);
         let packed = lod_boundary_centres_uniform(Some(focus));
         for (index, expected) in focus.boundary_centres().into_iter().enumerate() {
@@ -6763,6 +6776,10 @@ mod tests {
             );
         }
         assert_eq!(lod_boundary_centres_uniform(None), [[0.0; 4]; 4]);
+        assert_eq!(
+            lod_boundary_half_extents_uniform(),
+            [[12.8, 32.0, 64.0, 128.0], [256.0, 409.6, 819.2, 1_638.4]]
+        );
     }
 
     #[test]

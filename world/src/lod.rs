@@ -1790,7 +1790,7 @@ fn append_ecology_tree_proxy(
     // bands; the union bounds preserve aggregate foliage area as detail is removed. This is the
     // voxel-world equivalent of Nanite foliage's area-preserving aggregate representation.
     let maximum_crown_bands = match level {
-        // At the 9.6 m canonical handoff a 10 cm slice is still several pixels tall. Preserve far
+        // At the 12.8 m canonical handoff a 10 cm slice is still several pixels tall. Preserve far
         // more of the canonical crown profile here, while bounding server bytes and GPU quads.
         SurfaceLodLevel::Stride2 => 24,
         SurfaceLodLevel::Stride4 => 14,

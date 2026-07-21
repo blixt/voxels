@@ -59,7 +59,7 @@ collision_lookahead_seconds = 2.5
 # activate atomically.
 velocity_lookahead_seconds = 1.5
 view_cone_half_angle_degrees = 55.0
-# Underground views need exact volume beyond the ordinary 9.6 m canonical surface handoff:
+# Underground views need exact volume beyond the ordinary 12.8 m canonical surface handoff:
 # heightfield LODs cannot represent a tunnel terminator. Matching air cells on resident chunk faces
 # form a bounded portal graph, retaining visible cave branches and the solid walls that end them
 # throughout the expanded camera view instead of only along sparse crosshair rays.
@@ -74,11 +74,11 @@ upload = 3
 # One radius for each surface LOD level: stride 2 through 256. The four background rings use
 # 3.2–25.6 m cells; each fixed-size tile doubles linear coverage without increasing its mesh cost.
 [streaming.surface]
-load_radius_tiles = [4, 4, 4, 5, 4, 5, 4, 3]
+load_radius_tiles = [5, 5, 5, 5, 4, 5, 4, 4]
 retention_margin_tiles = 1
 
 [rendering]
-view_distance_metres = 2400.0
+view_distance_metres = 3200.0
 
 [rendering.shadows]
 vertical_fov_radians = 1.1868238 # 68 degrees

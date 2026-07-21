@@ -3935,7 +3935,7 @@ mod tests {
 
         assert!(
             interest.iter().any(|coord| coord.z <= -4),
-            "the exact corridor must cross the 9.6m canonical-to-surface handoff"
+            "the exact corridor must cross the 12.8m canonical-to-surface handoff"
         );
         assert!(
             interest.iter().any(|coord| coord.z <= -9),

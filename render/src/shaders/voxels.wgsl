@@ -46,11 +46,11 @@ const CORNERS = array<vec2<i32>, 4>(
 );
 const STANDARD_STRIP = array<u32, 4>(1u, 2u, 0u, 3u);
 const FLIPPED_STRIP = array<u32, 4>(0u, 1u, 3u, 2u);
-// Cover the full pixel-diamond around independently rasterized T-junctions. A half-pixel
-// expansion is insufficient after perspective interpolation and viewport rounding; one extra
-// quarter pixel keeps adjacent coarse/fine quads conservative without changing world-space
-// positions, lighting, depth ordering, or silhouettes against actual sky.
-const CONSERVATIVE_EXPANSION_PIXELS: f32 = 1.25;
+// Cover the full pixel-diamond around independently rasterized T-junctions. Smaller margins still
+// exposed isolated samples after perspective interpolation and viewport rounding; 1.5 pixels keeps
+// adjacent coarse/fine quads conservative without changing world-space positions, lighting, depth
+// ordering, or silhouettes against actual sky.
+const CONSERVATIVE_EXPANSION_PIXELS: f32 = 1.5;
 const MORPH_CLOSURE_EXTENT_FLAG: u32 = 0x8000u;
 
 fn corner_ao(packed: u32, corner: u32) -> f32 {
@@ -150,6 +150,10 @@ fn lod_boundary_center(boundary: u32) -> vec2<f32> {
   return select(packed.xy, packed.zw, (boundary & 1u) != 0u);
 }
 
+fn lod_boundary_half_extent(boundary: u32) -> f32 {
+  return frame.lod_boundary_half_extents[boundary / 4u][boundary & 3u];
+}
+
 fn surface_parent_normal_blend(world: vec3<f32>, material: u32) -> f32 {
   if frame.lod_options.w < 0.5 || (material & 0x80000000u) == 0u {
     return 0.0;
@@ -159,16 +163,7 @@ fn surface_parent_normal_blend(world: vec3<f32>, material: u32) -> f32 {
     return 0.0;
   }
   let boundary = level + 1u;
-  var half_extent = 25.6;
-  switch boundary {
-    case 2u: { half_extent = 51.2; }
-    case 3u: { half_extent = 102.4; }
-    case 4u: { half_extent = 204.8; }
-    case 5u: { half_extent = 409.6; }
-    case 6u: { half_extent = 819.2; }
-    case 7u: { half_extent = 1638.4; }
-    default: {}
-  }
+  let half_extent = lod_boundary_half_extent(boundary);
   let delta = abs(world.xz - lod_boundary_center(boundary));
   let inside = half_extent - max(delta.x, delta.y);
   // At sprint speed this remains a roughly 200ms spatial morph at the nearest ring while avoiding
@@ -178,7 +173,7 @@ fn surface_parent_normal_blend(world: vec3<f32>, material: u32) -> f32 {
 }
 
 fn surface_wall_macro_blend(world: vec3<f32>) -> f32 {
-  // The canonical square reaches 9.6m along its axes and 13.6m at its corners. Start close enough
+  // The canonical square reaches 12.8m along its axes and 18.1m at its corners. Start close enough
   // that every first coarse wall still uses almost exactly its voxel-face normal, then converge
   // toward the bounded terrain slope over the next LOD rings. Camera distance keeps this lighting
   // invariant when the snapped ownership hierarchy moves around a stationary world point.

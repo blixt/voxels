@@ -54,6 +54,7 @@ mod tests {
                 "render_options",
                 "lod_options",
                 "lod_boundary_centres",
+                "lod_boundary_half_extents",
                 "camera_forward",
                 "shadow_splits",
                 "shadow_texel_sizes",
@@ -409,7 +410,7 @@ mod tests {
         assert!(voxels.contains("let far_surface = (material & 0x80000000u) != 0u"));
         assert!(voxels.contains("let canonical_opaque = (ao & 0x00800000u) != 0u"));
         assert!(voxels.contains("fn conservative_surface_clip("));
-        assert!(voxels.contains("const CONSERVATIVE_EXPANSION_PIXELS: f32 = 1.25"));
+        assert!(voxels.contains("const CONSERVATIVE_EXPANSION_PIXELS: f32 = 1.5"));
         assert!(voxels.contains("fn conservative_axis_offset("));
         assert!(voxels.contains("CONSERVATIVE_EXPANSION_PIXELS * 2.0"));
         assert!(voxels.contains("out.position = conservative_surface_clip("));

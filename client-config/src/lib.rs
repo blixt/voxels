@@ -766,12 +766,12 @@ mod tests {
                     upload: 3,
                 },
                 surface: SurfaceStreamingConfig {
-                    load_radius_tiles: [4, 4, 4, 5, 4, 5, 4, 3],
+                    load_radius_tiles: [5, 5, 5, 5, 4, 5, 4, 4],
                     retention_margin_tiles: 1,
                 },
             },
             rendering: RenderingConfig {
-                view_distance_metres: 2_400.0,
+                view_distance_metres: 3_200.0,
                 shadows: ShadowConfig {
                     vertical_fov_radians: 68.0_f32.to_radians(),
                     near_plane: 0.05,

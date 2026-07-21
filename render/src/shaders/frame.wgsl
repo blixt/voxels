@@ -8,6 +8,7 @@ struct Frame {
   render_options: vec4<f32>,
   lod_options: vec4<f32>,
   lod_boundary_centres: array<vec4<f32>, 4>,
+  lod_boundary_half_extents: array<vec4<f32>, 2>,
   camera_forward: vec4<f32>,
   shadow_splits: vec4<f32>,
   shadow_texel_sizes: vec4<f32>,
