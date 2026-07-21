@@ -10,11 +10,23 @@ function cargo(args: string[], env = process.env): void {
 
 cargo(["fmt", "--all", "--", "--check"]);
 cargo(["test", "--workspace"]);
+cargo(["test", "-p", "voxels-world-service", "--features", "automation-fixture"]);
 cargo([
   "clippy",
   "--workspace",
   "--exclude",
   "voxels-shell",
+  "--all-targets",
+  "--",
+  "-D",
+  "warnings",
+]);
+cargo([
+  "clippy",
+  "-p",
+  "voxels-world-service",
+  "--features",
+  "automation-fixture",
   "--all-targets",
   "--",
   "-D",

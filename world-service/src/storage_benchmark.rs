@@ -240,9 +240,10 @@ pub fn run_storage_benchmark(
             continue;
         }
         let command = command.ok_or("player received no benchmark operation")?;
-        let error = reopened
-            .apply(&source, player.id, u64::from(index as u32 + 1), command)
-            .expect_err("an evicted operation receipt must not be reapplied");
+        let Err(error) = reopened.apply(&source, player.id, u64::from(index as u32 + 1), command)
+        else {
+            return Err("evicted operation receipt was reapplied".into());
+        };
         if !error
             .to_string()
             .contains("older than the bounded retry window")
