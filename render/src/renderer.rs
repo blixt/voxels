@@ -5666,6 +5666,72 @@ fn append_lod_transition(
                 return false;
             };
         if coarse_cell.height == fine_cell.height {
+            let Some(fine_parent_height) = fine_parent_height else {
+                continue;
+            };
+            if fine_parent_height == fine_cell.height {
+                continue;
+            }
+            let Some(fine_level) = SurfaceLodLevel::from_stride_voxels(fine_stride) else {
+                return false;
+            };
+            let (lower, upper, face, surface) = if coarse_cell.height > fine_parent_height {
+                (
+                    fine_parent_height,
+                    coarse_cell.height,
+                    outward_face,
+                    coarse_cell,
+                )
+            } else {
+                (
+                    coarse_cell.height,
+                    fine_parent_height,
+                    inward_face,
+                    fine_cell,
+                )
+            };
+            let collapsed_plane = coarse_cell.height.saturating_add(1);
+            let mut remaining = i64::from(upper) - i64::from(lower);
+            let mut y = lower.saturating_add(1);
+            while remaining > 0 {
+                let vertical_extent = remaining.min(i64::from(u16::MAX)) as u16;
+                let origin_voxels = match face {
+                    0 => [boundary[0].saturating_sub(1), y, boundary[1]],
+                    1 => [boundary[0], y, boundary[1]],
+                    4 => [boundary[0], y, boundary[1].saturating_sub(1)],
+                    5 => [boundary[0], y, boundary[1]],
+                    _ => unreachable!(),
+                };
+                let top = y.saturating_add(i32::from(vertical_extent));
+                quads.push((
+                    GpuQuad {
+                        origin: origin_voxels,
+                        extent_voxels: [
+                            fine_stride as u16 | MORPH_CLOSURE_EXTENT_FLAG,
+                            vertical_extent,
+                        ],
+                        material_face: pack_surface_horizon_material(
+                            pack_gpu_material_face(
+                                u32::from(surface.material.id())
+                                    | FAR_MATERIAL_FLAG
+                                    | (u32::from(fine_level.index()) << SURFACE_LOD_SHIFT),
+                                face,
+                            ),
+                            fine_cell.horizon_profile,
+                        ),
+                        ao: pack_surface_horizon_ao(
+                            fine_cell.macro_normal,
+                            fine_cell.horizon_profile,
+                        ),
+                    },
+                    pack_surface_morph_heights(
+                        collapsed_plane.saturating_sub(y),
+                        collapsed_plane.saturating_sub(top),
+                    ),
+                ));
+                remaining -= i64::from(vertical_extent);
+                y = top;
+            }
             continue;
         }
         let (lower, upper, face, surface) = if coarse_cell.height > fine_cell.height {
@@ -7174,6 +7240,36 @@ mod tests {
         };
         assert!(slice_owned_by_lod(Some(focus), Some(&plan), &key, &main));
         assert!(!slice_owned_by_lod(Some(focus), Some(&plan), &key, &edge));
+    }
+
+    #[test]
+    fn active_lod_transition_grows_a_parent_only_step_from_the_shared_child_surface() {
+        let focus = GeometricLodFocus::snapped(0, 0);
+        let coarse = SurfacePatchId::new(SurfaceLodLevel::Stride4, 8, 0);
+        let fine_low = SurfacePatchId::new(SurfaceLodLevel::Stride2, 15, 0);
+        let fine_high = SurfacePatchId::new(SurfaceLodLevel::Stride2, 15, 1);
+        let fine_parent = fine_low.parent().unwrap();
+        let resident = HashSet::from([coarse, fine_low, fine_high]);
+        let mut selection = SurfacePatchSelection::default();
+        selection.rebuild(focus, &resident, &HashSet::new());
+        let profiles = HashMap::from([
+            (coarse, flat_patch_profile(coarse, 10)),
+            (fine_low, flat_patch_profile(fine_low, 10)),
+            (fine_high, flat_patch_profile(fine_high, 10)),
+            (fine_parent, flat_patch_profile(fine_parent, 12)),
+        ]);
+
+        let transitions = build_lod_transitions(&selection, &profiles, &HashMap::new());
+
+        assert_eq!(transitions.incomplete_edges, 0);
+        assert_eq!(transitions.exact_edges.len(), 1);
+        assert_eq!(transitions.quads.len(), 16);
+        for (quad, &morph_heights) in transitions.quads.iter().zip(&transitions.morph_heights) {
+            assert_eq!(quad.extent_voxels, [2 | MORPH_CLOSURE_EXTENT_FLAG, 2]);
+            assert_eq!(quad.origin[1], 11);
+            assert_eq!((morph_heights as u16) as i16, 0);
+            assert_eq!(((morph_heights >> 16) as u16) as i16, -2);
+        }
     }
 
     #[test]
