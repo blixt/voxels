@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
-import { PressedKeys, WheelAccumulator, keyCode, requestPointerLockSafely } from "./input.ts";
+import {
+  PressedKeys,
+  WheelAccumulator,
+  keyCode,
+  requestPointerLockSafely,
+  shouldCancelInputForVisibility,
+} from "./input.ts";
 
 describe("browser key state", () => {
   it("keeps aliased Shift input active until both physical keys are released", () => {
@@ -17,6 +23,11 @@ describe("browser key state", () => {
     keys.clear();
 
     expect(keys.keyUp("ShiftRight")).toBe(6);
+  });
+
+  it("cancels held input when the page becomes hidden", () => {
+    expect(shouldCancelInputForVisibility("hidden")).toBe(true);
+    expect(shouldCancelInputForVisibility("visible")).toBe(false);
   });
 
   it("preserves repeatable key-down events and ignores unknown keys", () => {

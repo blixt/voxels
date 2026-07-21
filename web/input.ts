@@ -24,6 +24,10 @@ export function keyCode(code: string): number {
   return KEY_CODES[code] ?? 0;
 }
 
+export function shouldCancelInputForVisibility(state: DocumentVisibilityState): boolean {
+  return state === "hidden";
+}
+
 export async function requestPointerLockSafely(
   request: () => Promise<void>,
   onFailure: (error: unknown) => void,

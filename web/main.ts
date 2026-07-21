@@ -8,7 +8,12 @@ import {
 } from "./automation.ts";
 import { watchDevicePixelRatio } from "./display.ts";
 import { terminateAfterAcknowledgement } from "./hmr-lifecycle.ts";
-import { PressedKeys, WheelAccumulator, requestPointerLockSafely } from "./input.ts";
+import {
+  PressedKeys,
+  WheelAccumulator,
+  requestPointerLockSafely,
+  shouldCancelInputForVisibility,
+} from "./input.ts";
 import {
   namedPlayerUrl,
   resolveBrowserPlayerSession,
@@ -512,6 +517,9 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     );
   };
   window.addEventListener("blur", cancelInput);
+  document.addEventListener("visibilitychange", () => {
+    if (shouldCancelInputForVisibility(document.visibilityState)) cancelInput();
+  });
   document.addEventListener("pointerlockchange", () => {
     if (document.pointerLockElement === canvas) {
       canvas.classList.toggle("ui-cursor", uiCursorMode);
@@ -547,9 +555,14 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
   reducedMotion.addEventListener("change", handleReducedMotionChange);
   let pageClosing = false;
   window.addEventListener("pagehide", (event) => {
-    // A page entering the back-forward cache is frozen with its worker and must resume intact.
+    // A page entering the back-forward cache resumes its worker, but physical key state cannot
+    // be trusted across the freeze.
     // A real navigation/reload gets one explicit worker turn to close its native connections.
-    if (event.persisted || pageClosing) return;
+    if (event.persisted) {
+      cancelInput();
+      return;
+    }
+    if (pageClosing) return;
     pageClosing = true;
     playable = false;
     flush();
