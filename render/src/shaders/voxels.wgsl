@@ -167,7 +167,9 @@ fn surface_parent_normal_blend(world: vec3<f32>, material: u32) -> f32 {
   }
   let delta = abs(world.xz - lod_boundary_center(boundary));
   let inside = half_extent - max(delta.x, delta.y);
-  let width = max(3.2, half_extent * 0.025);
+  // At sprint speed this remains a roughly 200ms spatial morph at the nearest ring while avoiding
+  // vertex-sidecar work on a second full row of Stride2 patches.
+  let width = max(1.6, half_extent * 0.02);
   return 1.0 - smoothstep(0.0, width, inside);
 }
 
@@ -205,10 +207,11 @@ fn quad_world(
   ao: u32,
   morph_heights: u32,
   morph_closure: bool,
+  morph_geometry: bool,
 ) -> MorphedQuadPosition {
   var world = vec3<f32>(origin + quad_local(face, uv, extent)) * frame.viewport_voxel.z;
   var parent_blend = 0.0;
-  if (ao & 0x01000000u) != 0u {
+  if morph_geometry && (ao & 0x01000000u) != 0u {
     parent_blend = surface_parent_normal_blend(world, material);
     let morph_blend = select(parent_blend, 1.0 - parent_blend, morph_closure);
     world.y += surface_morph_delta(morph_heights, uv.y)
@@ -271,14 +274,14 @@ fn conservative_surface_clip(
   return clip;
 }
 
-@vertex
-fn vs_main(
-  @builtin(vertex_index) vertex_index: u32,
-  @location(0) origin: vec3<i32>,
-  @location(1) extent_voxels: vec2<u32>,
-  @location(2) material_face: u32,
-  @location(3) ao: u32,
-  @location(4) morph_heights: u32,
+fn voxel_vertex(
+  vertex_index: u32,
+  origin: vec3<i32>,
+  extent_voxels: vec2<u32>,
+  material_face: u32,
+  ao: u32,
+  morph_heights: u32,
+  morph_geometry: bool,
 ) -> VertexOut {
   let face = (material_face >> 16u) & 7u;
   let material = material_face & 0xfff8ffffu;
@@ -308,6 +311,7 @@ fn vs_main(
     ao,
     morph_heights,
     morph_closure,
+    morph_geometry,
   );
   let world = morphed_position.world;
   let surface_macro_normal = (ao & 0x01000000u) != 0u;
@@ -344,6 +348,37 @@ fn vs_main(
   out.ao = select(corner_ao(ao, corner), 1.0, surface_macro_normal);
   out.terrain_lighting = terrain_lighting;
   return out;
+}
+
+@vertex
+fn vs_main_fixed(
+  @builtin(vertex_index) vertex_index: u32,
+  @location(0) origin: vec3<i32>,
+  @location(1) extent_voxels: vec2<u32>,
+  @location(2) material_face: u32,
+  @location(3) ao: u32,
+) -> VertexOut {
+  return voxel_vertex(vertex_index, origin, extent_voxels, material_face, ao, 0u, false);
+}
+
+@vertex
+fn vs_main_morph(
+  @builtin(vertex_index) vertex_index: u32,
+  @location(0) origin: vec3<i32>,
+  @location(1) extent_voxels: vec2<u32>,
+  @location(2) material_face: u32,
+  @location(3) ao: u32,
+  @location(4) morph_heights: u32,
+) -> VertexOut {
+  return voxel_vertex(
+    vertex_index,
+    origin,
+    extent_voxels,
+    material_face,
+    ao,
+    morph_heights,
+    true,
+  );
 }
 
 fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {

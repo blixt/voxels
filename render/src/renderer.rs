@@ -318,9 +318,6 @@ struct GpuQuad {
     extent_voxels: [u16; 2],
     material_face: u32,
     ao: u32,
-    /// Signed bottom/top Y deltas to the next-coarser surface, packed as two i16 values.
-    /// Canonical geometry and standalone surface features keep this zero.
-    morph_heights: u32,
 }
 
 #[repr(C)]
@@ -350,6 +347,7 @@ struct SurfacePatchProfile {
 #[derive(Default)]
 struct LodTransitionBuild {
     quads: Vec<GpuQuad>,
+    morph_heights: Vec<u32>,
     exact_edges: HashSet<(SurfacePatchId, u8)>,
     incomplete_edges: u32,
 }
@@ -375,11 +373,10 @@ struct CanonicalChunkProfile {
 
 type CanonicalColumnProfiles = HashMap<(i32, i32), BTreeMap<i32, CanonicalChunkProfile>>;
 
-const _: () = assert!(size_of::<GpuQuad>() == 28);
+const _: () = assert!(size_of::<GpuQuad>() == 24);
 const _: () = assert!(std::mem::offset_of!(GpuQuad, extent_voxels) == 12);
 const _: () = assert!(std::mem::offset_of!(GpuQuad, material_face) == 16);
 const _: () = assert!(std::mem::offset_of!(GpuQuad, ao) == 20);
-const _: () = assert!(std::mem::offset_of!(GpuQuad, morph_heights) == 24);
 
 fn pack_gpu_material_face(material: u32, face: u8) -> u32 {
     debug_assert_eq!(material & GPU_FACE_MASK, 0);
@@ -471,6 +468,7 @@ impl LodDrawPlan {
 
 struct ChunkMesh {
     allocation: Allocation,
+    morph_allocation: Option<Allocation>,
     quad_count: u32,
     content_fingerprint: u64,
     slices: Vec<MeshSlice>,
@@ -602,6 +600,8 @@ struct DrawItem {
     offset: u32,
     size: u32,
     quad_count: u32,
+    morph_page: Option<u16>,
+    morph_offset: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -610,6 +610,8 @@ struct DrawSpan {
     offset: u32,
     size: u32,
     quad_count: u32,
+    morph_page: Option<u16>,
+    morph_offset: u32,
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -622,11 +624,104 @@ struct DrawList {
     selected_slices: u32,
 }
 
+/// Camera-visible opaque geometry split by whether its vertices can move in the current LOD band.
+/// Most resident geometry is fixed, so its pipeline can compile out parent-height decoding and
+/// boundary-distance math while the narrow morph band retains the exact same geometry contract.
+#[derive(Debug, Default, Eq, PartialEq)]
+struct WorldDrawLists {
+    fixed: DrawList,
+    morphing: DrawList,
+    mesh_count: u32,
+    quad_count: u32,
+    fingerprint: u64,
+    tested_slices: u32,
+    selected_slices: u32,
+}
+
 #[derive(Debug, Default, Eq, PartialEq)]
 struct CutDrawLists {
-    stable: DrawList,
-    outgoing: DrawList,
-    incoming: DrawList,
+    stable: WorldDrawLists,
+    outgoing: WorldDrawLists,
+    incoming: WorldDrawLists,
+}
+
+#[derive(Debug)]
+struct WorldDrawListBuilder {
+    fixed: DrawListBuilder,
+    morphing: DrawListBuilder,
+    mesh_count: u32,
+    quad_count: u32,
+    fingerprint: u64,
+    tested_slices: u32,
+    selected_slices: u32,
+}
+
+impl Default for WorldDrawListBuilder {
+    fn default() -> Self {
+        Self {
+            fixed: DrawListBuilder::without_fingerprint(),
+            morphing: DrawListBuilder::without_fingerprint(),
+            mesh_count: 0,
+            quad_count: 0,
+            fingerprint: FINGERPRINT_OFFSET,
+            tested_slices: 0,
+            selected_slices: 0,
+        }
+    }
+}
+
+impl WorldDrawListBuilder {
+    fn test_slice(&mut self) {
+        self.tested_slices = self.tested_slices.saturating_add(1);
+    }
+
+    fn select_slice(&mut self, chunk: &ChunkMesh, slice: &MeshSlice, morphing: bool) {
+        self.selected_slices = self.selected_slices.saturating_add(1);
+        self.quad_count = self.quad_count.saturating_add(slice.quad_count);
+        if morphing {
+            self.morphing.select_morph_slice(chunk, slice);
+        } else {
+            self.fixed.select_slice(chunk, slice);
+        }
+    }
+
+    fn select_mesh(&mut self, key: MeshKey, chunk: &ChunkMesh) {
+        self.mesh_count = self.mesh_count.saturating_add(1);
+        self.fingerprint = fingerprint_value(self.fingerprint, u64::from(key.0));
+        self.fingerprint = fingerprint_value(self.fingerprint, key.1 as u32 as u64);
+        self.fingerprint = fingerprint_value(self.fingerprint, key.2 as u32 as u64);
+        self.fingerprint = fingerprint_value(self.fingerprint, key.3 as u32 as u64);
+        self.fingerprint = fingerprint_value(self.fingerprint, chunk.content_fingerprint);
+    }
+
+    fn finish(mut self) -> WorldDrawLists {
+        let fixed = self.fixed.finish();
+        let morphing = self.morphing.finish();
+        for (role, draw_list) in [(0_u64, &fixed), (1, &morphing)] {
+            self.fingerprint = fingerprint_value(self.fingerprint, role);
+            for span in &draw_list.spans {
+                self.fingerprint = fingerprint_value(self.fingerprint, u64::from(span.page));
+                self.fingerprint = fingerprint_value(self.fingerprint, u64::from(span.offset));
+                self.fingerprint = fingerprint_value(self.fingerprint, u64::from(span.size));
+                self.fingerprint = fingerprint_value(self.fingerprint, u64::from(span.quad_count));
+                self.fingerprint = fingerprint_value(
+                    self.fingerprint,
+                    span.morph_page.map_or(u64::MAX, u64::from),
+                );
+                self.fingerprint =
+                    fingerprint_value(self.fingerprint, u64::from(span.morph_offset));
+            }
+        }
+        WorldDrawLists {
+            fixed,
+            morphing,
+            mesh_count: self.mesh_count,
+            quad_count: self.quad_count,
+            fingerprint: self.fingerprint,
+            tested_slices: self.tested_slices,
+            selected_slices: self.selected_slices,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -662,6 +757,7 @@ impl DrawListBuilder {
         }
     }
 
+    #[cfg(test)]
     fn test_slice(&mut self) {
         self.tested_slices = self.tested_slices.saturating_add(1);
     }
@@ -674,10 +770,33 @@ impl DrawListBuilder {
             offset,
             size: slice.size,
             quad_count: slice.quad_count,
+            morph_page: None,
+            morph_offset: 0,
         });
         self.quad_count = self.quad_count.saturating_add(slice.quad_count);
     }
 
+    fn select_morph_slice(&mut self, chunk: &ChunkMesh, slice: &MeshSlice) {
+        let Some(morph_allocation) = chunk.morph_allocation else {
+            debug_assert!(false, "morphing slices require a sidecar allocation");
+            return;
+        };
+        let quad_bytes = size_of::<GpuQuad>() as u32;
+        debug_assert_eq!(slice.relative_offset % quad_bytes, 0);
+        let first_quad = slice.relative_offset / quad_bytes;
+        self.selected_slices = self.selected_slices.saturating_add(1);
+        self.items.push(DrawItem {
+            page: chunk.allocation.page,
+            offset: chunk.allocation.offset + slice.relative_offset,
+            size: slice.size,
+            quad_count: slice.quad_count,
+            morph_page: Some(morph_allocation.page),
+            morph_offset: morph_allocation.offset + first_quad * size_of::<u32>() as u32,
+        });
+        self.quad_count = self.quad_count.saturating_add(slice.quad_count);
+    }
+
+    #[cfg(test)]
     fn select_mesh(&mut self, key: MeshKey, chunk: &ChunkMesh) {
         self.mesh_count = self.mesh_count.saturating_add(1);
         if self.fingerprint_enabled {
@@ -700,6 +819,12 @@ impl DrawListBuilder {
                 self.fingerprint = fingerprint_value(self.fingerprint, u64::from(span.offset));
                 self.fingerprint = fingerprint_value(self.fingerprint, u64::from(span.size));
                 self.fingerprint = fingerprint_value(self.fingerprint, u64::from(span.quad_count));
+                self.fingerprint = fingerprint_value(
+                    self.fingerprint,
+                    span.morph_page.map_or(u64::MAX, u64::from),
+                );
+                self.fingerprint =
+                    fingerprint_value(self.fingerprint, u64::from(span.morph_offset));
             }
         }
         DrawList {
@@ -1115,15 +1240,25 @@ pub struct Renderer {
     config: SurfaceConfiguration,
     sky_pipeline: RenderPipeline,
     depth_prepass_fast_pipeline: RenderPipeline,
+    depth_prepass_morph_pipeline: RenderPipeline,
+    depth_prepass_transition_fixed_pipeline: RenderPipeline,
     depth_prepass_transition_pipeline: RenderPipeline,
     voxel_pipeline: RenderPipeline,
     voxel_flat_pipeline: RenderPipeline,
     voxel_ambient_occlusion_pipeline: RenderPipeline,
     voxel_ambient_occlusion_flat_pipeline: RenderPipeline,
+    voxel_morph_pipeline: RenderPipeline,
+    voxel_morph_flat_pipeline: RenderPipeline,
+    voxel_morph_ambient_occlusion_pipeline: RenderPipeline,
+    voxel_morph_ambient_occlusion_flat_pipeline: RenderPipeline,
     voxel_transition_pipeline: RenderPipeline,
     voxel_transition_flat_pipeline: RenderPipeline,
     voxel_transition_ambient_occlusion_pipeline: RenderPipeline,
     voxel_transition_ambient_occlusion_flat_pipeline: RenderPipeline,
+    voxel_morph_transition_pipeline: RenderPipeline,
+    voxel_morph_transition_flat_pipeline: RenderPipeline,
+    voxel_morph_transition_ambient_occlusion_pipeline: RenderPipeline,
+    voxel_morph_transition_ambient_occlusion_flat_pipeline: RenderPipeline,
     water_pipeline: RenderPipeline,
     weather_pipeline: RenderPipeline,
     avatar_gpu: AvatarGpu,
@@ -1206,7 +1341,8 @@ struct ShadowGpu {
     layer_views: [TextureView; CASCADE_COUNT],
     uniform_buffers: [Buffer; CASCADE_COUNT],
     bind_groups: [BindGroup; CASCADE_COUNT],
-    pipeline: RenderPipeline,
+    fixed_pipeline: RenderPipeline,
+    morph_pipeline: RenderPipeline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1364,32 +1500,20 @@ impl ShadowGpu {
             immediate_size: 0,
         });
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/shadow.wgsl"));
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("shadow caster pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(quad_layout())],
-                compilation_options: Default::default(),
-            },
-            fragment: None,
-            primitive: quad_primitive_state(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 2.0,
-                    clamp: 0.0,
-                },
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let fixed_pipeline = shadow_caster_pipeline(
+            device,
+            "fixed shadow caster pipeline",
+            &pipeline_layout,
+            &shader,
+            false,
+        );
+        let morph_pipeline = shadow_caster_pipeline(
+            device,
+            "morphing shadow caster pipeline",
+            &pipeline_layout,
+            &shader,
+            true,
+        );
         Ok(Self {
             layout,
             _texture: texture,
@@ -1398,7 +1522,8 @@ impl ShadowGpu {
             layer_views,
             uniform_buffers,
             bind_groups,
-            pipeline,
+            fixed_pipeline,
+            morph_pipeline,
         })
     }
 
@@ -1774,6 +1899,7 @@ impl Renderer {
             SCENE_FORMAT,
             &[],
             PipelineOptions {
+                vertex_entry: "vs_main",
                 fragment_entry: "fs_main",
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
@@ -1801,6 +1927,7 @@ impl Renderer {
             SCENE_FORMAT,
             &[],
             PipelineOptions {
+                vertex_entry: "vs_main",
                 fragment_entry: "fs_main",
                 blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
@@ -1827,84 +1954,140 @@ impl Renderer {
             "spatial AO depth pipeline",
             &sky_pipeline_layout,
             &voxel_shader,
+            false,
+        );
+        let depth_prepass_morph_pipeline = fragmentless_depth_pipeline(
+            &device,
+            "spatial AO morph depth pipeline",
+            &sky_pipeline_layout,
+            &voxel_shader,
+            true,
+        );
+        let depth_prepass_transition_fixed_pipeline = transition_depth_pipeline(
+            &device,
+            "complete cut transition fixed depth pipeline",
+            &cut_transition_depth_layout,
+            &voxel_shader,
+            false,
         );
         let depth_prepass_transition_pipeline = transition_depth_pipeline(
             &device,
             "complete cut transition depth pipeline",
             &cut_transition_depth_layout,
             &voxel_shader,
+            true,
         );
         let voxel_pipeline = create_voxel_pipeline(
             &device,
             "voxel pipeline",
             &world_pipeline_layout,
             &voxel_shader,
-            true,
-            false,
-            false,
+            VoxelPipelineVariant::new(true, false),
         );
         let voxel_flat_pipeline = create_voxel_pipeline(
             &device,
             "flat voxel pipeline",
             &world_pipeline_layout,
             &voxel_shader,
-            false,
-            false,
-            false,
+            VoxelPipelineVariant::new(false, false),
         );
         let voxel_ambient_occlusion_pipeline = create_voxel_pipeline(
             &device,
             "spatial AO voxel pipeline",
             &world_pipeline_layout,
             &voxel_shader,
-            true,
-            true,
-            false,
+            VoxelPipelineVariant::new(true, true),
         );
         let voxel_ambient_occlusion_flat_pipeline = create_voxel_pipeline(
             &device,
             "flat spatial AO voxel pipeline",
             &world_pipeline_layout,
             &voxel_shader,
-            false,
-            true,
-            false,
+            VoxelPipelineVariant::new(false, true),
+        );
+        let voxel_morph_pipeline = create_voxel_pipeline(
+            &device,
+            "morphing voxel pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            VoxelPipelineVariant::new(true, false).morphing(),
+        );
+        let voxel_morph_flat_pipeline = create_voxel_pipeline(
+            &device,
+            "flat morphing voxel pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            VoxelPipelineVariant::new(false, false).morphing(),
+        );
+        let voxel_morph_ambient_occlusion_pipeline = create_voxel_pipeline(
+            &device,
+            "spatial AO morphing voxel pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            VoxelPipelineVariant::new(true, true).morphing(),
+        );
+        let voxel_morph_ambient_occlusion_flat_pipeline = create_voxel_pipeline(
+            &device,
+            "flat spatial AO morphing voxel pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            VoxelPipelineVariant::new(false, true).morphing(),
         );
         let voxel_transition_pipeline = create_voxel_pipeline(
             &device,
             "transition voxel pipeline",
             &world_pipeline_layout,
             &voxel_shader,
-            true,
-            false,
-            true,
+            VoxelPipelineVariant::new(true, false).transition(),
         );
         let voxel_transition_flat_pipeline = create_voxel_pipeline(
             &device,
             "flat transition voxel pipeline",
             &world_pipeline_layout,
             &voxel_shader,
-            false,
-            false,
-            true,
+            VoxelPipelineVariant::new(false, false).transition(),
         );
         let voxel_transition_ambient_occlusion_pipeline = create_voxel_pipeline(
             &device,
             "spatial AO transition voxel pipeline",
             &world_pipeline_layout,
             &voxel_shader,
-            true,
-            true,
-            true,
+            VoxelPipelineVariant::new(true, true).transition(),
         );
         let voxel_transition_ambient_occlusion_flat_pipeline = create_voxel_pipeline(
             &device,
             "flat spatial AO transition voxel pipeline",
             &world_pipeline_layout,
             &voxel_shader,
-            false,
-            true,
-            true,
+            VoxelPipelineVariant::new(false, true).transition(),
+        );
+        let voxel_morph_transition_pipeline = create_voxel_pipeline(
+            &device,
+            "morphing transition voxel pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            VoxelPipelineVariant::new(true, false).morphing_transition(),
+        );
+        let voxel_morph_transition_flat_pipeline = create_voxel_pipeline(
+            &device,
+            "flat morphing transition voxel pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            VoxelPipelineVariant::new(false, false).morphing_transition(),
+        );
+        let voxel_morph_transition_ambient_occlusion_pipeline = create_voxel_pipeline(
+            &device,
+            "spatial AO morphing transition voxel pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            VoxelPipelineVariant::new(true, true).morphing_transition(),
+        );
+        let voxel_morph_transition_ambient_occlusion_flat_pipeline = create_voxel_pipeline(
+            &device,
+            "flat spatial AO morphing transition voxel pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            VoxelPipelineVariant::new(false, true).morphing_transition(),
         );
         let water_pipeline = pipeline(
             &device,
@@ -1914,6 +2097,7 @@ impl Renderer {
             SCENE_FORMAT,
             &[Some(quad_layout())],
             PipelineOptions {
+                vertex_entry: "vs_main_fixed",
                 fragment_entry: "fs_water",
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
@@ -1953,15 +2137,25 @@ impl Renderer {
             config,
             sky_pipeline,
             depth_prepass_fast_pipeline,
+            depth_prepass_morph_pipeline,
+            depth_prepass_transition_fixed_pipeline,
             depth_prepass_transition_pipeline,
             voxel_pipeline,
             voxel_flat_pipeline,
             voxel_ambient_occlusion_pipeline,
             voxel_ambient_occlusion_flat_pipeline,
+            voxel_morph_pipeline,
+            voxel_morph_flat_pipeline,
+            voxel_morph_ambient_occlusion_pipeline,
+            voxel_morph_ambient_occlusion_flat_pipeline,
             voxel_transition_pipeline,
             voxel_transition_flat_pipeline,
             voxel_transition_ambient_occlusion_pipeline,
             voxel_transition_ambient_occlusion_flat_pipeline,
+            voxel_morph_transition_pipeline,
+            voxel_morph_transition_flat_pipeline,
+            voxel_morph_transition_ambient_occlusion_pipeline,
+            voxel_morph_transition_ambient_occlusion_flat_pipeline,
             water_pipeline,
             weather_pipeline,
             avatar_gpu,
@@ -2482,7 +2676,6 @@ impl Renderer {
                 } else {
                     0
                 },
-            morph_heights: 0,
         };
         // Greedy canonical terrain has intentional T-junctions where one long quad meets several
         // shorter neighbors. Mark only its opaque faces for subpixel conservative coverage; water
@@ -2503,6 +2696,7 @@ impl Renderer {
             let prepared = self.prepare_mesh_sliced(
                 key,
                 &opaque_quads,
+                None,
                 vec![MeshSlice {
                     relative_offset: 0,
                     size: opaque_count * quad_bytes,
@@ -2606,31 +2800,29 @@ impl Renderer {
             .iter()
             .zip(macro_normals.iter().copied())
             .zip(horizon_profiles.iter().copied())
-            .zip(geometry_morphs.iter().copied())
-            .map(
-                |(((quad, macro_normal), horizon_profile), morph_heights)| GpuQuad {
-                    origin: quad.origin,
-                    extent_voxels: quad.extent,
-                    material_face: pack_surface_horizon_material(
-                        pack_gpu_material_face(
-                            u32::from(quad.material.id())
-                                | FAR_MATERIAL_FLAG
-                                | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
-                            quad.face,
-                        ),
-                        horizon_profile,
+            .map(|((quad, macro_normal), horizon_profile)| GpuQuad {
+                origin: quad.origin,
+                extent_voxels: quad.extent,
+                material_face: pack_surface_horizon_material(
+                    pack_gpu_material_face(
+                        u32::from(quad.material.id())
+                            | FAR_MATERIAL_FLAG
+                            | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
+                        quad.face,
                     ),
-                    ao: pack_surface_horizon_ao(macro_normal, horizon_profile),
-                    morph_heights,
-                },
-            )
+                    horizon_profile,
+                ),
+                ao: pack_surface_horizon_ao(macro_normal, horizon_profile),
+            })
             .collect();
+        let mut gpu_morph_heights = geometry_morphs;
         let closure_base = gpu_quads.len() as u32;
-        gpu_quads.extend(surface_morph_closure_gpu_quads(
-            tile,
-            &macro_normals,
-            &horizon_profiles,
-        ));
+        for (quad, morph_heights) in
+            surface_morph_closure_gpu_quads(tile, &macro_normals, &horizon_profiles)
+        {
+            gpu_quads.push(quad);
+            gpu_morph_heights.push(morph_heights);
+        }
         let water_gpu_quads: Vec<_> = water
             .quads
             .iter()
@@ -2644,11 +2836,10 @@ impl Renderer {
                     quad.face,
                 ),
                 ao: 0xff,
-                morph_heights: 0,
             })
             .collect();
-        if gpu_quads_match_resident(self.chunks.get(&key), &gpu_quads)
-            && gpu_quads_match_resident(self.water_chunks.get(&key), &water_gpu_quads)
+        if gpu_quads_match_resident(self.chunks.get(&key), &gpu_quads, Some(&gpu_morph_heights))
+            && gpu_quads_match_resident(self.water_chunks.get(&key), &water_gpu_quads, None)
         {
             // Underground edits commonly dirty the enclosing stride-two transport tile without
             // changing its top surface. Preserve the exact resident GPU products and LOD plan in
@@ -2742,7 +2933,9 @@ impl Renderer {
         let opaque_update = if gpu_quads.is_empty() {
             None
         } else {
-            let Some(prepared) = self.prepare_mesh_sliced(key, &gpu_quads, slices) else {
+            let Some(prepared) =
+                self.prepare_mesh_sliced(key, &gpu_quads, Some(&gpu_morph_heights), slices)
+            else {
                 return false;
             };
             Some(prepared)
@@ -2783,6 +2976,7 @@ impl Renderer {
         &mut self,
         key: MeshKey,
         gpu_quads: &[GpuQuad],
+        morph_heights: Option<&[u32]>,
         slices: Vec<MeshSlice>,
     ) -> Option<ChunkMesh> {
         let activation_mask = self.chunk_activations.upload_mask(key);
@@ -2792,6 +2986,7 @@ impl Renderer {
             &mut self.arena,
             &mut self.arena_buffers,
             gpu_quads,
+            morph_heights,
             slices,
             activation_mask,
             "opaque voxel mesh arena page",
@@ -2811,6 +3006,7 @@ impl Renderer {
             &mut self.water_arena,
             &mut self.water_arena_buffers,
             gpu_quads,
+            None,
             slices,
             activation_mask,
             "water mesh arena page",
@@ -2973,7 +3169,8 @@ impl Renderer {
                     &self.surface_patch_profiles,
                     &self.canonical_surface_profiles,
                 );
-                let transition_mesh_key = match self.publish_lod_transition_mesh(&transitions.quads)
+                let transition_mesh_key = match self
+                    .publish_lod_transition_mesh(&transitions.quads, &transitions.morph_heights)
                 {
                     Ok(key) => key,
                     Err(()) => {
@@ -3082,6 +3279,7 @@ impl Renderer {
     fn publish_lod_transition_mesh(
         &mut self,
         gpu_quads: &[GpuQuad],
+        morph_heights: &[u32],
     ) -> Result<Option<MeshKey>, ()> {
         if gpu_quads.is_empty() {
             return Ok(None);
@@ -3092,7 +3290,7 @@ impl Renderer {
         } else {
             LOD_TRANSITION_MESH_KEYS[0]
         };
-        if gpu_quads_match_resident(self.chunks.get(&key), gpu_quads) {
+        if gpu_quads_match_resident(self.chunks.get(&key), gpu_quads, Some(morph_heights)) {
             return Ok(Some(key));
         }
         let Some((bounds_min, bounds_max)) = gpu_quad_bounds(gpu_quads) else {
@@ -3110,7 +3308,9 @@ impl Renderer {
             morph_closure: false,
             render_layer: RenderLayer::Opaque,
         };
-        let Some(prepared) = self.prepare_mesh_sliced(key, gpu_quads, vec![slice]) else {
+        let Some(prepared) =
+            self.prepare_mesh_sliced(key, gpu_quads, Some(morph_heights), vec![slice])
+        else {
             return Err(());
         };
         commit_prepared_mesh(&mut self.arena, &mut self.chunks, key, Some(prepared));
@@ -3198,12 +3398,18 @@ impl Renderer {
     fn remove_opaque_mesh(&mut self, key: MeshKey) {
         if let Some(chunk) = self.chunks.remove(&key) {
             let _ = self.arena.free(chunk.allocation);
+            if let Some(morph_allocation) = chunk.morph_allocation {
+                let _ = self.arena.free(morph_allocation);
+            }
         }
     }
 
     fn remove_water_mesh(&mut self, key: MeshKey) {
         if let Some(chunk) = self.water_chunks.remove(&key) {
             let _ = self.water_arena.free(chunk.allocation);
+            if let Some(morph_allocation) = chunk.morph_allocation {
+                let _ = self.water_arena.free(morph_allocation);
+            }
         }
     }
 
@@ -3498,7 +3704,7 @@ impl Renderer {
                 },
             )
         });
-        let mut shadow_draw_calls = 0;
+        let mut shadow_draw_calls = 0u32;
         if shadows_active {
             for (cascade_index, draw_list) in shadow_draw_lists.iter().enumerate() {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -3518,18 +3724,19 @@ impl Renderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(&self.shadow_gpu.pipeline);
                 pass.set_bind_group(0, &self.shadow_gpu.bind_groups[cascade_index], &[]);
-                for span in &draw_list.spans {
-                    let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
-                        continue;
-                    };
-                    let start = u64::from(span.offset);
-                    let end = start + u64::from(span.size);
-                    pass.set_vertex_buffer(0, buffer.slice(start..end));
-                    pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
-                    shadow_draw_calls += 1;
-                }
+                pass.set_pipeline(&self.shadow_gpu.fixed_pipeline);
+                shadow_draw_calls = shadow_draw_calls.saturating_add(draw_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    &draw_list.fixed,
+                ));
+                pass.set_pipeline(&self.shadow_gpu.morph_pipeline);
+                shadow_draw_calls = shadow_draw_calls.saturating_add(draw_morph_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    &draw_list.morphing,
+                ));
                 if has_avatars {
                     self.avatar_gpu.draw_shadow(&mut pass);
                     shadow_draw_calls += 1;
@@ -3560,27 +3767,53 @@ impl Renderer {
                     depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
                         &mut pass,
                         &self.arena_buffers,
-                        &cut_draw_lists.stable,
+                        &cut_draw_lists.stable.fixed,
                     ));
-                    pass.set_pipeline(&self.depth_prepass_transition_pipeline);
+                    pass.set_pipeline(&self.depth_prepass_morph_pipeline);
+                    depth_prepass_draw_calls =
+                        depth_prepass_draw_calls.saturating_add(draw_morph_spans(
+                            &mut pass,
+                            &self.arena_buffers,
+                            &cut_draw_lists.stable.morphing,
+                        ));
+                    pass.set_pipeline(&self.depth_prepass_transition_fixed_pipeline);
                     pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
                     depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
                         &mut pass,
                         &self.arena_buffers,
-                        &cut_draw_lists.outgoing,
+                        &cut_draw_lists.outgoing.fixed,
                     ));
+                    pass.set_pipeline(&self.depth_prepass_transition_pipeline);
+                    depth_prepass_draw_calls =
+                        depth_prepass_draw_calls.saturating_add(draw_morph_spans(
+                            &mut pass,
+                            &self.arena_buffers,
+                            &cut_draw_lists.outgoing.morphing,
+                        ));
+                    pass.set_pipeline(&self.depth_prepass_transition_fixed_pipeline);
                     pass.set_bind_group(3, &self.cut_transition_bind_groups[2], &[]);
                     depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
                         &mut pass,
                         &self.arena_buffers,
-                        &cut_draw_lists.incoming,
+                        &cut_draw_lists.incoming.fixed,
                     ));
+                    pass.set_pipeline(&self.depth_prepass_transition_pipeline);
+                    depth_prepass_draw_calls =
+                        depth_prepass_draw_calls.saturating_add(draw_morph_spans(
+                            &mut pass,
+                            &self.arena_buffers,
+                            &cut_draw_lists.incoming.morphing,
+                        ));
                 } else {
                     depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
                         &mut pass,
                         &self.arena_buffers,
-                        &world_draw_list,
+                        &world_draw_list.fixed,
                     ));
+                    pass.set_pipeline(&self.depth_prepass_morph_pipeline);
+                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(
+                        draw_morph_spans(&mut pass, &self.arena_buffers, &world_draw_list.morphing),
+                    );
                 }
                 if has_avatars {
                     self.avatar_gpu.draw_depth(&mut pass);
@@ -3641,37 +3874,78 @@ impl Renderer {
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
             pass.set_bind_group(2, self.ambient_occlusion_gpu.sample_bind_group(), &[]);
             pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
-            let (stable_pipeline, transition_pipeline) =
+            let (fixed_pipeline, morph_pipeline, transition_pipeline, morph_transition_pipeline) =
                 if self.options.screen_space_ambient_occlusion {
                     if self.options.material_detail {
                         (
                             &self.voxel_ambient_occlusion_pipeline,
+                            &self.voxel_morph_ambient_occlusion_pipeline,
                             &self.voxel_transition_ambient_occlusion_pipeline,
+                            &self.voxel_morph_transition_ambient_occlusion_pipeline,
                         )
                     } else {
                         (
                             &self.voxel_ambient_occlusion_flat_pipeline,
+                            &self.voxel_morph_ambient_occlusion_flat_pipeline,
                             &self.voxel_transition_ambient_occlusion_flat_pipeline,
+                            &self.voxel_morph_transition_ambient_occlusion_flat_pipeline,
                         )
                     }
                 } else if self.options.material_detail {
-                    (&self.voxel_pipeline, &self.voxel_transition_pipeline)
+                    (
+                        &self.voxel_pipeline,
+                        &self.voxel_morph_pipeline,
+                        &self.voxel_transition_pipeline,
+                        &self.voxel_morph_transition_pipeline,
+                    )
                 } else {
                     (
                         &self.voxel_flat_pipeline,
+                        &self.voxel_morph_flat_pipeline,
                         &self.voxel_transition_flat_pipeline,
+                        &self.voxel_morph_transition_flat_pipeline,
                     )
                 };
-            pass.set_pipeline(stable_pipeline);
             if let Some(cut_draw_lists) = &cut_draw_lists {
-                draw_spans(&mut pass, &self.arena_buffers, &cut_draw_lists.stable);
+                pass.set_pipeline(fixed_pipeline);
+                draw_spans(&mut pass, &self.arena_buffers, &cut_draw_lists.stable.fixed);
+                pass.set_pipeline(morph_pipeline);
+                draw_morph_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    &cut_draw_lists.stable.morphing,
+                );
                 pass.set_pipeline(transition_pipeline);
                 pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
-                draw_spans(&mut pass, &self.arena_buffers, &cut_draw_lists.outgoing);
+                draw_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    &cut_draw_lists.outgoing.fixed,
+                );
+                pass.set_pipeline(morph_transition_pipeline);
+                draw_morph_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    &cut_draw_lists.outgoing.morphing,
+                );
+                pass.set_pipeline(transition_pipeline);
                 pass.set_bind_group(3, &self.cut_transition_bind_groups[2], &[]);
-                draw_spans(&mut pass, &self.arena_buffers, &cut_draw_lists.incoming);
+                draw_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    &cut_draw_lists.incoming.fixed,
+                );
+                pass.set_pipeline(morph_transition_pipeline);
+                draw_morph_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    &cut_draw_lists.incoming.morphing,
+                );
             } else {
-                draw_spans(&mut pass, &self.arena_buffers, &world_draw_list);
+                pass.set_pipeline(fixed_pipeline);
+                draw_spans(&mut pass, &self.arena_buffers, &world_draw_list.fixed);
+                pass.set_pipeline(morph_pipeline);
+                draw_morph_spans(&mut pass, &self.arena_buffers, &world_draw_list.morphing);
             }
             self.avatar_gpu
                 .draw_scene(&mut pass, self.options.screen_space_ambient_occlusion);
@@ -3778,8 +4052,10 @@ impl Renderer {
             resident_chunks: self.chunks.len() as u32,
             visible_chunks: world_draw_list.mesh_count,
             draw_calls: world_draw_list
+                .fixed
                 .spans
                 .len()
+                .saturating_add(world_draw_list.morphing.spans.len())
                 .saturating_add(water_draw_list.spans.len())
                 .saturating_add(usize::from(has_avatars)) as u32,
             water_draw_calls: water_draw_list.spans.len() as u32,
@@ -3998,6 +4274,8 @@ impl Renderer {
                     offset: chunk.allocation.offset + slice.relative_offset,
                     size: slice.size,
                     quad_count: slice.quad_count,
+                    morph_page: None,
+                    morph_offset: 0,
                 });
                 selected = true;
                 quad_count = quad_count.saturating_add(slice.quad_count);
@@ -4041,6 +4319,33 @@ fn draw_spans<'pass>(
     draws
 }
 
+fn draw_morph_spans<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    arena_buffers: &'pass [Buffer],
+    draw_list: &DrawList,
+) -> u32 {
+    let mut draws = 0u32;
+    for span in &draw_list.spans {
+        let (Some(base_buffer), Some(morph_page)) =
+            (arena_buffers.get(span.page as usize), span.morph_page)
+        else {
+            continue;
+        };
+        let Some(morph_buffer) = arena_buffers.get(morph_page as usize) else {
+            continue;
+        };
+        let base_start = u64::from(span.offset);
+        let base_end = base_start + u64::from(span.size);
+        let morph_start = u64::from(span.morph_offset);
+        let morph_end = morph_start + u64::from(span.quad_count) * size_of::<u32>() as u64;
+        pass.set_vertex_buffer(0, base_buffer.slice(base_start..base_end));
+        pass.set_vertex_buffer(1, morph_buffer.slice(morph_start..morph_end));
+        pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
+        draws = draws.saturating_add(1);
+    }
+    draws
+}
+
 /// Builds the camera and three shadow selections in one resident-mesh traversal.
 ///
 /// Geometric LOD ownership is independent of clip volume. Computing it once per opaque slice avoids
@@ -4059,10 +4364,10 @@ fn collect_opaque_draw_lists(
     geometric_lod_focus: Option<GeometricLodFocus>,
     view_clip: AabbClipVolume,
     shadow_clips: [AabbClipVolume; CASCADE_COUNT],
-) -> ([DrawList; CASCADE_COUNT], DrawList, u32) {
-    let mut shadow_builders: [DrawListBuilder; CASCADE_COUNT] =
-        std::array::from_fn(|_| DrawListBuilder::without_fingerprint());
-    let mut world_builder = DrawListBuilder::default();
+) -> ([WorldDrawLists; CASCADE_COUNT], WorldDrawLists, u32) {
+    let mut shadow_builders: [WorldDrawListBuilder; CASCADE_COUNT] =
+        std::array::from_fn(|_| WorldDrawListBuilder::default());
+    let mut world_builder = WorldDrawListBuilder::default();
     let mut lod_ownership_refreshes = 0u32;
 
     for (key, chunk) in chunks {
@@ -4108,7 +4413,11 @@ fn collect_opaque_draw_lists(
                 && (world_chunk_clip == AabbClipClassification::Inside
                     || view_clip.contains_aabb(slice.bounds_min, slice.bounds_max))
             {
-                world_builder.select_slice(chunk, slice);
+                world_builder.select_slice(
+                    chunk,
+                    slice,
+                    slice_uses_geometry_morph(key, geometric_lod_focus, slice),
+                );
                 world_mesh_selected = true;
             }
             for cascade_index in 0..CASCADE_COUNT {
@@ -4117,7 +4426,11 @@ fn collect_opaque_draw_lists(
                         || shadow_clips[cascade_index]
                             .contains_aabb(slice.bounds_min, slice.bounds_max))
                 {
-                    shadow_builders[cascade_index].select_slice(chunk, slice);
+                    shadow_builders[cascade_index].select_slice(
+                        chunk,
+                        slice,
+                        slice_uses_geometry_morph(key, geometric_lod_focus, slice),
+                    );
                     shadow_mesh_selected[cascade_index] = true;
                 }
             }
@@ -4133,9 +4446,9 @@ fn collect_opaque_draw_lists(
     }
 
     let shadow_draw_lists = if shadows {
-        shadow_builders.map(DrawListBuilder::finish)
+        shadow_builders.map(WorldDrawListBuilder::finish)
     } else {
-        std::array::from_fn(|_| DrawList::default())
+        std::array::from_fn(|_| WorldDrawLists::default())
     };
     (
         shadow_draw_lists,
@@ -4155,9 +4468,9 @@ fn collect_cut_transition_draw_lists(
     far_terrain: bool,
     view_clip: AabbClipVolume,
 ) -> CutDrawLists {
-    let mut stable = DrawListBuilder::default();
-    let mut outgoing = DrawListBuilder::default();
-    let mut incoming = DrawListBuilder::default();
+    let mut stable = WorldDrawListBuilder::default();
+    let mut outgoing = WorldDrawListBuilder::default();
+    let mut incoming = WorldDrawListBuilder::default();
     for (key, chunk) in chunks {
         if !chunk.active()
             || (key.0 != 0 && !far_terrain)
@@ -4178,17 +4491,18 @@ fn collect_cut_transition_draw_lists(
             let was_owned =
                 slice_owned_by_lod(transition.from_focus, Some(&transition.from), key, slice);
             let is_owned = slice_owned_by_lod(current_focus, Some(current_plan), key, slice);
+            let morphing = slice_uses_geometry_morph(key, current_focus, slice);
             match (was_owned, is_owned) {
                 (true, true) => {
-                    stable.select_slice(chunk, slice);
+                    stable.select_slice(chunk, slice, morphing);
                     selected_mesh[0] = true;
                 }
                 (true, false) => {
-                    outgoing.select_slice(chunk, slice);
+                    outgoing.select_slice(chunk, slice, morphing);
                     selected_mesh[1] = true;
                 }
                 (false, true) => {
-                    incoming.select_slice(chunk, slice);
+                    incoming.select_slice(chunk, slice, morphing);
                     selected_mesh[2] = true;
                 }
                 (false, false) => {}
@@ -4239,11 +4553,15 @@ fn prepare_mesh_sliced_into(
     arena: &mut ArenaAllocator,
     arena_buffers: &mut Vec<Buffer>,
     gpu_quads: &[GpuQuad],
+    morph_heights: Option<&[u32]>,
     mut slices: Vec<MeshSlice>,
     activation_mask: u8,
     buffer_label: &'static str,
 ) -> Option<ChunkMesh> {
     if gpu_quads.is_empty() {
+        return None;
+    }
+    if morph_heights.is_some_and(|heights| heights.len() != gpu_quads.len()) {
         return None;
     }
     slices.retain(|slice| slice.size > 0 && slice.quad_count > 0);
@@ -4263,10 +4581,29 @@ fn prepare_mesh_sliced_into(
         return None;
     };
     let allocation = arena.allocate(byte_len)?;
-    while arena_buffers.len() <= allocation.page as usize {
+    let morph_bytes = morph_heights.map(bytemuck::cast_slice::<u32, u8>);
+    let morph_allocation = if let Some(morph_bytes) = morph_bytes {
+        let Ok(morph_byte_len) = u32::try_from(morph_bytes.len()) else {
+            let _ = arena.free(allocation);
+            return None;
+        };
+        let Some(morph_allocation) = arena.allocate(morph_byte_len) else {
+            let _ = arena.free(allocation);
+            return None;
+        };
+        Some(morph_allocation)
+    } else {
+        None
+    };
+    let highest_page =
+        morph_allocation.map_or(allocation.page, |morph| allocation.page.max(morph.page));
+    while arena_buffers.len() <= highest_page as usize {
         let page = arena_buffers.len() as u16;
         let Some(capacity) = arena.page_capacity(page) else {
             let _ = arena.free(allocation);
+            if let Some(morph_allocation) = morph_allocation {
+                let _ = arena.free(morph_allocation);
+            }
             return None;
         };
         arena_buffers.push(device.create_buffer(&wgpu::BufferDescriptor {
@@ -4278,13 +4615,33 @@ fn prepare_mesh_sliced_into(
     }
     let Some(buffer) = arena_buffers.get(allocation.page as usize) else {
         let _ = arena.free(allocation);
+        if let Some(morph_allocation) = morph_allocation {
+            let _ = arena.free(morph_allocation);
+        }
         return None;
     };
     queue.write_buffer(buffer, u64::from(allocation.offset), bytes);
+    if let (Some(morph_bytes), Some(morph_allocation)) = (morph_bytes, morph_allocation) {
+        let Some(morph_buffer) = arena_buffers.get(morph_allocation.page as usize) else {
+            let _ = arena.free(allocation);
+            let _ = arena.free(morph_allocation);
+            return None;
+        };
+        queue.write_buffer(
+            morph_buffer,
+            u64::from(morph_allocation.offset),
+            morph_bytes,
+        );
+    }
+    let content_fingerprint = morph_bytes.map_or_else(
+        || fingerprint_bytes(bytes),
+        |morph_bytes| fingerprint_value(fingerprint_bytes(bytes), fingerprint_bytes(morph_bytes)),
+    );
     Some(ChunkMesh {
         allocation,
+        morph_allocation,
         quad_count: gpu_quads.len() as u32,
-        content_fingerprint: fingerprint_bytes(bytes),
+        content_fingerprint,
         slices,
         lod_ownership_focus: None,
         lod_ownership_stale: true,
@@ -4295,26 +4652,47 @@ fn prepare_mesh_sliced_into(
     })
 }
 
-fn gpu_quads_match_resident(mesh: Option<&ChunkMesh>, quads: &[GpuQuad]) -> bool {
+fn gpu_quads_match_resident(
+    mesh: Option<&ChunkMesh>,
+    quads: &[GpuQuad],
+    morph_heights: Option<&[u32]>,
+) -> bool {
+    let quad_bytes = bytemuck::cast_slice(quads);
+    let content_fingerprint = morph_heights.map_or_else(
+        || fingerprint_bytes(quad_bytes),
+        |heights| {
+            fingerprint_value(
+                fingerprint_bytes(quad_bytes),
+                fingerprint_bytes(bytemuck::cast_slice(heights)),
+            )
+        },
+    );
     gpu_quad_content_matches(
         mesh.map(|mesh| (mesh.quad_count, mesh.content_fingerprint)),
-        quads,
+        quads.len() as u32,
+        content_fingerprint,
     )
 }
 
-fn gpu_quad_content_matches(resident: Option<(u32, u64)>, quads: &[GpuQuad]) -> bool {
-    if quads.is_empty() {
+fn gpu_quad_content_matches(
+    resident: Option<(u32, u64)>,
+    quad_count: u32,
+    content_fingerprint: u64,
+) -> bool {
+    if quad_count == 0 {
         return resident.is_none();
     }
-    resident.is_some_and(|(quad_count, fingerprint)| {
-        quad_count == quads.len() as u32
-            && fingerprint == fingerprint_bytes(bytemuck::cast_slice(quads))
+    resident.is_some_and(|(resident_count, fingerprint)| {
+        resident_count == quad_count && fingerprint == content_fingerprint
     })
 }
 
 fn discard_prepared_mesh(arena: &mut ArenaAllocator, prepared: Option<ChunkMesh>) {
     if let Some(prepared) = prepared {
         let _ = arena.free(prepared.allocation);
+        if let Some(morph_allocation) = prepared.morph_allocation {
+            let _ = arena.free(morph_allocation);
+        }
     }
 }
 
@@ -4331,6 +4709,9 @@ fn commit_prepared_mesh(
     };
     if let Some(old) = old {
         let _ = arena.free(old.allocation);
+        if let Some(morph_allocation) = old.morph_allocation {
+            let _ = arena.free(morph_allocation);
+        }
     }
 }
 
@@ -4533,7 +4914,7 @@ fn surface_morph_closure_gpu_quads(
     tile: &SurfaceTileMesh,
     macro_normals: &[u32],
     horizon_profiles: &[u16],
-) -> Vec<GpuQuad> {
+) -> Vec<(GpuQuad, u32)> {
     let stride = tile.coord.stride_voxels();
     let attributes = tile
         .quads
@@ -4575,24 +4956,26 @@ fn surface_morph_closure_gpu_quads(
             let static_bottom = quad.origin[1];
             let static_top = static_bottom.saturating_add(i32::from(quad.extent[1]));
             debug_assert_eq!(quad.extent[0] & MORPH_CLOSURE_EXTENT_FLAG, 0);
-            GpuQuad {
-                origin: quad.origin,
-                extent_voxels: [quad.extent[0] | MORPH_CLOSURE_EXTENT_FLAG, quad.extent[1]],
-                material_face: pack_surface_horizon_material(
-                    pack_gpu_material_face(
-                        u32::from(quad.material.id())
-                            | FAR_MATERIAL_FLAG
-                            | (u32::from(tile.coord.level.index()) << SURFACE_LOD_SHIFT),
-                        quad.face,
+            (
+                GpuQuad {
+                    origin: quad.origin,
+                    extent_voxels: [quad.extent[0] | MORPH_CLOSURE_EXTENT_FLAG, quad.extent[1]],
+                    material_face: pack_surface_horizon_material(
+                        pack_gpu_material_face(
+                            u32::from(quad.material.id())
+                                | FAR_MATERIAL_FLAG
+                                | (u32::from(tile.coord.level.index()) << SURFACE_LOD_SHIFT),
+                            quad.face,
+                        ),
+                        horizon_profile,
                     ),
-                    horizon_profile,
-                ),
-                ao: pack_surface_horizon_ao(macro_normal, horizon_profile),
-                morph_heights: pack_surface_morph_heights(
+                    ao: pack_surface_horizon_ao(macro_normal, horizon_profile),
+                },
+                pack_surface_morph_heights(
                     collapsed_plane.saturating_sub(static_bottom),
                     collapsed_plane.saturating_sub(static_top),
                 ),
-            }
+            )
         })
         .collect()
 }
@@ -4907,6 +5290,7 @@ fn build_lod_transitions(
     transitions.sort_unstable_by_key(|(patch, edge)| (*patch, edge.index()));
     let mut build = LodTransitionBuild {
         quads: Vec::with_capacity(transitions.len() * 16),
+        morph_heights: Vec::with_capacity(transitions.len() * 16),
         ..LodTransitionBuild::default()
     };
     for (patch, edge) in transitions {
@@ -4925,7 +5309,10 @@ fn build_lod_transitions(
             coarse,
         ) {
             build.exact_edges.insert((patch, edge.index() as u8));
-            build.quads.extend(edge_quads);
+            for (quad, morph_heights) in edge_quads {
+                build.quads.push(quad);
+                build.morph_heights.push(morph_heights);
+            }
         } else {
             build.incomplete_edges = build.incomplete_edges.saturating_add(1);
         }
@@ -4934,7 +5321,7 @@ fn build_lod_transitions(
 }
 
 fn append_lod_transition(
-    quads: &mut Vec<GpuQuad>,
+    quads: &mut Vec<(GpuQuad, u32)>,
     selection: &SurfacePatchSelection,
     surface_profiles: &HashMap<SurfacePatchId, SurfacePatchProfile>,
     canonical_profiles: &CanonicalColumnProfiles,
@@ -5052,24 +5439,26 @@ fn append_lod_transition(
                 5 => [boundary[0], y, boundary[1]],
                 _ => unreachable!(),
             };
-            quads.push(GpuQuad {
-                origin: origin_voxels,
-                extent_voxels: [fine_stride as u16, vertical_extent],
-                material_face: pack_surface_horizon_material(
-                    pack_gpu_material_face(
-                        u32::from(surface.material.id())
-                            | FAR_MATERIAL_FLAG
-                            | (u32::from(encoded_level.index()) << SURFACE_LOD_SHIFT),
-                        face,
+            quads.push((
+                GpuQuad {
+                    origin: origin_voxels,
+                    extent_voxels: [fine_stride as u16, vertical_extent],
+                    material_face: pack_surface_horizon_material(
+                        pack_gpu_material_face(
+                            u32::from(surface.material.id())
+                                | FAR_MATERIAL_FLAG
+                                | (u32::from(encoded_level.index()) << SURFACE_LOD_SHIFT),
+                            face,
+                        ),
+                        transition_horizon,
                     ),
-                    transition_horizon,
-                ),
-                // Between surface levels the connector follows the fine level's parent blend and
-                // collapses exactly as that shell reaches the coarse height. The canonical seam
-                // remains exact and static because canonical geometry has no coarser morph field.
-                ao: pack_surface_horizon_ao(transition_normal, transition_horizon),
+                    // Between surface levels the connector follows the fine level's parent blend
+                    // and collapses exactly as that shell reaches the coarse height. The canonical
+                    // seam remains exact and static because canonical geometry has no sidecar.
+                    ao: pack_surface_horizon_ao(transition_normal, transition_horizon),
+                },
                 morph_heights,
-            });
+            ));
             remaining -= i64::from(vertical_extent);
             y = y.saturating_add(i32::from(vertical_extent));
         }
@@ -5279,9 +5668,23 @@ fn surface_patch_intersects_morph_band(focus: GeometricLodFocus, patch: SurfaceP
         )
         .max()
         .unwrap_or(0);
-    // Matches the shader's max(3.2m, half_extent * 0.025) band in canonical 10cm voxels.
-    let width = 32_i64.max((i64::from(half_extent) + 39) / 40);
+    // Matches the shader's max(1.6m, half_extent * 0.02) band in canonical 10cm voxels.
+    let width = 16_i64.max((i64::from(half_extent) + 49) / 50);
     maximum_axis_delta >= i64::from(half_extent) - width
+}
+
+fn slice_uses_geometry_morph(
+    key: &MeshKey,
+    focus: Option<GeometricLodFocus>,
+    slice: &MeshSlice,
+) -> bool {
+    if LOD_TRANSITION_MESH_KEYS.contains(key) {
+        return true;
+    }
+    let (Some(focus), Some(patch)) = (focus, slice.surface_patch_id) else {
+        return false;
+    };
+    surface_patch_intersects_morph_band(focus, patch)
 }
 
 fn mesh_casts_directional_shadow(key: &MeshKey) -> bool {
@@ -5302,6 +5705,12 @@ fn coalesce_draw_items(mut items: Vec<DrawItem>) -> Vec<DrawSpan> {
         if let Some(last) = spans.last_mut()
             && last.page == item.page
             && last.offset.checked_add(last.size) == Some(item.offset)
+            && last.morph_page == item.morph_page
+            && last.morph_page.is_none_or(|_| {
+                last.morph_offset
+                    .checked_add(last.quad_count * size_of::<u32>() as u32)
+                    == Some(item.morph_offset)
+            })
             && let (Some(size), Some(quad_count)) = (
                 last.size.checked_add(item.size),
                 last.quad_count.checked_add(item.quad_count),
@@ -5316,6 +5725,8 @@ fn coalesce_draw_items(mut items: Vec<DrawItem>) -> Vec<DrawSpan> {
             offset: item.offset,
             size: item.size,
             quad_count: item.quad_count,
+            morph_page: item.morph_page,
+            morph_offset: item.morph_offset,
         });
     }
     spans
@@ -5791,6 +6202,7 @@ fn view_projection(
 }
 
 struct PipelineOptions<'a> {
+    vertex_entry: &'a str,
     fragment_entry: &'a str,
     blend: Option<wgpu::BlendState>,
     write_mask: wgpu::ColorWrites,
@@ -5798,34 +6210,82 @@ struct PipelineOptions<'a> {
     fragment_constants: &'a [(&'a str, f64)],
 }
 
+#[derive(Clone, Copy)]
+struct VoxelPipelineVariant {
+    material_detail: bool,
+    spatial_ao: bool,
+    morph_geometry: bool,
+    cut_transition: bool,
+}
+
+impl VoxelPipelineVariant {
+    const fn new(material_detail: bool, spatial_ao: bool) -> Self {
+        Self {
+            material_detail,
+            spatial_ao,
+            morph_geometry: false,
+            cut_transition: false,
+        }
+    }
+
+    const fn morphing(mut self) -> Self {
+        self.morph_geometry = true;
+        self
+    }
+
+    const fn transition(mut self) -> Self {
+        self.cut_transition = true;
+        self
+    }
+
+    const fn morphing_transition(self) -> Self {
+        self.morphing().transition()
+    }
+}
+
 fn create_voxel_pipeline(
     device: &Device,
     label: &str,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
-    material_detail: bool,
-    spatial_ao: bool,
-    cut_transition: bool,
+    variant: VoxelPipelineVariant,
 ) -> RenderPipeline {
     let constants = [
-        ("MATERIAL_DETAIL", if material_detail { 1.0 } else { 0.0 }),
-        ("CUT_TRANSITION", if cut_transition { 1.0 } else { 0.0 }),
+        (
+            "MATERIAL_DETAIL",
+            if variant.material_detail { 1.0 } else { 0.0 },
+        ),
+        (
+            "CUT_TRANSITION",
+            if variant.cut_transition { 1.0 } else { 0.0 },
+        ),
     ];
+    let fixed_buffers = [Some(quad_layout())];
+    let morph_buffers = [Some(quad_layout()), Some(morph_height_layout())];
     pipeline(
         device,
         label,
         layout,
         shader,
         SCENE_FORMAT,
-        &[Some(quad_layout())],
+        if variant.morph_geometry {
+            &morph_buffers
+        } else {
+            &fixed_buffers
+        },
         PipelineOptions {
+            vertex_entry: if variant.morph_geometry {
+                "vs_main_morph"
+            } else {
+                "vs_main_fixed"
+            },
             fragment_entry: "fs_main",
             blend: None,
             write_mask: wgpu::ColorWrites::ALL,
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: Some(!spatial_ao),
-                depth_compare: Some(if spatial_ao {
+                depth_write_enabled: Some(!variant.spatial_ao),
+                depth_compare: Some(if variant.spatial_ao {
                     wgpu::CompareFunction::LessEqual
                 } else {
                     wgpu::CompareFunction::Less
@@ -5852,7 +6312,7 @@ fn pipeline(
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: Some("vs_main"),
+            entry_point: Some(options.vertex_entry),
             buffers,
             compilation_options: Default::default(),
         },
@@ -5882,14 +6342,25 @@ fn fragmentless_depth_pipeline(
     label: &str,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
+    morph_geometry: bool,
 ) -> RenderPipeline {
+    let fixed_buffers = [Some(quad_layout())];
+    let morph_buffers = [Some(quad_layout()), Some(morph_height_layout())];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: Some("vs_main"),
-            buffers: &[Some(quad_layout())],
+            entry_point: Some(if morph_geometry {
+                "vs_main_morph"
+            } else {
+                "vs_main_fixed"
+            }),
+            buffers: if morph_geometry {
+                &morph_buffers
+            } else {
+                &fixed_buffers
+            },
             compilation_options: Default::default(),
         },
         fragment: None,
@@ -5912,14 +6383,25 @@ fn transition_depth_pipeline(
     label: &str,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
+    morph_geometry: bool,
 ) -> RenderPipeline {
+    let fixed_buffers = [Some(quad_layout())];
+    let morph_buffers = [Some(quad_layout()), Some(morph_height_layout())];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: Some("vs_main"),
-            buffers: &[Some(quad_layout())],
+            entry_point: Some(if morph_geometry {
+                "vs_main_morph"
+            } else {
+                "vs_main_fixed"
+            }),
+            buffers: if morph_geometry {
+                &morph_buffers
+            } else {
+                &fixed_buffers
+            },
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -5945,16 +6427,69 @@ fn transition_depth_pipeline(
     })
 }
 
+fn shadow_caster_pipeline(
+    device: &Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    morph_geometry: bool,
+) -> RenderPipeline {
+    let fixed_buffers = [Some(quad_layout())];
+    let morph_buffers = [Some(quad_layout()), Some(morph_height_layout())];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some(if morph_geometry {
+                "vs_main_morph"
+            } else {
+                "vs_main_fixed"
+            }),
+            buffers: if morph_geometry {
+                &morph_buffers
+            } else {
+                &fixed_buffers
+            },
+            compilation_options: Default::default(),
+        },
+        fragment: None,
+        primitive: quad_primitive_state(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 2.0,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 fn quad_layout() -> wgpu::VertexBufferLayout<'static> {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
         0 => Sint32x3,
         1 => Uint16x2,
         2 => Uint32,
-        3 => Uint32,
-        4 => Uint32
+        3 => Uint32
     ];
     wgpu::VertexBufferLayout {
         array_stride: size_of::<GpuQuad>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &ATTRIBUTES,
+    }
+}
+
+fn morph_height_layout() -> wgpu::VertexBufferLayout<'static> {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![4 => Uint32];
+    wgpu::VertexBufferLayout {
+        array_stride: size_of::<u32>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &ATTRIBUTES,
     }
@@ -6062,7 +6597,7 @@ mod tests {
             packed[side_index], value,
             "terrain wall shares its cell's macro normal"
         );
-        assert_eq!(size_of::<GpuQuad>(), 28);
+        assert_eq!(size_of::<GpuQuad>(), 24);
     }
 
     #[test]
@@ -6109,12 +6644,12 @@ mod tests {
         let gpu = surface_morph_closure_gpu_quads(&tile, &macro_normals, &horizons);
 
         assert_eq!(gpu.len(), 32);
-        for quad in gpu {
+        for (quad, morph_heights) in gpu {
             assert_ne!(quad.extent_voxels[0] & MORPH_CLOSURE_EXTENT_FLAG, 0);
             assert_eq!(quad.extent_voxels[0] & !MORPH_CLOSURE_EXTENT_FLAG, 2);
             assert_eq!(quad.extent_voxels[1], 2);
-            let bottom_delta = (quad.morph_heights as u16) as i16;
-            let top_delta = ((quad.morph_heights >> 16) as u16) as i16;
+            let bottom_delta = (morph_heights as u16) as i16;
+            let top_delta = ((morph_heights >> 16) as u16) as i16;
             assert_eq!(bottom_delta, 0);
             assert_eq!(top_delta, -2);
             assert_eq!(quad.origin[1] + i32::from(bottom_delta), 11);
@@ -6214,7 +6749,7 @@ mod tests {
             assert_eq!((material_face >> SURFACE_LOD_SHIFT) & 7, 3);
             assert_ne!(ao & SURFACE_MACRO_NORMAL_FLAG, 0);
         }
-        assert_eq!(size_of::<GpuQuad>(), 28);
+        assert_eq!(size_of::<GpuQuad>(), 24);
     }
 
     #[test]
@@ -6616,10 +7151,9 @@ mod tests {
             extent_voxels: [u16::MAX, 1],
             material_face: pack_gpu_material_face(materials[3], 5),
             ao: u32::MAX,
-            morph_heights: u32::MAX,
         };
         let bytes = bytemuck::bytes_of(&quad);
-        assert_eq!(bytes.len(), 28);
+        assert_eq!(bytes.len(), 24);
         assert_eq!(quad.extent_voxels, [u16::MAX, 1]);
     }
 
@@ -6630,22 +7164,57 @@ mod tests {
             extent_voxels: [8, 5],
             material_face: pack_gpu_material_face(u32::from(Material::Grass.id()), 2),
             ao: 0xff,
-            morph_heights: 0,
         };
         let quads = [quad];
         let fingerprint = fingerprint_bytes(bytemuck::cast_slice(&quads));
-        assert!(gpu_quad_content_matches(Some((1, fingerprint)), &quads));
-        assert!(!gpu_quad_content_matches(Some((2, fingerprint)), &quads));
+        assert!(gpu_quad_content_matches(
+            Some((1, fingerprint)),
+            1,
+            fingerprint
+        ));
+        assert!(!gpu_quad_content_matches(
+            Some((2, fingerprint)),
+            1,
+            fingerprint
+        ));
 
         let mut changed = quad;
         changed.origin[1] += 1;
+        let changed_fingerprint = fingerprint_bytes(bytemuck::bytes_of(&changed));
         assert!(!gpu_quad_content_matches(
             Some((1, fingerprint)),
-            &[changed]
+            1,
+            changed_fingerprint,
         ));
-        assert!(gpu_quad_content_matches(None, &[]));
-        assert!(!gpu_quad_content_matches(Some((1, fingerprint)), &[]));
-        assert!(!gpu_quad_content_matches(None, &quads));
+        assert!(gpu_quad_content_matches(None, 0, FINGERPRINT_OFFSET));
+        assert!(!gpu_quad_content_matches(
+            Some((1, fingerprint)),
+            0,
+            FINGERPRINT_OFFSET,
+        ));
+        assert!(!gpu_quad_content_matches(None, 1, fingerprint));
+
+        let first_morph = [pack_surface_morph_heights(-3, 7)];
+        let second_morph = [pack_surface_morph_heights(-3, 8)];
+        let first_fingerprint = fingerprint_value(
+            fingerprint,
+            fingerprint_bytes(bytemuck::cast_slice(&first_morph)),
+        );
+        let second_fingerprint = fingerprint_value(
+            fingerprint,
+            fingerprint_bytes(bytemuck::cast_slice(&second_morph)),
+        );
+        assert_ne!(first_fingerprint, second_fingerprint);
+        assert!(gpu_quad_content_matches(
+            Some((1, first_fingerprint)),
+            1,
+            first_fingerprint,
+        ));
+        assert!(!gpu_quad_content_matches(
+            Some((1, first_fingerprint)),
+            1,
+            second_fingerprint,
+        ));
     }
 
     #[test]
@@ -6692,7 +7261,6 @@ mod tests {
                     extent_voxels: [extent, 1],
                     material_face: pack_gpu_material_face(u32::from(Material::Grass.id()), 2),
                     ao: 0,
-                    morph_heights: 0,
                 };
                 let right = GpuQuad {
                     origin: [origin + i32::from(extent), -31, 47],
@@ -6864,11 +7432,14 @@ mod tests {
         let key = (0, 1, 2, 3);
         let mut arena = ArenaAllocator::new(128, 4);
         let resident = arena.allocate(32).expect("resident allocation");
+        let resident_morph = arena.allocate(8).expect("resident morph allocation");
         let prepared = arena.allocate(64).expect("prepared allocation");
+        let prepared_morph = arena.allocate(8).expect("prepared morph allocation");
         let mut chunks = BTreeMap::from([(
             key,
             ChunkMesh {
                 allocation: resident,
+                morph_allocation: Some(resident_morph),
                 quad_count: 1,
                 content_fingerprint: 1,
                 slices: Vec::new(),
@@ -6885,6 +7456,7 @@ mod tests {
             &mut arena,
             Some(ChunkMesh {
                 allocation: prepared,
+                morph_allocation: Some(prepared_morph),
                 quad_count: 2,
                 content_fingerprint: 2,
                 slices: Vec::new(),
@@ -6898,9 +7470,15 @@ mod tests {
         );
 
         assert_eq!(chunks.get(&key).map(|mesh| mesh.allocation), Some(resident));
-        assert_eq!(arena.stats().allocated_bytes, u64::from(resident.size));
+        assert_eq!(
+            arena.stats().allocated_bytes,
+            u64::from(resident.size + resident_morph.size)
+        );
         assert!(!arena.free(prepared));
-        assert!(arena.free(chunks.remove(&key).expect("resident mesh").allocation));
+        assert!(!arena.free(prepared_morph));
+        let resident_mesh = chunks.remove(&key).expect("resident mesh");
+        assert!(arena.free(resident_mesh.allocation));
+        assert!(arena.free(resident_mesh.morph_allocation.expect("resident morph")));
     }
 
     fn test_slice() -> MeshSlice {
@@ -7093,24 +7671,32 @@ mod tests {
                 offset: 64,
                 size: 32,
                 quad_count: 1,
+                morph_page: None,
+                morph_offset: 0,
             },
             DrawItem {
                 page: 0,
                 offset: 96,
                 size: 64,
                 quad_count: 2,
+                morph_page: None,
+                morph_offset: 0,
             },
             DrawItem {
                 page: 0,
                 offset: 0,
                 size: 96,
                 quad_count: 3,
+                morph_page: None,
+                morph_offset: 0,
             },
             DrawItem {
                 page: 0,
                 offset: 192,
                 size: 32,
                 quad_count: 1,
+                morph_page: None,
+                morph_offset: 0,
             },
         ]);
         assert_eq!(
@@ -7121,21 +7707,45 @@ mod tests {
                     offset: 0,
                     size: 160,
                     quad_count: 5,
+                    morph_page: None,
+                    morph_offset: 0,
                 },
                 DrawSpan {
                     page: 0,
                     offset: 192,
                     size: 32,
                     quad_count: 1,
+                    morph_page: None,
+                    morph_offset: 0,
                 },
                 DrawSpan {
                     page: 1,
                     offset: 64,
                     size: 32,
                     quad_count: 1,
+                    morph_page: None,
+                    morph_offset: 0,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn morph_draws_coalesce_only_when_base_and_sidecar_are_both_contiguous() {
+        let item = |offset, morph_offset| DrawItem {
+            page: 0,
+            offset,
+            size: size_of::<GpuQuad>() as u32,
+            quad_count: 1,
+            morph_page: Some(1),
+            morph_offset,
+        };
+        let contiguous = coalesce_draw_items(vec![item(0, 0), item(24, 4)]);
+        assert_eq!(contiguous.len(), 1);
+        assert_eq!(contiguous[0].quad_count, 2);
+
+        let split_sidecar = coalesce_draw_items(vec![item(0, 0), item(24, 8)]);
+        assert_eq!(split_sidecar.len(), 2);
     }
 
     fn reference_draw_list(
@@ -7161,6 +7771,28 @@ mod tests {
             }
         }
         builder.finish()
+    }
+
+    fn assert_world_draw_lists_match_reference(actual: &WorldDrawLists, expected: &DrawList) {
+        let items = actual
+            .fixed
+            .spans
+            .iter()
+            .chain(&actual.morphing.spans)
+            .map(|span| DrawItem {
+                page: span.page,
+                offset: span.offset,
+                size: span.size,
+                quad_count: span.quad_count,
+                morph_page: None,
+                morph_offset: 0,
+            })
+            .collect();
+        assert_eq!(coalesce_draw_items(items), expected.spans);
+        assert_eq!(actual.mesh_count, expected.mesh_count);
+        assert_eq!(actual.quad_count, expected.quad_count);
+        assert_eq!(actual.tested_slices, expected.tested_slices);
+        assert_eq!(actual.selected_slices, expected.selected_slices);
     }
 
     #[test]
@@ -7210,6 +7842,7 @@ mod tests {
                 canonical_key,
                 ChunkMesh {
                     allocation: canonical_allocation,
+                    morph_allocation: None,
                     quad_count: canonical_slice.quad_count,
                     content_fingerprint: 11,
                     slices: vec![canonical_slice],
@@ -7225,6 +7858,7 @@ mod tests {
                 surface_key,
                 ChunkMesh {
                     allocation: surface_allocation,
+                    morph_allocation: None,
                     quad_count: surface_slice.quad_count + surface_edge_slice.quad_count,
                     content_fingerprint: 22,
                     slices: vec![surface_slice, surface_edge_slice],
@@ -7279,7 +7913,7 @@ mod tests {
                     && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
             },
         );
-        let expected_shadows = std::array::from_fn(|cascade_index| {
+        let expected_shadows: [DrawList; CASCADE_COUNT] = std::array::from_fn(|cascade_index| {
             let mut draw_list = reference_draw_list(
                 &chunks,
                 |key, chunk| {
@@ -7297,8 +7931,10 @@ mod tests {
             draw_list.fingerprint = FINGERPRINT_OFFSET;
             draw_list
         });
-        assert_eq!(actual_world, expected_world);
-        assert_eq!(actual_shadows, expected_shadows);
+        assert_world_draw_lists_match_reference(&actual_world, &expected_world);
+        for (actual, expected) in actual_shadows.iter().zip(&expected_shadows) {
+            assert_world_draw_lists_match_reference(actual, expected);
+        }
         assert_eq!(actual_world.quad_count, actual_shadows[0].quad_count);
 
         let cached_world = collect_opaque_draw_lists(
@@ -7311,7 +7947,7 @@ mod tests {
             shadow_clips,
         )
         .1;
-        assert_eq!(cached_world, expected_world);
+        assert_eq!(cached_world, actual_world);
         assert!(
             chunks
                 .values()
@@ -7352,7 +7988,7 @@ mod tests {
                     && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
             },
         );
-        assert_eq!(moved_world, moved_expected);
+        assert_world_draw_lists_match_reference(&moved_world, &moved_expected);
         assert_eq!(
             chunks
                 .get(&canonical_key)
@@ -7487,6 +8123,7 @@ mod tests {
         let allocation = arena.allocate(surface.size).expect("test mesh allocation");
         let chunk = ChunkMesh {
             allocation,
+            morph_allocation: None,
             quad_count: surface.quad_count,
             content_fingerprint: 1,
             slices: vec![surface],

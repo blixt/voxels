@@ -53,18 +53,18 @@ fn surface_parent_blend(world: vec3<f32>, material: u32) -> f32 {
   }
   let delta = abs(world.xz - lod_boundary_center(boundary));
   let inside = half_extent - max(delta.x, delta.y);
-  let width = max(3.2, half_extent * 0.025);
+  let width = max(1.6, half_extent * 0.02);
   return 1.0 - smoothstep(0.0, width, inside);
 }
 
-@vertex
-fn vs_main(
-  @builtin(vertex_index) vertex_index: u32,
-  @location(0) origin: vec3<i32>,
-  @location(1) extent_voxels: vec2<u32>,
-  @location(2) material_face: u32,
-  @location(4) morph_heights: u32,
-) -> @builtin(position) vec4<f32> {
+fn shadow_vertex(
+  vertex_index: u32,
+  origin: vec3<i32>,
+  extent_voxels: vec2<u32>,
+  material_face: u32,
+  morph_heights: u32,
+  morph_geometry: bool,
+) -> vec4<f32> {
   let face = (material_face >> 16u) & 7u;
   let material = material_face & 0xfff8ffffu;
   let morph_closure = (extent_voxels.x & MORPH_CLOSURE_EXTENT_FLAG) != 0u;
@@ -83,10 +83,40 @@ fn vs_main(
     default: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 0); }
   }
   var world = vec3<f32>(origin + local) * shadow_frame.camera_voxel.w;
-  let parent_blend = surface_parent_blend(world, material);
-  let morph_blend = select(parent_blend, 1.0 - parent_blend, morph_closure);
-  world.y += surface_morph_delta(morph_heights, uv.y)
-    * shadow_frame.camera_voxel.w
-    * morph_blend;
+  if morph_geometry {
+    let parent_blend = surface_parent_blend(world, material);
+    let morph_blend = select(parent_blend, 1.0 - parent_blend, morph_closure);
+    world.y += surface_morph_delta(morph_heights, uv.y)
+      * shadow_frame.camera_voxel.w
+      * morph_blend;
+  }
   return shadow_frame.clip_from_world * vec4<f32>(world, 1.0);
+}
+
+@vertex
+fn vs_main_fixed(
+  @builtin(vertex_index) vertex_index: u32,
+  @location(0) origin: vec3<i32>,
+  @location(1) extent_voxels: vec2<u32>,
+  @location(2) material_face: u32,
+) -> @builtin(position) vec4<f32> {
+  return shadow_vertex(vertex_index, origin, extent_voxels, material_face, 0u, false);
+}
+
+@vertex
+fn vs_main_morph(
+  @builtin(vertex_index) vertex_index: u32,
+  @location(0) origin: vec3<i32>,
+  @location(1) extent_voxels: vec2<u32>,
+  @location(2) material_face: u32,
+  @location(4) morph_heights: u32,
+) -> @builtin(position) vec4<f32> {
+  return shadow_vertex(
+    vertex_index,
+    origin,
+    extent_voxels,
+    material_face,
+    morph_heights,
+    true,
+  );
 }
