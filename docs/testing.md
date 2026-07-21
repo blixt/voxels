@@ -2,8 +2,10 @@
 
 This is the canonical index for Voxels verification. Use the smallest row that covers a change, then
 move down to a real-browser or multi-client gate when the change crosses that boundary. All
-integration harnesses create explicit temporary configs, databases, ports, browser contexts, and
-profiles. They do not reuse or reset the development world or browser OPFS data.
+integration harnesses that own a world create explicit temporary configs, databases, ports, browser
+contexts, and profiles. They do not reuse or reset the development world or browser OPFS data.
+`spectator-feed --url=...` is the explicit exception: it attaches a fresh browser context to the
+specified running world without resetting it.
 
 ## Fast path
 
@@ -27,6 +29,9 @@ vp run automation -- run render-profile --mode=directional --explore-seconds=120
 
 # Durable edit layout, write latency, checkpointing, or restart change
 vp run automation -- run storage-benchmark
+
+# Edit continuity, underground rendering, or tunnel LOD coverage
+vp run automation -- run digging
 ```
 
 `vp run verify` is the complete static and build gate: TypeScript checks, TypeScript tests, host Rust
@@ -51,6 +56,7 @@ behavioral, visual, resource, or transport evidence that the general gate cannot
 | Watertight LOD      | `vp run automation -- run lod-transition --mode=watertight`                                             | Strict seam/coverage regression path                                                             |
 | Terrain boundary    | `vp run automation -- run lod-transition --mode=boundary-coverage`                                      | Reported vertical boundary pose, sky exposure, and exact browser scale                           |
 | LOD video           | `vp run automation -- run lod-transition --video`                                                       | The same validated traversal captured as raw WebM                                                |
+| Digging             | `vp run automation -- run digging`                                                                      | Edit replacement continuity, enclosed performance, and tunnel LOD coverage                       |
 | World Lab/UI        | `vp run automation -- run world-lab`                                                                    | Rust UI interaction and synchronized world diagnostics                                           |
 | Spectator feed      | `vp run automation -- run spectator-feed`                                                               | Bodyless read-only camera, movement, body restore, screenshots, and video                        |
 | Weather motion      | `vp run automation -- run weather-motion`                                                               | World-anchored clouds and downward precipitation                                                 |
