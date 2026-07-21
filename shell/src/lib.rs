@@ -1897,6 +1897,7 @@ mod web {
             let enclosed_view = complete_interest(enclosed_view_interest);
             let surface = complete_interest(surface_interest);
             canonical_ready_chunks.extend(surface.iter().copied());
+            let canonical_surface_ready_chunks = surface.clone();
             drop(scheduler);
             self.reconcile_activation_reason(
                 &self.radial_active_chunks,
@@ -1920,6 +1921,7 @@ mod web {
             );
             let mut renderer = self.renderer.borrow_mut();
             renderer.set_canonical_ready_chunks(canonical_ready_chunks);
+            renderer.set_canonical_surface_ready_chunks(canonical_surface_ready_chunks);
             renderer.set_enclosed_view_ready_chunks(enclosed_view);
         }
 

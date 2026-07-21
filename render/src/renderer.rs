@@ -1291,6 +1291,7 @@ pub struct Renderer {
     surface_patch_residency: HashSet<SurfacePatchId>,
     surface_incomplete_parents: HashSet<SurfacePatchId>,
     canonical_ready_chunks: HashSet<(i32, i32, i32)>,
+    canonical_surface_ready_chunks: HashSet<(i32, i32, i32)>,
     enclosed_view_ready_chunks: HashSet<(i32, i32, i32)>,
     surface_patch_residency_revision: u64,
     lod_draw_plan: LodDrawPlan,
@@ -2188,6 +2189,7 @@ impl Renderer {
             surface_patch_residency: HashSet::new(),
             surface_incomplete_parents: HashSet::new(),
             canonical_ready_chunks: HashSet::new(),
+            canonical_surface_ready_chunks: HashSet::new(),
             enclosed_view_ready_chunks: HashSet::new(),
             surface_patch_residency_revision: 0,
             lod_draw_plan: LodDrawPlan::default(),
@@ -2410,9 +2412,9 @@ impl Renderer {
 
     /// Replaces the exact canonical chunks in complete current vertical bands.
     ///
-    /// Incomplete columns keep their stride-two surface parent. Keeping Y here is essential:
-    /// retained profiles outside the current band may no longer have an active mesh and therefore
-    /// cannot prove that canonical geometry owns the corresponding surface cells.
+    /// This set owns only exact-volume meshes. It deliberately does not suppress the heightfield
+    /// fallback: an all-air band around a high spectator or a deep tunnel is complete volume data,
+    /// but says nothing about whether the terrain surface in the same X/Z column is represented.
     pub fn set_canonical_ready_chunks(
         &mut self,
         chunks: impl IntoIterator<Item = (i32, i32, i32)>,
@@ -2426,25 +2428,48 @@ impl Renderer {
             .symmetric_difference(&replacement)
             .copied()
             .collect::<HashSet<_>>();
-        let mut changed_columns =
-            changed_canonical_ready_columns(&self.canonical_ready_chunks, &replacement);
         self.canonical_ready_chunks = replacement;
         changed_chunks.retain(|&(x, _, z)| {
             self.lod_draw_plan_focus
                 .is_some_and(|focus| focus.owns_canonical_chunk(x, z))
         });
+        if changed_chunks.is_empty() {
+            return;
+        }
+        for (key, mesh) in &mut self.chunks {
+            if key.0 == 0 && changed_chunks.contains(&(key.1, key.2, key.3)) {
+                mesh.lod_ownership_stale = true;
+            }
+        }
+        self.invalidate_lod_draw_plan(LOD_PLAN_REBUILD_CANONICAL_COLUMNS);
+    }
+
+    /// Replaces the exact chunks that form a complete terrain-following surface cut.
+    ///
+    /// Only this independently proven set may suppress stride-two fallback patches. The shell
+    /// derives it from surface-height hints and publishes a column only after every requested Y
+    /// chunk is renderable, so unrelated air, tunnel, and interaction bands cannot punch square
+    /// holes through the terrain when viewed from above.
+    pub fn set_canonical_surface_ready_chunks(
+        &mut self,
+        chunks: impl IntoIterator<Item = (i32, i32, i32)>,
+    ) {
+        let replacement = chunks.into_iter().collect::<HashSet<_>>();
+        if replacement == self.canonical_surface_ready_chunks {
+            return;
+        }
+        let mut changed_columns =
+            changed_canonical_ready_columns(&self.canonical_surface_ready_chunks, &replacement);
+        self.canonical_surface_ready_chunks = replacement;
         changed_columns.retain(|(x, z)| {
             self.lod_draw_plan_focus
                 .is_some_and(|focus| focus.owns_canonical_chunk(*x, *z))
         });
-        if changed_columns.is_empty() && changed_chunks.is_empty() {
+        if changed_columns.is_empty() {
             return;
         }
         for (key, mesh) in &mut self.chunks {
-            if key.0 == 0
-                && (changed_columns.contains(&(key.1, key.3))
-                    || changed_chunks.contains(&(key.1, key.2, key.3)))
-            {
+            if key.0 == 0 && changed_columns.contains(&(key.1, key.3)) {
                 mesh.lod_ownership_stale = true;
             }
         }
@@ -3157,7 +3182,9 @@ impl Renderer {
             };
         let canonical_chunks =
             canonical_ready_chunks_for_focus(focus, &self.canonical_ready_chunks);
-        let canonical_columns = canonical_chunks
+        let canonical_surface_chunks =
+            canonical_ready_chunks_for_focus(focus, &self.canonical_surface_ready_chunks);
+        let canonical_columns = canonical_surface_chunks
             .iter()
             .map(|&(x, _, z)| (x, z))
             .collect::<HashSet<_>>();
@@ -3398,7 +3425,7 @@ impl Renderer {
             voxel_x.div_euclid(CHUNK_EDGE as i32),
             voxel_z.div_euclid(CHUNK_EDGE as i32),
         );
-        let covered = canonical_surface_cell_coverage(column, &self.canonical_ready_chunks);
+        let covered = canonical_surface_cell_coverage(column, &self.canonical_surface_ready_chunks);
         (covered as u16, (CHUNK_EDGE * CHUNK_EDGE) as u16)
     }
 
