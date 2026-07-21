@@ -612,6 +612,17 @@ mod web {
         requirements: EditRequirements,
     }
 
+    struct PendingCanonicalMesh {
+        revision: u64,
+        mesh: MeshedChunk,
+    }
+
+    #[derive(Clone)]
+    struct CanonicalPublication {
+        server_revision: u64,
+        requirements: BTreeMap<(i32, i32, i32), u64>,
+    }
+
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable)]
     struct InputRecord {
@@ -656,7 +667,9 @@ mod web {
         scheduler: RefCell<StreamScheduler>,
         chunks: RefCell<BTreeMap<(i32, i32, i32), Chunk>>,
         chunk_halos: RefCell<BTreeMap<(i32, i32, i32), MeshingHalo>>,
-        pending_meshes: RefCell<BTreeMap<(i32, i32, i32), MeshedChunk>>,
+        pending_meshes: RefCell<BTreeMap<(i32, i32, i32), PendingCanonicalMesh>>,
+        pending_uploads: RefCell<BTreeMap<(i32, i32, i32), voxels_runtime::WorkTicket>>,
+        canonical_publications: RefCell<VecDeque<CanonicalPublication>>,
         binary_mesh_scratch: RefCell<BinaryMeshScratch>,
         surface_focus: Cell<Option<[SurfaceTileCoord; SURFACE_LOD_LEVEL_COUNT]>>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
@@ -1275,49 +1288,35 @@ mod web {
                         ));
                         continue;
                     }
-                    self.pending_meshes
-                        .borrow_mut()
-                        .insert(coord_key(ticket.coord), mesh);
+                    self.pending_meshes.borrow_mut().insert(
+                        coord_key(ticket.coord),
+                        PendingCanonicalMesh {
+                            revision: ticket.revision,
+                            mesh,
+                        },
+                    );
                     let _ = self.scheduler.borrow_mut().complete(ticket);
                 }
             }
             for ticket in work.upload {
-                let mesh = self
-                    .pending_meshes
+                self.pending_uploads
                     .borrow_mut()
-                    .remove(&coord_key(ticket.coord));
-                let Some(mesh) = mesh else {
-                    continue;
-                };
-                let uploaded_mesh = self
-                    .chunks
-                    .borrow()
-                    .get(&coord_key(ticket.coord))
-                    .is_some_and(|chunk| self.renderer.borrow_mut().upload_chunk(chunk, &mesh));
-                if uploaded_mesh {
-                    let _ = self.scheduler.borrow_mut().complete(ticket);
-                    uploaded = true;
-                } else {
-                    self.pending_meshes
-                        .borrow_mut()
-                        .insert(coord_key(ticket.coord), mesh);
-                    let _ = self.scheduler.borrow_mut().retry(ticket);
-                    web_sys::console::error_1(&JsValue::from_str(
-                        "voxel mesh arena allocation failed; upload requeued",
-                    ));
-                }
+                    .insert(coord_key(ticket.coord), ticket);
             }
+            uploaded |= self.publish_ready_canonical_cuts();
             let evictions = self.scheduler.borrow_mut().drain_evictions();
             let evicted = !evictions.is_empty();
             if !evictions.is_empty() {
                 let mut chunks = self.chunks.borrow_mut();
                 let mut halos = self.chunk_halos.borrow_mut();
                 let mut pending = self.pending_meshes.borrow_mut();
+                let mut pending_uploads = self.pending_uploads.borrow_mut();
                 let mut renderer = self.renderer.borrow_mut();
                 for eviction in evictions {
                     chunks.remove(&coord_key(eviction.coord));
                     halos.remove(&coord_key(eviction.coord));
                     pending.remove(&coord_key(eviction.coord));
+                    pending_uploads.remove(&coord_key(eviction.coord));
                     renderer.remove_chunk(eviction.coord);
                 }
             }
@@ -1330,6 +1329,205 @@ mod web {
                 );
             }
             self.stream_surface_lods(camera.position);
+        }
+
+        fn register_canonical_publication(
+            &self,
+            server_revision: u64,
+            requirements: &[CanonicalRequirement],
+        ) {
+            if requirements.is_empty() {
+                return;
+            }
+            let replacement = requirements
+                .iter()
+                .map(|requirement| (coord_key(requirement.coord), requirement.revision))
+                .collect::<BTreeMap<_, _>>();
+            let replacement_keys = replacement.keys().copied().collect::<BTreeSet<_>>();
+            let mut merged = BTreeMap::new();
+            let mut publications = self.canonical_publications.borrow_mut();
+            publications.retain(|publication| {
+                let overlaps = publication
+                    .requirements
+                    .keys()
+                    .any(|key| replacement_keys.contains(key));
+                if overlaps {
+                    merged.extend(
+                        publication
+                            .requirements
+                            .iter()
+                            .map(|(key, revision)| (*key, *revision)),
+                    );
+                }
+                !overlaps
+            });
+            // The newest scheduler capability wins for overlapping chunks. Non-overlapping chunks
+            // from an unfinished older edit remain in the same atomic cut.
+            merged.extend(replacement);
+            publications.push_back(CanonicalPublication {
+                server_revision,
+                requirements: merged,
+            });
+        }
+
+        fn publish_ready_canonical_cuts(&self) -> bool {
+            let publications = self
+                .canonical_publications
+                .borrow()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut uploaded_any = false;
+
+            for publication in publications {
+                let current = {
+                    let scheduler = self.scheduler.borrow();
+                    publication
+                        .requirements
+                        .iter()
+                        .filter_map(|(key, revision)| {
+                            let coord = ChunkCoord::new(key.0, key.1, key.2);
+                            scheduler
+                                .status(coord)
+                                .is_some_and(|status| status.revision == *revision)
+                                .then_some((*key, *revision))
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                };
+                if current.is_empty() {
+                    self.canonical_publications
+                        .borrow_mut()
+                        .retain(|candidate| {
+                            candidate.server_revision != publication.server_revision
+                        });
+                    continue;
+                }
+                if current != publication.requirements
+                    && let Some(candidate) = self
+                        .canonical_publications
+                        .borrow_mut()
+                        .iter_mut()
+                        .find(|candidate| candidate.server_revision == publication.server_revision)
+                {
+                    candidate.requirements.clone_from(&current);
+                }
+
+                let ready = {
+                    let meshes = self.pending_meshes.borrow();
+                    let uploads = self.pending_uploads.borrow();
+                    current.iter().all(|(key, revision)| {
+                        meshes
+                            .get(key)
+                            .is_some_and(|mesh| mesh.revision == *revision)
+                            && uploads
+                                .get(key)
+                                .is_some_and(|ticket| ticket.revision == *revision)
+                    })
+                };
+                if !ready {
+                    continue;
+                }
+
+                let uploaded = {
+                    let chunks = self.chunks.borrow();
+                    let meshes = self.pending_meshes.borrow();
+                    let mut cut = Vec::with_capacity(current.len());
+                    for key in current.keys() {
+                        let Some(chunk) = chunks.get(key) else {
+                            cut.clear();
+                            break;
+                        };
+                        let Some(mesh) = meshes.get(key) else {
+                            cut.clear();
+                            break;
+                        };
+                        cut.push((chunk, &mesh.mesh));
+                    }
+                    cut.len() == current.len()
+                        && self.renderer.borrow_mut().upload_chunks_atomic(cut)
+                };
+                if uploaded {
+                    let mut uploads = self.pending_uploads.borrow_mut();
+                    let mut meshes = self.pending_meshes.borrow_mut();
+                    let mut scheduler = self.scheduler.borrow_mut();
+                    for key in current.keys() {
+                        if let Some(ticket) = uploads.remove(key) {
+                            let _ = scheduler.complete(ticket);
+                        }
+                        meshes.remove(key);
+                    }
+                    self.canonical_publications
+                        .borrow_mut()
+                        .retain(|candidate| {
+                            candidate.server_revision != publication.server_revision
+                        });
+                    uploaded_any = true;
+                } else {
+                    let mut uploads = self.pending_uploads.borrow_mut();
+                    let mut scheduler = self.scheduler.borrow_mut();
+                    for key in current.keys() {
+                        if let Some(ticket) = uploads.remove(key) {
+                            let _ = scheduler.retry(ticket);
+                        }
+                    }
+                    log_gpu_error("canonical cut allocation failed; complete cut requeued");
+                }
+            }
+
+            let grouped = self
+                .canonical_publications
+                .borrow()
+                .iter()
+                .flat_map(|publication| publication.requirements.keys().copied())
+                .collect::<BTreeSet<_>>();
+            let individual = self
+                .pending_uploads
+                .borrow()
+                .iter()
+                .filter_map(|(key, ticket)| (!grouped.contains(key)).then_some((*key, *ticket)))
+                .collect::<Vec<_>>();
+            for (key, ticket) in individual {
+                let ticket_current =
+                    self.scheduler
+                        .borrow()
+                        .status(ticket.coord)
+                        .is_some_and(|status| {
+                            status.revision == ticket.revision
+                                && status.state == ChunkState::Uploading
+                        });
+                let mesh_current = self
+                    .pending_meshes
+                    .borrow()
+                    .get(&key)
+                    .is_some_and(|mesh| mesh.revision == ticket.revision);
+                if !ticket_current || !mesh_current {
+                    self.pending_uploads.borrow_mut().remove(&key);
+                    if ticket_current {
+                        let _ = self.scheduler.borrow_mut().retry(ticket);
+                    }
+                    continue;
+                }
+                let uploaded = {
+                    let chunks = self.chunks.borrow();
+                    let meshes = self.pending_meshes.borrow();
+                    chunks.get(&key).is_some_and(|chunk| {
+                        meshes.get(&key).is_some_and(|mesh| {
+                            self.renderer.borrow_mut().upload_chunk(chunk, &mesh.mesh)
+                        })
+                    })
+                };
+                if uploaded {
+                    self.pending_uploads.borrow_mut().remove(&key);
+                    self.pending_meshes.borrow_mut().remove(&key);
+                    let _ = self.scheduler.borrow_mut().complete(ticket);
+                    uploaded_any = true;
+                } else {
+                    self.pending_uploads.borrow_mut().remove(&key);
+                    let _ = self.scheduler.borrow_mut().retry(ticket);
+                    log_gpu_error("voxel mesh arena allocation failed; upload requeued");
+                }
+            }
+            uploaded_any
         }
 
         fn collision_stream_interest(
@@ -2315,7 +2513,7 @@ mod web {
             if !accepted_mutations.is_empty() {
                 self.last_enclosure_probe.set(f64::NEG_INFINITY);
             }
-            let canonical = {
+            let canonical: Vec<CanonicalRequirement> = {
                 let mut scheduler = self.scheduler.borrow_mut();
                 let report = scheduler.mark_voxels_edited(&coords);
                 report
@@ -2330,6 +2528,7 @@ mod web {
                     })
                     .collect()
             };
+            self.register_canonical_publication(server_revision, &canonical);
             let surface_revision = if affected_surface_tiles.is_empty() {
                 self.surface_revisions.borrow().epoch()
             } else {
@@ -2381,6 +2580,9 @@ mod web {
             *self.edits.borrow_mut() = EditMap::default();
             self.edit_revisions.borrow_mut().clear();
             self.surface_accepted_edit_revisions.borrow_mut().clear();
+            self.pending_meshes.borrow_mut().clear();
+            self.pending_uploads.borrow_mut().clear();
+            self.canonical_publications.borrow_mut().clear();
             self.scheduler.borrow_mut().invalidate_all_generation();
             let replacement = self.surface_revisions.borrow_mut().begin_edit();
             let retained = self
@@ -2851,7 +3053,7 @@ mod web {
                     .pending_meshes
                     .borrow()
                     .values()
-                    .map(MeshedChunk::retained_bytes)
+                    .map(|pending| pending.mesh.retained_bytes())
                     .sum::<usize>();
                 let edit_logical_bytes = engine.edits.borrow().logical_bytes();
                 let stream_interest = engine.cinder_stream_interest.get();
@@ -3352,6 +3554,8 @@ mod web {
             chunks: RefCell::new(BTreeMap::new()),
             chunk_halos: RefCell::new(BTreeMap::new()),
             pending_meshes: RefCell::new(BTreeMap::new()),
+            pending_uploads: RefCell::new(BTreeMap::new()),
+            canonical_publications: RefCell::new(VecDeque::new()),
             binary_mesh_scratch: RefCell::new(BinaryMeshScratch::default()),
             surface_focus: Cell::new(None),
             surface_resident: RefCell::new(BTreeSet::new()),

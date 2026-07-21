@@ -2381,7 +2381,7 @@ impl Renderer {
         let opaque_update = if opaque_count == 0 {
             None
         } else {
-            let Some(prepared) = self.prepare_mesh_sliced(
+            let prepared = self.prepare_mesh_sliced(
                 key,
                 &opaque_quads,
                 vec![MeshSlice {
@@ -2394,9 +2394,7 @@ impl Renderer {
                     boundary_edge: None,
                     render_layer: RenderLayer::Opaque,
                 }],
-            ) else {
-                return None;
-            };
+            )?;
             Some(prepared)
         };
         let translucent_count = mesh.translucent.len() as u32;
