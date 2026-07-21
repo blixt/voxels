@@ -202,6 +202,33 @@ fn enclosed_view_stream_interest(
     chunks.into_iter().collect()
 }
 
+/// Activates an exact interest column only after every originally requested vertical chunk can
+/// render. Capacity-truncated siblings must remain visible to this check so a partial column never
+/// replaces the complete fallback surface.
+#[cfg(any(target_arch = "wasm32", test))]
+fn complete_renderable_interest_columns(
+    interest: &[voxels_world::ChunkCoord],
+    mut is_renderable: impl FnMut(voxels_world::ChunkCoord) -> bool,
+) -> std::collections::BTreeSet<(i32, i32, i32)> {
+    let mut columns =
+        std::collections::BTreeMap::<(i32, i32), Vec<voxels_world::ChunkCoord>>::new();
+    for &coord in interest {
+        columns.entry((coord.x, coord.z)).or_default().push(coord);
+    }
+    let mut complete = std::collections::BTreeSet::new();
+    for coords in columns.values() {
+        if coords.iter().copied().all(&mut is_renderable) {
+            complete.extend(
+                coords
+                    .iter()
+                    .copied()
+                    .map(|coord| (coord.x, coord.y, coord.z)),
+            );
+        }
+    }
+    complete
+}
+
 #[cfg(any(target_arch = "wasm32", test))]
 fn camera_from_resume_values(values: [f32; 5]) -> CameraState {
     CameraState::from_persisted(
@@ -1656,25 +1683,9 @@ mod web {
             }
 
             let complete_interest = |interest: &[ChunkCoord]| {
-                let mut columns = BTreeMap::<(i32, i32), Vec<ChunkCoord>>::new();
-                for coord in interest {
-                    if scheduler
-                        .status(*coord)
-                        .is_some_and(|status| status.desired)
-                    {
-                        columns.entry((coord.x, coord.z)).or_default().push(*coord);
-                    }
-                }
-                let mut complete = BTreeSet::new();
-                for coords in columns.values() {
-                    if coords
-                        .iter()
-                        .all(|coord| scheduler.desired_chunk_renderable(*coord))
-                    {
-                        complete.extend(coords.iter().copied().map(coord_key));
-                    }
-                }
-                complete
+                crate::complete_renderable_interest_columns(interest, |coord| {
+                    scheduler.desired_chunk_renderable(coord)
+                })
             };
             let interaction = complete_interest(collision_interest);
             let enclosed_view = complete_interest(enclosed_view_interest);
@@ -3601,16 +3612,36 @@ mod tests {
     }
 
     #[test]
-    fn retained_partial_columns_do_not_replace_surface_cover() {
-        let complete_current = BTreeSet::from([(13, 4, -9), (13, 5, -9), (13, 6, -9)]);
-        let ready = complete_current.clone();
-        let mut active_with_retention = complete_current;
-        active_with_retention.extend([(14, 4, -9), (14, 5, -9)]);
+    fn capacity_truncated_columns_do_not_replace_surface_cover() {
+        let complete_column = [
+            voxels_world::ChunkCoord::new(13, 4, -9),
+            voxels_world::ChunkCoord::new(13, 5, -9),
+            voxels_world::ChunkCoord::new(13, 6, -9),
+        ];
+        let truncated_column = [
+            voxels_world::ChunkCoord::new(14, 4, -9),
+            voxels_world::ChunkCoord::new(14, 5, -9),
+            voxels_world::ChunkCoord::new(14, 6, -9),
+        ];
+        let interest = [complete_column, truncated_column].concat();
+        let admitted = complete_column
+            .into_iter()
+            .chain(truncated_column[..2].iter().copied())
+            .collect::<BTreeSet<_>>();
 
-        assert!(ready.contains(&(13, 4, -9)));
-        assert!(!ready.contains(&(14, 4, -9)));
-        assert!(active_with_retention.contains(&(14, 4, -9)));
-        assert!(active_with_retention.contains(&(14, 5, -9)));
+        let ready =
+            complete_renderable_interest_columns(&interest, |coord| admitted.contains(&coord));
+
+        assert!(
+            complete_column
+                .into_iter()
+                .all(|coord| { ready.contains(&(coord.x, coord.y, coord.z)) })
+        );
+        assert!(
+            truncated_column
+                .into_iter()
+                .all(|coord| { !ready.contains(&(coord.x, coord.y, coord.z)) })
+        );
     }
 
     #[test]
