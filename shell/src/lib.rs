@@ -178,15 +178,18 @@ fn enclosed_view_stream_interest(
     let mut chunks = BTreeSet::new();
     for [horizontal, vertical] in ENCLOSED_VIEW_RAY_OFFSETS {
         let direction = (forward + right * horizontal + up * vertical).normalize_or(forward);
-        if raycast_voxels(
+        if let Some(hit) = raycast_voxels(
             camera.position,
             direction,
             clearance,
             VOXEL_SIZE_METRES,
             &mut is_opaque,
-        )
-        .is_some()
-        {
+        ) {
+            chunks.insert(voxels_world::ChunkCoord::new(
+                hit.voxel[0].div_euclid(CHUNK_EDGE as i32),
+                hit.voxel[1].div_euclid(CHUNK_EDGE as i32),
+                hit.voxel[2].div_euclid(CHUNK_EDGE as i32),
+            ));
             continue;
         }
         for step in 0..=steps {
@@ -3811,13 +3814,17 @@ mod tests {
     }
 
     #[test]
-    fn enclosed_view_interest_stops_at_nearby_canonical_walls() {
+    fn enclosed_view_interest_owns_nearby_occluders_without_streaming_behind_them() {
         let camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
         let interest = enclosed_view_stream_interest(&camera, 32.0, 0.8, |_, _, z| z <= -16);
 
         assert!(
-            interest.is_empty(),
-            "a wall inside the canonical clearance span needs no distant volume"
+            !interest.is_empty(),
+            "a wall used to reject a view ray must remain an exact render owner"
+        );
+        assert!(
+            interest.iter().all(|coord| coord.z >= -1),
+            "a nearby wall must stop exact-volume interest from extending behind it"
         );
     }
 
