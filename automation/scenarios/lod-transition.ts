@@ -439,13 +439,14 @@ async function compareScreenshots(page: Page, before: Buffer, after: Buffer) {
 }
 
 async function analyzeWatertightTerrain(page: Page, screenshot: Buffer) {
-  // This fixed camera looks down onto uninterrupted terrain. With the diagnostic fixture active,
-  // any magenta sample in this band is the actual atmospheric background leaking through geometry.
+  // This fixed camera points 21 degrees below the horizon, placing the mathematical horizon well
+  // above the lower half of the viewport. Scan almost all ground pixels rather than the historical
+  // narrow center band so cracks on any LOD-ring edge are observable.
   return analyzeDiagnosticSky(page, screenshot, {
-    x0: 0.4,
-    x1: 0.88,
-    y0: 0.52,
-    y1: 0.605,
+    x0: 0.02,
+    x1: 0.98,
+    y0: 0.46,
+    y1: 0.98,
   });
 }
 
@@ -639,30 +640,30 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
         image: await analyzeWatertightTerrain(page, before),
       },
     ];
-    if (boundaryCoverage) {
-      for (const [index, offset] of [-0.16, -0.08, 0.08, 0.16].entries()) {
+    for (const [index, offset] of [-0.4, -0.2, 0.2, 0.4].entries()) {
+      if (boundaryCoverage) await page.keyboard.press("F3");
+      beforeSnapshot = await setCameraLook(
+        engine,
+        options.look[0] + offset,
+        options.look[1],
+        timings,
+      );
+      beforeSnapshot = await waitForStableFrame(page, engine, initialCentres, timings);
+      if (boundaryCoverage) {
         await page.keyboard.press("F3");
-        beforeSnapshot = await setCameraLook(
-          engine,
-          options.look[0] + offset,
-          options.look[1],
-          timings,
-        );
         beforeSnapshot = await waitForStableFrame(page, engine, initialCentres, timings);
-        await page.keyboard.press("F3");
-        beforeSnapshot = await waitForStableFrame(page, engine, initialCentres, timings);
-        const screenshot = await page.screenshot();
-        await context.artifacts.write(
-          `LOD heading ${index + 1}`,
-          `heading-${index + 1}.png`,
-          screenshot,
-          "image/png",
-        );
-        headingSamples.push({
-          yaw: options.look[0] + offset,
-          image: await analyzeWatertightTerrain(page, screenshot),
-        });
       }
+      const screenshot = await page.screenshot();
+      await context.artifacts.write(
+        `LOD heading ${index + 1}`,
+        `heading-${index + 1}.png`,
+        screenshot,
+        "image/png",
+      );
+      headingSamples.push({
+        yaw: options.look[0] + offset,
+        image: await analyzeWatertightTerrain(page, screenshot),
+      });
     }
     await engine.setDiagnosticSky(null);
     await sampleStablePerformance(page, engine, timings, 2_000);
@@ -715,6 +716,20 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       details: result,
     };
   } else {
+    const movingCoverage = {
+      samples: 0,
+      worst: await analyzeWatertightTerrain(page, before),
+      worstScreenshot: before,
+    };
+    const captureMovingCoverage = async (): Promise<void> => {
+      const screenshot = await page.screenshot();
+      const analysis = await analyzeWatertightTerrain(page, screenshot);
+      movingCoverage.samples += 1;
+      if (analysis.diagnosticSkyPixels > movingCoverage.worst.diagnosticSkyPixels) {
+        movingCoverage.worst = analysis;
+        movingCoverage.worstScreenshot = screenshot;
+      }
+    };
     const cameraVoxelX = beforePose[0] / 0.1;
     const firstCentre = initialCentres[0];
     if (firstCentre === undefined) throw new Error("LOD fixture has no boundary centre");
@@ -732,12 +747,22 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     if (planarDistance(crossedPose, beforePose) <= 0) {
       throw new Error("LOD focus changed without measurable player movement");
     }
+    for (let transitionFrame = 0; transitionFrame < 10; transitionFrame += 1) {
+      await page.waitForTimeout(24);
+      await captureMovingCoverage();
+    }
     await returnToPose(page, engine, beforePose, initialCentres, timings);
     const afterSnapshot = await waitForStableChangedFrame(page, engine, initialCentres, timings);
     const afterCentres = boundaryCentres(afterSnapshot);
     const afterPose = cameraPosition(afterSnapshot);
     const after = await page.screenshot();
     await context.artifacts.write("LOD after", "after.png", after, "image/png");
+    await context.artifacts.write(
+      "Worst moving LOD coverage",
+      "moving-worst-coverage.png",
+      movingCoverage.worstScreenshot,
+      "image/png",
+    );
     const afterVideoSeconds = (Date.now() - videoStartedAtMs) / 1_000;
     if (options.recordVideo) await page.waitForTimeout(1_500);
     await engine.setDiagnosticSky(null);
@@ -749,6 +774,10 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     ]);
     const image = {
       ...comparison,
+      movingCoverage: {
+        samples: movingCoverage.samples,
+        worst: movingCoverage.worst,
+      },
       diagnosticSkyExposure: {
         before: beforeSkyExposure,
         after: afterSkyExposure,
@@ -777,6 +806,8 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     ) {
       violations.push("valley terrain exposes the diagnostic magenta sky");
     }
+    if (image.movingCoverage.worst.diagnosticSkyPixels > 0)
+      violations.push("moving LOD transition exposes the diagnostic magenta sky");
     if (image.ssim < 0.97) violations.push("valley SSIM fell below 0.97");
     if (performance.frameP95Ms > 12) violations.push("frame p95 exceeded 12ms");
     if (performance.fractionAbove16_67Ms > 0.01)

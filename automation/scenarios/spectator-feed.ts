@@ -164,6 +164,21 @@ async function runSpectatorFeed(context: ScenarioContext, arguments_: readonly s
     (snapshot) => snapshotValue(snapshot, "spectatorActive") === 1,
     { description: "spectator role was lost during feed capture" },
   );
+  if (validateGroundCoverage) {
+    await viewport.engine.waitForSnapshot(
+      (snapshot) =>
+        snapshotValue(snapshot, "allLodsReady") === 1 &&
+        snapshotValue(snapshot, "pendingJobs") === 0 &&
+        snapshotValue(snapshot, "surfaceInFlight") === 0,
+      {
+        timeoutMs: CAMERA_SETTLE_TIMEOUT_MS,
+        description: "aerial ground coverage did not settle after spectator motion",
+      },
+    );
+    // Let the renderer's intentionally short complete-cut transition expire. Persistent seam
+    // validation and moving-transition validation are separate assertions.
+    await viewport.engine.wait(500);
+  }
   await viewport.screenshot("Spectator feed end", {
     filename: "spectator-feed-end.png",
   });

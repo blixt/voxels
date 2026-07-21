@@ -203,7 +203,19 @@ async function performDig(
     );
   }
   if (stableCompleteSamples < 3) {
-    throw new Error(`dig replacement did not settle at ${target.join(",")}`);
+    throw new Error(
+      `dig replacement did not settle at ${target.join(",")}: ${JSON.stringify({
+        pendingJobs: snapshotValue(latest, "pendingJobs"),
+        surfaceInFlight: snapshotValue(latest, "surfaceInFlight"),
+        required: snapshotValue(latest, "editCanonicalRequired"),
+        renderable: snapshotValue(latest, "editCanonicalRenderable"),
+        owned: snapshotValue(latest, "editCanonicalOwned"),
+        enclosedRequired: snapshotValue(latest, "enclosedViewRequired"),
+        streamRequested: snapshotValue(latest, "streamInterestRequested"),
+        streamDesired: snapshotValue(latest, "streamInterestDesired"),
+        streamTruncated: snapshotValue(latest, "streamInterestTruncated"),
+      })}`,
+    );
   }
   return {
     target,
