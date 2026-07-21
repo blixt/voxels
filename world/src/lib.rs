@@ -1,6 +1,7 @@
 //! Deterministic, host-testable voxel world representation, generation, meshing, and storage codecs.
 
 pub mod atlas;
+pub mod binary_mesh;
 pub mod cave;
 pub mod celestial;
 pub mod chunk;
@@ -94,3 +95,4 @@ pub use atlas::{
     PILGRIM_CHAPTERS, PILGRIM_DESTINATIONS, RouteChapter, RouteChapterId,
     pilgrim_chapter_at_distance,
 };
+pub use binary_mesh::{BinaryMeshScratch, mesh_chunk_binary, mesh_chunk_binary_with_scratch};

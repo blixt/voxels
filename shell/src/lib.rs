@@ -402,11 +402,11 @@ mod web {
         PlayerIdentity, VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
     };
     use voxels_world::{
-        AtmosphereSample, CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT_PORTAL_COUNT,
-        CaveStreamInterest, Chunk, ChunkCoord, EditMap, Material, MeshedChunk, MeshingHalo,
-        PortalState, SURFACE_LOD_LEVEL_COUNT, SurfaceLodLevel, SurfaceRegion, SurfaceSample,
-        SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord, WorldProductPriority,
-        WorldSourceIdentityHash, mesh_chunk,
+        AtmosphereSample, BinaryMeshScratch, CHUNK_EDGE, CHUNK_VOXEL_BYTES,
+        CINDER_VAULT_PORTAL_COUNT, CaveStreamInterest, Chunk, ChunkCoord, EditMap, Material,
+        MeshedChunk, MeshingHalo, PortalState, SURFACE_LOD_LEVEL_COUNT, SurfaceLodLevel,
+        SurfaceRegion, SurfaceSample, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
+        WorldProductPriority, WorldSourceIdentityHash, mesh_chunk_binary_with_scratch,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -657,6 +657,7 @@ mod web {
         chunks: RefCell<BTreeMap<(i32, i32, i32), Chunk>>,
         chunk_halos: RefCell<BTreeMap<(i32, i32, i32), MeshingHalo>>,
         pending_meshes: RefCell<BTreeMap<(i32, i32, i32), MeshedChunk>>,
+        binary_mesh_scratch: RefCell<BinaryMeshScratch>,
         surface_focus: Cell<Option<[SurfaceTileCoord; SURFACE_LOD_LEVEL_COUNT]>>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
         surface_chunk_hints: RefCell<SurfaceChunkHintIndex>,
@@ -1256,13 +1257,17 @@ mod web {
                         continue;
                     };
                     let mut halo_contract_valid = true;
-                    let mesh = mesh_chunk(chunk, |x, y, z| {
-                        let Some(material) = halo.sample_world(x, y, z) else {
-                            halo_contract_valid = false;
-                            return Material::Stone;
-                        };
-                        material
-                    });
+                    let mesh = mesh_chunk_binary_with_scratch(
+                        chunk,
+                        |x, y, z| {
+                            let Some(material) = halo.sample_world(x, y, z) else {
+                                halo_contract_valid = false;
+                                return Material::Stone;
+                            };
+                            material
+                        },
+                        &mut self.binary_mesh_scratch.borrow_mut(),
+                    );
                     if !halo_contract_valid {
                         let _ = self.scheduler.borrow_mut().retry(ticket);
                         web_sys::console::error_1(&JsValue::from_str(
@@ -3347,6 +3352,7 @@ mod web {
             chunks: RefCell::new(BTreeMap::new()),
             chunk_halos: RefCell::new(BTreeMap::new()),
             pending_meshes: RefCell::new(BTreeMap::new()),
+            binary_mesh_scratch: RefCell::new(BinaryMeshScratch::default()),
             surface_focus: Cell::new(None),
             surface_resident: RefCell::new(BTreeSet::new()),
             surface_chunk_hints: RefCell::new(BTreeMap::new()),
