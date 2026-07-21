@@ -1,6 +1,10 @@
 node_modules/
 dist/
 target/
+.env.cloudflare.local
+!.env.cloudflare.local.example
+.wrangler-local/
+.wrangler/
 web/generated/*
 !web/generated/voxels.d.ts
 .vite-plus/

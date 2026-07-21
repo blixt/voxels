@@ -16,10 +16,15 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::serve::ListenerExt;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::stream::{FuturesUnordered, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -30,19 +35,19 @@ use voxels_core::{PLAYER_EYE_HEIGHT_METRES, PLAYER_RADIUS_METRES};
 #[cfg(test)]
 use voxels_world::protocol::EditShape;
 use voxels_world::protocol::{
-    ChunkBatchItem, ChunkBatchRequest, EditSessionId, EditVolume, EncodedChunkBatchItem,
-    EncodedSurfaceTileBatchItem, FRAME_FRAGMENT_OVERHEAD_BYTES, PlayerIdentity, PlayerResume,
-    PresenceOpened, PresencePong, ResyncRequired, SpawnPoint, SurfaceTileBatchItem,
-    SurfaceTileBatchRequest, VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
-    WorldOpened, cancel_kind, chunk_batch_kind, clone_message_with_request_id, decode_cancel,
-    decode_chunk_batch, decode_edit_command, decode_open_presence, decode_open_world,
-    decode_player_pose, decode_presence_ping, decode_surface_tile_batch, edit_command_kind,
-    encode_chunk_batch_item, encode_chunk_batch_result_from_items, encode_edit_commit,
-    encode_error, encode_frame_fragment, encode_presence_opened, encode_presence_pong,
-    encode_resync_required, encode_surface_tile_batch_item,
-    encode_surface_tile_batch_result_from_items, encode_world_opened, message_kind,
-    message_request_id, open_presence_kind, open_world_kind, player_pose_kind, presence_ping_kind,
-    surface_tile_batch_kind,
+    BrowserUserId, ChunkBatchItem, ChunkBatchRequest, EditSessionId, EditVolume,
+    EncodedChunkBatchItem, EncodedSurfaceTileBatchItem, FRAME_FRAGMENT_OVERHEAD_BYTES, PlayerId,
+    PlayerIdentity, PlayerResume, PresenceOpened, PresencePong, ResyncRequired, SpawnPoint,
+    SurfaceTileBatchItem, SurfaceTileBatchRequest, VoxelMutation, WorldCapabilities,
+    WorldEnvironmentSnapshot, WorldOpened, cancel_kind, chunk_batch_kind,
+    clone_message_with_request_id, decode_cancel, decode_chunk_batch, decode_edit_command,
+    decode_open_presence, decode_open_world, decode_player_pose, decode_presence_ping,
+    decode_surface_tile_batch, edit_command_kind, encode_chunk_batch_item,
+    encode_chunk_batch_result_from_items, encode_edit_commit, encode_error, encode_frame_fragment,
+    encode_presence_opened, encode_presence_pong, encode_resync_required,
+    encode_surface_tile_batch_item, encode_surface_tile_batch_result_from_items,
+    encode_world_opened, message_kind, message_request_id, open_presence_kind, open_world_kind,
+    player_pose_kind, presence_ping_kind, surface_tile_batch_kind,
 };
 use voxels_world::{
     CHUNK_EDGE, ChunkCoord, Material, MeshingHalo, SurfaceSampleBlockRequest, WORLD_SCHEMA_VERSION,
@@ -53,12 +58,20 @@ use voxels_world::{
 pub const WORLD_WEBSOCKET_PATH: &str = "/v28/world";
 pub const PRESENCE_WEBSOCKET_PATH: &str = "/v28/presence";
 pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v28";
+pub const HEALTH_PATH: &str = "/healthz";
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
+const INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+const WRITER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const SIGNED_SESSION_MAX_FUTURE_SECONDS: u64 = 13 * 60 * 60;
+type HmacSha256 = Hmac<Sha256>;
 
 /// Prepared server state. Source construction and spawn coverage validation happen before bind.
 pub struct WorldServer {
     router: Router,
+    allow_non_loopback: bool,
+    shutdown: watch::Sender<bool>,
+    edits: Arc<EditAuthority>,
 }
 
 impl WorldServer {
@@ -118,9 +131,12 @@ impl WorldServer {
         let presence = PresenceHub::new(config.presence, config.gameplay)
             .map_err(WorldServerError::Presence)?;
         let environment = EnvironmentAuthority::new(config.environment, presence.now_ms());
+        let authorization = ConnectionAuthorization::from_config(&config.transport)?;
+        let allow_non_loopback = config.transport.allow_non_loopback;
+        let (shutdown, shutdown_rx) = watch::channel(false);
         let state = Arc::new(ServerState {
             allowed_origins: config.transport.allowed_origins,
-            auth_subprotocol_token: config.transport.auth_subprotocol_token,
+            authorization,
             max_frame_bytes: config.transport.max_frame_bytes,
             max_queued_outbound_bytes_per_client: config
                 .transport
@@ -148,29 +164,56 @@ impl WorldServer {
             environment,
             presence,
             source,
-            edits,
+            edits: Arc::clone(&edits),
             generation_tx,
+            process_shutdown: shutdown_rx,
         });
         let router = Router::new()
+            .route(HEALTH_PATH, get(|| async { StatusCode::OK }))
             .route(WORLD_WEBSOCKET_PATH, get(world_websocket_endpoint))
             .route(PRESENCE_WEBSOCKET_PATH, get(presence_websocket_endpoint))
             .with_state(state);
-        Ok(Self { router })
+        Ok(Self {
+            router,
+            allow_non_loopback,
+            shutdown,
+            edits,
+        })
     }
 
     pub async fn serve(self, listener: TcpListener) -> Result<(), WorldServerError> {
+        self.serve_until(listener, std::future::pending()).await
+    }
+
+    pub async fn serve_until<F>(
+        self,
+        listener: TcpListener,
+        shutdown_signal: F,
+    ) -> Result<(), WorldServerError>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
         let address = listener
             .local_addr()
             .map_err(|error| WorldServerError::Listener(error.to_string()))?;
-        if !address.ip().is_loopback() {
+        if !address.ip().is_loopback() && !self.allow_non_loopback {
             return Err(WorldServerError::NonLoopbackListener(address));
         }
         let listener = listener.tap_io(|stream| {
             let _ = stream.set_nodelay(true);
         });
-        axum::serve(listener, self.router)
+        let shutdown = self.shutdown;
+        let result = axum::serve(listener, self.router)
+            .with_graceful_shutdown(async move {
+                shutdown_signal.await;
+                let _ = shutdown.send(true);
+            })
             .await
-            .map_err(|error| WorldServerError::Serve(error.to_string()))
+            .map_err(|error| WorldServerError::Serve(error.to_string()));
+        self.edits
+            .checkpoint()
+            .map_err(|error| WorldServerError::Edits(error.to_string()))?;
+        result
     }
 }
 
@@ -185,7 +228,29 @@ pub async fn serve_loaded_config(
             address,
             reason: error.to_string(),
         })?;
-    server.serve(listener).await
+    server.serve_until(listener, shutdown_signal()).await
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+        match terminate {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 #[derive(Debug)]
@@ -195,6 +260,7 @@ pub enum WorldServerError {
     Spawn(WorldSourceError),
     InvalidSpawnProduct,
     Presence(String),
+    Authorization(String),
     Edits(String),
     Manifest(WorldManifestError),
     Bind { address: SocketAddr, reason: String },
@@ -213,6 +279,9 @@ impl fmt::Display for WorldServerError {
                 formatter.write_str("world source returned a mismatched spawn surface product")
             }
             Self::Presence(reason) => write!(formatter, "could not initialize presence: {reason}"),
+            Self::Authorization(reason) => {
+                write!(formatter, "could not initialize authorization: {reason}")
+            }
             Self::Edits(error) => write!(formatter, "could not initialize edit authority: {error}"),
             Self::Manifest(error) => write!(formatter, "invalid world manifest: {error}"),
             Self::Bind { address, reason } => {
@@ -594,7 +663,7 @@ fn validate_spawn_chunk(
 
 struct ServerState {
     allowed_origins: Vec<String>,
-    auth_subprotocol_token: String,
+    authorization: ConnectionAuthorization,
     max_frame_bytes: usize,
     max_queued_outbound_bytes_per_client: usize,
     max_in_flight_batches: u16,
@@ -609,6 +678,7 @@ struct ServerState {
     source: Arc<dyn WorldSourceEngine>,
     edits: Arc<EditAuthority>,
     generation_tx: mpsc::Sender<GenerationJob>,
+    process_shutdown: watch::Receiver<bool>,
 }
 
 async fn world_websocket_endpoint(
@@ -616,27 +686,13 @@ async fn world_websocket_endpoint(
     headers: HeaderMap,
     websocket: WebSocketUpgrade,
 ) -> Response {
-    let allowed_origin = headers
-        .get(ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|origin| {
-            state
-                .allowed_origins
-                .iter()
-                .any(|allowed| allowed == origin)
-        });
-    if !allowed_origin {
-        return (StatusCode::FORBIDDEN, "origin is not allowed").into_response();
-    }
-    if !header_offers_protocol(&headers, WORLD_WEBSOCKET_PROTOCOL)
-        || !header_offers_protocol(&headers, &state.auth_subprotocol_token)
-    {
+    let Some(authorized_identity) = authorize_request(&state, &headers) else {
         return (
             StatusCode::UNAUTHORIZED,
             "world-service authorization required",
         )
             .into_response();
-    }
+    };
     let connection_permit = match Arc::clone(&state.connections).try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
@@ -654,7 +710,7 @@ async fn world_websocket_endpoint(
         .protocols([WORLD_WEBSOCKET_PROTOCOL])
         .on_upgrade(move |socket| async move {
             let _connection_permit = connection_permit;
-            run_session(socket, state).await;
+            run_session(socket, state, authorized_identity).await;
         })
 }
 
@@ -663,13 +719,13 @@ async fn presence_websocket_endpoint(
     headers: HeaderMap,
     websocket: WebSocketUpgrade,
 ) -> Response {
-    if !request_is_authorized(&state, &headers) {
+    let Some(authorized_identity) = authorize_request(&state, &headers) else {
         return (
             StatusCode::UNAUTHORIZED,
             "world-service authorization required",
         )
             .into_response();
-    }
+    };
     let connection_permit = match Arc::clone(&state.presence_connections).try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
@@ -687,12 +743,12 @@ async fn presence_websocket_endpoint(
         .protocols([WORLD_WEBSOCKET_PROTOCOL])
         .on_upgrade(move |socket| async move {
             let _connection_permit = connection_permit;
-            run_presence_session(socket, state).await;
+            run_presence_session(socket, state, authorized_identity).await;
         })
 }
 
-fn request_is_authorized(state: &ServerState, headers: &HeaderMap) -> bool {
-    headers
+fn authorize_request(state: &ServerState, headers: &HeaderMap) -> Option<AuthorizedIdentity> {
+    let origin_allowed = headers
         .get(ORIGIN)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|origin| {
@@ -700,9 +756,11 @@ fn request_is_authorized(state: &ServerState, headers: &HeaderMap) -> bool {
                 .allowed_origins
                 .iter()
                 .any(|allowed| allowed == origin)
-        })
-        && header_offers_protocol(headers, WORLD_WEBSOCKET_PROTOCOL)
-        && header_offers_protocol(headers, &state.auth_subprotocol_token)
+        });
+    if !origin_allowed || !header_offers_protocol(headers, WORLD_WEBSOCKET_PROTOCOL) {
+        return None;
+    }
+    state.authorization.authorize(headers)
 }
 
 fn header_offers_protocol(headers: &HeaderMap, expected: &str) -> bool {
@@ -712,6 +770,116 @@ fn header_offers_protocol(headers: &HeaderMap, expected: &str) -> bool {
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
         .any(|protocol| protocol.trim() == expected)
+}
+
+#[derive(Clone)]
+enum ConnectionAuthorization {
+    Static(String),
+    SignedSession(HmacSha256),
+}
+
+#[derive(Clone, Copy)]
+enum AuthorizedIdentity {
+    Unbound,
+    Player {
+        browser_user_id: BrowserUserId,
+        player_id: PlayerId,
+    },
+}
+
+impl AuthorizedIdentity {
+    fn matches(self, browser_user_id: BrowserUserId, player_id: PlayerId) -> bool {
+        match self {
+            Self::Unbound => true,
+            Self::Player {
+                browser_user_id: expected_browser,
+                player_id: expected_player,
+            } => expected_browser == browser_user_id && expected_player == player_id,
+        }
+    }
+}
+
+impl ConnectionAuthorization {
+    fn from_config(config: &crate::LoopbackTransportConfig) -> Result<Self, WorldServerError> {
+        let Some(environment_name) = &config.auth_session_hmac_key_env else {
+            return Ok(Self::Static(config.auth_subprotocol_token.clone()));
+        };
+        let key = std::env::var(environment_name).map_err(|_| {
+            WorldServerError::Authorization(format!(
+                "required session signing key environment variable {environment_name} is unavailable"
+            ))
+        })?;
+        if key.len() < 32 {
+            return Err(WorldServerError::Authorization(format!(
+                "session signing key from {environment_name} must contain at least 32 bytes"
+            )));
+        }
+        let hmac = HmacSha256::new_from_slice(key.as_bytes()).map_err(|_| {
+            WorldServerError::Authorization("session signing key is invalid".to_owned())
+        })?;
+        Ok(Self::SignedSession(hmac))
+    }
+
+    fn authorize(&self, headers: &HeaderMap) -> Option<AuthorizedIdentity> {
+        match self {
+            Self::Static(expected) => {
+                header_offers_protocol(headers, expected).then_some(AuthorizedIdentity::Unbound)
+            }
+            Self::SignedSession(hmac) => {
+                offered_protocols(headers).find_map(|token| verify_signed_session(hmac, token))
+            }
+        }
+    }
+}
+
+fn offered_protocols(headers: &HeaderMap) -> impl Iterator<Item = &str> {
+    headers
+        .get_all(SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+}
+
+fn verify_signed_session(hmac: &HmacSha256, token: &str) -> Option<AuthorizedIdentity> {
+    let parts = token.split('.').collect::<Vec<_>>();
+    let [
+        "vxs1",
+        expiry_text,
+        browser_text,
+        player_text,
+        nonce_text,
+        signature_text,
+    ] = parts.as_slice()
+    else {
+        return None;
+    };
+    let expires_at = u64::from_str_radix(expiry_text, 36).ok()?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    if expires_at <= now || expires_at > now.saturating_add(SIGNED_SESSION_MAX_FUTURE_SECONDS) {
+        return None;
+    }
+    if URL_SAFE_NO_PAD.decode(nonce_text).ok()?.len() != 12 {
+        return None;
+    }
+    let signature = URL_SAFE_NO_PAD.decode(signature_text).ok()?;
+    let payload = parts[..5].join(".");
+    let mut verifier = hmac.clone();
+    verifier.update(payload.as_bytes());
+    verifier.verify_slice(&signature).ok()?;
+    let browser_user_id = decode_uuid(browser_text).map(BrowserUserId::from_bytes)?;
+    let player_id = decode_uuid(player_text).map(PlayerId::from_bytes)?;
+    if browser_user_id.is_nil() || player_id.is_nil() {
+        return None;
+    }
+    Some(AuthorizedIdentity::Player {
+        browser_user_id,
+        player_id,
+    })
+}
+
+fn decode_uuid(value: &str) -> Option<[u8; 16]> {
+    URL_SAFE_NO_PAD.decode(value).ok()?.try_into().ok()
 }
 
 struct SessionRequests {
@@ -1293,8 +1461,17 @@ impl PendingGenerationBatch {
     }
 }
 
-async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
-    let first = match next_socket_binary(&mut socket).await {
+async fn run_session(
+    mut socket: WebSocket,
+    state: Arc<ServerState>,
+    authorized_identity: AuthorizedIdentity,
+) {
+    let mut process_shutdown = state.process_shutdown.clone();
+    let first = match tokio::select! {
+        biased;
+        _ = wait_for_shutdown(&mut process_shutdown) => return,
+        first = next_initial_socket_binary(&mut socket) => first,
+    } {
         Ok(Some(bytes)) => bytes,
         Ok(None) => return,
         Err(message) => {
@@ -1313,6 +1490,14 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
             return;
         }
     };
+    if !authorized_identity.matches(open.identity.browser_user_id, open.identity.player_id) {
+        let _ = socket
+            .send(Message::Binary(
+                encode_error(0, "session credential does not own the requested player").into(),
+            ))
+            .await;
+        return;
+    }
     let mut loaded_player = match state
         .edits
         .load_player(open.identity.player_id, state.world.default_player_resume())
@@ -1398,6 +1583,8 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
 
     loop {
         let inbound_frame = tokio::select! {
+            biased;
+            _ = wait_for_shutdown(&mut process_shutdown) => break,
             edit = edit_subscription.receiver.recv(), if edit_subscription_open => {
                 let Some(commit) = edit else {
                     edit_subscription_open = false;
@@ -1641,11 +1828,20 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
     reader.abort();
     let _ = reader.await;
     drop(outbound);
-    let _ = writer.await;
+    finish_socket_writer(writer).await;
 }
 
-async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
-    let first = match next_socket_binary(&mut socket).await {
+async fn run_presence_session(
+    mut socket: WebSocket,
+    state: Arc<ServerState>,
+    authorized_identity: AuthorizedIdentity,
+) {
+    let mut process_shutdown = state.process_shutdown.clone();
+    let first = match tokio::select! {
+        biased;
+        _ = wait_for_shutdown(&mut process_shutdown) => return,
+        first = next_initial_socket_binary(&mut socket) => first,
+    } {
         Ok(Some(bytes)) => bytes,
         Ok(None) => return,
         Err(message) => {
@@ -1672,6 +1868,14 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
             .await;
         return;
     };
+    if !authorized_identity.matches(attachment.browser_user_id(), attachment.player_id()) {
+        let _ = socket
+            .send(Message::Binary(
+                encode_error(0, "session credential does not own the presence player").into(),
+            ))
+            .await;
+        return;
+    }
     let Some(traffic) = state.traffic.get(attachment.connection_id) else {
         let _ = socket
             .send(Message::Binary(
@@ -1748,6 +1952,7 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
             // while a dense-area delta is being prepared, so always drain control frames and the
             // latest coalesced pose before spending another turn on observer replication.
             biased;
+            _ = wait_for_shutdown(&mut process_shutdown) => break,
             message = inbound.recv() => {
                 let bytes = match message {
                     Some(InboundFrame::Binary(bytes)) => bytes,
@@ -1902,7 +2107,21 @@ async fn run_presence_session(mut socket: WebSocket, state: Arc<ServerState>) {
     }
     reader.abort();
     let _ = reader.await;
-    let _ = writer.await;
+    finish_socket_writer(writer).await;
+}
+
+async fn finish_socket_writer(writer: tokio::task::JoinHandle<()>) {
+    finish_socket_writer_with_timeout(writer, WRITER_SHUTDOWN_TIMEOUT).await;
+}
+
+async fn finish_socket_writer_with_timeout(
+    mut writer: tokio::task::JoinHandle<()>,
+    timeout: Duration,
+) {
+    if tokio::time::timeout(timeout, &mut writer).await.is_err() {
+        writer.abort();
+        let _ = writer.await;
+    }
 }
 
 fn pose_admission_error(admission: PoseAdmission) -> Option<&'static str> {
@@ -2019,6 +2238,25 @@ async fn next_socket_binary(socket: &mut WebSocket) -> Result<Option<Vec<u8>>, &
             Some(Ok(Message::Close(_))) | None => return Ok(None),
             Some(Ok(Message::Text(_))) => return Err("VXWP accepts binary messages only"),
             Some(Err(_)) => return Ok(None),
+        }
+    }
+}
+
+async fn next_initial_socket_binary(
+    socket: &mut WebSocket,
+) -> Result<Option<Vec<u8>>, &'static str> {
+    tokio::time::timeout(INITIAL_FRAME_TIMEOUT, next_socket_binary(socket))
+        .await
+        .unwrap_or(Err("initial VXWP frame timed out"))
+}
+
+async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    while shutdown.changed().await.is_ok() {
+        if *shutdown.borrow_and_update() {
+            return;
         }
     }
 }
@@ -2910,6 +3148,69 @@ mod tests {
         WorldProductPriority,
     };
 
+    fn encode_base36(mut value: u64) -> String {
+        let mut encoded = Vec::new();
+        loop {
+            let digit = (value % 36) as u8;
+            encoded.push(if digit < 10 {
+                b'0' + digit
+            } else {
+                b'a' + digit - 10
+            });
+            value /= 36;
+            if value == 0 {
+                break;
+            }
+        }
+        encoded.reverse();
+        String::from_utf8(encoded).expect("ASCII base36")
+    }
+
+    #[test]
+    fn signed_session_tokens_bind_the_exact_browser_and_player_identity() {
+        let hmac = HmacSha256::new_from_slice(b"test-only-session-signing-key-that-is-long-enough")
+            .expect("HMAC key");
+        let browser_user_id = BrowserUserId::from_bytes(*Uuid::new_v4().as_bytes());
+        let player_id = PlayerId::from_bytes(*Uuid::new_v4().as_bytes());
+        let expires_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_secs()
+            + 60;
+        let payload = format!(
+            "vxs1.{}.{}.{}.{}",
+            encode_base36(expires_at),
+            URL_SAFE_NO_PAD.encode(browser_user_id.as_bytes()),
+            URL_SAFE_NO_PAD.encode(player_id.as_bytes()),
+            URL_SAFE_NO_PAD.encode([7_u8; 12]),
+        );
+        let mut signer = hmac.clone();
+        signer.update(payload.as_bytes());
+        let token = format!(
+            "{payload}.{}",
+            URL_SAFE_NO_PAD.encode(signer.finalize().into_bytes())
+        );
+
+        let authorized = verify_signed_session(&hmac, &token).expect("valid signed session");
+        assert!(authorized.matches(browser_user_id, player_id));
+        assert!(!authorized.matches(
+            browser_user_id,
+            PlayerId::from_bytes(*Uuid::new_v4().as_bytes())
+        ));
+        assert!(verify_signed_session(&hmac, &format!("{token}A")).is_none());
+    }
+
+    #[tokio::test]
+    async fn stalled_socket_writer_is_aborted_within_its_shutdown_bound() {
+        let writer = tokio::spawn(std::future::pending::<()>());
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            finish_socket_writer_with_timeout(writer, Duration::from_millis(10)),
+        )
+        .await
+        .expect("writer shutdown exceeded its configured bound");
+    }
+
     #[test]
     fn fragmented_outbound_frames_do_not_reuse_embedded_request_ids() {
         let first_bytes = encode_error(1, &"a".repeat(256));
@@ -3214,8 +3515,10 @@ mod tests {
             source: WorldSourceMode::ProceduralV16,
             transport: LoopbackTransportConfig {
                 listen: SocketAddr::from(([127, 0, 0, 1], 0)),
+                allow_non_loopback: false,
                 allowed_origins: vec!["http://test.local".to_owned()],
                 auth_subprotocol_token: "test-local-token".to_owned(),
+                auth_session_hmac_key_env: None,
                 max_frame_bytes: voxels_world::protocol::MAX_PROTOCOL_FRAME_BYTES,
                 max_queued_outbound_bytes_per_client: 32 * 1024 * 1024,
                 outbound_bandwidth_floor_bytes_per_second: 96 * 1024,

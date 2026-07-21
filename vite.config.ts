@@ -523,6 +523,19 @@ export default defineConfig(({ command, mode }) => ({
         cache: false,
       },
       "check:rust": { command: "node scripts/check-rust.ts", cache: false },
+      wrangler: {
+        command: "node scripts/wrangler-local.mjs",
+        cache: false,
+      },
+      "build:production": {
+        command: "VOXELS_CLIENT_CONFIG_PATH=config/client.production.toml vp build",
+        cache: false,
+      },
+      deploy: {
+        command: "node scripts/wrangler-local.mjs deploy",
+        dependsOn: ["build:production"],
+        cache: false,
+      },
       verify: {
         command: ["vp check", "vp test", "vp run check:rust", "vp build"],
         cache: false,

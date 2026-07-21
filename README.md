@@ -19,6 +19,9 @@ and streaming while the native Rust world service owns generation and durable wo
    far-LOD tower in real Chrome with `vp run automation -- run multiplayer`.
 
 `vp run verify` runs the complete TypeScript, Rust, test, lint, and production-build gate.
+The production deployment serves the browser and session Worker at <https://voxels.lol> and runs
+the authoritative server on Fly.io. See [Deployment](docs/deployment.md) for topology, secrets,
+release commands, smoke tests, persistence, and rollback notes.
 `vp run automation -- list` is the single index for behavioral tests, benchmarks, bot loads,
 screenshots, traces, video, and provider setup. Every run is isolated under `target/automation/`;
 see [Automation scenarios](docs/automation.md) for the authoring API and composition model.
