@@ -11,7 +11,9 @@ export class EngineHandle {
      * `[inventory_revision, air, grass, ..., glow_crystal]` in stable material-ID order.
      */
     inventory(): Float64Array;
+    mission_control_screenshot_pending(): boolean;
     report_mission_control_copy_result(copied: boolean): void;
+    report_mission_control_screenshot_result(saved: boolean): void;
     resize(css_width: number, css_height: number, dpr: number): void;
     set_diagnostic_sky(enabled: boolean, red: number, green: number, blue: number): boolean;
     set_material_detail(enabled: boolean): boolean;
@@ -45,7 +47,17 @@ export class EngineHandle {
      */
     surface_edit_state(stride: number, x: number, z: number): Float64Array;
     take_mission_control_copy(): string | undefined;
+    take_mission_control_screenshot(): MissionControlScreenshot | undefined;
     ui_open(): boolean;
+}
+
+export class MissionControlScreenshot {
+    private constructor();
+    free(): void;
+    rgba(): Uint8Array;
+    readonly filename: string;
+    readonly height: number;
+    readonly width: number;
 }
 
 export function create_engine(canvas: OffscreenCanvas, css_width: number, css_height: number, dpr: number, reduced_motion: boolean, config_toml: string, player: Array<any>): Promise<EngineHandle>;
@@ -56,6 +68,7 @@ export interface InitOutput {
     readonly __externref_table_alloc: () => number;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbg_enginehandle_free: (a: number, b: number) => void;
+    readonly __wbg_missioncontrolscreenshot_free: (a: number, b: number) => void;
     readonly __wbindgen_destroy_closure: (a: number, b: number) => void;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __wbindgen_externrefs: WebAssembly.Table;
@@ -68,7 +81,9 @@ export interface InitOutput {
     readonly enginehandle_destroy: (a: number) => any;
     readonly enginehandle_feed_input: (a: number, b: number, c: number) => number;
     readonly enginehandle_inventory: (a: number) => [number, number];
+    readonly enginehandle_mission_control_screenshot_pending: (a: number) => number;
     readonly enginehandle_report_mission_control_copy_result: (a: number, b: number) => void;
+    readonly enginehandle_report_mission_control_screenshot_result: (a: number, b: number) => void;
     readonly enginehandle_resize: (a: number, b: number, c: number, d: number) => void;
     readonly enginehandle_set_diagnostic_sky: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly enginehandle_set_material_detail: (a: number, b: number) => number;
@@ -81,8 +96,13 @@ export interface InitOutput {
     readonly enginehandle_submit_place: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
     readonly enginehandle_surface_edit_state: (a: number, b: number, c: number, d: number) => [number, number];
     readonly enginehandle_take_mission_control_copy: (a: number) => [number, number];
+    readonly enginehandle_take_mission_control_screenshot: (a: number) => number;
     readonly enginehandle_ui_open: (a: number) => number;
     readonly memory: WebAssembly.Memory;
+    readonly missioncontrolscreenshot_filename: (a: number) => [number, number];
+    readonly missioncontrolscreenshot_height: (a: number) => number;
+    readonly missioncontrolscreenshot_rgba: (a: number) => [number, number];
+    readonly missioncontrolscreenshot_width: (a: number) => number;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

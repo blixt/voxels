@@ -268,6 +268,8 @@ pub enum UiTarget {
     EditShape,
     Header,
     CopyDiagnostics,
+    DiagnosticSky,
+    TakeScreenshot,
     Close,
     Time(TimeControl),
     Weather(WeatherControl),
@@ -285,6 +287,8 @@ pub enum UiAction {
     None,
     EditShapeChanged(EditShape),
     CopyDiagnostics,
+    DiagnosticSkyChanged(bool),
+    TakeScreenshot,
     PanelOpenChanged(bool),
     TimeChanged(TimeControl),
     WeatherChanged(WeatherControl),
@@ -393,6 +397,7 @@ pub enum SurfaceRole {
     Segment,
     AuthorityBadge,
     MovementCard,
+    DiagnosticsCard,
     NavigationCard,
     Button,
     StatCard,
@@ -450,6 +455,7 @@ pub struct UiLayout {
     pub header: Rect,
     pub world_card: Rect,
     pub movement_card: Rect,
+    pub diagnostics_card: Rect,
     pub navigation: Rect,
     pub compact: bool,
     pub regions: Vec<InteractiveRegion>,
@@ -513,6 +519,7 @@ pub struct MissionControlUi {
     developer_controls: bool,
     spectator_available: bool,
     spectator_active: bool,
+    diagnostic_sky_active: bool,
     time_control: TimeControl,
     weather_control: WeatherControl,
     reduced_motion: bool,
@@ -551,6 +558,7 @@ impl MissionControlUi {
             developer_controls: config.developer_controls,
             spectator_available: config.spectator_available,
             spectator_active: false,
+            diagnostic_sky_active: false,
             time_control: TimeControl::FollowServer,
             weather_control: WeatherControl::FollowServer,
             reduced_motion: false,
@@ -604,6 +612,14 @@ impl MissionControlUi {
         if !available {
             self.set_spectator_active(false);
         }
+    }
+
+    pub const fn diagnostic_sky_active(&self) -> bool {
+        self.diagnostic_sky_active
+    }
+
+    pub fn set_diagnostic_sky_active(&mut self, active: bool) {
+        self.diagnostic_sky_active = active;
     }
 
     pub const fn time_control(&self) -> TimeControl {
@@ -890,9 +906,38 @@ impl MissionControlUi {
                 rect: movement_card,
             });
         }
-        let navigation = Rect::new(
+        let diagnostics_card = Rect::new(
             world_card.x,
             movement_card.y + movement_card.height + 10.0,
+            world_card.width,
+            70.0,
+        );
+        let screenshot_width = if compact { 104.0 } else { 128.0 };
+        let screenshot = Rect::new(
+            diagnostics_card.x + diagnostics_card.width - 10.0 - screenshot_width,
+            diagnostics_card.y + 30.0,
+            screenshot_width,
+            40.0,
+        );
+        let diagnostic_sky = Rect::new(
+            diagnostics_card.x + 10.0,
+            diagnostics_card.y + 27.0,
+            (screenshot.x - diagnostics_card.x - 20.0).max(40.0),
+            46.0,
+        );
+        regions.extend([
+            InteractiveRegion {
+                target: UiTarget::DiagnosticSky,
+                rect: diagnostic_sky,
+            },
+            InteractiveRegion {
+                target: UiTarget::TakeScreenshot,
+                rect: screenshot,
+            },
+        ]);
+        let navigation = Rect::new(
+            world_card.x,
+            diagnostics_card.y + diagnostics_card.height + 10.0,
             world_card.width,
             if compact {
                 COMPACT_NAVIGATION_HEIGHT
@@ -937,6 +982,7 @@ impl MissionControlUi {
             header,
             world_card,
             movement_card,
+            diagnostics_card,
             navigation,
             compact,
             regions,
@@ -1006,6 +1052,11 @@ impl MissionControlUi {
             Some(UiTarget::Launcher) => self.toggle_open(),
             Some(UiTarget::EditShape) => UiAction::None,
             Some(UiTarget::CopyDiagnostics) => UiAction::CopyDiagnostics,
+            Some(UiTarget::DiagnosticSky) if self.developer_controls => {
+                self.diagnostic_sky_active = !self.diagnostic_sky_active;
+                UiAction::DiagnosticSkyChanged(self.diagnostic_sky_active)
+            }
+            Some(UiTarget::TakeScreenshot) => UiAction::TakeScreenshot,
             Some(UiTarget::Close) => self.set_open(false),
             Some(UiTarget::Time(control)) if self.developer_controls => {
                 self.time_control = control;
@@ -1018,9 +1069,10 @@ impl MissionControlUi {
             Some(UiTarget::Spectator) if self.developer_controls && self.spectator_available => {
                 UiAction::SpectatorRequested(!self.spectator_active)
             }
-            Some(UiTarget::Time(_)) | Some(UiTarget::Weather(_)) | Some(UiTarget::Spectator) => {
-                UiAction::None
-            }
+            Some(UiTarget::Time(_))
+            | Some(UiTarget::Weather(_))
+            | Some(UiTarget::Spectator)
+            | Some(UiTarget::DiagnosticSky) => UiAction::None,
             Some(UiTarget::Header) | None => UiAction::None,
         }
     }
@@ -1104,6 +1156,7 @@ impl MissionControlUi {
 
         self.push_world_controls(&mut draw, &layout, opacity);
         self.push_movement_control(&mut draw, &layout, opacity);
+        self.push_diagnostics_controls(&mut draw, &layout, opacity);
         self.push_navigation(&mut draw, &layout, opacity);
 
         let card_data = self.card_data(layout.compact, layout.stat_cards.len());
@@ -1332,6 +1385,100 @@ impl MissionControlUi {
             Color::new(1.0, 1.0, 1.0, 0.2 * opacity),
             SurfaceRole::ToggleThumb,
         );
+    }
+
+    fn push_diagnostics_controls(&self, draw: &mut UiDrawList, layout: &UiLayout, opacity: f32) {
+        push_surface(
+            draw,
+            layout.diagnostics_card,
+            16.0,
+            CARD_COLOR.with_alpha(opacity),
+            PANEL_BORDER.with_alpha(opacity * 0.45),
+            SurfaceRole::DiagnosticsCard,
+        );
+        push_text(
+            draw,
+            "CAPTURE / GEOMETRY",
+            [
+                layout.diagnostics_card.x + 12.0,
+                layout.diagnostics_card.y + 18.0,
+            ],
+            8.5,
+            TEXT_MUTED.with_alpha(opacity),
+            TextAlign::Left,
+        );
+
+        if let Some(rect) = layout.region(UiTarget::DiagnosticSky) {
+            let enabled_alpha = if self.developer_controls { 1.0 } else { 0.45 };
+            push_text(
+                draw,
+                if layout.compact {
+                    "DEBUG SKY"
+                } else {
+                    "MAGENTA DEBUG SKY"
+                },
+                [rect.x + 2.0, rect.y + 14.0],
+                if layout.compact { 8.0 } else { 9.0 },
+                TEXT_PRIMARY.with_alpha(opacity * enabled_alpha),
+                TextAlign::Left,
+            );
+            push_text(
+                draw,
+                if self.developer_controls {
+                    "Exposes missing geometry"
+                } else {
+                    "Developer controls disabled"
+                },
+                [rect.x + 2.0, rect.y + 33.0],
+                if layout.compact { 6.5 } else { 7.5 },
+                TEXT_MUTED.with_alpha(opacity * enabled_alpha),
+                TextAlign::Left,
+            );
+            let track = Rect::new(rect.x + rect.width - 42.0, rect.y + 11.0, 40.0, 22.0);
+            let value = f32::from(self.diagnostic_sky_active);
+            push_surface(
+                draw,
+                track,
+                11.0,
+                TOGGLE_OFF
+                    .mix(ACCENT, value)
+                    .with_alpha(opacity * enabled_alpha),
+                PANEL_BORDER.with_alpha(opacity * 0.55 * enabled_alpha),
+                SurfaceRole::ToggleTrack,
+            );
+            push_surface(
+                draw,
+                Rect::new(track.x + 3.0 + value * 18.0, track.y + 3.0, 16.0, 16.0),
+                8.0,
+                TEXT_PRIMARY.with_alpha(opacity * enabled_alpha),
+                Color::new(1.0, 1.0, 1.0, 0.2 * opacity * enabled_alpha),
+                SurfaceRole::ToggleThumb,
+            );
+        }
+
+        if let Some(rect) = layout.region(UiTarget::TakeScreenshot) {
+            let hover = self.hover_eased_value(UiTarget::TakeScreenshot);
+            push_surface(
+                draw,
+                rect,
+                9.0,
+                CARD_COLOR.mix(HOVER_COLOR, hover).with_alpha(opacity),
+                ACCENT.with_alpha(opacity * (0.5 + hover * 0.4)),
+                SurfaceRole::Button,
+            );
+            push_text(
+                draw,
+                if layout.compact {
+                    "SCREENSHOT"
+                } else {
+                    "TAKE SCREENSHOT"
+                },
+                rect.center(),
+                if layout.compact { 7.5 } else { 8.0 },
+                TEXT_PRIMARY.with_alpha(opacity),
+                TextAlign::Center,
+            );
+        }
     }
 
     fn push_navigation(&self, draw: &mut UiDrawList, layout: &UiLayout, opacity: f32) {
@@ -1791,6 +1938,15 @@ impl MissionControlUi {
             movement_label(stats).to_ascii_lowercase(),
         );
         let _ = writeln!(report, "Spectator mode: {}", navigation.spectator);
+        let _ = writeln!(
+            report,
+            "Diagnostic sky: {}",
+            if self.diagnostic_sky_active {
+                "magenta"
+            } else {
+                "off"
+            }
+        );
 
         let _ = writeln!(report, "\nWORLD");
         let _ = writeln!(
@@ -1935,6 +2091,16 @@ impl MissionControlUi {
         }
 
         report
+    }
+
+    pub fn screenshot_filename(&self) -> String {
+        let navigation = self.stats.navigation;
+        let [x, y, z] = navigation.eye_position_metres;
+        format!(
+            "voxels-x{x:.2}-y{y:.2}-z{z:.2}-h{:.1}-p{:.1}.png",
+            normalized_heading(navigation.heading_degrees),
+            navigation.pitch_degrees,
+        )
     }
 
     fn set_hover(&mut self, target: Option<UiTarget>) {
@@ -2128,7 +2294,12 @@ mod tests {
             }
             assert!(layout.world_card.y >= layout.header.y + layout.header.height);
             assert!(layout.movement_card.y >= layout.world_card.y + layout.world_card.height);
-            assert!(layout.navigation.y >= layout.movement_card.y + layout.movement_card.height);
+            assert!(
+                layout.diagnostics_card.y >= layout.movement_card.y + layout.movement_card.height
+            );
+            assert!(
+                layout.navigation.y >= layout.diagnostics_card.y + layout.diagnostics_card.height
+            );
         }
     }
 
@@ -2192,7 +2363,7 @@ mod tests {
     }
 
     #[test]
-    fn time_weather_and_spectator_controls_emit_typed_actions() {
+    fn world_and_capture_controls_emit_typed_actions() {
         let viewport = viewport(1_280.0, 720.0);
         let mut ui = enabled(true);
         assert_eq!(
@@ -2219,6 +2390,19 @@ mod tests {
             activate(&mut ui, UiTarget::Time(TimeControl::FollowServer), viewport),
             UiAction::TimeChanged(TimeControl::FollowServer)
         );
+        assert_eq!(
+            activate(&mut ui, UiTarget::DiagnosticSky, viewport),
+            UiAction::DiagnosticSkyChanged(true)
+        );
+        assert!(ui.diagnostic_sky_active());
+        assert_eq!(
+            activate(&mut ui, UiTarget::DiagnosticSky, viewport),
+            UiAction::DiagnosticSkyChanged(false)
+        );
+        assert_eq!(
+            activate(&mut ui, UiTarget::TakeScreenshot, viewport),
+            UiAction::TakeScreenshot
+        );
     }
 
     #[test]
@@ -2238,6 +2422,14 @@ mod tests {
             UiAction::None
         );
         assert_eq!(ui.layout(viewport).region(UiTarget::Spectator), None);
+        assert_eq!(
+            activate(&mut ui, UiTarget::DiagnosticSky, viewport),
+            UiAction::None
+        );
+        assert_eq!(
+            activate(&mut ui, UiTarget::TakeScreenshot, viewport),
+            UiAction::TakeScreenshot
+        );
         assert_eq!(ui.time_control(), TimeControl::FollowServer);
         assert_eq!(ui.weather_control(), WeatherControl::FollowServer);
     }
@@ -2259,6 +2451,12 @@ mod tests {
                 .iter()
                 .any(|surface| surface.role == SurfaceRole::MovementCard)
         );
+        assert!(
+            draw.glass
+                .iter()
+                .any(|surface| surface.role == SurfaceRole::DiagnosticsCard)
+        );
+        assert!(draw.text.iter().any(|run| run.text == "TAKE SCREENSHOT"));
         assert_eq!(
             draw.glass
                 .iter()
@@ -2410,6 +2608,24 @@ mod tests {
                 .text
                 .iter()
                 .any(|run| run.text.contains("Swimming controls"))
+        );
+    }
+
+    #[test]
+    fn screenshot_filename_identifies_the_exact_camera_pose() {
+        let mut ui = enabled(true);
+        ui.set_stats(LiveStats {
+            navigation: NavigationTelemetry {
+                eye_position_metres: [269.625, 133.625, 447.649],
+                heading_degrees: -8.6,
+                pitch_degrees: -15.9,
+                ..NavigationTelemetry::default()
+            },
+            ..LiveStats::default()
+        });
+        assert_eq!(
+            ui.screenshot_filename(),
+            "voxels-x269.62-y133.62-z447.65-h351.4-p-15.9.png"
         );
     }
 }

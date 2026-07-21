@@ -2,6 +2,7 @@ import "./style.css";
 import { authorizeClientBootstrap } from "./client-authorization.ts";
 import { loadClientConfig } from "./client-config.ts";
 import { writeClipboardText } from "./clipboard.ts";
+import { downloadBlob } from "./download.ts";
 import {
   type EngineAutomationApi,
   type EngineAutomationContract,
@@ -324,6 +325,9 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
       void writeClipboardText(navigator.clipboard, event.data.text).then((copied) => {
         worker.postMessage({ kind: "missionControlCopyResult", copied });
       });
+    } else if (event.data.kind === "downloadMissionControlScreenshot") {
+      const saved = downloadBlob(event.data.blob, event.data.filename);
+      worker.postMessage({ kind: "missionControlScreenshotResult", saved });
     } else if (event.data.kind === "error") {
       failWorker(`The Rust engine could not start.\n${event.data.message}`);
     } else if (event.data.kind === "automationContract") {

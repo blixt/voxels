@@ -954,6 +954,20 @@ pub struct RenderDiagnostics {
     pub avatar_draw_calls: u32,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct ScreenshotCapture {
+    pub filename: String,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+#[derive(Default)]
+struct ScreenshotReadbackState {
+    in_flight: bool,
+    completed: Option<ScreenshotCapture>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalLightVisibility {
     Visible,
@@ -1339,6 +1353,8 @@ pub struct Renderer {
     log_error: fn(&str),
     ui_text_error_reported: bool,
     diagnostics_copy_requested: bool,
+    screenshot_requested: bool,
+    screenshot_readback: Arc<Mutex<ScreenshotReadbackState>>,
     host_ui_action: Option<HostUiAction>,
     underwater_blend: f32,
     interior: InteriorEnvironment,
@@ -2137,6 +2153,7 @@ impl Renderer {
 
         let placement_inventory = PlacementInventory::new();
         let mut ui = MissionControlUi::new(runtime_config.mission_control);
+        ui.set_diagnostic_sky_active(runtime_config.diagnostic_sky_color.is_some());
         ui.set_environment_status(daylight_phase.label(), surface_region_label(surface_region));
         ui.set_world_clock(
             celestial_observation.local_solar_day_fraction as f32,
@@ -2237,6 +2254,8 @@ impl Renderer {
             log_error,
             ui_text_error_reported: false,
             diagnostics_copy_requested: false,
+            screenshot_requested: false,
+            screenshot_readback: Arc::new(Mutex::new(ScreenshotReadbackState::default())),
             host_ui_action: None,
             underwater_blend: 0.0,
             interior: InteriorEnvironment::default(),
@@ -2531,6 +2550,8 @@ impl Renderer {
     pub fn set_diagnostic_sky_color(&mut self, color: Option<[f32; 3]>) {
         self.runtime_config.diagnostic_sky_color =
             color.map(|value| value.map(|channel| channel.clamp(0.0, 1.0)));
+        self.ui
+            .set_diagnostic_sky_active(self.runtime_config.diagnostic_sky_color.is_some());
     }
 
     /// Selects the material-detail pipeline for deterministic profiling without adding a
@@ -2592,6 +2613,29 @@ impl Renderer {
         });
     }
 
+    pub fn screenshot_pending(&self) -> bool {
+        self.screenshot_requested
+            || self
+                .screenshot_readback
+                .lock()
+                .is_ok_and(|state| state.in_flight || state.completed.is_some())
+    }
+
+    pub fn take_screenshot_capture(&mut self) -> Option<ScreenshotCapture> {
+        self.screenshot_readback
+            .lock()
+            .ok()
+            .and_then(|mut state| state.completed.take())
+    }
+
+    pub fn report_screenshot_result(&mut self, saved: bool) {
+        self.ui.show_gameplay_toast(if saved {
+            "SCREENSHOT DOWNLOADED"
+        } else {
+            "COULD NOT SAVE SCREENSHOT"
+        });
+    }
+
     pub fn set_reduced_motion(&mut self, reduced_motion: bool) {
         self.ui.set_reduced_motion(reduced_motion);
     }
@@ -2643,6 +2687,14 @@ impl Renderer {
             }
             UiAction::CopyDiagnostics => {
                 self.diagnostics_copy_requested = true;
+            }
+            UiAction::DiagnosticSkyChanged(active) => {
+                self.set_diagnostic_sky_color(active.then_some([1.0, 0.0, 1.0]));
+            }
+            UiAction::TakeScreenshot => {
+                if !self.screenshot_pending() {
+                    self.screenshot_requested = true;
+                }
             }
             UiAction::TimeChanged(control) => {
                 self.debug_environment_override.day_fraction = control.day_fraction();
@@ -3916,6 +3968,22 @@ impl Renderer {
         } else {
             self.ui_gpu.scene_view()
         };
+        let screenshot_target = self.screenshot_requested.then(|| {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("screenshot composite target"),
+                size: wgpu::Extent3d {
+                    width: self.config.width,
+                    height: self.config.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("opaque world pass"),
@@ -4300,6 +4368,27 @@ impl Renderer {
             });
             self.ui_gpu.draw(&mut pass);
         }
+        if let Some(target) = screenshot_target.as_ref() {
+            let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("screenshot composite pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.ui_gpu.draw(&mut pass);
+        }
+        self.schedule_screenshot_readback(&mut encoder, screenshot_target.as_ref());
         if let (Some(timer), Some(gpu_frame)) = (self.gpu_timer.as_ref(), gpu_frame.as_ref()) {
             timer.resolve(&mut encoder, gpu_frame);
         }
@@ -4313,6 +4402,105 @@ impl Renderer {
         self.queue.present(frame);
         self.diagnostics.cpu_submit_ms = (now_ms() - submit_started).max(0.0) as f32;
         true
+    }
+
+    fn schedule_screenshot_readback(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: Option<&wgpu::Texture>,
+    ) {
+        if !self.screenshot_requested {
+            return;
+        }
+        self.screenshot_requested = false;
+        let Some(texture) = texture else {
+            (self.log_error)("screenshot capture failed: composite target was not created");
+            self.report_screenshot_result(false);
+            return;
+        };
+        let bgra = match self.config.format {
+            TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb => true,
+            TextureFormat::Rgba8Unorm | TextureFormat::Rgba8UnormSrgb => false,
+            _ => {
+                (self.log_error)(
+                    "screenshot capture unavailable: presentation format is not RGBA8 or BGRA8",
+                );
+                self.report_screenshot_result(false);
+                return;
+            }
+        };
+        let width = self.config.width;
+        let height = self.config.height;
+        let Some(unpadded_bytes_per_row) = width.checked_mul(4) else {
+            self.report_screenshot_result(false);
+            return;
+        };
+        let padded_bytes_per_row = unpadded_bytes_per_row
+            .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer_size = u64::from(padded_bytes_per_row) * u64::from(height);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("screenshot readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let filename = self.ui.screenshot_filename();
+        let state = Arc::clone(&self.screenshot_readback);
+        if let Ok(mut readback) = state.lock() {
+            readback.in_flight = true;
+            readback.completed = None;
+        } else {
+            self.report_screenshot_result(false);
+            return;
+        }
+        let callback_buffer = buffer.clone();
+        let log_error = self.log_error;
+        encoder.map_buffer_on_submit(&buffer, wgpu::MapMode::Read, .., move |result| {
+            let mapped = result.is_ok();
+            let capture = if mapped {
+                let capture = callback_buffer
+                    .get_mapped_range(..)
+                    .ok()
+                    .and_then(|mapped| {
+                        unpack_screenshot_rgba(&mapped, width, height, padded_bytes_per_row, bgra)
+                            .map(|rgba| ScreenshotCapture {
+                                filename,
+                                width,
+                                height,
+                                rgba,
+                            })
+                    });
+                callback_buffer.unmap();
+                capture
+            } else {
+                log_error("screenshot capture failed: GPU readback buffer could not be mapped");
+                None
+            };
+            if mapped && capture.is_none() {
+                log_error("screenshot capture failed: GPU pixels could not be decoded");
+            }
+            if let Ok(mut readback) = state.lock() {
+                readback.in_flight = false;
+                readback.completed = capture;
+            }
+        });
     }
 
     fn collect_draw_list(
@@ -6624,9 +6812,54 @@ fn preferred_format(formats: &[TextureFormat]) -> TextureFormat {
         .unwrap_or(formats[0])
 }
 
+fn unpack_screenshot_rgba(
+    padded: &[u8],
+    width: u32,
+    height: u32,
+    padded_bytes_per_row: u32,
+    bgra: bool,
+) -> Option<Vec<u8>> {
+    let row_bytes = usize::try_from(width.checked_mul(4)?).ok()?;
+    let padded_row_bytes = usize::try_from(padded_bytes_per_row).ok()?;
+    let height = usize::try_from(height).ok()?;
+    if padded_row_bytes < row_bytes || padded.len() < padded_row_bytes.checked_mul(height)? {
+        return None;
+    }
+    let mut rgba = vec![0; row_bytes.checked_mul(height)?];
+    for (source, destination) in padded
+        .chunks_exact(padded_row_bytes)
+        .take(height)
+        .zip(rgba.chunks_exact_mut(row_bytes))
+    {
+        destination.copy_from_slice(&source[..row_bytes]);
+        if bgra {
+            for pixel in destination.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+        }
+    }
+    Some(rgba)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screenshot_readback_removes_row_padding_and_normalizes_bgra() {
+        let mut padded = vec![0xEE; 512];
+        padded[..8].copy_from_slice(&[3, 2, 1, 4, 7, 6, 5, 8]);
+        padded[256..264].copy_from_slice(&[11, 10, 9, 12, 15, 14, 13, 16]);
+        assert_eq!(
+            unpack_screenshot_rgba(&padded, 2, 2, 256, true),
+            Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
+        );
+        assert_eq!(
+            unpack_screenshot_rgba(&padded, 2, 3, 256, false),
+            None,
+            "incomplete mapped rows must never become a truncated PNG"
+        );
+    }
 
     fn flat_patch_profile(patch: SurfacePatchId, height: i32) -> SurfacePatchProfile {
         SurfacePatchProfile {

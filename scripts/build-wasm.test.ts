@@ -60,6 +60,9 @@ describe("WASM build inputs", () => {
     const declaration = `export class EngineHandle {
     [Symbol.dispose](): void;
 }
+export class ScreenshotCapture {
+    [Symbol.dispose](): void;
+}
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly wasm_bindgen_debug___convert__closures_____invoke: () => void;
@@ -69,6 +72,8 @@ export interface InitOutput {
     assert.equal(
       normalizeWasmDeclaration(declaration),
       `export class EngineHandle {
+}
+export class ScreenshotCapture {
 }
 export interface InitOutput {
     readonly enginehandle_destroy: (a: number) => void;

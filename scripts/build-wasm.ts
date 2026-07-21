@@ -190,7 +190,7 @@ export function publishWasmArtifacts(staging: string, output = OUT): void {
 export function normalizeWasmDeclaration(source: string): string {
   // wasm-bindgen emits explicit-resource-management syntax that Vite+'s current type-aware lint
   // worker does not load. `free()` and our explicit `destroy()` remain typed.
-  const supported = source.replace("    [Symbol.dispose](): void;\n", "");
+  const supported = source.replaceAll("    [Symbol.dispose](): void;\n", "");
   // Debug and release builds expose different hashed closure trampolines in InitOutput. They are
   // implementation details rather than callable application exports, so retaining them makes the
   // one tracked declaration alternate between profiles without adding useful type information.

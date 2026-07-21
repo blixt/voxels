@@ -58,6 +58,7 @@ export type ToWorker =
   | { kind: "resize"; cssWidth: number; cssHeight: number; dpr: number }
   | { kind: "reducedMotion"; reduced: boolean }
   | { kind: "missionControlCopyResult"; copied: boolean }
+  | { kind: "missionControlScreenshotResult"; saved: boolean }
   | { kind: "profile"; profileId: number }
   | { kind: "spectator"; requestId: number; active: boolean }
   | {
@@ -95,6 +96,7 @@ export type FromWorker =
   | { kind: "destroyed" }
   | { kind: "uiMode"; cursor: boolean }
   | { kind: "copyMissionControl"; text: string }
+  | { kind: "downloadMissionControlScreenshot"; blob: Blob; filename: string }
   | { kind: "error"; message: string }
   | { kind: "automationContract"; requestId: number; value: string }
   | { kind: "snapshot"; requestId: number; values: number[] }

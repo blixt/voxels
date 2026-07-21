@@ -184,6 +184,7 @@ impl GlassInstance {
             | SurfaceRole::Segment
             | SurfaceRole::AuthorityBadge
             | SurfaceRole::MovementCard
+            | SurfaceRole::DiagnosticsCard
             | SurfaceRole::ToggleTrack => 2.0,
         };
         Self {

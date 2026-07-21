@@ -476,7 +476,7 @@ mod web {
     };
     use voxels_render::renderer::{
         ChunkActivationReason, HostUiAction, LocalLightVisibility, MissionControlConfig, Renderer,
-        RendererConfig, RendererFeatureConfig, VolumetricCloudConfig,
+        RendererConfig, RendererFeatureConfig, ScreenshotCapture, VolumetricCloudConfig,
     };
     use voxels_render::shadow::DirectionalShadowConfig;
     use voxels_render::ui::{LiveStats, NavigationTelemetry};
@@ -2853,6 +2853,47 @@ mod web {
     }
 
     #[wasm_bindgen]
+    pub struct MissionControlScreenshot {
+        filename: String,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    }
+
+    impl From<ScreenshotCapture> for MissionControlScreenshot {
+        fn from(capture: ScreenshotCapture) -> Self {
+            Self {
+                filename: capture.filename,
+                width: capture.width,
+                height: capture.height,
+                rgba: capture.rgba,
+            }
+        }
+    }
+
+    #[wasm_bindgen]
+    impl MissionControlScreenshot {
+        #[wasm_bindgen(getter)]
+        pub fn filename(&self) -> String {
+            self.filename.clone()
+        }
+
+        #[wasm_bindgen(getter)]
+        pub fn width(&self) -> u32 {
+            self.width
+        }
+
+        #[wasm_bindgen(getter)]
+        pub fn height(&self) -> u32 {
+            self.height
+        }
+
+        pub fn rgba(&mut self) -> Vec<u8> {
+            std::mem::take(&mut self.rgba)
+        }
+    }
+
+    #[wasm_bindgen]
     pub struct EngineHandle {
         engine: Option<Rc<Engine>>,
     }
@@ -2910,6 +2951,25 @@ mod web {
                     .renderer
                     .borrow_mut()
                     .report_diagnostics_copy_result(copied);
+            }
+        }
+
+        pub fn mission_control_screenshot_pending(&self) -> bool {
+            self.engine
+                .as_ref()
+                .is_some_and(|engine| engine.renderer.borrow().screenshot_pending())
+        }
+
+        pub fn take_mission_control_screenshot(&self) -> Option<MissionControlScreenshot> {
+            self.engine
+                .as_ref()
+                .and_then(|engine| engine.renderer.borrow_mut().take_screenshot_capture())
+                .map(Into::into)
+        }
+
+        pub fn report_mission_control_screenshot_result(&self, saved: bool) {
+            if let Some(engine) = self.engine.as_ref() {
+                engine.renderer.borrow_mut().report_screenshot_result(saved);
             }
         }
 
