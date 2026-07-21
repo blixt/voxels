@@ -55,9 +55,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v28/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v28/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v28";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v29/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v29/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v29";
 pub const HEALTH_PATH: &str = "/healthz";
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
@@ -3815,7 +3815,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v28, test-local-token"),
+            HeaderValue::from_static("voxels.world.v29, test-local-token"),
         );
         let (socket, response) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -4848,7 +4848,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v28, test-local-token"),
+            HeaderValue::from_static("voxels.world.v29, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -4882,7 +4882,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v28, test-local-token"),
+            HeaderValue::from_static("voxels.world.v29, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);

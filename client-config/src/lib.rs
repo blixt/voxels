@@ -728,9 +728,9 @@ mod tests {
                 controls_enabled: true,
             },
             world: WorldTransportConfig {
-                endpoint: "ws://127.0.0.1:9777/v28/world".to_owned(),
-                presence_endpoint: "ws://127.0.0.1:9777/v28/presence".to_owned(),
-                subprotocol: "voxels.world.v28".to_owned(),
+                endpoint: "ws://127.0.0.1:9777/v29/world".to_owned(),
+                presence_endpoint: "ws://127.0.0.1:9777/v29/presence".to_owned(),
+                subprotocol: "voxels.world.v29".to_owned(),
                 auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
                 max_in_flight_batches: 8,
                 buffered_amount_high_water_bytes: 8 * 1024 * 1024,
