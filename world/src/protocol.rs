@@ -2328,7 +2328,10 @@ impl FrameReassembler {
 
 pub fn encode_error(request_id: u64, message: &str) -> Vec<u8> {
     let bytes = message.as_bytes();
-    let len = bytes.len().min(u16::MAX as usize);
+    let mut len = bytes.len().min(u16::MAX as usize);
+    while !message.is_char_boundary(len) {
+        len -= 1;
+    }
     let mut payload = Vec::with_capacity(len + 2);
     push_u16(&mut payload, len as u16);
     payload.extend_from_slice(&bytes[..len]);
@@ -5022,5 +5025,18 @@ mod tests {
                 "duplicate chunk result coordinate"
             ))
         );
+    }
+
+    #[test]
+    fn oversized_unicode_errors_truncate_at_a_character_boundary() {
+        let prefix = "a".repeat(u16::MAX as usize - 1);
+        let message = format!("{prefix}é");
+
+        let (request_id, decoded) =
+            decode_error(&encode_error(17, &message)).expect("decode error");
+
+        assert_eq!(request_id, 17);
+        assert_eq!(decoded, prefix);
+        assert_eq!(decoded.len(), u16::MAX as usize - 1);
     }
 }
