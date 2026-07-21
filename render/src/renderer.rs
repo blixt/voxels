@@ -2057,23 +2057,6 @@ impl Renderer {
         self.environment.key_light_direction
     }
 
-    pub const fn daylight_phase(&self) -> DaylightPhase {
-        self.daylight_phase
-    }
-
-    pub fn set_geometric_lod_focus(
-        &mut self,
-        voxel_x: i32,
-        voxel_z: i32,
-        surface_level_count: usize,
-    ) {
-        self.geometric_lod_focus = Some(GeometricLodFocus::snapped_for_levels(
-            voxel_x,
-            voxel_z,
-            surface_level_count,
-        ));
-    }
-
     pub fn advance_geometric_lod_focus(
         &mut self,
         voxel_x: i32,
@@ -2197,28 +2180,11 @@ impl Renderer {
         self.placement_inventory.selected()
     }
 
-    pub fn inventory_counts(&self) -> [u64; Material::ALL.len()] {
-        self.placement_inventory.counts
-    }
-
-    pub fn inventory_count(&self, material: Material) -> u64 {
-        self.placement_inventory.count(material)
-    }
-
     /// Replaces the complete server-authored inventory snapshot. Selection follows the first
     /// stocked material only when the current material has become unavailable.
     pub fn set_inventory_counts(&mut self, counts: [u64; Material::ALL.len()]) {
         self.placement_inventory.set_counts(counts);
         sync_inventory_ui(&mut self.ui, &self.placement_inventory);
-    }
-
-    /// Selects a material only when the latest authoritative inventory says it is available.
-    pub fn set_placement_material(&mut self, material: Material) -> bool {
-        let selected = self.placement_inventory.select(material);
-        if selected {
-            sync_inventory_ui(&mut self.ui, &self.placement_inventory);
-        }
-        selected
     }
 
     /// Cycles in either direction, skipping every material whose authoritative count is zero.

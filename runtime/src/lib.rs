@@ -1015,14 +1015,6 @@ impl StreamScheduler {
             .is_some_and(|entry| entry.desired && entry.ever_resident)
     }
 
-    /// Whether a column still owns at least one uploaded mesh, including a stale mesh retained
-    /// transactionally while a replacement is queued.
-    pub fn column_has_renderable_chunk(&self, x: i32, z: i32) -> bool {
-        self.entries
-            .values()
-            .any(|entry| entry.coord.x == x && entry.coord.z == z && entry.ever_resident)
-    }
-
     fn start_stage(
         &mut self,
         stage: WorkStage,

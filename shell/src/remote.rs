@@ -19,8 +19,8 @@ use voxels_world::protocol::{
     WorldCapabilities, WorldOpened,
 };
 use voxels_world::{
-    ChunkCoord, ChunkSnapshot, SurfaceTileCoord, WorldManifestHash, WorldProductPriority,
-    WorldSourceError, WorldSourceIdentityHash,
+    ChunkCoord, SurfaceTileCoord, WorldManifestHash, WorldProductPriority, WorldSourceError,
+    WorldSourceIdentityHash,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -163,10 +163,6 @@ impl RemoteWorldClient {
         receiver.await
     }
 
-    pub fn connection_state(&self) -> RemoteConnectionState {
-        self.inner.state.get()
-    }
-
     pub fn world_opened(&self) -> Option<WorldOpened> {
         self.inner.opened.borrow().clone()
     }
@@ -177,10 +173,6 @@ impl RemoteWorldClient {
             .borrow()
             .as_ref()
             .map(|opened| opened.manifest.source_identity_hash())
-    }
-
-    pub fn in_flight_batches(&self) -> usize {
-        self.inner.pending.borrow().len()
     }
 
     /// Submits scheduler generation capabilities and returns their protocol request id.
@@ -212,29 +204,6 @@ impl RemoteWorldClient {
         self.inner
             .send_chunk_request(priority, coords, ChunkDelivery::OneShot(sender))?;
         receiver.await
-    }
-
-    pub async fn request_chunk(
-        &self,
-        priority: WorldProductPriority,
-        coord: ChunkCoord,
-    ) -> Result<ChunkSnapshot, RemoteWorldError> {
-        let result = self.request_chunks(priority, vec![coord]).await?;
-        let mut items = result.items;
-        if items.len() != 1 {
-            return Err(RemoteWorldError::ResponseMismatch(
-                "single chunk request returned the wrong item count",
-            ));
-        }
-        let item = items.pop().ok_or(RemoteWorldError::ResponseMismatch(
-            "single chunk result disappeared",
-        ))?;
-        if item.coord != coord {
-            return Err(RemoteWorldError::ResponseMismatch(
-                "single chunk response returned a different coordinate",
-            ));
-        }
-        item.result.map_err(RemoteWorldError::Source)
     }
 
     /// Removes a request locally before emitting best-effort cancellation. A late response for the
