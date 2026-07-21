@@ -1120,6 +1120,10 @@ pub struct Renderer {
     voxel_flat_pipeline: RenderPipeline,
     voxel_ambient_occlusion_pipeline: RenderPipeline,
     voxel_ambient_occlusion_flat_pipeline: RenderPipeline,
+    voxel_transition_pipeline: RenderPipeline,
+    voxel_transition_flat_pipeline: RenderPipeline,
+    voxel_transition_ambient_occlusion_pipeline: RenderPipeline,
+    voxel_transition_ambient_occlusion_flat_pipeline: RenderPipeline,
     water_pipeline: RenderPipeline,
     weather_pipeline: RenderPipeline,
     avatar_gpu: AvatarGpu,
@@ -1830,89 +1834,77 @@ impl Renderer {
             &cut_transition_depth_layout,
             &voxel_shader,
         );
-        let voxel_pipeline = pipeline(
+        let voxel_pipeline = create_voxel_pipeline(
             &device,
             "voxel pipeline",
             &world_pipeline_layout,
             &voxel_shader,
-            SCENE_FORMAT,
-            &[Some(quad_layout())],
-            PipelineOptions {
-                fragment_entry: "fs_main",
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                fragment_constants: &[("MATERIAL_DETAIL", 1.0)],
-            },
+            true,
+            false,
+            false,
         );
-        let voxel_flat_pipeline = pipeline(
+        let voxel_flat_pipeline = create_voxel_pipeline(
             &device,
             "flat voxel pipeline",
             &world_pipeline_layout,
             &voxel_shader,
-            SCENE_FORMAT,
-            &[Some(quad_layout())],
-            PipelineOptions {
-                fragment_entry: "fs_main",
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                fragment_constants: &[("MATERIAL_DETAIL", 0.0)],
-            },
+            false,
+            false,
+            false,
         );
-        let voxel_ambient_occlusion_pipeline = pipeline(
+        let voxel_ambient_occlusion_pipeline = create_voxel_pipeline(
             &device,
             "spatial AO voxel pipeline",
             &world_pipeline_layout,
             &voxel_shader,
-            SCENE_FORMAT,
-            &[Some(quad_layout())],
-            PipelineOptions {
-                fragment_entry: "fs_main",
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                fragment_constants: &[("MATERIAL_DETAIL", 1.0)],
-            },
+            true,
+            true,
+            false,
         );
-        let voxel_ambient_occlusion_flat_pipeline = pipeline(
+        let voxel_ambient_occlusion_flat_pipeline = create_voxel_pipeline(
             &device,
             "flat spatial AO voxel pipeline",
             &world_pipeline_layout,
             &voxel_shader,
-            SCENE_FORMAT,
-            &[Some(quad_layout())],
-            PipelineOptions {
-                fragment_entry: "fs_main",
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                fragment_constants: &[("MATERIAL_DETAIL", 0.0)],
-            },
+            false,
+            true,
+            false,
+        );
+        let voxel_transition_pipeline = create_voxel_pipeline(
+            &device,
+            "transition voxel pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            true,
+            false,
+            true,
+        );
+        let voxel_transition_flat_pipeline = create_voxel_pipeline(
+            &device,
+            "flat transition voxel pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            false,
+            false,
+            true,
+        );
+        let voxel_transition_ambient_occlusion_pipeline = create_voxel_pipeline(
+            &device,
+            "spatial AO transition voxel pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            true,
+            true,
+            true,
+        );
+        let voxel_transition_ambient_occlusion_flat_pipeline = create_voxel_pipeline(
+            &device,
+            "flat spatial AO transition voxel pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            false,
+            true,
+            true,
         );
         let water_pipeline = pipeline(
             &device,
@@ -1966,6 +1958,10 @@ impl Renderer {
             voxel_flat_pipeline,
             voxel_ambient_occlusion_pipeline,
             voxel_ambient_occlusion_flat_pipeline,
+            voxel_transition_pipeline,
+            voxel_transition_flat_pipeline,
+            voxel_transition_ambient_occlusion_pipeline,
+            voxel_transition_ambient_occlusion_flat_pipeline,
             water_pipeline,
             weather_pipeline,
             avatar_gpu,
@@ -3645,19 +3641,31 @@ impl Renderer {
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
             pass.set_bind_group(2, self.ambient_occlusion_gpu.sample_bind_group(), &[]);
             pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
-            pass.set_pipeline(if self.options.screen_space_ambient_occlusion {
-                if self.options.material_detail {
-                    &self.voxel_ambient_occlusion_pipeline
+            let (stable_pipeline, transition_pipeline) =
+                if self.options.screen_space_ambient_occlusion {
+                    if self.options.material_detail {
+                        (
+                            &self.voxel_ambient_occlusion_pipeline,
+                            &self.voxel_transition_ambient_occlusion_pipeline,
+                        )
+                    } else {
+                        (
+                            &self.voxel_ambient_occlusion_flat_pipeline,
+                            &self.voxel_transition_ambient_occlusion_flat_pipeline,
+                        )
+                    }
+                } else if self.options.material_detail {
+                    (&self.voxel_pipeline, &self.voxel_transition_pipeline)
                 } else {
-                    &self.voxel_ambient_occlusion_flat_pipeline
-                }
-            } else if self.options.material_detail {
-                &self.voxel_pipeline
-            } else {
-                &self.voxel_flat_pipeline
-            });
+                    (
+                        &self.voxel_flat_pipeline,
+                        &self.voxel_transition_flat_pipeline,
+                    )
+                };
+            pass.set_pipeline(stable_pipeline);
             if let Some(cut_draw_lists) = &cut_draw_lists {
                 draw_spans(&mut pass, &self.arena_buffers, &cut_draw_lists.stable);
+                pass.set_pipeline(transition_pipeline);
                 pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
                 draw_spans(&mut pass, &self.arena_buffers, &cut_draw_lists.outgoing);
                 pass.set_bind_group(3, &self.cut_transition_bind_groups[2], &[]);
@@ -5790,6 +5798,46 @@ struct PipelineOptions<'a> {
     fragment_constants: &'a [(&'a str, f64)],
 }
 
+fn create_voxel_pipeline(
+    device: &Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    material_detail: bool,
+    spatial_ao: bool,
+    cut_transition: bool,
+) -> RenderPipeline {
+    let constants = [
+        ("MATERIAL_DETAIL", if material_detail { 1.0 } else { 0.0 }),
+        ("CUT_TRANSITION", if cut_transition { 1.0 } else { 0.0 }),
+    ];
+    pipeline(
+        device,
+        label,
+        layout,
+        shader,
+        SCENE_FORMAT,
+        &[Some(quad_layout())],
+        PipelineOptions {
+            fragment_entry: "fs_main",
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(!spatial_ao),
+                depth_compare: Some(if spatial_ao {
+                    wgpu::CompareFunction::LessEqual
+                } else {
+                    wgpu::CompareFunction::Less
+                }),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            fragment_constants: &constants,
+        },
+    )
+}
+
 fn pipeline(
     device: &Device,
     label: &str,
@@ -5878,7 +5926,10 @@ fn transition_depth_pipeline(
             module: shader,
             entry_point: Some("fs_depth_transition"),
             targets: &[],
-            compilation_options: Default::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &[("CUT_TRANSITION", 1.0)],
+                ..Default::default()
+            },
         }),
         primitive: quad_primitive_state(),
         depth_stencil: Some(wgpu::DepthStencilState {

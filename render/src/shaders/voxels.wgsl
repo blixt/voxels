@@ -27,6 +27,7 @@ struct CutTransitionUniform {
 @group(3) @binding(0) var<uniform> cut_transition: CutTransitionUniform;
 
 override MATERIAL_DETAIL: u32 = 1u;
+override CUT_TRANSITION: u32 = 0u;
 
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
@@ -190,6 +191,11 @@ fn quad_local(face: u32, uv: vec2<i32>, extent: vec2<i32>) -> vec3<i32> {
   }
 }
 
+struct MorphedQuadPosition {
+  world: vec3<f32>,
+  parent_blend: f32,
+};
+
 fn quad_world(
   origin: vec3<i32>,
   face: u32,
@@ -199,16 +205,17 @@ fn quad_world(
   ao: u32,
   morph_heights: u32,
   morph_closure: bool,
-) -> vec3<f32> {
+) -> MorphedQuadPosition {
   var world = vec3<f32>(origin + quad_local(face, uv, extent)) * frame.viewport_voxel.z;
+  var parent_blend = 0.0;
   if (ao & 0x01000000u) != 0u {
-    let parent_blend = surface_parent_normal_blend(world, material);
+    parent_blend = surface_parent_normal_blend(world, material);
     let morph_blend = select(parent_blend, 1.0 - parent_blend, morph_closure);
     world.y += surface_morph_delta(morph_heights, uv.y)
       * frame.viewport_voxel.z
       * morph_blend;
   }
-  return world;
+  return MorphedQuadPosition(world, parent_blend);
 }
 
 fn conservative_axis_offset(clip: vec4<f32>, axis: vec3<f32>, direction: f32) -> vec2<f32> {
@@ -292,7 +299,7 @@ fn vs_main(
     case 4u: { normal.z = 1.0; }
     default: { normal.z = -1.0; }
   }
-  let world = quad_world(
+  let morphed_position = quad_world(
     origin,
     face,
     uv,
@@ -302,12 +309,13 @@ fn vs_main(
     morph_heights,
     morph_closure,
   );
+  let world = morphed_position.world;
   let surface_macro_normal = (ao & 0x01000000u) != 0u;
   var terrain_lighting = vec2<f32>(1.0);
   if surface_macro_normal {
     let own_normal = unpack_surface_macro_normal(ao, false);
     let parent_normal = unpack_surface_macro_normal(ao, true);
-    let parent_blend = surface_parent_normal_blend(world, material);
+    let parent_blend = morphed_position.parent_blend;
     let terrain_normal = normalize(
       mix(own_normal, parent_normal, parent_blend),
     );
@@ -506,6 +514,9 @@ fn hash31(position: vec3<f32>) -> f32 {
 }
 
 fn cut_transition_visible(position: vec2<f32>) -> bool {
+  if CUT_TRANSITION == 0u {
+    return true;
+  }
   let role = u32(round(cut_transition.phase_role.y));
   if role == 0u {
     return true;
