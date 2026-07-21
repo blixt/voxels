@@ -645,6 +645,9 @@ struct CutDrawLists {
     incoming: WorldDrawLists,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MissingMorphSidecar;
+
 #[derive(Debug)]
 struct WorldDrawListBuilder {
     fixed: DrawListBuilder,
@@ -675,14 +678,20 @@ impl WorldDrawListBuilder {
         self.tested_slices = self.tested_slices.saturating_add(1);
     }
 
-    fn select_slice(&mut self, chunk: &ChunkMesh, slice: &MeshSlice, morphing: bool) {
+    fn select_slice(
+        &mut self,
+        chunk: &ChunkMesh,
+        slice: &MeshSlice,
+        morphing: bool,
+    ) -> Result<(), MissingMorphSidecar> {
         self.selected_slices = self.selected_slices.saturating_add(1);
         self.quad_count = self.quad_count.saturating_add(slice.quad_count);
         if morphing {
-            self.morphing.select_morph_slice(chunk, slice);
+            self.morphing.select_morph_slice(chunk, slice)?;
         } else {
             self.fixed.select_slice(chunk, slice);
         }
+        Ok(())
     }
 
     fn select_mesh(&mut self, key: MeshKey, chunk: &ChunkMesh) {
@@ -776,11 +785,12 @@ impl DrawListBuilder {
         self.quad_count = self.quad_count.saturating_add(slice.quad_count);
     }
 
-    fn select_morph_slice(&mut self, chunk: &ChunkMesh, slice: &MeshSlice) {
-        let Some(morph_allocation) = chunk.morph_allocation else {
-            debug_assert!(false, "morphing slices require a sidecar allocation");
-            return;
-        };
+    fn select_morph_slice(
+        &mut self,
+        chunk: &ChunkMesh,
+        slice: &MeshSlice,
+    ) -> Result<(), MissingMorphSidecar> {
+        let morph_allocation = chunk.morph_allocation.ok_or(MissingMorphSidecar)?;
         let quad_bytes = size_of::<GpuQuad>() as u32;
         debug_assert_eq!(slice.relative_offset % quad_bytes, 0);
         let first_quad = slice.relative_offset / quad_bytes;
@@ -794,6 +804,7 @@ impl DrawListBuilder {
             morph_offset: morph_allocation.offset + first_quad * size_of::<u32>() as u32,
         });
         self.quad_count = self.quad_count.saturating_add(slice.quad_count);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -3619,7 +3630,7 @@ impl Renderer {
         // columns can still replace atomically and retained surface tiles can be incomplete. Keep
         // the cached resident hierarchy authoritative after settling as well as while streaming.
         let lod_draw_plan = resident_hierarchy.then_some(&self.lod_draw_plan);
-        let (shadow_draw_lists, world_draw_list, lod_ownership_refreshes) =
+        let Ok((shadow_draw_lists, world_draw_list, lod_ownership_refreshes)) =
             collect_opaque_draw_lists(
                 &mut self.chunks,
                 lod_draw_plan,
@@ -3628,17 +3639,25 @@ impl Renderer {
                 geometric_lod_focus,
                 view_clip,
                 shadow_clips,
-            );
-        let cut_draw_lists = self.cut_transition.as_ref().map(|transition| {
-            collect_cut_transition_draw_lists(
+            )
+        else {
+            return false;
+        };
+        let cut_draw_lists = if let Some(transition) = self.cut_transition.as_ref() {
+            let Ok(draw_lists) = collect_cut_transition_draw_lists(
                 &self.chunks,
                 &self.lod_draw_plan,
                 geometric_lod_focus,
                 transition,
                 self.options.far_terrain,
                 view_clip,
-            )
-        });
+            ) else {
+                return false;
+            };
+            Some(draw_lists)
+        } else {
+            None
+        };
         let water_draw_list = self.collect_draw_list(
             &self.water_chunks,
             |key, chunk| {
@@ -4364,7 +4383,7 @@ fn collect_opaque_draw_lists(
     geometric_lod_focus: Option<GeometricLodFocus>,
     view_clip: AabbClipVolume,
     shadow_clips: [AabbClipVolume; CASCADE_COUNT],
-) -> ([WorldDrawLists; CASCADE_COUNT], WorldDrawLists, u32) {
+) -> Result<([WorldDrawLists; CASCADE_COUNT], WorldDrawLists, u32), MissingMorphSidecar> {
     let mut shadow_builders: [WorldDrawListBuilder; CASCADE_COUNT] =
         std::array::from_fn(|_| WorldDrawListBuilder::default());
     let mut world_builder = WorldDrawListBuilder::default();
@@ -4417,7 +4436,7 @@ fn collect_opaque_draw_lists(
                     chunk,
                     slice,
                     slice_uses_geometry_morph(key, geometric_lod_focus, slice),
-                );
+                )?;
                 world_mesh_selected = true;
             }
             for cascade_index in 0..CASCADE_COUNT {
@@ -4430,7 +4449,7 @@ fn collect_opaque_draw_lists(
                         chunk,
                         slice,
                         slice_uses_geometry_morph(key, geometric_lod_focus, slice),
-                    );
+                    )?;
                     shadow_mesh_selected[cascade_index] = true;
                 }
             }
@@ -4450,11 +4469,11 @@ fn collect_opaque_draw_lists(
     } else {
         std::array::from_fn(|_| WorldDrawLists::default())
     };
-    (
+    Ok((
         shadow_draw_lists,
         world_builder.finish(),
         lod_ownership_refreshes,
-    )
+    ))
 }
 
 /// Splits only the camera-visible geometry whose complete-cut ownership changed. Stable clusters
@@ -4467,7 +4486,7 @@ fn collect_cut_transition_draw_lists(
     transition: &CutTransition,
     far_terrain: bool,
     view_clip: AabbClipVolume,
-) -> CutDrawLists {
+) -> Result<CutDrawLists, MissingMorphSidecar> {
     let mut stable = WorldDrawListBuilder::default();
     let mut outgoing = WorldDrawListBuilder::default();
     let mut incoming = WorldDrawListBuilder::default();
@@ -4494,15 +4513,15 @@ fn collect_cut_transition_draw_lists(
             let morphing = slice_uses_geometry_morph(key, current_focus, slice);
             match (was_owned, is_owned) {
                 (true, true) => {
-                    stable.select_slice(chunk, slice, morphing);
+                    stable.select_slice(chunk, slice, morphing)?;
                     selected_mesh[0] = true;
                 }
                 (true, false) => {
-                    outgoing.select_slice(chunk, slice, morphing);
+                    outgoing.select_slice(chunk, slice, morphing)?;
                     selected_mesh[1] = true;
                 }
                 (false, true) => {
-                    incoming.select_slice(chunk, slice, morphing);
+                    incoming.select_slice(chunk, slice, morphing)?;
                     selected_mesh[2] = true;
                 }
                 (false, false) => {}
@@ -4518,11 +4537,11 @@ fn collect_cut_transition_draw_lists(
             incoming.select_mesh(*key, chunk);
         }
     }
-    CutDrawLists {
+    Ok(CutDrawLists {
         stable: stable.finish(),
         outgoing: outgoing.finish(),
         incoming: incoming.finish(),
-    }
+    })
 }
 
 const FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -5707,8 +5726,9 @@ fn coalesce_draw_items(mut items: Vec<DrawItem>) -> Vec<DrawSpan> {
             && last.offset.checked_add(last.size) == Some(item.offset)
             && last.morph_page == item.morph_page
             && last.morph_page.is_none_or(|_| {
-                last.morph_offset
-                    .checked_add(last.quad_count * size_of::<u32>() as u32)
+                last.quad_count
+                    .checked_mul(size_of::<u32>() as u32)
+                    .and_then(|size| last.morph_offset.checked_add(size))
                     == Some(item.morph_offset)
             })
             && let (Some(size), Some(quad_count)) = (
@@ -7903,7 +7923,8 @@ mod tests {
             focus,
             view_clip,
             shadow_clips,
-        );
+        )
+        .unwrap_or_else(|_| panic!("test meshes must have every required morph sidecar"));
         let expected_world = reference_draw_list(
             &chunks,
             |_, chunk| view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max),
@@ -7946,6 +7967,7 @@ mod tests {
             view_clip,
             shadow_clips,
         )
+        .unwrap_or_else(|_| panic!("test meshes must have every required morph sidecar"))
         .1;
         assert_eq!(cached_world, actual_world);
         assert!(
@@ -7978,6 +8000,7 @@ mod tests {
             view_clip,
             shadow_clips,
         )
+        .unwrap_or_else(|_| panic!("test meshes must have every required morph sidecar"))
         .1;
         let moved_expected = reference_draw_list(
             &chunks,
