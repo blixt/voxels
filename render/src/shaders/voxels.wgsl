@@ -46,7 +46,11 @@ const CORNERS = array<vec2<i32>, 4>(
 );
 const STANDARD_STRIP = array<u32, 4>(1u, 2u, 0u, 3u);
 const FLIPPED_STRIP = array<u32, 4>(0u, 1u, 3u, 2u);
-const CONSERVATIVE_EXPANSION_PIXELS: f32 = 0.75;
+// Cover the full pixel-diamond around independently rasterized T-junctions. A half-pixel
+// expansion is insufficient after perspective interpolation and viewport rounding; one extra
+// quarter pixel keeps adjacent coarse/fine quads conservative without changing world-space
+// positions, lighting, depth ordering, or silhouettes against actual sky.
+const CONSERVATIVE_EXPANSION_PIXELS: f32 = 1.25;
 const MORPH_CLOSURE_EXTENT_FLAG: u32 = 0x8000u;
 
 fn corner_ao(packed: u32, corner: u32) -> f32 {
@@ -565,8 +569,12 @@ fn cut_transition_visible(position: vec2<f32>) -> bool {
     15u, 7u, 13u, 5u,
   );
   let threshold = (f32(bayer[x + y * 4u]) + 0.5) / 16.0;
-  let incoming = threshold < clamp(cut_transition.phase_role.x, 0.0, 1.0);
-  return select(!incoming, incoming, role == 2u);
+  if role == 1u {
+    // The outgoing cut remains an intact geometric safety net. Complementary masks assume both
+    // LODs cover identical pixels, which is exactly the assumption a transition must not make.
+    return true;
+  }
+  return threshold < clamp(cut_transition.phase_role.x, 0.0, 1.0);
 }
 
 @fragment
@@ -871,7 +879,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let continuous_uv = surface_uv(input.world, input.normal) * material_scale;
   let detail_uv_dx = dpdx(continuous_uv);
   let detail_uv_dy = dpdy(continuous_uv);
-  // Keep derivatives in uniform flow, then apply the complementary old/new pixel ownership mask.
+  // Keep derivatives in uniform flow, then apply the coverage-preserving cut transition mask.
   if !cut_transition_visible(input.position.xy) {
     discard;
   }

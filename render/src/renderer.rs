@@ -448,21 +448,26 @@ impl LodDrawPlan {
         &self,
         focus: Option<GeometricLodFocus>,
         voxel_x: i32,
+        voxel_y: i32,
         voxel_z: i32,
     ) -> u16 {
-        if let Some(patch) = self.patches.selected_patch_at([voxel_x, voxel_z]) {
-            return patch.level.stride_voxels() as u16;
-        }
         let chunk_x = voxel_x.div_euclid(CHUNK_EDGE as i32);
+        let chunk_y = voxel_y.div_euclid(CHUNK_EDGE as i32);
         let chunk_z = voxel_z.div_euclid(CHUNK_EDGE as i32);
+        if self.owns_canonical_chunk(&(0, chunk_x, chunk_y, chunk_z))
+            || self.owns_enclosed_view_chunk(&(0, chunk_x, chunk_y, chunk_z))
+        {
+            return 1;
+        }
         if focus.is_some_and(|focus| {
             focus.owner_at(voxel_x, voxel_z) == LodOwner::Canonical
                 && self.owns_canonical_column(chunk_x, chunk_z)
         }) {
-            1
-        } else {
-            0
+            return 1;
         }
+        self.patches
+            .selected_patch_at([voxel_x, voxel_z])
+            .map_or(0, |patch| patch.level.stride_voxels() as u16)
     }
 }
 
@@ -3409,11 +3414,24 @@ impl Renderer {
             })
     }
 
-    /// Exact geometric representation selected at one horizontal world coordinate in the most
+    /// Exact geometric representation selected at one world coordinate in the most
     /// recently built draw plan. Zero means no selected owner and is therefore a coverage bug.
-    pub fn presented_lod_stride_voxels(&self, voxel_x: i32, voxel_z: i32) -> u16 {
-        self.lod_draw_plan
-            .presented_stride_at(self.lod_draw_plan_focus, voxel_x, voxel_z)
+    pub fn presented_lod_stride_voxels(&self, voxel_x: i32, voxel_y: i32, voxel_z: i32) -> u16 {
+        let current = self.lod_draw_plan.presented_stride_at(
+            self.lod_draw_plan_focus,
+            voxel_x,
+            voxel_y,
+            voxel_z,
+        );
+        let outgoing = self.cut_transition.as_ref().map_or(0, |transition| {
+            transition
+                .from
+                .presented_stride_at(transition.from_focus, voxel_x, voxel_y, voxel_z)
+        });
+        match (current, outgoing) {
+            (0, stride) | (stride, 0) => stride,
+            (left, right) => left.min(right),
+        }
     }
 
     /// Number of horizontal cells owned by the currently active exact canonical vertical band.
@@ -4510,8 +4528,9 @@ fn collect_opaque_draw_lists(
 }
 
 /// Splits only the camera-visible geometry whose complete-cut ownership changed. Stable clusters
-/// stay on the ordinary single-draw path; outgoing and incoming clusters receive complementary
-/// fragment masks for the short transition interval.
+/// stay on the ordinary single-draw path; the outgoing cut remains intact while the incoming cut
+/// dithers over it for the short transition interval. This permits brief overdraw but cannot expose
+/// the sky when two independently simplified cuts do not cover exactly the same pixels.
 fn collect_cut_transition_draw_lists(
     chunks: &BTreeMap<MeshKey, ChunkMesh>,
     current_plan: &LodDrawPlan,
@@ -7066,7 +7085,7 @@ mod tests {
             canonical_columns: HashSet::new(),
             ..LodDrawPlan::default()
         };
-        assert_eq!(fallback_plan.presented_stride_at(Some(focus), 1, 1), 2);
+        assert_eq!(fallback_plan.presented_stride_at(Some(focus), 1, 1, 1), 2);
 
         let mut canonical = SurfacePatchSelection::default();
         canonical.rebuild(focus, &resident, &HashSet::from([(0, 0)]));
@@ -7075,8 +7094,18 @@ mod tests {
             canonical_columns: HashSet::from([(0, 0)]),
             ..LodDrawPlan::default()
         };
-        assert_eq!(canonical_plan.presented_stride_at(Some(focus), 1, 1), 1);
-        assert_eq!(canonical_plan.presented_stride_at(None, 1, 1), 0);
+        assert_eq!(canonical_plan.presented_stride_at(Some(focus), 1, 1, 1), 1);
+        assert_eq!(canonical_plan.presented_stride_at(None, 1, 1, 1), 0);
+
+        let enclosed_plan = LodDrawPlan {
+            enclosed_view_chunks: HashSet::from([(0, -2, 0)]),
+            ..fallback_plan
+        };
+        assert_eq!(
+            enclosed_plan.presented_stride_at(Some(focus), 1, -63, 1),
+            1,
+            "an exact underground owner must win over the surface proxy in the same column"
+        );
     }
 
     #[test]

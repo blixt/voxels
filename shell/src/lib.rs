@@ -8,15 +8,7 @@ const INTERACTION_REACH_METRES: f32 = 5.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const INTERACTION_STREAM_MARGIN_METRES: f32 = 0.7;
 #[cfg(any(target_arch = "wasm32", test))]
-const ENCLOSED_VIEW_CLEARANCE_METRES: f32 = 8.0;
-#[cfg(any(target_arch = "wasm32", test))]
-const ENCLOSED_VIEW_RAY_OFFSETS: [[f32; 2]; 5] = [
-    [0.0, 0.0],
-    [-0.18, 0.0],
-    [0.18, 0.0],
-    [0.0, -0.14],
-    [0.0, 0.14],
-];
+const CHUNK_FACE_WORDS: usize = voxels_world::CHUNK_EDGE * voxels_world::CHUNK_EDGE / 64;
 #[cfg(target_arch = "wasm32")]
 const COLLISION_READINESS_RESERVE_SECONDS: f32 = 1.0;
 #[cfg(any(target_arch = "wasm32", test))]
@@ -145,61 +137,155 @@ fn urgent_stream_interest(
     chunks.into_iter().collect()
 }
 
-/// Sparse exact-volume interest through visible tunnel apertures.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChunkPortalMask {
+    faces: [[u64; CHUNK_FACE_WORDS]; 6],
+}
+
+impl ChunkPortalMask {
+    fn from_chunk(chunk: &voxels_world::Chunk) -> Self {
+        let mut portals = Self {
+            faces: [[0; CHUNK_FACE_WORDS]; 6],
+        };
+        let edge = voxels_world::CHUNK_EDGE;
+        for vertical in 0..edge {
+            for horizontal in 0..edge {
+                let index = horizontal + vertical * edge;
+                let probes = [
+                    (0, [0, horizontal, vertical]),
+                    (1, [edge - 1, horizontal, vertical]),
+                    (2, [horizontal, 0, vertical]),
+                    (3, [horizontal, edge - 1, vertical]),
+                    (4, [horizontal, vertical, 0]),
+                    (5, [horizontal, vertical, edge - 1]),
+                ];
+                for (face, [x, y, z]) in probes {
+                    if !chunk.get(x, y, z).occludes_ambient() {
+                        portals.faces[face][index / 64] |= 1_u64 << (index % 64);
+                    }
+                }
+            }
+        }
+        portals
+    }
+
+    fn face_is_open(&self, face: usize) -> bool {
+        self.faces[face].iter().any(|word| *word != 0)
+    }
+
+    fn connects(&self, face: usize, neighbor: &Self) -> bool {
+        let opposite = [1, 0, 3, 2, 5, 4][face];
+        self.faces[face]
+            .iter()
+            .zip(&neighbor.faces[opposite])
+            .any(|(left, right)| left & right != 0)
+    }
+}
+
+/// Exact-volume interest through the connected resident cave/tunnel portal graph.
 ///
-/// The ordinary distant representation is a height surface and therefore cannot represent a
-/// player-made tunnel terminator. Nearby canonical occupancy rejects rays that already hit a wall;
-/// only openings receive a narrow full-resolution corridor. Five deterministic rays cover the
-/// central tunnel aperture without paying for an outdoor full-frustum volume.
+/// A view-ray fan makes residency depend on the crosshair: a terminator or side wall disappears as
+/// soon as it moves between rays even while it remains in the viewport. Instead, flood through
+/// matching air cells on resident chunk faces, retaining each reachable chunk plus the immediate
+/// neighbor that closes an opening. Unknown neighbors become the next streamed frontier; solid
+/// neighbors remain exact occluders and stop traversal. An expanded view cone keeps the graph
+/// bounded and stable beyond every screen edge, without following a shaft into outdoor air.
 #[cfg(any(target_arch = "wasm32", test))]
 fn enclosed_view_stream_interest(
     camera: &CameraState,
     distance_metres: f32,
-    ray_radius_metres: f32,
-    mut is_opaque: impl FnMut(i32, i32, i32) -> bool,
+    cone_half_angle_degrees: f32,
+    portals: &std::collections::BTreeMap<(i32, i32, i32), ChunkPortalMask>,
 ) -> Vec<voxels_world::ChunkCoord> {
-    use std::collections::BTreeSet;
-    use voxels_core::raycast_voxels;
+    use std::collections::{BTreeSet, VecDeque};
     use voxels_world::{CHUNK_EDGE, VOXEL_SIZE_METRES};
 
     if !distance_metres.is_finite()
         || distance_metres <= 0.0
-        || !ray_radius_metres.is_finite()
-        || ray_radius_metres <= 0.0
+        || !cone_half_angle_degrees.is_finite()
+        || !(0.0..90.0).contains(&cone_half_angle_degrees)
     {
         return Vec::new();
     }
-    let forward = camera.forward();
-    let right = forward.cross(glam::Vec3::Y).normalize_or(glam::Vec3::X);
-    let up = right.cross(forward).normalize_or(glam::Vec3::Y);
-    let clearance = distance_metres.min(ENCLOSED_VIEW_CLEARANCE_METRES);
     let chunk_size = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
-    let steps = (distance_metres / (chunk_size * 0.5)).ceil().max(1.0) as u32;
+    let chunk_radius = chunk_size * 3.0_f32.sqrt() * 0.5;
+    let cone_tangent = cone_half_angle_degrees.to_radians().tan();
+    let forward = camera.forward();
+    let origin = (camera.position / chunk_size).floor().as_ivec3();
+    let origin = voxels_world::ChunkCoord::new(origin.x, origin.y, origin.z);
+    let radius_chunks = (distance_metres / chunk_size).ceil().max(1.0) as i32;
+    let radius_squared = i64::from(radius_chunks) * i64::from(radius_chunks);
+    let directions = [
+        ([-1, 0, 0], 0),
+        ([1, 0, 0], 1),
+        ([0, -1, 0], 2),
+        ([0, 1, 0], 3),
+        ([0, 0, -1], 4),
+        ([0, 0, 1], 5),
+    ];
     let mut chunks = BTreeSet::new();
-    for [horizontal, vertical] in ENCLOSED_VIEW_RAY_OFFSETS {
-        let direction = (forward + right * horizontal + up * vertical).normalize_or(forward);
-        if let Some(hit) = raycast_voxels(
-            camera.position,
-            direction,
-            clearance,
-            VOXEL_SIZE_METRES,
-            &mut is_opaque,
-        ) {
-            chunks.insert(voxels_world::ChunkCoord::new(
-                hit.voxel[0].div_euclid(CHUNK_EDGE as i32),
-                hit.voxel[1].div_euclid(CHUNK_EDGE as i32),
-                hit.voxel[2].div_euclid(CHUNK_EDGE as i32),
-            ));
+    let mut visited = BTreeSet::from([origin]);
+    let mut queue = VecDeque::from([origin]);
+    while let Some(current) = queue.pop_front() {
+        chunks.insert(current);
+        let Some(current_portals) = portals.get(&(current.x, current.y, current.z)) else {
             continue;
-        }
-        for step in 0..=steps {
-            let distance = distance_metres * step as f32 / steps as f32;
-            let centre = camera.position + direction * distance;
-            insert_chunk_aabb(
-                &mut chunks,
-                centre - glam::Vec3::splat(ray_radius_metres),
-                centre + glam::Vec3::splat(ray_radius_metres),
+        };
+        for ([dx, dy, dz], face) in directions {
+            if !current_portals.face_is_open(face) {
+                continue;
+            }
+            let (Some(x), Some(y), Some(z)) = (
+                current.x.checked_add(dx),
+                current.y.checked_add(dy),
+                current.z.checked_add(dz),
+            ) else {
+                continue;
+            };
+            let neighbor = voxels_world::ChunkCoord::new(x, y, z);
+            if !neighbor.is_world_representable() {
+                continue;
+            }
+            let center = glam::Vec3::new(
+                (x as f32 + 0.5) * chunk_size,
+                (y as f32 + 0.5) * chunk_size,
+                (z as f32 + 0.5) * chunk_size,
             );
+            let camera_to_center = center - camera.position;
+            let axial = camera_to_center.dot(forward);
+            if axial < -chunk_radius {
+                continue;
+            }
+            let perpendicular_squared =
+                (camera_to_center.length_squared() - axial * axial).max(0.0);
+            let cone_radius = axial.max(0.0) * cone_tangent + chunk_radius;
+            if perpendicular_squared > cone_radius * cone_radius {
+                continue;
+            }
+            let distance_squared = [
+                i64::from(x) - i64::from(origin.x),
+                i64::from(y) - i64::from(origin.y),
+                i64::from(z) - i64::from(origin.z),
+            ]
+            .into_iter()
+            .map(|axis| axis * axis)
+            .sum::<i64>();
+            if distance_squared > radius_squared {
+                continue;
+            }
+            // Always retain the first chunk across an opening. If it is solid, it is the exact
+            // wall that terminates the visible cave rather than a portal to traverse.
+            chunks.insert(neighbor);
+            if visited.contains(&neighbor) {
+                continue;
+            }
+            let Some(neighbor_portals) = portals.get(&(x, y, z)) else {
+                continue;
+            };
+            if current_portals.connects(face, neighbor_portals) {
+                visited.insert(neighbor);
+                queue.push_back(neighbor);
+            }
         }
     }
     chunks.into_iter().collect()
@@ -375,7 +461,7 @@ mod web {
         RemoteChunkCompletion, RemoteEditEvent, RemoteSurfaceCompletion, RemoteSurfaceTicket,
         RemoteWorldClient, RemoteWorldError,
     };
-    use crate::world_environment_at;
+    use crate::{ChunkPortalMask, world_environment_at};
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
     use std::cell::{Cell, RefCell};
@@ -455,7 +541,6 @@ mod web {
         stream_velocity_lookahead_seconds: f32,
         stream_view_cone_half_angle_degrees: f32,
         stream_enclosed_view_distance_metres: f32,
-        stream_enclosed_view_ray_radius_metres: f32,
         stream_enclosed_view_threshold: f32,
         surface_load_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
         surface_retain_margin_tiles: i32,
@@ -669,6 +754,7 @@ mod web {
         edit_revisions: RefCell<AuthoritativeEditRevisions>,
         scheduler: RefCell<StreamScheduler>,
         chunks: RefCell<BTreeMap<(i32, i32, i32), Chunk>>,
+        chunk_portals: RefCell<BTreeMap<(i32, i32, i32), ChunkPortalMask>>,
         chunk_halos: RefCell<BTreeMap<(i32, i32, i32), MeshingHalo>>,
         pending_meshes: RefCell<BTreeMap<(i32, i32, i32), PendingCanonicalMesh>>,
         pending_uploads: RefCell<BTreeMap<(i32, i32, i32), voxels_runtime::WorkTicket>>,
@@ -1311,15 +1397,18 @@ mod web {
             let evicted = !evictions.is_empty();
             if !evictions.is_empty() {
                 let mut chunks = self.chunks.borrow_mut();
+                let mut portals = self.chunk_portals.borrow_mut();
                 let mut halos = self.chunk_halos.borrow_mut();
                 let mut pending = self.pending_meshes.borrow_mut();
                 let mut pending_uploads = self.pending_uploads.borrow_mut();
                 let mut renderer = self.renderer.borrow_mut();
                 for eviction in evictions {
-                    chunks.remove(&coord_key(eviction.coord));
-                    halos.remove(&coord_key(eviction.coord));
-                    pending.remove(&coord_key(eviction.coord));
-                    pending_uploads.remove(&coord_key(eviction.coord));
+                    let key = coord_key(eviction.coord);
+                    chunks.remove(&key);
+                    portals.remove(&key);
+                    halos.remove(&key);
+                    pending.remove(&key);
+                    pending_uploads.remove(&key);
                     renderer.remove_chunk(eviction.coord);
                 }
             }
@@ -1576,16 +1665,11 @@ mod web {
             if self.enclosure.get().enclosure < self.config.stream_enclosed_view_threshold {
                 return Vec::new();
             }
-            let chunks = self.chunks.borrow();
             crate::enclosed_view_stream_interest(
                 camera,
                 self.config.stream_enclosed_view_distance_metres,
-                self.config.stream_enclosed_view_ray_radius_metres,
-                |x, y, z| {
-                    resident_material(&chunks, VoxelCoord::new(x, y, z))
-                        .unwrap_or(Material::Stone)
-                        .occludes_ambient()
-                },
+                self.config.stream_view_cone_half_angle_degrees,
+                &self.chunk_portals.borrow(),
             )
         }
 
@@ -1829,12 +1913,14 @@ mod web {
             if self.scheduler.borrow_mut().complete(ticket) != CompletionStatus::Accepted {
                 return;
             }
-            self.chunks
+            let key = coord_key(ticket.coord);
+            self.chunk_portals
                 .borrow_mut()
-                .insert(coord_key(ticket.coord), snapshot.chunk);
+                .insert(key, ChunkPortalMask::from_chunk(&snapshot.chunk));
+            self.chunks.borrow_mut().insert(key, snapshot.chunk);
             self.chunk_halos
                 .borrow_mut()
-                .insert(coord_key(ticket.coord), snapshot.meshing_halo);
+                .insert(key, snapshot.meshing_halo);
         }
 
         fn reconcile_chunk_activation(
@@ -2516,6 +2602,18 @@ mod web {
                 &accepted_mutations,
             );
             if !accepted_mutations.is_empty() {
+                let changed_chunks = accepted_mutations
+                    .iter()
+                    .map(|mutation| mutation.coord.chunk())
+                    .collect::<BTreeSet<_>>();
+                let chunks = self.chunks.borrow();
+                let mut portals = self.chunk_portals.borrow_mut();
+                for coord in changed_chunks {
+                    let key = coord_key(coord);
+                    if let Some(chunk) = chunks.get(&key) {
+                        portals.insert(key, ChunkPortalMask::from_chunk(chunk));
+                    }
+                }
                 self.last_enclosure_probe.set(f64::NEG_INFINITY);
             }
             let canonical: Vec<CanonicalRequirement> = {
@@ -2966,13 +3064,18 @@ mod web {
                 let diagnostics = engine.scheduler.borrow().diagnostics();
                 let profile = *engine.profile.borrow();
                 let camera_voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
+                let camera_voxel_y = (camera.position.y / VOXEL_SIZE_METRES).floor() as i32;
                 let camera_voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
                 let (render, target, presented_lod_stride_voxels, canonical_surface_coverage) = {
                     let renderer = engine.renderer.borrow();
                     (
                         renderer.diagnostics(),
                         renderer.target_voxel(),
-                        renderer.presented_lod_stride_voxels(camera_voxel_x, camera_voxel_z),
+                        renderer.presented_lod_stride_voxels(
+                            camera_voxel_x,
+                            camera_voxel_y,
+                            camera_voxel_z,
+                        ),
                         renderer.canonical_surface_coverage_at(camera_voxel_x, camera_voxel_z),
                     )
                 };
@@ -3438,9 +3541,6 @@ mod web {
             stream_velocity_lookahead_seconds: streaming.priority.velocity_lookahead_seconds,
             stream_view_cone_half_angle_degrees: streaming.priority.view_cone_half_angle_degrees,
             stream_enclosed_view_distance_metres: streaming.priority.enclosed_view_distance_metres,
-            stream_enclosed_view_ray_radius_metres: streaming
-                .priority
-                .enclosed_view_ray_radius_metres,
             stream_enclosed_view_threshold: streaming.priority.enclosed_view_threshold,
             surface_load_radius_tiles: streaming
                 .surface
@@ -3568,6 +3668,7 @@ mod web {
             edit_revisions: RefCell::new(AuthoritativeEditRevisions::default()),
             scheduler: RefCell::new(scheduler),
             chunks: RefCell::new(BTreeMap::new()),
+            chunk_portals: RefCell::new(BTreeMap::new()),
             chunk_halos: RefCell::new(BTreeMap::new()),
             pending_meshes: RefCell::new(BTreeMap::new()),
             pending_uploads: RefCell::new(BTreeMap::new()),
@@ -3716,7 +3817,26 @@ pub use web::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn portal_mask(open_faces: &[usize]) -> ChunkPortalMask {
+        let mut mask = ChunkPortalMask {
+            faces: [[0; CHUNK_FACE_WORDS]; 6],
+        };
+        for face in open_faces {
+            mask.faces[*face][0] = 1;
+        }
+        mask
+    }
+
+    fn straight_tunnel_portals(
+        min_z: i32,
+        max_z: i32,
+    ) -> BTreeMap<(i32, i32, i32), ChunkPortalMask> {
+        (min_z..=max_z)
+            .map(|z| ((0, 1, z), portal_mask(&[4, 5])))
+            .collect()
+    }
 
     #[test]
     fn server_resume_values_are_sanitized_before_use() {
@@ -3810,7 +3930,8 @@ mod tests {
     #[test]
     fn enclosed_view_interest_reaches_beyond_the_surface_handoff() {
         let camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
-        let interest = enclosed_view_stream_interest(&camera, 32.0, 0.8, |_, _, _| false);
+        let portals = straight_tunnel_portals(-9, 0);
+        let interest = enclosed_view_stream_interest(&camera, 32.0, 55.0, &portals);
 
         assert!(
             interest.iter().any(|coord| coord.z <= -4),
@@ -3821,15 +3942,19 @@ mod tests {
             "the configured corridor must retain a terminator near 32m"
         );
         assert!(
-            interest.len() <= 96,
-            "sparse aperture rays must stay below the secondary-interest budget"
+            interest.len() <= 24,
+            "a straight portal corridor must stay well below the secondary-interest budget"
         );
     }
 
     #[test]
     fn enclosed_view_interest_owns_nearby_occluders_without_streaming_behind_them() {
         let camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
-        let interest = enclosed_view_stream_interest(&camera, 32.0, 0.8, |_, _, z| z <= -16);
+        let portals = BTreeMap::from([
+            ((0, 1, 0), portal_mask(&[4, 5])),
+            ((0, 1, -1), portal_mask(&[])),
+        ]);
+        let interest = enclosed_view_stream_interest(&camera, 32.0, 55.0, &portals);
 
         assert!(
             !interest.is_empty(),
@@ -3839,6 +3964,66 @@ mod tests {
             interest.iter().all(|coord| coord.z >= -1),
             "a nearby wall must stop exact-volume interest from extending behind it"
         );
+    }
+
+    #[test]
+    fn enclosed_view_interest_stays_complete_across_the_visible_heading_range() {
+        let mut camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
+        let portals = straight_tunnel_portals(-6, 2);
+        let first = enclosed_view_stream_interest(&camera, 24.0, 55.0, &portals);
+
+        camera.yaw += 0.55;
+        let turned = enclosed_view_stream_interest(&camera, 24.0, 55.0, &portals);
+
+        for z in -6..=0 {
+            let coord = voxels_world::ChunkCoord::new(0, 1, z);
+            assert!(first.contains(&coord));
+            assert!(
+                turned.contains(&coord),
+                "visible tunnel chunk {z} was revoked"
+            );
+        }
+    }
+
+    #[test]
+    fn enclosed_view_interest_does_not_follow_connected_air_behind_the_camera() {
+        let mut camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
+        camera.yaw = std::f32::consts::PI;
+        let portals = straight_tunnel_portals(-9, 0);
+        let interest = enclosed_view_stream_interest(&camera, 32.0, 55.0, &portals);
+
+        assert!(interest.iter().all(|coord| coord.z >= 0));
+    }
+
+    #[test]
+    fn chunk_portals_require_matching_air_cells() {
+        let mut current = voxels_world::Chunk::filled(
+            voxels_world::ChunkCoord::new(0, 0, 0),
+            voxels_world::Material::Stone,
+        );
+        let mut neighbor = voxels_world::Chunk::filled(
+            voxels_world::ChunkCoord::new(0, 0, -1),
+            voxels_world::Material::Stone,
+        );
+        current.set(4, 7, 0, voxels_world::Material::Air);
+        neighbor.set(
+            5,
+            7,
+            voxels_world::CHUNK_EDGE - 1,
+            voxels_world::Material::Air,
+        );
+        let current = ChunkPortalMask::from_chunk(&current);
+        let mismatched = ChunkPortalMask::from_chunk(&neighbor);
+        assert!(!current.connects(4, &mismatched));
+
+        neighbor.set(
+            4,
+            7,
+            voxels_world::CHUNK_EDGE - 1,
+            voxels_world::Material::Air,
+        );
+        let matching = ChunkPortalMask::from_chunk(&neighbor);
+        assert!(current.connects(4, &matching));
     }
 
     #[test]

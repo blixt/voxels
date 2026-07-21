@@ -11,7 +11,7 @@ use voxels_runtime::{
     MAX_LOAD_RADIUS_CHUNKS, MAX_SECONDARY_INTEREST_CHUNKS, MAX_VERTICAL_RADIUS_CHUNKS,
 };
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 26;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 27;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -114,11 +114,8 @@ pub struct StreamingPriorityConfig {
     pub collision_lookahead_seconds: f32,
     pub velocity_lookahead_seconds: f32,
     pub view_cone_half_angle_degrees: f32,
-    /// Full-resolution distance retained through visible openings while the camera is enclosed.
+    /// Full-resolution distance retained through connected openings while the camera is enclosed.
     pub enclosed_view_distance_metres: f32,
-    /// Radius around each sparse view ray. The rays are rejected by nearby solid canonical voxels,
-    /// so this covers tunnel apertures without turning the outdoor view frustum into exact chunks.
-    pub enclosed_view_ray_radius_metres: f32,
     /// Minimum enclosure fraction before the exact-volume view corridor is enabled.
     pub enclosed_view_threshold: f32,
 }
@@ -326,13 +323,6 @@ impl ClientConfig {
             0.0,
             MAX_ENCLOSED_VIEW_DISTANCE_METRES,
             false,
-        )?;
-        ensure_finite_range(
-            self.streaming.priority.enclosed_view_ray_radius_metres,
-            "streaming.priority.enclosed_view_ray_radius_metres",
-            0.1,
-            6.4,
-            true,
         )?;
         ensure_finite_range(
             self.streaming.priority.enclosed_view_threshold,
@@ -768,7 +758,6 @@ mod tests {
                     velocity_lookahead_seconds: 1.5,
                     view_cone_half_angle_degrees: 55.0,
                     enclosed_view_distance_metres: 32.0,
-                    enclosed_view_ray_radius_metres: 0.8,
                     enclosed_view_threshold: 0.65,
                 },
                 frame_budget: FrameBudgetConfig {
@@ -861,18 +850,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 26", "schema_version = 25");
+        let wrong_schema = fixture.replace("schema_version = 27", "schema_version = 26");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 25,
+                found: 26,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 26",
-            "schema_version = 26\nunknown_root = true",
+            "schema_version = 27",
+            "schema_version = 27\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),
@@ -946,13 +935,6 @@ mod tests {
         config.streaming.priority.enclosed_view_distance_metres =
             MAX_ENCLOSED_VIEW_DISTANCE_METRES + 1.0;
         assert_invalid_field(&config, "streaming.priority.enclosed_view_distance_metres");
-
-        let mut config = valid_config();
-        config.streaming.priority.enclosed_view_ray_radius_metres = 6.5;
-        assert_invalid_field(
-            &config,
-            "streaming.priority.enclosed_view_ray_radius_metres",
-        );
 
         let mut config = valid_config();
         config.streaming.priority.enclosed_view_threshold = 1.1;

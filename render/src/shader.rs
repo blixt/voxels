@@ -409,11 +409,13 @@ mod tests {
         assert!(voxels.contains("let far_surface = (material & 0x80000000u) != 0u"));
         assert!(voxels.contains("let canonical_opaque = (ao & 0x00800000u) != 0u"));
         assert!(voxels.contains("fn conservative_surface_clip("));
-        assert!(voxels.contains("const CONSERVATIVE_EXPANSION_PIXELS: f32 = 0.75"));
+        assert!(voxels.contains("const CONSERVATIVE_EXPANSION_PIXELS: f32 = 1.25"));
         assert!(voxels.contains("fn conservative_axis_offset("));
         assert!(voxels.contains("CONSERVATIVE_EXPANSION_PIXELS * 2.0"));
         assert!(voxels.contains("out.position = conservative_surface_clip("));
         assert!(voxels.contains("out.world = world"));
+        assert!(voxels.contains("if role == 1u"));
+        assert!(voxels.contains("return threshold < clamp(cut_transition.phase_role.x"));
     }
 
     #[test]

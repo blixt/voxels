@@ -395,6 +395,19 @@ impl SurfaceTileMesh {
                 }
             }
         }
+        // A skyline proxy can contribute a terrain band and a crown band several chunks above it.
+        // Publishing only those endpoints lets the exact cut omit the trunk or lower crown while
+        // suppressing the complete proxy. Fill the small per-column interval so surface readiness
+        // proves the entire visible feature volume, not just independently sampled top faces.
+        for ys in hints.values_mut() {
+            let Some(minimum) = ys.first().copied() else {
+                continue;
+            };
+            let Some(maximum) = ys.last().copied() else {
+                continue;
+            };
+            ys.extend(minimum..=maximum);
+        }
         hints
     }
 }
@@ -2359,6 +2372,14 @@ mod tests {
             assert!(ys.contains(&surface_y.saturating_sub(1)));
             assert!(ys.contains(&surface_y));
             assert!(ys.contains(&surface_y.saturating_add(1)));
+        }
+        for ys in hints.values() {
+            let minimum = *ys.first().expect("hint band minimum");
+            let maximum = *ys.last().expect("hint band maximum");
+            assert_eq!(
+                ys.len(),
+                usize::try_from(maximum - minimum + 1).expect("bounded hint band")
+            );
         }
     }
 
