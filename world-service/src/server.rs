@@ -1373,9 +1373,13 @@ async fn run_session(mut socket: WebSocket, state: Arc<ServerState>) {
         loaded_player,
         state.environment.snapshot(environment_server_time_ms),
     );
+    let Ok(opened_bytes) = encode_world_opened(&opened) else {
+        session.cancel_all();
+        return;
+    };
     if outbound
         .send(OutboundFrame {
-            bytes: encode_world_opened(&opened),
+            bytes: opened_bytes,
             offset: 0,
             fragment_transfer_id: None,
             priority: TrafficPriority::Critical,

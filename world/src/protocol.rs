@@ -34,6 +34,8 @@ pub const MAX_FRAME_FRAGMENT_DATA_BYTES: usize =
 pub const EDIT_SESSION_NOT_CURRENT: &str = "edit session is no longer current";
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
+const MAX_MANIFEST_MODEL_STRING_BYTES: usize = 4_096;
+const MAX_MANIFEST_MODEL_WEIGHT_HASHES: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
 const SURFACE_SNAPSHOT_VERSION: u16 = 7;
 
@@ -820,14 +822,38 @@ pub fn decode_open_world(bytes: &[u8]) -> Result<OpenWorld, ProtocolError> {
     })
 }
 
-pub fn encode_world_opened(opened: &WorldOpened) -> Vec<u8> {
-    debug_assert!(opened.connection_id != 0);
-    debug_assert!(!opened.presence_session_id.is_nil());
-    debug_assert!(!opened.edit_session_id.is_nil());
-    debug_assert!(validate_player_resume(&opened.player_resume).is_ok());
-    debug_assert!(validate_inventory(&opened.inventory).is_ok());
-    debug_assert!(validate_world_environment(&opened.environment).is_ok());
-    let manifest = encode_manifest(&opened.manifest);
+pub fn encode_world_opened(opened: &WorldOpened) -> Result<Vec<u8>, ProtocolError> {
+    if opened.recommended_in_flight_batches == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "server recommended a zero request window",
+        ));
+    }
+    validate_player_identity(&opened.identity)?;
+    if opened.connection_id == 0 {
+        return Err(ProtocolError::InvalidPayload("world connection id is zero"));
+    }
+    if opened.presence_session_id.is_nil() {
+        return Err(ProtocolError::InvalidPayload("presence session id is nil"));
+    }
+    if opened.edit_session_id.is_nil() {
+        return Err(ProtocolError::InvalidPayload("edit session id is nil"));
+    }
+    if ![
+        opened.spawn.moisture,
+        opened.spawn.temperature,
+        opened.spawn.ridge,
+    ]
+    .into_iter()
+    .all(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "spawn fields are not finite and normalized",
+        ));
+    }
+    validate_player_resume(&opened.player_resume)?;
+    validate_inventory(&opened.inventory)?;
+    validate_world_environment(&opened.environment)?;
+    let manifest = encode_manifest(&opened.manifest)?;
     let mut payload = Vec::with_capacity(manifest.len() + 320);
     push_u32(&mut payload, manifest.len() as u32);
     payload.extend_from_slice(&manifest);
@@ -852,7 +878,7 @@ pub fn encode_world_opened(opened: &WorldOpened) -> Vec<u8> {
     push_f32(&mut payload, opened.spawn.ridge);
     encode_player_resume(&mut payload, opened.player_resume);
     encode_inventory(&mut payload, opened.inventory);
-    encode_frame(KIND_WORLD_OPENED, 0, &payload)
+    Ok(encode_frame(KIND_WORLD_OPENED, 0, &payload))
 }
 
 pub fn decode_world_opened(bytes: &[u8]) -> Result<WorldOpened, ProtocolError> {
@@ -2990,7 +3016,20 @@ fn expect_zero_request_id(frame: &Frame<'_>) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-fn encode_manifest(manifest: &WorldManifest) -> Vec<u8> {
+fn encode_manifest(manifest: &WorldManifest) -> Result<Vec<u8>, ProtocolError> {
+    manifest
+        .validate()
+        .map_err(|_| ProtocolError::InvalidPayload("invalid world manifest"))?;
+    if let Some(model) = &manifest.source.model {
+        if model.repository.len() > MAX_MANIFEST_MODEL_STRING_BYTES
+            || model.immutable_revision.len() > MAX_MANIFEST_MODEL_STRING_BYTES
+        {
+            return Err(ProtocolError::LimitExceeded("model string bytes"));
+        }
+        if model.weight_hashes.len() > MAX_MANIFEST_MODEL_WEIGHT_HASHES {
+            return Err(ProtocolError::LimitExceeded("model hash count"));
+        }
+    }
     let mut bytes = Vec::new();
     bytes.extend_from_slice(manifest.world_id.as_bytes());
     push_u64(&mut bytes, manifest.seed);
@@ -3029,7 +3068,7 @@ fn encode_manifest(manifest: &WorldManifest) -> Vec<u8> {
     bytes.push(source.macro_coordinate_transform.z_axis_sign as u8);
     push_u32(&mut bytes, source.voxel_composer_version);
     push_u32(&mut bytes, source.authored_content_version);
-    bytes
+    Ok(bytes)
 }
 
 fn decode_manifest(bytes: &[u8]) -> Result<WorldManifest, ProtocolError> {
@@ -3048,7 +3087,7 @@ fn decode_manifest(bytes: &[u8]) -> Result<WorldManifest, ProtocolError> {
             let repository = cursor.string()?;
             let immutable_revision = cursor.string()?;
             let count = usize::from(cursor.u16()?);
-            if count == 0 || count > 64 {
+            if count == 0 || count > MAX_MANIFEST_MODEL_WEIGHT_HASHES {
                 return Err(ProtocolError::LimitExceeded("model hash count"));
             }
             let mut weight_hashes = Vec::with_capacity(count);
@@ -4010,7 +4049,7 @@ impl<'a> Cursor<'a> {
 
     fn string(&mut self) -> Result<String, ProtocolError> {
         let len = usize::from(self.u16()?);
-        if len > 4096 {
+        if len > MAX_MANIFEST_MODEL_STRING_BYTES {
             return Err(ProtocolError::LimitExceeded("string bytes"));
         }
         Ok(std::str::from_utf8(self.bytes(len)?)
@@ -4142,9 +4181,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn world_opened_round_trip_is_manifest_validated() {
-        let opened = WorldOpened {
+    fn world_opened_fixture() -> WorldOpened {
+        WorldOpened {
             manifest: WorldManifest::procedural_v16(WorldId::from_bytes([7; 16]), 42),
             capabilities: WorldCapabilities::CANONICAL_CHUNKS
                 .union(WorldCapabilities::AUTHORED_ROUTES)
@@ -4204,10 +4242,62 @@ mod tests {
                     counts
                 },
             },
-        };
+        }
+    }
+
+    #[test]
+    fn world_opened_round_trip_is_manifest_validated() {
+        let opened = world_opened_fixture();
         assert_eq!(
-            decode_world_opened(&encode_world_opened(&opened)),
+            decode_world_opened(&encode_world_opened(&opened).expect("encode WorldOpened")),
             Ok(opened)
+        );
+    }
+
+    #[test]
+    fn world_opened_model_identity_obeys_shared_wire_bounds() {
+        let mut opened = world_opened_fixture();
+        opened.manifest.source.source_kind = WorldSourceKind::TerrainDiffusion30m;
+        opened.manifest.source.authored_content_version = crate::NO_AUTHORED_CONTENT_VERSION;
+        opened.manifest.source.device_requirement = SourceDeviceRequirement::AppleMetal;
+        opened.manifest.source.model = Some(ModelIdentity {
+            repository: "r".repeat(MAX_MANIFEST_MODEL_STRING_BYTES),
+            immutable_revision: "v".repeat(MAX_MANIFEST_MODEL_STRING_BYTES),
+            weight_hashes: vec![
+                WorldSourceIdentityHash::from_bytes([3; 32]);
+                MAX_MANIFEST_MODEL_WEIGHT_HASHES
+            ],
+        });
+
+        let encoded = encode_world_opened(&opened).expect("encode maximum model identity");
+        assert_eq!(decode_world_opened(&encoded), Ok(opened.clone()));
+
+        let mut oversized_repository = opened.clone();
+        oversized_repository
+            .manifest
+            .source
+            .model
+            .as_mut()
+            .expect("model")
+            .repository
+            .push('r');
+        assert_eq!(
+            encode_world_opened(&oversized_repository),
+            Err(ProtocolError::LimitExceeded("model string bytes"))
+        );
+
+        let mut oversized_hashes = opened;
+        oversized_hashes
+            .manifest
+            .source
+            .model
+            .as_mut()
+            .expect("model")
+            .weight_hashes
+            .push(WorldSourceIdentityHash::from_bytes([4; 32]));
+        assert_eq!(
+            encode_world_opened(&oversized_hashes),
+            Err(ProtocolError::LimitExceeded("model hash count"))
         );
     }
 
