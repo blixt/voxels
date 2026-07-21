@@ -19,6 +19,13 @@ struct LocalLightUniform {
 @group(1) @binding(1) var opaque_scene_sampler: sampler;
 @group(2) @binding(0) var filtered_spatial_ao: texture_2d<f32>;
 
+struct CutTransitionUniform {
+  // x is normalized phase; y is 0 stable, 1 outgoing, or 2 incoming.
+  phase_role: vec4<f32>,
+};
+
+@group(3) @binding(0) var<uniform> cut_transition: CutTransitionUniform;
+
 override MATERIAL_DETAIL: u32 = 1u;
 
 struct VertexOut {
@@ -453,6 +460,31 @@ fn hash31(position: vec3<f32>) -> f32 {
   return fract(sin(value) * 43758.5453);
 }
 
+fn cut_transition_visible(position: vec2<f32>) -> bool {
+  let role = u32(round(cut_transition.phase_role.y));
+  if role == 0u {
+    return true;
+  }
+  let x = u32(max(floor(position.x), 0.0)) & 3u;
+  let y = u32(max(floor(position.y), 0.0)) & 3u;
+  let bayer = array<u32, 16>(
+    0u, 8u, 2u, 10u,
+    12u, 4u, 14u, 6u,
+    3u, 11u, 1u, 9u,
+    15u, 7u, 13u, 5u,
+  );
+  let threshold = (f32(bayer[x + y * 4u]) + 0.5) / 16.0;
+  let incoming = threshold < clamp(cut_transition.phase_role.x, 0.0, 1.0);
+  return select(!incoming, incoming, role == 2u);
+}
+
+@fragment
+fn fs_depth_transition(input: VertexOut) {
+  if !cut_transition_visible(input.position.xy) {
+    discard;
+  }
+}
+
 fn cloud_surface_weather(world: vec3<f32>) -> vec2<f32> {
   let coverage_control = clamp(frame.fog_exposure.z, 0.0, 1.0);
   if coverage_control < 0.08 {
@@ -748,6 +780,10 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let continuous_uv = surface_uv(input.world, input.normal) * material_scale;
   let detail_uv_dx = dpdx(continuous_uv);
   let detail_uv_dy = dpdy(continuous_uv);
+  // Keep derivatives in uniform flow, then apply the complementary old/new pixel ownership mask.
+  if !cut_transition_visible(input.position.xy) {
+    discard;
+  }
   if distance_to_camera >= 144.0 {
     let distant_radiance = distant_surface_radiance(input, material, sun);
     return vec4<f32>(

@@ -220,7 +220,7 @@ pub fn surface_patch_transition_is_candidate(
 /// construction then performs only constant-time membership checks instead of repeating ancestor
 /// walks for every patch. Transition candidates are geometric adjacencies only: the renderer must
 /// prove and install their complete connector geometry before suppressing either source edge.
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SurfacePatchSelection {
     patches: HashSet<SurfacePatchId>,
     transition_candidates: HashSet<(SurfacePatchId, u8)>,

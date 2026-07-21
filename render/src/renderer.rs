@@ -67,10 +67,9 @@ const GPU_FACE_SHIFT: u32 = 16;
 const GPU_FACE_MASK: u32 = 0b111 << GPU_FACE_SHIFT;
 const CANONICAL_RASTER_COVERAGE_FLAG: u32 = 1 << 23;
 const SURFACE_MACRO_NORMAL_FLAG: u32 = 1 << 24;
-// Surface quads retain their 24-byte GPU layout. Sixteen horizon bits occupy otherwise unused
-// material and AO bits: eight cardinal 2-bit angles (own + parent LOD). Keeping the parent profile
-// lets the shader use the same geomorph band as macro normals instead of popping lighting at a
-// surface-ring handoff.
+// Sixteen horizon bits occupy otherwise unused material and AO bits: eight cardinal 2-bit angles
+// (own + parent LOD). Keeping the parent profile lets the shader use the same geomorph band as
+// macro normals instead of popping lighting at a surface-ring handoff.
 const SURFACE_HORIZON_MATERIAL_LOW_SHIFT: u32 = 19;
 const SURFACE_HORIZON_MATERIAL_HIGH_SHIFT: u32 = 30;
 const SURFACE_HORIZON_AO_SHIFT: u32 = 25;
@@ -80,7 +79,8 @@ const SURFACE_HORIZON_AO_SHIFT: u32 = 25;
 // adjacent LOD sampling phases.
 const SURFACE_MACRO_SLOPE_SCALE: f32 = 0.40;
 const SURFACE_MACRO_SLOPE_MAX: f32 = 0.5;
-const LOD_TRANSITION_MESH_KEY: MeshKey = (u8::MAX, 0, 0, 0);
+const LOD_TRANSITION_MESH_KEYS: [MeshKey; 2] = [(u8::MAX, 0, 0, 0), (u8::MAX, 1, 0, 0)];
+const CUT_TRANSITION_SECONDS: f32 = 0.24;
 const LOD_PLAN_REBUILD_FOCUS: u32 = 1;
 const LOD_PLAN_REBUILD_CANONICAL_COLUMNS: u32 = 1 << 1;
 const LOD_PLAN_REBUILD_CANONICAL_PROFILE: u32 = 1 << 2;
@@ -314,6 +314,15 @@ struct GpuQuad {
     morph_heights: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuCutTransition {
+    /// x is the normalized transition phase; y is 0 stable, 1 outgoing, or 2 incoming.
+    phase_role: [f32; 4],
+}
+
+const _: () = assert!(size_of::<GpuCutTransition>() == 16);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SurfaceCell {
     height: i32,
@@ -380,22 +389,42 @@ fn pack_surface_horizon_ao(macro_normal: u32, horizon_profile: u16) -> u32 {
     macro_normal | ((u32::from(horizon_profile) >> 9) << SURFACE_HORIZON_AO_SHIFT)
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct LodDrawPlan {
     patches: SurfacePatchSelection,
     canonical_columns: HashSet<(i32, i32)>,
+    canonical_chunks: HashSet<(i32, i32, i32)>,
     enclosed_view_chunks: HashSet<(i32, i32, i32)>,
     exact_transition_edges: HashSet<(SurfacePatchId, u8)>,
     incomplete_transition_edges: u32,
+    transition_mesh_key: Option<MeshKey>,
+}
+
+#[derive(Clone, Debug)]
+struct CutTransition {
+    from: LodDrawPlan,
+    from_focus: Option<GeometricLodFocus>,
+    started_at: f32,
 }
 
 impl LodDrawPlan {
+    fn has_geometry(&self) -> bool {
+        self.patches.owned_patches().next().is_some()
+            || !self.canonical_columns.is_empty()
+            || !self.canonical_chunks.is_empty()
+            || !self.enclosed_view_chunks.is_empty()
+    }
+
     fn owns_patch(&self, patch: SurfacePatchId) -> bool {
         self.patches.owns(patch)
     }
 
     fn owns_canonical_column(&self, chunk_x: i32, chunk_z: i32) -> bool {
         self.canonical_columns.contains(&(chunk_x, chunk_z))
+    }
+
+    fn owns_canonical_chunk(&self, key: &MeshKey) -> bool {
+        key.0 == 0 && self.canonical_chunks.contains(&(key.1, key.2, key.3))
     }
 
     fn owns_enclosed_view_chunk(&self, key: &MeshKey) -> bool {
@@ -581,6 +610,13 @@ struct DrawList {
     fingerprint: u64,
     tested_slices: u32,
     selected_slices: u32,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct CutDrawLists {
+    stable: DrawList,
+    outgoing: DrawList,
+    incoming: DrawList,
 }
 
 #[derive(Debug)]
@@ -1069,6 +1105,7 @@ pub struct Renderer {
     config: SurfaceConfiguration,
     sky_pipeline: RenderPipeline,
     depth_prepass_fast_pipeline: RenderPipeline,
+    depth_prepass_transition_pipeline: RenderPipeline,
     voxel_pipeline: RenderPipeline,
     voxel_flat_pipeline: RenderPipeline,
     voxel_ambient_occlusion_pipeline: RenderPipeline,
@@ -1083,6 +1120,8 @@ pub struct Renderer {
     shadow_direction: ShadowDirectionTracker,
     frame_buffer: Buffer,
     frame_bind_group: BindGroup,
+    cut_transition_buffers: [Buffer; 3],
+    cut_transition_bind_groups: [BindGroup; 3],
     local_light_buffer: Buffer,
     material_detail: MaterialDetailGpu,
     chunks: BTreeMap<MeshKey, ChunkMesh>,
@@ -1098,6 +1137,7 @@ pub struct Renderer {
     lod_draw_plan_focus: Option<GeometricLodFocus>,
     lod_draw_plan_revision: u64,
     lod_draw_plan_dirty_reasons: u32,
+    cut_transition: Option<CutTransition>,
     chunk_activations: ChunkActivations,
     local_light_candidates: BTreeMap<MeshKey, Vec<GpuLocalLight>>,
     arena: ArenaAllocator,
@@ -1642,6 +1682,39 @@ impl Renderer {
             SCENE_FORMAT,
             DEPTH_FORMAT,
         );
+        let cut_transition_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("complete cut transition layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let cut_transition_buffers = std::array::from_fn(|role| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("complete cut transition uniform"),
+                contents: bytemuck::bytes_of(&GpuCutTransition {
+                    phase_role: [1.0, role as f32, 0.0, 0.0],
+                }),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            })
+        });
+        let cut_transition_bind_groups = std::array::from_fn(|role| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("complete cut transition bind group"),
+                layout: &cut_transition_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: cut_transition_buffers[role].as_entire_binding(),
+                }],
+            })
+        });
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sky pipeline layout"),
             bind_group_layouts: &[Some(&frame_layout)],
@@ -1654,6 +1727,18 @@ impl Renderer {
                     Some(&frame_layout),
                     None,
                     Some(ambient_occlusion_gpu.sample_layout()),
+                    Some(&cut_transition_layout),
+                ],
+                immediate_size: 0,
+            });
+        let cut_transition_depth_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("complete cut transition depth layout"),
+                bind_group_layouts: &[
+                    Some(&frame_layout),
+                    None,
+                    None,
+                    Some(&cut_transition_layout),
                 ],
                 immediate_size: 0,
             });
@@ -1726,6 +1811,12 @@ impl Renderer {
             &device,
             "spatial AO depth pipeline",
             &sky_pipeline_layout,
+            &voxel_shader,
+        );
+        let depth_prepass_transition_pipeline = transition_depth_pipeline(
+            &device,
+            "complete cut transition depth pipeline",
+            &cut_transition_depth_layout,
             &voxel_shader,
         );
         let voxel_pipeline = pipeline(
@@ -1859,6 +1950,7 @@ impl Renderer {
             config,
             sky_pipeline,
             depth_prepass_fast_pipeline,
+            depth_prepass_transition_pipeline,
             voxel_pipeline,
             voxel_flat_pipeline,
             voxel_ambient_occlusion_pipeline,
@@ -1873,6 +1965,8 @@ impl Renderer {
             shadow_direction,
             frame_buffer,
             frame_bind_group,
+            cut_transition_buffers,
+            cut_transition_bind_groups,
             local_light_buffer,
             material_detail,
             chunks: BTreeMap::new(),
@@ -1888,6 +1982,7 @@ impl Renderer {
             lod_draw_plan_focus: None,
             lod_draw_plan_revision: u64::MAX,
             lod_draw_plan_dirty_reasons: 0,
+            cut_transition: None,
             chunk_activations: ChunkActivations::default(),
             local_light_candidates: BTreeMap::new(),
             arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuQuad>() as u32),
@@ -2114,18 +2209,30 @@ impl Renderer {
         if replacement == self.canonical_ready_chunks {
             return;
         }
+        let mut changed_chunks = self
+            .canonical_ready_chunks
+            .symmetric_difference(&replacement)
+            .copied()
+            .collect::<HashSet<_>>();
         let mut changed_columns =
             changed_canonical_ready_columns(&self.canonical_ready_chunks, &replacement);
         self.canonical_ready_chunks = replacement;
+        changed_chunks.retain(|&(x, _, z)| {
+            self.lod_draw_plan_focus
+                .is_some_and(|focus| focus.owns_canonical_chunk(x, z))
+        });
         changed_columns.retain(|(x, z)| {
             self.lod_draw_plan_focus
                 .is_some_and(|focus| focus.owns_canonical_chunk(*x, *z))
         });
-        if changed_columns.is_empty() {
+        if changed_columns.is_empty() && changed_chunks.is_empty() {
             return;
         }
         for (key, mesh) in &mut self.chunks {
-            if key.0 == 0 && changed_columns.contains(&(key.1, key.3)) {
+            if key.0 == 0
+                && (changed_columns.contains(&(key.1, key.3))
+                    || changed_chunks.contains(&(key.1, key.2, key.3)))
+            {
                 mesh.lod_ownership_stale = true;
             }
         }
@@ -2808,8 +2915,12 @@ impl Renderer {
             } else {
                 0
             };
-        let canonical_columns =
-            canonical_ready_columns_for_focus(focus, &self.canonical_ready_chunks);
+        let canonical_chunks =
+            canonical_ready_chunks_for_focus(focus, &self.canonical_ready_chunks);
+        let canonical_columns = canonical_chunks
+            .iter()
+            .map(|&(x, _, z)| (x, z))
+            .collect::<HashSet<_>>();
         let mut patches = SurfacePatchSelection::default();
         if let Some(focus) = focus {
             patches.rebuild_with_incomplete_parents(
@@ -2822,11 +2933,12 @@ impl Renderer {
         let profile_changed = rebuild_reason
             & (LOD_PLAN_REBUILD_CANONICAL_PROFILE | LOD_PLAN_REBUILD_SURFACE_PROFILE)
             != 0;
-        let (exact_transition_edges, incomplete_transition_edges) =
+        let (exact_transition_edges, incomplete_transition_edges, transition_mesh_key) =
             if patches == self.lod_draw_plan.patches && !profile_changed {
                 (
                     self.lod_draw_plan.exact_transition_edges.clone(),
                     self.lod_draw_plan.incomplete_transition_edges,
+                    self.lod_draw_plan.transition_mesh_key,
                 )
             } else {
                 let mut transitions = build_lod_transitions(
@@ -2834,13 +2946,22 @@ impl Renderer {
                     &self.surface_patch_profiles,
                     &self.canonical_surface_profiles,
                 );
-                if !self.replace_lod_transition_mesh(&transitions.quads) {
-                    transitions.incomplete_edges = transitions
-                        .incomplete_edges
-                        .saturating_add(transitions.exact_edges.len() as u32);
-                    transitions.exact_edges.clear();
-                }
-                (transitions.exact_edges, transitions.incomplete_edges)
+                let transition_mesh_key = match self.publish_lod_transition_mesh(&transitions.quads)
+                {
+                    Ok(key) => key,
+                    Err(()) => {
+                        transitions.incomplete_edges = transitions
+                            .incomplete_edges
+                            .saturating_add(transitions.exact_edges.len() as u32);
+                        transitions.exact_edges.clear();
+                        None
+                    }
+                };
+                (
+                    transitions.exact_edges,
+                    transitions.incomplete_edges,
+                    transition_mesh_key,
+                )
             };
         for key in changed_surface_lod_ownership_keys(
             &self.lod_draw_plan,
@@ -2864,30 +2985,91 @@ impl Renderer {
                 }
             }
         }
-        self.lod_draw_plan = LodDrawPlan {
+        let changed_canonical_chunks = self
+            .lod_draw_plan
+            .canonical_chunks
+            .symmetric_difference(&canonical_chunks)
+            .copied()
+            .collect::<HashSet<_>>();
+        for &(x, y, z) in &changed_canonical_chunks {
+            if let Some(mesh) = self.chunks.get_mut(&(0, x, y, z)) {
+                mesh.lod_ownership_stale = true;
+            }
+        }
+        let previous_plan_resident = self.lod_draw_plan_is_resident();
+        let next_plan = LodDrawPlan {
             patches,
             canonical_columns,
+            canonical_chunks,
             enclosed_view_chunks: self.enclosed_view_ready_chunks.clone(),
             exact_transition_edges,
             incomplete_transition_edges,
+            transition_mesh_key,
         };
+        if next_plan != self.lod_draw_plan
+            && self.lod_draw_plan.has_geometry()
+            && previous_plan_resident
+            && self.lod_draw_plan_focus.is_some()
+            && focus.is_some()
+        {
+            self.cut_transition = Some(CutTransition {
+                from: self.lod_draw_plan.clone(),
+                from_focus: self.lod_draw_plan_focus,
+                started_at: self.time,
+            });
+        }
+        self.lod_draw_plan = next_plan;
         self.lod_draw_plan_focus = focus;
         self.lod_draw_plan_revision = self.surface_patch_residency_revision;
         self.lod_draw_plan_dirty_reasons = 0;
         rebuild_reason
     }
 
-    fn replace_lod_transition_mesh(&mut self, gpu_quads: &[GpuQuad]) -> bool {
+    fn lod_draw_plan_is_resident(&self) -> bool {
+        let surface_resident = self
+            .lod_draw_plan
+            .patches
+            .owned_patches()
+            .all(|patch| self.surface_patch_residency.contains(&patch));
+        let canonical_resident = self
+            .lod_draw_plan
+            .canonical_chunks
+            .iter()
+            .all(|&(x, y, z)| {
+                self.chunks
+                    .get(&(0, x, y, z))
+                    .is_some_and(ChunkMesh::active)
+            });
+        let enclosed_resident = self
+            .lod_draw_plan
+            .enclosed_view_chunks
+            .iter()
+            .all(|key| self.chunks.contains_key(&(0, key.0, key.1, key.2)));
+        let connector_resident = self
+            .lod_draw_plan
+            .transition_mesh_key
+            .is_none_or(|key| self.chunks.contains_key(&key));
+        surface_resident && canonical_resident && enclosed_resident && connector_resident
+    }
+
+    fn publish_lod_transition_mesh(
+        &mut self,
+        gpu_quads: &[GpuQuad],
+    ) -> Result<Option<MeshKey>, ()> {
         if gpu_quads.is_empty() {
-            self.remove_opaque_mesh(LOD_TRANSITION_MESH_KEY);
-            return true;
+            return Ok(None);
         }
-        if gpu_quads_match_resident(self.chunks.get(&LOD_TRANSITION_MESH_KEY), gpu_quads) {
-            return true;
+        let active = self.lod_draw_plan.transition_mesh_key;
+        let key = if active == Some(LOD_TRANSITION_MESH_KEYS[0]) {
+            LOD_TRANSITION_MESH_KEYS[1]
+        } else {
+            LOD_TRANSITION_MESH_KEYS[0]
+        };
+        if gpu_quads_match_resident(self.chunks.get(&key), gpu_quads) {
+            return Ok(Some(key));
         }
         let Some((bounds_min, bounds_max)) = gpu_quad_bounds(gpu_quads) else {
-            self.remove_opaque_mesh(LOD_TRANSITION_MESH_KEY);
-            return false;
+            return Err(());
         };
         let quad_count = gpu_quads.len() as u32;
         let slice = MeshSlice {
@@ -2900,19 +3082,45 @@ impl Renderer {
             boundary_edge: None,
             render_layer: RenderLayer::Opaque,
         };
-        let Some(prepared) =
-            self.prepare_mesh_sliced(LOD_TRANSITION_MESH_KEY, gpu_quads, vec![slice])
-        else {
-            self.remove_opaque_mesh(LOD_TRANSITION_MESH_KEY);
-            return false;
+        let Some(prepared) = self.prepare_mesh_sliced(key, gpu_quads, vec![slice]) else {
+            return Err(());
         };
-        commit_prepared_mesh(
-            &mut self.arena,
-            &mut self.chunks,
-            LOD_TRANSITION_MESH_KEY,
-            Some(prepared),
-        );
-        true
+        commit_prepared_mesh(&mut self.arena, &mut self.chunks, key, Some(prepared));
+        Ok(Some(key))
+    }
+
+    fn maintain_cut_transition(&mut self, resident_hierarchy: bool) -> Option<f32> {
+        if !resident_hierarchy
+            || self.cut_transition.as_ref().is_some_and(|transition| {
+                self.time - transition.started_at >= CUT_TRANSITION_SECONDS
+            })
+        {
+            self.cut_transition = None;
+        }
+        let phase = self.cut_transition.as_ref().map(|transition| {
+            ((self.time - transition.started_at) / CUT_TRANSITION_SECONDS).clamp(0.0, 1.0)
+        });
+        let outgoing_key = self
+            .cut_transition
+            .as_ref()
+            .and_then(|transition| transition.from.transition_mesh_key);
+        for key in LOD_TRANSITION_MESH_KEYS {
+            if self.lod_draw_plan.transition_mesh_key != Some(key) && outgoing_key != Some(key) {
+                self.remove_opaque_mesh(key);
+            }
+        }
+        if let Some(phase) = phase {
+            for role in 1..=2 {
+                self.queue.write_buffer(
+                    &self.cut_transition_buffers[role],
+                    0,
+                    bytemuck::bytes_of(&GpuCutTransition {
+                        phase_role: [phase, role as f32, 0.0, 0.0],
+                    }),
+                );
+            }
+        }
+        phase
     }
 
     /// Browser-smoke diagnostics for proving that a revised remote surface product reached the
@@ -3171,6 +3379,7 @@ impl Renderer {
         } else {
             0
         };
+        let _ = self.maintain_cut_transition(resident_hierarchy);
         let cpu_lod_plan_ms = (now_ms() - lod_plan_started).max(0.0) as f32;
         // Queue readiness is not a proof that every fixed geometric owner is resident. Canonical
         // columns can still replace atomically and retained surface tiles can be incomplete. Keep
@@ -3186,6 +3395,16 @@ impl Renderer {
                 view_clip,
                 shadow_clips,
             );
+        let cut_draw_lists = self.cut_transition.as_ref().map(|transition| {
+            collect_cut_transition_draw_lists(
+                &self.chunks,
+                &self.lod_draw_plan,
+                geometric_lod_focus,
+                transition,
+                self.options.far_terrain,
+                view_clip,
+            )
+        });
         let water_draw_list = self.collect_draw_list(
             &self.water_chunks,
             |key, chunk| {
@@ -3305,15 +3524,31 @@ impl Renderer {
                 });
                 pass.set_pipeline(&self.depth_prepass_fast_pipeline);
                 pass.set_bind_group(0, &self.frame_bind_group, &[]);
-                for span in &world_draw_list.spans {
-                    let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
-                        continue;
-                    };
-                    let start = u64::from(span.offset);
-                    let end = start + u64::from(span.size);
-                    pass.set_vertex_buffer(0, buffer.slice(start..end));
-                    pass.draw(0..6, 0..span.quad_count);
-                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(1);
+                if let Some(cut_draw_lists) = &cut_draw_lists {
+                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        &cut_draw_lists.stable,
+                    ));
+                    pass.set_pipeline(&self.depth_prepass_transition_pipeline);
+                    pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        &cut_draw_lists.outgoing,
+                    ));
+                    pass.set_bind_group(3, &self.cut_transition_bind_groups[2], &[]);
+                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        &cut_draw_lists.incoming,
+                    ));
+                } else {
+                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        &world_draw_list,
+                    ));
                 }
                 if has_avatars {
                     self.avatar_gpu.draw_depth(&mut pass);
@@ -3373,6 +3608,7 @@ impl Renderer {
             });
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
             pass.set_bind_group(2, self.ambient_occlusion_gpu.sample_bind_group(), &[]);
+            pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
             pass.set_pipeline(if self.options.screen_space_ambient_occlusion {
                 if self.options.material_detail {
                     &self.voxel_ambient_occlusion_pipeline
@@ -3384,14 +3620,14 @@ impl Renderer {
             } else {
                 &self.voxel_flat_pipeline
             });
-            for span in &world_draw_list.spans {
-                let Some(buffer) = self.arena_buffers.get(span.page as usize) else {
-                    continue;
-                };
-                let start = u64::from(span.offset);
-                let end = start + u64::from(span.size);
-                pass.set_vertex_buffer(0, buffer.slice(start..end));
-                pass.draw(0..6, 0..span.quad_count);
+            if let Some(cut_draw_lists) = &cut_draw_lists {
+                draw_spans(&mut pass, &self.arena_buffers, &cut_draw_lists.stable);
+                pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                draw_spans(&mut pass, &self.arena_buffers, &cut_draw_lists.outgoing);
+                pass.set_bind_group(3, &self.cut_transition_bind_groups[2], &[]);
+                draw_spans(&mut pass, &self.arena_buffers, &cut_draw_lists.incoming);
+            } else {
+                draw_spans(&mut pass, &self.arena_buffers, &world_draw_list);
             }
             self.avatar_gpu
                 .draw_scene(&mut pass, self.options.screen_space_ambient_occlusion);
@@ -3573,8 +3809,9 @@ impl Renderer {
                 .saturating_add(world_draw_list.selected_slices)
                 .saturating_add(water_draw_list.selected_slices),
             lod_transition_quads: self
-                .chunks
-                .get(&LOD_TRANSITION_MESH_KEY)
+                .lod_draw_plan
+                .transition_mesh_key
+                .and_then(|key| self.chunks.get(&key))
                 .map_or(0, |mesh| mesh.quad_count),
             lod_incomplete_transition_edges: self.lod_draw_plan.incomplete_transition_edges,
             lod_boundary_centres: geometric_lod_focus
@@ -3741,6 +3978,25 @@ impl Renderer {
     }
 }
 
+fn draw_spans<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    arena_buffers: &'pass [Buffer],
+    draw_list: &DrawList,
+) -> u32 {
+    let mut draws = 0u32;
+    for span in &draw_list.spans {
+        let Some(buffer) = arena_buffers.get(span.page as usize) else {
+            continue;
+        };
+        let start = u64::from(span.offset);
+        let end = start + u64::from(span.size);
+        pass.set_vertex_buffer(0, buffer.slice(start..end));
+        pass.draw(0..6, 0..span.quad_count);
+        draws = draws.saturating_add(1);
+    }
+    draws
+}
+
 /// Builds the camera and three shadow selections in one resident-mesh traversal.
 ///
 /// Geometric LOD ownership is independent of clip volume. Computing it once per opaque slice avoids
@@ -3842,6 +4098,73 @@ fn collect_opaque_draw_lists(
         world_builder.finish(),
         lod_ownership_refreshes,
     )
+}
+
+/// Splits only the camera-visible geometry whose complete-cut ownership changed. Stable clusters
+/// stay on the ordinary single-draw path; outgoing and incoming clusters receive complementary
+/// fragment masks for the short transition interval.
+fn collect_cut_transition_draw_lists(
+    chunks: &BTreeMap<MeshKey, ChunkMesh>,
+    current_plan: &LodDrawPlan,
+    current_focus: Option<GeometricLodFocus>,
+    transition: &CutTransition,
+    far_terrain: bool,
+    view_clip: AabbClipVolume,
+) -> CutDrawLists {
+    let mut stable = DrawListBuilder::default();
+    let mut outgoing = DrawListBuilder::default();
+    let mut incoming = DrawListBuilder::default();
+    for (key, chunk) in chunks {
+        if !chunk.active()
+            || (key.0 != 0 && !far_terrain)
+            || !view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max)
+        {
+            continue;
+        }
+        let mut selected_mesh = [false; 3];
+        for slice in &chunk.slices {
+            stable.test_slice();
+            outgoing.test_slice();
+            incoming.test_slice();
+            if slice.render_layer != RenderLayer::Opaque
+                || !view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
+            {
+                continue;
+            }
+            let was_owned =
+                slice_owned_by_lod(transition.from_focus, Some(&transition.from), key, slice);
+            let is_owned = slice_owned_by_lod(current_focus, Some(current_plan), key, slice);
+            match (was_owned, is_owned) {
+                (true, true) => {
+                    stable.select_slice(chunk, slice);
+                    selected_mesh[0] = true;
+                }
+                (true, false) => {
+                    outgoing.select_slice(chunk, slice);
+                    selected_mesh[1] = true;
+                }
+                (false, true) => {
+                    incoming.select_slice(chunk, slice);
+                    selected_mesh[2] = true;
+                }
+                (false, false) => {}
+            }
+        }
+        if selected_mesh[0] {
+            stable.select_mesh(*key, chunk);
+        }
+        if selected_mesh[1] {
+            outgoing.select_mesh(*key, chunk);
+        }
+        if selected_mesh[2] {
+            incoming.select_mesh(*key, chunk);
+        }
+    }
+    CutDrawLists {
+        stable: stable.finish(),
+        outgoing: outgoing.finish(),
+        incoming: incoming.finish(),
+    }
 }
 
 const FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -4391,16 +4714,17 @@ fn canonical_ready_columns(ready_chunks: &HashSet<(i32, i32, i32)>) -> HashSet<(
     ready_chunks.iter().map(|&(x, _, z)| (x, z)).collect()
 }
 
-fn canonical_ready_columns_for_focus(
+fn canonical_ready_chunks_for_focus(
     focus: Option<GeometricLodFocus>,
     ready_chunks: &HashSet<(i32, i32, i32)>,
-) -> HashSet<(i32, i32)> {
+) -> HashSet<(i32, i32, i32)> {
     let Some(focus) = focus else {
         return HashSet::new();
     };
-    canonical_ready_columns(ready_chunks)
-        .into_iter()
-        .filter(|(x, z)| focus.owns_canonical_chunk(*x, *z))
+    ready_chunks
+        .iter()
+        .copied()
+        .filter(|&(x, _, z)| focus.owns_canonical_chunk(x, z))
         .collect()
 }
 
@@ -4790,19 +5114,17 @@ fn slice_owned_by_lod(
     key: &MeshKey,
     slice: &MeshSlice,
 ) -> bool {
-    let Some(focus) = focus else {
+    if focus.is_none() {
         return key.0 == 0;
-    };
+    }
     let Some(plan) = lod_draw_plan else {
         return false;
     };
-    if *key == LOD_TRANSITION_MESH_KEY {
-        return true;
+    if LOD_TRANSITION_MESH_KEYS.contains(key) {
+        return plan.transition_mesh_key == Some(*key);
     }
     if key.0 == 0 {
-        return plan.owns_enclosed_view_chunk(key)
-            || (focus.owns_canonical_chunk(key.1, key.3)
-                && plan.owns_canonical_column(key.1, key.3));
+        return plan.owns_enclosed_view_chunk(key) || plan.owns_canonical_chunk(key);
     }
     let Some(level) = SurfaceLodLevel::ALL.get(usize::from(key.0 - 1)).copied() else {
         return false;
@@ -5395,6 +5717,41 @@ fn fragmentless_depth_pipeline(
     })
 }
 
+fn transition_depth_pipeline(
+    device: &Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+) -> RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[Some(quad_layout())],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_depth_transition"),
+            targets: &[],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 fn quad_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
         0 => Sint32x3,
@@ -5648,9 +6005,11 @@ mod tests {
         let plan = LodDrawPlan {
             patches: selection,
             canonical_columns: HashSet::new(),
+            canonical_chunks: HashSet::new(),
             enclosed_view_chunks: HashSet::new(),
             exact_transition_edges: transitions.exact_edges,
             incomplete_transition_edges: transitions.incomplete_edges,
+            transition_mesh_key: None,
         };
         assert!(slice_owned_by_lod(Some(focus), Some(&plan), &key, &main));
         assert!(!slice_owned_by_lod(Some(focus), Some(&plan), &key, &edge));
@@ -5706,9 +6065,11 @@ mod tests {
         let incomplete_plan = LodDrawPlan {
             patches: selection,
             canonical_columns: HashSet::new(),
+            canonical_chunks: HashSet::new(),
             enclosed_view_chunks: HashSet::new(),
             exact_transition_edges: incomplete.exact_edges,
             incomplete_transition_edges: incomplete.incomplete_edges,
+            transition_mesh_key: None,
         };
         assert!(
             incomplete_plan.owns_source_edge(coarse, edge),
@@ -5746,9 +6107,11 @@ mod tests {
         let complete_plan = LodDrawPlan {
             patches: complete_selection,
             canonical_columns: HashSet::from([(131, 191)]),
+            canonical_chunks: HashSet::new(),
             enclosed_view_chunks: HashSet::new(),
             exact_transition_edges: complete.exact_edges,
             incomplete_transition_edges: complete.incomplete_edges,
+            transition_mesh_key: None,
         };
         assert!(!complete_plan.owns_source_edge(coarse, edge));
     }
@@ -5788,14 +6151,14 @@ mod tests {
     }
 
     #[test]
-    fn canonical_plan_ignores_ready_columns_outside_exact_geometric_ownership() {
+    fn canonical_plan_preserves_exact_vertical_ownership_inside_geometric_focus() {
         let focus = GeometricLodFocus::snapped(0, 0);
-        let ready = HashSet::from([(0, 0, 0), (100, 0, 100)]);
+        let ready = HashSet::from([(0, 0, 0), (0, 1, 0), (100, 0, 100)]);
         assert_eq!(
-            canonical_ready_columns_for_focus(Some(focus), &ready),
-            HashSet::from([(0, 0)])
+            canonical_ready_chunks_for_focus(Some(focus), &ready),
+            HashSet::from([(0, 0, 0), (0, 1, 0)])
         );
-        assert!(canonical_ready_columns_for_focus(None, &ready).is_empty());
+        assert!(canonical_ready_chunks_for_focus(None, &ready).is_empty());
     }
 
     #[test]
@@ -6729,6 +7092,7 @@ mod tests {
         let resident = HashSet::from([patch_id]);
         let mut plan = LodDrawPlan {
             canonical_columns: HashSet::from([(0, 0)]),
+            canonical_chunks: HashSet::from([(0, 0, 0)]),
             ..Default::default()
         };
         plan.patches.rebuild(focus, &resident, &HashSet::new());
@@ -6738,6 +7102,10 @@ mod tests {
             &(0, 0, 0, 0),
             &test_slice()
         ));
+        assert!(
+            !slice_owned_by_lod(Some(focus), Some(&plan), &(0, 0, 1, 0), &test_slice()),
+            "a ready X/Z column must not claim an unrelated vertical chunk"
+        );
         assert!(!slice_owned_by_lod(
             Some(focus),
             Some(&plan),
