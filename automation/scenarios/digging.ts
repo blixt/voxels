@@ -331,6 +331,55 @@ async function captureStepBackCoverage(
   );
 }
 
+async function captureTunnelHeadingCoverage(
+  page: Page,
+  engine: EngineClient,
+  centreYaw: number,
+): Promise<{
+  readonly samples: number;
+  readonly worst: DiagnosticSkyAnalysis;
+  readonly captures: readonly DiagnosticSkyAnalysis[];
+  readonly worstScreenshot: Buffer;
+}> {
+  const analyses: DiagnosticSkyAnalysis[] = [];
+  let worstScreenshot = await page.screenshot();
+  let worst = await analyzeDiagnosticSky(page, worstScreenshot, {
+    x0: 0.02,
+    x1: 0.98,
+    y0: 0.02,
+    y1: 0.95,
+  });
+  analyses.push(worst);
+  // A 16:9 viewport with the configured 68-degree vertical FOV has roughly 100 degrees of
+  // horizontal coverage. These offsets keep the terminator in the viewport while moving it far
+  // outside the legacy five-ray cluster around the crosshair.
+  for (const yawOffset of [-0.55, -0.35, 0, 0.35, 0.55]) {
+    await engine.setCameraLook(centreYaw + yawOffset, 0);
+    for (let frame = 0; frame < 8; frame += 1) {
+      await engine.wait(32);
+      const screenshot = await page.screenshot();
+      const analysis = await analyzeDiagnosticSky(page, screenshot, {
+        x0: 0.02,
+        x1: 0.98,
+        y0: 0.02,
+        y1: 0.95,
+      });
+      analyses.push(analysis);
+      if (analysis.diagnosticSkyPixels > worst.diagnosticSkyPixels) {
+        worst = analysis;
+        worstScreenshot = screenshot;
+      }
+    }
+  }
+  await engine.setCameraLook(centreYaw, 0);
+  return {
+    samples: analyses.length,
+    worst,
+    captures: analyses,
+    worstScreenshot,
+  };
+}
+
 async function runDigging(context: ScenarioContext, arguments_: readonly string[]) {
   const options = parseOptions(arguments_);
   const world = await startWorldStack(context, {
@@ -448,6 +497,8 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
 
   await engine.setDiagnosticSky([255, 0, 255]);
   const stepBack = await captureStepBackCoverage(page, engine, options.stepBackDistanceMetres);
+  const tunnelYaw = snapshotValue(await engine.snapshot(), "yaw");
+  const headingCoverage = await captureTunnelHeadingCoverage(page, engine, tunnelYaw);
   const enclosedView = await engine.waitForSnapshot(
     (snapshot) => {
       const required = snapshotValue(snapshot, "enclosedViewRequired");
@@ -468,6 +519,12 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
     "Worst tunnel diagnostic coverage",
     "tunnel-worst-coverage.png",
     stepBack.worstScreenshot,
+    "image/png",
+  );
+  await context.artifacts.write(
+    "Worst tunnel heading coverage",
+    "tunnel-worst-heading.png",
+    headingCoverage.worstScreenshot,
     "image/png",
   );
   await engine.setDiagnosticSky(null);
@@ -500,6 +557,8 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
     violations.push("fully enclosed digging produced a frame slower than 30 Hz");
   if (stepBack.worst.diagnosticSkyPixels > 0)
     violations.push("the enclosed tunnel exposed diagnostic sky while stepping backward");
+  if (headingCoverage.worst.diagnosticSkyPixels > 0)
+    violations.push("the enclosed tunnel exposed diagnostic sky while turning within its walls");
   if (undergroundPerformance.frameMs.median > 8.8)
     violations.push("underground rendering did not sustain a 120 Hz median frame interval");
   if (undergroundPerformance.cpuMs.p95 > 8)
@@ -542,6 +601,10 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
         renderable: snapshotValue(enclosedView, "enclosedViewRenderable"),
         owned: snapshotValue(enclosedView, "enclosedViewOwned"),
       },
+    },
+    headingCoverage: {
+      samples: headingCoverage.samples,
+      worst: headingCoverage.worst,
     },
     violations,
   };

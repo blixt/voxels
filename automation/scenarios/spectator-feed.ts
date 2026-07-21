@@ -4,6 +4,7 @@ import path from "node:path";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import { BrowserCapability } from "../lib/browser.ts";
 import { snapshotValue } from "../lib/engine.ts";
+import { analyzeDiagnosticSky } from "../lib/image.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { startWorldStack, type WorldClientRoute } from "../lib/world.ts";
 import { namedPlayerUrl } from "../../web/local-player.ts";
@@ -105,6 +106,7 @@ async function runSpectatorFeed(context: ScenarioContext, arguments_: readonly s
     maximum: Math.PI,
   });
   const noVideo = options.flag("no-video");
+  const validateGroundCoverage = options.flag("ground-coverage");
   const sessionStateOption = options.string("session-state");
   options.assertEmpty();
   if (look !== undefined && Math.abs(look[1]) > 1.5) {
@@ -146,6 +148,14 @@ async function runSpectatorFeed(context: ScenarioContext, arguments_: readonly s
   }
   if (look !== undefined) await viewport.engine.setCameraLook(look[0], look[1]);
 
+  if (validateGroundCoverage) {
+    const pitch = snapshotValue(await viewport.engine.snapshot(), "pitch");
+    if (pitch > -1.45) {
+      throw new Error("--ground-coverage requires a downward --look pitch at or below -1.45");
+    }
+    await viewport.engine.setDiagnosticSky([255, 0, 255]);
+  }
+
   await viewport.screenshot("Spectator feed start", {
     filename: "spectator-feed-start.png",
   });
@@ -157,6 +167,27 @@ async function runSpectatorFeed(context: ScenarioContext, arguments_: readonly s
   await viewport.screenshot("Spectator feed end", {
     filename: "spectator-feed-end.png",
   });
+  const groundCoverageScreenshot = validateGroundCoverage
+    ? await viewport.page.screenshot()
+    : undefined;
+  const groundCoverage =
+    groundCoverageScreenshot === undefined
+      ? undefined
+      : await analyzeDiagnosticSky(viewport.page, groundCoverageScreenshot, {
+          x0: 0.02,
+          x1: 0.98,
+          y0: 0.08,
+          y1: 0.98,
+        });
+  if (groundCoverageScreenshot !== undefined) {
+    await context.artifacts.write(
+      "Aerial diagnostic ground coverage",
+      "spectator-ground-coverage.png",
+      groundCoverageScreenshot,
+      "image/png",
+    );
+  }
+  await viewport.engine.setDiagnosticSky(null);
 
   const restored = await viewport.engine.setSpectator(false);
   const restoredPosition = position(restored);
@@ -170,6 +201,12 @@ async function runSpectatorFeed(context: ScenarioContext, arguments_: readonly s
     await viewport.context.storageState({ path: sessionStatePath });
   }
   browser.assertHealthy();
+
+  if (groundCoverage !== undefined && groundCoverage.diagnosticSkyPixels > 0) {
+    throw new Error(
+      `a downward aerial view exposed ${groundCoverage.diagnosticSkyPixels} diagnostic-sky pixels`,
+    );
+  }
 
   const startPosition = position(spectating);
   const endPosition = position(end);
@@ -194,6 +231,7 @@ async function runSpectatorFeed(context: ScenarioContext, arguments_: readonly s
       endPosition,
       restoredPosition,
       recordedVideo: !noVideo,
+      groundCoverage: groundCoverage ?? null,
       sessionStatePath: sessionStatePath ?? null,
     },
   };
