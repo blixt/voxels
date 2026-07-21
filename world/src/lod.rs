@@ -271,6 +271,15 @@ pub struct SurfaceQuad {
     pub material: Material,
 }
 
+/// A vertical face that is collapsed onto an exact child surface until that surface geomorphs
+/// toward a parent height discontinuity. Keeping this topology explicit prevents a parent step
+/// from opening a transient aperture between child cells that originally shared one height.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SurfaceMorphClosure {
+    pub quad: SurfaceQuad,
+    pub collapsed_height: i32,
+}
+
 /// Conservative half-open voxel bounds derived from actual surface geometry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SurfaceBounds {
@@ -310,6 +319,10 @@ pub struct SurfacePatch {
     /// them with an exact height-matched connector at a geometric LOD boundary.
     pub quad_range: Range<u32>,
     pub edge_ranges: [Range<u32>; 4],
+    /// Morph closures use their own compact stream because they are absent from the exact child
+    /// cut. Ranges follow the same main/edge ownership split as ordinary surface quads.
+    pub morph_closure_range: Range<u32>,
+    pub edge_morph_closure_ranges: [Range<u32>; 4],
     pub bounds: SurfaceBounds,
 }
 
@@ -334,6 +347,7 @@ impl SurfacePatch {
 pub struct SurfaceTileMesh {
     pub coord: SurfaceTileCoord,
     pub quads: Vec<SurfaceQuad>,
+    pub morph_closures: Vec<SurfaceMorphClosure>,
     pub patches: Vec<SurfacePatch>,
     /// View-independent height samples used to keep lighting continuous across streamed tile and
     /// LOD boundaries. `heights` retains the tile's one-cell halo; `parent_heights` covers the
@@ -883,6 +897,8 @@ fn generate_surface_tile_mesh_with_options(
     let [origin_x, origin_z] = coord.voxel_origin();
     let stride = coord.stride_voxels();
     let edge = SURFACE_TILE_EDGE_CELLS;
+    let shading_surface = shading_surface.unwrap_or(surface);
+    let parent_surface = parent_shading_surface.unwrap_or(shading_surface);
     let sample_edge = edge + 2;
     let mut samples = Vec::with_capacity((sample_edge * sample_edge) as usize);
     for sample_z in -1..=edge {
@@ -997,6 +1013,8 @@ fn generate_surface_tile_mesh_with_options(
                 ],
                 quad_range,
                 edge_ranges,
+                morph_closure_range: 0..0,
+                edge_morph_closure_ranges: std::array::from_fn(|_| 0..0),
                 bounds,
             });
         }
@@ -1022,7 +1040,54 @@ fn generate_surface_tile_mesh_with_options(
             });
         }
     }
-    let shading_surface = shading_surface.unwrap_or(surface);
+    let mut morph_closures = Vec::new();
+    if coord.level.next_coarser().is_some() {
+        for patch in &mut patches {
+            let cell_min = [
+                i32::from(patch.cell_bounds[0][0]),
+                i32::from(patch.cell_bounds[0][1]),
+            ];
+            let closure_start = morph_closures.len() as u32;
+            append_patch_morph_closures(
+                &mut morph_closures,
+                None,
+                [origin_x, origin_z],
+                cell_min,
+                stride,
+                &sample,
+                parent_surface,
+            );
+            patch.morph_closure_range = closure_start..morph_closures.len() as u32;
+            patch.edge_morph_closure_ranges = std::array::from_fn(|edge_index| {
+                let closure_start = morph_closures.len() as u32;
+                append_patch_morph_closures(
+                    &mut morph_closures,
+                    Some(SurfacePatchEdge::ALL[edge_index]),
+                    [origin_x, origin_z],
+                    cell_min,
+                    stride,
+                    &sample,
+                    parent_surface,
+                );
+                closure_start..morph_closures.len() as u32
+            });
+            for closure in std::iter::once(&patch.morph_closure_range)
+                .chain(&patch.edge_morph_closure_ranges)
+                .flat_map(|range| range.clone())
+            {
+                if let Some(closure) = morph_closures.get(closure as usize) {
+                    let collapsed_plane = closure.collapsed_height.saturating_add(1);
+                    let static_bottom = closure.quad.origin[1];
+                    let static_top =
+                        static_bottom.saturating_add(i32::from(closure.quad.extent[1]));
+                    patch.bounds.min[1] =
+                        patch.bounds.min[1].min(collapsed_plane.min(static_bottom));
+                    patch.bounds.max[1] =
+                        patch.bounds.max[1].max(collapsed_plane.max(static_top).saturating_add(1));
+                }
+            }
+        }
+    }
     let heights = if std::ptr::eq(shading_surface, surface) {
         samples.iter().map(|sample| sample.0).collect()
     } else {
@@ -1038,7 +1103,6 @@ fn generate_surface_tile_mesh_with_options(
             })
             .collect()
     };
-    let parent_surface = parent_shading_surface.unwrap_or(shading_surface);
     let parent_heights = coord.level.next_coarser().map_or_else(Vec::new, |_| {
         let parent_stride = stride * 2;
         (-1..=(SURFACE_TILE_EDGE_CELLS / 2))
@@ -1070,6 +1134,7 @@ fn generate_surface_tile_mesh_with_options(
     SurfaceTileMesh {
         coord,
         quads,
+        morph_closures,
         patches,
         shading: SurfaceShading {
             heights,
@@ -1145,6 +1210,104 @@ fn append_patch_edge_faces(
             remaining -= i64::from(vertical_extent);
             if remaining > 0 {
                 origin[1] = origin[1].saturating_add(i32::from(vertical_extent));
+            }
+        }
+    }
+}
+
+fn append_patch_morph_closures(
+    closures: &mut Vec<SurfaceMorphClosure>,
+    owned_edge: Option<SurfacePatchEdge>,
+    tile_origin: [i32; 2],
+    patch_cell_min: [i32; 2],
+    stride: i32,
+    sample: &impl Fn(i32, i32) -> (i32, Material),
+    parent_surface: &dyn Fn(i32, i32) -> (i32, Material),
+) {
+    let patch_max_x = patch_cell_min[0] + SURFACE_PATCH_EDGE_CELLS;
+    let patch_max_z = patch_cell_min[1] + SURFACE_PATCH_EDGE_CELLS;
+    let parent_stride = stride.saturating_mul(2);
+    let parent_height = |cell_x: i32, cell_z: i32| {
+        let parent_cell_x = cell_x.div_euclid(2);
+        let parent_cell_z = cell_z.div_euclid(2);
+        parent_surface(
+            offset_clamped(
+                tile_origin[0],
+                parent_cell_x
+                    .saturating_mul(parent_stride)
+                    .saturating_add(parent_stride / 2),
+            ),
+            offset_clamped(
+                tile_origin[1],
+                parent_cell_z
+                    .saturating_mul(parent_stride)
+                    .saturating_add(parent_stride / 2),
+            ),
+        )
+        .0
+    };
+
+    for cell_z in patch_cell_min[1]..patch_max_z {
+        for cell_x in patch_cell_min[0]..patch_max_x {
+            for (dx, dz, boundary_edge, positive_face, negative_face) in [
+                (1, 0, SurfacePatchEdge::PositiveX, FACE_POS_X, FACE_NEG_X),
+                (0, 1, SurfacePatchEdge::PositiveZ, FACE_POS_Z, FACE_NEG_Z),
+            ] {
+                let lies_on_patch_edge = (dx != 0 && cell_x + 1 == patch_max_x)
+                    || (dz != 0 && cell_z + 1 == patch_max_z);
+                if match owned_edge {
+                    None => lies_on_patch_edge,
+                    Some(edge) => !lies_on_patch_edge || edge != boundary_edge,
+                } {
+                    continue;
+                }
+
+                let (child_height, child_material) = sample(cell_x, cell_z);
+                let (neighbor_height, neighbor_material) = sample(cell_x + dx, cell_z + dz);
+                if child_height != neighbor_height {
+                    continue;
+                }
+                let own_parent = parent_height(cell_x, cell_z);
+                let neighbor_parent = parent_height(cell_x + dx, cell_z + dz);
+                if own_parent == neighbor_parent {
+                    continue;
+                }
+                let own_parent_is_higher = own_parent > neighbor_parent;
+                let (lower, upper, face, material) = if own_parent_is_higher {
+                    (own_parent, neighbor_parent, positive_face, child_material)
+                } else {
+                    (
+                        neighbor_parent,
+                        own_parent,
+                        negative_face,
+                        neighbor_material,
+                    )
+                };
+                let (lower, upper) = (lower.min(upper), lower.max(upper));
+                let x = offset_clamped(tile_origin[0], cell_x.saturating_mul(stride));
+                let z = offset_clamped(tile_origin[1], cell_z.saturating_mul(stride));
+                let mut origin = match face {
+                    FACE_POS_X => [offset_clamped(x, stride - 1), lower.saturating_add(1), z],
+                    FACE_NEG_X => [offset_clamped(x, stride), lower.saturating_add(1), z],
+                    FACE_POS_Z => [x, lower.saturating_add(1), offset_clamped(z, stride - 1)],
+                    FACE_NEG_Z => [x, lower.saturating_add(1), offset_clamped(z, stride)],
+                    _ => unreachable!(),
+                };
+                let mut remaining = i64::from(upper) - i64::from(lower);
+                while remaining > 0 {
+                    let vertical_extent = remaining.min(i64::from(u16::MAX)) as u16;
+                    closures.push(SurfaceMorphClosure {
+                        quad: SurfaceQuad {
+                            origin,
+                            face,
+                            extent: [stride as u16, vertical_extent],
+                            material,
+                        },
+                        collapsed_height: child_height,
+                    });
+                    remaining -= i64::from(vertical_extent);
+                    origin[1] = origin[1].saturating_add(i32::from(vertical_extent));
+                }
             }
         }
     }
@@ -2447,6 +2610,39 @@ mod tests {
             assert_eq!(bounds.min[2], origin_z);
             assert_eq!(bounds.max[2], origin_z + coord.voxel_span());
         }
+    }
+
+    #[test]
+    fn flat_child_surface_emits_collapsed_walls_for_parent_height_steps() {
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0);
+        let child = |_x, _z| (10, Material::Grass);
+        let parent = |x, _z| {
+            if x >= 4 {
+                (12, Material::Grass)
+            } else {
+                (10, Material::Grass)
+            }
+        };
+        let tile =
+            generate_surface_tile_mesh_with_features_and_shading(coord, child, child, parent, &[]);
+
+        assert_eq!(tile.morph_closures.len(), 32);
+        assert!(tile.morph_closures.iter().all(|closure| {
+            closure.collapsed_height == 10
+                && closure.quad.face == FACE_NEG_X
+                && closure.quad.origin[0] == 4
+                && closure.quad.origin[1] == 11
+                && closure.quad.extent == [2, 2]
+        }));
+        let mut owned = vec![0_u8; tile.morph_closures.len()];
+        for range in tile.patches.iter().flat_map(|patch| {
+            std::iter::once(&patch.morph_closure_range).chain(&patch.edge_morph_closure_ranges)
+        }) {
+            for index in range.clone() {
+                owned[index as usize] += 1;
+            }
+        }
+        assert!(owned.into_iter().all(|owners| owners == 1));
     }
 
     #[test]

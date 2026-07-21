@@ -46,6 +46,7 @@ const CORNERS = array<vec2<i32>, 4>(
 const STANDARD_STRIP = array<u32, 4>(1u, 2u, 0u, 3u);
 const FLIPPED_STRIP = array<u32, 4>(0u, 1u, 3u, 2u);
 const CONSERVATIVE_EXPANSION_PIXELS: f32 = 0.75;
+const MORPH_CLOSURE_EXTENT_FLAG: u32 = 0x8000u;
 
 fn corner_ao(packed: u32, corner: u32) -> f32 {
   return f32((packed >> (corner * 2u)) & 3u) / 3.0;
@@ -197,12 +198,15 @@ fn quad_world(
   material: u32,
   ao: u32,
   morph_heights: u32,
+  morph_closure: bool,
 ) -> vec3<f32> {
   var world = vec3<f32>(origin + quad_local(face, uv, extent)) * frame.viewport_voxel.z;
   if (ao & 0x01000000u) != 0u {
+    let parent_blend = surface_parent_normal_blend(world, material);
+    let morph_blend = select(parent_blend, 1.0 - parent_blend, morph_closure);
     world.y += surface_morph_delta(morph_heights, uv.y)
       * frame.viewport_voxel.z
-      * surface_parent_normal_blend(world, material);
+      * morph_blend;
   }
   return world;
 }
@@ -271,7 +275,11 @@ fn vs_main(
 ) -> VertexOut {
   let face = (material_face >> 16u) & 7u;
   let material = material_face & 0xfff8ffffu;
-  let extent = vec2<i32>(extent_voxels);
+  let morph_closure = (extent_voxels.x & MORPH_CLOSURE_EXTENT_FLAG) != 0u;
+  let extent = vec2<i32>(vec2<u32>(
+    extent_voxels.x & ~MORPH_CLOSURE_EXTENT_FLAG,
+    extent_voxels.y,
+  ));
   let flip = corner_ao(ao, 0u) + corner_ao(ao, 2u) > corner_ao(ao, 1u) + corner_ao(ao, 3u);
   let corner = select(STANDARD_STRIP[vertex_index], FLIPPED_STRIP[vertex_index], flip);
   let uv = CORNERS[corner];
@@ -284,7 +292,16 @@ fn vs_main(
     case 4u: { normal.z = 1.0; }
     default: { normal.z = -1.0; }
   }
-  let world = quad_world(origin, face, uv, extent, material, ao, morph_heights);
+  let world = quad_world(
+    origin,
+    face,
+    uv,
+    extent,
+    material,
+    ao,
+    morph_heights,
+    morph_closure,
+  );
   let surface_macro_normal = (ao & 0x01000000u) != 0u;
   var terrain_lighting = vec2<f32>(1.0);
   if surface_macro_normal {

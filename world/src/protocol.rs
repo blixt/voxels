@@ -8,17 +8,17 @@ use crate::{
     ChunkCoord, ChunkSnapshot, Material, MeshingHalo, ModelIdentity, SURFACE_HORIZON_CELL_COUNT,
     SURFACE_PARENT_HORIZON_CELL_COUNT, SURFACE_PARENT_SHADING_EDGE_SAMPLES,
     SURFACE_SHADING_EDGE_SAMPLES, SourceDeviceRequirement, SurfaceBounds, SurfaceLodLevel,
-    SurfacePatch, SurfaceQuad, SurfaceRegion, SurfaceShading, SurfaceTileCoord, SurfaceTileMesh,
-    SurfaceTileSnapshot, VOXEL_SIZE_METRES, VoxelCoord, WaterPatch, WaterTileMesh, WorldId,
-    WorldManifest, WorldProductPriority, WorldSourceError, WorldSourceIdentity,
-    WorldSourceIdentityHash, WorldSourceKind, codec,
+    SurfaceMorphClosure, SurfacePatch, SurfaceQuad, SurfaceRegion, SurfaceShading,
+    SurfaceTileCoord, SurfaceTileMesh, SurfaceTileSnapshot, VOXEL_SIZE_METRES, VoxelCoord,
+    WaterPatch, WaterTileMesh, WorldId, WorldManifest, WorldProductPriority, WorldSourceError,
+    WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind, codec,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 28;
+pub const PROTOCOL_VERSION: u16 = 29;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -37,7 +37,7 @@ const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
 const MAX_MANIFEST_MODEL_STRING_BYTES: usize = 4_096;
 const MAX_MANIFEST_MODEL_WEIGHT_HASHES: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
-const SURFACE_SNAPSHOT_VERSION: u16 = 7;
+const SURFACE_SNAPSHOT_VERSION: u16 = 8;
 
 const KIND_OPEN_WORLD: u16 = 1;
 const KIND_WORLD_OPENED: u16 = 2;
@@ -3234,8 +3234,16 @@ fn decode_surface_snapshot(
 fn encode_surface_mesh(output: &mut Vec<u8>, mesh: &SurfaceTileMesh) {
     push_u32(output, mesh.quads.len() as u32);
     push_u16(output, mesh.patches.len() as u16);
-    push_u16(output, 0);
+    push_u16(output, mesh.morph_closures.len() as u16);
     encode_surface_quads(output, mesh.coord, &mesh.quads);
+    encode_surface_quad_iter(
+        output,
+        mesh.coord,
+        mesh.morph_closures.iter().map(|closure| closure.quad),
+    );
+    for closure in &mesh.morph_closures {
+        push_i32(output, closure.collapsed_height);
+    }
     for patch in &mesh.patches {
         output.extend_from_slice(&[
             patch.cell_bounds[0][0],
@@ -3245,6 +3253,10 @@ fn encode_surface_mesh(output: &mut Vec<u8>, mesh: &SurfaceTileMesh) {
         ]);
         encode_range(output, &patch.quad_range);
         for range in &patch.edge_ranges {
+            encode_range(output, range);
+        }
+        encode_range(output, &patch.morph_closure_range);
+        for range in &patch.edge_morph_closure_ranges {
             encode_range(output, range);
         }
         encode_surface_bounds(output, patch.bounds);
@@ -3265,14 +3277,25 @@ fn decode_surface_mesh(
 ) -> Result<SurfaceTileMesh, ProtocolError> {
     let quad_count = cursor.u32()? as usize;
     let patch_count = usize::from(cursor.u16()?);
+    let morph_closure_count = usize::from(cursor.u16()?);
     if quad_count > MAX_SURFACE_QUADS_PER_TILE
+        || morph_closure_count > MAX_SURFACE_QUADS_PER_TILE
         || patch_count == 0
         || patch_count > MAX_SURFACE_PATCHES_PER_TILE
-        || cursor.u16()? != 0
     {
         return Err(ProtocolError::LimitExceeded("surface mesh geometry"));
     }
     let quads = decode_surface_quads(cursor, coord, quad_count)?;
+    let closure_quads = decode_surface_quads(cursor, coord, morph_closure_count)?;
+    let morph_closures = closure_quads
+        .into_iter()
+        .map(|quad| {
+            Ok(SurfaceMorphClosure {
+                quad,
+                collapsed_height: cursor.i32()?,
+            })
+        })
+        .collect::<Result<Vec<_>, ProtocolError>>()?;
     let mut patches = Vec::with_capacity(patch_count);
     for _ in 0..patch_count {
         let cell_bounds = [[cursor.u8()?, cursor.u8()?], [cursor.u8()?, cursor.u8()?]];
@@ -3283,11 +3306,20 @@ fn decode_surface_mesh(
             decode_range(cursor)?,
             decode_range(cursor)?,
         ];
+        let morph_closure_range = decode_range(cursor)?;
+        let edge_morph_closure_ranges = [
+            decode_range(cursor)?,
+            decode_range(cursor)?,
+            decode_range(cursor)?,
+            decode_range(cursor)?,
+        ];
         let bounds = decode_surface_bounds(cursor)?;
         patches.push(SurfacePatch {
             cell_bounds,
             quad_range,
             edge_ranges,
+            morph_closure_range,
+            edge_morph_closure_ranges,
             bounds,
         });
     }
@@ -3310,6 +3342,7 @@ fn decode_surface_mesh(
     let mesh = SurfaceTileMesh {
         coord,
         quads,
+        morph_closures,
         patches,
         shading: SurfaceShading {
             heights,
@@ -3373,6 +3406,14 @@ fn decode_water_mesh(
 }
 
 fn encode_surface_quads(output: &mut Vec<u8>, coord: SurfaceTileCoord, quads: &[SurfaceQuad]) {
+    encode_surface_quad_iter(output, coord, quads.iter().copied());
+}
+
+fn encode_surface_quad_iter(
+    output: &mut Vec<u8>,
+    coord: SurfaceTileCoord,
+    quads: impl IntoIterator<Item = SurfaceQuad>,
+) {
     let tile_origin = coord.voxel_origin();
     let mut previous = [i64::from(tile_origin[0]), 0, i64::from(tile_origin[1])];
     for quad in quads {
@@ -3546,7 +3587,9 @@ fn validate_range(range: &std::ops::Range<u32>, quad_count: usize) -> Result<(),
 fn validate_surface_mesh(mesh: &SurfaceTileMesh) -> Result<(), ProtocolError> {
     let patches_per_edge = crate::SURFACE_PATCHES_PER_TILE_EDGE as usize;
     let expected_patch_count = patches_per_edge * patches_per_edge;
-    if mesh.quads.len() > MAX_SURFACE_QUADS_PER_TILE {
+    if mesh.quads.len() > MAX_SURFACE_QUADS_PER_TILE
+        || mesh.morph_closures.len() > MAX_SURFACE_QUADS_PER_TILE
+    {
         return Err(ProtocolError::LimitExceeded("surface mesh geometry"));
     }
     let expected_parent_heights = if mesh.coord.level.next_coarser().is_some() {
@@ -3589,6 +3632,10 @@ fn validate_surface_mesh(mesh: &SurfaceTileMesh) -> Result<(), ProtocolError> {
         validate_range(&patch.quad_range, mesh.quads.len())?;
         for range in &patch.edge_ranges {
             validate_range(range, mesh.quads.len())?;
+        }
+        validate_range(&patch.morph_closure_range, mesh.morph_closures.len())?;
+        for range in &patch.edge_morph_closure_ranges {
+            validate_range(range, mesh.morph_closures.len())?;
         }
         if (0..3).any(|axis| patch.bounds.min[axis] >= patch.bounds.max[axis]) {
             return Err(ProtocolError::InvalidPayload("invalid surface bounds"));

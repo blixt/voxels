@@ -14,6 +14,7 @@ const CORNERS = array<vec2<i32>, 4>(
   vec2<i32>(0, 1),
 );
 const STANDARD_STRIP = array<u32, 4>(1u, 2u, 0u, 3u);
+const MORPH_CLOSURE_EXTENT_FLAG: u32 = 0x8000u;
 
 fn unpack_signed_i16(value: u32) -> f32 {
   let bits = value & 65535u;
@@ -66,7 +67,11 @@ fn vs_main(
 ) -> @builtin(position) vec4<f32> {
   let face = (material_face >> 16u) & 7u;
   let material = material_face & 0xfff8ffffu;
-  let extent = vec2<i32>(extent_voxels);
+  let morph_closure = (extent_voxels.x & MORPH_CLOSURE_EXTENT_FLAG) != 0u;
+  let extent = vec2<i32>(vec2<u32>(
+    extent_voxels.x & ~MORPH_CLOSURE_EXTENT_FLAG,
+    extent_voxels.y,
+  ));
   let uv = CORNERS[STANDARD_STRIP[vertex_index]];
   var local = vec3<i32>(0);
   switch face {
@@ -78,8 +83,10 @@ fn vs_main(
     default: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 0); }
   }
   var world = vec3<f32>(origin + local) * shadow_frame.camera_voxel.w;
+  let parent_blend = surface_parent_blend(world, material);
+  let morph_blend = select(parent_blend, 1.0 - parent_blend, morph_closure);
   world.y += surface_morph_delta(morph_heights, uv.y)
     * shadow_frame.camera_voxel.w
-    * surface_parent_blend(world, material);
+    * morph_blend;
   return shadow_frame.clip_from_world * vec4<f32>(world, 1.0);
 }

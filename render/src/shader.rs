@@ -397,6 +397,10 @@ mod tests {
         assert!(voxels.contains("vec3<f32>(origin + quad_local(face, uv, extent))"));
         assert!(shadows.contains("vec3<f32>(origin + local)"));
         assert!(shadows.contains("surface_parent_blend(world, material)"));
+        for shader in [voxels, shadows] {
+            assert!(shader.contains("const MORPH_CLOSURE_EXTENT_FLAG: u32 = 0x8000u"));
+            assert!(shader.contains("select(parent_blend, 1.0 - parent_blend, morph_closure)"));
+        }
     }
 
     #[test]

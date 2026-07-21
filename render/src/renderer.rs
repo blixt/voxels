@@ -7,7 +7,10 @@ use crate::environment::{
     DaylightPhase, DebugEnvironmentOverride, InteriorEnvironment, OutdoorEnvironment,
     WorldEnvironmentState, surface_region_label,
 };
-use crate::lod::{GeometricLodFocus, LodOwner, SurfacePatchSelection, incomplete_resident_parents};
+use crate::lod::{
+    GeometricLodFocus, LOD_BOUNDARY_HALF_EXTENTS, LodOwner, SurfacePatchSelection,
+    incomplete_resident_parents,
+};
 use crate::material_detail::MaterialDetailGpu;
 use crate::shadow::{
     AabbClipClassification, AabbClipVolume, CASCADE_COUNT, DirectionalShadowBasis,
@@ -26,9 +29,9 @@ use voxels_core::{CameraState, EnclosureSample, RemoteAvatarPose};
 use voxels_world::protocol::{EditShape, EditVolume};
 use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, Material, MeshedChunk,
-    Quad, RenderLayer, SURFACE_PATCHES_PER_TILE_EDGE, SurfaceBounds, SurfaceLodLevel,
-    SurfacePatchEdge, SurfacePatchId, SurfaceRegion, SurfaceTileCoord, SurfaceTileMesh,
-    VOXEL_SIZE_METRES, WaterTileMesh,
+    Quad, RenderLayer, SURFACE_PATCHES_PER_TILE_EDGE, SurfaceLodLevel, SurfacePatchEdge,
+    SurfacePatchId, SurfaceRegion, SurfaceTileCoord, SurfaceTileMesh, VOXEL_SIZE_METRES,
+    WaterTileMesh,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -73,6 +76,7 @@ const SURFACE_MACRO_NORMAL_FLAG: u32 = 1 << 24;
 const SURFACE_HORIZON_MATERIAL_LOW_SHIFT: u32 = 19;
 const SURFACE_HORIZON_MATERIAL_HIGH_SHIFT: u32 = 30;
 const SURFACE_HORIZON_AO_SHIFT: u32 = 25;
+const MORPH_CLOSURE_EXTENT_FLAG: u16 = 1 << 15;
 // Decimated height samples are not band-limited. Keeping their full derivative makes a one-voxel
 // clipmap snap turn unresolved relief into a false near-horizontal slope (and an almost black
 // valley at low sun angles). A conservative macro cue remains legible while staying stable across
@@ -588,6 +592,7 @@ struct MeshSlice {
     bounds_max: glam::Vec3,
     surface_patch_id: Option<SurfacePatchId>,
     boundary_edge: Option<SurfacePatchEdge>,
+    morph_closure: bool,
     render_layer: RenderLayer,
 }
 
@@ -2510,6 +2515,7 @@ impl Renderer {
                     bounds_max: max,
                     surface_patch_id: None,
                     boundary_edge: None,
+                    morph_closure: false,
                     render_layer: RenderLayer::Opaque,
                 }],
             )?;
@@ -2530,6 +2536,7 @@ impl Renderer {
                     bounds_max: max,
                     surface_patch_id: None,
                     boundary_edge: None,
+                    morph_closure: false,
                     render_layer: RenderLayer::Translucent,
                 }],
             ) else {
@@ -2598,12 +2605,12 @@ impl Renderer {
         let horizon_profiles = surface_horizon_profiles(tile);
         let geometry_morphs = surface_geometry_morphs(tile, &macro_normals);
         let patch_profiles = surface_patch_profiles(tile, &macro_normals, &horizon_profiles);
-        let gpu_quads: Vec<_> = tile
+        let mut gpu_quads: Vec<_> = tile
             .quads
             .iter()
-            .zip(macro_normals)
-            .zip(horizon_profiles)
-            .zip(geometry_morphs)
+            .zip(macro_normals.iter().copied())
+            .zip(horizon_profiles.iter().copied())
+            .zip(geometry_morphs.iter().copied())
             .map(
                 |(((quad, macro_normal), horizon_profile), morph_heights)| GpuQuad {
                     origin: quad.origin,
@@ -2622,6 +2629,12 @@ impl Renderer {
                 },
             )
             .collect();
+        let closure_base = gpu_quads.len() as u32;
+        gpu_quads.extend(surface_morph_closure_gpu_quads(
+            tile,
+            &macro_normals,
+            &horizon_profiles,
+        ));
         let water_gpu_quads: Vec<_> = water
             .quads
             .iter()
@@ -2647,47 +2660,58 @@ impl Renderer {
             return true;
         }
         let quad_bytes = size_of::<GpuQuad>() as u32;
-        let slices: Vec<_> = tile
-            .patches
-            .iter()
-            .filter_map(|patch| {
-                let patch_id = SurfacePatchId::from_tile_cell_min(
-                    coord,
-                    [patch.cell_bounds[0][0], patch.cell_bounds[0][1]],
-                )?;
-                Some(
-                    std::iter::once((patch.quad_range.clone(), patch.bounds, None))
-                        .chain(SurfacePatchEdge::ALL.into_iter().map(|edge| {
-                            let range = patch.edge_ranges[edge.index()].clone();
-                            let bounds = SurfaceBounds::from_quads(
-                                &tile.quads[range.start as usize..range.end as usize],
-                            )
-                            .unwrap_or(patch.bounds);
-                            (range, bounds, Some(edge))
-                        }))
-                        .filter(|(range, _, _)| range.start < range.end)
-                        .map(move |(range, bounds, boundary_edge)| {
-                            let bounds_min = glam::Vec3::from_array(
-                                bounds.min.map(|value| value as f32 * VOXEL_SIZE_METRES),
-                            );
-                            let bounds_max = glam::Vec3::from_array(
-                                bounds.max.map(|value| value as f32 * VOXEL_SIZE_METRES),
-                            );
-                            MeshSlice {
-                                relative_offset: range.start * quad_bytes,
-                                size: (range.end - range.start) * quad_bytes,
-                                quad_count: range.end - range.start,
-                                bounds_min,
-                                bounds_max,
-                                surface_patch_id: Some(patch_id),
-                                boundary_edge,
-                                render_layer: RenderLayer::Opaque,
-                            }
-                        }),
-                )
-            })
-            .flatten()
-            .collect();
+        let mut slices = Vec::new();
+        for patch in &tile.patches {
+            let Some(patch_id) = SurfacePatchId::from_tile_cell_min(
+                coord,
+                [patch.cell_bounds[0][0], patch.cell_bounds[0][1]],
+            ) else {
+                continue;
+            };
+            let bounds_min = glam::Vec3::from_array(
+                patch
+                    .bounds
+                    .min
+                    .map(|value| value as f32 * VOXEL_SIZE_METRES),
+            );
+            let bounds_max = glam::Vec3::from_array(
+                patch
+                    .bounds
+                    .max
+                    .map(|value| value as f32 * VOXEL_SIZE_METRES),
+            );
+            let mut push_slice = |range: std::ops::Range<u32>, boundary_edge, morph_closure| {
+                if range.start < range.end {
+                    slices.push(MeshSlice {
+                        relative_offset: range.start * quad_bytes,
+                        size: (range.end - range.start) * quad_bytes,
+                        quad_count: range.end - range.start,
+                        bounds_min,
+                        bounds_max,
+                        surface_patch_id: Some(patch_id),
+                        boundary_edge,
+                        morph_closure,
+                        render_layer: RenderLayer::Opaque,
+                    });
+                }
+            };
+            push_slice(patch.quad_range.clone(), None, false);
+            for edge in SurfacePatchEdge::ALL {
+                push_slice(patch.edge_ranges[edge.index()].clone(), Some(edge), false);
+            }
+            push_slice(
+                offset_range(&patch.morph_closure_range, closure_base),
+                None,
+                true,
+            );
+            for edge in SurfacePatchEdge::ALL {
+                push_slice(
+                    offset_range(&patch.edge_morph_closure_ranges[edge.index()], closure_base),
+                    Some(edge),
+                    true,
+                );
+            }
+        }
         let water_slices = water
             .patches
             .iter()
@@ -2714,6 +2738,7 @@ impl Renderer {
                     ),
                     surface_patch_id: patch_id,
                     boundary_edge: None,
+                    morph_closure: false,
                     render_layer: RenderLayer::Translucent,
                 }
             })
@@ -3086,6 +3111,7 @@ impl Renderer {
             bounds_max,
             surface_patch_id: None,
             boundary_edge: None,
+            morph_closure: false,
             render_layer: RenderLayer::Opaque,
         };
         let Some(prepared) = self.prepare_mesh_sliced(key, gpu_quads, vec![slice]) else {
@@ -4495,6 +4521,78 @@ fn surface_geometry_morphs(tile: &SurfaceTileMesh, macro_normals: &[u32]) -> Vec
         .collect()
 }
 
+fn surface_morph_closure_gpu_quads(
+    tile: &SurfaceTileMesh,
+    macro_normals: &[u32],
+    horizon_profiles: &[u16],
+) -> Vec<GpuQuad> {
+    let stride = tile.coord.stride_voxels();
+    let attributes = tile
+        .quads
+        .iter()
+        .zip(macro_normals)
+        .zip(horizon_profiles)
+        .filter_map(|((quad, &macro_normal), &horizon_profile)| {
+            (quad.face == 2 && quad.extent == [stride as u16; 2]).then_some((
+                (quad.origin[0], quad.origin[2]),
+                (macro_normal, horizon_profile),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+
+    tile.morph_closures
+        .iter()
+        .map(|closure| {
+            let quad = closure.quad;
+            let preferred_cell = match quad.face {
+                0 => [quad.origin[0].saturating_sub(stride - 1), quad.origin[2]],
+                1 => [quad.origin[0], quad.origin[2]],
+                4 => [quad.origin[0], quad.origin[2].saturating_sub(stride - 1)],
+                5 => [quad.origin[0], quad.origin[2]],
+                _ => unreachable!("morph closures are vertical faces"),
+            };
+            let fallback_cell = match quad.face {
+                0 => [preferred_cell[0].saturating_add(stride), preferred_cell[1]],
+                1 => [preferred_cell[0].saturating_sub(stride), preferred_cell[1]],
+                4 => [preferred_cell[0], preferred_cell[1].saturating_add(stride)],
+                5 => [preferred_cell[0], preferred_cell[1].saturating_sub(stride)],
+                _ => unreachable!(),
+            };
+            let (macro_normal, horizon_profile) = attributes
+                .get(&(preferred_cell[0], preferred_cell[1]))
+                .or_else(|| attributes.get(&(fallback_cell[0], fallback_cell[1])))
+                .copied()
+                .unwrap_or((pack_surface_macro_normals(glam::Vec3::Y, glam::Vec3::Y), 0));
+            let collapsed_plane = closure.collapsed_height.saturating_add(1);
+            let static_bottom = quad.origin[1];
+            let static_top = static_bottom.saturating_add(i32::from(quad.extent[1]));
+            debug_assert_eq!(quad.extent[0] & MORPH_CLOSURE_EXTENT_FLAG, 0);
+            GpuQuad {
+                origin: quad.origin,
+                extent_voxels: [quad.extent[0] | MORPH_CLOSURE_EXTENT_FLAG, quad.extent[1]],
+                material_face: pack_surface_horizon_material(
+                    pack_gpu_material_face(
+                        u32::from(quad.material.id())
+                            | FAR_MATERIAL_FLAG
+                            | (u32::from(tile.coord.level.index()) << SURFACE_LOD_SHIFT),
+                        quad.face,
+                    ),
+                    horizon_profile,
+                ),
+                ao: pack_surface_horizon_ao(macro_normal, horizon_profile),
+                morph_heights: pack_surface_morph_heights(
+                    collapsed_plane.saturating_sub(static_bottom),
+                    collapsed_plane.saturating_sub(static_top),
+                ),
+            }
+        })
+        .collect()
+}
+
+fn offset_range(range: &std::ops::Range<u32>, offset: u32) -> std::ops::Range<u32> {
+    range.start.saturating_add(offset)..range.end.saturating_add(offset)
+}
+
 fn sampled_shading_normal(
     heights: &[i32],
     edge: usize,
@@ -5124,9 +5222,9 @@ fn slice_owned_by_lod(
     key: &MeshKey,
     slice: &MeshSlice,
 ) -> bool {
-    if focus.is_none() {
+    let Some(focus) = focus else {
         return key.0 == 0;
-    }
+    };
     let Some(plan) = lod_draw_plan else {
         return false;
     };
@@ -5145,10 +5243,37 @@ fn slice_owned_by_lod(
     if patch_id.level != level {
         return false;
     }
+    if slice.morph_closure && !surface_patch_intersects_morph_band(focus, patch_id) {
+        return false;
+    }
     slice.boundary_edge.map_or_else(
         || plan.owns_patch(patch_id),
         |edge| plan.owns_source_edge(patch_id, edge),
     )
+}
+
+fn surface_patch_intersects_morph_band(focus: GeometricLodFocus, patch: SurfacePatchId) -> bool {
+    let boundary = usize::from(patch.level.index()) + 1;
+    let Some(&half_extent) = LOD_BOUNDARY_HALF_EXTENTS.get(boundary) else {
+        return false;
+    };
+    let Some([[min_x, min_z], [max_x, max_z]]) = patch.voxel_bounds_xz() else {
+        return false;
+    };
+    let centre = focus.boundary_centres()[boundary];
+    let maximum_axis_delta = [min_x, max_x]
+        .into_iter()
+        .map(|x| (i64::from(x) - i64::from(centre[0])).abs())
+        .chain(
+            [min_z, max_z]
+                .into_iter()
+                .map(|z| (i64::from(z) - i64::from(centre[1])).abs()),
+        )
+        .max()
+        .unwrap_or(0);
+    // Matches the shader's max(3.2m, half_extent * 0.025) band in canonical 10cm voxels.
+    let width = 32_i64.max((i64::from(half_extent) + 39) / 40);
+    maximum_axis_delta >= i64::from(half_extent) - width
 }
 
 fn mesh_casts_directional_shadow(key: &MeshKey) -> bool {
@@ -5911,6 +6036,56 @@ mod tests {
     }
 
     #[test]
+    fn parent_only_steps_are_explicit_quads_collapsed_onto_the_child_surface() {
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0);
+        let child = |_x, _z| (10, Material::Grass);
+        let parent = |x, _z| {
+            if x >= 4 {
+                (12, Material::Grass)
+            } else {
+                (10, Material::Grass)
+            }
+        };
+        let tile = voxels_world::generate_surface_tile_mesh_with_features_and_shading(
+            coord,
+            child,
+            child,
+            parent,
+            &[],
+        );
+        let macro_normals = surface_macro_normals(&tile);
+        let horizons = surface_horizon_profiles(&tile);
+        let gpu = surface_morph_closure_gpu_quads(&tile, &macro_normals, &horizons);
+
+        assert_eq!(gpu.len(), 32);
+        for quad in gpu {
+            assert_ne!(quad.extent_voxels[0] & MORPH_CLOSURE_EXTENT_FLAG, 0);
+            assert_eq!(quad.extent_voxels[0] & !MORPH_CLOSURE_EXTENT_FLAG, 2);
+            assert_eq!(quad.extent_voxels[1], 2);
+            let bottom_delta = (quad.morph_heights as u16) as i16;
+            let top_delta = ((quad.morph_heights >> 16) as u16) as i16;
+            assert_eq!(bottom_delta, 0);
+            assert_eq!(top_delta, -2);
+            assert_eq!(quad.origin[1] + i32::from(bottom_delta), 11);
+            assert_eq!(
+                quad.origin[1] + i32::from(quad.extent_voxels[1]) + i32::from(top_delta),
+                11
+            );
+        }
+    }
+
+    #[test]
+    fn collapsed_parent_step_quads_are_drawn_only_inside_the_morph_band() {
+        let focus = GeometricLodFocus::snapped(0, 0);
+        let inner = SurfacePatchId::new(SurfaceLodLevel::Stride2, 4, 0);
+        let boundary = SurfacePatchId::new(SurfaceLodLevel::Stride2, 14, 0);
+        let outermost = SurfacePatchId::new(SurfaceLodLevel::Stride256, 0, 0);
+        assert!(!surface_patch_intersects_morph_band(focus, inner));
+        assert!(surface_patch_intersects_morph_band(focus, boundary));
+        assert!(!surface_patch_intersects_morph_band(focus, outermost));
+    }
+
+    #[test]
     fn visible_and_shadow_passes_share_exact_lod_boundary_centres() {
         let focus = GeometricLodFocus::snapped(1_614, 294);
         let packed = lod_boundary_centres_uniform(Some(focus));
@@ -6041,6 +6216,7 @@ mod tests {
             bounds_max: glam::Vec3::ONE,
             surface_patch_id: Some(coarse),
             boundary_edge: None,
+            morph_closure: false,
             render_layer: RenderLayer::Opaque,
         };
         let edge = MeshSlice {
@@ -6685,6 +6861,7 @@ mod tests {
             bounds_max: glam::Vec3::splat(10_000.0),
             surface_patch_id: None,
             boundary_edge: None,
+            morph_closure: false,
             render_layer: RenderLayer::Opaque,
         }
     }
@@ -6949,6 +7126,7 @@ mod tests {
             bounds_max,
             surface_patch_id: None,
             boundary_edge: None,
+            morph_closure: false,
             render_layer: RenderLayer::Opaque,
         };
         let surface_slice = MeshSlice {
@@ -6959,6 +7137,7 @@ mod tests {
             bounds_max,
             surface_patch_id: Some(SurfacePatchId::new(SurfaceLodLevel::Stride2, 6, 0)),
             boundary_edge: None,
+            morph_closure: false,
             render_layer: RenderLayer::Opaque,
         };
         let surface_edge_slice = MeshSlice {
