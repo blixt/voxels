@@ -9,7 +9,7 @@ use crate::environment::{
 };
 use crate::lod::{
     GeometricLodFocus, LOD_BOUNDARY_HALF_EXTENTS, LodOwner, SurfacePatchSelection,
-    incomplete_resident_parents, lod_boundary_half_extents_are_valid,
+    SurfacePatchSelectionBuild, incomplete_resident_parents, lod_boundary_half_extents_are_valid,
 };
 use crate::material_detail::MaterialDetailGpu;
 use crate::shadow::{
@@ -92,6 +92,7 @@ const LOD_PLAN_REBUILD_SURFACE_RESIDENCY: u32 = 1 << 3;
 const LOD_PLAN_REBUILD_SURFACE_PROFILE: u32 = 1 << 4;
 const LOD_PLAN_REBUILD_ENCLOSED_VIEW: u32 = 1 << 5;
 const LOD_PLAN_REBUILD_CANONICAL_VOLUME: u32 = 1 << 6;
+const LOD_SELECTION_WORK_ITEMS_PER_FRAME: usize = 1_024;
 const GPU_QUERY_COUNT: u32 = 24;
 const PRECIPITATION_INSTANCE_COUNT: u32 = 48 * 48 * 2;
 const QUAD_VERTEX_COUNT: u32 = 4;
@@ -417,6 +418,12 @@ struct CutTransition {
     from: LodDrawPlan,
     from_focus: Option<GeometricLodFocus>,
     started_at: f32,
+}
+
+struct PendingSurfaceSelection {
+    focus: GeometricLodFocus,
+    canonical_columns: HashSet<(i32, i32)>,
+    build: SurfacePatchSelectionBuild,
 }
 
 impl LodDrawPlan {
@@ -1323,6 +1330,7 @@ pub struct Renderer {
     lod_draw_plan_focus: Option<GeometricLodFocus>,
     lod_draw_plan_revision: u64,
     lod_draw_plan_dirty_reasons: u32,
+    pending_surface_selection: Option<PendingSurfaceSelection>,
     cut_transition: Option<CutTransition>,
     chunk_activations: ChunkActivations,
     local_light_candidates: BTreeMap<MeshKey, Vec<GpuLocalLight>>,
@@ -2230,6 +2238,7 @@ impl Renderer {
             lod_draw_plan_focus: None,
             lod_draw_plan_revision: u64::MAX,
             lod_draw_plan_dirty_reasons: 0,
+            pending_surface_selection: None,
             cut_transition: None,
             chunk_activations: ChunkActivations::default(),
             local_light_candidates: BTreeMap::new(),
@@ -3259,6 +3268,22 @@ impl Renderer {
         self.lod_draw_plan_dirty_reasons |= reason;
     }
 
+    fn update_exact_lod_membership(&mut self, canonical_chunks: HashSet<(i32, i32, i32)>) {
+        for &(x, y, z) in self
+            .lod_draw_plan
+            .canonical_chunks
+            .symmetric_difference(&canonical_chunks)
+        {
+            if let Some(mesh) = self.chunks.get_mut(&(0, x, y, z)) {
+                mesh.lod_ownership_stale = true;
+            }
+        }
+        self.lod_draw_plan.canonical_chunks = canonical_chunks;
+        self.lod_draw_plan
+            .enclosed_view_chunks
+            .clone_from(&self.enclosed_view_ready_chunks);
+    }
+
     fn refresh_lod_draw_plan(&mut self, focus: Option<GeometricLodFocus>) -> u32 {
         if self.lod_draw_plan_focus == focus
             && self.lod_draw_plan_revision == self.surface_patch_residency_revision
@@ -3273,53 +3298,79 @@ impl Renderer {
             };
         let canonical_chunks =
             canonical_ready_chunks_for_focus(focus, &self.canonical_ready_chunks);
-        let surface_hierarchy_reasons = LOD_PLAN_REBUILD_FOCUS
-            | LOD_PLAN_REBUILD_CANONICAL_COLUMNS
-            | LOD_PLAN_REBUILD_CANONICAL_PROFILE
-            | LOD_PLAN_REBUILD_SURFACE_RESIDENCY
-            | LOD_PLAN_REBUILD_SURFACE_PROFILE;
-        if rebuild_reason & surface_hierarchy_reasons == 0 {
-            let changed_canonical_chunks = self
-                .lod_draw_plan
-                .canonical_chunks
-                .symmetric_difference(&canonical_chunks)
-                .copied()
-                .collect::<HashSet<_>>();
-            for &(x, y, z) in &changed_canonical_chunks {
-                if let Some(mesh) = self.chunks.get_mut(&(0, x, y, z)) {
-                    mesh.lod_ownership_stale = true;
-                }
-            }
-            // Exact-volume chunks supplement the unchanged surface cut. Their prior uploaded mesh
-            // remains drawable throughout transactional replacement, so canonical/enclosed-view
-            // membership can switch atomically without exposing the sky. Starting a global cut
-            // transition here would reclassify every visible surface slice for 240 ms after each
-            // sparse tunnel edit even though no surface owner changed. Mutate only these two sets:
-            // cloning the plan would copy the full high-detail surface hierarchy on every edit.
-            self.lod_draw_plan.canonical_chunks = canonical_chunks;
-            self.lod_draw_plan
-                .enclosed_view_chunks
-                .clone_from(&self.enclosed_view_ready_chunks);
-            self.lod_draw_plan_focus = focus;
-            self.lod_draw_plan_revision = self.surface_patch_residency_revision;
-            self.lod_draw_plan_dirty_reasons = 0;
-            return rebuild_reason;
-        }
         let canonical_surface_chunks =
             canonical_ready_chunks_for_focus(focus, &self.canonical_surface_ready_chunks);
         let canonical_columns = canonical_surface_chunks
             .iter()
             .map(|&(x, _, z)| (x, z))
             .collect::<HashSet<_>>();
-        let mut patches = SurfacePatchSelection::default();
-        if let Some(focus) = focus {
-            patches.rebuild_with_incomplete_parents(
-                focus,
-                &self.surface_patch_residency,
-                &canonical_columns,
-                &self.surface_incomplete_parents,
-            );
+        let synchronous_surface_reasons = LOD_PLAN_REBUILD_FOCUS
+            | LOD_PLAN_REBUILD_CANONICAL_PROFILE
+            | LOD_PLAN_REBUILD_SURFACE_RESIDENCY
+            | LOD_PLAN_REBUILD_SURFACE_PROFILE;
+        let canonical_columns_changed = canonical_columns != self.lod_draw_plan.canonical_columns;
+        if rebuild_reason & synchronous_surface_reasons == 0 && !canonical_columns_changed {
+            // Exact-volume chunks supplement the unchanged surface cut. Their prior uploaded mesh
+            // remains drawable throughout transactional replacement, so canonical/enclosed-view
+            // membership can switch atomically without exposing the sky. Starting a global cut
+            // transition here would reclassify every visible surface slice for 240 ms after each
+            // sparse tunnel edit even though no surface owner changed. A canonical-ready update
+            // whose X/Z column set is unchanged belongs here too: vertical chunk readiness cannot
+            // alter the 2D surface cut.
+            self.pending_surface_selection = None;
+            self.update_exact_lod_membership(canonical_chunks);
+            self.lod_draw_plan_focus = focus;
+            self.lod_draw_plan_revision = self.surface_patch_residency_revision;
+            self.lod_draw_plan_dirty_reasons = 0;
+            return rebuild_reason;
         }
+        let patches = if rebuild_reason & synchronous_surface_reasons == 0
+            && self.lod_draw_plan_focus == focus
+            && let Some(focus) = focus
+        {
+            let target_changed = self
+                .pending_surface_selection
+                .as_ref()
+                .is_none_or(|pending| {
+                    pending.focus != focus || pending.canonical_columns != canonical_columns
+                });
+            if target_changed {
+                self.pending_surface_selection = Some(PendingSurfaceSelection {
+                    focus,
+                    canonical_columns: canonical_columns.clone(),
+                    build: SurfacePatchSelectionBuild::new(
+                        focus,
+                        &self.surface_patch_residency,
+                        &canonical_columns,
+                        &self.surface_incomplete_parents,
+                    ),
+                });
+            }
+            let Some(patches) = self
+                .pending_surface_selection
+                .as_mut()
+                .and_then(|pending| pending.build.advance(LOD_SELECTION_WORK_ITEMS_PER_FRAME))
+            else {
+                // Keep presenting the last complete surface cut while its refinement is built.
+                // Exact tunnel/cavern membership is independent and can still advance immediately.
+                self.update_exact_lod_membership(canonical_chunks);
+                return rebuild_reason;
+            };
+            self.pending_surface_selection = None;
+            patches
+        } else {
+            self.pending_surface_selection = None;
+            let mut patches = SurfacePatchSelection::default();
+            if let Some(focus) = focus {
+                patches.rebuild_with_incomplete_parents(
+                    focus,
+                    &self.surface_patch_residency,
+                    &canonical_columns,
+                    &self.surface_incomplete_parents,
+                );
+            }
+            patches
+        };
         let profile_changed = rebuild_reason
             & (LOD_PLAN_REBUILD_CANONICAL_PROFILE | LOD_PLAN_REBUILD_SURFACE_PROFILE)
             != 0;
