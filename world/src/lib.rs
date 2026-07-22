@@ -52,10 +52,11 @@ pub use lod::{
     SURFACE_SHADING_EDGE_SAMPLES, SURFACE_TILE_EDGE_CELLS, SurfaceBounds, SurfaceLodLevel,
     SurfaceMorphClosure, SurfacePatch, SurfacePatchEdge, SurfacePatchId, SurfaceQuad,
     SurfaceShading, SurfaceTileCoord, SurfaceTileMesh, WaterPatch, WaterTileMesh,
-    generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, generate_surface_tile_mesh,
-    generate_surface_tile_mesh_with, generate_surface_tile_mesh_with_features,
-    generate_surface_tile_mesh_with_features_and_shading, generate_water_tile_mesh_with,
-    surface_tiles_affected_by_column, surface_tiles_affected_by_voxel,
+    fallback_surface_wall_material, generate_edited_surface_tile_mesh,
+    generate_edited_water_tile_mesh, generate_surface_tile_mesh, generate_surface_tile_mesh_with,
+    generate_surface_tile_mesh_with_features, generate_surface_tile_mesh_with_features_and_shading,
+    generate_water_tile_mesh_with, surface_tiles_affected_by_column,
+    surface_tiles_affected_by_voxel,
 };
 pub use macro_composer::HeightfieldWorldSource;
 pub use material::{Material, MaterialEmission, RenderLayer};

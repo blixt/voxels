@@ -31,7 +31,7 @@ use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, Material, MeshedChunk,
     Quad, RenderLayer, SURFACE_PATCHES_PER_TILE_EDGE, SurfaceLodLevel, SurfacePatchEdge,
     SurfacePatchId, SurfaceRegion, SurfaceTileCoord, SurfaceTileMesh, VOXEL_SIZE_METRES,
-    WaterTileMesh,
+    WaterTileMesh, fallback_surface_wall_material,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -5713,6 +5713,59 @@ fn build_lod_transitions(
     build
 }
 
+fn for_each_fallback_surface_wall_run(
+    lower_height: i32,
+    upper_height: i32,
+    surface_material: Material,
+    mut emit: impl FnMut(i32, u16, Material),
+) {
+    let first_y = lower_height.saturating_add(1);
+    if first_y > upper_height {
+        return;
+    }
+    // The fallback stratification changes only in the shallow 1.6 m below the surface. Keep a
+    // potentially enormous defensive remainder constant-time, then coalesce the shallow samples.
+    let shallow_first_y = first_y.max(upper_height.saturating_sub(16));
+    let mut emit_split = |mut y: i32, mut length: i64, material: Material| {
+        while length > 0 {
+            let extent = length.min(i64::from(u16::MAX)) as u16;
+            emit(y, extent, material);
+            length -= i64::from(extent);
+            y = y.saturating_add(i32::from(extent));
+        }
+    };
+    let mut run_start = first_y;
+    let mut run_material = fallback_surface_wall_material(
+        surface_material,
+        i64::from(upper_height) - i64::from(run_start),
+    );
+    let mut y = if shallow_first_y > first_y {
+        shallow_first_y
+    } else {
+        run_start.saturating_add(1)
+    };
+    while y <= upper_height {
+        let material = fallback_surface_wall_material(
+            surface_material,
+            i64::from(upper_height) - i64::from(y),
+        );
+        if material != run_material {
+            emit_split(run_start, i64::from(y) - i64::from(run_start), run_material);
+            run_start = y;
+            run_material = material;
+        }
+        if y == i32::MAX {
+            break;
+        }
+        y += 1;
+    }
+    emit_split(
+        run_start,
+        i64::from(upper_height) - i64::from(run_start) + 1,
+        run_material,
+    );
+}
+
 fn append_lod_transition(
     quads: &mut Vec<(GpuQuad, u32)>,
     selection: &SurfacePatchSelection,
@@ -5822,47 +5875,47 @@ fn append_lod_transition(
                 )
             };
             let collapsed_plane = coarse_cell.height.saturating_add(1);
-            let mut remaining = i64::from(upper) - i64::from(lower);
-            let mut y = lower.saturating_add(1);
-            while remaining > 0 {
-                let vertical_extent = remaining.min(i64::from(u16::MAX)) as u16;
-                let origin_voxels = match face {
-                    0 => [boundary[0].saturating_sub(1), y, boundary[1]],
-                    1 => [boundary[0], y, boundary[1]],
-                    4 => [boundary[0], y, boundary[1].saturating_sub(1)],
-                    5 => [boundary[0], y, boundary[1]],
-                    _ => unreachable!(),
-                };
-                let top = y.saturating_add(i32::from(vertical_extent));
-                quads.push((
-                    GpuQuad {
-                        origin: origin_voxels,
-                        extent_voxels: [
-                            fine_stride as u16 | MORPH_CLOSURE_EXTENT_FLAG,
-                            vertical_extent,
-                        ],
-                        material_face: pack_surface_horizon_material(
-                            pack_gpu_material_face(
-                                u32::from(surface.material.id())
-                                    | FAR_MATERIAL_FLAG
-                                    | (u32::from(fine_level.index()) << SURFACE_LOD_SHIFT),
-                                face,
+            for_each_fallback_surface_wall_run(
+                lower,
+                upper,
+                surface.material,
+                |y, vertical_extent, material| {
+                    let origin_voxels = match face {
+                        0 => [boundary[0].saturating_sub(1), y, boundary[1]],
+                        1 => [boundary[0], y, boundary[1]],
+                        4 => [boundary[0], y, boundary[1].saturating_sub(1)],
+                        5 => [boundary[0], y, boundary[1]],
+                        _ => unreachable!(),
+                    };
+                    let top = y.saturating_add(i32::from(vertical_extent));
+                    quads.push((
+                        GpuQuad {
+                            origin: origin_voxels,
+                            extent_voxels: [
+                                fine_stride as u16 | MORPH_CLOSURE_EXTENT_FLAG,
+                                vertical_extent,
+                            ],
+                            material_face: pack_surface_horizon_material(
+                                pack_gpu_material_face(
+                                    u32::from(material.id())
+                                        | FAR_MATERIAL_FLAG
+                                        | (u32::from(fine_level.index()) << SURFACE_LOD_SHIFT),
+                                    face,
+                                ),
+                                fine_cell.horizon_profile,
                             ),
-                            fine_cell.horizon_profile,
+                            ao: pack_surface_horizon_ao(
+                                fine_cell.macro_normal,
+                                fine_cell.horizon_profile,
+                            ),
+                        },
+                        pack_surface_morph_heights(
+                            collapsed_plane.saturating_sub(y),
+                            collapsed_plane.saturating_sub(top),
                         ),
-                        ao: pack_surface_horizon_ao(
-                            fine_cell.macro_normal,
-                            fine_cell.horizon_profile,
-                        ),
-                    },
-                    pack_surface_morph_heights(
-                        collapsed_plane.saturating_sub(y),
-                        collapsed_plane.saturating_sub(top),
-                    ),
-                ));
-                remaining -= i64::from(vertical_extent);
-                y = top;
-            }
+                    ));
+                },
+            );
             continue;
         }
         let (lower, upper, face, surface) = if coarse_cell.height > fine_cell.height {
@@ -5875,8 +5928,6 @@ fn append_lod_transition(
         } else {
             (coarse_cell.height, fine_cell.height, inward_face, fine_cell)
         };
-        let mut remaining = i64::from(upper) - i64::from(lower);
-        let mut y = lower.saturating_add(1);
         let fine_level = SurfaceLodLevel::from_stride_voxels(fine_stride);
         let (encoded_level, transition_normal, transition_horizon, morph_heights) = if let (
             Some(fine_level),
@@ -5908,38 +5959,40 @@ fn append_lod_transition(
                 0,
             )
         };
-        while remaining > 0 {
-            let vertical_extent = remaining.min(i64::from(u16::MAX)) as u16;
-            let origin_voxels = match face {
-                0 => [boundary[0].saturating_sub(1), y, boundary[1]],
-                1 => [boundary[0], y, boundary[1]],
-                4 => [boundary[0], y, boundary[1].saturating_sub(1)],
-                5 => [boundary[0], y, boundary[1]],
-                _ => unreachable!(),
-            };
-            quads.push((
-                GpuQuad {
-                    origin: origin_voxels,
-                    extent_voxels: [fine_stride as u16, vertical_extent],
-                    material_face: pack_surface_horizon_material(
-                        pack_gpu_material_face(
-                            u32::from(surface.material.id())
-                                | FAR_MATERIAL_FLAG
-                                | (u32::from(encoded_level.index()) << SURFACE_LOD_SHIFT),
-                            face,
+        for_each_fallback_surface_wall_run(
+            lower,
+            upper,
+            surface.material,
+            |y, vertical_extent, material| {
+                let origin_voxels = match face {
+                    0 => [boundary[0].saturating_sub(1), y, boundary[1]],
+                    1 => [boundary[0], y, boundary[1]],
+                    4 => [boundary[0], y, boundary[1].saturating_sub(1)],
+                    5 => [boundary[0], y, boundary[1]],
+                    _ => unreachable!(),
+                };
+                quads.push((
+                    GpuQuad {
+                        origin: origin_voxels,
+                        extent_voxels: [fine_stride as u16, vertical_extent],
+                        material_face: pack_surface_horizon_material(
+                            pack_gpu_material_face(
+                                u32::from(material.id())
+                                    | FAR_MATERIAL_FLAG
+                                    | (u32::from(encoded_level.index()) << SURFACE_LOD_SHIFT),
+                                face,
+                            ),
+                            transition_horizon,
                         ),
-                        transition_horizon,
-                    ),
-                    // Between surface levels the connector follows the fine level's parent blend
-                    // and collapses exactly as that shell reaches the coarse height. The canonical
-                    // seam remains exact and static because canonical geometry has no sidecar.
-                    ao: pack_surface_horizon_ao(transition_normal, transition_horizon),
-                },
-                morph_heights,
-            ));
-            remaining -= i64::from(vertical_extent);
-            y = y.saturating_add(i32::from(vertical_extent));
-        }
+                        // Between surface levels the connector follows the fine level's parent blend
+                        // and collapses exactly as that shell reaches the coarse height. The canonical
+                        // seam remains exact and static because canonical geometry has no sidecar.
+                        ao: pack_surface_horizon_ao(transition_normal, transition_horizon),
+                    },
+                    morph_heights,
+                ));
+            },
+        );
     }
     true
 }
@@ -7095,13 +7148,32 @@ mod tests {
             cells: vec![
                 Some(SurfaceCell {
                     height,
-                    material: Material::Grass,
+                    material: Material::Stone,
                     macro_normal: pack_surface_macro_normals(glam::Vec3::Y, glam::Vec3::Y),
                     horizon_profile: 0,
                 });
                 (voxels_world::SURFACE_PATCH_EDGE_CELLS.pow(2)) as usize
             ],
         }
+    }
+
+    #[test]
+    fn lod_connector_fallback_keeps_surface_cover_one_voxel_deep() {
+        let mut runs = Vec::new();
+        for_each_fallback_surface_wall_run(0, 20, Material::Grass, |y, extent, material| {
+            runs.push((y, extent, material));
+        });
+        assert_eq!(
+            runs,
+            [
+                (1, 9, Material::Stone),
+                (10, 10, Material::Dirt),
+                (20, 1, Material::Grass),
+            ]
+        );
+        assert!(runs.iter().all(|(_, extent, material)| {
+            !matches!(material, Material::Grass | Material::Moss | Material::Snow) || *extent == 1
+        }));
     }
 
     fn counts(entries: &[(Material, u64)]) -> [u64; Material::ALL.len()] {
@@ -7489,7 +7561,7 @@ mod tests {
         for local_x in 16..32 {
             canonical_cells[local_x + 31 * CHUNK_EDGE] = Some(SurfaceCell {
                 height: 20,
-                material: Material::Grass,
+                material: Material::Stone,
                 macro_normal: 0xff,
                 horizon_profile: 0,
             });
