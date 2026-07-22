@@ -61,6 +61,13 @@ traffic, and a 25.9 ms worst frame. Its strict whole-corridor surface-ready rati
 moving; that metric requires every desired tile to be current simultaneously, whereas the renderer's
 presented-stride metric measures the terrain actually visible at the camera.
 
+A later 120-second procedural flight verified that this behavior does not decay with distance. The
+camera travelled 15.36 km at 128 m/s. Ten-second generation windows stayed at roughly 4,790 accepted
+completions with zero stale completions; the final window delivered 1.21 times the first window's
+world bytes per second. The surface queue rose during acceleration, then remained in a bounded
+roughly 700-790-tile band instead of growing with distance. Stride 1 was presented for 99.8-100% of
+samples in the final nine complete windows; isolated coarser samples recovered within 87.1 ms.
+
 The retained four-tile batch is the measured balance. One-tile responses consumed the request
 window, made cold spawn 43% slower, and reduced useful flight throughput. Eight-tile responses
 amortized scheduling but produced 74% more flight bytes than four, canceled more large requests,
@@ -79,16 +86,20 @@ per-player CPU consumption under load.
 2. Fine surface levels become velocity-aligned corridors only when their tile-crossing rate exceeds
    the configured useful-completion rate. Longitudinal lead is unchanged; only cross-track work is
    reduced. Ordinary running and a stopped camera retain the complete square footprint.
-3. Direction, focus, and corridor changes cancel batches only when every item is obsolete. Mixed
-   batches finish, and stale individual results are ignored rather than admitted under a newer
-   revision.
+3. Direction, focus, and corridor changes cancel a batch as soon as any item is obsolete. Useful
+   siblings are requeued under the current focus; obsolete siblings are discarded. This prevents
+   one useful tile from letting three obsolete tiles retain an equal-priority socket slot.
 4. A higher-priority request may preempt stale lower-priority work in the bounded client window.
-   Collision remains the strongest class, then visible exact/surface work, then prefetch.
+   Collision remains the strongest class, followed by visible exact chunks, the current tile at
+   each interactive surface level, visible surface work, replacements, and prefetch.
 5. Canceling a fragmented response emits an explicit VXWP fragment-abort frame. Without it, the
    client retained a partial reassembly slot forever; repeated fast-travel cancellation exhausted
    all 32 slots and disconnected the world socket. VXWP v32 deliberately has no legacy path.
 6. Four surface tiles remain one generation request. Coarser parents remain rendered until their
-   exact replacement cut is ready, preserving holes/seams correctness while the corridor advances.
+   exact replacement cut is ready. The connector builder joins any selected finer level directly,
+   not only the adjacent level, using the child product's embedded immediate-parent height. A
+   30-second diagnostic-sky run covered 3.25 km in 80 captured frames with zero exposed sky pixels,
+   zero ownerless camera samples, and zero incomplete connector edges.
 
 The policy is controlled by the versioned client configuration:
 
@@ -178,11 +189,19 @@ vp run automation -- run network-benchmark --runs=1 --source=procedural-v16 \
 # Explicit server concurrency experiment
 vp run automation -- run network-benchmark --runs=1 --source=procedural-v16 \
   --flight-seconds=15 --flight-only --generation-workers-per-client=7
+
+# Strict moving geometry-coverage gate (fails on one diagnostic-sky pixel)
+vp run automation -- run lod-transition --mode=travel-coverage \
+  --source=procedural-v16 --travel-seconds=30
 ```
 
 The retained mixed-route artifact is
 `target/automation/network-benchmark/2026-07-22T15-48-23-734Z-b074a8c9/report.json`.
 The baseline is
 `target/automation/network-benchmark/2026-07-22T14-30-47-533Z-024e62a8/report.json`.
+The sustained-flight artifact is
+`target/automation/network-benchmark/2026-07-22T19-41-07-699Z-084b6d85/report.json`; the strict
+non-adjacent-connector coverage artifact is
+`target/automation/lod-transition/2026-07-22T19-49-21-064Z-6c9441ce/report.json`.
 Artifacts are intentionally ignored and use isolated temporary worlds; the measurements above are
 recorded here so the design evidence survives artifact cleanup.
