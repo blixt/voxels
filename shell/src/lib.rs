@@ -162,8 +162,15 @@ impl ChunkPortalMask {
                 if voxel_components[seed] != 0 || chunk.get(x, y, z).occludes_ambient() {
                     continue;
                 }
-                let component = u16::try_from(component_faces.len())
-                    .expect("a 32-cubed chunk has fewer than u16::MAX components");
+                let Ok(component) = u16::try_from(component_faces.len()) else {
+                    // A 32-cubed chunk cannot exhaust the label space, but keep malformed future
+                    // chunk dimensions fail-closed: unlabelled air is culled rather than panicking.
+                    return Self {
+                        voxel_components: voxel_components.into(),
+                        component_faces,
+                        component_face_cells,
+                    };
+                };
                 component_faces.push(0);
                 component_face_cells.push([[0; CHUNK_FACE_WORDS]; 6]);
                 voxel_components[seed] = component;
@@ -392,13 +399,18 @@ impl ChunkPortalMask {
                 continue;
             }
             neighboring_components.sort_unstable();
-            let component = neighboring_components.first().copied().unwrap_or_else(|| {
-                let component = u16::try_from(self.component_faces.len())
-                    .expect("a 32-cubed chunk has fewer than u16::MAX components");
+            let component = if let Some(component) = neighboring_components.first().copied() {
+                component
+            } else {
+                let Ok(component) = u16::try_from(self.component_faces.len()) else {
+                    // See `from_chunk`: leave this newly opened region unlabelled if a future
+                    // chunk size ever exceeds the compact component-label representation.
+                    continue;
+                };
                 self.component_faces.push(0);
                 self.component_face_cells.push([[0; CHUNK_FACE_WORDS]; 6]);
                 component
-            });
+            };
             for &merged in neighboring_components.iter().skip(1) {
                 for label in &mut self.voxel_components {
                     if *label == merged {
