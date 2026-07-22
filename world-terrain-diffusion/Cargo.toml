@@ -10,6 +10,7 @@ workspace = true
 
 [lib]
 name = "voxels_world_terrain_diffusion"
+doctest = false
 
 [features]
 default = []
