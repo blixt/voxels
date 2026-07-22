@@ -32,6 +32,10 @@ vp run automation -- run storage-benchmark
 
 # Edit continuity, underground rendering, or tunnel LOD coverage
 vp run automation -- run digging
+
+# Registered forest/valley LOD fidelity, first-view completeness, and 120 Hz cost
+vp run automation -- run lod-fidelity --arena=forest --viewport=1500x1000 --dpr=2
+vp run automation -- run lod-fidelity --arena=valley --viewport=1500x1000 --dpr=2
 ```
 
 `vp run verify` is the complete static and build gate: TypeScript checks, TypeScript tests, host Rust
@@ -53,6 +57,7 @@ behavioral, visual, resource, or transport evidence that the general gate cannot
 | Network comparison  | `vp run automation -- run network-compare before.json after.json`                                       | Only schema-, fixture-, source-, protocol-, link-, repetition-, and environment-equal runs       |
 | Durable world store | `vp run automation -- run storage-benchmark`                                                            | Production planner/SQLite authority, ordered latency, checkpoint, retry, and restart; no sockets |
 | LOD transition      | `vp run automation -- run lod-transition`                                                               | Same-pose real-browser handoff and image evidence                                                |
+| LOD fidelity        | `vp run automation -- run lod-fidelity --arena=forest`                                                  | Registered LOD sweep, asymmetric missing geometry, first-view completeness, and frame/GPU cost   |
 | Watertight LOD      | `vp run automation -- run lod-transition --mode=watertight`                                             | Strict seam/coverage regression path                                                             |
 | Terrain boundary    | `vp run automation -- run lod-transition --mode=boundary-coverage`                                      | Reported vertical boundary pose, sky exposure, and exact browser scale                           |
 | LOD video           | `vp run automation -- run lod-transition --video`                                                       | The same validated traversal captured as raw WebM                                                |
@@ -72,6 +77,20 @@ behavioral, visual, resource, or transport evidence that the general gate cannot
 
 Every scenario writes to `target/automation/<scenario>/<run-id>/`; its
 `target/automation/<scenario>/latest.json` points to the last completed run.
+
+`lod-fidelity` captures the most detailed measured policy first, then compares every cheaper policy
+at three exactly registered headings in both ordinary rendering and diagnostic-magenta geometry
+masks. It reports symmetric silhouette disagreement separately from geometry that exists in the
+reference but disappeared from the candidate. The latter catches a missing tree crown, wall, or
+overhang even when a global similarity score remains high. It then turns more than a full peripheral
+field away and back at each heading, waits for a typed Rust renderer-frame sequence, and requires the
+first presented target view to contain every geometry pixel in the settled view. Aim/edit prefetch
+may remain busy during that check; it is not allowed to change the surface LOD cut.
+
+Use `--arena=forest` for dense skyline features and `--arena=valley` for the terrain case that has
+proved most sensitive to distant LOD boundaries. Production changes to geometric LOD thresholds must
+pass both at the actual target framebuffer. A CSS viewport of `1500x1000` with `--dpr=2` is a
+3000x2000 framebuffer, not a lower-resolution proxy.
 
 The directional renderer profile locks noon and clear weather and follows a straight 8 m/s route for
 the requested duration. The first 30-second epoch is the profile warm-up; every epoch is still
