@@ -870,7 +870,7 @@ impl BotRuntime {
             let mut expected_edit_rejection = false;
             if let Some(pending) = self.pending_edits.remove(&request_id) {
                 self.report.edits_rejected = self.report.edits_rejected.saturating_add(1);
-                if message == "placement target is occupied" {
+                if is_edit_conflict_rejection(&message) {
                     self.report.edit_conflicts = self.report.edit_conflicts.saturating_add(1);
                     expected_edit_rejection = true;
                 } else if is_authority_guard_rejection(&message) {
@@ -1142,6 +1142,10 @@ fn is_authority_guard_rejection(message: &str) -> bool {
     )
 }
 
+fn is_edit_conflict_rejection(message: &str) -> bool {
+    message == "placement volume is occupied or obstructed"
+}
+
 fn position_voxel(position: Vec3) -> VoxelCoord {
     VoxelCoord::new(
         (position.x / VOXEL_SIZE_METRES).floor() as i32,
@@ -1357,6 +1361,16 @@ mod tests {
             assert!(is_authority_guard_rejection(message));
         }
         assert!(!is_authority_guard_rejection(
+            "world generator stopped unexpectedly"
+        ));
+    }
+
+    #[test]
+    fn current_placement_conflicts_are_distinct_from_protocol_failures() {
+        assert!(is_edit_conflict_rejection(
+            "placement volume is occupied or obstructed"
+        ));
+        assert!(!is_edit_conflict_rejection(
             "world generator stopped unexpectedly"
         ));
     }
