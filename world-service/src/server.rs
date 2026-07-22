@@ -1059,16 +1059,21 @@ async fn abort_partial_frame(
     sink: &mut SplitSink<WebSocket, Message>,
     frame: &OutboundFrame,
 ) -> bool {
-    let Some(abort) = partial_frame_abort(frame) else {
-        return true;
+    let abort = match partial_frame_abort(frame) {
+        Ok(Some(abort)) => abort,
+        Ok(None) => return true,
+        Err(_) => return false,
     };
     sink.send(Message::Binary(abort.into())).await.is_ok()
 }
 
-fn partial_frame_abort(frame: &OutboundFrame) -> Option<Vec<u8>> {
+fn partial_frame_abort(
+    frame: &OutboundFrame,
+) -> Result<Option<Vec<u8>>, voxels_world::protocol::ProtocolError> {
     frame
         .fragment_transfer_id
-        .map(|transfer_id| encode_frame_fragment_abort(transfer_id).expect("non-zero transfer id"))
+        .map(encode_frame_fragment_abort)
+        .transpose()
 }
 
 struct PresenceOutboundFrame {
@@ -3274,7 +3279,9 @@ mod tests {
         assert_ne!(first_transfer, second_transfer);
         assert_eq!(reassembler.accept(&first_wire).unwrap(), None);
         assert_eq!(reassembler.accept(&second_wire).unwrap(), None);
-        let abort = partial_frame_abort(&first).expect("fragmented frame abort");
+        let abort = partial_frame_abort(&first)
+            .unwrap()
+            .expect("fragmented frame abort");
         assert_eq!(decode_frame_fragment_abort(&abort).unwrap(), first_transfer);
         assert!(reassembler.abort(decode_frame_fragment_abort(&abort).unwrap()));
         let mut second_reassembled = false;
