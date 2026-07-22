@@ -35,8 +35,8 @@ at DPR 2 (3000x2000 physical pixels):
 
 | Arena / policy       | Worst SSIM | Mask disagreement | Reference geometry missing | Frame p95 | Total GPU p95 |
 | -------------------- | ---------: | ----------------: | -------------------------: | --------: | ------------: |
-| Forest / uniform-125 |   0.999993 |                 0 |                          0 |    8.8 ms |       5.24 ms |
-| Forest / uniform-150 |   1.000000 |                 0 |                          0 |    9.5 ms |       5.90 ms |
+| Forest / uniform-125 |   0.999993 |                 0 |                          0 |    9.4 ms |       5.70 ms |
+| Forest / uniform-150 |   1.000000 |                 0 |                          0 |    9.7 ms |       5.90 ms |
 | Valley / uniform-125 |   0.999076 |          0.000179 |                  0.0000368 |    8.6 ms |       5.83 ms |
 | Valley / uniform-150 |   1.000000 |                 0 |                          0 |    8.7 ms |       5.83 ms |
 
@@ -66,7 +66,7 @@ not post-hoc hole covers: incomplete replacement geometry never becomes authorit
 
 The retained reports are under:
 
-- `target/automation/lod-fidelity/2026-07-22T02-28-16-191Z-c1d7910e/` (forest);
+- `target/automation/lod-fidelity/2026-07-22T02-46-53-441Z-0f4db77d/` (forest, full clean-tree measurement);
 - `target/automation/lod-fidelity/2026-07-22T02-30-13-171Z-d758ccc2/` (valley);
 - `target/automation/lod-transition/2026-07-22T02-04-35-293Z-b4aced18/` (moving handoff);
 - `target/automation/digging/2026-07-22T02-32-16-601Z-1a456018/` (tunnel).
