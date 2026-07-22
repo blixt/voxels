@@ -32,11 +32,12 @@ function maskedFrame(
   return frame;
 }
 
-function vxwpFrame(kind: number, bytes: number, sequence: number): Buffer {
+function vxwpFrame(kind: number, bytes: number, sequence: number, requestId = 0n): Buffer {
   const frame = Buffer.alloc(bytes);
   frame.write("VXWP");
   frame.writeUInt16LE(kind, 6);
-  frame.writeUInt32LE(sequence, 24);
+  frame.writeBigUInt64LE(requestId, 12);
+  if (bytes >= 28) frame.writeUInt32LE(sequence, 24);
   return frame;
 }
 
@@ -152,6 +153,25 @@ describe("network benchmark link", () => {
 
     expect(testInternals.clonedStats(stats).messages["downstream:error"]?.controlErrors).toEqual({
       "world generator is busy": 2,
+    });
+  });
+
+  it("attributes cancellations to the exact world-product request kind", () => {
+    const stats = testInternals.blankStats();
+    const inspector = new testInternals.ConnectionInspector({ current: stats });
+    inspector.path = "/v31/world";
+    const chunks = vxwpFrame(3, 25, 0, 41n);
+    chunks[24] = 2;
+    const surface = vxwpFrame(7, 25, 0, 42n);
+    surface[24] = 3;
+    inspector.onMessage("upstream", 0x2, chunks, chunks.length, 1);
+    inspector.onMessage("upstream", 0x2, surface, surface.length, 1);
+    inspector.onMessage("upstream", 0x2, vxwpFrame(5, 24, 0, 41n), 24, 1);
+    inspector.onMessage("upstream", 0x2, vxwpFrame(5, 24, 0, 42n), 24, 1);
+
+    expect(testInternals.clonedStats(stats).messages["upstream:cancel"]?.cancelTargets).toEqual({
+      chunk_batch: 1,
+      surface_tile_batch: 1,
     });
   });
 

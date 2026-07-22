@@ -17,8 +17,8 @@ import {
 } from "../lib/world.ts";
 import type { WorldSource } from "../lib/world.ts";
 
-const RESULT_SCHEMA_VERSION = 10;
-const FIXTURE_VERSION = 5;
+const RESULT_SCHEMA_VERSION = 11;
+const FIXTURE_VERSION = 6;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
 const SAMPLE_INTERVAL_MS = 16;
@@ -28,6 +28,7 @@ const SHORT_WALK_METRES = 2;
 const STREAMING_WALK_METRES = 35;
 const SPECTATOR_ACCELERATION_SECONDS = 10.5;
 const DEFAULT_FLIGHT_SECONDS = 15;
+const CRUISE_WINDOW_SECONDS = 10;
 const MOVEMENT_PROGRESS_EPSILON_METRES = 0.025;
 const MAX_MOVEMENT_NO_PROGRESS_MS = 150;
 const MAX_STREAMING_POSE_INTERVAL_MS = 50;
@@ -83,6 +84,13 @@ interface ViewportSample {
   readonly canonicalSurfaceCellsResident: number;
   readonly canonicalSurfaceCellsRequired: number;
   readonly surfaceQueued: number;
+  readonly generationQueued: number;
+  readonly generationInFlight: number;
+  readonly acceptedCompletions: number;
+  readonly staleCompletions: number;
+  readonly totalEvictions: number;
+  readonly canceledChunkRequests: number;
+  readonly canceledSurfaceRequests: number;
   readonly bytes: ByteSummary;
 }
 
@@ -155,6 +163,61 @@ function coverage(resident: number, required: number): number {
   return Math.min(Math.max(resident / required, 0), 1);
 }
 
+function canceledRequestFrames(stats: LinkStats, target: string): number {
+  return stats.messages["upstream:cancel"]?.cancelTargets?.[target] ?? 0;
+}
+
+function cruiseWindow(samples: readonly ViewportSample[]) {
+  const first = samples[0];
+  const last = samples.at(-1);
+  if (first === undefined || last === undefined) return null;
+  const durationSeconds = Math.max((last.elapsedMs - first.elapsedMs) / 1_000, 0.001);
+  const distanceMetres = Math.hypot(last.cameraX - first.cameraX, last.cameraZ - first.cameraZ);
+  return {
+    startedMs: rounded(first.elapsedMs),
+    endedMs: rounded(last.elapsedMs),
+    samples: samples.length,
+    distanceMetres: rounded(distanceMetres, 3),
+    meanSpeedMetresPerSecond: rounded(distanceMetres / durationSeconds, 3),
+    strideOnePresentationRatio: ratio(samples, (sample) => sample.presentedLodStrideVoxels === 1),
+    maximumPresentedStrideVoxels: Math.max(
+      0,
+      ...samples.map((sample) => sample.presentedLodStrideVoxels),
+    ),
+    surfaceQueue: numericSummary(samples.map((sample) => sample.surfaceQueued)),
+    surfaceInFlight: numericSummary(samples.map((sample) => sample.surfaceInFlight)),
+    generationQueue: numericSummary(samples.map((sample) => sample.generationQueued)),
+    generationInFlight: numericSummary(samples.map((sample) => sample.generationInFlight)),
+    acceptedCompletions: last.acceptedCompletions - first.acceptedCompletions,
+    staleCompletions: last.staleCompletions - first.staleCompletions,
+    evictions: last.totalEvictions - first.totalEvictions,
+    canceledChunkRequests: last.canceledChunkRequests - first.canceledChunkRequests,
+    canceledSurfaceRequests: last.canceledSurfaceRequests - first.canceledSurfaceRequests,
+    worldDownstreamBytes: last.bytes.worldDownstream - first.bytes.worldDownstream,
+    worldDownstreamBytesPerSecond: rounded(
+      (last.bytes.worldDownstream - first.bytes.worldDownstream) / durationSeconds,
+      3,
+    ),
+  };
+}
+
+function cruiseWindows(
+  samples: readonly ViewportSample[],
+): NonNullable<ReturnType<typeof cruiseWindow>>[] {
+  const first = samples[0];
+  if (first === undefined) return [];
+  const windows = Map.groupBy(samples, (sample) =>
+    Math.floor((sample.elapsedMs - first.elapsedMs) / (CRUISE_WINDOW_SECONDS * 1_000)),
+  );
+  return [...windows.values()].flatMap((window) => {
+    const summary = cruiseWindow(window);
+    if (summary === null || summary.endedMs - summary.startedMs < CRUISE_WINDOW_SECONDS * 500) {
+      return [];
+    }
+    return [summary];
+  });
+}
+
 function cruiseQuality(
   samples: readonly ViewportSample[],
   measurementStartedMs: number,
@@ -193,6 +256,9 @@ function cruiseQuality(
       last.elapsedMs - degradedStartedMs,
     );
   }
+  const windows = cruiseWindows(measured);
+  const firstWindow = windows[0];
+  const lastWindow = windows.at(-1);
   return {
     samples: measured.length,
     durationSeconds: rounded(durationSeconds, 3),
@@ -235,6 +301,33 @@ function cruiseQuality(
     longestDegradedPresentationMs: rounded(longestDegradedPresentationMs),
     surfaceQueue: numericSummary(measured.map((sample) => sample.surfaceQueued)),
     surfaceInFlight: numericSummary(measured.map((sample) => sample.surfaceInFlight)),
+    generationQueue: numericSummary(measured.map((sample) => sample.generationQueued)),
+    generationInFlight: numericSummary(measured.map((sample) => sample.generationInFlight)),
+    cancellations: {
+      chunks: last.canceledChunkRequests - first.canceledChunkRequests,
+      surfaces: last.canceledSurfaceRequests - first.canceledSurfaceRequests,
+    },
+    staleCompletions: last.staleCompletions - first.staleCompletions,
+    acceptedCompletions: last.acceptedCompletions - first.acceptedCompletions,
+    evictions: last.totalEvictions - first.totalEvictions,
+    windows,
+    firstToLastWindow:
+      firstWindow === undefined || lastWindow === undefined
+        ? null
+        : {
+            surfaceQueueMedianDelta:
+              (lastWindow.surfaceQueue.median ?? 0) - (firstWindow.surfaceQueue.median ?? 0),
+            generationQueueMedianDelta:
+              (lastWindow.generationQueue.median ?? 0) - (firstWindow.generationQueue.median ?? 0),
+            worldDownstreamBytesPerSecondRatio:
+              firstWindow.worldDownstreamBytesPerSecond <= 0
+                ? null
+                : rounded(
+                    lastWindow.worldDownstreamBytesPerSecond /
+                      firstWindow.worldDownstreamBytesPerSecond,
+                    4,
+                  ),
+          },
     worldDownstreamBytes: last.bytes.worldDownstream - first.bytes.worldDownstream,
   };
 }
@@ -476,7 +569,8 @@ async function runScenario({
       throw error;
     }
     const elapsedMs = performance.now() - started;
-    const wire = byteSummary(link.snapshot());
+    const linkStats = link.snapshot();
+    const wire = byteSummary(linkStats);
     samples.push({
       elapsedMs,
       cameraX: snapshotValue(current, "cameraX"),
@@ -497,6 +591,13 @@ async function runScenario({
       canonicalSurfaceCellsResident: snapshotValue(current, "canonicalSurfaceCellsResident"),
       canonicalSurfaceCellsRequired: snapshotValue(current, "canonicalSurfaceCellsRequired"),
       surfaceQueued: snapshotValue(current, "surfaceQueued"),
+      generationQueued: snapshotValue(current, "generationQueued"),
+      generationInFlight: snapshotValue(current, "generationInFlight"),
+      acceptedCompletions: snapshotValue(current, "acceptedCompletions"),
+      staleCompletions: snapshotValue(current, "staleCompletions"),
+      totalEvictions: snapshotValue(current, "totalEvictions"),
+      canceledChunkRequests: canceledRequestFrames(linkStats, "chunk_batch"),
+      canceledSurfaceRequests: canceledRequestFrames(linkStats, "surface_tile_batch"),
       bytes: wire,
     });
     const measurementStartedMs = markedMeasurementStartedMs ?? actionFinishedMs;
@@ -573,6 +674,8 @@ async function runScenario({
       0,
     ),
     canceledRequestFrames: stats.messages["upstream:cancel"]?.frames ?? 0,
+    canceledChunkRequestFrames: canceledRequestFrames(stats, "chunk_batch"),
+    canceledSurfaceRequestFrames: canceledRequestFrames(stats, "surface_tile_batch"),
     worldProductPriorityFrames: priorities,
   };
   return {
@@ -1141,6 +1244,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         streamingWalkMetres: STREAMING_WALK_METRES,
         spectatorAccelerationSeconds: SPECTATOR_ACCELERATION_SECONDS,
         spectatorFlightSeconds: flightSeconds,
+        cruiseWindowSeconds: CRUISE_WINDOW_SECONDS,
         movementProgressEpsilonMetres: MOVEMENT_PROGRESS_EPSILON_METRES,
         maximumMovementNoProgressMs: MAX_MOVEMENT_NO_PROGRESS_MS,
         turnRadians: TURN_RADIANS,
