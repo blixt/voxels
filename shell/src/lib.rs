@@ -141,6 +141,27 @@ fn predictive_stream_position(
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn predictive_surface_position(
+    position: glam::Vec3,
+    velocity: glam::Vec3,
+    nominal_lookahead_seconds: f32,
+    maximum_lead_metres: f32,
+    fast_travel_threshold_metres_per_second: f32,
+) -> glam::Vec3 {
+    let horizontal = glam::Vec2::new(velocity.x, velocity.z);
+    if horizontal.length() < fast_travel_threshold_metres_per_second || maximum_lead_metres <= 0.0 {
+        return predictive_stream_position(
+            position,
+            velocity,
+            nominal_lookahead_seconds,
+            maximum_lead_metres,
+        );
+    }
+    let lead = horizontal.normalize_or_zero() * maximum_lead_metres;
+    position + glam::Vec3::new(lead.x, 0.0, lead.y)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn adaptive_surface_cross_radii(
     configured: [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
     minimum: [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
@@ -214,9 +235,10 @@ fn surface_product_priority(
 ) -> voxels_world::WorldProductPriority {
     // The full current ancestor chain is a bounded set of eight tiles. If any intermediate parent
     // waits in prefetch, a fast camera can be forced to display a dramatically coarser ancestor
-    // even though the missing tile is directly under it. Keep lead/background breadth bounded,
-    // but let every current-chain tile preempt obsolete visible work.
-    if focus.current.contains(&coord) {
+    // even though the missing tile is directly under it. The current and predicted ancestor chains
+    // contain at most sixteen tiles together, so both may preempt obsolete breadth without turning
+    // the entire visible corridor into urgent work. Wider background cover stays throttled.
+    if focus.current.contains(&coord) || focus.lead.contains(&coord) {
         voxels_world::WorldProductPriority::ImmediateSurface
     } else if usize::from(coord.level.index()) < interactive_level_count {
         voxels_world::WorldProductPriority::VisibleSurface
@@ -985,9 +1007,9 @@ mod web {
     };
     use crate::{
         ChunkPortalMask, INTERACTIVE_SURFACE_LOD_LEVELS, SurfaceStreamFocus,
-        adaptive_surface_cross_radii, predictive_stream_position, surface_motion_axis,
-        surface_offset_in_coverage, surface_product_priority, surface_tile_in_coverage,
-        world_environment_at,
+        adaptive_surface_cross_radii, predictive_stream_position, predictive_surface_position,
+        surface_motion_axis, surface_offset_in_coverage, surface_product_priority,
+        surface_tile_in_coverage, world_environment_at,
     };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
@@ -2749,6 +2771,14 @@ mod web {
             let current_focus = std::array::from_fn(|index| {
                 world_to_surface_tile(position, SurfaceLodLevel::ALL[index])
             });
+            // Once travel outruns the finest tile budget, use the entire configured overlapping
+            // window as generation lead at every level. A fixed wall-clock prediction can be
+            // shorter than accumulated service latency and request a coarse parent only after the
+            // camera has nearly crossed into it.
+            let fast_travel_threshold_metres_per_second =
+                self.config.surface_fast_travel_full_rate_tiles_per_second
+                    * SurfaceLodLevel::Stride2.tile_span_voxels() as f32
+                    * VOXEL_SIZE_METRES;
             let lead_focus = std::array::from_fn(|index| {
                 let level = SurfaceLodLevel::ALL[index];
                 let radius = longitudinal_radii[index];
@@ -2756,11 +2786,12 @@ mod web {
                     * level.tile_span_voxels() as f32
                     * VOXEL_SIZE_METRES;
                 world_to_surface_tile(
-                    predictive_stream_position(
+                    predictive_surface_position(
                         position,
                         streaming_velocity,
                         self.config.stream_velocity_lookahead_seconds,
                         maximum_lead_metres,
+                        fast_travel_threshold_metres_per_second,
                     ),
                     level,
                 )
@@ -4948,6 +4979,27 @@ mod tests {
     }
 
     #[test]
+    fn fast_travel_uses_the_full_bounded_surface_lead() {
+        let position = glam::Vec3::new(10.0, 7.0, -4.0);
+        let ordinary =
+            predictive_surface_position(position, glam::Vec3::new(8.0, 0.0, 0.0), 1.5, 100.0, 25.6);
+        assert_eq!(ordinary, glam::Vec3::new(22.0, 7.0, -4.0));
+
+        let fast = predictive_surface_position(
+            position,
+            glam::Vec3::new(128.0, 0.0, 0.0),
+            1.5,
+            100.0,
+            25.6,
+        );
+        assert_eq!(fast, glam::Vec3::new(110.0, 7.0, -4.0));
+        assert_eq!(
+            predictive_surface_position(position, glam::Vec3::ZERO, 1.5, 100.0, 25.6,),
+            position
+        );
+    }
+
+    #[test]
     fn fast_travel_surface_coverage_keeps_current_ground_and_forward_lead() {
         let focus = SurfaceStreamFocus {
             current: voxels_world::SurfaceLodLevel::ALL
@@ -4998,7 +5050,7 @@ mod tests {
         );
         assert_eq!(
             surface_product_priority(focus.lead[0], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
-            voxels_world::WorldProductPriority::VisibleSurface
+            voxels_world::WorldProductPriority::ImmediateSurface
         );
         assert_eq!(
             surface_product_priority(focus.current[4], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
@@ -5006,7 +5058,7 @@ mod tests {
         );
         assert_eq!(
             surface_product_priority(focus.lead[4], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
-            voxels_world::WorldProductPriority::Prefetch
+            voxels_world::WorldProductPriority::ImmediateSurface
         );
     }
 
