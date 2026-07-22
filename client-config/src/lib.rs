@@ -806,7 +806,7 @@ mod tests {
                 view_distance_metres: 3_200.0,
                 geometry_lod: GeometryLodConfig {
                     boundary_half_extents_voxels: [
-                        128, 320, 640, 1_280, 2_560, 4_096, 8_192, 16_384,
+                        192, 480, 960, 1_920, 3_840, 6_144, 12_288, 24_576,
                     ],
                 },
                 shadows: ShadowConfig {

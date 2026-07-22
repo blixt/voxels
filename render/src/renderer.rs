@@ -7142,7 +7142,13 @@ mod tests {
     fn collapsed_parent_step_quads_are_drawn_only_inside_the_morph_band() {
         let focus = GeometricLodFocus::snapped(0, 0);
         let inner = SurfacePatchId::new(SurfaceLodLevel::Stride2, 4, 0);
-        let boundary = SurfacePatchId::new(SurfaceLodLevel::Stride2, 18, 0);
+        let boundary = SurfacePatchId::new(
+            SurfaceLodLevel::Stride2,
+            LOD_BOUNDARY_HALF_EXTENTS[1]
+                / SurfacePatchId::new(SurfaceLodLevel::Stride2, 0, 0).voxel_span()
+                - 2,
+            0,
+        );
         let outermost = SurfacePatchId::new(SurfaceLodLevel::Stride256, 0, 0);
         assert!(!surface_patch_intersects_morph_band(focus, inner));
         assert!(surface_patch_intersects_morph_band(focus, boundary));
@@ -7169,10 +7175,12 @@ mod tests {
             );
         }
         assert_eq!(lod_boundary_centres_uniform(None), [[0.0; 4]; 4]);
-        assert_eq!(
-            lod_boundary_half_extents_uniform(Some(focus)),
-            [[12.8, 32.0, 64.0, 128.0], [256.0, 409.6, 819.2, 1_638.4]]
-        );
+        let expected = std::array::from_fn(|group| {
+            std::array::from_fn(|entry| {
+                LOD_BOUNDARY_HALF_EXTENTS[group * 4 + entry] as f32 * VOXEL_SIZE_METRES
+            })
+        });
+        assert_eq!(lod_boundary_half_extents_uniform(Some(focus)), expected);
     }
 
     #[test]

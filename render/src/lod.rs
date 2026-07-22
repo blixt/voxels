@@ -7,7 +7,8 @@ use voxels_world::{CHUNK_EDGE, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId
 
 /// Half extents in canonical 10 cm voxels. Every boundary is a multiple of the patch span on both
 /// sides, so whole patches can change owner without overlap, holes, or fragment clipping.
-pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 8] = [128, 320, 640, 1_280, 2_560, 4_096, 8_192, 16_384];
+pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 8] =
+    [192, 480, 960, 1_920, 3_840, 6_144, 12_288, 24_576];
 // Snap only as coarsely as both adjacent representations require. In particular, the near handoff
 // moves in one 3.2 m chunk rather than a 12.8 m feature cell, cutting its worst visible replacement
 // strip by two thirds while preserving whole-chunk and whole-patch ownership.
@@ -483,7 +484,12 @@ mod tests {
     #[test]
     fn incomplete_child_groups_keep_the_parent_without_overlap() {
         let focus = GeometricLodFocus::snapped(0, 0);
-        let parent = SurfacePatchId::new(SurfaceLodLevel::Stride4, 4, 0);
+        let parent_span = SurfacePatchId::new(SurfaceLodLevel::Stride4, 0, 0).voxel_span();
+        let parent = SurfacePatchId::new(
+            SurfaceLodLevel::Stride4,
+            LOD_BOUNDARY_HALF_EXTENTS[0] / parent_span,
+            0,
+        );
         let children = parent.children().expect("finer children");
         let parent_center = parent.voxel_center_xz().unwrap();
         assert_eq!(
@@ -786,9 +792,15 @@ mod tests {
     #[test]
     fn transitions_are_owned_only_on_resolution_boundaries() {
         let focus = GeometricLodFocus::snapped(0, 0);
+        let canonical_half_extent = LOD_BOUNDARY_HALF_EXTENTS[0];
+        let stride2_patch_span = SurfacePatchId::new(SurfaceLodLevel::Stride2, 0, 0).voxel_span();
         let interior = SurfaceBounds {
-            min: [144, -64, 0],
-            max: [160, 128, 16],
+            min: [canonical_half_extent + stride2_patch_span, -64, 0],
+            max: [
+                canonical_half_extent + stride2_patch_span * 2,
+                128,
+                stride2_patch_span,
+            ],
         };
         assert!(!focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,
@@ -797,8 +809,12 @@ mod tests {
         ));
 
         let canonical_boundary = SurfaceBounds {
-            min: [128, -64, 0],
-            max: [144, 128, 16],
+            min: [canonical_half_extent, -64, 0],
+            max: [
+                canonical_half_extent + stride2_patch_span,
+                128,
+                stride2_patch_span,
+            ],
         };
         assert!(focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,
@@ -812,8 +828,13 @@ mod tests {
         ));
 
         let wrong_level = SurfaceBounds {
-            min: [320, -64, 0],
-            max: [352, 128, 32],
+            min: [LOD_BOUNDARY_HALF_EXTENTS[1], -64, 0],
+            max: [
+                LOD_BOUNDARY_HALF_EXTENTS[1]
+                    + SurfacePatchId::new(SurfaceLodLevel::Stride4, 0, 0).voxel_span(),
+                128,
+                SurfacePatchId::new(SurfaceLodLevel::Stride4, 0, 0).voxel_span(),
+            ],
         };
         assert!(!focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,

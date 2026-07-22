@@ -84,7 +84,7 @@ view_distance_metres = 3200.0
 # Nested half extents in canonical 10 cm voxels. These deliberately grow nonlinearly: retain finer
 # geometry longer through the visually sensitive near field, then spend detail more slowly near the
 # horizon. Every value is aligned to the patch grid of its handoff.
-boundary_half_extents_voxels = [128, 320, 640, 1280, 2560, 4096, 8192, 16384]
+boundary_half_extents_voxels = [192, 480, 960, 1920, 3840, 6144, 12288, 24576]
 
 [rendering.shadows]
 vertical_fov_radians = 1.1868238 # 68 degrees
