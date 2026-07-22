@@ -69,6 +69,37 @@ function spatialDistance(left: Vector3, right: Vector3): number {
   return Math.hypot(left[0] - right[0], left[1] - right[1], left[2] - right[2]);
 }
 
+function summarizePresentedStrides(samples: readonly { readonly presentedStrideVoxels: number }[]) {
+  const strides = samples.map((sample) => sample.presentedStrideVoxels);
+  const sorted = [...strides].sort((left, right) => left - right);
+  const count = strides.length;
+  const histogram = [...new Set(sorted)].map((stride) => ({
+    stride,
+    samples: strides.filter((candidate) => candidate === stride).length,
+  }));
+  return {
+    samples: count,
+    histogram,
+    canonicalFraction: strides.filter((stride) => stride === 1).length / Math.max(count, 1),
+    strideAtMost8Fraction: strides.filter((stride) => stride <= 8).length / Math.max(count, 1),
+    stride128PlusFraction: strides.filter((stride) => stride >= 128).length / Math.max(count, 1),
+    medianStride: sorted[Math.floor(count * 0.5)] ?? 0,
+    p90Stride: sorted[Math.min(Math.floor(count * 0.9), count - 1)] ?? 0,
+    meanLodExponent:
+      strides.reduce((sum, stride) => sum + Math.log2(Math.max(stride, 1)), 0) / Math.max(count, 1),
+  };
+}
+
+function summarizeTravelLodQuality(samples: readonly { readonly presentedStrideVoxels: number }[]) {
+  const third = Math.ceil(samples.length / 3);
+  return {
+    overall: summarizePresentedStrides(samples),
+    early: summarizePresentedStrides(samples.slice(0, third)),
+    middle: summarizePresentedStrides(samples.slice(third, third * 2)),
+    late: summarizePresentedStrides(samples.slice(third * 2)),
+  };
+}
+
 function collectTiming(snapshot: readonly number[], timings: LodTimings): void {
   timings.frameIntervals.push(...frameSamples(snapshot).map((sample) => sample.intervalMs));
   timings.incompleteTransitionEdges.push(snapshotValue(snapshot, "lodIncompleteTransitionEdges"));
@@ -446,13 +477,13 @@ async function compareScreenshots(page: Page, before: Buffer, after: Buffer) {
 }
 
 async function analyzeWatertightTerrain(page: Page, screenshot: Buffer) {
-  // This fixed camera points 21 degrees below the horizon, placing the mathematical horizon well
-  // above the lower half of the viewport. Scan almost all ground pixels rather than the historical
-  // narrow center band so cracks on any LOD-ring edge are observable.
+  // This fixed camera points 21 degrees below the horizon. Keep the region below the tree-lined
+  // silhouette: magenta pockets between distant trunks are legitimate sky, whereas an enclosed
+  // component in this lower ground band is missing terrain coverage.
   return analyzeDiagnosticSky(page, screenshot, {
     x0: 0.02,
     x1: 0.98,
-    y0: 0.46,
+    y0: 0.55,
     y1: 0.98,
   });
 }
@@ -706,7 +737,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     const stoppedImmediateScreenshot = await page.screenshot();
     const stoppedImmediate = await analyzeWatertightTerrain(page, stoppedImmediateScreenshot);
     let settledSamples = 0;
-    const stoppedSettledSnapshot = await engine.waitForSnapshot(
+    await engine.waitForSnapshot(
       (snapshot) => {
         collectTiming(snapshot, timings);
         const settled =
@@ -723,6 +754,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     );
     // Let the short old-cut overlay retire after the canonical cut has stabilized.
     await page.waitForTimeout(250);
+    const stoppedSettledSnapshot = await readSnapshot(engine, timings);
     const stoppedSettledScreenshot = await page.screenshot();
     const stoppedSettled = await analyzeWatertightTerrain(page, stoppedSettledScreenshot);
     await engine.setDiagnosticSky(null);
@@ -786,6 +818,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
           last: samples.at(-1)?.surfaceQueued ?? 0,
           maximum: Math.max(0, ...samples.map((sample) => sample.surfaceQueued)),
         },
+        lodQuality: summarizeTravelLodQuality(samples),
       },
       worst,
       stopped: {
