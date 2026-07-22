@@ -17,8 +17,8 @@ import {
 } from "../lib/world.ts";
 import type { WorldSource } from "../lib/world.ts";
 
-const RESULT_SCHEMA_VERSION = 7;
-const FIXTURE_VERSION = 3;
+const RESULT_SCHEMA_VERSION = 8;
+const FIXTURE_VERSION = 4;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
 const SAMPLE_INTERVAL_MS = 16;
@@ -26,6 +26,8 @@ const READY_STABLE_SAMPLES = 3;
 const SCENARIO_TIMEOUT_MS = 90_000;
 const SHORT_WALK_METRES = 2;
 const STREAMING_WALK_METRES = 35;
+const SPECTATOR_ACCELERATION_SECONDS = 10.5;
+const DEFAULT_FLIGHT_SECONDS = 15;
 const MOVEMENT_PROGRESS_EPSILON_METRES = 0.025;
 const MAX_MOVEMENT_NO_PROGRESS_MS = 150;
 const MAX_STREAMING_POSE_INTERVAL_MS = 50;
@@ -63,6 +65,8 @@ interface ByteSummary {
 
 interface ViewportSample {
   readonly elapsedMs: number;
+  readonly cameraX: number;
+  readonly cameraZ: number;
   readonly signature: string;
   readonly visibleChunks: number;
   readonly quads: number;
@@ -72,6 +76,13 @@ interface ViewportSample {
   readonly stride32Tiles: number;
   readonly stride64Tiles: number;
   readonly allLodsReady: boolean;
+  readonly presentedLodStrideVoxels: number;
+  readonly lodFocusLagVoxels: number;
+  readonly canonicalImmediateResident: number;
+  readonly canonicalImmediateRequired: number;
+  readonly canonicalSurfaceCellsResident: number;
+  readonly canonicalSurfaceCellsRequired: number;
+  readonly surfaceQueued: number;
   readonly bytes: ByteSummary;
 }
 
@@ -131,6 +142,80 @@ function byteSummary(stats: LinkStats): ByteSummary {
     presenceDownstream: presence.downstream.streamBytes,
     vxwpUpstream: stats.upstream.vxwpPayloadBytes,
     vxwpDownstream: stats.downstream.vxwpPayloadBytes,
+  };
+}
+
+function ratio(samples: readonly ViewportSample[], predicate: (sample: ViewportSample) => boolean) {
+  if (samples.length === 0) return 0;
+  return rounded(samples.filter(predicate).length / samples.length, 4);
+}
+
+function cruiseQuality(
+  samples: readonly ViewportSample[],
+  measurementStartedMs: number,
+  actionFinishedMs: number,
+) {
+  const measured = samples.filter(
+    (sample) => sample.elapsedMs >= measurementStartedMs && sample.elapsedMs <= actionFinishedMs,
+  );
+  const first = measured[0];
+  const last = measured.at(-1);
+  if (first === undefined || last === undefined) return null;
+  const durationSeconds = Math.max((last.elapsedMs - first.elapsedMs) / 1_000, 0.001);
+  const distanceMetres = Math.hypot(last.cameraX - first.cameraX, last.cameraZ - first.cameraZ);
+  const exactReady = (sample: ViewportSample) =>
+    sample.canonicalImmediateRequired > 0 &&
+    sample.canonicalImmediateResident === sample.canonicalImmediateRequired;
+  const surfaceReady = (sample: ViewportSample) =>
+    sample.canonicalSurfaceCellsRequired > 0 &&
+    sample.canonicalSurfaceCellsResident === sample.canonicalSurfaceCellsRequired;
+  let longestDegradedPresentationMs = 0;
+  let degradedStartedMs: number | null = null;
+  for (const sample of measured) {
+    if (sample.presentedLodStrideVoxels !== 1) {
+      degradedStartedMs ??= sample.elapsedMs;
+    } else if (degradedStartedMs !== null) {
+      longestDegradedPresentationMs = Math.max(
+        longestDegradedPresentationMs,
+        sample.elapsedMs - degradedStartedMs,
+      );
+      degradedStartedMs = null;
+    }
+  }
+  if (degradedStartedMs !== null) {
+    longestDegradedPresentationMs = Math.max(
+      longestDegradedPresentationMs,
+      last.elapsedMs - degradedStartedMs,
+    );
+  }
+  return {
+    samples: measured.length,
+    durationSeconds: rounded(durationSeconds, 3),
+    distanceMetres: rounded(distanceMetres, 3),
+    meanSpeedMetresPerSecond: rounded(distanceMetres / durationSeconds, 3),
+    readiness: {
+      exactNearRatio: ratio(measured, exactReady),
+      canonicalSurfaceRatio: ratio(measured, surfaceReady),
+      strideOnePresentationRatio: ratio(
+        measured,
+        (sample) => sample.presentedLodStrideVoxels === 1,
+      ),
+      interactiveLodsRatio: ratio(measured, (sample) => sample.interactiveLodsReady),
+      fullyHighDetailRatio: ratio(
+        measured,
+        (sample) =>
+          exactReady(sample) && surfaceReady(sample) && sample.presentedLodStrideVoxels === 1,
+      ),
+    },
+    maximumPresentedStrideVoxels: Math.max(
+      0,
+      ...measured.map((sample) => sample.presentedLodStrideVoxels),
+    ),
+    maximumFocusLagVoxels: Math.max(0, ...measured.map((sample) => sample.lodFocusLagVoxels)),
+    longestDegradedPresentationMs: rounded(longestDegradedPresentationMs),
+    surfaceQueue: numericSummary(measured.map((sample) => sample.surfaceQueued)),
+    surfaceInFlight: numericSummary(measured.map((sample) => sample.surfaceInFlight)),
+    worldDownstreamBytes: last.bytes.worldDownstream - first.bytes.worldDownstream,
   };
 }
 
@@ -282,6 +367,40 @@ async function walkDistance(
   };
 }
 
+async function flyAtCruiseSpeed(
+  page: Page,
+  engine: EngineClient,
+  measureSeconds: number,
+  { capture, markMeasurementStart }: BenchmarkActionContext,
+) {
+  await engine.setSpectator(true);
+  await page.keyboard.down("KeyW");
+  let measurementStarted: readonly number[] | null = null;
+  let measurementFinished: readonly number[] | null = null;
+  try {
+    await page.waitForTimeout(SPECTATOR_ACCELERATION_SECONDS * 1_000);
+    measurementStarted = await capture();
+    markMeasurementStart();
+    await page.waitForTimeout(measureSeconds * 1_000);
+    measurementFinished = await capture();
+  } finally {
+    await page.keyboard.up("KeyW");
+  }
+  if (measurementStarted === null || measurementFinished === null) {
+    throw new Error("spectator cruise did not capture its measurement interval");
+  }
+  const distanceMetres = Math.hypot(
+    snapshotValue(measurementFinished, "cameraX") - snapshotValue(measurementStarted, "cameraX"),
+    snapshotValue(measurementFinished, "cameraZ") - snapshotValue(measurementStarted, "cameraZ"),
+  );
+  return {
+    accelerationSeconds: SPECTATOR_ACCELERATION_SECONDS,
+    measurementSeconds: measureSeconds,
+    distanceMetres: rounded(distanceMetres, 3),
+    meanSpeedMetresPerSecond: rounded(distanceMetres / measureSeconds, 3),
+  };
+}
+
 async function runScenario({
   name,
   engine,
@@ -337,6 +456,8 @@ async function runScenario({
     const wire = byteSummary(link.snapshot());
     samples.push({
       elapsedMs,
+      cameraX: snapshotValue(current, "cameraX"),
+      cameraZ: snapshotValue(current, "cameraZ"),
       signature: viewportSignature(current),
       visibleChunks: snapshotValue(current, "visibleChunks"),
       quads: snapshotValue(current, "quads"),
@@ -346,6 +467,13 @@ async function runScenario({
       stride32Tiles: snapshotValue(current, "stride32Tiles"),
       stride64Tiles: snapshotValue(current, "stride64Tiles"),
       allLodsReady: snapshotValue(current, "allLodsReady") === 1,
+      presentedLodStrideVoxels: snapshotValue(current, "presentedLodStrideVoxels"),
+      lodFocusLagVoxels: snapshotValue(current, "lodFocusLagVoxels"),
+      canonicalImmediateResident: snapshotValue(current, "canonicalImmediateResident"),
+      canonicalImmediateRequired: snapshotValue(current, "canonicalImmediateRequired"),
+      canonicalSurfaceCellsResident: snapshotValue(current, "canonicalSurfaceCellsResident"),
+      canonicalSurfaceCellsRequired: snapshotValue(current, "canonicalSurfaceCellsRequired"),
+      surfaceQueued: snapshotValue(current, "surfaceQueued"),
       bytes: wire,
     });
     const measurementStartedMs = markedMeasurementStartedMs ?? actionFinishedMs;
@@ -446,6 +574,10 @@ async function runScenario({
       },
     },
     realtime,
+    cruiseQuality:
+      name === "spectator_cruise"
+        ? cruiseQuality(samples, measurementStartedMs, actionFinishedMs)
+        : null,
     messages: stats.messages,
     frameTiming: frameTimingSummary(frameState.samples, frameState.droppedSamples),
     sampleCount: samples.length,
@@ -504,6 +636,9 @@ function aggregateRuns(runs: readonly NetworkRun[]) {
         scenario.realtime.proxyRoundTrip.p95Ms === null
           ? []
           : [scenario.realtime.proxyRoundTrip.p95Ms],
+      );
+      const cruise = scenarios.flatMap((scenario) =>
+        scenario.cruiseQuality === null ? [] : [scenario.cruiseQuality],
       );
       return [
         name,
@@ -592,6 +727,40 @@ function aggregateRuns(runs: readonly NetworkRun[]) {
               0,
             ),
           },
+          cruise:
+            cruise.length === 0
+              ? null
+              : {
+                  meanSpeedMetresPerSecond: numericSummary(
+                    cruise.map((quality) => quality.meanSpeedMetresPerSecond),
+                  ),
+                  exactNearRatio: numericSummary(
+                    cruise.map((quality) => quality.readiness.exactNearRatio),
+                  ),
+                  canonicalSurfaceRatio: numericSummary(
+                    cruise.map((quality) => quality.readiness.canonicalSurfaceRatio),
+                  ),
+                  strideOnePresentationRatio: numericSummary(
+                    cruise.map((quality) => quality.readiness.strideOnePresentationRatio),
+                  ),
+                  fullyHighDetailRatio: numericSummary(
+                    cruise.map((quality) => quality.readiness.fullyHighDetailRatio),
+                  ),
+                  maximumPresentedStrideVoxels: Math.max(
+                    ...cruise.map((quality) => quality.maximumPresentedStrideVoxels),
+                  ),
+                  maximumFocusLagVoxels: Math.max(
+                    ...cruise.map((quality) => quality.maximumFocusLagVoxels),
+                  ),
+                  longestDegradedPresentationMs: Math.max(
+                    ...cruise.map((quality) => quality.longestDegradedPresentationMs),
+                  ),
+                  medianWorldDownstreamBytes:
+                    percentile(
+                      cruise.map((quality) => quality.worldDownstreamBytes),
+                      0.5,
+                    ) ?? 0,
+                },
         },
       ];
     }),
@@ -707,10 +876,17 @@ function markdownReport(result: NetworkMarkdownReport): string {
     const realtime = summary.realtime;
     return `| ${name} | ${realtime.meanPoseIntervalMs.median?.toFixed(1) ?? "n/a"} | ${realtime.proxyRoundTripP95Ms.max?.toFixed(1) ?? "n/a"} | ${realtime.maxObservedRoundTripMs.max?.toFixed(1) ?? "n/a"} | ${realtime.presenceUpstreamPeakQueueDelayMs.max?.toFixed(3) ?? "n/a"} | ${realtime.collisionRequestFrames.toLocaleString("en-US")} / ${realtime.ordinaryRequestFrames.toLocaleString("en-US")} | ${realtime.canceledRequestFrames.toLocaleString("en-US")} |`;
   });
+  const cruiseRows = Object.entries(result.summary).flatMap(([name, summary]) => {
+    const cruise = summary.cruise;
+    if (cruise === null) return [];
+    return [
+      `| ${name} | ${cruise.meanSpeedMetresPerSecond.median?.toFixed(1) ?? "n/a"} | ${((cruise.exactNearRatio.median ?? 0) * 100).toFixed(1)}% | ${((cruise.canonicalSurfaceRatio.median ?? 0) * 100).toFixed(1)}% | ${((cruise.strideOnePresentationRatio.median ?? 0) * 100).toFixed(1)}% | ${((cruise.fullyHighDetailRatio.median ?? 0) * 100).toFixed(1)}% | ${cruise.maximumPresentedStrideVoxels} | ${cruise.maximumFocusLagVoxels.toFixed(1)} | ${cruise.longestDegradedPresentationMs.toFixed(1)} | ${cruise.medianWorldDownstreamBytes.toLocaleString("en-US")} |`,
+    ];
+  });
   const guardSummary = result.guards.passed
     ? "Passed."
     : `Failed:\n${result.guards.violations.map((violation) => `- ${violation}`).join("\n")}`;
-  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nWorld source: \`${result.world.source}\`; repetitions: ${result.repetitions}; environment: ${result.environment.cpu}, ${result.environment.platform}, Chrome ${result.environment.chrome}, Node ${result.environment.node}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\nStreaming guards: ${guardSummary}\n\n| Scenario | Interactive ready median (ms) | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at interactive | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Interactive ready” is when canonical terrain and the original four surface rings are complete; kilometre horizon prefetch starts only afterward. “Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Movement continuity\n\n| Scenario | Longest no-progress median (ms) | max (ms) |\n| --- | ---: | ---: |\n${movementRows.join("\n")}\n\nA movement sample counts as progress after at least ${MOVEMENT_PROGRESS_EPSILON_METRES} metres of horizontal displacement. Long no-progress intervals while movement input remains held expose collision stalls caused by missing canonical chunks; the fixed route fails at more than ${MAX_MOVEMENT_NO_PROGRESS_MS} ms.\n\n## Realtime control and collision priority\n\n| Scenario | Mean pose interval (ms) | Proxy p95 RTT (ms) | Client max RTT (ms) | Presence upload queue max (ms) | Collision / ordinary requests | Canceled requests |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n${realtimeRows.join("\n")}\n\nPose traffic uses a dedicated WebSocket and coalesces stale samples instead of queueing them. Proxy RTT measures ping-to-pong across the shaped link and server without client scheduling after delivery. Collision requests identify the current support volume and intended movement corridor; canceled requests show collision-critical work preempting an already-full ordinary request window.\n\n## Link pressure\n\n| Scenario | Downstream peak queue delay median/max (ms) | Downstream peak queued median/max (bytes) | Source pauses |\n| --- | ---: | ---: | ---: |\n${pressureRows.join("\n")}\n\nQueue delay excludes configured propagation and each pacing quantum's own serialization. A source pause means the proxy's bounded queue applied TCP backpressure.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
+  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nWorld source: \`${result.world.source}\`; repetitions: ${result.repetitions}; environment: ${result.environment.cpu}, ${result.environment.platform}, Chrome ${result.environment.chrome}, Node ${result.environment.node}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\nStreaming guards: ${guardSummary}\n\n| Scenario | Interactive ready median (ms) | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at interactive | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Interactive ready” is when canonical terrain and the original four surface rings are complete; kilometre horizon prefetch starts only afterward. “Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Full-speed spectator fidelity\n\n| Scenario | Speed (m/s) | Exact near ready | Surface ready | Stride-1 presented | Fully high detail | Max stride | Max focus lag (voxels) | Longest degraded (ms) | World bytes |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${cruiseRows.join("\n")}\n\nThe cruise measurement begins after spectator acceleration reaches its configured maximum. “Fully high detail” requires exact immediate chunks, canonical surface coverage, and a stride-1 presentation in the same sample; the benchmark continues sampling until the stopped viewport settles.\n\n## Movement continuity\n\n| Scenario | Longest no-progress median (ms) | max (ms) |\n| --- | ---: | ---: |\n${movementRows.join("\n")}\n\nA movement sample counts as progress after at least ${MOVEMENT_PROGRESS_EPSILON_METRES} metres of horizontal displacement. Long no-progress intervals while movement input remains held expose collision stalls caused by missing canonical chunks; the fixed route fails at more than ${MAX_MOVEMENT_NO_PROGRESS_MS} ms.\n\n## Realtime control and collision priority\n\n| Scenario | Mean pose interval (ms) | Proxy p95 RTT (ms) | Client max RTT (ms) | Presence upload queue max (ms) | Collision / ordinary requests | Canceled requests |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n${realtimeRows.join("\n")}\n\nPose traffic uses a dedicated WebSocket and coalesces stale samples instead of queueing them. Proxy RTT measures ping-to-pong across the shaped link and server without client scheduling after delivery. Collision requests identify the current support volume and intended movement corridor; canceled requests show collision-critical work preempting an already-full ordinary request window.\n\n## Link pressure\n\n| Scenario | Downstream peak queue delay median/max (ms) | Downstream peak queued median/max (bytes) | Source pauses |\n| --- | ---: | ---: | ---: |\n${pressureRows.join("\n")}\n\nQueue delay excludes configured propagation and each pacing quantum's own serialization. A source pause means the proxy's bounded queue applied TCP backpressure.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
 }
 
 async function main(context: ScenarioContext, arguments_: readonly string[]) {
@@ -744,6 +920,12 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
     ["procedural-v16", "terrain-diffusion-30m"] as const satisfies readonly WorldSource[],
     "terrain-diffusion-30m",
   );
+  const flightSeconds =
+    options.number("flight-seconds", {
+      fallback: DEFAULT_FLIGHT_SECONDS,
+      minimum: 5,
+      maximum: 120,
+    }) ?? DEFAULT_FLIGHT_SECONDS;
   options.assertEmpty();
   const proxyPort = await reserveEphemeralPort();
   const previewPort = await reserveEphemeralPort();
@@ -825,6 +1007,16 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
             walkDistance(page, STREAMING_WALK_METRES, { ...context, sprint: true }),
         }),
       );
+      runs.push(
+        await runScenario({
+          name: "spectator_cruise",
+          engine,
+          link,
+          errors: viewport.failures,
+          timeoutMs: Math.max(SCENARIO_TIMEOUT_MS, (flightSeconds + 45) * 1_000),
+          action: (context) => flyAtCruiseSpeed(page, engine, flightSeconds, context),
+        }),
+      );
       await viewport.close();
 
       const pivotViewport = await browser.open({
@@ -892,6 +1084,8 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         readyStableSamples: READY_STABLE_SAMPLES,
         shortWalkMetres: SHORT_WALK_METRES,
         streamingWalkMetres: STREAMING_WALK_METRES,
+        spectatorAccelerationSeconds: SPECTATOR_ACCELERATION_SECONDS,
+        spectatorFlightSeconds: flightSeconds,
         movementProgressEpsilonMetres: MOVEMENT_PROGRESS_EPSILON_METRES,
         maximumMovementNoProgressMs: MAX_MOVEMENT_NO_PROGRESS_MS,
         turnRadians: TURN_RADIANS,
@@ -908,6 +1102,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         "short_walk",
         "cached_turn_180",
         "streaming_walk",
+        "spectator_cruise",
         "turn_during_spawn",
       ],
       guards: {
