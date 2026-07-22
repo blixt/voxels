@@ -2544,6 +2544,31 @@ impl Renderer {
             .contains(&(coord.x, coord.y, coord.z))
     }
 
+    /// Tiles referenced by the complete cut currently reaching the screen.
+    ///
+    /// Streaming eviction uses this as a transaction boundary: the current cut and its short
+    /// outgoing transition remain resident until the renderer has selected their replacement.
+    /// Removing one of these tiles first would invalidate the very fallback that is meant to hide
+    /// asynchronous LOD arrival.
+    pub fn presented_surface_tiles(&self) -> Vec<SurfaceTileCoord> {
+        let mut tiles = self
+            .lod_draw_plan
+            .patches
+            .owned_patches()
+            .map(surface_tile_for_patch)
+            .collect::<HashSet<_>>();
+        if let Some(transition) = &self.cut_transition {
+            tiles.extend(
+                transition
+                    .from
+                    .patches
+                    .owned_patches()
+                    .map(surface_tile_for_patch),
+            );
+        }
+        tiles.into_iter().collect()
+    }
+
     /// Replaces the exact underground chunks selected through visible tunnel apertures.
     ///
     /// These chunks supplement the height-surface hierarchy in three dimensions. They deliberately

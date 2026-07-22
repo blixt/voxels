@@ -2809,6 +2809,12 @@ mod web {
                     .map(|radius| radius + self.config.surface_retain_margin_tiles);
                 let retain_cross_radii =
                     cross_radii.map(|radius| radius + self.config.surface_retain_margin_tiles);
+                let presented_tiles = self
+                    .renderer
+                    .borrow()
+                    .presented_surface_tiles()
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
                 let evicted: Vec<_> = self
                     .surface_resident
                     .borrow()
@@ -2819,13 +2825,14 @@ mod web {
                         if !changed_levels[index] {
                             return false;
                         }
-                        !surface_tile_in_coverage(
-                            *coord,
-                            Some(focus),
-                            retain_longitudinal_radii,
-                            retain_cross_radii,
-                            motion_axis,
-                        )
+                        !presented_tiles.contains(coord)
+                            && !surface_tile_in_coverage(
+                                *coord,
+                                Some(focus),
+                                retain_longitudinal_radii,
+                                retain_cross_radii,
+                                motion_axis,
+                            )
                     })
                     .collect();
                 if !evicted.is_empty() {
