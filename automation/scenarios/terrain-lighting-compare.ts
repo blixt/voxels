@@ -8,7 +8,7 @@ interface ImageSample {
   readonly pixels: Uint8ClampedArray;
 }
 
-interface LightingSummary {
+export interface LightingSummary {
   readonly blockMean: number;
   readonly blockP10: number;
   readonly blockP90: number;
@@ -28,6 +28,35 @@ interface LightingComparison {
   readonly reference: LightingSummary;
   readonly candidate: LightingSummary;
   readonly ratios: Omit<LightingSummary, "blockMean" | "blockP10" | "blockP90">;
+}
+
+export function lightingRatios(
+  reference: LightingSummary,
+  candidate: LightingSummary,
+): LightingComparison["ratios"] {
+  const ratio = (label: string, numerator: number, denominator: number): number => {
+    if (!Number.isFinite(numerator)) {
+      throw new Error(`candidate terrain lighting ${label} must be finite`);
+    }
+    if (!Number.isFinite(denominator) || denominator <= 0) {
+      throw new Error(`reference terrain lighting has no measurable ${label}`);
+    }
+    return numerator / denominator;
+  };
+  return {
+    blockP90P10: ratio("block contrast", candidate.blockP90P10, reference.blockP90P10),
+    blockP90ToP10: ratio("contrast ratio", candidate.blockP90ToP10, reference.blockP90ToP10),
+    coarseGradientRms: ratio(
+      "coarse gradient",
+      candidate.coarseGradientRms,
+      reference.coarseGradientRms,
+    ),
+    coarseGradientRelativeRms: ratio(
+      "relative coarse gradient",
+      candidate.coarseGradientRelativeRms,
+      reference.coarseGradientRelativeRms,
+    ),
+  };
 }
 
 export default defineScenario({
@@ -50,8 +79,8 @@ export default defineScenario({
     const images = await Promise.all(
       [referencePath, candidatePath].map(async (file) => (await readFile(file)).toString("base64")),
     );
-    const metrics = await viewport.page.evaluate(
-      async ([reference, candidate]): Promise<LightingComparison> => {
+    const analysis = await viewport.page.evaluate(
+      async ([reference, candidate]): Promise<Omit<LightingComparison, "ratios">> => {
         const decode = async (base64: string): Promise<ImageSample> => {
           const response = await fetch(`data:image/png;base64,${base64}`);
           const bitmap = await createImageBitmap(await response.blob());
@@ -93,6 +122,12 @@ export default defineScenario({
         const summarize = (image: ImageSample): LightingSummary => {
           const width = Math.floor((roi.x1 - roi.x0) / block);
           const height = Math.floor((roi.y1 - roi.y0) / block);
+          const lag = 4;
+          if (width <= lag || height <= lag) {
+            throw new Error(
+              "terrain-lighting images are too small for 8-pixel blocks and a 4-block gradient lag",
+            );
+          }
           const values = new Float32Array(width * height);
           for (let blockY = 0; blockY < height; blockY += 1) {
             for (let blockX = 0; blockX < width; blockX += 1) {
@@ -106,7 +141,6 @@ export default defineScenario({
             }
           }
           const gradients: number[] = [];
-          const lag = 4;
           for (let y = 0; y < height - lag; y += 1) {
             for (let x = 0; x < width - lag; x += 1) {
               const center = values[x + y * width];
@@ -141,20 +175,15 @@ export default defineScenario({
           roi,
           reference: referenceMetrics,
           candidate: candidateMetrics,
-          ratios: {
-            blockP90P10: candidateMetrics.blockP90P10 / referenceMetrics.blockP90P10,
-            blockP90ToP10: candidateMetrics.blockP90ToP10 / referenceMetrics.blockP90ToP10,
-            coarseGradientRms:
-              candidateMetrics.coarseGradientRms / referenceMetrics.coarseGradientRms,
-            coarseGradientRelativeRms:
-              candidateMetrics.coarseGradientRelativeRms /
-              referenceMetrics.coarseGradientRelativeRms,
-          },
         };
       },
       images as [string, string],
     );
     browser.assertHealthy();
+    const metrics: LightingComparison = {
+      ...analysis,
+      ratios: lightingRatios(analysis.reference, analysis.candidate),
+    };
     return {
       summary: "Terrain lighting comparison complete.",
       metrics: { ...metrics },
