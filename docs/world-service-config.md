@@ -26,15 +26,18 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 23
+schema_version = 24
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
 
 [transport]
 listen = "127.0.0.1:9777"
+allow_non_loopback = false
 allowed_origins = ["http://127.0.0.1:5173", "http://localhost:5173"]
 auth_subprotocol_token = "replace-with-a-random-local-token"
+# For public deployments, name an environment variable containing the HMAC key instead:
+# auth_session_hmac_key_env = "VOXELS_SESSION_SIGNING_KEY"
 max_frame_bytes = 16777216
 max_queued_outbound_bytes_per_client = 33554432
 outbound_bandwidth_floor_bytes_per_second = 98304
@@ -121,6 +124,13 @@ quality_histogram = [0.0, 0.0, 0.0, 1.0, 1.5]
 sea_level_voxels = 52
 # model_cache = "/an/optional/cache/root"
 ```
+
+The checked-in development configuration remains loopback-only. A public listener must explicitly
+set `allow_non_loopback = true`, and every allowed origin must use HTTPS. Setting
+`auth_session_hmac_key_env` switches authorization from the static development token to short-lived
+signed session tokens bound to the exact browser and player IDs in the opening protocol frame. The
+named environment variable must contain at least 32 bytes and is never serialized into configuration
+or sent to the browser. See [Deployment](deployment.md) for the production secret flow.
 
 `outbound_bandwidth_floor_bytes_per_second` is the safe VXWP payload rate shared by a player's world
 and presence WebSockets. When the receiver reports end-to-end RTT and the connection has queued

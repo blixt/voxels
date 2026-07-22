@@ -1,0 +1,135 @@
+# Versioned client-owned configuration. World seed and provider selection belong to the server.
+schema_version = 26
+
+[developer]
+# Enables local-only time/weather visualization overrides and server-authorized spectator mode.
+# These controls never change the shared world environment or grant inventory materials.
+controls_enabled = false
+
+# The client knows only where canonical world products come from. The service chooses the
+# procedural or Terrain Diffusion provider in config/world-service.toml.
+[world]
+endpoint = "wss://voxels-world-blixt.fly.dev/v28/world"
+presence_endpoint = "wss://voxels-world-blixt.fly.dev/v28/presence"
+subprotocol = "voxels.world.v28"
+# The browser replaces this reserved marker with a short-lived credential from the same-origin
+# Cloudflare session endpoint before the TOML enters the Rust engine.
+auth_subprotocol_token = "session:/api/session"
+max_in_flight_batches = 8
+buffered_amount_high_water_bytes = 8388608
+buffered_amount_low_water_bytes = 2097152
+request_timeout_ms = 10000
+reconnect_initial_delay_ms = 250
+reconnect_max_delay_ms = 5000
+reconnect_attempt_limit = 30
+
+[multiplayer]
+# Presence uses a dedicated small-frame WebSocket so world chunk payloads cannot block motion.
+pose_send_interval_ms = 33
+# Fast feedback lets the server stop a bandwidth probe before it becomes a standing queue.
+clock_sync_interval_ms = 250
+# Pose packets are latest-state data: once any application byte is still queued, skip this sample
+# instead of putting a newer pose behind stale motion on the ordered WebSocket stream.
+buffered_amount_high_water_bytes = 1
+# Adaptive receiver delay starts here and remains inside the declared min/max envelope.
+interpolation_delay_ms = 100
+min_interpolation_delay_ms = 67
+max_interpolation_delay_ms = 200
+max_extrapolation_ms = 750
+
+[runtime]
+fixed_step_seconds = 0.008333334
+max_steps_per_frame = 6
+max_edit_trackers = 128
+
+[streaming]
+load_radius_chunks = 5
+vertical_radius_chunks = 1
+# Gameplay starts once this complete horizontal radius, including the configured vertical span,
+# has reached GPU-resident state and the renderer has presented it at least once.
+startup_ready_radius_chunks = 1
+retention_margin_chunks = 1
+max_tracked_chunks = 320
+max_secondary_interest_chunks = 192
+
+[streaming.priority]
+# Give the swept player body and its current support a hard priority through generation, meshing,
+# upload, and server traffic. This remains bounded secondary interest rather than extra residency.
+collision_lookahead_seconds = 2.5
+# Keep the immediate 3x3 canonical-chunk vicinity first, then favor this forward cone and predicted
+# position for ordinary work. Complete surface-LOD levels stay spatially ordered because they
+# activate atomically.
+velocity_lookahead_seconds = 1.5
+view_cone_half_angle_degrees = 55.0
+# Underground views need exact volume beyond the ordinary 9.6 m canonical surface handoff:
+# heightfield LODs cannot represent a tunnel terminator. Five sparse rays extend only through
+# nearby canonical air, keeping this bounded while retaining solid end walls during camera motion.
+enclosed_view_distance_metres = 32.0
+enclosed_view_ray_radius_metres = 0.8
+enclosed_view_threshold = 0.65
+
+[streaming.frame_budget]
+generation = 2
+meshing = 1
+upload = 3
+
+# One radius for each surface LOD level: stride 2 through 256. The four background rings use
+# 3.2–25.6 m cells; each fixed-size tile doubles linear coverage without increasing its mesh cost.
+[streaming.surface]
+load_radius_tiles = [4, 4, 4, 5, 4, 5, 4, 3]
+retention_margin_tiles = 1
+
+[rendering]
+view_distance_metres = 2400.0
+
+[rendering.shadows]
+vertical_fov_radians = 1.1868238 # 68 degrees
+near_plane = 0.05
+far_plane = 220.0
+split_lambda = 0.65
+# Startup rejects values above 4096, above the selected GPU's 2D texture limit, or above the
+# renderer's bounded shadow-memory budget.
+shadow_map_resolution = 1024
+# Retain one parallel-transported shadow basis until its light direction moves by 1/8 degree.
+# Direct light remains continuous while shadow-map updates occur only after meaningful motion.
+direction_update_threshold_radians = 0.0021816616
+caster_depth_expansion = 64.0
+
+[rendering.volumetric_clouds]
+enabled = true
+resolution_scale = 0.5
+view_steps = 14
+light_steps = 2
+max_distance_metres = 14000.0
+extinction = 0.006
+
+[rendering.features]
+cascaded_sun_shadows = true
+voxel_ambient_occlusion = true
+# Screen-space AO has no temporal/world-space history yet, so enabling it makes hill shading move
+# with camera rotation. Voxel AO plus stable sun shadows remain enabled by default.
+screen_space_ambient_occlusion = false
+atmospheric_fog = true
+far_terrain = true
+water_surface = true
+target_outline = true
+material_surface_detail = true
+cave_headlamp = true
+voxel_emissive_lights = true
+
+[rendering.diagnostics]
+# Uncomment for terrain-coverage debugging. Atmospheric sky, clouds, celestial objects, and
+# precipitation are replaced by one unmistakable background color.
+# sky_override_rgb = [255, 0, 255]
+
+[rendering.mission_control]
+open = false
+
+[diagnostics]
+enclosure_probe_interval_ms = 100
+enclosure_probe_distance_metres = 12.0
+
+[profiling]
+speed_metres_per_second = 12.0
+warmup_seconds = 30.0
+measure_seconds = 60.0

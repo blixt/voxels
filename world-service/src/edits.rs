@@ -223,6 +223,13 @@ impl fmt::Display for EditAuthorityError {
 impl std::error::Error for EditAuthorityError {}
 
 impl EditAuthority {
+    pub(crate) fn checkpoint(&self) -> Result<(), EditAuthorityError> {
+        self.lock()
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(sql_error("checkpoint edit database"))
+    }
+
     pub(crate) fn open(
         path: &Path,
         world_id: WorldId,

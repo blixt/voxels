@@ -1,0 +1,22 @@
+FROM rust:1.97.0-bookworm AS builder
+
+WORKDIR /src
+COPY . .
+RUN cargo build --locked --profile worldgen \
+    --package voxels-world-service \
+    --bin voxels-worldd
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates gosu \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10001 voxels \
+    && install --directory --owner voxels --group voxels /app /data
+
+COPY --from=builder /src/target/worldgen/voxels-worldd /usr/local/bin/voxels-worldd
+COPY config/world-service.production.toml /app/config/world-service.toml
+COPY scripts/world-service-entrypoint.sh /usr/local/bin/world-service-entrypoint
+
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/world-service-entrypoint"]

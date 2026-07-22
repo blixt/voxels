@@ -12,7 +12,8 @@
     "playwright": "^1.61.1",
     "typescript": "~6.0.2",
     "vite": "catalog:",
-    "vite-plus": "catalog:"
+    "vite-plus": "catalog:",
+    "wrangler": "^4.112.0"
   },
   "devEngines": {
     "packageManager": {

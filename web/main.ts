@@ -1,4 +1,5 @@
 import "./style.css";
+import { authorizeClientBootstrap } from "./client-authorization.ts";
 import { loadClientConfig } from "./client-config.ts";
 import { writeClipboardText } from "./clipboard.ts";
 import {
@@ -80,14 +81,27 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
 
   let configToml: string;
   let player: BrowserPlayerSession;
+  let sessionExpiresAt: number | undefined;
   showLoading("Starting Voxels", "Loading client configuration…");
   try {
-    [configToml, player] = await Promise.all([loadClientConfig(), resolveBrowserPlayerSession()]);
+    const [loadedConfig, localPlayer] = await Promise.all([
+      loadClientConfig(),
+      resolveBrowserPlayerSession(),
+    ]);
+    ({ configToml, player, sessionExpiresAt } = await authorizeClientBootstrap(
+      loadedConfig,
+      localPlayer,
+    ));
   } catch (error) {
     fail(`Could not load client configuration or local player.\n${String(error)}`);
     return;
   }
   if (player.playerName !== "default") document.title = `Voxels · ${player.playerName}`;
+  if (sessionExpiresAt !== undefined) {
+    const refreshAheadMs = 5 * 60 * 1_000;
+    const refreshDelayMs = Math.max(0, sessionExpiresAt * 1_000 - Date.now() - refreshAheadMs);
+    window.setTimeout(() => location.reload(), refreshDelayMs);
+  }
 
   const worker = new Worker(new URL("./worker.ts", import.meta.url), {
     type: "module",

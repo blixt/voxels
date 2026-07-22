@@ -36,7 +36,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 23;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 24;
 pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 13;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
@@ -51,9 +51,16 @@ const EDIT_DATABASE_SOURCE_TOKEN: &str = "{source_hash}";
 #[serde(deny_unknown_fields)]
 pub struct LoopbackTransportConfig {
     pub listen: SocketAddr,
+    /// Public deployments must opt in explicitly; local and automation configs remain loopback-only.
+    #[serde(default)]
+    pub allow_non_loopback: bool,
     pub allowed_origins: Vec<String>,
     /// Offered as a second `Sec-WebSocket-Protocol` value so it is not placed in a URL or log.
     pub auth_subprotocol_token: String,
+    /// Optional environment variable containing the HMAC key for signed public session tokens.
+    /// When set, the static token remains only a syntactically valid local/config placeholder.
+    #[serde(default)]
+    pub auth_session_hmac_key_env: Option<String>,
     pub max_frame_bytes: usize,
     /// Maximum encoded world-product bytes retained while a client socket is backpressured.
     pub max_queued_outbound_bytes_per_client: usize,
@@ -91,11 +98,13 @@ impl Default for LoopbackTransportConfig {
     fn default() -> Self {
         Self {
             listen: SocketAddr::from(([127, 0, 0, 1], 9_777)),
+            allow_non_loopback: false,
             allowed_origins: vec![
                 "http://127.0.0.1:5173".to_owned(),
                 "http://localhost:5173".to_owned(),
             ],
             auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
+            auth_session_hmac_key_env: None,
             max_frame_bytes: MAX_PROTOCOL_FRAME_BYTES,
             max_queued_outbound_bytes_per_client: 32 * 1024 * 1024,
             outbound_bandwidth_floor_bytes_per_second: 96 * 1024,
@@ -421,7 +430,7 @@ impl WorldServiceConfig {
                 found: self.schema_version,
             });
         }
-        if !self.transport.listen.ip().is_loopback() {
+        if !self.transport.listen.ip().is_loopback() && !self.transport.allow_non_loopback {
             return Err(WorldServiceConfigError::ListenIsNotLoopback(
                 self.transport.listen,
             ));
@@ -436,8 +445,25 @@ impl WorldServiceConfig {
                 ));
             }
         }
+        if self.transport.allow_non_loopback
+            && self
+                .transport
+                .allowed_origins
+                .iter()
+                .any(|origin| !origin.starts_with("https://"))
+        {
+            return Err(WorldServiceConfigError::InsecurePublicOrigin);
+        }
         if !valid_websocket_protocol_token(&self.transport.auth_subprotocol_token) {
             return Err(WorldServiceConfigError::InvalidAuthSubprotocolToken);
+        }
+        if self
+            .transport
+            .auth_session_hmac_key_env
+            .as_deref()
+            .is_some_and(|name| !valid_environment_name(name))
+        {
+            return Err(WorldServiceConfigError::InvalidAuthSessionEnvironment);
         }
         if !(FRAME_HEADER_BYTES..=MAX_PROTOCOL_FRAME_BYTES)
             .contains(&self.transport.max_frame_bytes)
@@ -735,6 +761,14 @@ fn valid_websocket_protocol_token(token: &str) -> bool {
         })
 }
 
+fn valid_environment_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_uppercase() || (index > 0 && byte.is_ascii_digit())
+        })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorldServiceConfigError {
     Read {
@@ -748,9 +782,11 @@ pub enum WorldServiceConfigError {
         found: u32,
     },
     ListenIsNotLoopback(SocketAddr),
+    InsecurePublicOrigin,
     EmptyAllowedOrigins,
     InvalidAllowedOrigin(String),
     InvalidAuthSubprotocolToken,
+    InvalidAuthSessionEnvironment,
     InvalidMaxFrameBytes {
         min: usize,
         max: usize,
@@ -790,6 +826,8 @@ impl fmt::Display for WorldServiceConfigError {
                 formatter,
                 "world-service transport must listen on loopback, not {address}"
             ),
+            Self::InsecurePublicOrigin => formatter
+                .write_str("public world-service transports require https:// allowed origins"),
             Self::EmptyAllowedOrigins => {
                 formatter.write_str("world-service transport requires at least one allowed origin")
             }
@@ -798,6 +836,9 @@ impl fmt::Display for WorldServiceConfigError {
             }
             Self::InvalidAuthSubprotocolToken => formatter.write_str(
                 "auth_subprotocol_token must be a non-empty RFC WebSocket protocol token of at most 128 bytes",
+            ),
+            Self::InvalidAuthSessionEnvironment => formatter.write_str(
+                "auth_session_hmac_key_env must be an uppercase ASCII environment variable name",
             ),
             Self::InvalidMaxFrameBytes { min, max, found } => write!(
                 formatter,
@@ -1047,7 +1088,7 @@ mod tests {
     };
 
     const CONFIG_TOML: &str = r#"
-schema_version = 23
+schema_version = 24
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -1170,6 +1211,30 @@ sea_level_voxels = 52
     }
 
     #[test]
+    fn checked_in_production_config_requires_signed_sessions_and_public_https_origins() {
+        let config = WorldServiceConfig::from_toml(include_str!(
+            "../../config/world-service.production.toml"
+        ))
+        .expect("production config");
+        assert!(config.transport.allow_non_loopback);
+        assert_eq!(
+            config.transport.auth_session_hmac_key_env.as_deref(),
+            Some("VOXELS_SESSION_SIGNING_KEY")
+        );
+        assert!(
+            config
+                .transport
+                .allowed_origins
+                .iter()
+                .all(|origin| origin.starts_with("https://"))
+        );
+        assert_eq!(
+            config.edits.database.as_path(),
+            std::path::Path::new("/data/world-state.sqlite3")
+        );
+    }
+
+    #[test]
     fn default_spawn_is_a_five_metre_raised_platform() {
         let spawn = SpawnConfig::default();
         let checked_in =
@@ -1207,7 +1272,7 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 23", "schema_version = 22");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 24", "schema_version = 23");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {

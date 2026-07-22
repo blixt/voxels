@@ -17,6 +17,14 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["automation", "web", "scripts", "vite.config.ts", "vite.config.test.ts"],
+  "include": [
+    "automation",
+    "cloudflare",
+    "web",
+    "scripts",
+    "worker-configuration.d.ts",
+    "vite.config.ts",
+    "vite.config.test.ts"
+  ],
   "exclude": ["web/generated"]
 }

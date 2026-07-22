@@ -13,10 +13,10 @@ use std::time::Instant;
 use uuid::Uuid;
 use voxels_core::player_intersects_voxel;
 use voxels_world::protocol::{
-    EditVolume, PLAYER_POSE_DISCONTINUITY, PLAYER_POSE_GLIDING, PLAYER_POSE_GROUNDED,
-    PLAYER_POSE_SPECTATOR, PLAYER_POSE_SWIMMING, PlayerId, PlayerIdentity, PlayerPoseUpdate,
-    PlayerPresenceState, PlayerPresenceUpdate, PlayerResume, PresenceDelta, PresenceSessionId,
-    encode_presence_delta,
+    BrowserUserId, EditVolume, PLAYER_POSE_DISCONTINUITY, PLAYER_POSE_GLIDING,
+    PLAYER_POSE_GROUNDED, PLAYER_POSE_SPECTATOR, PLAYER_POSE_SWIMMING, PlayerId, PlayerIdentity,
+    PlayerPoseUpdate, PlayerPresenceState, PlayerPresenceUpdate, PlayerResume, PresenceDelta,
+    PresenceSessionId, encode_presence_delta,
 };
 use voxels_world::{VOXEL_SIZE_METRES, VoxelCoord};
 
@@ -39,6 +39,7 @@ struct PresenceInner {
 }
 
 struct PlayerSession {
+    browser_user_id: BrowserUserId,
     connection_id: u64,
     session_id: PresenceSessionId,
     color_index: u16,
@@ -103,6 +104,7 @@ pub(crate) struct PresenceAttachment {
     pub(crate) connection_id: u64,
     session_id: PresenceSessionId,
     player_id: PlayerId,
+    browser_user_id: BrowserUserId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -351,6 +353,7 @@ impl PresenceHub {
         inner.players.insert(
             identity.player_id,
             PlayerSession {
+                browser_user_id: identity.browser_user_id,
                 connection_id,
                 session_id,
                 color_index,
@@ -392,6 +395,7 @@ impl PresenceHub {
             connection_id: player.connection_id,
             session_id,
             player_id,
+            browser_user_id: player.browser_user_id,
         })
     }
 
@@ -823,6 +827,16 @@ impl Drop for PresenceAttachment {
     fn drop(&mut self) {
         self.hub
             .detach_presence(self.player_id, self.connection_id, self.session_id);
+    }
+}
+
+impl PresenceAttachment {
+    pub(crate) const fn browser_user_id(&self) -> BrowserUserId {
+        self.browser_user_id
+    }
+
+    pub(crate) const fn player_id(&self) -> PlayerId {
+        self.player_id
     }
 }
 

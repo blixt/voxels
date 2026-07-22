@@ -3,17 +3,19 @@ schema_version = 24
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
-# Terrain Diffusion is the checked-in default. Set this to "procedural-v16" for the deterministic
-# authored generator; clients consume the same canonical protocol either way.
-source = "terrain-diffusion-30m"
+# The Linux deployment uses the deterministic authored generator. Terrain Diffusion remains a
+# native Apple/Metal provider; clients consume the same canonical protocol either way.
+source = "procedural-v16"
 
 [transport]
-# Native transport is deliberately loopback-only. Port 0 may be used by tests for an ephemeral port.
-listen = "127.0.0.1:9777"
-allow_non_loopback = false
-allowed_origins = ["http://127.0.0.1:5173", "http://localhost:5173"]
-# Replace with a random RFC WebSocket subprotocol token on each local installation.
-auth_subprotocol_token = "replace-with-a-random-local-token"
+# Fly Proxy terminates TLS and forwards plain HTTP/WebSocket traffic to this private machine port.
+listen = "0.0.0.0:8080"
+allow_non_loopback = true
+allowed_origins = ["https://voxels.lol"]
+# Public clients receive short-lived signed credentials. The signing key is present only in the
+# Cloudflare Worker and Fly Machine secret stores, never in this file or the browser bundle.
+auth_subprotocol_token = "signed-session-required"
+auth_session_hmac_key_env = "VOXELS_SESSION_SIGNING_KEY"
 max_frame_bytes = 16777216
 # Memory bound for completed world products waiting behind a slow client.
 max_queued_outbound_bytes_per_client = 33554432
@@ -27,22 +29,22 @@ outbound_queue_delay_target_ms = 25
 outbound_feedback_timeout_ms = 3000
 outbound_max_frame_fragment_bytes = 32768
 max_in_flight_batches = 16
-max_connections = 1024
-# Covers the worst-case negotiated request window for all 1024 admitted world connections.
-global_queue_capacity = 16384
+max_connections = 128
+# Covers the worst-case negotiated request window for all 128 admitted world connections.
+global_queue_capacity = 2048
 # Immutable encoded products are shared by overlapping requests.
-product_cache_bytes = 268435456
+product_cache_bytes = 134217728
 # Complete compressed batches are shared across co-located clients and identical retries.
-response_cache_bytes = 67108864
-generation_workers = 8
-generation_workers_per_client = 2
+response_cache_bytes = 33554432
+generation_workers = 2
+generation_workers_per_client = 1
 # One urgent batch per client can jump queued ordinary generation; the global cap still applies.
 collision_generation_workers_per_client = 1
 
 [presence]
 # Per-client spatial deltas tick at about 30 Hz; unchanged poses are omitted.
 broadcast_interval_ms = 33
-max_players = 1024
+max_players = 128
 # Browsers normally send at 30 Hz; this higher ceiling permits modest timer catch-up without abuse.
 max_pose_updates_per_second = 60
 # Internal interest management only; this remains one authoritative, unsharded world.
@@ -64,7 +66,7 @@ look_error_milliradians = 175
 allow_gliding = true
 # Local development permits bodyless spectator cameras. They retain world-stream interest but have
 # no replicated avatar or edit authority. Production worlds can disable the capability.
-allow_spectator_mode = true
+allow_spectator_mode = false
 # Browser raycasts stop at 5m. The extra metre absorbs ordinary ordering skew between the
 # independent presence and world sockets; it is a hard cap, not client-controlled velocity credit.
 interaction_reach_centimetres = 500
@@ -108,10 +110,9 @@ weather_seed = 1474984685
 weather_revision = 1
 
 [edits]
-# Native server authority. This checked-in local path is ignored by git; deployments should point
-# it at durable storage. Compatibility tokens make local iteration start fresh state after schema,
-# world, or source changes without deleting the previous world. Explicit paths remain strict.
-database = "../tmp/world-state/schema-{edit_schema}/{world_id}-{source_hash}.sqlite3"
+# Native server authority lives on the mounted encrypted Fly Volume. This explicit path is strict:
+# schema, world, or source changes require an intentional migration or a new volume/database.
+database = "/data/world-state.sqlite3"
 change_queue_capacity = 1024
 
 [spawn]
