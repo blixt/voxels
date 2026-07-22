@@ -212,12 +212,11 @@ fn surface_product_priority(
     focus: SurfaceStreamFocus,
     interactive_level_count: usize,
 ) -> voxels_world::WorldProductPriority {
-    if focus
-        .current
-        .iter()
-        .take(interactive_level_count)
-        .any(|current| *current == coord)
-    {
+    // The full current ancestor chain is a bounded set of eight tiles. If any intermediate parent
+    // waits in prefetch, a fast camera can be forced to display a dramatically coarser ancestor
+    // even though the missing tile is directly under it. Keep lead/background breadth bounded,
+    // but let every current-chain tile preempt obsolete visible work.
+    if focus.current.contains(&coord) {
         voxels_world::WorldProductPriority::ImmediateSurface
     } else if usize::from(coord.level.index()) < interactive_level_count {
         voxels_world::WorldProductPriority::VisibleSurface
@@ -5003,6 +5002,10 @@ mod tests {
         );
         assert_eq!(
             surface_product_priority(focus.current[4], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
+            voxels_world::WorldProductPriority::ImmediateSurface
+        );
+        assert_eq!(
+            surface_product_priority(focus.lead[4], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
             voxels_world::WorldProductPriority::Prefetch
         );
     }
