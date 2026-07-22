@@ -479,6 +479,7 @@ fn visible_portal_cells(
     let mut visible = [0_u64; CHUNK_FACE_WORDS];
     let cell_radius = VOXEL_SIZE_METRES * 3.0_f32.sqrt() * 0.5;
     let forward = camera.forward();
+    let distance_limit_squared = (distance_metres + cell_radius).powi(2);
     for face_index in 0..CHUNK_EDGE * CHUNK_EDGE {
         let [local_x, local_y, local_z] = ChunkPortalMask::face_voxel(face, face_index);
         let world_voxel = glam::IVec3::new(
@@ -489,10 +490,11 @@ fn visible_portal_cells(
         let center = (world_voxel.as_vec3() + glam::Vec3::splat(0.5)) * VOXEL_SIZE_METRES;
         let camera_to_center = center - camera.position;
         let axial = camera_to_center.dot(forward);
-        if axial < -cell_radius || camera_to_center.length() > distance_metres + cell_radius {
+        let distance_squared = camera_to_center.length_squared();
+        if axial < -cell_radius || distance_squared > distance_limit_squared {
             continue;
         }
-        let perpendicular_squared = (camera_to_center.length_squared() - axial * axial).max(0.0);
+        let perpendicular_squared = (distance_squared - axial * axial).max(0.0);
         let cone_radius = axial.max(0.0) * cone_tangent + cell_radius;
         if perpendicular_squared <= cone_radius * cone_radius {
             ChunkPortalMask::mark_face_cell(&mut visible, face_index);
@@ -516,7 +518,7 @@ fn enclosed_view_stream_interest(
     cone_half_angle_degrees: f32,
     portals: &std::collections::BTreeMap<(i32, i32, i32), ChunkPortalMask>,
 ) -> Vec<voxels_world::ChunkCoord> {
-    use std::collections::{BTreeSet, VecDeque};
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use voxels_world::{CHUNK_EDGE, VOXEL_SIZE_METRES};
 
     if !distance_metres.is_finite()
@@ -545,6 +547,7 @@ fn enclosed_view_stream_interest(
     let mut chunks = BTreeSet::new();
     let mut visited = BTreeSet::new();
     let mut queue = VecDeque::new();
+    let mut visible_face_cells = BTreeMap::new();
     let camera_voxel = (camera.position / VOXEL_SIZE_METRES).floor().as_ivec3();
     if let Some(origin_portals) = portals.get(&(origin.x, origin.y, origin.z)) {
         let component = origin_portals.component_at(
@@ -564,15 +567,19 @@ fn enclosed_view_stream_interest(
             continue;
         };
         for ([dx, dy, dz], face) in directions {
-            let visible_cells =
-                visible_portal_cells(camera, current, face, distance_metres, cone_tangent);
-            if !current_portals.component_opens_face(current_component, face)
-                || !current_portals.component_has_visible_face_cell(
-                    current_component,
-                    face,
-                    &visible_cells,
-                )
-            {
+            if !current_portals.component_opens_face(current_component, face) {
+                continue;
+            }
+            let visible_cells = visible_face_cells
+                .entry((current, face))
+                .or_insert_with(|| {
+                    visible_portal_cells(camera, current, face, distance_metres, cone_tangent)
+                });
+            if !current_portals.component_has_visible_face_cell(
+                current_component,
+                face,
+                visible_cells,
+            ) {
                 continue;
             }
             let (Some(x), Some(y), Some(z)) = (
@@ -623,7 +630,7 @@ fn enclosed_view_stream_interest(
                 current_component,
                 face,
                 neighbor_portals,
-                &visible_cells,
+                visible_cells,
             ) {
                 if visited.insert((neighbor, neighbor_component)) {
                     queue.push_back((neighbor, neighbor_component));
@@ -845,9 +852,9 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const AUTOMATION_CONTRACT_VERSION: u32 = 4;
+    const AUTOMATION_CONTRACT_VERSION: u32 = 6;
     const SNAPSHOT_SCHEMA_VERSION: u32 = 37;
-    const FRAME_SAMPLE_WIDTH: u32 = 20;
+    const FRAME_SAMPLE_WIDTH: u32 = 26;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
         "cameraX,cameraY,cameraZ,yaw,pitch,grounded,quads,edits,residentChunks,trackedChunks,visibleChunks,drawCalls,",
@@ -968,6 +975,12 @@ mod web {
         stream_publish_ms: f32,
         stream_surface_ms: f32,
         stream_presence_ms: f32,
+        stream_interest_ms: f32,
+        stream_scheduler_update_ms: f32,
+        stream_scheduler_admit_ms: f32,
+        stream_collision_interest_ms: f32,
+        stream_enclosed_interest_ms: f32,
+        stream_surface_interest_ms: f32,
     }
 
     #[derive(Clone, Copy, Default)]
@@ -977,6 +990,12 @@ mod web {
         mesh_ms: f32,
         publish_ms: f32,
         surface_ms: f32,
+        interest_ms: f32,
+        scheduler_update_ms: f32,
+        scheduler_admit_ms: f32,
+        collision_interest_ms: f32,
+        enclosed_interest_ms: f32,
+        surface_interest_ms: f32,
     }
 
     struct FrameHistory {
@@ -1033,6 +1052,12 @@ mod web {
                     sample.stream_publish_ms,
                     sample.stream_surface_ms,
                     sample.stream_presence_ms,
+                    sample.stream_interest_ms,
+                    sample.stream_scheduler_update_ms,
+                    sample.stream_scheduler_admit_ms,
+                    sample.stream_collision_interest_ms,
+                    sample.stream_enclosed_interest_ms,
+                    sample.stream_surface_interest_ms,
                 ]);
             }
             self.len = 0;
@@ -1658,6 +1683,12 @@ mod web {
                 stream_publish_ms: stream_breakdown.publish_ms,
                 stream_surface_ms: stream_breakdown.surface_ms,
                 stream_presence_ms,
+                stream_interest_ms: stream_breakdown.interest_ms,
+                stream_scheduler_update_ms: stream_breakdown.scheduler_update_ms,
+                stream_scheduler_admit_ms: stream_breakdown.scheduler_admit_ms,
+                stream_collision_interest_ms: stream_breakdown.collision_interest_ms,
+                stream_enclosed_interest_ms: stream_breakdown.enclosed_interest_ms,
+                stream_surface_interest_ms: stream_breakdown.surface_interest_ms,
             });
             if let Err(error) = self.request_frame() {
                 web_sys::console::error_1(&error);
@@ -1676,13 +1707,22 @@ mod web {
             let remote_ms = (performance_now(performance) - remote_start) as f32;
             let plan_start = performance_now(performance);
             let focus = world_to_chunk(camera.position);
+            let collision_interest_start = performance_now(performance);
             let collision_interest = self.collision_stream_interest(
                 camera,
                 streaming_velocity,
                 self.config.stream_collision_lookahead_seconds,
             );
+            let collision_interest_ms =
+                (performance_now(performance) - collision_interest_start) as f32;
+            let enclosed_interest_start = performance_now(performance);
             let enclosed_view_interest = self.enclosed_view_stream_interest(camera);
+            let enclosed_interest_ms =
+                (performance_now(performance) - enclosed_interest_start) as f32;
+            let surface_interest_start = performance_now(performance);
             let surface_interest = self.surface_stream_interest(focus, &collision_interest);
+            let surface_interest_ms =
+                (performance_now(performance) - surface_interest_start) as f32;
             let mut urgent_interest = collision_interest.clone();
             urgent_interest.extend(enclosed_view_interest.iter().copied());
             let mut interest = urgent_interest.clone();
@@ -1694,16 +1734,23 @@ mod web {
                 self.config.stream_velocity_lookahead_seconds,
                 self.config.stream_view_cone_half_angle_degrees,
             );
-            let (focus_changed, work) = {
+            let interest_ms = (performance_now(performance) - plan_start) as f32;
+            let (focus_changed, scheduler_update_ms, work, scheduler_admit_ms) = {
                 let mut scheduler = self.scheduler.borrow_mut();
+                let update_start = performance_now(performance);
                 let changed = scheduler.update_focus_with_interest(focus, &interest);
+                let scheduler_update_ms = (performance_now(performance) - update_start) as f32;
+                let admit_start = performance_now(performance);
+                let work = scheduler.schedule_frame_prioritized_with_urgency(
+                    self.config.stream_frame_budget,
+                    priority_hint,
+                    &urgent_interest,
+                );
                 (
                     changed,
-                    scheduler.schedule_frame_prioritized_with_urgency(
-                        self.config.stream_frame_budget,
-                        priority_hint,
-                        &urgent_interest,
-                    ),
+                    scheduler_update_ms,
+                    work,
+                    (performance_now(performance) - admit_start) as f32,
                 )
             };
             let mut uploaded = false;
@@ -1816,6 +1863,12 @@ mod web {
                 mesh_ms,
                 publish_ms,
                 surface_ms,
+                interest_ms,
+                scheduler_update_ms,
+                scheduler_admit_ms,
+                collision_interest_ms,
+                enclosed_interest_ms,
+                surface_interest_ms,
             }
         }
 

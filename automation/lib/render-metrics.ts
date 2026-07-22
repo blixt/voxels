@@ -31,6 +31,12 @@ export interface FrameSample {
   readonly streamPublishMs: number;
   readonly streamSurfaceMs: number;
   readonly streamPresenceMs: number;
+  readonly streamInterestMs: number;
+  readonly streamSchedulerUpdateMs: number;
+  readonly streamSchedulerAdmitMs: number;
+  readonly streamCollisionInterestMs: number;
+  readonly streamEnclosedInterestMs: number;
+  readonly streamSurfaceInterestMs: number;
 }
 
 export interface GpuFrameSample {
@@ -106,6 +112,12 @@ export function frameSamples(snapshot: readonly number[]): FrameSample[] {
       streamPublishMs: required(snapshot, start + 17, "frame sample"),
       streamSurfaceMs: required(snapshot, start + 18, "frame sample"),
       streamPresenceMs: required(snapshot, start + 19, "frame sample"),
+      streamInterestMs: required(snapshot, start + 20, "frame sample"),
+      streamSchedulerUpdateMs: required(snapshot, start + 21, "frame sample"),
+      streamSchedulerAdmitMs: required(snapshot, start + 22, "frame sample"),
+      streamCollisionInterestMs: required(snapshot, start + 23, "frame sample"),
+      streamEnclosedInterestMs: required(snapshot, start + 24, "frame sample"),
+      streamSurfaceInterestMs: required(snapshot, start + 25, "frame sample"),
     });
   }
   return samples;
@@ -334,6 +346,12 @@ export function summarizeRenderPhase(captures: readonly RenderSnapshotCapture[])
       publishMs: summary(samples.map((sample) => sample.streamPublishMs)),
       surfaceMs: summary(samples.map((sample) => sample.streamSurfaceMs)),
       presenceMs: summary(samples.map((sample) => sample.streamPresenceMs)),
+      interestMs: summary(samples.map((sample) => sample.streamInterestMs)),
+      schedulerUpdateMs: summary(samples.map((sample) => sample.streamSchedulerUpdateMs)),
+      schedulerAdmitMs: summary(samples.map((sample) => sample.streamSchedulerAdmitMs)),
+      collisionInterestMs: summary(samples.map((sample) => sample.streamCollisionInterestMs)),
+      enclosedInterestMs: summary(samples.map((sample) => sample.streamEnclosedInterestMs)),
+      surfaceInterestMs: summary(samples.map((sample) => sample.streamSurfaceInterestMs)),
     },
     renderSubmissionMs: summary(samples.map((sample) => sample.renderSubmissionMs)),
     unattributedCpuMs: summary(unattributedCpu),
