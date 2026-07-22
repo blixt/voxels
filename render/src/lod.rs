@@ -295,7 +295,6 @@ impl SurfacePatchSelection {
                     *patch,
                 )
             }));
-        balance_surface_selection(&mut self.patches, resident);
         for patch in self.patches.iter().copied() {
             insert_transition_candidates(
                 &self.patches,
@@ -399,7 +398,6 @@ impl SurfacePatchSelectionBuild {
             return None;
         }
         if self.transition_order.is_empty() {
-            balance_surface_selection(&mut self.selection.patches, &self.resident);
             self.transition_order = self.selection.patches.iter().copied().collect();
         }
         while remaining > 0 && self.transition_cursor < self.transition_order.len() {
@@ -417,56 +415,6 @@ impl SurfacePatchSelectionBuild {
         (self.transition_cursor == self.transition_order.len())
             .then(|| std::mem::take(&mut self.selection))
     }
-}
-
-/// Enforces the 2:1 adjacency invariant required by the exact connector mesh.
-///
-/// Streaming can temporarily have a fine sibling group beside a much coarser fallback. Coarsening
-/// the fine side one resident parent at a time preserves complete coverage while turning a large
-/// asynchronous jump into adjacent refinement steps. This is the same bounded-neighbor rule used
-/// by crack-free balanced quadtrees; it also guarantees every reported surface transition is one
-/// level wide instead of asking the connector builder to bridge missing hierarchy levels.
-fn balance_surface_selection(
-    selected: &mut HashSet<SurfacePatchId>,
-    resident: &HashSet<SurfacePatchId>,
-) {
-    loop {
-        let mut patches = selected.iter().copied().collect::<Vec<_>>();
-        patches.sort_unstable();
-        let parent = patches.into_iter().find_map(|patch| {
-            SurfacePatchEdge::ALL.into_iter().find_map(|edge| {
-                let points = points_across_patch_edge(patch, edge)?;
-                points.into_iter().find_map(|point| {
-                    let neighbor = selected_surface_patch_at(selected, point)?;
-                    let difference = patch.level.index().abs_diff(neighbor.level.index());
-                    if difference <= 1 {
-                        return None;
-                    }
-                    let finer = if patch.level.index() < neighbor.level.index() {
-                        patch
-                    } else {
-                        neighbor
-                    };
-                    finer.parent().filter(|parent| resident.contains(parent))
-                })
-            })
-        });
-        let Some(parent) = parent else {
-            break;
-        };
-        selected.retain(|patch| !surface_patch_is_descendant_of(*patch, parent));
-        selected.insert(parent);
-    }
-}
-
-fn surface_patch_is_descendant_of(mut patch: SurfacePatchId, ancestor: SurfacePatchId) -> bool {
-    while patch.level.index() < ancestor.level.index() {
-        let Some(parent) = patch.parent() else {
-            return false;
-        };
-        patch = parent;
-    }
-    patch == ancestor
 }
 
 fn insert_transition_candidates(
@@ -672,31 +620,6 @@ mod tests {
         assert_eq!(selection.patch_count(), 4);
         assert!(!selection.owns(parent));
         assert!(children.into_iter().all(|child| selection.owns(child)));
-    }
-
-    #[test]
-    fn streamed_selection_coarsens_large_neighbor_jumps_to_two_to_one() {
-        let coarse = SurfacePatchId::new(SurfaceLodLevel::Stride16, 0, 0);
-        let fine_edge = (0..8)
-            .map(|z| SurfacePatchId::new(SurfaceLodLevel::Stride2, 8, z))
-            .collect::<Vec<_>>();
-        let mut selected = resident(std::iter::once(coarse).chain(fine_edge.iter().copied()));
-        let mut available = selected.clone();
-        for fine in &fine_edge {
-            let stride4 = fine.parent().expect("stride-four parent");
-            let stride8 = stride4.parent().expect("stride-eight parent");
-            available.insert(stride4);
-            available.insert(stride8);
-        }
-
-        balance_surface_selection(&mut selected, &available);
-
-        assert!(fine_edge.into_iter().all(|fine| !selected.contains(&fine)));
-        for point in points_across_patch_edge(coarse, SurfacePatchEdge::PositiveX).unwrap() {
-            let neighbor = selected_surface_patch_at(&selected, point).expect("balanced neighbor");
-            assert_eq!(neighbor.level, SurfaceLodLevel::Stride8);
-            assert_eq!(coarse.level.index().abs_diff(neighbor.level.index()), 1);
-        }
     }
 
     #[test]
