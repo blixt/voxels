@@ -210,6 +210,7 @@ pub struct RendererConfig {
     pub features: RendererFeatureConfig,
     pub mission_control: MissionControlConfig,
     pub view_distance_metres: f32,
+    pub lod_boundary_half_extents_voxels: [i32; 8],
     pub directional_shadows: DirectionalShadowConfig,
     pub volumetric_clouds: VolumetricCloudConfig,
     pub diagnostic_sky_color: Option<[f32; 3]>,
@@ -221,6 +222,7 @@ impl Default for RendererConfig {
             features: RendererFeatureConfig::default(),
             mission_control: MissionControlConfig::default(),
             view_distance_metres: 3_200.0,
+            lod_boundary_half_extents_voxels: LOD_BOUNDARY_HALF_EXTENTS,
             directional_shadows: DirectionalShadowConfig::default(),
             volumetric_clouds: VolumetricCloudConfig::default(),
             diagnostic_sky_color: None,
@@ -1596,6 +1598,17 @@ impl Renderer {
         {
             return Err("renderer view distance must be finite and positive".to_owned());
         }
+        if !runtime_config
+            .lod_boundary_half_extents_voxels
+            .windows(2)
+            .all(|pair| pair[0] > 0 && pair[0] < pair[1])
+            || runtime_config.lod_boundary_half_extents_voxels[7] <= 0
+        {
+            return Err(
+                "renderer LOD boundary half extents must be positive and strictly increasing"
+                    .to_owned(),
+            );
+        }
         let instance = Instance::new(InstanceDescriptor {
             backends: Backends::BROWSER_WEBGPU,
             ..InstanceDescriptor::new_without_display_handle()
@@ -2415,7 +2428,14 @@ impl Renderer {
         surface_level_count: usize,
     ) {
         self.geometric_lod_focus = Some(self.geometric_lod_focus.map_or_else(
-            || GeometricLodFocus::snapped_for_levels(voxel_x, voxel_z, surface_level_count),
+            || {
+                GeometricLodFocus::snapped_with_half_extents_for_levels(
+                    voxel_x,
+                    voxel_z,
+                    surface_level_count,
+                    self.runtime_config.lod_boundary_half_extents_voxels,
+                )
+            },
             |focus| {
                 focus.advanced_for_levels(voxel_x, voxel_z, ready_level_count, surface_level_count)
             },
@@ -6038,7 +6058,8 @@ fn slice_owned_by_lod(
 
 fn surface_patch_intersects_morph_band(focus: GeometricLodFocus, patch: SurfacePatchId) -> bool {
     let boundary = usize::from(patch.level.index()) + 1;
-    let Some(&half_extent) = LOD_BOUNDARY_HALF_EXTENTS.get(boundary) else {
+    let boundary_half_extents = focus.boundary_half_extents();
+    let Some(&half_extent) = boundary_half_extents.get(boundary) else {
         return false;
     };
     let Some([[min_x, min_z], [max_x, max_z]]) = patch.voxel_bounds_xz() else {
@@ -6355,7 +6376,7 @@ fn frame_uniform(
         ],
         lod_options: [0.0, 0.0, 0.0, if lod_focus.is_some() { 1.0 } else { 0.0 }],
         lod_boundary_centres: lod_boundary_centres_uniform(lod_focus),
-        lod_boundary_half_extents: lod_boundary_half_extents_uniform(),
+        lod_boundary_half_extents: lod_boundary_half_extents_uniform(lod_focus),
         camera_forward: [
             camera_forward.x,
             camera_forward.y,
@@ -6493,7 +6514,7 @@ fn shadow_frame_uniform(
         ],
         lod_options: [0.0, 0.0, 0.0, if lod_focus.is_some() { 1.0 } else { 0.0 }],
         lod_boundary_centres: lod_boundary_centres_uniform(lod_focus),
-        lod_boundary_half_extents: lod_boundary_half_extents_uniform(),
+        lod_boundary_half_extents: lod_boundary_half_extents_uniform(lod_focus),
     }
 }
 
@@ -6511,10 +6532,14 @@ fn lod_boundary_centres_uniform(lod_focus: Option<GeometricLodFocus>) -> [[f32; 
     })
 }
 
-fn lod_boundary_half_extents_uniform() -> [[f32; 4]; 2] {
+fn lod_boundary_half_extents_uniform(lod_focus: Option<GeometricLodFocus>) -> [[f32; 4]; 2] {
+    let boundary_half_extents = lod_focus.map_or(
+        LOD_BOUNDARY_HALF_EXTENTS,
+        GeometricLodFocus::boundary_half_extents,
+    );
     std::array::from_fn(|group| {
         std::array::from_fn(|index| {
-            LOD_BOUNDARY_HALF_EXTENTS[group * 4 + index] as f32 * VOXEL_SIZE_METRES
+            boundary_half_extents[group * 4 + index] as f32 * VOXEL_SIZE_METRES
         })
     })
 }
@@ -7135,7 +7160,7 @@ mod tests {
         }
         assert_eq!(lod_boundary_centres_uniform(None), [[0.0; 4]; 4]);
         assert_eq!(
-            lod_boundary_half_extents_uniform(),
+            lod_boundary_half_extents_uniform(Some(focus)),
             [[12.8, 32.0, 64.0, 128.0], [256.0, 409.6, 819.2, 1_638.4]]
         );
     }

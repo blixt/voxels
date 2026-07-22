@@ -21,7 +21,7 @@ import {
 import type { WorldServiceCargoProfile } from "../../scripts/world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
-const AUTOMATION_FIXTURE_SCHEMA_VERSION = 6;
+const AUTOMATION_FIXTURE_SCHEMA_VERSION = 7;
 
 export type WorldSource = "procedural-v16" | "terrain-diffusion-30m";
 
@@ -37,6 +37,16 @@ export interface WorldFixtureOptions {
   readonly generationWorkers?: number;
   readonly cascadedShadows?: boolean;
   readonly screenSpaceAmbientOcclusion?: boolean;
+  readonly lodBoundaryHalfExtentsVoxels?: readonly [
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+  ];
   readonly diagnosticSkyRgb?: readonly [number, number, number];
   readonly profilingWarmupSeconds?: number;
   readonly profilingMeasureSeconds?: number;
@@ -75,6 +85,7 @@ export interface WorldFixture {
   readonly generationWorkers: number;
   readonly cascadedShadows: boolean;
   readonly screenSpaceAmbientOcclusion: boolean;
+  readonly lodBoundaryHalfExtentsVoxels: readonly number[];
   readonly profilingWarmupSeconds: number;
   readonly profilingMeasureSeconds: number;
   readonly dayLengthSeconds: number;
@@ -208,6 +219,17 @@ function numberPair(value: unknown, label: string): readonly [number, number] {
   return [value[0] as number, value[1] as number];
 }
 
+function finiteNumberArray(value: unknown, length: number, label: string): readonly number[] {
+  if (
+    !Array.isArray(value) ||
+    value.length !== length ||
+    value.some((entry) => typeof entry !== "number" || !Number.isFinite(entry))
+  ) {
+    throw new Error(`${label} must contain ${length} finite numbers`);
+  }
+  return Object.freeze([...value]) as readonly number[];
+}
+
 function parseFixtureResponse(value: unknown): FixtureResolved {
   const response = record(value, "automation fixture response");
   if (response.schemaVersion !== AUTOMATION_FIXTURE_SCHEMA_VERSION) {
@@ -229,6 +251,11 @@ function parseFixtureResponse(value: unknown): FixtureResolved {
   return Object.freeze({
     ...resolved,
     spawnVoxels: numberPair(resolved.spawnVoxels, "automation fixture spawnVoxels"),
+    lodBoundaryHalfExtentsVoxels: finiteNumberArray(
+      resolved.lodBoundaryHalfExtentsVoxels,
+      8,
+      "automation fixture lodBoundaryHalfExtentsVoxels",
+    ),
     cloudVelocityMetresPerSecond: numberPair(
       resolved.cloudVelocityMetresPerSecond,
       "automation fixture cloudVelocityMetresPerSecond",

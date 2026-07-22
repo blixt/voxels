@@ -1,5 +1,5 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 27
+schema_version = 28
 
 [developer]
 # Enables local-only time/weather visualization overrides and server-authorized spectator mode.
@@ -79,6 +79,12 @@ retention_margin_tiles = 1
 
 [rendering]
 view_distance_metres = 3200.0
+
+[rendering.geometry_lod]
+# Nested half extents in canonical 10 cm voxels. These deliberately grow nonlinearly: retain finer
+# geometry longer through the visually sensitive near field, then spend detail more slowly near the
+# horizon. Every value is aligned to the patch grid of its handoff.
+boundary_half_extents_voxels = [128, 320, 640, 1280, 2560, 4096, 8192, 16384]
 
 [rendering.shadows]
 vertical_fov_radians = 1.1868238 # 68 degrees

@@ -3981,6 +3981,10 @@ mod web {
                 spectator_available: false,
             },
             view_distance_metres: rendering.view_distance_metres,
+            lod_boundary_half_extents_voxels: rendering
+                .geometry_lod
+                .boundary_half_extents_voxels
+                .map(|extent| extent as i32),
             directional_shadows: DirectionalShadowConfig {
                 vertical_fov_radians: rendering.shadows.vertical_fov_radians,
                 near_plane: rendering.shadows.near_plane,

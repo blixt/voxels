@@ -11,7 +11,7 @@ use voxels_runtime::{
     MAX_LOAD_RADIUS_CHUNKS, MAX_SECONDARY_INTEREST_CHUNKS, MAX_VERTICAL_RADIUS_CHUNKS,
 };
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 27;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 28;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -20,6 +20,8 @@ const MAX_TRACKED_CHUNKS: u32 = 1_048_576;
 const MAX_SURFACE_RADIUS_TILES: u32 = 64;
 const MAX_FRAME_STAGE_BUDGET: u32 = 65_536;
 const MAX_VIEW_DISTANCE_METRES: f32 = 100_000.0;
+const MAX_LOD_BOUNDARY_HALF_EXTENT_VOXELS: u32 = 1_000_000;
+const LOD_BOUNDARY_ALIGNMENT_VOXELS: [u32; 8] = [32, 32, 64, 128, 256, 512, 1_024, 2_048];
 const MAX_ENCLOSED_VIEW_DISTANCE_METRES: f32 = 128.0;
 const MAX_SHADOW_MAP_RESOLUTION: u32 = 4_096;
 const MAX_DIAGNOSTIC_INTERVAL_MS: u32 = 3_600_000;
@@ -139,11 +141,21 @@ pub struct SurfaceStreamingConfig {
 #[serde(deny_unknown_fields)]
 pub struct RenderingConfig {
     pub view_distance_metres: f32,
+    pub geometry_lod: GeometryLodConfig,
     pub shadows: ShadowConfig,
     pub volumetric_clouds: VolumetricCloudConfig,
     pub features: RendererFeatureConfig,
     pub diagnostics: RenderingDiagnosticsConfig,
     pub mission_control: MissionControlConfig,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeometryLodConfig {
+    /// Half extent of each nested LOD ownership square in canonical 10 cm voxels. Values are
+    /// intentionally explicit rather than derived from one multiplier: terrain and tree fidelity
+    /// need not have linearly spaced handoffs, and each boundary remains patch-grid aligned.
+    pub boundary_half_extents_voxels: [u32; 8],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -369,6 +381,26 @@ impl ClientConfig {
             MAX_VIEW_DISTANCE_METRES,
             false,
         )?;
+        let mut previous = 0;
+        for (index, half_extent) in self
+            .rendering
+            .geometry_lod
+            .boundary_half_extents_voxels
+            .into_iter()
+            .enumerate()
+        {
+            let alignment = LOD_BOUNDARY_ALIGNMENT_VOXELS[index];
+            if half_extent <= previous
+                || half_extent > MAX_LOD_BOUNDARY_HALF_EXTENT_VOXELS
+                || !half_extent.is_multiple_of(alignment)
+            {
+                return invalid(
+                    "rendering.geometry_lod.boundary_half_extents_voxels",
+                    "must be strictly increasing, bounded, and aligned to each LOD patch grid",
+                );
+            }
+            previous = half_extent;
+        }
         let shadows = self.rendering.shadows;
         if !shadows.vertical_fov_radians.is_finite()
             || shadows.vertical_fov_radians <= 0.0
@@ -772,6 +804,11 @@ mod tests {
             },
             rendering: RenderingConfig {
                 view_distance_metres: 3_200.0,
+                geometry_lod: GeometryLodConfig {
+                    boundary_half_extents_voxels: [
+                        128, 320, 640, 1_280, 2_560, 4_096, 8_192, 16_384,
+                    ],
+                },
                 shadows: ShadowConfig {
                     vertical_fov_radians: 68.0_f32.to_radians(),
                     near_plane: 0.05,
@@ -850,18 +887,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 27", "schema_version = 26");
+        let wrong_schema = fixture.replace("schema_version = 28", "schema_version = 27");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 26,
+                found: 27,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 27",
-            "schema_version = 27\nunknown_root = true",
+            "schema_version = 28",
+            "schema_version = 28\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),
@@ -994,6 +1031,13 @@ mod tests {
         let mut config = valid_config();
         config.rendering.view_distance_metres = f32::INFINITY;
         assert_invalid_field(&config, "rendering.view_distance_metres");
+
+        let mut config = valid_config();
+        config.rendering.geometry_lod.boundary_half_extents_voxels[2] = 321;
+        assert_invalid_field(
+            &config,
+            "rendering.geometry_lod.boundary_half_extents_voxels",
+        );
 
         let mut config = valid_config();
         config.rendering.shadows.vertical_fov_radians = std::f32::consts::PI;

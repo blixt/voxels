@@ -23,6 +23,7 @@ pub enum LodOwner {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GeometricLodFocus {
     boundary_centres: [[i32; 2]; 8],
+    boundary_half_extents: [i32; 8],
     surface_level_count: u8,
 }
 
@@ -32,15 +33,37 @@ impl GeometricLodFocus {
     }
 
     pub fn snapped_for_levels(voxel_x: i32, voxel_z: i32, surface_level_count: usize) -> Self {
+        Self::snapped_with_half_extents_for_levels(
+            voxel_x,
+            voxel_z,
+            surface_level_count,
+            LOD_BOUNDARY_HALF_EXTENTS,
+        )
+    }
+
+    pub fn snapped_with_half_extents_for_levels(
+        voxel_x: i32,
+        voxel_z: i32,
+        surface_level_count: usize,
+        boundary_half_extents: [i32; 8],
+    ) -> Self {
         assert!(
             (1..=SurfaceLodLevel::ALL.len()).contains(&surface_level_count),
             "geometric LOD focus must own at least one known surface level"
+        );
+        assert!(
+            boundary_half_extents
+                .windows(2)
+                .all(|pair| pair[0] > 0 && pair[0] < pair[1])
+                && boundary_half_extents[7] > 0,
+            "geometric LOD half extents must be positive and strictly increasing"
         );
         Self {
             boundary_centres: std::array::from_fn(|index| {
                 let snap = LOD_BOUNDARY_SNAP[index];
                 [snap_nearest(voxel_x, snap), snap_nearest(voxel_z, snap)]
             }),
+            boundary_half_extents,
             surface_level_count: surface_level_count as u8,
         }
     }
@@ -73,11 +96,16 @@ impl GeometricLodFocus {
         self.boundary_centres
     }
 
+    pub const fn boundary_half_extents(self) -> [i32; 8] {
+        self.boundary_half_extents
+    }
+
     pub fn owner_at(self, voxel_x: i32, voxel_z: i32) -> LodOwner {
         let voxel_x = i64::from(voxel_x);
         let voxel_z = i64::from(voxel_z);
         let surface_level_count = usize::from(self.surface_level_count);
-        for (index, half_extent) in LOD_BOUNDARY_HALF_EXTENTS
+        for (index, half_extent) in self
+            .boundary_half_extents
             .into_iter()
             .take(surface_level_count)
             .enumerate()
