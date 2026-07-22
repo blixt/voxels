@@ -494,6 +494,15 @@ impl RemoteInner {
                     self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()))
                 }
             }
+        } else if kind == protocol::frame_fragment_abort_kind() {
+            match protocol::decode_frame_fragment_abort(&bytes) {
+                Ok(transfer_id) => {
+                    self.frame_reassembler.borrow_mut().abort(transfer_id);
+                }
+                Err(error) => {
+                    self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()));
+                }
+            }
         } else if kind == protocol::world_opened_kind() {
             self.handle_world_opened(generation, &bytes);
         } else if kind == protocol::chunk_batch_result_kind() {

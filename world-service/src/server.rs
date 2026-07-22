@@ -44,10 +44,11 @@ use voxels_world::protocol::{
     decode_open_presence, decode_open_world, decode_player_pose, decode_presence_ping,
     decode_surface_tile_batch, edit_command_kind, encode_chunk_batch_item,
     encode_chunk_batch_result_from_items, encode_edit_commit, encode_error, encode_frame_fragment,
-    encode_presence_opened, encode_presence_pong, encode_resync_required,
-    encode_surface_tile_batch_item, encode_surface_tile_batch_result_from_items,
-    encode_world_opened, message_kind, message_request_id, open_presence_kind, open_world_kind,
-    player_pose_kind, presence_ping_kind, surface_tile_batch_kind,
+    encode_frame_fragment_abort, encode_presence_opened, encode_presence_pong,
+    encode_resync_required, encode_surface_tile_batch_item,
+    encode_surface_tile_batch_result_from_items, encode_world_opened, message_kind,
+    message_request_id, open_presence_kind, open_world_kind, player_pose_kind, presence_ping_kind,
+    surface_tile_batch_kind,
 };
 use voxels_world::{
     CHUNK_EDGE, ChunkCoord, Material, MeshingHalo, SurfaceSampleBlockRequest, WORLD_SCHEMA_VERSION,
@@ -55,9 +56,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v30/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v30/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v30";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v31/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v31/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v31";
 pub const HEALTH_PATH: &str = "/healthz";
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
@@ -1052,6 +1053,22 @@ impl OutboundFrame {
         self.offset = end;
         Ok((wire, self.offset == self.bytes.len()))
     }
+}
+
+async fn abort_partial_frame(
+    sink: &mut SplitSink<WebSocket, Message>,
+    frame: &OutboundFrame,
+) -> bool {
+    let Some(abort) = partial_frame_abort(frame) else {
+        return true;
+    };
+    sink.send(Message::Binary(abort.into())).await.is_ok()
+}
+
+fn partial_frame_abort(frame: &OutboundFrame) -> Option<Vec<u8>> {
+    frame
+        .fragment_transfer_id
+        .map(|transfer_id| encode_frame_fragment_abort(transfer_id).expect("non-zero transfer id"))
 }
 
 struct PresenceOutboundFrame {
@@ -2315,7 +2332,13 @@ async fn write_frames(
                 .and_then(|frame| frame.tracked.as_ref())
                 .is_some_and(TrackedRequest::is_cancelled)
             {
-                if let Some(tracked) = queue.pop_front().and_then(|frame| frame.tracked) {
+                let Some(frame) = queue.pop_front() else {
+                    break;
+                };
+                if !abort_partial_frame(&mut sink, &frame).await {
+                    break 'writer;
+                }
+                if let Some(tracked) = frame.tracked {
                     tracked.finish();
                 }
             }
@@ -2363,6 +2386,12 @@ async fn write_frames(
                         .as_ref()
                         .is_some_and(TrackedRequest::is_cancelled)
                     {
+                        if !abort_partial_frame(&mut sink, &frame).await {
+                            if let Some(tracked) = frame.tracked {
+                                tracked.finish();
+                            }
+                            break 'writer;
+                        }
                         if let Some(tracked) = frame.tracked {
                             tracked.finish();
                         }
@@ -3137,11 +3166,11 @@ mod tests {
         BrowserUserId, ChunkBatchRequest, EditCommand, EditCommit, FrameReassembler, OpenPresence,
         OpenWorld, PLAYER_POSE_GROUNDED, PlayerId, PlayerIdentity, PlayerPoseUpdate, PresenceDelta,
         PresenceOpened, PresenceSessionId, SurfaceTileBatchRequest, decode_chunk_batch_result,
-        decode_edit_commit, decode_error, decode_frame_fragment, decode_presence_delta,
-        decode_presence_opened, decode_surface_tile_batch_result, decode_world_opened,
-        edit_commit_kind, encode_chunk_batch, encode_edit_command, encode_open_presence,
-        encode_open_world, encode_player_pose, encode_surface_tile_batch, error_kind,
-        frame_fragment_kind, presence_delta_kind,
+        decode_edit_commit, decode_error, decode_frame_fragment, decode_frame_fragment_abort,
+        decode_presence_delta, decode_presence_opened, decode_surface_tile_batch_result,
+        decode_world_opened, edit_commit_kind, encode_chunk_batch, encode_edit_command,
+        encode_open_presence, encode_open_world, encode_player_pose, encode_surface_tile_batch,
+        error_kind, frame_fragment_kind, presence_delta_kind,
     };
     use voxels_world::{
         ChunkCoord, ProceduralWorldSource, SurfaceLodLevel, SurfaceTileCoord, VoxelCoord,
@@ -3234,7 +3263,7 @@ mod tests {
         let mut next_transfer_id = 1;
         let mut reassembler = FrameReassembler::default();
 
-        let (first_wire, mut first_complete) = first
+        let (first_wire, first_complete) = first
             .take_next_wire(Some(64), &mut next_transfer_id)
             .unwrap();
         let (second_wire, mut second_complete) = second
@@ -3245,32 +3274,22 @@ mod tests {
         assert_ne!(first_transfer, second_transfer);
         assert_eq!(reassembler.accept(&first_wire).unwrap(), None);
         assert_eq!(reassembler.accept(&second_wire).unwrap(), None);
-        let mut first_reassembled = false;
+        let abort = partial_frame_abort(&first).expect("fragmented frame abort");
+        assert_eq!(decode_frame_fragment_abort(&abort).unwrap(), first_transfer);
+        assert!(reassembler.abort(decode_frame_fragment_abort(&abort).unwrap()));
         let mut second_reassembled = false;
 
-        while !first_complete || !second_complete {
-            if !first_complete {
-                let (wire, complete) = first
-                    .take_next_wire(Some(64), &mut next_transfer_id)
-                    .unwrap();
-                first_complete = complete;
-                if let Some(frame) = reassembler.accept(&wire).unwrap() {
-                    assert_eq!(frame, first_bytes);
-                    first_reassembled = true;
-                }
-            }
-            if !second_complete {
-                let (wire, complete) = second
-                    .take_next_wire(Some(64), &mut next_transfer_id)
-                    .unwrap();
-                second_complete = complete;
-                if let Some(frame) = reassembler.accept(&wire).unwrap() {
-                    assert_eq!(frame, second_bytes);
-                    second_reassembled = true;
-                }
+        assert!(!first_complete);
+        while !second_complete {
+            let (wire, complete) = second
+                .take_next_wire(Some(64), &mut next_transfer_id)
+                .unwrap();
+            second_complete = complete;
+            if let Some(frame) = reassembler.accept(&wire).unwrap() {
+                assert_eq!(frame, second_bytes);
+                second_reassembled = true;
             }
         }
-        assert!(first_reassembled);
         assert!(second_reassembled);
     }
 
@@ -3815,7 +3834,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v30, test-local-token"),
+            HeaderValue::from_static("voxels.world.v31, test-local-token"),
         );
         let (socket, response) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -4848,7 +4867,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v30, test-local-token"),
+            HeaderValue::from_static("voxels.world.v31, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -4882,7 +4901,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v30, test-local-token"),
+            HeaderValue::from_static("voxels.world.v31, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);

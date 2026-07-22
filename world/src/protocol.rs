@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 30;
+pub const PROTOCOL_VERSION: u16 = 31;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -58,6 +58,7 @@ const KIND_EDIT_COMMAND: u16 = 15;
 const KIND_EDIT_COMMIT: u16 = 16;
 const KIND_RESYNC_REQUIRED: u16 = 17;
 const KIND_FRAME_FRAGMENT: u16 = 18;
+const KIND_FRAME_FRAGMENT_ABORT: u16 = 19;
 const FLAG_NONE: u16 = 0;
 const RESERVED: u16 = 0;
 const RESULT_CODEC_BROTLI: u8 = 1;
@@ -2267,6 +2268,26 @@ pub fn decode_frame_fragment(bytes: &[u8]) -> Result<FrameFragment, ProtocolErro
     Ok(fragment)
 }
 
+pub fn encode_frame_fragment_abort(transfer_id: u64) -> Result<Vec<u8>, ProtocolError> {
+    if transfer_id == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "fragment abort transfer id is zero",
+        ));
+    }
+    Ok(encode_frame(KIND_FRAME_FRAGMENT_ABORT, transfer_id, &[]))
+}
+
+pub fn decode_frame_fragment_abort(bytes: &[u8]) -> Result<u64, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_kind(&frame, KIND_FRAME_FRAGMENT_ABORT)?;
+    if frame.request_id == 0 || !frame.payload.is_empty() {
+        return Err(ProtocolError::InvalidPayload(
+            "invalid frame fragment abort",
+        ));
+    }
+    Ok(frame.request_id)
+}
+
 fn validate_frame_fragment(fragment: &FrameFragment) -> Result<(), ProtocolError> {
     validate_frame_fragment_fields(
         fragment.transfer_id,
@@ -2353,6 +2374,10 @@ impl FrameReassembler {
 
     pub fn clear(&mut self) {
         self.transfers.clear();
+    }
+
+    pub fn abort(&mut self, transfer_id: u64) -> bool {
+        self.transfers.remove(&transfer_id).is_some()
     }
 }
 
@@ -2472,6 +2497,10 @@ pub const fn resync_required_kind() -> u16 {
 
 pub const fn frame_fragment_kind() -> u16 {
     KIND_FRAME_FRAGMENT
+}
+
+pub const fn frame_fragment_abort_kind() -> u16 {
+    KIND_FRAME_FRAGMENT_ABORT
 }
 
 fn encode_player_pose_body(output: &mut Vec<u8>, pose: PlayerPoseUpdate) {
@@ -4547,7 +4576,19 @@ mod tests {
         assert_eq!(reassembler.accept(&first_a), Ok(None));
         assert_eq!(reassembler.accept(&second_a), Ok(None));
         assert_eq!(reassembler.accept(&second_b), Ok(Some(second)));
-        assert_eq!(reassembler.accept(&first_b), Ok(Some(first)));
+        assert_eq!(reassembler.accept(&first_b), Ok(Some(first.clone())));
+
+        let abandoned = encode_frame_fragment(103, first.len(), 0, &first[..3_000]).unwrap();
+        assert_eq!(reassembler.accept(&abandoned), Ok(None));
+        let abort = encode_frame_fragment_abort(103).unwrap();
+        assert_eq!(decode_frame_fragment_abort(&abort), Ok(103));
+        assert!(reassembler.abort(103));
+        assert!(!reassembler.abort(103));
+        for transfer_id in 104..=168 {
+            let fragment = encode_frame_fragment(transfer_id, first.len(), 0, &first[..1]).unwrap();
+            assert_eq!(reassembler.accept(&fragment), Ok(None));
+            assert!(reassembler.abort(transfer_id));
+        }
 
         let orphan = encode_frame_fragment(73, 100, 10, &[1; 10]).unwrap();
         assert!(matches!(

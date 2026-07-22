@@ -1,6 +1,6 @@
 # Multiplayer scaling envelope
 
-VXWP v30 supports one unsharded authoritative world with up to 1,024 admitted player sessions. Spatial
+VXWP v31 supports one unsharded authoritative world with up to 1,024 admitted player sessions. Spatial
 interest management is an internal replication index, not a gameplay shard: every player inside the
 same location's 256 m interest radius can discover every other player there. Players beyond that
 radius contribute no entity records or bytes to one another's presence streams.
@@ -98,7 +98,7 @@ and six independent ephemeral BrowserContexts. Each context has separate local s
 receives an independently shaped 40 ms RTT, 50/10 Mbit/s link, and must negotiate a distinct browser
 user and player identity. Five builders and one observer start together. The observer then travels at
 least 120 m from the builders, beyond the configured 96 m mid-presence tier, and all six clients must
-still render the other five articulated avatars. Per-player `/v30/world` and `/v30/presence` stream and
+still render the other five articulated avatars. Per-player `/v31/world` and `/v31/presence` stream and
 VXWP byte counts and screenshots are written to the isolated
 `target/automation/multiplayer/<run-id>/` directory. The stable
 `target/automation/multiplayer/latest.json` pointer identifies the newest run; its far-observer
