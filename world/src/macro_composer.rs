@@ -20,7 +20,7 @@ use crate::{
     WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash, generate_water_tile_mesh_with,
     surface_tiles_affected_by_column,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const SURFACE_TILE_SAMPLE_EDGE: u32 = 34;
 const ECOLOGY_CELL_VOXELS: i32 = 64;
@@ -769,6 +769,20 @@ impl HeightfieldWorldSource {
         }
         Ok(features)
     }
+
+    fn conservative_surface_tiles_affected_by_voxels(
+        &self,
+        edits: &EditMap,
+        coords: &[VoxelCoord],
+    ) -> Vec<SurfaceTileCoord> {
+        let mut affected = BTreeSet::new();
+        for &coord in coords {
+            for level in SurfaceLodLevel::ALL {
+                affected.extend(self.surface_tiles_affected_by_voxel(edits, level, coord));
+            }
+        }
+        affected.into_iter().collect()
+    }
 }
 
 impl WorldSourceEngine for HeightfieldWorldSource {
@@ -838,6 +852,66 @@ impl WorldSourceEngine for HeightfieldWorldSource {
             }
         }
         affected
+    }
+
+    fn surface_tiles_affected_by_voxels(
+        &self,
+        edits: &EditMap,
+        coords: &[VoxelCoord],
+    ) -> Vec<SurfaceTileCoord> {
+        let Some(min_x) = coords.iter().map(|coord| coord.x).min() else {
+            return Vec::new();
+        };
+        let min_z = coords.iter().map(|coord| coord.z).min().unwrap_or(0);
+        let max_x = coords.iter().map(|coord| coord.x).max().unwrap_or(min_x);
+        let max_z = coords.iter().map(|coord| coord.z).max().unwrap_or(min_z);
+        let Some(width) = max_x
+            .checked_sub(min_x)
+            .and_then(|span| span.checked_add(1))
+            .and_then(|span| u32::try_from(span).ok())
+        else {
+            return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
+        };
+        let Some(depth) = max_z
+            .checked_sub(min_z)
+            .and_then(|span| span.checked_add(1))
+            .and_then(|span| u32::try_from(span).ok())
+        else {
+            return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
+        };
+        let Ok(region) = self.prepare_region(
+            WorldProductPriority::ReplacementSurface,
+            [min_x, min_z],
+            [width, depth],
+            1,
+        ) else {
+            return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
+        };
+        let mut affected = BTreeSet::new();
+        for &coord in coords {
+            let Ok((surface_y, _)) = self.edited_surface(&region, edits, coord.x, coord.z) else {
+                return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
+            };
+            if coord.y < surface_y {
+                continue;
+            }
+            for level in SurfaceLodLevel::ALL {
+                affected.extend(surface_tiles_affected_by_column(level, coord.x, coord.z));
+            }
+            for feature in self.skyline_features_at(coord) {
+                if feature.material_at(coord).is_none() {
+                    continue;
+                }
+                for level in SurfaceLodLevel::ALL {
+                    let owner =
+                        SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
+                    if owner.is_world_representable() {
+                        affected.insert(owner);
+                    }
+                }
+            }
+        }
+        affected.into_iter().collect()
     }
 
     fn atmosphere_sample(&self, x: i32, z: i32) -> (AtmosphereSample, SurfaceRegion) {
@@ -2453,6 +2527,27 @@ mod tests {
             .generate_edited_surface_tile(&edits, coord)
             .expect("edited water tile");
         assert_ne!(drained.water, pristine.water);
+    }
+
+    #[test]
+    fn batched_subsurface_edits_do_not_invalidate_heightfield_surface_tiles() {
+        let source = heightfield(FakeBehavior::Valid);
+        let edits = EditMap::default();
+
+        assert!(
+            source
+                .surface_tiles_affected_by_voxels(
+                    &edits,
+                    &[VoxelCoord::new(1, -4, 1), VoxelCoord::new(2, 0, 2)],
+                )
+                .is_empty()
+        );
+        let surface = source.surface_tiles_affected_by_voxels(&edits, &[VoxelCoord::new(1, 1, 1)]);
+        assert!(
+            SurfaceLodLevel::ALL
+                .into_iter()
+                .all(|level| { surface.contains(&SurfaceTileCoord::containing(level, 1, 1)) })
+        );
     }
 
     #[test]

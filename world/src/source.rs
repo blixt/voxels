@@ -527,6 +527,23 @@ pub trait WorldSourceEngine: Send + Sync {
         coord: VoxelCoord,
     ) -> Vec<SurfaceTileCoord>;
 
+    /// Returns every derived surface tile affected by a batch of canonical voxel changes.
+    /// Sources with expensive field lookups can override this to sample the edited columns once
+    /// for the whole operation instead of repeating the same query for every LOD level.
+    fn surface_tiles_affected_by_voxels(
+        &self,
+        edits: &crate::EditMap,
+        coords: &[VoxelCoord],
+    ) -> Vec<SurfaceTileCoord> {
+        let mut affected = std::collections::BTreeSet::new();
+        for &coord in coords {
+            for level in SurfaceLodLevel::ALL {
+                affected.extend(self.surface_tiles_affected_by_voxel(edits, level, coord));
+            }
+        }
+        affected.into_iter().collect()
+    }
+
     fn atmosphere_sample(&self, x: i32, z: i32) -> (AtmosphereSample, SurfaceRegion);
 
     fn skyline_features_anchored_in(&self, bounds: [[i32; 2]; 2]) -> Vec<SkylineFeature>;

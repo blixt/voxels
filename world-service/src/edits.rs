@@ -1329,15 +1329,12 @@ impl AffectedProducts {
         edits: &EditMap,
         mutations: &[VoxelMutation],
     ) {
-        for mutation in mutations {
-            for level in SurfaceLodLevel::ALL {
-                self.surfaces.extend(source.surface_tiles_affected_by_voxel(
-                    edits,
-                    level,
-                    mutation.coord,
-                ));
-            }
-        }
+        let coords = mutations
+            .iter()
+            .map(|mutation| mutation.coord)
+            .collect::<Vec<_>>();
+        self.surfaces
+            .extend(source.surface_tiles_affected_by_voxels(edits, &coords));
     }
 
     fn finish(
