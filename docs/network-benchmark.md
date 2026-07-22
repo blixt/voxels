@@ -176,7 +176,7 @@ decode jank on this machine.
 
 ## 2026-07-18 canonical view-and-velocity priority
 
-VXWP v31 preserves the complete immediate 3x3 canonical-chunk vicinity, then reorders unstarted
+VXWP v32 preserves the complete immediate 3x3 canonical-chunk vicinity, then reorders unstarted
 generation, meshing, and upload tickets every frame by a 55-degree camera cone and a 1.5-second
 velocity prediction. This changes request order only: residency, cache identity, product fidelity,
 and every traffic bound remain unchanged. The values are typed client configuration.

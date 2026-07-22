@@ -86,7 +86,7 @@ per-player CPU consumption under load.
    Collision remains the strongest class, then visible exact/surface work, then prefetch.
 5. Canceling a fragmented response emits an explicit VXWP fragment-abort frame. Without it, the
    client retained a partial reassembly slot forever; repeated fast-travel cancellation exhausted
-   all 32 slots and disconnected the world socket. VXWP v31 deliberately has no legacy path.
+   all 32 slots and disconnected the world socket. VXWP v32 deliberately has no legacy path.
 6. Four surface tiles remain one generation request. Coarser parents remain rendered until their
    exact replacement cut is ready, preserving holes/seams correctness while the corridor advances.
 

@@ -1,5 +1,5 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 31
+schema_version = 32
 
 [developer]
 # Enables local-only time/weather visualization overrides and server-authorized spectator mode.
@@ -9,9 +9,9 @@ controls_enabled = false
 # The client knows only where canonical world products come from. The service chooses the
 # procedural or Terrain Diffusion provider in config/world-service.toml.
 [world]
-endpoint = "wss://voxels-world-blixt.fly.dev/v31/world"
-presence_endpoint = "wss://voxels-world-blixt.fly.dev/v31/presence"
-subprotocol = "voxels.world.v31"
+endpoint = "wss://voxels-world-blixt.fly.dev/v32/world"
+presence_endpoint = "wss://voxels-world-blixt.fly.dev/v32/presence"
+subprotocol = "voxels.world.v32"
 # The browser replaces this reserved marker with a short-lived credential from the same-origin
 # Cloudflare session endpoint before the TOML enters the Rust engine.
 auth_subprotocol_token = "session:/api/session"

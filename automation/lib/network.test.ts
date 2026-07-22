@@ -113,7 +113,9 @@ describe("network benchmark link", () => {
     request.write("VXWP");
     request[24] = 1;
     expect(testInternals.worldProductPriorityName(request)).toBe("collision_critical");
-    request[24] = 5;
+    request[24] = 3;
+    expect(testInternals.worldProductPriorityName(request)).toBe("immediate_surface");
+    request[24] = 6;
     expect(testInternals.worldProductPriorityName(request)).toBe("prefetch");
     request[24] = 0;
     expect(testInternals.worldProductPriorityName(request)).toBeNull();
@@ -123,7 +125,7 @@ describe("network benchmark link", () => {
     let now = 100;
     const stats = testInternals.blankStats();
     const inspector = new testInternals.ConnectionInspector({ current: stats }, () => now);
-    inspector.path = "/v31/presence";
+    inspector.path = "/v32/presence";
     inspector.onMessage("upstream", 0x2, vxwpFrame(13, 40, 7), 40, 1);
     now = 112.25;
     inspector.onMessage("downstream", 0x2, vxwpFrame(14, 56, 7), 56, 1);
@@ -147,7 +149,7 @@ describe("network benchmark link", () => {
   it("retains control-error reasons instead of reporting opaque error-frame counts", () => {
     const stats = testInternals.blankStats();
     const inspector = new testInternals.ConnectionInspector({ current: stats });
-    inspector.path = "/v31/world";
+    inspector.path = "/v32/world";
     inspector.onMessage("downstream", 0x2, vxwpError("world generator is busy"), 49, 1);
     inspector.onMessage("downstream", 0x2, vxwpError("world generator is busy"), 49, 1);
 
@@ -159,7 +161,7 @@ describe("network benchmark link", () => {
   it("attributes cancellations to the exact world-product request kind", () => {
     const stats = testInternals.blankStats();
     const inspector = new testInternals.ConnectionInspector({ current: stats });
-    inspector.path = "/v31/world";
+    inspector.path = "/v32/world";
     const chunks = vxwpFrame(3, 25, 0, 41n);
     chunks[24] = 2;
     const surface = vxwpFrame(7, 25, 0, 42n);

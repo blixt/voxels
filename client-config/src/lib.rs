@@ -11,7 +11,7 @@ use voxels_runtime::{
     MAX_LOAD_RADIUS_CHUNKS, MAX_SECONDARY_INTEREST_CHUNKS, MAX_VERTICAL_RADIUS_CHUNKS,
 };
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 31;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 32;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -825,9 +825,9 @@ mod tests {
                 controls_enabled: true,
             },
             world: WorldTransportConfig {
-                endpoint: "ws://127.0.0.1:9777/v31/world".to_owned(),
-                presence_endpoint: "ws://127.0.0.1:9777/v31/presence".to_owned(),
-                subprotocol: "voxels.world.v31".to_owned(),
+                endpoint: "ws://127.0.0.1:9777/v32/world".to_owned(),
+                presence_endpoint: "ws://127.0.0.1:9777/v32/presence".to_owned(),
+                subprotocol: "voxels.world.v32".to_owned(),
                 auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
                 max_in_flight_batches: 8,
                 buffered_amount_high_water_bytes: 8 * 1024 * 1024,
@@ -971,18 +971,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 31", "schema_version = 30");
+        let wrong_schema = fixture.replace("schema_version = 32", "schema_version = 31");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 30,
+                found: 31,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 31",
-            "schema_version = 31\nunknown_root = true",
+            "schema_version = 32",
+            "schema_version = 32\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),
