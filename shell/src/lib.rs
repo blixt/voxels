@@ -1918,6 +1918,12 @@ mod web {
                     (performance_now(performance) - admit_start) as f32,
                 )
             };
+            if focus_changed {
+                let scheduler = self.scheduler.borrow();
+                self.remote.cancel_chunk_batches_outside(|coord| {
+                    scheduler.status(coord).is_some_and(|status| status.desired)
+                });
+            }
             let mut uploaded = false;
 
             let urgent_interest_keys: BTreeSet<_> =

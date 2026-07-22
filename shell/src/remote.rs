@@ -216,6 +216,15 @@ impl RemoteWorldClient {
         self.inner.completions.borrow_mut().pop_front()
     }
 
+    /// Cancels scheduler-owned chunk batches once none of their coordinates remain desired.
+    ///
+    /// One-shot bootstrap requests are deliberately excluded: they are not backed by scheduler
+    /// capabilities and their caller owns their lifetime directly. Mixed scheduler batches remain
+    /// alive so a useful coordinate is not discarded with stale siblings.
+    pub fn cancel_chunk_batches_outside(&self, keep: impl Fn(ChunkCoord) -> bool) -> usize {
+        self.inner.cancel_chunk_batches_outside(keep)
+    }
+
     pub fn submit_surface_batch(
         &self,
         priority: WorldProductPriority,
@@ -1068,6 +1077,32 @@ impl RemoteInner {
                     Some(request_id)
                 }
                 _ => None,
+            })
+            .collect::<Vec<_>>();
+        let canceled = request_ids.len();
+        for request_id in request_ids {
+            self.cancel(request_id);
+        }
+        canceled
+    }
+
+    fn cancel_chunk_batches_outside(&self, keep: impl Fn(ChunkCoord) -> bool) -> usize {
+        let request_ids = self
+            .pending
+            .borrow()
+            .iter()
+            .filter_map(|(&request_id, pending)| match pending {
+                PendingBatch::Chunks {
+                    expected_coords,
+                    delivery: ChunkDelivery::Drain(_),
+                    ..
+                } if expected_coords.iter().all(|coord| !keep(*coord)) => Some(request_id),
+                PendingBatch::Chunks {
+                    delivery: ChunkDelivery::OneShot(_),
+                    ..
+                }
+                | PendingBatch::Surface { .. }
+                | PendingBatch::Chunks { .. } => None,
             })
             .collect::<Vec<_>>();
         let canceled = request_ids.len();
