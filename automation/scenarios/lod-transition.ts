@@ -480,7 +480,7 @@ function summarizePerformance(timings: LodTimings) {
   };
 }
 
-type LodMode = "transition" | "watertight" | "boundary-coverage";
+type LodMode = "transition" | "watertight" | "boundary-coverage" | "travel-coverage";
 
 interface LodOptions {
   readonly mode: LodMode;
@@ -496,6 +496,7 @@ interface LodOptions {
   readonly cascadedShadows: boolean;
   readonly screenSpaceAmbientOcclusion: boolean;
   readonly recordVideo: boolean;
+  readonly travelSeconds: number;
   readonly buildProfile: "debug" | "wasm-dev" | "release";
 }
 
@@ -503,7 +504,7 @@ function parseOptions(arguments_: readonly string[]): LodOptions {
   const argumentsReader = new ScenarioArguments(arguments_);
   const mode = argumentsReader.choice(
     "mode",
-    ["transition", "watertight", "boundary-coverage"] as const,
+    ["transition", "watertight", "boundary-coverage", "travel-coverage"] as const,
     "transition",
   );
   const boundaryCoverage = mode === "boundary-coverage";
@@ -573,6 +574,12 @@ function parseOptions(arguments_: readonly string[]): LodOptions {
     cascadedShadows: shadows === "on",
     screenSpaceAmbientOcclusion: ambientOcclusion === "on",
     recordVideo: argumentsReader.flag("video"),
+    travelSeconds:
+      argumentsReader.number("travel-seconds", {
+        fallback: 30,
+        minimum: 1,
+        maximum: 300,
+      }) ?? 30,
     buildProfile: argumentsReader.choice(
       "build",
       ["debug", "wasm-dev", "release"] as const,
@@ -586,6 +593,7 @@ function parseOptions(arguments_: readonly string[]): LodOptions {
 async function runLodTransition(context: ScenarioContext, arguments_: readonly string[]) {
   const options = parseOptions(arguments_);
   const boundaryCoverage = options.mode === "boundary-coverage";
+  const travelCoverage = options.mode === "travel-coverage";
   const watertight = options.mode !== "transition";
   const timings: LodTimings = {
     frameIntervals: [],
@@ -644,6 +652,150 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
   await context.artifacts.write("LOD before", "before.png", before, "image/png");
   const beforeVideoSeconds = (Date.now() - videoStartedAtMs) / 1_000;
   if (options.recordVideo && !watertight) await page.waitForTimeout(1_500);
+
+  if (travelCoverage) {
+    await engine.setSpectator(true);
+    const travelStartedAt = Date.now();
+    const travelStartedPose = cameraPosition(await readSnapshot(engine, timings));
+    const samples: Array<{
+      readonly elapsedMs: number;
+      readonly camera: Vector3;
+      readonly diagnosticSkyPixels: number;
+      readonly largestComponentPixels: number;
+      readonly presentedStrideVoxels: number;
+      readonly incompleteTransitionEdges: number;
+      readonly surfaceQueued: number;
+    }> = [];
+    let worst = await analyzeWatertightTerrain(page, before);
+    let worstScreenshot = before;
+    await page.keyboard.down("KeyW");
+    try {
+      while (Date.now() - travelStartedAt < options.travelSeconds * 1_000) {
+        await page.waitForTimeout(200);
+        const snapshot = await readSnapshot(engine, timings);
+        const screenshot = await page.screenshot();
+        const analysis = await analyzeWatertightTerrain(page, screenshot);
+        samples.push({
+          elapsedMs: Date.now() - travelStartedAt,
+          camera: cameraPosition(snapshot),
+          diagnosticSkyPixels: analysis.diagnosticSkyPixels,
+          largestComponentPixels: analysis.largestComponentPixels,
+          presentedStrideVoxels: snapshotValue(snapshot, "presentedLodStrideVoxels"),
+          incompleteTransitionEdges: snapshotValue(snapshot, "lodIncompleteTransitionEdges"),
+          surfaceQueued: snapshotValue(snapshot, "surfaceQueued"),
+        });
+        if (
+          analysis.diagnosticSkyPixels > worst.diagnosticSkyPixels ||
+          (analysis.diagnosticSkyPixels === worst.diagnosticSkyPixels &&
+            analysis.largestComponentPixels > worst.largestComponentPixels)
+        ) {
+          worst = analysis;
+          worstScreenshot = screenshot;
+        }
+        if (analysis.diagnosticSkyPixels > 0) break;
+      }
+    } finally {
+      await page.keyboard.up("KeyW");
+    }
+    const stoppedImmediateSnapshot = await readSnapshot(engine, timings);
+    const travelFinishedPose = cameraPosition(stoppedImmediateSnapshot);
+    const stoppedImmediateScreenshot = await page.screenshot();
+    const stoppedImmediate = await analyzeWatertightTerrain(page, stoppedImmediateScreenshot);
+    await page.waitForTimeout(500);
+    const stoppedSettledSnapshot = await readSnapshot(engine, timings);
+    const stoppedSettledScreenshot = await page.screenshot();
+    const stoppedSettled = await analyzeWatertightTerrain(page, stoppedSettledScreenshot);
+    await engine.setDiagnosticSky(null);
+    await context.artifacts.write(
+      "Worst sustained travel coverage",
+      "travel-worst-coverage.png",
+      worstScreenshot,
+      "image/png",
+    );
+    await context.artifacts.write(
+      "Coverage immediately after stopping",
+      "travel-stopped-immediate.png",
+      stoppedImmediateScreenshot,
+      "image/png",
+    );
+    await context.artifacts.write(
+      "Coverage after the LOD handoff window",
+      "travel-stopped-settled.png",
+      stoppedSettledScreenshot,
+      "image/png",
+    );
+    const uncoveredOwnerSamples = samples.filter(
+      (sample) => sample.presentedStrideVoxels === 0,
+    ).length;
+    const violations: string[] = [];
+    if (worst.diagnosticSkyPixels > 0) {
+      violations.push("sustained travel exposed diagnostic sky inside the terrain ROI");
+    }
+    if (uncoveredOwnerSamples > 0) {
+      violations.push("sustained travel sampled a world point without an LOD owner");
+    }
+    browser.assertHealthy();
+    const result = {
+      ok: violations.length === 0,
+      mode: options.mode,
+      commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+      dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "",
+      source: options.source,
+      browser: browser.version,
+      travel: {
+        requestedSeconds: options.travelSeconds,
+        samples: samples.length,
+        distanceMetres: spatialDistance(travelStartedPose, travelFinishedPose),
+        uncoveredOwnerSamples,
+        maximumPresentedStrideVoxels: Math.max(
+          0,
+          ...samples.map((sample) => sample.presentedStrideVoxels),
+        ),
+        maximumIncompleteTransitionEdges: Math.max(
+          0,
+          ...samples.map((sample) => sample.incompleteTransitionEdges),
+        ),
+        surfaceQueue: {
+          first: samples[0]?.surfaceQueued ?? 0,
+          last: samples.at(-1)?.surfaceQueued ?? 0,
+          maximum: Math.max(0, ...samples.map((sample) => sample.surfaceQueued)),
+        },
+      },
+      worst,
+      stopped: {
+        immediate: {
+          image: stoppedImmediate,
+          presentedStrideVoxels: snapshotValue(
+            stoppedImmediateSnapshot,
+            "presentedLodStrideVoxels",
+          ),
+          incompleteTransitionEdges: snapshotValue(
+            stoppedImmediateSnapshot,
+            "lodIncompleteTransitionEdges",
+          ),
+          surfaceQueued: snapshotValue(stoppedImmediateSnapshot, "surfaceQueued"),
+        },
+        settled: {
+          image: stoppedSettled,
+          presentedStrideVoxels: snapshotValue(stoppedSettledSnapshot, "presentedLodStrideVoxels"),
+          incompleteTransitionEdges: snapshotValue(
+            stoppedSettledSnapshot,
+            "lodIncompleteTransitionEdges",
+          ),
+          surfaceQueued: snapshotValue(stoppedSettledSnapshot, "surfaceQueued"),
+        },
+      },
+      samples,
+      violations,
+    };
+    await context.artifacts.writeJson("LOD report", "report.json", result);
+    if (!result.ok) throw new Error(`LOD travel coverage violations: ${violations.join(", ")}`);
+    return {
+      summary: "Sustained LOD travel coverage passed.",
+      metrics: result.travel,
+      details: result,
+    };
+  }
 
   if (watertight) {
     const headingSamples = [
