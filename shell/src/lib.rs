@@ -680,6 +680,25 @@ fn complete_renderable_interest_columns(
     complete
 }
 
+/// Activates every independently renderable chunk in an exact three-dimensional interest set.
+///
+/// Unlike a terrain-surface replacement, tunnel and cavern geometry does not claim an X/Z column:
+/// each chunk supplements the heightfield hierarchy only at its own Y coordinate. Requiring every
+/// newly discovered sibling in a column to be ready would revoke already presented tunnel walls
+/// while the portal frontier streams, exposing the atmospheric background for one or more frames.
+#[cfg(any(target_arch = "wasm32", test))]
+fn renderable_exact_interest_chunks(
+    interest: &[voxels_world::ChunkCoord],
+    mut is_renderable: impl FnMut(voxels_world::ChunkCoord) -> bool,
+) -> std::collections::BTreeSet<(i32, i32, i32)> {
+    interest
+        .iter()
+        .copied()
+        .filter(|coord| is_renderable(*coord))
+        .map(|coord| (coord.x, coord.y, coord.z))
+        .collect()
+}
+
 #[cfg(any(target_arch = "wasm32", test))]
 fn camera_from_resume_values(values: [f32; 5]) -> CameraState {
     CameraState::from_persisted(
@@ -2452,7 +2471,13 @@ mod web {
                 })
             };
             let interaction = complete_interest(collision_interest);
-            let enclosed_view = complete_interest(enclosed_view_interest);
+            // Exact cave/tunnel chunks supplement the surface hierarchy independently in 3D.
+            // Do not apply the surface cut's all-Y-siblings rule here: portal discovery can add a
+            // pending chunk to an already visible column, and that must not revoke its ready wall.
+            let enclosed_view =
+                crate::renderable_exact_interest_chunks(enclosed_view_interest, |coord| {
+                    scheduler.desired_chunk_renderable(coord)
+                });
             let surface = complete_interest(surface_interest);
             canonical_ready_chunks.extend(surface.iter().copied());
             let canonical_surface_ready_chunks = surface.clone();
@@ -4777,6 +4802,24 @@ mod tests {
             truncated_column
                 .into_iter()
                 .all(|coord| { !ready.contains(&(coord.x, coord.y, coord.z)) })
+        );
+    }
+
+    #[test]
+    fn pending_portal_frontier_does_not_revoke_ready_tunnel_sibling() {
+        let visible_wall = voxels_world::ChunkCoord::new(69, 42, 137);
+        let pending_frontier = voxels_world::ChunkCoord::new(69, 43, 137);
+        let interest = [visible_wall, pending_frontier];
+        let renderable = BTreeSet::from([visible_wall]);
+
+        let active =
+            renderable_exact_interest_chunks(&interest, |coord| renderable.contains(&coord));
+
+        assert_eq!(active, BTreeSet::from([(69, 42, 137)]));
+        assert!(
+            complete_renderable_interest_columns(&interest, |coord| renderable.contains(&coord))
+                .is_empty(),
+            "the surface-column rule reproduces the tunnel flicker when one Y sibling is pending"
         );
     }
 
