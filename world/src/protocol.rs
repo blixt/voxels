@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 29;
+pub const PROTOCOL_VERSION: u16 = 30;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -37,7 +37,8 @@ const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
 const MAX_MANIFEST_MODEL_STRING_BYTES: usize = 4_096;
 const MAX_MANIFEST_MODEL_WEIGHT_HASHES: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
-const SURFACE_SNAPSHOT_VERSION: u16 = 8;
+const SURFACE_SNAPSHOT_VERSION: u16 = 9;
+const SURFACE_QUAD_SYNTHETIC_FALLBACK_BIT: u64 = 1 << 19;
 
 const KIND_OPEN_WORLD: u16 = 1;
 const KIND_WORLD_OPENED: u16 = 2;
@@ -3418,7 +3419,13 @@ fn encode_surface_quad_iter(
     let mut previous = [i64::from(tile_origin[0]), 0, i64::from(tile_origin[1])];
     for quad in quads {
         encode_delta_coord(output, quad.origin, &mut previous);
-        let metadata = u64::from(quad.face) | (u64::from(quad.material.id()) << 3);
+        let metadata = u64::from(quad.face)
+            | (u64::from(quad.material.id()) << 3)
+            | if quad.synthetic_fallback {
+                SURFACE_QUAD_SYNTHETIC_FALLBACK_BIT
+            } else {
+                0
+            };
         push_var_u64(output, metadata);
         push_var_u64(output, u64::from(quad.extent[0]));
         push_var_u64(output, u64::from(quad.extent[1]));
@@ -3437,11 +3444,10 @@ fn decode_surface_quads(
         let origin = decode_delta_coord(cursor, &mut previous)?;
         let metadata = decode_var_u64(cursor, 3)?;
         let face = (metadata & 0b111) as u8;
-        if face > 5 {
+        if face > 5 || metadata >> 20 != 0 {
             return Err(ProtocolError::InvalidPayload("invalid surface quad face"));
         }
-        let material_id = u16::try_from(metadata >> 3)
-            .map_err(|_| ProtocolError::UnknownEnum("material", metadata >> 3))?;
+        let material_id = ((metadata >> 3) & u64::from(u16::MAX)) as u16;
         let material = Material::from_id(material_id).ok_or(ProtocolError::UnknownEnum(
             "material",
             u64::from(material_id),
@@ -3460,6 +3466,7 @@ fn decode_surface_quads(
             face,
             extent,
             material,
+            synthetic_fallback: metadata & SURFACE_QUAD_SYNTHETIC_FALLBACK_BIT != 0,
         });
     }
     Ok(quads)
@@ -4690,12 +4697,14 @@ mod tests {
                 face: 0,
                 extent: [1, u16::MAX],
                 material: Material::Stone,
+                synthetic_fallback: true,
             },
             SurfaceQuad {
                 origin: [i32::MAX, i32::MIN, i32::MAX],
                 face: 5,
                 extent: [u16::MAX, 1],
                 material: Material::GlowCrystal,
+                synthetic_fallback: false,
             },
         ];
         let mut encoded = Vec::new();

@@ -30,8 +30,8 @@ use voxels_world::protocol::{EditShape, EditVolume};
 use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, Material, MeshedChunk,
     Quad, RenderLayer, SURFACE_PATCHES_PER_TILE_EDGE, SurfaceLodLevel, SurfacePatchEdge,
-    SurfacePatchId, SurfaceRegion, SurfaceTileCoord, SurfaceTileMesh, VOXEL_SIZE_METRES,
-    WaterTileMesh, fallback_surface_wall_material,
+    SurfacePatchId, SurfaceQuad, SurfaceRegion, SurfaceTileCoord, SurfaceTileMesh,
+    VOXEL_SIZE_METRES, WaterTileMesh, fallback_surface_wall_material,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -450,6 +450,10 @@ impl LodDrawPlan {
         key.0 == 0 && self.enclosed_view_chunks.contains(&(key.1, key.2, key.3))
     }
 
+    fn owns_exact_volume_coord(&self, coord: (i32, i32, i32)) -> bool {
+        self.canonical_chunks.contains(&coord) || self.enclosed_view_chunks.contains(&coord)
+    }
+
     fn owns_source_edge(&self, patch: SurfacePatchId, edge: SurfacePatchEdge) -> bool {
         self.owns_patch(patch)
             && !self
@@ -599,7 +603,7 @@ impl ChunkActivations {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct MeshSlice {
     relative_offset: u32,
     size: u32,
@@ -609,6 +613,8 @@ struct MeshSlice {
     surface_patch_id: Option<SurfacePatchId>,
     boundary_edge: Option<SurfacePatchEdge>,
     morph_closure: bool,
+    /// Synthetic heightfield cover is owned until this exact-volume chunk is resident.
+    exact_replacement_chunk: Option<(i32, i32, i32)>,
     render_layer: RenderLayer,
 }
 
@@ -2464,9 +2470,10 @@ impl Renderer {
 
     /// Replaces the exact canonical chunks in complete current vertical bands.
     ///
-    /// This set owns only exact-volume meshes. It deliberately does not suppress the heightfield
-    /// fallback: an all-air band around a high spectator or a deep tunnel is complete volume data,
-    /// but says nothing about whether the terrain surface in the same X/Z column is represented.
+    /// This set owns only exact-volume meshes. It does not suppress whole heightfield patches: an
+    /// all-air band around a high spectator or a deep tunnel says nothing about the terrain surface
+    /// in the same X/Z column. It may replace explicitly tagged vertical fallback spans in the
+    /// exact same 3D chunk, since those spans exist solely until exact volume is renderable.
     pub fn set_canonical_ready_chunks(
         &mut self,
         chunks: impl IntoIterator<Item = (i32, i32, i32)>,
@@ -2848,6 +2855,7 @@ impl Renderer {
                     surface_patch_id: None,
                     boundary_edge: None,
                     morph_closure: false,
+                    exact_replacement_chunk: None,
                     render_layer: RenderLayer::Opaque,
                 }],
             )?;
@@ -2869,6 +2877,7 @@ impl Renderer {
                     surface_patch_id: None,
                     boundary_edge: None,
                     morph_closure: false,
+                    exact_replacement_chunk: None,
                     render_layer: RenderLayer::Translucent,
                 }],
             ) else {
@@ -2965,6 +2974,16 @@ impl Renderer {
             gpu_quads.push(quad);
             gpu_morph_heights.push(morph_heights);
         }
+        let exact_replacement_chunks = tile
+            .quads
+            .iter()
+            .map(surface_exact_replacement_chunk)
+            .collect::<Vec<_>>();
+        let closure_exact_replacement_chunks = tile
+            .morph_closures
+            .iter()
+            .map(|closure| surface_exact_replacement_chunk(&closure.quad))
+            .collect::<Vec<_>>();
         let water_gpu_quads: Vec<_> = water
             .quads
             .iter()
@@ -2980,14 +2999,6 @@ impl Renderer {
                 ao: 0xff,
             })
             .collect();
-        if gpu_quads_match_resident(self.chunks.get(&key), &gpu_quads, Some(&gpu_morph_heights))
-            && gpu_quads_match_resident(self.water_chunks.get(&key), &water_gpu_quads, None)
-        {
-            // Underground edits commonly dirty the enclosing stride-two transport tile without
-            // changing its top surface. Preserve the exact resident GPU products and LOD plan in
-            // that case instead of reallocating identical bytes and invalidating every slice.
-            return true;
-        }
         let quad_bytes = size_of::<GpuQuad>() as u32;
         let mut slices = Vec::new();
         for patch in &tile.patches {
@@ -3009,39 +3020,60 @@ impl Renderer {
                     .max
                     .map(|value| value as f32 * VOXEL_SIZE_METRES),
             );
-            let mut push_slice = |range: std::ops::Range<u32>, boundary_edge, morph_closure| {
-                if range.start < range.end {
-                    slices.push(MeshSlice {
-                        relative_offset: range.start * quad_bytes,
-                        size: (range.end - range.start) * quad_bytes,
-                        quad_count: range.end - range.start,
-                        bounds_min,
-                        bounds_max,
-                        surface_patch_id: Some(patch_id),
-                        boundary_edge,
-                        morph_closure,
-                        render_layer: RenderLayer::Opaque,
-                    });
-                }
-            };
-            push_slice(patch.quad_range.clone(), None, false);
+            append_surface_slices(
+                &mut slices,
+                patch.quad_range.clone(),
+                0,
+                &exact_replacement_chunks,
+                quad_bytes,
+                bounds_min,
+                bounds_max,
+                patch_id,
+                None,
+                false,
+            );
             for edge in SurfacePatchEdge::ALL {
-                push_slice(patch.edge_ranges[edge.index()].clone(), Some(edge), false);
+                append_surface_slices(
+                    &mut slices,
+                    patch.edge_ranges[edge.index()].clone(),
+                    0,
+                    &exact_replacement_chunks,
+                    quad_bytes,
+                    bounds_min,
+                    bounds_max,
+                    patch_id,
+                    Some(edge),
+                    false,
+                );
             }
-            push_slice(
-                offset_range(&patch.morph_closure_range, closure_base),
+            append_surface_slices(
+                &mut slices,
+                patch.morph_closure_range.clone(),
+                closure_base,
+                &closure_exact_replacement_chunks,
+                quad_bytes,
+                bounds_min,
+                bounds_max,
+                patch_id,
                 None,
                 true,
             );
             for edge in SurfacePatchEdge::ALL {
-                push_slice(
-                    offset_range(&patch.edge_morph_closure_ranges[edge.index()], closure_base),
+                append_surface_slices(
+                    &mut slices,
+                    patch.edge_morph_closure_ranges[edge.index()].clone(),
+                    closure_base,
+                    &closure_exact_replacement_chunks,
+                    quad_bytes,
+                    bounds_min,
+                    bounds_max,
+                    patch_id,
                     Some(edge),
                     true,
                 );
             }
         }
-        let water_slices = water
+        let water_slices: Vec<_> = water
             .patches
             .iter()
             .map(|patch| {
@@ -3068,10 +3100,25 @@ impl Renderer {
                     surface_patch_id: patch_id,
                     boundary_edge: None,
                     morph_closure: false,
+                    exact_replacement_chunk: None,
                     render_layer: RenderLayer::Translucent,
                 }
             })
             .collect();
+        if gpu_quads_match_resident(self.chunks.get(&key), &gpu_quads, Some(&gpu_morph_heights))
+            && mesh_slices_match_resident(self.chunks.get(&key), &slices, gpu_quads.len())
+            && gpu_quads_match_resident(self.water_chunks.get(&key), &water_gpu_quads, None)
+            && mesh_slices_match_resident(
+                self.water_chunks.get(&key),
+                &water_slices,
+                water_gpu_quads.len(),
+            )
+        {
+            // Underground edits commonly dirty the enclosing stride-two transport tile without
+            // changing its GPU geometry or ownership metadata. Preserve the exact resident
+            // products and LOD plan instead of reallocating identical bytes and slices.
+            return true;
+        }
         let opaque_update = if gpu_quads.is_empty() {
             None
         } else {
@@ -3286,6 +3333,8 @@ impl Renderer {
     }
 
     fn update_exact_lod_membership(&mut self, canonical_chunks: HashSet<(i32, i32, i32)>) {
+        let enclosed_view_chunks = self.enclosed_view_ready_chunks.clone();
+        self.mark_exact_replacement_ownership_stale(&canonical_chunks, &enclosed_view_chunks);
         for &(x, y, z) in self
             .lod_draw_plan
             .canonical_chunks
@@ -3296,9 +3345,39 @@ impl Renderer {
             }
         }
         self.lod_draw_plan.canonical_chunks = canonical_chunks;
-        self.lod_draw_plan
-            .enclosed_view_chunks
-            .clone_from(&self.enclosed_view_ready_chunks);
+        self.lod_draw_plan.enclosed_view_chunks = enclosed_view_chunks;
+    }
+
+    fn mark_exact_replacement_ownership_stale(
+        &mut self,
+        canonical_chunks: &HashSet<(i32, i32, i32)>,
+        enclosed_view_chunks: &HashSet<(i32, i32, i32)>,
+    ) {
+        let changed = self
+            .lod_draw_plan
+            .canonical_chunks
+            .symmetric_difference(canonical_chunks)
+            .chain(
+                self.lod_draw_plan
+                    .enclosed_view_chunks
+                    .symmetric_difference(enclosed_view_chunks),
+            )
+            .copied()
+            .collect::<HashSet<_>>();
+        if changed.is_empty() {
+            return;
+        }
+        for (key, mesh) in &mut self.chunks {
+            if key.0 == SurfaceLodLevel::Stride2.index() + 1
+                && mesh.slices.iter().any(|slice| {
+                    slice
+                        .exact_replacement_chunk
+                        .is_some_and(|coord| changed.contains(&coord))
+                })
+            {
+                mesh.lod_ownership_stale = true;
+            }
+        }
     }
 
     fn refresh_lod_draw_plan(&mut self, focus: Option<GeometricLodFocus>) -> u32 {
@@ -3455,12 +3534,14 @@ impl Renderer {
                 mesh.lod_ownership_stale = true;
             }
         }
+        let enclosed_view_chunks = self.enclosed_view_ready_chunks.clone();
+        self.mark_exact_replacement_ownership_stale(&canonical_chunks, &enclosed_view_chunks);
         let previous_plan_resident = self.lod_draw_plan_is_resident();
         let next_plan = LodDrawPlan {
             patches,
             canonical_columns,
             canonical_chunks,
-            enclosed_view_chunks: self.enclosed_view_ready_chunks.clone(),
+            enclosed_view_chunks,
             exact_transition_edges,
             incomplete_transition_edges,
             transition_mesh_key,
@@ -3541,6 +3622,7 @@ impl Renderer {
             surface_patch_id: None,
             boundary_edge: None,
             morph_closure: false,
+            exact_replacement_chunk: None,
             render_layer: RenderLayer::Opaque,
         };
         let Some(prepared) =
@@ -5067,6 +5149,17 @@ fn gpu_quads_match_resident(
     )
 }
 
+fn mesh_slices_match_resident(
+    mesh: Option<&ChunkMesh>,
+    slices: &[MeshSlice],
+    quad_count: usize,
+) -> bool {
+    if quad_count == 0 {
+        return mesh.is_none();
+    }
+    mesh.is_some_and(|mesh| mesh.slices == slices)
+}
+
 fn gpu_quad_content_matches(
     resident: Option<(u32, u64)>,
     quad_count: u32,
@@ -5373,8 +5466,72 @@ fn surface_morph_closure_gpu_quads(
         .collect()
 }
 
-fn offset_range(range: &std::ops::Range<u32>, offset: u32) -> std::ops::Range<u32> {
-    range.start.saturating_add(offset)..range.end.saturating_add(offset)
+fn surface_exact_replacement_chunk(quad: &SurfaceQuad) -> Option<(i32, i32, i32)> {
+    if !quad.synthetic_fallback {
+        return None;
+    }
+    debug_assert!(matches!(quad.face, 0 | 1 | 4 | 5));
+    debug_assert!(!quad.extent.contains(&0));
+    let chunk_edge = CHUNK_EDGE as i32;
+    let max = match quad.face {
+        0 | 1 => [
+            quad.origin[0],
+            quad.origin[1].saturating_add(i32::from(quad.extent[1]) - 1),
+            quad.origin[2].saturating_add(i32::from(quad.extent[0]) - 1),
+        ],
+        4 | 5 => [
+            quad.origin[0].saturating_add(i32::from(quad.extent[0]) - 1),
+            quad.origin[1].saturating_add(i32::from(quad.extent[1]) - 1),
+            quad.origin[2],
+        ],
+        _ => return None,
+    };
+    let chunk = quad.origin.map(|value| value.div_euclid(chunk_edge));
+    debug_assert_eq!(
+        chunk,
+        max.map(|value| value.div_euclid(chunk_edge)),
+        "replaceable surface spans must be partitioned on exact chunk boundaries"
+    );
+    Some((chunk[0], chunk[1], chunk[2]))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_surface_slices(
+    slices: &mut Vec<MeshSlice>,
+    source_range: std::ops::Range<u32>,
+    gpu_base: u32,
+    exact_replacement_chunks: &[Option<(i32, i32, i32)>],
+    quad_bytes: u32,
+    bounds_min: glam::Vec3,
+    bounds_max: glam::Vec3,
+    patch_id: SurfacePatchId,
+    boundary_edge: Option<SurfacePatchEdge>,
+    morph_closure: bool,
+) {
+    let mut start = source_range.start;
+    while start < source_range.end {
+        let exact_replacement_chunk = exact_replacement_chunks[start as usize];
+        let mut end = start + 1;
+        while end < source_range.end
+            && exact_replacement_chunks[end as usize] == exact_replacement_chunk
+        {
+            end += 1;
+        }
+        let gpu_start = gpu_base.saturating_add(start);
+        slices.push(MeshSlice {
+            relative_offset: gpu_start * quad_bytes,
+            size: (end - start) * quad_bytes,
+            quad_count: end - start,
+            bounds_min,
+            bounds_max,
+            surface_patch_id: Some(patch_id),
+            boundary_edge,
+            morph_closure,
+            exact_replacement_chunk,
+            render_layer: RenderLayer::Opaque,
+        });
+        start = end;
+    }
 }
 
 fn sampled_shading_normal(
@@ -6167,6 +6324,12 @@ fn slice_owned_by_lod(
     }
     if key.0 == 0 {
         return plan.owns_enclosed_view_chunk(key) || plan.owns_canonical_chunk(key);
+    }
+    if slice
+        .exact_replacement_chunk
+        .is_some_and(|coord| plan.owns_exact_volume_coord(coord))
+    {
+        return false;
     }
     let Some(level) = SurfaceLodLevel::ALL.get(usize::from(key.0 - 1)).copied() else {
         return false;
@@ -7444,6 +7607,7 @@ mod tests {
             surface_patch_id: Some(coarse),
             boundary_edge: None,
             morph_closure: false,
+            exact_replacement_chunk: None,
             render_layer: RenderLayer::Opaque,
         };
         let edge = MeshSlice {
@@ -8174,6 +8338,7 @@ mod tests {
             surface_patch_id: None,
             boundary_edge: None,
             morph_closure: false,
+            exact_replacement_chunk: None,
             render_layer: RenderLayer::Opaque,
         }
     }
@@ -8493,6 +8658,7 @@ mod tests {
             surface_patch_id: None,
             boundary_edge: None,
             morph_closure: false,
+            exact_replacement_chunk: None,
             render_layer: RenderLayer::Opaque,
         };
         let surface_slice = MeshSlice {
@@ -8504,6 +8670,7 @@ mod tests {
             surface_patch_id: Some(SurfacePatchId::new(SurfaceLodLevel::Stride2, 6, 0)),
             boundary_edge: None,
             morph_closure: false,
+            exact_replacement_chunk: None,
             render_layer: RenderLayer::Opaque,
         };
         let surface_edge_slice = MeshSlice {
@@ -8740,6 +8907,55 @@ mod tests {
             &(SurfaceLodLevel::Stride4.index() + 1, 1, 0, 0),
             &stride_two_patch
         ));
+
+        let mut fallback = stride_two_patch;
+        fallback.exact_replacement_chunk = Some((7, -2, 0));
+        assert!(
+            !slice_owned_by_lod(
+                Some(focus),
+                Some(&plan),
+                &(SurfaceLodLevel::Stride2.index() + 1, 1, 0, 0),
+                &fallback,
+            ),
+            "ready exact volume must replace only its tagged synthetic cover"
+        );
+        fallback.exact_replacement_chunk = Some((7, 1, 0));
+        assert!(
+            slice_owned_by_lod(
+                Some(focus),
+                Some(&plan),
+                &(SurfaceLodLevel::Stride2.index() + 1, 1, 0, 0),
+                &fallback,
+            ),
+            "unrelated exact-volume readiness must leave fallback coverage resident"
+        );
+    }
+
+    #[test]
+    fn replaceable_surface_quads_map_to_one_exact_chunk_in_negative_space() {
+        for (face, origin, extent, expected) in [
+            (0, [-33, -2, -32], [2, 2], (-2, -1, -1)),
+            (1, [-32, 32, -34], [2, 1], (-1, 1, -2)),
+            (4, [-32, -34, 31], [2, 2], (-1, -2, 0)),
+            (5, [-34, 0, 32], [2, 1], (-2, 0, 1)),
+        ] {
+            let quad = SurfaceQuad {
+                origin,
+                face,
+                extent,
+                material: Material::Stone,
+                synthetic_fallback: true,
+            };
+            assert_eq!(surface_exact_replacement_chunk(&quad), Some(expected));
+        }
+        let ordinary = SurfaceQuad {
+            origin: [0; 3],
+            face: 0,
+            extent: [2, 2],
+            material: Material::Stone,
+            synthetic_fallback: false,
+        };
+        assert_eq!(surface_exact_replacement_chunk(&ordinary), None);
     }
 
     #[test]
