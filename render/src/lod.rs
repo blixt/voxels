@@ -296,38 +296,13 @@ impl SurfacePatchSelection {
                 )
             }));
         for patch in self.patches.iter().copied() {
-            for edge in SurfacePatchEdge::ALL {
-                let neighbor = match edge {
-                    SurfacePatchEdge::NegativeX => patch.neighbor(-1, 0),
-                    SurfacePatchEdge::PositiveX => patch.neighbor(1, 0),
-                    SurfacePatchEdge::NegativeZ => patch.neighbor(0, -1),
-                    SurfacePatchEdge::PositiveZ => patch.neighbor(0, 1),
-                };
-                if neighbor.is_some_and(|neighbor| self.patches.contains(&neighbor)) {
-                    continue;
-                }
-                let Some(neighbor_points) = points_across_patch_edge(patch, edge) else {
-                    continue;
-                };
-                let selected_neighbors =
-                    neighbor_points.map(|point| selected_surface_patch_at(&self.patches, point));
-                let borders_finer_surface = selected_neighbors.iter().all(|neighbor| {
-                    neighbor.is_some_and(|neighbor| neighbor.level.index() < patch.level.index())
-                });
-                let borders_ready_canonical = patch.level == SurfaceLodLevel::Stride2
-                    && selected_neighbors.iter().all(Option::is_none)
-                    && neighbor_points.iter().all(|point| {
-                        focus.owner_at(point[0], point[1]) == LodOwner::Canonical
-                            && canonical_ready_columns.contains(&(
-                                point[0].div_euclid(CHUNK_EDGE as i32),
-                                point[1].div_euclid(CHUNK_EDGE as i32),
-                            ))
-                    });
-                if borders_finer_surface || borders_ready_canonical {
-                    self.transition_candidates
-                        .insert((patch, edge.index() as u8));
-                }
-            }
+            insert_transition_candidates(
+                &self.patches,
+                &mut self.transition_candidates,
+                focus,
+                canonical_ready_columns,
+                patch,
+            );
         }
     }
 
@@ -363,6 +338,122 @@ impl SurfacePatchSelection {
 
     pub fn selected_patch_at(&self, point: [i32; 2]) -> Option<SurfacePatchId> {
         selected_surface_patch_at(&self.patches, point)
+    }
+}
+
+/// Incremental equivalent of [`SurfacePatchSelection::rebuild_with_incomplete_parents`].
+///
+/// Canonical surface columns often become ready while the complete previous cut is still resident.
+/// Splitting selection and adjacency work across frames lets the renderer retain that cut until the
+/// replacement is complete instead of spending a long WASM frame rebuilding unrelated rings.
+pub(crate) struct SurfacePatchSelectionBuild {
+    focus: GeometricLodFocus,
+    resident: HashSet<SurfacePatchId>,
+    canonical_ready_columns: HashSet<(i32, i32)>,
+    incomplete_parents: HashSet<SurfacePatchId>,
+    resident_order: Vec<SurfacePatchId>,
+    transition_order: Vec<SurfacePatchId>,
+    selection: SurfacePatchSelection,
+    selection_cursor: usize,
+    transition_cursor: usize,
+}
+
+impl SurfacePatchSelectionBuild {
+    pub(crate) fn new(
+        focus: GeometricLodFocus,
+        resident: &HashSet<SurfacePatchId>,
+        canonical_ready_columns: &HashSet<(i32, i32)>,
+        incomplete_parents: &HashSet<SurfacePatchId>,
+    ) -> Self {
+        Self {
+            focus,
+            resident: resident.clone(),
+            canonical_ready_columns: canonical_ready_columns.clone(),
+            incomplete_parents: incomplete_parents.clone(),
+            resident_order: resident.iter().copied().collect(),
+            transition_order: Vec::new(),
+            selection: SurfacePatchSelection::default(),
+            selection_cursor: 0,
+            transition_cursor: 0,
+        }
+    }
+
+    pub(crate) fn advance(&mut self, work_items: usize) -> Option<SurfacePatchSelection> {
+        let mut remaining = work_items.max(1);
+        while remaining > 0 && self.selection_cursor < self.resident_order.len() {
+            let patch = self.resident_order[self.selection_cursor];
+            self.selection_cursor += 1;
+            remaining -= 1;
+            if surface_patch_is_selected_with_incomplete_parents(
+                self.focus,
+                &self.resident,
+                &self.canonical_ready_columns,
+                &self.incomplete_parents,
+                patch,
+            ) {
+                self.selection.patches.insert(patch);
+            }
+        }
+        if self.selection_cursor < self.resident_order.len() {
+            return None;
+        }
+        if self.transition_order.is_empty() {
+            self.transition_order = self.selection.patches.iter().copied().collect();
+        }
+        while remaining > 0 && self.transition_cursor < self.transition_order.len() {
+            let patch = self.transition_order[self.transition_cursor];
+            self.transition_cursor += 1;
+            remaining -= 1;
+            insert_transition_candidates(
+                &self.selection.patches,
+                &mut self.selection.transition_candidates,
+                self.focus,
+                &self.canonical_ready_columns,
+                patch,
+            );
+        }
+        (self.transition_cursor == self.transition_order.len())
+            .then(|| std::mem::take(&mut self.selection))
+    }
+}
+
+fn insert_transition_candidates(
+    selected: &HashSet<SurfacePatchId>,
+    transitions: &mut HashSet<(SurfacePatchId, u8)>,
+    focus: GeometricLodFocus,
+    canonical_ready_columns: &HashSet<(i32, i32)>,
+    patch: SurfacePatchId,
+) {
+    for edge in SurfacePatchEdge::ALL {
+        let neighbor = match edge {
+            SurfacePatchEdge::NegativeX => patch.neighbor(-1, 0),
+            SurfacePatchEdge::PositiveX => patch.neighbor(1, 0),
+            SurfacePatchEdge::NegativeZ => patch.neighbor(0, -1),
+            SurfacePatchEdge::PositiveZ => patch.neighbor(0, 1),
+        };
+        if neighbor.is_some_and(|neighbor| selected.contains(&neighbor)) {
+            continue;
+        }
+        let Some(neighbor_points) = points_across_patch_edge(patch, edge) else {
+            continue;
+        };
+        let selected_neighbors =
+            neighbor_points.map(|point| selected_surface_patch_at(selected, point));
+        let borders_finer_surface = selected_neighbors.iter().all(|neighbor| {
+            neighbor.is_some_and(|neighbor| neighbor.level.index() < patch.level.index())
+        });
+        let borders_ready_canonical = patch.level == SurfaceLodLevel::Stride2
+            && selected_neighbors.iter().all(Option::is_none)
+            && neighbor_points.iter().all(|point| {
+                focus.owner_at(point[0], point[1]) == LodOwner::Canonical
+                    && canonical_ready_columns.contains(&(
+                        point[0].div_euclid(CHUNK_EDGE as i32),
+                        point[1].div_euclid(CHUNK_EDGE as i32),
+                    ))
+            });
+        if borders_finer_surface || borders_ready_canonical {
+            transitions.insert((patch, edge.index() as u8));
+        }
     }
 }
 
@@ -560,6 +651,50 @@ mod tests {
             boundary,
             SurfacePatchEdge::NegativeX
         ));
+    }
+
+    #[test]
+    fn incremental_selection_exactly_matches_synchronous_selection() {
+        let focus = GeometricLodFocus::snapped(117, -73);
+        let mut resident = HashSet::new();
+        for level in SurfaceLodLevel::ALL {
+            for patch_z in -12..=12 {
+                for patch_x in -12..=12 {
+                    // Leave deterministic holes in otherwise complete sibling groups so the test
+                    // covers ancestor fallback as well as ordinary refinement and transitions.
+                    if (patch_x * 3 + patch_z * 5 + level.index() as i32).rem_euclid(23) != 0 {
+                        resident.insert(SurfacePatchId::new(level, patch_x, patch_z));
+                    }
+                }
+            }
+        }
+        let canonical_ready_columns = (-6_i32..=6)
+            .flat_map(|z| (-6_i32..=6).map(move |x| (x, z)))
+            .filter(|(x, z)| (x + z).rem_euclid(4) != 0)
+            .collect::<HashSet<_>>();
+        let incomplete_parents = incomplete_resident_parents(&resident);
+        let mut expected = SurfacePatchSelection::default();
+        expected.rebuild_with_incomplete_parents(
+            focus,
+            &resident,
+            &canonical_ready_columns,
+            &incomplete_parents,
+        );
+
+        for work_items in [1, 7, 4_096] {
+            let mut build = SurfacePatchSelectionBuild::new(
+                focus,
+                &resident,
+                &canonical_ready_columns,
+                &incomplete_parents,
+            );
+            let actual = loop {
+                if let Some(selection) = build.advance(work_items) {
+                    break selection;
+                }
+            };
+            assert_eq!(actual, expected, "work_items={work_items}");
+        }
     }
 
     #[test]
