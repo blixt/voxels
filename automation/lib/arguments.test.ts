@@ -23,4 +23,12 @@ describe("scenario arguments", () => {
     expect(() => arguments_.number("count")).toThrow(/finite number/u);
     expect(() => arguments_.assertEmpty()).toThrow(/--extra/u);
   });
+
+  it("rejects blank numeric values instead of coercing them to zero", () => {
+    const blankNumber = new ScenarioArguments(["--day-fraction= "]);
+    expect(() => blankNumber.number("day-fraction")).toThrow(/finite number/u);
+
+    const blankPair = new ScenarioArguments(["--spawn=,"]);
+    expect(() => blankPair.pair("spawn", { integer: true })).toThrow(/invalid value/u);
+  });
 });

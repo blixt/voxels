@@ -55,8 +55,10 @@ export class ScenarioArguments {
   ): number | undefined {
     const source = this.string(name);
     if (source === undefined) return options.fallback;
-    const value = Number(source);
+    const trimmed = source.trim();
+    const value = Number(trimmed);
     if (
+      trimmed.length === 0 ||
       !Number.isFinite(value) ||
       (options.integer === true && !Number.isInteger(value)) ||
       (options.minimum !== undefined && value < options.minimum) ||
@@ -87,6 +89,9 @@ export class ScenarioArguments {
     if (source === undefined) return options.fallback;
     const parts = source.split(options.separator ?? ",").map((part) => part.trim());
     if (parts.length !== 2) throw new Error(`--${name} requires two values`);
+    if (parts.some((part) => part.length === 0)) {
+      throw new Error(`--${name} contains an invalid value`);
+    }
     const first = Number(parts[0]);
     const second = Number(parts[1]);
     for (const value of [first, second]) {
