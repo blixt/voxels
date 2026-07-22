@@ -5,7 +5,7 @@
 //! learned macro shape. It adds deterministic climate-driven vegetation, but does not invent caves,
 //! routes, or authored atlas content.
 
-use crate::lod::generate_surface_tile_mesh_with_aggregated_ecology_and_shading;
+use crate::lod::generate_surface_tile_mesh_with_materials_and_aggregated_ecology_and_shading;
 use crate::{
     AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, ChunkSnapshot, EditMap,
     FEATURE_MAX_RADIUS_VOXELS, MACRO_FIELD_SCHEMA_VERSION, MAX_MACRO_BLOCK_SAMPLES,
@@ -501,7 +501,7 @@ impl HeightfieldWorldSource {
                     feature.material_at(coord).unwrap_or(Material::Air)
                 })
         });
-        let terrain = generate_surface_tile_mesh_with_aggregated_ecology_and_shading(
+        let terrain = generate_surface_tile_mesh_with_materials_and_aggregated_ecology_and_shading(
             coord,
             |x, z| {
                 let sampled = self
@@ -512,6 +512,12 @@ impl HeightfieldWorldSource {
                     .copied()
                     .filter(|(height, _)| *height >= sampled.0)
                     .unwrap_or(sampled)
+            },
+            |x, y, z| {
+                let generated = self
+                    .material_at(&region, x, y, z)
+                    .unwrap_or(Material::Stone);
+                edits.resolve_generated(VoxelCoord::new(x, y, z), generated)
             },
             |x, z| {
                 self.edited_surface(&region, edits, x, z)
@@ -1977,6 +1983,42 @@ mod tests {
         assert_eq!(material_for_column(&lava_field, 0, 80), Material::Basalt);
         let shore = column(1, 0.60, 0.82, 0.20, -0.60);
         assert_eq!(surface_profile(&shore, 3).0, Material::Clay);
+    }
+
+    #[test]
+    fn diffusion_surface_walls_at_reported_region_keep_surface_cover_one_voxel_deep() {
+        let source = diffusion_heightfield();
+        let edits = EditMap::default();
+        let mut wall_quads = 0_usize;
+        for level in SurfaceLodLevel::ALL {
+            let coord = SurfaceTileCoord::containing(level, 2_275, 4_520);
+            let tile = source
+                .generate_edited_surface_tile(&edits, coord)
+                .expect("reported-region diffusion surface tile")
+                .terrain;
+            for quad in tile
+                .quads
+                .iter()
+                .chain(tile.morph_closures.iter().map(|closure| &closure.quad))
+                .filter(|quad| quad.face != crate::mesh::FACE_POS_Y)
+            {
+                wall_quads += 1;
+                if matches!(
+                    quad.material,
+                    Material::Grass | Material::Moss | Material::Snow
+                ) {
+                    assert_eq!(
+                        quad.extent[1], 1,
+                        "{level:?} stretched {:?} down {} voxels at {:?}",
+                        quad.material, quad.extent[1], quad.origin
+                    );
+                }
+            }
+        }
+        assert!(
+            wall_quads > 0,
+            "fixture must exercise vertical surface walls"
+        );
     }
 
     #[test]
