@@ -11,7 +11,7 @@ use voxels_runtime::{
     MAX_LOAD_RADIUS_CHUNKS, MAX_SECONDARY_INTEREST_CHUNKS, MAX_VERTICAL_RADIUS_CHUNKS,
 };
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 29;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 30;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -145,6 +145,11 @@ pub struct FrameBudgetConfig {
 #[serde(deny_unknown_fields)]
 pub struct SurfaceStreamingConfig {
     pub load_radius_tiles: [u32; 8],
+    /// Lower per-level radii used only as travel crosses tiles faster than generation can settle.
+    /// Coarser resident parents remain the geometric fallback outside the reduced fine cut.
+    pub fast_travel_min_radius_tiles: [u32; 8],
+    /// Tile-boundary crossings per second at which a level reaches its fast-travel minimum.
+    pub fast_travel_full_rate_tiles_per_second: f32,
     pub retention_margin_tiles: u32,
 }
 
@@ -414,6 +419,29 @@ impl ClientConfig {
                 MAX_SURFACE_RADIUS_TILES,
             )?;
         }
+        for (minimum, configured) in self
+            .streaming
+            .surface
+            .fast_travel_min_radius_tiles
+            .into_iter()
+            .zip(self.streaming.surface.load_radius_tiles)
+        {
+            ensure_integer_range(
+                minimum,
+                "streaming.surface.fast_travel_min_radius_tiles",
+                0,
+                configured,
+            )?;
+        }
+        ensure_finite_range(
+            self.streaming
+                .surface
+                .fast_travel_full_rate_tiles_per_second,
+            "streaming.surface.fast_travel_full_rate_tiles_per_second",
+            0.1,
+            120.0,
+            false,
+        )?;
         ensure_integer_range(
             self.streaming.surface.retention_margin_tiles,
             "streaming.surface.retention_margin_tiles",
@@ -853,6 +881,8 @@ mod tests {
                 },
                 surface: SurfaceStreamingConfig {
                     load_radius_tiles: [5, 5, 5, 5, 4, 5, 4, 4],
+                    fast_travel_min_radius_tiles: [2, 2, 4, 5, 4, 5, 4, 4],
+                    fast_travel_full_rate_tiles_per_second: 4.0,
                     retention_margin_tiles: 1,
                 },
             },
@@ -941,18 +971,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 29", "schema_version = 28");
+        let wrong_schema = fixture.replace("schema_version = 30", "schema_version = 29");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 28,
+                found: 29,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 29",
-            "schema_version = 29\nunknown_root = true",
+            "schema_version = 30",
+            "schema_version = 30\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),

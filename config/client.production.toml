@@ -1,5 +1,5 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 29
+schema_version = 30
 
 [developer]
 # Enables local-only time/weather visualization overrides and server-authorized spectator mode.
@@ -84,6 +84,11 @@ upload = 3
 # 3.2–25.6 m cells; each fixed-size tile doubles linear coverage without increasing its mesh cost.
 [streaming.surface]
 load_radius_tiles = [4, 4, 4, 5, 4, 5, 4, 3]
+# Sustained flight narrows only fine replacement cuts whose tile-boundary rate outruns useful
+# completion. Already-resident coarser parents remain visible, so this trades footprint for current
+# near detail without creating coverage holes; slowing down restores the full radii above.
+fast_travel_min_radius_tiles = [2, 2, 3, 5, 4, 5, 4, 3]
+fast_travel_full_rate_tiles_per_second = 4.0
 retention_margin_tiles = 1
 
 [rendering]
