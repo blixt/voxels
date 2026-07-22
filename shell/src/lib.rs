@@ -139,7 +139,7 @@ fn predictive_stream_position(
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-fn adaptive_surface_load_radii(
+fn adaptive_surface_cross_radii(
     configured: [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
     minimum: [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
     full_rate_tiles_per_second: f32,
@@ -154,6 +154,47 @@ fn adaptive_surface_load_radii(
         (configured[index] as f32 - (configured[index] - minimum[index]) as f32 * blend).ceil()
             as i32
     })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn surface_motion_axis(velocity: glam::Vec3) -> [i32; 2] {
+    let x = velocity.x;
+    let z = velocity.z;
+    if x * x + z * z < 0.25 {
+        return [0, 0];
+    }
+    let absolute_x = x.abs();
+    let absolute_z = z.abs();
+    if absolute_x > absolute_z * 2.0 {
+        [x.signum() as i32, 0]
+    } else if absolute_z > absolute_x * 2.0 {
+        [0, z.signum() as i32]
+    } else {
+        [x.signum() as i32, z.signum() as i32]
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn surface_offset_in_coverage(
+    dx: i32,
+    dz: i32,
+    longitudinal_radius: i32,
+    cross_radius: i32,
+    motion_axis: [i32; 2],
+) -> bool {
+    if motion_axis == [0, 0] || cross_radius >= longitudinal_radius {
+        return dx.abs().max(dz.abs()) <= longitudinal_radius;
+    }
+    let [axis_x, axis_z] = motion_axis;
+    let norm_squared = i64::from(axis_x * axis_x + axis_z * axis_z);
+    let dx = i64::from(dx);
+    let dz = i64::from(dz);
+    let axis_x = i64::from(axis_x);
+    let axis_z = i64::from(axis_z);
+    let along = dx * axis_x + dz * axis_z;
+    let cross = -dx * axis_z + dz * axis_x;
+    along * along <= i64::from(longitudinal_radius).pow(2) * norm_squared
+        && cross * cross <= i64::from(cross_radius).pow(2) * norm_squared
 }
 
 /// Canonical chunks intersecting the current body/support, intended movement sweep, or view/edit
@@ -890,8 +931,8 @@ mod web {
         RemoteWorldClient, RemoteWorldError,
     };
     use crate::{
-        ChunkPortalMask, adaptive_surface_load_radii, predictive_stream_position,
-        world_environment_at,
+        ChunkPortalMask, adaptive_surface_cross_radii, predictive_stream_position,
+        surface_motion_axis, surface_offset_in_coverage, world_environment_at,
     };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
@@ -974,7 +1015,7 @@ mod web {
         stream_enclosed_view_distance_metres: f32,
         stream_enclosed_view_threshold: f32,
         surface_load_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
-        surface_fast_travel_min_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
+        surface_fast_travel_min_cross_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
         surface_fast_travel_full_rate_tiles_per_second: f32,
         surface_retain_margin_tiles: i32,
         enclosure_probe_interval_ms: f64,
@@ -1233,7 +1274,8 @@ mod web {
         canonical_publications: RefCell<VecDeque<CanonicalPublication>>,
         binary_mesh_scratch: RefCell<BinaryMeshScratch>,
         surface_focus: Cell<Option<[SurfaceTileCoord; SURFACE_LOD_LEVEL_COUNT]>>,
-        surface_load_radii: Cell<[i32; SURFACE_LOD_LEVEL_COUNT]>,
+        surface_cross_radii: Cell<[i32; SURFACE_LOD_LEVEL_COUNT]>,
+        surface_motion_axis: Cell<[i32; 2]>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
         surface_chunk_hints: RefCell<SurfaceChunkHintIndex>,
         surface_revisions: RefCell<SurfaceRevisionCache>,
@@ -2453,7 +2495,9 @@ mod web {
             if !surface_tile_in_coverage(
                 coord,
                 self.surface_focus.get(),
-                self.surface_load_radii.get(),
+                self.config.surface_load_radius_tiles,
+                self.surface_cross_radii.get(),
+                self.surface_motion_axis.get(),
             ) {
                 return;
             }
@@ -2630,15 +2674,21 @@ mod web {
 
         fn stream_surface_lods(&self, camera: &CameraState, streaming_velocity: glam::Vec3) {
             let position = camera.position;
-            let load_radii = adaptive_surface_load_radii(
-                self.config.surface_load_radius_tiles,
-                self.config.surface_fast_travel_min_radius_tiles,
+            let longitudinal_radii = self.config.surface_load_radius_tiles;
+            let cross_radii = adaptive_surface_cross_radii(
+                longitudinal_radii,
+                self.config.surface_fast_travel_min_cross_radius_tiles,
                 self.config.surface_fast_travel_full_rate_tiles_per_second,
                 streaming_velocity,
             );
+            let motion_axis = if cross_radii == longitudinal_radii {
+                [0, 0]
+            } else {
+                surface_motion_axis(streaming_velocity)
+            };
             let focus = std::array::from_fn(|index| {
                 let level = SurfaceLodLevel::ALL[index];
-                let radius = load_radii[index];
+                let radius = longitudinal_radii[index];
                 let maximum_lead_metres = (radius - 1).max(0) as f32
                     * level.tile_span_voxels() as f32
                     * VOXEL_SIZE_METRES;
@@ -2663,26 +2713,48 @@ mod web {
                         self.config.stream_view_cone_half_angle_degrees,
                     )
                 });
-            let previous_radii = self.surface_load_radii.replace(load_radii);
-            if self.surface_focus.get() != Some(focus) || previous_radii != load_radii {
+            let previous_radii = self.surface_cross_radii.replace(cross_radii);
+            let previous_axis = self.surface_motion_axis.replace(motion_axis);
+            if self.surface_focus.get() != Some(focus)
+                || previous_radii != cross_radii
+                || previous_axis != motion_axis
+            {
                 let previous_focus = self.surface_focus.replace(Some(focus));
                 let changed_levels: [bool; SURFACE_LOD_LEVEL_COUNT] =
                     std::array::from_fn(|index| {
                         previous_focus.is_none_or(|previous| previous[index] != focus[index])
-                            || previous_radii[index] != load_radii[index]
+                            || previous_radii[index] != cross_radii[index]
+                            || (previous_axis != motion_axis
+                                && cross_radii[index] < longitudinal_radii[index])
                     });
                 self.remote.cancel_surface_batches_outside(|coord| {
-                    surface_tile_in_coverage(coord, Some(focus), load_radii)
+                    surface_tile_in_coverage(
+                        coord,
+                        Some(focus),
+                        longitudinal_radii,
+                        cross_radii,
+                        motion_axis,
+                    )
                 });
                 let mut desired = BTreeSet::new();
                 for (index, level) in SurfaceLodLevel::ALL.into_iter().enumerate() {
                     if !changed_levels[index] {
                         continue;
                     }
-                    let radius = load_radii[index];
+                    let longitudinal_radius = longitudinal_radii[index];
+                    let cross_radius = cross_radii[index];
                     let level_focus = focus[index];
-                    for dz in -radius..=radius {
-                        for dx in -radius..=radius {
+                    for dz in -longitudinal_radius..=longitudinal_radius {
+                        for dx in -longitudinal_radius..=longitudinal_radius {
+                            if !surface_offset_in_coverage(
+                                dx,
+                                dz,
+                                longitudinal_radius,
+                                cross_radius,
+                                motion_axis,
+                            ) {
+                                continue;
+                            }
                             let coord = SurfaceTileCoord::new(
                                 level,
                                 level_focus.x + dx,
@@ -2704,10 +2776,19 @@ mod web {
                         if !changed_levels[index] {
                             return false;
                         }
-                        let retain = load_radii[index] + self.config.surface_retain_margin_tiles;
+                        let longitudinal_retain =
+                            longitudinal_radii[index] + self.config.surface_retain_margin_tiles;
+                        let cross_retain =
+                            cross_radii[index] + self.config.surface_retain_margin_tiles;
                         let dx = coord.x - focus[index].x;
                         let dz = coord.z - focus[index].z;
-                        dx.abs().max(dz.abs()) > retain
+                        !surface_offset_in_coverage(
+                            dx,
+                            dz,
+                            longitudinal_retain,
+                            cross_retain,
+                            motion_axis,
+                        )
                     })
                     .collect();
                 if !evicted.is_empty() {
@@ -3378,7 +3459,9 @@ mod web {
                 && surface_tile_in_coverage(
                     coord,
                     self.surface_focus.get(),
-                    self.surface_load_radii.get(),
+                    self.config.surface_load_radius_tiles,
+                    self.surface_cross_radii.get(),
+                    self.surface_motion_axis.get(),
                 )
         }
 
@@ -3409,15 +3492,27 @@ mod web {
             };
             let resident = self.surface_resident.borrow();
             let revisions = self.surface_revisions.borrow();
+            let longitudinal_radii = self.config.surface_load_radius_tiles;
+            let cross_radii = self.surface_cross_radii.get();
+            let motion_axis = self.surface_motion_axis.get();
             for (index, level) in SurfaceLodLevel::ALL
                 .into_iter()
                 .take(level_count)
                 .enumerate()
             {
                 let center = focus[index];
-                let radius = self.surface_load_radii.get()[index];
-                for dz in -radius..=radius {
-                    for dx in -radius..=radius {
+                let longitudinal_radius = longitudinal_radii[index];
+                for dz in -longitudinal_radius..=longitudinal_radius {
+                    for dx in -longitudinal_radius..=longitudinal_radius {
+                        if !surface_offset_in_coverage(
+                            dx,
+                            dz,
+                            longitudinal_radius,
+                            cross_radii[index],
+                            motion_axis,
+                        ) {
+                            continue;
+                        }
                         let coord = SurfaceTileCoord::new(level, center.x + dx, center.z + dz);
                         if !coord.is_world_representable() {
                             continue;
@@ -4291,9 +4386,9 @@ mod web {
                 .surface
                 .load_radius_tiles
                 .map(|radius| radius as i32),
-            surface_fast_travel_min_radius_tiles: streaming
+            surface_fast_travel_min_cross_radius_tiles: streaming
                 .surface
-                .fast_travel_min_radius_tiles
+                .fast_travel_min_cross_radius_tiles
                 .map(|radius| radius as i32),
             surface_fast_travel_full_rate_tiles_per_second: streaming
                 .surface
@@ -4444,7 +4539,8 @@ mod web {
             canonical_publications: RefCell::new(VecDeque::new()),
             binary_mesh_scratch: RefCell::new(BinaryMeshScratch::default()),
             surface_focus: Cell::new(None),
-            surface_load_radii: Cell::new(engine_config.surface_load_radius_tiles),
+            surface_cross_radii: Cell::new(engine_config.surface_load_radius_tiles),
+            surface_motion_axis: Cell::new([0, 0]),
             surface_resident: RefCell::new(BTreeSet::new()),
             surface_chunk_hints: RefCell::new(BTreeMap::new()),
             surface_revisions: RefCell::new(SurfaceRevisionCache::new()),
@@ -4568,16 +4664,24 @@ mod web {
     fn surface_tile_in_coverage(
         coord: SurfaceTileCoord,
         focus: Option<[SurfaceTileCoord; SURFACE_LOD_LEVEL_COUNT]>,
-        load_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
+        longitudinal_radii: [i32; SURFACE_LOD_LEVEL_COUNT],
+        cross_radii: [i32; SURFACE_LOD_LEVEL_COUNT],
+        motion_axis: [i32; 2],
     ) -> bool {
         let Some(focus) = focus else {
             return false;
         };
         let index = coord.level.index() as usize;
         let center = focus[index];
-        let dx = (coord.x - center.x).abs();
-        let dz = (coord.z - center.z).abs();
-        dx.max(dz) <= load_radius_tiles[index]
+        let dx = coord.x - center.x;
+        let dz = coord.z - center.z;
+        surface_offset_in_coverage(
+            dx,
+            dz,
+            longitudinal_radii[index],
+            cross_radii[index],
+            motion_axis,
+        )
     }
 }
 
@@ -4746,18 +4850,41 @@ mod tests {
         let configured = [5, 5, 5, 5, 4, 5, 4, 4];
         let minimum = [2, 2, 4, 5, 4, 5, 4, 4];
         assert_eq!(
-            adaptive_surface_load_radii(configured, minimum, 4.0, glam::Vec3::ZERO),
+            adaptive_surface_cross_radii(configured, minimum, 4.0, glam::Vec3::ZERO),
             configured
         );
         assert_eq!(
-            adaptive_surface_load_radii(configured, minimum, 4.0, glam::Vec3::new(8.0, 0.0, 0.0),),
+            adaptive_surface_cross_radii(configured, minimum, 4.0, glam::Vec3::new(8.0, 0.0, 0.0),),
             configured,
             "ordinary sprinting must retain the complete configured footprint"
         );
         assert_eq!(
-            adaptive_surface_load_radii(configured, minimum, 4.0, glam::Vec3::new(128.0, 0.0, 0.0),),
+            adaptive_surface_cross_radii(
+                configured,
+                minimum,
+                4.0,
+                glam::Vec3::new(128.0, 0.0, 0.0),
+            ),
             minimum
         );
+    }
+
+    #[test]
+    fn fast_travel_surface_corridor_preserves_lead_while_narrowing_cross_track_work() {
+        assert_eq!(surface_motion_axis(glam::Vec3::ZERO), [0, 0]);
+        assert_eq!(surface_motion_axis(glam::Vec3::new(8.0, 0.0, 1.0)), [1, 0]);
+        assert_eq!(
+            surface_motion_axis(glam::Vec3::new(-3.0, 0.0, 5.0)),
+            [-1, 1]
+        );
+
+        assert!(surface_offset_in_coverage(5, 2, 5, 2, [1, 0]));
+        assert!(surface_offset_in_coverage(-5, 0, 5, 2, [1, 0]));
+        assert!(!surface_offset_in_coverage(0, 3, 5, 2, [1, 0]));
+
+        assert!(surface_offset_in_coverage(3, 3, 5, 2, [1, 1]));
+        assert!(!surface_offset_in_coverage(3, -3, 5, 2, [1, 1]));
+        assert!(surface_offset_in_coverage(5, 5, 5, 5, [0, 0]));
     }
 
     #[test]
