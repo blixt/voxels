@@ -3835,6 +3835,36 @@ mod tests {
     }
 
     #[test]
+    fn cinder_vault_overhang_has_chunk_owned_watertight_surface_fallback() {
+        let generator = Generator::new(0x5eed_cafe);
+        let [entrance_x, _, entrance_z] = crate::CINDER_VAULT.entrance;
+        let owner = SurfaceTileCoord::containing(SurfaceLodLevel::Stride2, entrance_x, entrance_z);
+        let fallbacks = (-1..=1)
+            .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+            .flat_map(|(dx, dz)| {
+                generate_surface_tile_mesh(
+                    generator,
+                    SurfaceTileCoord::new(SurfaceLodLevel::Stride2, owner.x + dx, owner.z + dz),
+                )
+                .quads
+                .into_iter()
+                .filter(|quad| quad.synthetic_fallback)
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            !fallbacks.is_empty(),
+            "the authored cave mouth must exercise exact-volume replacement of its coarse cover"
+        );
+        assert!(fallbacks.iter().all(|quad| {
+            matches!(quad.face, FACE_NEG_X | FACE_POS_X | FACE_NEG_Z | FACE_POS_Z)
+                && quad.origin[1].div_euclid(CHUNK_EDGE as i32)
+                    == (quad.origin[1] + i32::from(quad.extent[1]) - 1)
+                        .div_euclid(CHUNK_EDGE as i32)
+        }));
+    }
+
+    #[test]
     fn edit_outside_analytic_feature_does_not_suppress_proxy() {
         let generator = Generator::new(0x5eed);
         let feature = nearby_skyline_feature(generator);

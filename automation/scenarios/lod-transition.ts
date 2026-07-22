@@ -645,7 +645,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       },
     ];
     for (const [index, offset] of [-0.4, -0.2, 0.2, 0.4].entries()) {
-      if (boundaryCoverage) await page.keyboard.press("F3");
+      if (boundaryCoverage && options.openWorldLab) await page.keyboard.press("F3");
       beforeSnapshot = await setCameraLook(
         engine,
         options.look[0] + offset,
@@ -653,7 +653,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
         timings,
       );
       beforeSnapshot = await waitForStableFrame(page, engine, initialCentres, timings);
-      if (boundaryCoverage) {
+      if (boundaryCoverage && options.openWorldLab) {
         await page.keyboard.press("F3");
         beforeSnapshot = await waitForStableFrame(page, engine, initialCentres, timings);
       }
