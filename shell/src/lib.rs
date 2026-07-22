@@ -139,47 +139,231 @@ fn urgent_stream_interest(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ChunkPortalMask {
-    faces: [[u64; CHUNK_FACE_WORDS]; 6],
+    voxel_components: Box<[u16]>,
+    component_faces: Vec<u8>,
+    component_face_cells: Vec<[[u64; CHUNK_FACE_WORDS]; 6]>,
 }
 
 impl ChunkPortalMask {
     fn from_chunk(chunk: &voxels_world::Chunk) -> Self {
-        let mut portals = Self {
-            faces: [[0; CHUNK_FACE_WORDS]; 6],
-        };
+        use std::collections::VecDeque;
+
         let edge = voxels_world::CHUNK_EDGE;
-        for vertical in 0..edge {
-            for horizontal in 0..edge {
-                let index = horizontal + vertical * edge;
-                let probes = [
-                    (0, [0, horizontal, vertical]),
-                    (1, [edge - 1, horizontal, vertical]),
-                    (2, [horizontal, 0, vertical]),
-                    (3, [horizontal, edge - 1, vertical]),
-                    (4, [horizontal, vertical, 0]),
-                    (5, [horizontal, vertical, edge - 1]),
-                ];
-                for (face, [x, y, z]) in probes {
-                    if !chunk.get(x, y, z).occludes_ambient() {
-                        portals.faces[face][index / 64] |= 1_u64 << (index % 64);
+        let mut voxel_components = vec![0_u16; edge * edge * edge];
+        let mut component_faces = vec![0_u8];
+        let mut component_face_cells = vec![[[0_u64; CHUNK_FACE_WORDS]; 6]];
+        let mut queue = VecDeque::new();
+        for face in 0..6 {
+            for face_index in 0..edge * edge {
+                let [x, y, z] = Self::face_voxel(face, face_index);
+                let seed = Self::voxel_index(x, y, z);
+                if voxel_components[seed] != 0 || chunk.get(x, y, z).occludes_ambient() {
+                    continue;
+                }
+                let component = u16::try_from(component_faces.len())
+                    .expect("a 32-cubed chunk has fewer than u16::MAX components");
+                component_faces.push(0);
+                component_face_cells.push([[0; CHUNK_FACE_WORDS]; 6]);
+                voxel_components[seed] = component;
+                queue.push_back([x, y, z]);
+                while let Some([cell_x, cell_y, cell_z]) = queue.pop_front() {
+                    let faces = &mut component_faces[usize::from(component)];
+                    if cell_x == 0 {
+                        *faces |= 1 << 0;
+                        Self::mark_face_cell(
+                            &mut component_face_cells[usize::from(component)][0],
+                            cell_y + cell_z * edge,
+                        );
+                    }
+                    if cell_x + 1 == edge {
+                        *faces |= 1 << 1;
+                        Self::mark_face_cell(
+                            &mut component_face_cells[usize::from(component)][1],
+                            cell_y + cell_z * edge,
+                        );
+                    }
+                    if cell_y == 0 {
+                        *faces |= 1 << 2;
+                        Self::mark_face_cell(
+                            &mut component_face_cells[usize::from(component)][2],
+                            cell_x + cell_z * edge,
+                        );
+                    }
+                    if cell_y + 1 == edge {
+                        *faces |= 1 << 3;
+                        Self::mark_face_cell(
+                            &mut component_face_cells[usize::from(component)][3],
+                            cell_x + cell_z * edge,
+                        );
+                    }
+                    if cell_z == 0 {
+                        *faces |= 1 << 4;
+                        Self::mark_face_cell(
+                            &mut component_face_cells[usize::from(component)][4],
+                            cell_x + cell_y * edge,
+                        );
+                    }
+                    if cell_z + 1 == edge {
+                        *faces |= 1 << 5;
+                        Self::mark_face_cell(
+                            &mut component_face_cells[usize::from(component)][5],
+                            cell_x + cell_y * edge,
+                        );
+                    }
+                    for [next_x, next_y, next_z] in [
+                        cell_x.checked_sub(1).map(|x| [x, cell_y, cell_z]),
+                        (cell_x + 1 < edge).then_some([cell_x + 1, cell_y, cell_z]),
+                        cell_y.checked_sub(1).map(|y| [cell_x, y, cell_z]),
+                        (cell_y + 1 < edge).then_some([cell_x, cell_y + 1, cell_z]),
+                        cell_z.checked_sub(1).map(|z| [cell_x, cell_y, z]),
+                        (cell_z + 1 < edge).then_some([cell_x, cell_y, cell_z + 1]),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let next = Self::voxel_index(next_x, next_y, next_z);
+                        if voxel_components[next] == 0
+                            && !chunk.get(next_x, next_y, next_z).occludes_ambient()
+                        {
+                            voxel_components[next] = component;
+                            queue.push_back([next_x, next_y, next_z]);
+                        }
                     }
                 }
             }
         }
-        portals
+        Self {
+            voxel_components: voxel_components.into_boxed_slice(),
+            component_faces,
+            component_face_cells,
+        }
     }
 
-    fn face_is_open(&self, face: usize) -> bool {
-        self.faces[face].iter().any(|word| *word != 0)
+    fn mark_face_cell(words: &mut [u64; CHUNK_FACE_WORDS], index: usize) {
+        words[index / 64] |= 1_u64 << (index % 64);
     }
 
-    fn connects(&self, face: usize, neighbor: &Self) -> bool {
+    const fn voxel_index(x: usize, y: usize, z: usize) -> usize {
+        x + y * voxels_world::CHUNK_EDGE + z * voxels_world::CHUNK_EDGE * voxels_world::CHUNK_EDGE
+    }
+
+    fn face_voxel(face: usize, index: usize) -> [usize; 3] {
+        let edge = voxels_world::CHUNK_EDGE;
+        let horizontal = index % edge;
+        let vertical = index / edge;
+        match face {
+            0 => [0, horizontal, vertical],
+            1 => [edge - 1, horizontal, vertical],
+            2 => [horizontal, 0, vertical],
+            3 => [horizontal, edge - 1, vertical],
+            4 => [horizontal, vertical, 0],
+            5 => [horizontal, vertical, edge - 1],
+            _ => unreachable!("a chunk has six faces"),
+        }
+    }
+
+    fn component_at(&self, x: usize, y: usize, z: usize) -> u16 {
+        self.voxel_components[Self::voxel_index(x, y, z)]
+    }
+
+    fn component_at_face(&self, face: usize, index: usize) -> u16 {
+        let [x, y, z] = Self::face_voxel(face, index);
+        self.component_at(x, y, z)
+    }
+
+    fn component_opens_face(&self, component: u16, face: usize) -> bool {
+        component != 0
+            && self
+                .component_faces
+                .get(usize::from(component))
+                .is_some_and(|faces| faces & (1 << face) != 0)
+    }
+
+    fn connected_neighbor_components(
+        &self,
+        component: u16,
+        face: usize,
+        neighbor: &Self,
+        visible_cells: &[u64; CHUNK_FACE_WORDS],
+    ) -> Vec<u16> {
         let opposite = [1, 0, 3, 2, 5, 4][face];
-        self.faces[face]
-            .iter()
-            .zip(&neighbor.faces[opposite])
-            .any(|(left, right)| left & right != 0)
+        let mut connected = Vec::new();
+        let Some(component_cells) = self
+            .component_face_cells
+            .get(usize::from(component))
+            .map(|faces| &faces[face])
+        else {
+            return connected;
+        };
+        for (word_index, (&component_word, &visible_word)) in
+            component_cells.iter().zip(visible_cells).enumerate()
+        {
+            let mut candidates = component_word & visible_word;
+            while candidates != 0 {
+                let bit = candidates.trailing_zeros() as usize;
+                let index = word_index * 64 + bit;
+                let neighbor_component = neighbor.component_at_face(opposite, index);
+                if neighbor.component_opens_face(neighbor_component, opposite)
+                    && !connected.contains(&neighbor_component)
+                {
+                    connected.push(neighbor_component);
+                }
+                candidates &= candidates - 1;
+            }
+        }
+        connected
     }
+
+    fn component_has_visible_face_cell(
+        &self,
+        component: u16,
+        face: usize,
+        visible_cells: &[u64; CHUNK_FACE_WORDS],
+    ) -> bool {
+        self.component_face_cells
+            .get(usize::from(component))
+            .is_some_and(|faces| {
+                faces[face]
+                    .iter()
+                    .zip(visible_cells)
+                    .any(|(component, visible)| component & visible != 0)
+            })
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn visible_portal_cells(
+    camera: &CameraState,
+    chunk: voxels_world::ChunkCoord,
+    face: usize,
+    distance_metres: f32,
+    cone_tangent: f32,
+) -> [u64; CHUNK_FACE_WORDS] {
+    use voxels_world::{CHUNK_EDGE, VOXEL_SIZE_METRES};
+
+    let mut visible = [0_u64; CHUNK_FACE_WORDS];
+    let cell_radius = VOXEL_SIZE_METRES * 3.0_f32.sqrt() * 0.5;
+    let forward = camera.forward();
+    for face_index in 0..CHUNK_EDGE * CHUNK_EDGE {
+        let [local_x, local_y, local_z] = ChunkPortalMask::face_voxel(face, face_index);
+        let world_voxel = glam::IVec3::new(
+            chunk.x * CHUNK_EDGE as i32 + local_x as i32,
+            chunk.y * CHUNK_EDGE as i32 + local_y as i32,
+            chunk.z * CHUNK_EDGE as i32 + local_z as i32,
+        );
+        let center = (world_voxel.as_vec3() + glam::Vec3::splat(0.5)) * VOXEL_SIZE_METRES;
+        let camera_to_center = center - camera.position;
+        let axial = camera_to_center.dot(forward);
+        if axial < -cell_radius || camera_to_center.length() > distance_metres + cell_radius {
+            continue;
+        }
+        let perpendicular_squared = (camera_to_center.length_squared() - axial * axial).max(0.0);
+        let cone_radius = axial.max(0.0) * cone_tangent + cell_radius;
+        if perpendicular_squared <= cone_radius * cone_radius {
+            ChunkPortalMask::mark_face_cell(&mut visible, face_index);
+        }
+    }
+    visible
 }
 
 /// Exact-volume interest through the connected resident cave/tunnel portal graph.
@@ -224,15 +408,36 @@ fn enclosed_view_stream_interest(
         ([0, 0, 1], 5),
     ];
     let mut chunks = BTreeSet::new();
-    let mut visited = BTreeSet::from([origin]);
-    let mut queue = VecDeque::from([origin]);
-    while let Some(current) = queue.pop_front() {
+    let mut visited = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    let camera_voxel = (camera.position / VOXEL_SIZE_METRES).floor().as_ivec3();
+    if let Some(origin_portals) = portals.get(&(origin.x, origin.y, origin.z)) {
+        let component = origin_portals.component_at(
+            camera_voxel.x.rem_euclid(CHUNK_EDGE as i32) as usize,
+            camera_voxel.y.rem_euclid(CHUNK_EDGE as i32) as usize,
+            camera_voxel.z.rem_euclid(CHUNK_EDGE as i32) as usize,
+        );
+        if component != 0 {
+            visited.insert((origin, component));
+            queue.push_back((origin, component));
+        }
+    }
+    chunks.insert(origin);
+    while let Some((current, current_component)) = queue.pop_front() {
         chunks.insert(current);
         let Some(current_portals) = portals.get(&(current.x, current.y, current.z)) else {
             continue;
         };
         for ([dx, dy, dz], face) in directions {
-            if !current_portals.face_is_open(face) {
+            let visible_cells =
+                visible_portal_cells(camera, current, face, distance_metres, cone_tangent);
+            if !current_portals.component_opens_face(current_component, face)
+                || !current_portals.component_has_visible_face_cell(
+                    current_component,
+                    face,
+                    &visible_cells,
+                )
+            {
                 continue;
             }
             let (Some(x), Some(y), Some(z)) = (
@@ -276,15 +481,18 @@ fn enclosed_view_stream_interest(
             // Always retain the first chunk across an opening. If it is solid, it is the exact
             // wall that terminates the visible cave rather than a portal to traverse.
             chunks.insert(neighbor);
-            if visited.contains(&neighbor) {
-                continue;
-            }
             let Some(neighbor_portals) = portals.get(&(x, y, z)) else {
                 continue;
             };
-            if current_portals.connects(face, neighbor_portals) {
-                visited.insert(neighbor);
-                queue.push_back(neighbor);
+            for neighbor_component in current_portals.connected_neighbor_components(
+                current_component,
+                face,
+                neighbor_portals,
+                &visible_cells,
+            ) {
+                if visited.insert((neighbor, neighbor_component)) {
+                    queue.push_back((neighbor, neighbor_component));
+                }
             }
         }
     }
@@ -3880,13 +4088,17 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     fn portal_mask(open_faces: &[usize]) -> ChunkPortalMask {
-        let mut mask = ChunkPortalMask {
-            faces: [[0; CHUNK_FACE_WORDS]; 6],
-        };
+        let mut faces = 0_u8;
+        let mut face_cells = [[0_u64; CHUNK_FACE_WORDS]; 6];
         for face in open_faces {
-            mask.faces[*face][0] = 1;
+            faces |= 1 << face;
+            face_cells[*face].fill(u64::MAX);
         }
-        mask
+        ChunkPortalMask {
+            voxel_components: vec![1; voxels_world::CHUNK_EDGE.pow(3)].into_boxed_slice(),
+            component_faces: vec![0, faces],
+            component_face_cells: vec![[[0; CHUNK_FACE_WORDS]; 6], face_cells],
+        }
     }
 
     fn straight_tunnel_portals(
@@ -4056,6 +4268,76 @@ mod tests {
     }
 
     #[test]
+    fn enclosed_view_interest_keeps_shallow_tunnels_separate_from_sky_in_the_same_chunk() {
+        let split_portals = |coord| {
+            let mut chunk = voxels_world::Chunk::filled(coord, voxels_world::Material::Stone);
+            for z in 0..voxels_world::CHUNK_EDGE {
+                chunk.set(16, 16, z, voxels_world::Material::Air);
+            }
+            for z in 0..voxels_world::CHUNK_EDGE {
+                for x in 0..voxels_world::CHUNK_EDGE {
+                    chunk.set(
+                        x,
+                        voxels_world::CHUNK_EDGE - 1,
+                        z,
+                        voxels_world::Material::Air,
+                    );
+                }
+            }
+            ChunkPortalMask::from_chunk(&chunk)
+        };
+        let current = split_portals(voxels_world::ChunkCoord::new(0, 0, 0));
+        assert_ne!(
+            current.component_at(16, 16, 0),
+            current.component_at(16, voxels_world::CHUNK_EDGE - 1, 0),
+            "the tunnel and outdoor layer must remain separate portal components"
+        );
+        let portals = BTreeMap::from([
+            ((0, 0, 0), current),
+            (
+                (0, 0, -1),
+                split_portals(voxels_world::ChunkCoord::new(0, 0, -1)),
+            ),
+            ((1, 0, -1), portal_mask(&[0, 1, 4, 5])),
+        ]);
+        let camera = CameraState::spawn(glam::Vec3::new(1.65, 1.65, 1.65));
+
+        let interest = enclosed_view_stream_interest(&camera, 32.0, 55.0, &portals);
+
+        assert!(interest.contains(&voxels_world::ChunkCoord::new(0, 0, -1)));
+        assert!(interest.contains(&voxels_world::ChunkCoord::new(0, 0, -2)));
+        assert!(
+            !interest.contains(&voxels_world::ChunkCoord::new(1, 0, -1)),
+            "outdoor air sharing the chunk must not widen the tunnel component into the sky"
+        );
+    }
+
+    #[test]
+    fn enclosed_view_interest_does_not_turn_up_a_shaft_outside_the_view_cone() {
+        let coord = voxels_world::ChunkCoord::new(0, 0, 0);
+        let mut chunk = voxels_world::Chunk::filled(coord, voxels_world::Material::Stone);
+        for z in 0..voxels_world::CHUNK_EDGE {
+            chunk.set(16, 16, z, voxels_world::Material::Air);
+        }
+        for y in 16..voxels_world::CHUNK_EDGE {
+            chunk.set(16, y, 16, voxels_world::Material::Air);
+        }
+        let portals = BTreeMap::from([
+            ((0, 0, 0), ChunkPortalMask::from_chunk(&chunk)),
+            ((0, 1, 0), portal_mask(&[2, 3])),
+        ]);
+        let camera = CameraState::spawn(glam::Vec3::new(1.65, 1.65, 1.65));
+
+        let interest = enclosed_view_stream_interest(&camera, 32.0, 55.0, &portals);
+
+        assert!(interest.contains(&voxels_world::ChunkCoord::new(0, 0, -1)));
+        assert!(
+            !interest.contains(&voxels_world::ChunkCoord::new(0, 1, 0)),
+            "a connected shaft above the camera must not redirect a forward tunnel view"
+        );
+    }
+
+    #[test]
     fn chunk_portals_require_matching_air_cells() {
         let mut current = voxels_world::Chunk::filled(
             voxels_world::ChunkCoord::new(0, 0, 0),
@@ -4074,7 +4356,13 @@ mod tests {
         );
         let current = ChunkPortalMask::from_chunk(&current);
         let mismatched = ChunkPortalMask::from_chunk(&neighbor);
-        assert!(!current.connects(4, &mismatched));
+        let tunnel_component = current.component_at(4, 7, 0);
+        let visible = [u64::MAX; CHUNK_FACE_WORDS];
+        assert!(
+            current
+                .connected_neighbor_components(tunnel_component, 4, &mismatched, &visible)
+                .is_empty()
+        );
 
         neighbor.set(
             4,
@@ -4083,7 +4371,11 @@ mod tests {
             voxels_world::Material::Air,
         );
         let matching = ChunkPortalMask::from_chunk(&neighbor);
-        assert!(current.connects(4, &matching));
+        assert!(
+            !current
+                .connected_neighbor_components(tunnel_component, 4, &matching, &visible)
+                .is_empty()
+        );
     }
 
     #[test]
