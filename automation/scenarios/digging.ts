@@ -31,6 +31,21 @@ interface DigContinuity {
   readonly captures: readonly RenderSnapshotCapture[];
 }
 
+interface StationaryTunnelSample {
+  readonly frameSequence: number;
+  readonly camera: readonly [number, number, number, number, number];
+  readonly viewportFingerprint: readonly [number, number];
+  readonly visibleChunks: number;
+  readonly drawCalls: number;
+  readonly quads: number;
+  readonly enclosedView: {
+    readonly resident: number;
+    readonly required: number;
+    readonly renderable: number;
+    readonly owned: number;
+  };
+}
+
 interface Options {
   readonly source: WorldSource;
   readonly buildProfile: "debug" | "wasm-dev" | "release";
@@ -392,6 +407,127 @@ async function captureTunnelHeadingCoverage(
   };
 }
 
+async function captureStationaryTunnelStability(
+  page: Page,
+  engine: EngineClient,
+  frameSampleCount = 120,
+  imageSampleCount = 32,
+): Promise<{
+  readonly samples: readonly StationaryTunnelSample[];
+  readonly imageSamples: readonly DiagnosticSkyAnalysis[];
+  readonly distinctViewportFingerprints: number;
+  readonly distinctGeometryCounts: number;
+  readonly maximumCameraDrift: number;
+  readonly worst: DiagnosticSkyAnalysis;
+  readonly worstScreenshot: Buffer;
+}> {
+  const settled = await engine.waitForSnapshot(
+    (snapshot) => {
+      const required = snapshotValue(snapshot, "enclosedViewRequired");
+      return (
+        required > 0 &&
+        snapshotValue(snapshot, "enclosedViewResident") === required &&
+        snapshotValue(snapshot, "enclosedViewRenderable") === required &&
+        snapshotValue(snapshot, "enclosedViewOwned") === required &&
+        snapshotValue(snapshot, "pendingJobs") === 0 &&
+        snapshotValue(snapshot, "surfaceInFlight") === 0 &&
+        snapshotValue(snapshot, "allLodsReady") === 1
+      );
+    },
+    {
+      timeoutMs: 30_000,
+      intervalMs: 25,
+      description: "the stationary tunnel view did not settle",
+    },
+  );
+  // The complete-cut transition is intentionally short. Wait it out so this check measures a
+  // stationary ownership set rather than an expected one-shot handoff from the loading phase.
+  await engine.wait(500);
+  const origin = [
+    snapshotValue(settled, "cameraX"),
+    snapshotValue(settled, "cameraY"),
+    snapshotValue(settled, "cameraZ"),
+    snapshotValue(settled, "yaw"),
+    snapshotValue(settled, "pitch"),
+  ] as const;
+  const samples: StationaryTunnelSample[] = [];
+  let previousFrame = snapshotValue(settled, "frameSequence");
+  // Keep screenshot readback out of this loop. It is much slower than a frame and could alias a
+  // repetitive ownership oscillation; snapshots instead follow successive frame sequence values.
+  for (let index = 0; index < frameSampleCount; index += 1) {
+    const snapshot = await engine.waitForFrameAfter(previousFrame, {
+      timeoutMs: 2_000,
+      intervalMs: 1,
+      description: "stationary tunnel renderer stopped advancing",
+    });
+    previousFrame = snapshotValue(snapshot, "frameSequence");
+    samples.push({
+      frameSequence: previousFrame,
+      camera: [
+        snapshotValue(snapshot, "cameraX"),
+        snapshotValue(snapshot, "cameraY"),
+        snapshotValue(snapshot, "cameraZ"),
+        snapshotValue(snapshot, "yaw"),
+        snapshotValue(snapshot, "pitch"),
+      ],
+      viewportFingerprint: [
+        snapshotValue(snapshot, "viewportFingerprintLow24"),
+        snapshotValue(snapshot, "viewportFingerprintHigh24"),
+      ],
+      visibleChunks: snapshotValue(snapshot, "visibleChunks"),
+      drawCalls: snapshotValue(snapshot, "drawCalls"),
+      quads: snapshotValue(snapshot, "quads"),
+      enclosedView: {
+        resident: snapshotValue(snapshot, "enclosedViewResident"),
+        required: snapshotValue(snapshot, "enclosedViewRequired"),
+        renderable: snapshotValue(snapshot, "enclosedViewRenderable"),
+        owned: snapshotValue(snapshot, "enclosedViewOwned"),
+      },
+    });
+  }
+  const imageSamples: DiagnosticSkyAnalysis[] = [];
+  let worstScreenshot = await page.screenshot();
+  let worst = await analyzeDiagnosticSky(page, worstScreenshot, {
+    x0: 0.02,
+    x1: 0.98,
+    y0: 0.02,
+    y1: 0.95,
+  });
+  imageSamples.push(worst);
+  for (let index = 1; index < imageSampleCount; index += 1) {
+    const screenshot = await page.screenshot();
+    const diagnosticSky = await analyzeDiagnosticSky(page, screenshot, {
+      x0: 0.02,
+      x1: 0.98,
+      y0: 0.02,
+      y1: 0.95,
+    });
+    imageSamples.push(diagnosticSky);
+    if (diagnosticSky.diagnosticSkyPixels > worst.diagnosticSkyPixels) {
+      worst = diagnosticSky;
+      worstScreenshot = screenshot;
+    }
+  }
+  const maximumCameraDrift = Math.max(
+    ...samples.map((sample) =>
+      Math.max(...sample.camera.map((value, index) => Math.abs(value - (origin[index] ?? value)))),
+    ),
+  );
+  return {
+    samples,
+    imageSamples,
+    distinctViewportFingerprints: new Set(
+      samples.map((sample) => sample.viewportFingerprint.join(":")),
+    ).size,
+    distinctGeometryCounts: new Set(
+      samples.map((sample) => [sample.visibleChunks, sample.drawCalls, sample.quads].join(":")),
+    ).size,
+    maximumCameraDrift,
+    worst,
+    worstScreenshot,
+  };
+}
+
 async function runDigging(context: ScenarioContext, arguments_: readonly string[]) {
   const options = parseOptions(arguments_);
   const world = await startWorldStack(context, {
@@ -527,6 +663,7 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
       description: "the distant tunnel terminator did not gain exact-volume ownership",
     },
   );
+  const stationaryTunnel = await captureStationaryTunnelStability(page, engine);
   await context.artifacts.write(
     "Worst tunnel diagnostic coverage",
     "tunnel-worst-coverage.png",
@@ -537,6 +674,12 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
     "Worst tunnel heading coverage",
     "tunnel-worst-heading.png",
     headingCoverage.worstScreenshot,
+    "image/png",
+  );
+  await context.artifacts.write(
+    "Worst stationary tunnel coverage",
+    "tunnel-worst-stationary.png",
+    stationaryTunnel.worstScreenshot,
     "image/png",
   );
   await engine.setDiagnosticSky(null);
@@ -571,6 +714,24 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
     violations.push("the enclosed tunnel exposed diagnostic sky while stepping backward");
   if (headingCoverage.worst.diagnosticSkyPixels > 0)
     violations.push("the enclosed tunnel exposed diagnostic sky while turning within its walls");
+  if (stationaryTunnel.worst.diagnosticSkyPixels > 0)
+    violations.push("the stationary enclosed tunnel exposed diagnostic sky");
+  if (stationaryTunnel.maximumCameraDrift > 1e-5)
+    violations.push("the stationary tunnel camera drifted during the flicker check");
+  if (stationaryTunnel.distinctViewportFingerprints !== 1)
+    violations.push("the stationary tunnel viewport ownership fingerprint changed");
+  if (stationaryTunnel.distinctGeometryCounts !== 1)
+    violations.push("the stationary tunnel visible geometry counts changed");
+  if (
+    stationaryTunnel.samples.some(
+      (sample) =>
+        sample.enclosedView.required === 0 ||
+        sample.enclosedView.resident !== sample.enclosedView.required ||
+        sample.enclosedView.renderable !== sample.enclosedView.required ||
+        sample.enclosedView.owned !== sample.enclosedView.required,
+    )
+  )
+    violations.push("the stationary tunnel exact-volume ownership became incomplete");
   if (undergroundPerformance.frameMs.median > 8.8)
     violations.push("underground rendering did not sustain a 120 Hz median frame interval");
   if (undergroundPerformance.cpuMs.p95 > 8)
@@ -617,6 +778,15 @@ async function runDigging(context: ScenarioContext, arguments_: readonly string[
     headingCoverage: {
       samples: headingCoverage.samples,
       worst: headingCoverage.worst,
+    },
+    stationaryTunnel: {
+      sampleCount: stationaryTunnel.samples.length,
+      imageSampleCount: stationaryTunnel.imageSamples.length,
+      distinctViewportFingerprints: stationaryTunnel.distinctViewportFingerprints,
+      distinctGeometryCounts: stationaryTunnel.distinctGeometryCounts,
+      maximumCameraDrift: stationaryTunnel.maximumCameraDrift,
+      worst: stationaryTunnel.worst,
+      samples: stationaryTunnel.samples,
     },
     violations,
   };
