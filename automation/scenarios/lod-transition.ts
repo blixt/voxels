@@ -661,7 +661,9 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       readonly elapsedMs: number;
       readonly camera: Vector3;
       readonly diagnosticSkyPixels: number;
+      readonly enclosedSkyPixels: number;
       readonly largestComponentPixels: number;
+      readonly largestEnclosedComponentPixels: number;
       readonly presentedStrideVoxels: number;
       readonly incompleteTransitionEdges: number;
       readonly surfaceQueued: number;
@@ -679,20 +681,22 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
           elapsedMs: Date.now() - travelStartedAt,
           camera: cameraPosition(snapshot),
           diagnosticSkyPixels: analysis.diagnosticSkyPixels,
+          enclosedSkyPixels: analysis.enclosedPixels,
           largestComponentPixels: analysis.largestComponentPixels,
+          largestEnclosedComponentPixels: analysis.largestEnclosedComponentPixels,
           presentedStrideVoxels: snapshotValue(snapshot, "presentedLodStrideVoxels"),
           incompleteTransitionEdges: snapshotValue(snapshot, "lodIncompleteTransitionEdges"),
           surfaceQueued: snapshotValue(snapshot, "surfaceQueued"),
         });
         if (
-          analysis.diagnosticSkyPixels > worst.diagnosticSkyPixels ||
-          (analysis.diagnosticSkyPixels === worst.diagnosticSkyPixels &&
-            analysis.largestComponentPixels > worst.largestComponentPixels)
+          analysis.enclosedPixels > worst.enclosedPixels ||
+          (analysis.enclosedPixels === worst.enclosedPixels &&
+            analysis.largestEnclosedComponentPixels > worst.largestEnclosedComponentPixels)
         ) {
           worst = analysis;
           worstScreenshot = screenshot;
         }
-        if (analysis.diagnosticSkyPixels > 0) break;
+        if (analysis.enclosedPixels > 0) break;
       }
     } finally {
       await page.keyboard.up("KeyW");
@@ -701,8 +705,24 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     const travelFinishedPose = cameraPosition(stoppedImmediateSnapshot);
     const stoppedImmediateScreenshot = await page.screenshot();
     const stoppedImmediate = await analyzeWatertightTerrain(page, stoppedImmediateScreenshot);
-    await page.waitForTimeout(500);
-    const stoppedSettledSnapshot = await readSnapshot(engine, timings);
+    let settledSamples = 0;
+    const stoppedSettledSnapshot = await engine.waitForSnapshot(
+      (snapshot) => {
+        collectTiming(snapshot, timings);
+        const settled =
+          snapshotValue(snapshot, "presentedLodStrideVoxels") === 1 &&
+          snapshotValue(snapshot, "lodIncompleteTransitionEdges") === 0;
+        settledSamples = settled ? settledSamples + 1 : 0;
+        return settledSamples >= 3;
+      },
+      {
+        timeoutMs: 10_000,
+        intervalMs: 50,
+        description: "nearby surface did not return to three stable canonical samples",
+      },
+    );
+    // Let the short old-cut overlay retire after the canonical cut has stabilized.
+    await page.waitForTimeout(250);
     const stoppedSettledScreenshot = await page.screenshot();
     const stoppedSettled = await analyzeWatertightTerrain(page, stoppedSettledScreenshot);
     await engine.setDiagnosticSky(null);
@@ -728,8 +748,14 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       (sample) => sample.presentedStrideVoxels === 0,
     ).length;
     const violations: string[] = [];
-    if (worst.diagnosticSkyPixels > 0) {
-      violations.push("sustained travel exposed diagnostic sky inside the terrain ROI");
+    if (worst.enclosedPixels > 0) {
+      violations.push("sustained travel exposed enclosed diagnostic sky inside the terrain ROI");
+    }
+    if (stoppedImmediate.enclosedPixels > 0) {
+      violations.push("stopping exposed enclosed diagnostic sky inside the terrain ROI");
+    }
+    if (stoppedSettled.enclosedPixels > 0) {
+      violations.push("settled nearby terrain retained enclosed diagnostic sky");
     }
     if (uncoveredOwnerSamples > 0) {
       violations.push("sustained travel sampled a world point without an LOD owner");

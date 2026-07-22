@@ -21,7 +21,14 @@ export interface DiagnosticSkyAnalysis {
   readonly diagnosticSkyFraction: number;
   readonly largestComponentPixels: number;
   readonly largestComponentFraction: number;
+  /** Sky connected to the ROI perimeter, such as a legitimate terrain silhouette. */
+  readonly boundaryConnectedPixels: number;
+  /** Sky fully enclosed by rendered geometry, which is the useful missing-geometry signal. */
+  readonly enclosedPixels: number;
+  readonly largestEnclosedComponentPixels: number;
+  readonly largestEnclosedComponentFraction: number;
   readonly sampleCoordinates: readonly (readonly [number, number])[];
+  readonly enclosedSampleCoordinates: readonly (readonly [number, number])[];
 }
 
 export interface RenderedImageComparison {
@@ -114,17 +121,25 @@ export async function analyzeDiagnosticSky(
 
       const visited = new Uint8Array(mask.length);
       let largestComponentPixels = 0;
+      let boundaryConnectedPixels = 0;
+      let enclosedPixels = 0;
+      let largestEnclosedComponentPixels = 0;
+      const enclosedCoordinates: (readonly [number, number])[] = [];
       for (let start = 0; start < mask.length; start += 1) {
         if (mask[start] === 0 || visited[start] !== 0) continue;
         const stack = [start];
         visited[start] = 1;
         let componentPixels = 0;
+        let touchesBoundary = false;
+        const componentCoordinates: number[] = [];
         while (stack.length > 0) {
           const current = stack.pop();
           if (current === undefined) break;
           componentPixels += 1;
           const x = current % width;
           const y = Math.floor(current / width);
+          touchesBoundary ||= x === 0 || x + 1 === width || y === 0 || y + 1 === height;
+          if (componentCoordinates.length < 32) componentCoordinates.push(current);
           const neighbors = [
             x > 0 ? current - 1 : -1,
             x + 1 < width ? current + 1 : -1,
@@ -138,6 +153,22 @@ export async function analyzeDiagnosticSky(
           }
         }
         largestComponentPixels = Math.max(largestComponentPixels, componentPixels);
+        if (touchesBoundary) {
+          boundaryConnectedPixels += componentPixels;
+        } else {
+          enclosedPixels += componentPixels;
+          largestEnclosedComponentPixels = Math.max(
+            largestEnclosedComponentPixels,
+            componentPixels,
+          );
+          for (const coordinate of componentCoordinates) {
+            if (enclosedCoordinates.length >= 32) break;
+            enclosedCoordinates.push([
+              roi.x0 + (coordinate % width),
+              roi.y0 + Math.floor(coordinate / width),
+            ]);
+          }
+        }
       }
       const sampledPixels = mask.length;
       return {
@@ -147,7 +178,12 @@ export async function analyzeDiagnosticSky(
         diagnosticSkyFraction: diagnosticSkyPixels / sampledPixels,
         largestComponentPixels,
         largestComponentFraction: largestComponentPixels / sampledPixels,
+        boundaryConnectedPixels,
+        enclosedPixels,
+        largestEnclosedComponentPixels,
+        largestEnclosedComponentFraction: largestEnclosedComponentPixels / sampledPixels,
         sampleCoordinates: coordinates,
+        enclosedSampleCoordinates: enclosedCoordinates,
       };
     },
     { base64: screenshot.toString("base64"), normalizedRegion: region },
