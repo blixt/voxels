@@ -26,7 +26,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket, WorkerGlobalScope};
 
-use crate::request_window::collision_preemption_candidate;
+use crate::request_window::priority_preemption_candidate;
 
 pub type RemoteRequestId = u64;
 
@@ -1006,7 +1006,7 @@ impl RemoteInner {
         }
         let candidate = {
             let pending = self.pending.borrow();
-            collision_preemption_candidate(
+            priority_preemption_candidate(
                 priority,
                 pending
                     .iter()
