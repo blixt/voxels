@@ -329,6 +329,139 @@ impl ChunkPortalMask {
                     .any(|(component, visible)| component & visible != 0)
             })
     }
+
+    /// Extends portal components after solid voxels become non-occluding without rescanning the
+    /// entire chunk. Removing solids can only join air regions; it cannot split one. Newly exposed
+    /// interior air therefore stays unlabeled until it reaches a boundary-connected component,
+    /// while a newly opened boundary propagates through the complete connected cavity at once.
+    fn add_non_occluding_voxels(
+        &mut self,
+        chunk: &voxels_world::Chunk,
+        local_voxels: &[[usize; 3]],
+    ) {
+        use std::collections::VecDeque;
+
+        let edge = voxels_world::CHUNK_EDGE;
+        let mut visited = vec![false; edge * edge * edge];
+        let mut queue = VecDeque::new();
+        for &[start_x, start_y, start_z] in local_voxels {
+            let start = Self::voxel_index(start_x, start_y, start_z);
+            if visited[start]
+                || self.voxel_components[start] != 0
+                || chunk.get(start_x, start_y, start_z).occludes_ambient()
+            {
+                continue;
+            }
+            visited[start] = true;
+            queue.push_back([start_x, start_y, start_z]);
+            let mut region = Vec::new();
+            let mut neighboring_components = Vec::new();
+            let mut touches_boundary = false;
+            while let Some([x, y, z]) = queue.pop_front() {
+                region.push([x, y, z]);
+                touches_boundary |=
+                    x == 0 || x + 1 == edge || y == 0 || y + 1 == edge || z == 0 || z + 1 == edge;
+                for [next_x, next_y, next_z] in [
+                    x.checked_sub(1).map(|next| [next, y, z]),
+                    (x + 1 < edge).then_some([x + 1, y, z]),
+                    y.checked_sub(1).map(|next| [x, next, z]),
+                    (y + 1 < edge).then_some([x, y + 1, z]),
+                    z.checked_sub(1).map(|next| [x, y, next]),
+                    (z + 1 < edge).then_some([x, y, z + 1]),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let next = Self::voxel_index(next_x, next_y, next_z);
+                    let component = self.voxel_components[next];
+                    if component != 0 {
+                        if !neighboring_components.contains(&component) {
+                            neighboring_components.push(component);
+                        }
+                    } else if !visited[next]
+                        && !chunk.get(next_x, next_y, next_z).occludes_ambient()
+                    {
+                        visited[next] = true;
+                        queue.push_back([next_x, next_y, next_z]);
+                    }
+                }
+            }
+            if neighboring_components.is_empty() && !touches_boundary {
+                continue;
+            }
+            neighboring_components.sort_unstable();
+            let component = neighboring_components.first().copied().unwrap_or_else(|| {
+                let component = u16::try_from(self.component_faces.len())
+                    .expect("a 32-cubed chunk has fewer than u16::MAX components");
+                self.component_faces.push(0);
+                self.component_face_cells.push([[0; CHUNK_FACE_WORDS]; 6]);
+                component
+            });
+            for &merged in neighboring_components.iter().skip(1) {
+                for label in &mut self.voxel_components {
+                    if *label == merged {
+                        *label = component;
+                    }
+                }
+                let merged_index = usize::from(merged);
+                self.component_faces[usize::from(component)] |= self.component_faces[merged_index];
+                self.component_faces[merged_index] = 0;
+                for face in 0..6 {
+                    for word in 0..CHUNK_FACE_WORDS {
+                        self.component_face_cells[usize::from(component)][face][word] |=
+                            self.component_face_cells[merged_index][face][word];
+                        self.component_face_cells[merged_index][face][word] = 0;
+                    }
+                }
+            }
+            for [x, y, z] in region {
+                self.voxel_components[Self::voxel_index(x, y, z)] = component;
+                let faces = &mut self.component_faces[usize::from(component)];
+                if x == 0 {
+                    *faces |= 1 << 0;
+                    Self::mark_face_cell(
+                        &mut self.component_face_cells[usize::from(component)][0],
+                        y + z * edge,
+                    );
+                }
+                if x + 1 == edge {
+                    *faces |= 1 << 1;
+                    Self::mark_face_cell(
+                        &mut self.component_face_cells[usize::from(component)][1],
+                        y + z * edge,
+                    );
+                }
+                if y == 0 {
+                    *faces |= 1 << 2;
+                    Self::mark_face_cell(
+                        &mut self.component_face_cells[usize::from(component)][2],
+                        x + z * edge,
+                    );
+                }
+                if y + 1 == edge {
+                    *faces |= 1 << 3;
+                    Self::mark_face_cell(
+                        &mut self.component_face_cells[usize::from(component)][3],
+                        x + z * edge,
+                    );
+                }
+                if z == 0 {
+                    *faces |= 1 << 4;
+                    Self::mark_face_cell(
+                        &mut self.component_face_cells[usize::from(component)][4],
+                        x + y * edge,
+                    );
+                }
+                if z + 1 == edge {
+                    *faces |= 1 << 5;
+                    Self::mark_face_cell(
+                        &mut self.component_face_cells[usize::from(component)][5],
+                        x + y * edge,
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -2810,16 +2943,26 @@ mod web {
                 &accepted_mutations,
             );
             if !accepted_mutations.is_empty() {
-                let changed_chunks = accepted_mutations
-                    .iter()
-                    .map(|mutation| mutation.coord.chunk())
-                    .collect::<BTreeSet<_>>();
+                let mut changed_chunks = BTreeMap::<ChunkCoord, (Vec<[usize; 3]>, bool)>::new();
+                for mutation in &accepted_mutations {
+                    let entry = changed_chunks
+                        .entry(mutation.coord.chunk())
+                        .or_insert_with(|| (Vec::new(), false));
+                    entry.0.push(mutation.coord.local());
+                    entry.1 |= mutation.material.occludes_ambient();
+                }
                 let chunks = self.chunks.borrow();
                 let mut portals = self.chunk_portals.borrow_mut();
-                for coord in changed_chunks {
+                for (coord, (local_voxels, added_occluder)) in changed_chunks {
                     let key = coord_key(coord);
                     if let Some(chunk) = chunks.get(&key) {
-                        portals.insert(key, ChunkPortalMask::from_chunk(chunk));
+                        if !added_occluder && let Some(mask) = portals.get_mut(&key) {
+                            mask.add_non_occluding_voxels(chunk, &local_voxels);
+                        } else {
+                            // Adding an occluder can split a component, which requires a fresh
+                            // connected-component analysis. This path is intentionally exact.
+                            portals.insert(key, ChunkPortalMask::from_chunk(chunk));
+                        }
                     }
                 }
                 self.last_enclosure_probe.set(f64::NEG_INFINITY);
@@ -4376,6 +4519,53 @@ mod tests {
                 .connected_neighbor_components(tunnel_component, 4, &matching, &visible)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn incremental_portals_label_an_interior_tunnel_when_it_reaches_a_boundary() {
+        let coord = voxels_world::ChunkCoord::new(0, 0, 0);
+        let mut chunk = voxels_world::Chunk::filled(coord, voxels_world::Material::Stone);
+        let mut mask = ChunkPortalMask::from_chunk(&chunk);
+        let interior = (8..16).map(|z| [16, 16, z]).collect::<Vec<_>>();
+        for &[x, y, z] in &interior {
+            chunk.set(x, y, z, voxels_world::Material::Air);
+        }
+        mask.add_non_occluding_voxels(&chunk, &interior);
+        assert_eq!(mask.component_at(16, 16, 8), 0);
+
+        let opening = (0..8).map(|z| [16, 16, z]).collect::<Vec<_>>();
+        for &[x, y, z] in &opening {
+            chunk.set(x, y, z, voxels_world::Material::Air);
+        }
+        mask.add_non_occluding_voxels(&chunk, &opening);
+
+        let component = mask.component_at(16, 16, 0);
+        assert_ne!(component, 0);
+        assert_eq!(mask.component_at(16, 16, 15), component);
+        assert!(mask.component_opens_face(component, 4));
+    }
+
+    #[test]
+    fn incremental_portals_merge_components_joined_by_digging() {
+        let coord = voxels_world::ChunkCoord::new(0, 0, 0);
+        let mut chunk = voxels_world::Chunk::filled(coord, voxels_world::Material::Stone);
+        for x in 0..15 {
+            chunk.set(x, 16, 16, voxels_world::Material::Air);
+        }
+        for x in 16..voxels_world::CHUNK_EDGE {
+            chunk.set(x, 16, 16, voxels_world::Material::Air);
+        }
+        let mut mask = ChunkPortalMask::from_chunk(&chunk);
+        assert_ne!(mask.component_at(0, 16, 16), mask.component_at(31, 16, 16));
+
+        chunk.set(15, 16, 16, voxels_world::Material::Air);
+        mask.add_non_occluding_voxels(&chunk, &[[15, 16, 16]]);
+
+        let component = mask.component_at(0, 16, 16);
+        assert_ne!(component, 0);
+        assert_eq!(mask.component_at(31, 16, 16), component);
+        assert!(mask.component_opens_face(component, 0));
+        assert!(mask.component_opens_face(component, 1));
     }
 
     #[test]
