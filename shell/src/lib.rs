@@ -122,6 +122,22 @@ fn exact_streaming_velocity(camera: &CameraState, streaming_velocity: glam::Vec3
     }
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn predictive_stream_position(
+    position: glam::Vec3,
+    velocity: glam::Vec3,
+    lookahead_seconds: f32,
+    maximum_lead_metres: f32,
+) -> glam::Vec3 {
+    let horizontal = glam::Vec2::new(velocity.x, velocity.z) * lookahead_seconds.max(0.0);
+    let lead = if horizontal.length_squared() > maximum_lead_metres * maximum_lead_metres {
+        horizontal.normalize_or_zero() * maximum_lead_metres
+    } else {
+        horizontal
+    };
+    position + glam::Vec3::new(lead.x, 0.0, lead.y)
+}
+
 /// Canonical chunks intersecting the current body/support, intended movement sweep, or view/edit
 /// corridor. This bounded secondary interest is both scheduled and transported as collision
 /// critical, keeping physics and rendering ahead of running, gliding, swimming, and edits.
@@ -855,7 +871,7 @@ mod web {
         RemoteChunkCompletion, RemoteEditEvent, RemoteSurfaceCompletion, RemoteSurfaceTicket,
         RemoteWorldClient, RemoteWorldError,
     };
-    use crate::{ChunkPortalMask, world_environment_at};
+    use crate::{ChunkPortalMask, predictive_stream_position, world_environment_at};
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
     use std::cell::{Cell, RefCell};
@@ -1747,15 +1763,30 @@ mod web {
             self.drain_remote_generation();
             let remote_ms = (performance_now(performance) - remote_start) as f32;
             let plan_start = performance_now(performance);
-            let focus = world_to_chunk(camera.position);
+            // Lead the desired cylinder rather than only sorting it toward a prediction outside
+            // the window. The current camera remains at least one chunk inside the trailing edge,
+            // while newly exposed forward chunks receive real network and generation lead time.
+            let exact_load_radius = self.scheduler.borrow().config().load_radius_chunks;
+            let exact_lead_metres =
+                (exact_load_radius - 1).max(0) as f32 * CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
+            let focus = world_to_chunk(predictive_stream_position(
+                camera.position,
+                streaming_velocity,
+                self.config.stream_velocity_lookahead_seconds,
+                exact_lead_metres,
+            ));
             let exact_streaming_velocity =
                 crate::exact_streaming_velocity(camera, streaming_velocity);
             let collision_interest_start = performance_now(performance);
-            let collision_interest = self.collision_stream_interest(
-                camera,
-                exact_streaming_velocity,
-                self.config.stream_collision_lookahead_seconds,
-            );
+            let collision_interest = if camera.locomotion() == LocomotionMode::Spectator {
+                Vec::new()
+            } else {
+                self.collision_stream_interest(
+                    camera,
+                    exact_streaming_velocity,
+                    self.config.stream_collision_lookahead_seconds,
+                )
+            };
             let collision_interest_ms =
                 (performance_now(performance) - collision_interest_start) as f32;
             let enclosed_interest_start = performance_now(performance);
@@ -2576,7 +2607,20 @@ mod web {
         fn stream_surface_lods(&self, camera: &CameraState, streaming_velocity: glam::Vec3) {
             let position = camera.position;
             let focus = std::array::from_fn(|index| {
-                world_to_surface_tile(position, SurfaceLodLevel::ALL[index])
+                let level = SurfaceLodLevel::ALL[index];
+                let radius = self.config.surface_load_radius_tiles[index];
+                let maximum_lead_metres = (radius - 1).max(0) as f32
+                    * level.tile_span_voxels() as f32
+                    * VOXEL_SIZE_METRES;
+                world_to_surface_tile(
+                    predictive_stream_position(
+                        position,
+                        streaming_velocity,
+                        self.config.stream_velocity_lookahead_seconds,
+                        maximum_lead_metres,
+                    ),
+                    level,
+                )
             });
             let directional_priorities: [DirectionalStreamPriority; SURFACE_LOD_LEVEL_COUNT] =
                 std::array::from_fn(|index| {
@@ -3778,7 +3822,7 @@ mod web {
                 ) = {
                     let scheduler = engine.scheduler.borrow();
                     (
-                        scheduler.vicinity_readiness(1),
+                        scheduler.vicinity_readiness_at(world_to_chunk(camera.position), 1),
                         scheduler.interest_readiness(&collision_immediate_interest),
                         scheduler.interest_readiness(&collision_lookahead_interest),
                         scheduler.interest_readiness(&enclosed_view_interest),
@@ -4650,6 +4694,15 @@ mod tests {
         assert!(
             visual_interest.len() <= 192,
             "visual lookahead must fit the scheduler's hard secondary-interest bound"
+        );
+
+        let led = predictive_stream_position(camera.position, velocity, 1.5, 12.8);
+        let horizontal_lead = glam::Vec2::new(led.x - camera.position.x, led.z - camera.position.z);
+        assert!((horizontal_lead.length() - 12.8).abs() < 0.001);
+        assert_eq!(led.y, camera.position.y);
+        assert_eq!(
+            predictive_stream_position(camera.position, glam::Vec3::ZERO, 1.5, 12.8),
+            camera.position
         );
     }
 

@@ -842,6 +842,17 @@ impl StreamScheduler {
     /// The configured vertical span is included so the renderer can activate every counted X/Z
     /// column atomically and collision never begins against missing data.
     pub fn vicinity_readiness(&self, radius_chunks: i32) -> VicinityReadiness {
+        self.vicinity_readiness_at(self.focus, radius_chunks)
+    }
+
+    /// Reports complete uploaded coverage around an explicit world-space chunk. This differs from
+    /// [`Self::vicinity_readiness`] when streaming deliberately leads its scheduling focus ahead of
+    /// a fast camera; gameplay and diagnostics can still ask about the camera's actual vicinity.
+    pub fn vicinity_readiness_at(
+        &self,
+        focus: ChunkCoord,
+        radius_chunks: i32,
+    ) -> VicinityReadiness {
         if !self.focus_initialized || radius_chunks < 0 {
             return VicinityReadiness::default();
         }
@@ -856,9 +867,9 @@ impl StreamScheduler {
                 }
                 for dy in -self.config.vertical_radius_chunks..=self.config.vertical_radius_chunks {
                     let (Some(x), Some(y), Some(z)) = (
-                        self.focus.x.checked_add(dx),
-                        self.focus.y.checked_add(dy),
-                        self.focus.z.checked_add(dz),
+                        focus.x.checked_add(dx),
+                        focus.y.checked_add(dy),
+                        focus.z.checked_add(dz),
                     ) else {
                         continue;
                     };
