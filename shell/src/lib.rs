@@ -109,6 +109,19 @@ fn movement_stream_interest(
     chunks.into_iter().collect()
 }
 
+/// Spectators are collisionless and read-only, so their high cruise velocity must not turn a
+/// several-hundred-metre flight path into collision-critical exact-chunk traffic. Their current
+/// focus still updates normally, and the full velocity continues to prioritize forward desired
+/// work; walking, swimming, and gliding retain their swept collision corridor.
+#[cfg(any(target_arch = "wasm32", test))]
+fn exact_streaming_velocity(camera: &CameraState, streaming_velocity: glam::Vec3) -> glam::Vec3 {
+    if camera.locomotion() == voxels_core::LocomotionMode::Spectator {
+        glam::Vec3::ZERO
+    } else {
+        streaming_velocity
+    }
+}
+
 /// Canonical chunks intersecting the current body/support, intended movement sweep, or view/edit
 /// corridor. This bounded secondary interest is both scheduled and transported as collision
 /// critical, keeping physics and rendering ahead of running, gliding, swimming, and edits.
@@ -852,8 +865,8 @@ mod web {
     use voxels_core::{
         CameraState, EnclosureSample, InputState, LocomotionMode, PLAYER_EYE_HEIGHT_METRES,
         PLAYER_HEIGHT_METRES, PLAYER_RADIUS_METRES, PLAYER_SPRINT_SPEED_METRES_PER_SECOND,
-        ProfileAutomation, ProfileConfig, ProfilePhase, ProfileRoute, VoxelHit, VoxelPhysics,
-        probe_enclosure, raycast_voxels, voxel_segment_is_clear,
+        ProfileAutomation, ProfileConfig, ProfilePhase, ProfileRoute, SpectatorFlightConfig,
+        VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels, voxel_segment_is_clear,
     };
     use voxels_render::renderer::{
         ChunkActivationReason, HostUiAction, LocalLightVisibility, MissionControlConfig, Renderer,
@@ -1558,10 +1571,7 @@ mod web {
                         eye_chunk: [eye_chunk.x, eye_chunk.y, eye_chunk.z],
                         heading_degrees: camera.yaw.to_degrees().rem_euclid(360.0),
                         pitch_degrees: camera.pitch.to_degrees(),
-                        horizontal_speed_metres_per_second: camera
-                            .velocity
-                            .x
-                            .hypot(camera.velocity.z),
+                        speed_metres_per_second: camera.velocity.length(),
                         grounded: camera.grounded,
                         spectator: camera.locomotion() == LocomotionMode::Spectator,
                     },
@@ -1738,10 +1748,12 @@ mod web {
             let remote_ms = (performance_now(performance) - remote_start) as f32;
             let plan_start = performance_now(performance);
             let focus = world_to_chunk(camera.position);
+            let exact_streaming_velocity =
+                crate::exact_streaming_velocity(camera, streaming_velocity);
             let collision_interest_start = performance_now(performance);
             let collision_interest = self.collision_stream_interest(
                 camera,
-                streaming_velocity,
+                exact_streaming_velocity,
                 self.config.stream_collision_lookahead_seconds,
             );
             let collision_interest_ms =
@@ -1759,7 +1771,7 @@ mod web {
             // geometry-invariant while edits and collision still retain their urgent transport.
             let movement_interest = self.movement_collision_interest(
                 camera,
-                streaming_velocity,
+                exact_streaming_velocity,
                 self.config.stream_collision_lookahead_seconds,
             );
             let surface_interest = self.surface_stream_interest(focus, &movement_interest);
@@ -3694,15 +3706,17 @@ mod web {
                 } else {
                     camera.streaming_velocity(&engine.input.borrow())
                 };
+                let exact_streaming_velocity =
+                    crate::exact_streaming_velocity(&camera, streaming_velocity);
                 let collision_immediate_interest =
-                    engine.movement_collision_interest(&camera, streaming_velocity, 0.1);
+                    engine.movement_collision_interest(&camera, exact_streaming_velocity, 0.1);
                 let collision_lookahead_seconds =
                     (engine.config.stream_collision_lookahead_seconds
                         - crate::COLLISION_READINESS_RESERVE_SECONDS)
                         .max(0.1);
                 let collision_lookahead_interest = engine.movement_collision_interest(
                     &camera,
-                    streaming_velocity,
+                    exact_streaming_velocity,
                     collision_lookahead_seconds,
                 );
                 let enclosed_view_interest = engine.enclosed_view_stream_interest(&camera);
@@ -4224,13 +4238,26 @@ mod web {
         let edits = EditMap::default();
         let spawn = opened.spawn;
         let resume = opened.player_resume;
-        let camera = crate::camera_from_resume_values([
+        let mut camera = crate::camera_from_resume_values([
             resume.eye_position_metres[0],
             resume.eye_position_metres[1],
             resume.eye_position_metres[2],
             resume.look_yaw_radians,
             resume.look_pitch_radians,
         ]);
+        let spectator = runtime.spectator;
+        if !camera.set_spectator_flight_config(SpectatorFlightConfig {
+            initial_speed_metres_per_second: spectator.initial_speed_metres_per_second,
+            maximum_speed_metres_per_second: spectator.maximum_speed_metres_per_second,
+            acceleration_metres_per_second_squared: spectator
+                .acceleration_metres_per_second_squared,
+            direction_response_per_second: spectator.direction_response_per_second,
+            stopping_response_per_second: spectator.stopping_response_per_second,
+        }) {
+            return Err(JsValue::from_str(
+                "validated spectator flight configuration was rejected by simulation",
+            ));
+        }
         let presence =
             RemotePresenceClient::start(world_transport, client_config.multiplayer, &opened)
                 .map_err(|error| JsValue::from_str(&format!("connect player presence: {error}")))?;
@@ -4544,6 +4571,28 @@ mod tests {
         assert!(movement.iter().any(|coord| coord.x >= 4));
         assert!(urgent.iter().any(|coord| coord.z < 0));
         assert!(movement.iter().all(|coord| urgent.contains(coord)));
+    }
+
+    #[test]
+    fn fast_spectator_flight_does_not_create_a_collision_critical_chunk_trail() {
+        let mut camera = CameraState::spawn(glam::Vec3::new(1.6, 80.0, 1.6));
+        let velocity = glam::Vec3::new(128.0, 20.0, -32.0);
+        assert_eq!(exact_streaming_velocity(&camera, velocity), velocity);
+
+        camera.set_locomotion(voxels_core::LocomotionMode::Spectator);
+        assert_eq!(
+            exact_streaming_velocity(&camera, velocity),
+            glam::Vec3::ZERO
+        );
+        let interest = movement_stream_interest(
+            camera.position,
+            exact_streaming_velocity(&camera, velocity),
+            2.5,
+        );
+        assert!(
+            interest.len() <= 8,
+            "bodyless flight must not spend exact-chunk urgency along its entire cruise path"
+        );
     }
 
     #[test]

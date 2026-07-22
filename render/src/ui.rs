@@ -338,7 +338,7 @@ pub struct NavigationTelemetry {
     pub heading_degrees: f32,
     /// Positive looks up and negative looks down.
     pub pitch_degrees: f32,
-    pub horizontal_speed_metres_per_second: f32,
+    pub speed_metres_per_second: f32,
     pub grounded: bool,
     pub spectator: bool,
 }
@@ -1516,7 +1516,7 @@ impl MissionControlUi {
             heading_label(navigation.heading_degrees),
             normalized_heading(navigation.heading_degrees),
             pitch_label(navigation.pitch_degrees),
-            navigation.horizontal_speed_metres_per_second,
+            navigation.speed_metres_per_second,
         );
         if layout.compact {
             push_text(
@@ -1934,7 +1934,7 @@ impl MissionControlUi {
             heading_label(navigation.heading_degrees),
             normalized_heading(navigation.heading_degrees),
             pitch_label(navigation.pitch_degrees),
-            navigation.horizontal_speed_metres_per_second,
+            navigation.speed_metres_per_second,
             movement_label(stats).to_ascii_lowercase(),
         );
         let _ = writeln!(report, "Spectator mode: {}", navigation.spectator);

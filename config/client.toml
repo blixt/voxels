@@ -1,5 +1,5 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 28
+schema_version = 29
 
 [developer]
 # Enables local-only time/weather visualization overrides and server-authorized spectator mode.
@@ -39,6 +39,15 @@ max_extrapolation_ms = 750
 fixed_step_seconds = 0.008333334
 max_steps_per_frame = 6
 max_edit_trackers = 128
+
+[runtime.spectator]
+# Start with precise inspection movement, then gain 12 m/s each second of held input until the
+# camera reaches fast cross-world cruise. Releasing input brakes independently and quickly.
+initial_speed_metres_per_second = 8.0
+maximum_speed_metres_per_second = 128.0
+acceleration_metres_per_second_squared = 12.0
+direction_response_per_second = 10.0
+stopping_response_per_second = 14.0
 
 [streaming]
 load_radius_chunks = 5

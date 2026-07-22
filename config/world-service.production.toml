@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 24
+schema_version = 25
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -77,8 +77,11 @@ interaction_pose_max_age_ms = 1000
 max_horizontal_speed_centimetres_per_second = 900
 # Walking falls terminate at 18m/s; the remaining allowance absorbs pose sampling and rounding.
 max_vertical_speed_centimetres_per_second = 2000
+spectator_max_horizontal_speed_centimetres_per_second = 15000
+spectator_max_vertical_speed_centimetres_per_second = 15000
 movement_slack_centimetres = 100
 movement_credit_window_ms = 500
+spectator_movement_credit_window_ms = 2000
 
 [environment]
 # A complete accelerated day lasts 20 real minutes. Set this to 0 to hold the exact epoch fraction

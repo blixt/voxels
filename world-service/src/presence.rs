@@ -406,18 +406,31 @@ impl PresenceHub {
     ) -> PoseAdmission {
         let min_interval_ms =
             1_000_u64.div_ceil(u64::from(self.config.max_pose_updates_per_second));
-        let horizontal_speed =
-            f32::from(self.gameplay.max_horizontal_speed_centimetres_per_second) * 0.01;
-        let vertical_speed =
-            f32::from(self.gameplay.max_vertical_speed_centimetres_per_second) * 0.01;
+        let spectator = is_spectator(pose);
+        let horizontal_speed = f32::from(if spectator {
+            self.gameplay
+                .spectator_max_horizontal_speed_centimetres_per_second
+        } else {
+            self.gameplay.max_horizontal_speed_centimetres_per_second
+        }) * 0.01;
+        let vertical_speed = f32::from(if spectator {
+            self.gameplay
+                .spectator_max_vertical_speed_centimetres_per_second
+        } else {
+            self.gameplay.max_vertical_speed_centimetres_per_second
+        }) * 0.01;
         let movement_slack = f32::from(self.gameplay.movement_slack_centimetres) * 0.01;
-        let credit_window_seconds = f32::from(self.gameplay.movement_credit_window_ms) * 0.001;
+        let credit_window_seconds = f32::from(if spectator {
+            self.gameplay.spectator_movement_credit_window_ms
+        } else {
+            self.gameplay.movement_credit_window_ms
+        }) * 0.001;
         let horizontal_credit_limit = movement_slack + horizontal_speed * credit_window_seconds;
         let vertical_credit_limit = movement_slack + vertical_speed * credit_window_seconds;
         if !valid_pose(pose) {
             return PoseAdmission::Invalid("player pose fields are invalid");
         }
-        if is_spectator(pose) && !self.gameplay.allow_spectator_mode {
+        if spectator && !self.gameplay.allow_spectator_mode {
             return PoseAdmission::Invalid("spectator mode is not enabled for this world");
         }
         if pose.flags & PLAYER_POSE_GLIDING != 0 && !self.gameplay.allow_gliding {
@@ -1286,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn spectator_mode_requires_world_authority_and_keeps_movement_limits() {
+    fn spectator_mode_requires_world_authority_and_uses_separate_movement_limits() {
         let disabled = security_hub(GameplayConfig::default());
         let disabled_claim = disabled
             .join(&identity(21), resume(0.0, 1.62, 0.0))
@@ -1311,12 +1324,57 @@ mod tests {
             enabled.accept_pose(&enabled_attachment, spectator),
             PoseAdmission::Accepted
         );
+        enabled
+            .lock()
+            .players
+            .get_mut(&identity(22).player_id)
+            .expect("spectator")
+            .last_pose_receipt_ms = 0;
 
-        let mut too_fast = pose(2, 0.0, 0.0);
+        let mut fast_spectator = pose(2, 0.0, 0.0);
+        fast_spectator.flags = PLAYER_POSE_SPECTATOR;
+        fast_spectator.linear_velocity_metres_per_second = [128.0, 0.0, 0.0];
+        assert_eq!(
+            enabled.accept_pose(&enabled_attachment, fast_spectator),
+            PoseAdmission::Accepted
+        );
+
+        let credit_now = enabled.now_ms();
+        {
+            let mut inner = enabled.lock();
+            let player = inner
+                .players
+                .get_mut(&identity(22).player_id)
+                .expect("spectator");
+            player.last_pose_receipt_ms = 0;
+            player.movement_credit_updated_ms = credit_now;
+            player.horizontal_movement_credit_metres = 128.0;
+        }
+        let mut buffered_cruise = pose(3, 128.0, 0.0);
+        buffered_cruise.flags = PLAYER_POSE_SPECTATOR;
+        buffered_cruise.linear_velocity_metres_per_second = [128.0, 0.0, 0.0];
+        assert_eq!(
+            enabled.accept_pose(&enabled_attachment, buffered_cruise),
+            PoseAdmission::Accepted
+        );
+
+        let mut too_fast = pose(4, 128.0, 0.0);
         too_fast.flags = PLAYER_POSE_SPECTATOR;
-        too_fast.linear_velocity_metres_per_second = [9.01, 0.0, 0.0];
+        too_fast.linear_velocity_metres_per_second = [150.01, 0.0, 0.0];
         assert_eq!(
             enabled.accept_pose(&enabled_attachment, too_fast),
+            PoseAdmission::Invalid("player velocity exceeds the authoritative limit")
+        );
+
+        let normal = security_hub(GameplayConfig::default());
+        let normal_claim = normal
+            .join(&identity(23), resume(0.0, 1.62, 0.0))
+            .expect("join");
+        let normal_attachment = normal.attach(normal_claim.session_id).expect("attach");
+        let mut too_fast_player = pose(1, 0.0, 0.0);
+        too_fast_player.linear_velocity_metres_per_second = [9.01, 0.0, 0.0];
+        assert_eq!(
+            normal.accept_pose(&normal_attachment, too_fast_player),
             PoseAdmission::Invalid("player velocity exceeds the authoritative limit")
         );
     }

@@ -11,7 +11,7 @@ use voxels_runtime::{
     MAX_LOAD_RADIUS_CHUNKS, MAX_SECONDARY_INTEREST_CHUNKS, MAX_VERTICAL_RADIUS_CHUNKS,
 };
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 28;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 29;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -92,6 +92,17 @@ pub struct RuntimeConfig {
     pub fixed_step_seconds: f32,
     pub max_steps_per_frame: u32,
     pub max_edit_trackers: u32,
+    pub spectator: SpectatorFlightConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpectatorFlightConfig {
+    pub initial_speed_metres_per_second: f32,
+    pub maximum_speed_metres_per_second: f32,
+    pub acceleration_metres_per_second_squared: f32,
+    pub direction_response_per_second: f32,
+    pub stopping_response_per_second: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -268,6 +279,42 @@ impl ClientConfig {
             "runtime.max_edit_trackers",
             1,
             MAX_EDIT_TRACKERS,
+        )?;
+        let spectator = self.runtime.spectator;
+        ensure_finite_range(
+            spectator.initial_speed_metres_per_second,
+            "runtime.spectator.initial_speed_metres_per_second",
+            0.0,
+            50.0,
+            false,
+        )?;
+        ensure_finite_range(
+            spectator.maximum_speed_metres_per_second,
+            "runtime.spectator.maximum_speed_metres_per_second",
+            spectator.initial_speed_metres_per_second,
+            250.0,
+            true,
+        )?;
+        ensure_finite_range(
+            spectator.acceleration_metres_per_second_squared,
+            "runtime.spectator.acceleration_metres_per_second_squared",
+            0.0,
+            100.0,
+            false,
+        )?;
+        ensure_finite_range(
+            spectator.direction_response_per_second,
+            "runtime.spectator.direction_response_per_second",
+            0.0,
+            100.0,
+            false,
+        )?;
+        ensure_finite_range(
+            spectator.stopping_response_per_second,
+            "runtime.spectator.stopping_response_per_second",
+            0.0,
+            100.0,
+            false,
         )?;
 
         ensure_integer_range(
@@ -777,6 +824,13 @@ mod tests {
                 fixed_step_seconds: 1.0 / 120.0,
                 max_steps_per_frame: 6,
                 max_edit_trackers: 128,
+                spectator: SpectatorFlightConfig {
+                    initial_speed_metres_per_second: 8.0,
+                    maximum_speed_metres_per_second: 128.0,
+                    acceleration_metres_per_second_squared: 12.0,
+                    direction_response_per_second: 10.0,
+                    stopping_response_per_second: 14.0,
+                },
             },
             streaming: StreamingConfig {
                 load_radius_chunks: 5,
@@ -887,18 +941,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 28", "schema_version = 27");
+        let wrong_schema = fixture.replace("schema_version = 29", "schema_version = 28");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 27,
+                found: 28,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 28",
-            "schema_version = 28\nunknown_root = true",
+            "schema_version = 29",
+            "schema_version = 29\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),
@@ -924,6 +978,21 @@ mod tests {
         let mut config = valid_config();
         config.runtime.max_steps_per_frame = 0;
         assert_invalid_field(&config, "runtime.max_steps_per_frame");
+
+        let mut config = valid_config();
+        config.runtime.spectator.maximum_speed_metres_per_second =
+            config.runtime.spectator.initial_speed_metres_per_second - 0.1;
+        assert_invalid_field(&config, "runtime.spectator.maximum_speed_metres_per_second");
+
+        let mut config = valid_config();
+        config
+            .runtime
+            .spectator
+            .acceleration_metres_per_second_squared = f32::NAN;
+        assert_invalid_field(
+            &config,
+            "runtime.spectator.acceleration_metres_per_second_squared",
+        );
 
         let mut config = valid_config();
         config.streaming.load_radius_chunks = MAX_LOAD_RADIUS_CHUNKS as u32 + 1;
