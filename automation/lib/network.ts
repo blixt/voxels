@@ -28,6 +28,7 @@ export const VXWP_KIND = Object.freeze({
   editCommit: 16,
   resyncRequired: 17,
   frameFragment: 18,
+  frameFragmentAbort: 19,
 } as const);
 
 export type VxwpKind = (typeof VXWP_KIND)[keyof typeof VXWP_KIND];
@@ -51,6 +52,7 @@ export const VXWP_KIND_NAMES = Object.freeze({
   [VXWP_KIND.editCommit]: "edit_commit",
   [VXWP_KIND.resyncRequired]: "resync_required",
   [VXWP_KIND.frameFragment]: "frame_fragment",
+  [VXWP_KIND.frameFragmentAbort]: "frame_fragment_abort",
 } satisfies Record<VxwpKind, string>);
 
 export type LinkDirection = "upstream" | "downstream";
