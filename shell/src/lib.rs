@@ -1775,12 +1775,26 @@ mod web {
                 self.config.stream_collision_lookahead_seconds,
             );
             let surface_interest = self.surface_stream_interest(focus, &movement_interest);
+            // A spectator has no collision body, but its configured cruise speed can cross the
+            // ordinary exact radius before one server round trip. Admit a thin, capacity-bounded
+            // visual corridor ahead as ordinary work so those chunks are ready when the camera
+            // reaches them without misclassifying the entire path as collision-critical.
+            let spectator_visual_interest = if camera.locomotion() == LocomotionMode::Spectator {
+                self.movement_collision_interest(
+                    camera,
+                    streaming_velocity,
+                    self.config.stream_velocity_lookahead_seconds,
+                )
+            } else {
+                Vec::new()
+            };
             let surface_interest_ms =
                 (performance_now(performance) - surface_interest_start) as f32;
             let mut urgent_interest = collision_interest.clone();
             urgent_interest.extend(enclosed_view_interest.iter().copied());
             let mut interest = urgent_interest.clone();
             interest.extend(surface_interest.iter().copied());
+            interest.extend(spectator_visual_interest);
             let priority_hint = directional_stream_priority(
                 camera,
                 streaming_velocity,
@@ -1909,7 +1923,7 @@ mod web {
             }
             let publish_ms = (performance_now(performance) - publish_start) as f32;
             let surface_start = performance_now(performance);
-            self.stream_surface_lods(camera.position);
+            self.stream_surface_lods(camera, streaming_velocity);
             let surface_ms = (performance_now(performance) - surface_start) as f32;
             StreamFrameSample {
                 remote_ms,
@@ -2381,6 +2395,13 @@ mod web {
         }
 
         fn enqueue_surface_front(&self, coord: SurfaceTileCoord) {
+            if !surface_tile_in_coverage(
+                coord,
+                self.surface_focus.get(),
+                self.config.surface_load_radius_tiles,
+            ) {
+                return;
+            }
             if self.surface_in_flight.borrow().contains(&coord)
                 || self.surface_queue.borrow().contains(&coord)
             {
@@ -2552,16 +2573,35 @@ mod web {
             counts
         }
 
-        fn stream_surface_lods(&self, position: glam::Vec3) {
+        fn stream_surface_lods(&self, camera: &CameraState, streaming_velocity: glam::Vec3) {
+            let position = camera.position;
             let focus = std::array::from_fn(|index| {
                 world_to_surface_tile(position, SurfaceLodLevel::ALL[index])
             });
+            let directional_priorities: [DirectionalStreamPriority; SURFACE_LOD_LEVEL_COUNT] =
+                std::array::from_fn(|index| {
+                    let level = SurfaceLodLevel::ALL[index];
+                    directional_stream_priority(
+                        camera,
+                        streaming_velocity,
+                        level.tile_span_voxels() as f32 * VOXEL_SIZE_METRES,
+                        self.config.stream_velocity_lookahead_seconds,
+                        self.config.stream_view_cone_half_angle_degrees,
+                    )
+                });
             if self.surface_focus.get() != Some(focus) {
                 let previous_focus = self.surface_focus.replace(Some(focus));
                 let changed_levels: [bool; SURFACE_LOD_LEVEL_COUNT] =
                     std::array::from_fn(|index| {
                         previous_focus.is_none_or(|previous| previous[index] != focus[index])
                     });
+                self.remote.cancel_surface_batches_outside(|coord| {
+                    surface_tile_in_coverage(
+                        coord,
+                        Some(focus),
+                        self.config.surface_load_radius_tiles,
+                    )
+                });
                 let mut desired = BTreeSet::new();
                 for (index, level) in SurfaceLodLevel::ALL.into_iter().enumerate() {
                     if !changed_levels[index] {
@@ -2663,6 +2703,8 @@ mod web {
                     let dx = i128::from(coord.x) - i128::from(focus[index].x);
                     let dz = i128::from(coord.z) - i128::from(focus[index].z);
                     let background = index >= INTERACTIVE_SURFACE_LOD_LEVELS;
+                    let directional =
+                        directional_priorities[index].rank_offset(dx as i64, dz as i64);
                     // Startup establishes broad parent cover before refining it. During traversal,
                     // the hierarchy already has retained parents, so finest visible replacements
                     // must win; repeatedly loading each newly exposed coarse strip first otherwise
@@ -2672,7 +2714,14 @@ mod web {
                     } else {
                         u8::MAX - coord.level.index()
                     };
-                    (background, level_order, dx * dx + dz * dz, coord.z, coord.x)
+                    (
+                        background,
+                        level_order,
+                        directional,
+                        dx * dx + dz * dz,
+                        coord.z,
+                        coord.x,
+                    )
                 });
                 queue.clear();
                 queue.extend(candidates);
@@ -4592,6 +4641,15 @@ mod tests {
         assert!(
             interest.len() <= 8,
             "bodyless flight must not spend exact-chunk urgency along its entire cruise path"
+        );
+        let visual_interest = movement_stream_interest(camera.position, velocity, 1.5);
+        assert!(
+            visual_interest.iter().any(|coord| coord.x >= 20),
+            "ordinary visual interest must still lead a fast spectator by several round trips"
+        );
+        assert!(
+            visual_interest.len() <= 192,
+            "visual lookahead must fit the scheduler's hard secondary-interest bound"
         );
     }
 

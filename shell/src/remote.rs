@@ -228,6 +228,13 @@ impl RemoteWorldClient {
         self.inner.surface_completions.borrow_mut().pop_front()
     }
 
+    /// Cancels whole surface batches once none of their tiles belong to the caller's current
+    /// coverage. Mixed batches stay alive so one still-useful tile is never discarded with stale
+    /// siblings; stale siblings are ignored when that response arrives.
+    pub fn cancel_surface_batches_outside(&self, keep: impl Fn(SurfaceTileCoord) -> bool) -> usize {
+        self.inner.cancel_surface_batches_outside(keep)
+    }
+
     pub fn submit_edit(&self, action: EditAction) -> Result<RemoteRequestId, RemoteWorldError> {
         self.inner.send_edit(action)
     }
@@ -1038,6 +1045,27 @@ impl RemoteInner {
         self.send_cancel(request_id);
         self.finish_pending_error(request_id, RemoteWorldError::Canceled);
         true
+    }
+
+    fn cancel_surface_batches_outside(&self, keep: impl Fn(SurfaceTileCoord) -> bool) -> usize {
+        let request_ids = self
+            .pending
+            .borrow()
+            .iter()
+            .filter_map(|(&request_id, pending)| match pending {
+                PendingBatch::Surface { tickets, .. }
+                    if tickets.iter().all(|ticket| !keep(ticket.coord)) =>
+                {
+                    Some(request_id)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let canceled = request_ids.len();
+        for request_id in request_ids {
+            self.cancel(request_id);
+        }
+        canceled
     }
 
     fn send_cancel(&self, request_id: u64) {
