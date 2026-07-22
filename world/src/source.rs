@@ -376,9 +376,12 @@ impl WorldManifest {
 pub enum WorldProductPriority {
     CollisionCritical = 1,
     VisibleChunk = 2,
-    VisibleSurface = 3,
-    ReplacementSurface = 4,
-    Prefetch = 5,
+    /// The surface tiles containing the current camera position. This class may preempt older
+    /// visible-ring work so rapid traversal cannot strand the player on an uncovered leading edge.
+    ImmediateSurface = 3,
+    VisibleSurface = 4,
+    ReplacementSurface = 5,
+    Prefetch = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

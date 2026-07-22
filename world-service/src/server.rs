@@ -3021,6 +3021,7 @@ fn traffic_priority(priority: WorldProductPriority) -> TrafficPriority {
     match priority {
         WorldProductPriority::CollisionCritical => TrafficPriority::Collision,
         WorldProductPriority::VisibleChunk
+        | WorldProductPriority::ImmediateSurface
         | WorldProductPriority::VisibleSurface
         | WorldProductPriority::ReplacementSurface => TrafficPriority::VisibleWorld,
         WorldProductPriority::Prefetch => TrafficPriority::BackgroundWorld,

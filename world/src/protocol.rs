@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 31;
+pub const PROTOCOL_VERSION: u16 = 32;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -3949,9 +3949,10 @@ fn decode_priority(value: u8) -> Result<WorldProductPriority, ProtocolError> {
     Ok(match value {
         1 => WorldProductPriority::CollisionCritical,
         2 => WorldProductPriority::VisibleChunk,
-        3 => WorldProductPriority::VisibleSurface,
-        4 => WorldProductPriority::ReplacementSurface,
-        5 => WorldProductPriority::Prefetch,
+        3 => WorldProductPriority::ImmediateSurface,
+        4 => WorldProductPriority::VisibleSurface,
+        5 => WorldProductPriority::ReplacementSurface,
+        6 => WorldProductPriority::Prefetch,
         _ => return Err(ProtocolError::UnknownEnum("priority", u64::from(value))),
     })
 }

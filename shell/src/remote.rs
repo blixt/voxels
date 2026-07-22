@@ -26,7 +26,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket, WorkerGlobalScope};
 
-use crate::request_window::priority_preemption_candidate;
+use crate::request_window::{batch_has_obsolete_item, priority_preemption_candidate};
 
 pub type RemoteRequestId = u64;
 
@@ -237,9 +237,9 @@ impl RemoteWorldClient {
         self.inner.surface_completions.borrow_mut().pop_front()
     }
 
-    /// Cancels whole surface batches once none of their tiles belong to the caller's current
-    /// coverage. Mixed batches stay alive so one still-useful tile is never discarded with stale
-    /// siblings; stale siblings are ignored when that response arrives.
+    /// Cancels surface batches as soon as any tile falls outside the caller's current coverage.
+    /// The completion path immediately requeues still-useful siblings, preventing obsolete work
+    /// from occupying an equal-priority request slot during sustained travel.
     pub fn cancel_surface_batches_outside(&self, keep: impl Fn(SurfaceTileCoord) -> bool) -> usize {
         self.inner.cancel_surface_batches_outside(keep)
     }
@@ -1072,7 +1072,7 @@ impl RemoteInner {
             .iter()
             .filter_map(|(&request_id, pending)| match pending {
                 PendingBatch::Surface { tickets, .. }
-                    if tickets.iter().all(|ticket| !keep(ticket.coord)) =>
+                    if batch_has_obsolete_item(tickets.iter().map(|ticket| keep(ticket.coord))) =>
                 {
                     Some(request_id)
                 }

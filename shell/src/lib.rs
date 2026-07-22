@@ -13,6 +13,8 @@ const CHUNK_FACE_WORDS: usize = voxels_world::CHUNK_EDGE * voxels_world::CHUNK_E
 const COLLISION_READINESS_RESERVE_SECONDS: f32 = 1.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const INVENTORY_SWIPE_THRESHOLD_CSS_PIXELS: f32 = 34.0;
+#[cfg(any(target_arch = "wasm32", test))]
+const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
 
 #[cfg(any(target_arch = "wasm32", test))]
 fn inventory_swipe(anchor: [f32; 2], current: [f32; 2]) -> Option<(i32, [f32; 2])> {
@@ -202,6 +204,26 @@ fn surface_offset_in_coverage(
 struct SurfaceStreamFocus {
     current: [voxels_world::SurfaceTileCoord; voxels_world::SURFACE_LOD_LEVEL_COUNT],
     lead: [voxels_world::SurfaceTileCoord; voxels_world::SURFACE_LOD_LEVEL_COUNT],
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn surface_product_priority(
+    coord: voxels_world::SurfaceTileCoord,
+    focus: SurfaceStreamFocus,
+    interactive_level_count: usize,
+) -> voxels_world::WorldProductPriority {
+    if focus
+        .current
+        .iter()
+        .take(interactive_level_count)
+        .any(|current| *current == coord)
+    {
+        voxels_world::WorldProductPriority::ImmediateSurface
+    } else if usize::from(coord.level.index()) < interactive_level_count {
+        voxels_world::WorldProductPriority::VisibleSurface
+    } else {
+        voxels_world::WorldProductPriority::Prefetch
+    }
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -963,9 +985,10 @@ mod web {
         RemoteWorldClient, RemoteWorldError,
     };
     use crate::{
-        ChunkPortalMask, SurfaceStreamFocus, adaptive_surface_cross_radii,
-        predictive_stream_position, surface_motion_axis, surface_offset_in_coverage,
-        surface_tile_in_coverage, world_environment_at,
+        ChunkPortalMask, INTERACTIVE_SURFACE_LOD_LEVELS, SurfaceStreamFocus,
+        adaptive_surface_cross_radii, predictive_stream_position, surface_motion_axis,
+        surface_offset_in_coverage, surface_product_priority, surface_tile_in_coverage,
+        world_environment_at,
     };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
@@ -1029,7 +1052,6 @@ mod web {
         "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,lodIncompleteTransitionEdges,frameSequence,schemaVersion,sampleCount,",
         "droppedSamples",
     );
-    const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
     const SURFACE_HINT_VERTICAL_MARGIN_CHUNKS: i32 = 1;
     const INTERACTIVE_SURFACE_BATCH: usize = 4;
     const BACKGROUND_SURFACE_BATCH: usize = 2;
@@ -2901,7 +2923,9 @@ mod web {
                     let index = coord.level.index() as usize;
                     let dx = i128::from(coord.x) - i128::from(focus.current[index].x);
                     let dz = i128::from(coord.z) - i128::from(focus.current[index].z);
-                    let background = index >= INTERACTIVE_SURFACE_LOD_LEVELS;
+                    let priority =
+                        surface_product_priority(*coord, focus, INTERACTIVE_SURFACE_LOD_LEVELS);
+                    let background = priority == WorldProductPriority::Prefetch;
                     let directional =
                         directional_priorities[index].rank_offset(dx as i64, dz as i64);
                     // Startup establishes broad parent cover before refining it. During traversal,
@@ -2914,7 +2938,7 @@ mod web {
                         u8::MAX - coord.level.index()
                     };
                     (
-                        background,
+                        priority,
                         level_order,
                         directional,
                         dx * dx + dz * dz,
@@ -2926,6 +2950,10 @@ mod web {
                 queue.extend(candidates);
             }
 
+            self.submit_surface_lane(
+                WorldProductPriority::ImmediateSurface,
+                INTERACTIVE_SURFACE_LOD_LEVELS,
+            );
             self.submit_surface_lane(
                 WorldProductPriority::VisibleSurface,
                 INTERACTIVE_SURFACE_BATCH,
@@ -2972,10 +3000,13 @@ mod web {
 
             let mut tickets = Vec::with_capacity(batch_limit);
             let mut replacement_batch = None;
+            let focus = self.surface_focus.get();
             while tickets.len() < batch_limit {
                 let position = self.surface_queue.borrow().iter().position(|coord| {
-                    (usize::from(coord.level.index()) >= INTERACTIVE_SURFACE_LOD_LEVELS)
-                        == background
+                    focus.is_some_and(|focus| {
+                        surface_product_priority(*coord, focus, INTERACTIVE_SURFACE_LOD_LEVELS)
+                            == priority
+                    })
                 });
                 let Some(position) = position else {
                     break;
@@ -4952,6 +4983,28 @@ mod tests {
             cross,
             [1, 0],
         ));
+    }
+
+    #[test]
+    fn current_interactive_tiles_have_a_preemptive_surface_priority() {
+        let focus = SurfaceStreamFocus {
+            current: voxels_world::SurfaceLodLevel::ALL
+                .map(|level| voxels_world::SurfaceTileCoord::new(level, 7, -3)),
+            lead: voxels_world::SurfaceLodLevel::ALL
+                .map(|level| voxels_world::SurfaceTileCoord::new(level, 11, -3)),
+        };
+        assert_eq!(
+            surface_product_priority(focus.current[0], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
+            voxels_world::WorldProductPriority::ImmediateSurface
+        );
+        assert_eq!(
+            surface_product_priority(focus.lead[0], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
+            voxels_world::WorldProductPriority::VisibleSurface
+        );
+        assert_eq!(
+            surface_product_priority(focus.current[4], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
+            voxels_world::WorldProductPriority::Prefetch
+        );
     }
 
     #[test]
