@@ -47,10 +47,10 @@ const CORNERS = array<vec2<i32>, 4>(
 const STANDARD_STRIP = array<u32, 4>(1u, 2u, 0u, 3u);
 const FLIPPED_STRIP = array<u32, 4>(0u, 1u, 3u, 2u);
 // Cover the full pixel-diamond around independently rasterized T-junctions. Smaller margins still
-// exposed isolated samples after perspective interpolation and viewport rounding; 1.5 pixels keeps
+// exposed isolated samples after perspective interpolation and viewport rounding; three pixels keep
 // adjacent coarse/fine quads conservative without changing world-space positions, lighting, depth
 // ordering, or silhouettes against actual sky.
-const CONSERVATIVE_EXPANSION_PIXELS: f32 = 1.5;
+const CONSERVATIVE_EXPANSION_PIXELS: f32 = 3.0;
 const MORPH_CLOSURE_EXTENT_FLAG: u32 = 0x8000u;
 
 fn corner_ao(packed: u32, corner: u32) -> f32 {

@@ -4257,11 +4257,7 @@ impl Renderer {
             pass.set_pipeline(fixed_pipeline);
             draw_spans(&mut pass, &self.arena_buffers, &world_draw_list.fixed);
             pass.set_pipeline(morph_pipeline);
-            draw_morph_spans(
-                &mut pass,
-                &self.arena_buffers,
-                &world_draw_list.morphing,
-            );
+            draw_morph_spans(&mut pass, &self.arena_buffers, &world_draw_list.morphing);
             if let Some(cut_draw_lists) = &cut_draw_lists {
                 pass.set_pipeline(transition_pipeline);
                 pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
