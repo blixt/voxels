@@ -72,6 +72,34 @@ fn frame_admission(criterion: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+
+    let tunnel_interest = (-7..=7)
+        .flat_map(|z| {
+            (-7..=7).flat_map(move |x| {
+                (-1..=1).map(move |y| ChunkCoord::new(FOCUS.x + x, FOCUS.y + y, FOCUS.z + z))
+            })
+        })
+        .collect::<Vec<_>>();
+    criterion.bench_function("replace capped tunnel interest", |bencher| {
+        bencher.iter_batched(
+            || {
+                let mut scheduler = StreamScheduler::new(CONFIG)
+                    .expect("benchmark stream config must remain valid");
+                scheduler.update_focus_with_interest(FOCUS, &tunnel_interest);
+                scheduler
+            },
+            |mut scheduler| {
+                let shifted_focus = ChunkCoord::new(FOCUS.x + 1, FOCUS.y, FOCUS.z);
+                assert!(scheduler.update_focus_with_interest(shifted_focus, &tunnel_interest));
+                assert_eq!(
+                    scheduler.diagnostics().secondary_interest_normalized,
+                    MAX_SECONDARY_INTEREST_CHUNKS
+                );
+                black_box(scheduler);
+            },
+            BatchSize::SmallInput,
+        );
+    });
 }
 
 criterion_group!(streaming_benches, frame_admission);

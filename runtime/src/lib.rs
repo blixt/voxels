@@ -976,11 +976,16 @@ impl StreamScheduler {
         }
         candidates.sort_by_key(|coord| priority(focus, *coord));
         candidates.truncate(self.config.max_tracked_chunks);
+        let mut candidate_keys = candidates
+            .iter()
+            .copied()
+            .map(coord_key)
+            .collect::<BTreeSet<_>>();
         for coord in &self.secondary_interest {
             if candidates.len() == self.config.max_tracked_chunks {
                 break;
             }
-            if !candidates.contains(coord) {
+            if candidate_keys.insert(coord_key(*coord)) {
                 candidates.push(*coord);
             }
         }
@@ -1098,32 +1103,20 @@ fn normalized_interest(
     interest: &[ChunkCoord],
     limit: usize,
 ) -> (Vec<ChunkCoord>, usize) {
-    let mut normalized = Vec::with_capacity(interest.len().min(limit));
-    let mut truncated = 0usize;
-    for coord in interest.iter().copied() {
-        if !coord.is_world_representable() {
-            continue;
-        }
-        if normalized.contains(&coord) {
-            continue;
-        }
-        if normalized.len() < limit {
-            normalized.push(coord);
-            continue;
-        }
-        let farthest = normalized
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, candidate)| priority(focus, **candidate))
-            .map(|(index, _)| index);
-        if let Some(farthest) = farthest
-            && priority(focus, coord) < priority(focus, normalized[farthest])
-        {
-            normalized[farthest] = coord;
-        }
-        truncated = truncated.saturating_add(1);
-    }
+    let unique = interest
+        .iter()
+        .copied()
+        .filter(|coord| coord.is_world_representable())
+        .map(coord_key)
+        .collect::<BTreeSet<_>>();
+    let mut normalized = unique
+        .iter()
+        .copied()
+        .map(coord_from_key)
+        .collect::<Vec<_>>();
     normalized.sort_unstable_by_key(|coord| priority(focus, *coord));
+    let truncated = normalized.len().saturating_sub(limit);
+    normalized.truncate(limit);
     (normalized, truncated)
 }
 
