@@ -229,6 +229,21 @@ fn surface_tile_in_coverage(
         })
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn extend_surface_hierarchy(
+    desired: &mut std::collections::BTreeSet<voxels_world::SurfaceTileCoord>,
+) {
+    let descendants = desired.iter().copied().collect::<Vec<_>>();
+    for mut coord in descendants {
+        while let Some(parent) = coord.parent() {
+            if parent.is_world_representable() {
+                desired.insert(parent);
+            }
+            coord = parent;
+        }
+    }
+}
+
 /// Canonical chunks intersecting the current body/support, intended movement sweep, or view/edit
 /// corridor. This bounded secondary interest is both scheduled and transported as collision
 /// critical, keeping physics and rendering ahead of running, gliding, swimming, and edits.
@@ -964,8 +979,8 @@ mod web {
     };
     use crate::{
         ChunkPortalMask, SurfaceStreamFocus, adaptive_surface_cross_radii,
-        predictive_stream_position, surface_motion_axis, surface_offset_in_coverage,
-        surface_tile_in_coverage, world_environment_at,
+        extend_surface_hierarchy, predictive_stream_position, surface_motion_axis,
+        surface_offset_in_coverage, surface_tile_in_coverage, world_environment_at,
     };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
@@ -1307,6 +1322,7 @@ mod web {
         canonical_publications: RefCell<VecDeque<CanonicalPublication>>,
         binary_mesh_scratch: RefCell<BinaryMeshScratch>,
         surface_focus: Cell<Option<SurfaceStreamFocus>>,
+        surface_desired: RefCell<BTreeSet<SurfaceTileCoord>>,
         surface_cross_radii: Cell<[i32; SURFACE_LOD_LEVEL_COUNT]>,
         surface_motion_axis: Cell<[i32; 2]>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
@@ -2531,13 +2547,7 @@ mod web {
         }
 
         fn enqueue_surface_front(&self, coord: SurfaceTileCoord) {
-            if !surface_tile_in_coverage(
-                coord,
-                self.surface_focus.get(),
-                self.config.surface_load_radius_tiles,
-                self.surface_cross_radii.get(),
-                self.surface_motion_axis.get(),
-            ) {
+            if !self.surface_desired.borrow().contains(&coord) {
                 return;
             }
             if self.surface_in_flight.borrow().contains(&coord)
@@ -2766,7 +2776,7 @@ mod web {
                 || previous_axis != motion_axis
             {
                 let previous_focus = self.surface_focus.replace(Some(focus));
-                let changed_levels: [bool; SURFACE_LOD_LEVEL_COUNT] =
+                let mut changed_levels: [bool; SURFACE_LOD_LEVEL_COUNT] =
                     std::array::from_fn(|index| {
                         previous_focus.is_none_or(|previous| {
                             previous.current[index] != focus.current[index]
@@ -2803,6 +2813,17 @@ mod web {
                         }
                     }
                 }
+                // A fine tile is never a self-contained replacement. Its parent profile is needed
+                // both as a visible fallback and to build an exact connector at the refinement
+                // edge. Keep the requested hierarchy ancestor-closed so fast motion cannot load a
+                // child while canceling the profile required to join it to the coarser cut.
+                extend_surface_hierarchy(&mut desired);
+                for coord in desired
+                    .symmetric_difference(&self.surface_desired.borrow())
+                    .copied()
+                {
+                    changed_levels[usize::from(coord.level.index())] = true;
+                }
                 self.remote
                     .cancel_surface_batches_outside(|coord| desired.contains(&coord));
                 let retain_longitudinal_radii = longitudinal_radii
@@ -2826,6 +2847,7 @@ mod web {
                             return false;
                         }
                         !presented_tiles.contains(coord)
+                            && !desired.contains(coord)
                             && !surface_tile_in_coverage(
                                 *coord,
                                 Some(focus),
@@ -2872,7 +2894,7 @@ mod web {
                     !changed_levels[index] || resident.contains(&coord) || desired.contains(&coord)
                 });
                 let mut candidates = Vec::new();
-                for coord in desired {
+                for &coord in &desired {
                     if !changed_levels[coord.level.index() as usize] {
                         continue;
                     }
@@ -2924,6 +2946,7 @@ mod web {
                 });
                 queue.clear();
                 queue.extend(candidates);
+                *self.surface_desired.borrow_mut() = desired;
             }
 
             self.submit_surface_lane(
@@ -3502,14 +3525,7 @@ mod web {
         }
 
         fn surface_tile_relevant(&self, coord: SurfaceTileCoord) -> bool {
-            coord.is_world_representable()
-                && surface_tile_in_coverage(
-                    coord,
-                    self.surface_focus.get(),
-                    self.config.surface_load_radius_tiles,
-                    self.surface_cross_radii.get(),
-                    self.surface_motion_axis.get(),
-                )
+            coord.is_world_representable() && self.surface_desired.borrow().contains(&coord)
         }
 
         fn surface_coverage_current(&self) -> bool {
@@ -4592,6 +4608,7 @@ mod web {
             canonical_publications: RefCell::new(VecDeque::new()),
             binary_mesh_scratch: RefCell::new(BinaryMeshScratch::default()),
             surface_focus: Cell::new(None),
+            surface_desired: RefCell::new(BTreeSet::new()),
             surface_cross_radii: Cell::new(engine_config.surface_load_radius_tiles),
             surface_motion_axis: Cell::new([0, 0]),
             surface_resident: RefCell::new(BTreeSet::new()),
@@ -4952,6 +4969,27 @@ mod tests {
             cross,
             [1, 0],
         ));
+    }
+
+    #[test]
+    fn surface_stream_hierarchy_keeps_every_parent_of_a_requested_child() {
+        let child = voxels_world::SurfaceTileCoord::new(
+            voxels_world::SurfaceLodLevel::Stride2,
+            -3,
+            6,
+        );
+        let mut desired = BTreeSet::from([child]);
+        extend_surface_hierarchy(&mut desired);
+
+        let mut coord = child;
+        let mut expected = 1;
+        while let Some(parent) = coord.parent() {
+            assert!(desired.contains(&parent));
+            coord = parent;
+            expected += 1;
+        }
+        assert_eq!(desired.len(), expected);
+        assert_eq!(coord.level, voxels_world::SurfaceLodLevel::Stride256);
     }
 
     #[test]
