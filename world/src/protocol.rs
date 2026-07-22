@@ -283,6 +283,9 @@ const PLAYER_POSE_FLAGS: u16 = PLAYER_POSE_GROUNDED
     | PLAYER_POSE_DISCONTINUITY
     | PLAYER_POSE_SPECTATOR
     | PLAYER_POSE_GLIDING;
+// The wire validator only rejects pathological payloads. World-service applies the lower,
+// role-specific authoritative player and spectator limits from server configuration.
+const PLAYER_POSE_WIRE_SPEED_LIMIT_METRES_PER_SECOND: f32 = 600.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpenPresence {
@@ -2606,7 +2609,11 @@ fn validate_player_pose(
         .into_iter()
         .map(|value| value * value)
         .sum::<f32>();
-    if !velocity_squared.is_finite() || velocity_squared > 64.0 * 64.0 {
+    if !velocity_squared.is_finite()
+        || velocity_squared
+            > PLAYER_POSE_WIRE_SPEED_LIMIT_METRES_PER_SECOND
+                * PLAYER_POSE_WIRE_SPEED_LIMIT_METRES_PER_SECOND
+    {
         return Err(ProtocolError::InvalidPayload(
             "player velocity is nonfinite or too large",
         ));
@@ -4389,6 +4396,30 @@ mod tests {
         assert_eq!(
             decode_player_pose(&encode_player_pose(pose).expect("encode pose")),
             Ok(pose)
+        );
+        let fast_spectator_pose = PlayerPoseUpdate {
+            linear_velocity_metres_per_second: [128.0, 0.0, 0.0],
+            ..pose
+        };
+        assert_eq!(
+            decode_player_pose(
+                &encode_player_pose(fast_spectator_pose).expect("encode fast spectator pose")
+            ),
+            Ok(fast_spectator_pose)
+        );
+        let excessive_velocity_pose = PlayerPoseUpdate {
+            linear_velocity_metres_per_second: [
+                PLAYER_POSE_WIRE_SPEED_LIMIT_METRES_PER_SECOND + 1.0,
+                0.0,
+                0.0,
+            ],
+            ..pose
+        };
+        assert_eq!(
+            encode_player_pose(excessive_velocity_pose),
+            Err(ProtocolError::InvalidPayload(
+                "player velocity is nonfinite or too large"
+            ))
         );
 
         let visible_pose = PlayerPoseUpdate {
