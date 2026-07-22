@@ -68,6 +68,24 @@ world bytes per second. The surface queue rose during acceleration, then remaine
 roughly 700-790-tile band instead of growing with distance. Stride 1 was presented for 99.8-100% of
 samples in the final nine complete windows; isolated coarser samples recovered within 87.1 ms.
 
+The final current/predicted-ancestor scheduler repeated that soak after two additional correctness
+changes: current-surface generation now jumps queued ordinary work at both the per-session and global
+worker gates, and the equally bounded predicted ancestor chain shares that urgent class. Over 15.36
+km, the first acceleration window canceled 319 obsolete surface batches; steady ten-second windows
+then canceled 104-141 each while accepting 4,784-4,804 completions with zero stale completions. The
+generation queue stayed at a 282-283 median in every steady window, and the surface queue plateaued at
+an 814-819 median after filling its bounded overlap window. Stride 1 was presented for 99.2-100% of
+each steady window, with a longest degraded interval of 182.3 ms. The shaped 40 ms, 50/10 Mbit link
+added no backpressure and only 7.862 ms maximum downstream queue delay, so neither the socket nor
+uncanceled historical demand accumulated with distance.
+
+The stricter diagnostic-sky renderer check separately crossed 14.79 km while reading back the ground
+ROI throughout the route. It reported zero ownerless samples and zero enclosed sky pixels while
+moving, immediately after stopping, and after settling. Three-pixel conservative raster coverage is
+required around independently rasterized coarse/fine junctions at this viewport; two pixels still
+left isolated diagonal samples after perspective projection. This expansion changes only clip-space
+raster coverage. World positions, depth, lighting, and silhouettes against real sky remain unchanged.
+
 The retained four-tile batch is the measured balance. One-tile responses consumed the request
 window, made cold spawn 43% slower, and reduced useful flight throughput. Eight-tile responses
 amortized scheduling but produced 74% more flight bytes than four, canceled more large requests,
@@ -90,8 +108,10 @@ per-player CPU consumption under load.
    siblings are requeued under the current focus; obsolete siblings are discarded. This prevents
    one useful tile from letting three obsolete tiles retain an equal-priority socket slot.
 4. A higher-priority request may preempt stale lower-priority work in the bounded client window.
-   Collision remains the strongest class, followed by visible exact chunks, the current tile at
-   each interactive surface level, visible surface work, replacements, and prefetch.
+   Collision remains the strongest class, followed by visible exact chunks, the current and
+   predicted tiles at every surface level, visible surface work, replacements, and prefetch. Native
+   generation admission has the same collision/current-surface/ordinary ordering per session and
+   process-wide, so canceled or historical breadth cannot sit ahead of terrain beneath the camera.
 5. Canceling a fragmented response emits an explicit VXWP fragment-abort frame. Without it, the
    client retained a partial reassembly slot forever; repeated fast-travel cancellation exhausted
    all 32 slots and disconnected the world socket. VXWP v32 deliberately has no legacy path.
@@ -200,8 +220,8 @@ The retained mixed-route artifact is
 The baseline is
 `target/automation/network-benchmark/2026-07-22T14-30-47-533Z-024e62a8/report.json`.
 The sustained-flight artifact is
-`target/automation/network-benchmark/2026-07-22T19-41-07-699Z-084b6d85/report.json`; the strict
-non-adjacent-connector coverage artifact is
-`target/automation/lod-transition/2026-07-22T19-49-21-064Z-6c9441ce/report.json`.
+`target/automation/network-benchmark/2026-07-22T21-40-54-499Z-851b940a/report.json`; the strict
+long-distance diagnostic-sky artifact is
+`target/automation/lod-transition/2026-07-22T21-38-25-759Z-b3204eed/report.json`.
 Artifacts are intentionally ignored and use isolated temporary worlds; the measurements above are
 recorded here so the design evidence survives artifact cleanup.
