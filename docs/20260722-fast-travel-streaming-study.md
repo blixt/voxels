@@ -55,6 +55,12 @@ degraded interval. The mixed route is deliberately harder because its earlier mo
 leave realistic resident and queued work behind; the corridor's 90.7% result is the more useful
 number.
 
+A five-second flight-only sanity run on the native Metal Terrain Diffusion source also presented
+stride 1 for 98.5% of the measurement, with an 18.4 ms longest degraded interval, 2.08 MB of world
+traffic, and a 25.9 ms worst frame. Its strict whole-corridor surface-ready ratio remained zero while
+moving; that metric requires every desired tile to be current simultaneously, whereas the renderer's
+presented-stride metric measures the terrain actually visible at the camera.
+
 The retained four-tile batch is the measured balance. One-tile responses consumed the request
 window, made cold spawn 43% slower, and reduced useful flight throughput. Eight-tile responses
 amortized scheduling but produced 74% more flight bytes than four, canceled more large requests,
