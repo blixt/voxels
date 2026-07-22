@@ -15,7 +15,8 @@ This repository standardizes on Vite+.
 - Keep portable simulation in `core` and voxel data/generation/codecs/meshing in `world`; both must
   remain host-testable.
 - Keep WGPU rendering in `render`; it must not name browser or wasm types.
-- Keep browser/WASM glue, input decoding, and persistence in `shell`.
+- Keep browser/WASM glue and input decoding in `shell`; keep durable world/player persistence in
+  `world-service`.
 - Keep TypeScript limited to browser-required input, canvas, worker, and development harness code.
 - Version every persisted schema and binary format before committing it.
 
