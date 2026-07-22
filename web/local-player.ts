@@ -53,7 +53,9 @@ export async function resolveBrowserPlayerSession(
     const stored = storage.getItem(LOCAL_PLAYER_REGISTRY_KEY);
     const registry = stored === null ? createRegistry(randomUuid) : parseRegistry(stored);
     let changed = stored === null;
-    let playerId = registry.players[playerName];
+    let playerId = Object.hasOwn(registry.players, playerName)
+      ? registry.players[playerName]
+      : undefined;
     if (playerId === undefined) {
       playerId = checkedUuid(randomUuid(), "generated player id");
       if (Object.values(registry.players).includes(playerId)) {
@@ -69,7 +71,7 @@ export async function resolveBrowserPlayerSession(
         throw new Error(`Could not persist the local player registry: ${String(error)}`);
       }
     }
-    if (registry.players[DEFAULT_PLAYER_NAME] === undefined)
+    if (!Object.hasOwn(registry.players, DEFAULT_PLAYER_NAME))
       throw new Error("Local player registry has no default player.");
     return {
       browserUserId: registry.browserUserId,
@@ -114,7 +116,7 @@ function parseRegistry(contents: string): StoredPlayerRegistry {
     seen.add(validatedId);
     players[validatedName] = validatedId;
   }
-  if (!(DEFAULT_PLAYER_NAME in players)) {
+  if (!Object.hasOwn(players, DEFAULT_PLAYER_NAME)) {
     throw new Error("Local player registry has no default player.");
   }
   return {

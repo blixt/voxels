@@ -69,6 +69,21 @@ describe("local browser players", () => {
     expect(restoredAlice).toEqual(alice);
   });
 
+  it("creates names that match inherited object properties", async () => {
+    const storage = new MemoryStorage();
+    const randomUuid = uuidSequence();
+    const url = new URL("http://127.0.0.1:5173/?player=constructor");
+    const first = await resolveBrowserPlayerSession(url, storage, randomUuid, immediateLock);
+    const second = await resolveBrowserPlayerSession(url, storage, randomUuid, immediateLock);
+
+    expect(first).toEqual({
+      browserUserId: IDS[0],
+      playerId: IDS[2],
+      playerName: "constructor",
+    });
+    expect(second).toEqual(first);
+  });
+
   it("rejects ambiguous names and keeps ids out of generated urls", () => {
     expect(() => playerNameFromUrl(new URL("http://local/?player=Alice"))).toThrow("lowercase");
     expect(() => playerNameFromUrl(new URL("http://local/?player=a&player=b"))).toThrow(
