@@ -194,18 +194,6 @@ impl SurfaceTileCoord {
             ],
         ]
     }
-
-    /// The unique tile at the next coarser level that contains this tile.
-    ///
-    /// Euclidean division keeps the hierarchy continuous across the world origin: child tiles
-    /// `-2` and `-1` both belong to parent `-1`, just as `0` and `1` belong to parent `0`.
-    pub fn parent(self) -> Option<Self> {
-        Some(Self::new(
-            self.level.next_coarser()?,
-            self.x.div_euclid(2),
-            self.z.div_euclid(2),
-        ))
-    }
 }
 
 /// A stable patch key in a level-wide grid. Unlike tile-local cell bounds, this identity remains
@@ -2744,18 +2732,6 @@ mod tests {
         assert_eq!(
             SurfaceTileCoord::new(level, -1, 2).voxel_bounds_xz(),
             [[-128, 256], [0, 384]]
-        );
-        assert_eq!(
-            SurfaceTileCoord::new(SurfaceLodLevel::Stride2, -2, -1).parent(),
-            Some(SurfaceTileCoord::new(SurfaceLodLevel::Stride4, -1, -1))
-        );
-        assert_eq!(
-            SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 1, 0).parent(),
-            Some(SurfaceTileCoord::new(SurfaceLodLevel::Stride4, 0, 0))
-        );
-        assert_eq!(
-            SurfaceTileCoord::new(SurfaceLodLevel::Stride256, 0, 0).parent(),
-            None
         );
     }
 
