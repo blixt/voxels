@@ -7,11 +7,15 @@ rendering, persistence, and binary codecs live in Rust.
 
 ## Workspace boundaries
 
+- `client-config/` is a strict, versioned, host-testable client TOML contract. It validates runtime,
+  streaming, and rendering limits before the browser creates an engine.
 - `core/` is portable and host-testable. It owns commands, player/camera state, physics, exact voxel
   DDA picking, simulation, and game rules. It has no GPU, browser, filesystem, or JavaScript
   dependencies.
 - `world/` is portable and host-testable. It owns chunk coordinates/data, materials, procedural
   generation, edit overlays, greedy meshing, and durable voxel codecs.
+- `world-terrain-diffusion/` is the optional native Rust/Metal learned-terrain provider. It implements
+  the same source-neutral world-product boundary as the procedural generator.
 - `runtime/` is portable and host-testable. It owns deterministic chunk interest, bounded per-frame
   generation/meshing/upload admission, revisioned work tickets, stale-result rejection, eviction
   hysteresis, and streaming diagnostics. It owns no payloads or GPU resources.
@@ -21,10 +25,16 @@ rendering, persistence, and binary codecs live in Rust.
   glyphs, the controls toast, and crosshair. It names no web types so a native shell can reuse it.
 - `shell/` is the `wasm32-unknown-unknown` leaf. It owns the `wasm-bindgen` API, the transferred
   `OffscreenCanvas`, worker animation clock, packed input decoding, and remote clients.
+- `world-service/` is the native authority. It owns source bootstrap, bounded world/presence
+  transports, server-authoritative edits and players, and durable SQLite state.
+- `bots/` is the native, protocol-faithful load driver. It exercises the public world and presence
+  contracts without sharing server internals.
 - `web/` is the deliberately thin browser harness. Its only visible element is the canvas. Input is
   batched into fixed-size binary records and transferred to the worker; TypeScript only mirrors Rust's
   cursor/capture mode because pointer lock is a browser responsibility. Semantic actions, status, UI
   layout, text, world state, and feature behavior do not cross into TypeScript.
+- `automation/` is the typed development harness for isolated validation, benchmarks, profiling,
+  screenshots, traces, videos, and bot loads; it is not part of the shipped client runtime.
 
 The renderer and simulation run together in one dedicated worker. The shell advances runtime-issued
 generation, meshing, and upload tickets under independent frame budgets, while the renderer only owns
