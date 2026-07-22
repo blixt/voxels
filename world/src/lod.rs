@@ -591,7 +591,15 @@ pub fn surface_tiles_affected_by_voxel(
     level: SurfaceLodLevel,
     coord: VoxelCoord,
 ) -> Vec<SurfaceTileCoord> {
-    let mut affected = if coord.y >= edits.surface_sample(generator, coord.x, coord.z).0 {
+    // Stride-two is the only heightfield shell that overlaps the exact underground view volume,
+    // so it incorporates subsurface edits to avoid stale synthetic walls in tunnels. Coarser
+    // shells intentionally use pristine subsurface geology and only depend on edits at or above
+    // the lower of the generated and edited surfaces. The latter keeps progressively dug craters
+    // visible without making distant surface products depend on unrelated deep tunnel edits.
+    let generated_surface_y = generator.surface_sample(coord.x, coord.z).height;
+    let edited_surface_y = edits.surface_sample(generator, coord.x, coord.z).0;
+    let dependency_floor = generated_surface_y.min(edited_surface_y);
+    let mut affected = if level == SurfaceLodLevel::Stride2 || coord.y >= dependency_floor {
         surface_tiles_affected_by_column(level, coord.x, coord.z)
     } else {
         Vec::new()
@@ -628,13 +636,27 @@ pub fn generate_edited_surface_tile_mesh(
     let features = pristine_skyline_features(generator, edits, coord);
     let shading_surface = |x, z| edits.surface_sample(generator, x, z);
     let columns = RefCell::new(HashMap::new());
+    let surface_dependency_floors = RefCell::new(HashMap::new());
     let vertical_material = |x, y, z| {
         let generated = columns
             .borrow_mut()
             .entry((x, z))
             .or_insert_with(|| generator.column(x, z))
             .sample(y);
-        edits.resolve_generated(VoxelCoord::new(x, y, z), generated)
+        let dependency_floor = *surface_dependency_floors
+            .borrow_mut()
+            .entry((x, z))
+            .or_insert_with(|| {
+                generator
+                    .surface_sample(x, z)
+                    .height
+                    .min(edits.surface_sample(generator, x, z).0)
+            });
+        if coord.level == SurfaceLodLevel::Stride2 || y >= dependency_floor {
+            edits.resolve_generated(VoxelCoord::new(x, y, z), generated)
+        } else {
+            generated
+        }
     };
     if edits.is_empty() {
         let surface = |x, z| edits.surface_sample(generator, x, z);
@@ -1242,7 +1264,9 @@ fn generate_surface_tile_mesh_with_options(
 /// Material used when a synthetic surface wall has no exact collidable sample. Surface-cover
 /// materials occupy one voxel; below that, organic covers become soil and sufficiently deep
 /// fallback walls become rock. Production world sources normally supply exact vertical samples,
-/// while this rule keeps morph-only connector geometry physically plausible and opaque.
+/// while this rule keeps morph-only connector geometry physically plausible. When exact vertical
+/// data is available, known air and fluid spans remain open: filling them would manufacture solid
+/// columns across edited tunnels and cave mouths.
 pub const fn fallback_surface_wall_material(
     surface_material: Material,
     depth_voxels: i64,
@@ -1351,18 +1375,18 @@ fn append_surface_wall_quads(
 
     let material_at = |y: i32| {
         if y == wall.upper_height {
-            return wall.surface_material;
+            return Some(wall.surface_material);
         }
         let sampled = vertical_material(wall.sample_xz[0], y, wall.sample_xz[1]);
         if matches!(sampled, Material::Grass | Material::Moss | Material::Snow) {
-            fallback_surface_wall_material(sampled, i64::from(wall.upper_height) - i64::from(y))
-        } else if sampled.is_collidable() {
-            sampled
-        } else {
-            fallback_surface_wall_material(
-                wall.surface_material,
+            Some(fallback_surface_wall_material(
+                sampled,
                 i64::from(wall.upper_height) - i64::from(y),
-            )
+            ))
+        } else if sampled.is_collidable() {
+            Some(sampled)
+        } else {
+            None
         }
     };
     let mut run_start = exact_first_y;
@@ -1371,16 +1395,18 @@ fn append_surface_wall_quads(
     while y <= wall.upper_height {
         let material = material_at(y);
         if material != run_material {
-            let mut run_origin = wall.origin;
-            run_origin[1] = run_start;
-            append_single_material_wall_run(
-                quads,
-                run_origin,
-                wall.face,
-                wall.horizontal_extent,
-                i64::from(y) - i64::from(run_start),
-                run_material,
-            );
+            if let Some(run_material) = run_material {
+                let mut run_origin = wall.origin;
+                run_origin[1] = run_start;
+                append_single_material_wall_run(
+                    quads,
+                    run_origin,
+                    wall.face,
+                    wall.horizontal_extent,
+                    i64::from(y) - i64::from(run_start),
+                    run_material,
+                );
+            }
             run_start = y;
             run_material = material;
         }
@@ -1389,16 +1415,18 @@ fn append_surface_wall_quads(
         }
         y += 1;
     }
-    let mut run_origin = wall.origin;
-    run_origin[1] = run_start;
-    append_single_material_wall_run(
-        quads,
-        run_origin,
-        wall.face,
-        wall.horizontal_extent,
-        i64::from(wall.upper_height) - i64::from(run_start) + 1,
-        run_material,
-    );
+    if let Some(run_material) = run_material {
+        let mut run_origin = wall.origin;
+        run_origin[1] = run_start;
+        append_single_material_wall_run(
+            quads,
+            run_origin,
+            wall.face,
+            wall.horizontal_extent,
+            i64::from(wall.upper_height) - i64::from(run_start) + 1,
+            run_material,
+        );
+    }
 }
 
 fn append_patch_edge_faces(
@@ -2984,6 +3012,57 @@ mod tests {
     }
 
     #[test]
+    fn exact_vertical_air_keeps_surface_lod_walls_out_of_tunnels() {
+        let surface = |x, z| {
+            let height = if x == 1 && z == 1 { 10 } else { 0 };
+            (height, Material::Grass)
+        };
+        let vertical_material = |_x, y, _z| match y {
+            10 => Material::Grass,
+            8..=9 => Material::Dirt,
+            4..=6 => Material::Air,
+            _ => Material::Stone,
+        };
+        let tile = generate_surface_tile_mesh_with_options(
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
+            &surface,
+            SurfaceTileMeshOptions {
+                vertical_material: Some(&vertical_material),
+                patch_edges: false,
+                ..SurfaceTileMeshOptions::plain(&[])
+            },
+        );
+        let sides = tile
+            .quads
+            .iter()
+            .filter(|quad| quad.face != FACE_POS_Y)
+            .collect::<Vec<_>>();
+
+        for face in [FACE_NEG_X, FACE_POS_X, FACE_NEG_Z, FACE_POS_Z] {
+            assert_eq!(
+                sides
+                    .iter()
+                    .copied()
+                    .filter(|quad| quad.face == face)
+                    .map(|quad| (quad.origin[1], quad.extent[1], quad.material))
+                    .collect::<Vec<_>>(),
+                [
+                    (1, 3, Material::Stone),
+                    (7, 1, Material::Stone),
+                    (8, 2, Material::Dirt),
+                    (10, 1, Material::Grass),
+                ],
+                "known tunnel air must split rather than fill a synthetic surface wall"
+            );
+        }
+        assert!(sides.iter().all(|quad| {
+            let min_y = quad.origin[1];
+            let max_y = min_y + i32::from(quad.extent[1]);
+            max_y <= 4 || min_y > 6
+        }));
+    }
+
+    #[test]
     fn tall_surface_sides_split_without_truncating_vertical_coverage() {
         for (height, segments_per_face) in [(65_535, 1), (65_536, 2), (131_071, 3)] {
             let surface = |x, z| {
@@ -3746,7 +3825,7 @@ mod tests {
     }
 
     #[test]
-    fn underground_cave_edits_do_not_rebuild_surface_lods() {
+    fn underground_cave_edits_rebuild_only_the_exact_view_surface_shell() {
         let generator = Generator::new(0x5eed_cafe);
         let chamber = crate::CINDER_VAULT.chamber;
         let target = VoxelCoord::new(chamber[0], chamber[1], chamber[2]);
@@ -3757,7 +3836,12 @@ mod tests {
         let mut edits = EditMap::default();
         edits.set(generator, target, Material::Basalt);
         for level in SurfaceLodLevel::ALL {
-            assert!(surface_tiles_affected_by_voxel(generator, &edits, level, target).is_empty());
+            let affected = surface_tiles_affected_by_voxel(generator, &edits, level, target);
+            assert_eq!(
+                affected.is_empty(),
+                level != SurfaceLodLevel::Stride2,
+                "only stride-two overlaps exact tunnel ownership"
+            );
         }
     }
 }

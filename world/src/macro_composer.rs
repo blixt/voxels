@@ -20,6 +20,7 @@ use crate::{
     WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash, generate_water_tile_mesh_with,
     surface_tiles_affected_by_column,
 };
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 const SURFACE_TILE_SAMPLE_EDGE: u32 = 34;
@@ -501,6 +502,7 @@ impl HeightfieldWorldSource {
                     feature.material_at(coord).unwrap_or(Material::Air)
                 })
         });
+        let surface_dependency_floors = RefCell::new(BTreeMap::new());
         let terrain = generate_surface_tile_mesh_with_materials_and_aggregated_ecology_and_shading(
             coord,
             |x, z| {
@@ -514,10 +516,22 @@ impl HeightfieldWorldSource {
                     .unwrap_or(sampled)
             },
             |x, y, z| {
-                let generated = self
-                    .material_at(&region, x, y, z)
-                    .unwrap_or(Material::Stone);
-                edits.resolve_generated(VoxelCoord::new(x, y, z), generated)
+                let Some(column) = region.column(x, z) else {
+                    return Material::Stone;
+                };
+                let generated = material_for_column(column, self.sea_level_voxels, y);
+                let dependency_floor = *surface_dependency_floors
+                    .borrow_mut()
+                    .entry((x, z))
+                    .or_insert_with(|| {
+                        self.edited_surface(&region, edits, x, z)
+                            .map_or(column.height, |surface| column.height.min(surface.0))
+                    });
+                if coord.level == SurfaceLodLevel::Stride2 || y >= dependency_floor {
+                    edits.resolve_generated(VoxelCoord::new(x, y, z), generated)
+                } else {
+                    generated
+                }
             },
             |x, z| {
                 self.edited_surface(&region, edits, x, z)
@@ -843,11 +857,33 @@ impl WorldSourceEngine for HeightfieldWorldSource {
 
     fn surface_tiles_affected_by_voxel(
         &self,
-        _edits: &EditMap,
+        edits: &EditMap,
         level: SurfaceLodLevel,
         coord: VoxelCoord,
     ) -> Vec<SurfaceTileCoord> {
-        let mut affected = surface_tiles_affected_by_column(level, coord.x, coord.z);
+        let dependency_floor = self
+            .prepare_region(
+                WorldProductPriority::ReplacementSurface,
+                [coord.x, coord.z],
+                [1, 1],
+                1,
+            )
+            .ok()
+            .and_then(|region| {
+                let generated = region.column(coord.x, coord.z)?.height;
+                let edited = self
+                    .edited_surface(&region, edits, coord.x, coord.z)
+                    .ok()?
+                    .0;
+                Some(generated.min(edited))
+            });
+        let affects_terrain_shell = level == SurfaceLodLevel::Stride2
+            || dependency_floor.is_none_or(|surface_y| coord.y >= surface_y);
+        let mut affected = if affects_terrain_shell {
+            surface_tiles_affected_by_column(level, coord.x, coord.z)
+        } else {
+            Vec::new()
+        };
         for feature in self.skyline_features_at(coord) {
             if feature.material_at(coord).is_none() {
                 continue;
@@ -895,14 +931,20 @@ impl WorldSourceEngine for HeightfieldWorldSource {
         };
         let mut affected = BTreeSet::new();
         for &coord in coords {
-            let Ok((surface_y, _)) = self.edited_surface(&region, edits, coord.x, coord.z) else {
+            let Some(generated_surface_y) =
+                region.column(coord.x, coord.z).map(|column| column.height)
+            else {
                 return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
             };
-            if coord.y < surface_y {
-                continue;
-            }
+            let Ok((edited_surface_y, _)) = self.edited_surface(&region, edits, coord.x, coord.z)
+            else {
+                return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
+            };
+            let dependency_floor = generated_surface_y.min(edited_surface_y);
             for level in SurfaceLodLevel::ALL {
-                affected.extend(surface_tiles_affected_by_column(level, coord.x, coord.z));
+                if level == SurfaceLodLevel::Stride2 || coord.y >= dependency_floor {
+                    affected.extend(surface_tiles_affected_by_column(level, coord.x, coord.z));
+                }
             }
             for feature in self.skyline_features_at(coord) {
                 if feature.material_at(coord).is_none() {
@@ -2645,23 +2687,49 @@ mod tests {
     }
 
     #[test]
-    fn batched_subsurface_edits_do_not_invalidate_heightfield_surface_tiles() {
+    fn batched_subsurface_edits_invalidate_only_the_exact_view_surface_shell() {
         let source = heightfield(FakeBehavior::Valid);
         let edits = EditMap::default();
 
+        let underground = source.surface_tiles_affected_by_voxels(
+            &edits,
+            &[VoxelCoord::new(1, -4, 1), VoxelCoord::new(2, 0, 2)],
+        );
+        assert!(!underground.is_empty());
         assert!(
-            source
-                .surface_tiles_affected_by_voxels(
-                    &edits,
-                    &[VoxelCoord::new(1, -4, 1), VoxelCoord::new(2, 0, 2)],
-                )
-                .is_empty()
+            underground
+                .iter()
+                .all(|coord| coord.level == SurfaceLodLevel::Stride2)
         );
         let surface = source.surface_tiles_affected_by_voxels(&edits, &[VoxelCoord::new(1, 1, 1)]);
         assert!(
             SurfaceLodLevel::ALL
                 .into_iter()
                 .all(|level| { surface.contains(&SurfaceTileCoord::containing(level, 1, 1)) })
+        );
+    }
+
+    #[test]
+    fn one_metre_subsurface_edit_has_bounded_surface_replacement_fanout() {
+        let source = heightfield(FakeBehavior::Valid);
+        let edits = EditMap::default();
+        let coords = (1..=10)
+            .flat_map(|z| {
+                (1..=10).flat_map(move |x| (-10..0).map(move |y| VoxelCoord::new(x, y, z)))
+            })
+            .collect::<Vec<_>>();
+        let affected = source.surface_tiles_affected_by_voxels(&edits, &coords);
+
+        assert!(!affected.is_empty());
+        assert!(
+            affected
+                .iter()
+                .all(|coord| coord.level == SurfaceLodLevel::Stride2)
+        );
+        assert!(
+            affected.len() <= 3,
+            "one cubic metre of tunnel edits fanned out to {} surface products",
+            affected.len()
         );
     }
 
