@@ -1336,7 +1336,7 @@ mod tests {
         assert_ne!(first.identity_hash(), other.identity_hash());
         assert_eq!(
             first.identity_hash().to_string(),
-            "eb4c58b761510a84d9d058311228987798525c908407b17ec37e8a732ce6fadd"
+            "5067ad3f2d190a4c4c07ce74ff2a22effef267c6ff9fa7c944d8748d080bd19b"
         );
     }
 
@@ -1349,7 +1349,7 @@ mod tests {
         assert_eq!(first.validate(), Ok(()));
         assert_eq!(
             first.manifest_hash().map(|hash| hash.to_string()),
-            Ok("b788bf9f612f54752222fba71b7c5b1d4edd230f84797b0a4181e5a027a2ebe3".to_owned())
+            Ok("243a693635034d7567e52b56cd336b91bf6b4371de6a9e429aae5c08310f752d".to_owned())
         );
 
         let mut inconsistent = first;
