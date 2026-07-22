@@ -3290,23 +3290,16 @@ impl Renderer {
                     mesh.lod_ownership_stale = true;
                 }
             }
-            let previous_plan_resident = self.lod_draw_plan_is_resident();
-            let mut next_plan = self.lod_draw_plan.clone();
-            next_plan.canonical_chunks = canonical_chunks;
-            next_plan.enclosed_view_chunks = self.enclosed_view_ready_chunks.clone();
-            if next_plan != self.lod_draw_plan
-                && self.lod_draw_plan.has_geometry()
-                && previous_plan_resident
-                && self.lod_draw_plan_focus.is_some()
-                && focus.is_some()
-            {
-                self.cut_transition = Some(CutTransition {
-                    from: self.lod_draw_plan.clone(),
-                    from_focus: self.lod_draw_plan_focus,
-                    started_at: self.time,
-                });
-            }
-            self.lod_draw_plan = next_plan;
+            // Exact-volume chunks supplement the unchanged surface cut. Their prior uploaded mesh
+            // remains drawable throughout transactional replacement, so canonical/enclosed-view
+            // membership can switch atomically without exposing the sky. Starting a global cut
+            // transition here would reclassify every visible surface slice for 240 ms after each
+            // sparse tunnel edit even though no surface owner changed. Mutate only these two sets:
+            // cloning the plan would copy the full high-detail surface hierarchy on every edit.
+            self.lod_draw_plan.canonical_chunks = canonical_chunks;
+            self.lod_draw_plan
+                .enclosed_view_chunks
+                .clone_from(&self.enclosed_view_ready_chunks);
             self.lod_draw_plan_focus = focus;
             self.lod_draw_plan_revision = self.surface_patch_residency_revision;
             self.lod_draw_plan_dirty_reasons = 0;
