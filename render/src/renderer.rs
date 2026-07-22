@@ -3020,17 +3020,25 @@ impl Renderer {
                     .max
                     .map(|value| value as f32 * VOXEL_SIZE_METRES),
             );
+            let slice_template = |boundary_edge, morph_closure| MeshSlice {
+                relative_offset: 0,
+                size: 0,
+                quad_count: 0,
+                bounds_min,
+                bounds_max,
+                surface_patch_id: Some(patch_id),
+                boundary_edge,
+                morph_closure,
+                exact_replacement_chunk: None,
+                render_layer: RenderLayer::Opaque,
+            };
             append_surface_slices(
                 &mut slices,
                 patch.quad_range.clone(),
                 0,
                 &exact_replacement_chunks,
                 quad_bytes,
-                bounds_min,
-                bounds_max,
-                patch_id,
-                None,
-                false,
+                slice_template(None, false),
             );
             for edge in SurfacePatchEdge::ALL {
                 append_surface_slices(
@@ -3039,11 +3047,7 @@ impl Renderer {
                     0,
                     &exact_replacement_chunks,
                     quad_bytes,
-                    bounds_min,
-                    bounds_max,
-                    patch_id,
-                    Some(edge),
-                    false,
+                    slice_template(Some(edge), false),
                 );
             }
             append_surface_slices(
@@ -3052,11 +3056,7 @@ impl Renderer {
                 closure_base,
                 &closure_exact_replacement_chunks,
                 quad_bytes,
-                bounds_min,
-                bounds_max,
-                patch_id,
-                None,
-                true,
+                slice_template(None, true),
             );
             for edge in SurfacePatchEdge::ALL {
                 append_surface_slices(
@@ -3065,11 +3065,7 @@ impl Renderer {
                     closure_base,
                     &closure_exact_replacement_chunks,
                     quad_bytes,
-                    bounds_min,
-                    bounds_max,
-                    patch_id,
-                    Some(edge),
-                    true,
+                    slice_template(Some(edge), true),
                 );
             }
         }
@@ -5495,18 +5491,13 @@ fn surface_exact_replacement_chunk(quad: &SurfaceQuad) -> Option<(i32, i32, i32)
     Some((chunk[0], chunk[1], chunk[2]))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn append_surface_slices(
     slices: &mut Vec<MeshSlice>,
     source_range: std::ops::Range<u32>,
     gpu_base: u32,
     exact_replacement_chunks: &[Option<(i32, i32, i32)>],
     quad_bytes: u32,
-    bounds_min: glam::Vec3,
-    bounds_max: glam::Vec3,
-    patch_id: SurfacePatchId,
-    boundary_edge: Option<SurfacePatchEdge>,
-    morph_closure: bool,
+    template: MeshSlice,
 ) {
     let mut start = source_range.start;
     while start < source_range.end {
@@ -5522,13 +5513,8 @@ fn append_surface_slices(
             relative_offset: gpu_start * quad_bytes,
             size: (end - start) * quad_bytes,
             quad_count: end - start,
-            bounds_min,
-            bounds_max,
-            surface_patch_id: Some(patch_id),
-            boundary_edge,
-            morph_closure,
             exact_replacement_chunk,
-            render_layer: RenderLayer::Opaque,
+            ..template
         });
         start = end;
     }
