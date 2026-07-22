@@ -1764,11 +1764,11 @@ mod web {
             let remote_ms = (performance_now(performance) - remote_start) as f32;
             let plan_start = performance_now(performance);
             // Lead the desired cylinder rather than only sorting it toward a prediction outside
-            // the window. The current camera remains at least one chunk inside the trailing edge,
+            // the window. Reserve the complete radius-one camera vicinity behind the led center,
             // while newly exposed forward chunks receive real network and generation lead time.
             let exact_load_radius = self.scheduler.borrow().config().load_radius_chunks;
             let exact_lead_metres =
-                (exact_load_radius - 1).max(0) as f32 * CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
+                (exact_load_radius - 2).max(0) as f32 * CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
             let focus = world_to_chunk(predictive_stream_position(
                 camera.position,
                 streaming_velocity,
