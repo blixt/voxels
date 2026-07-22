@@ -91,6 +91,7 @@ const LOD_PLAN_REBUILD_CANONICAL_PROFILE: u32 = 1 << 2;
 const LOD_PLAN_REBUILD_SURFACE_RESIDENCY: u32 = 1 << 3;
 const LOD_PLAN_REBUILD_SURFACE_PROFILE: u32 = 1 << 4;
 const LOD_PLAN_REBUILD_ENCLOSED_VIEW: u32 = 1 << 5;
+const LOD_PLAN_REBUILD_CANONICAL_VOLUME: u32 = 1 << 6;
 const GPU_QUERY_COUNT: u32 = 24;
 const PRECIPITATION_INSTANCE_COUNT: u32 = 48 * 48 * 2;
 const QUAD_VERTEX_COUNT: u32 = 4;
@@ -2468,7 +2469,7 @@ impl Renderer {
                 mesh.lod_ownership_stale = true;
             }
         }
-        self.invalidate_lod_draw_plan(LOD_PLAN_REBUILD_CANONICAL_COLUMNS);
+        self.invalidate_lod_draw_plan(LOD_PLAN_REBUILD_CANONICAL_VOLUME);
     }
 
     /// Replaces the exact chunks that form a complete terrain-following surface cut.
@@ -3242,6 +3243,45 @@ impl Renderer {
             };
         let canonical_chunks =
             canonical_ready_chunks_for_focus(focus, &self.canonical_ready_chunks);
+        let surface_hierarchy_reasons = LOD_PLAN_REBUILD_FOCUS
+            | LOD_PLAN_REBUILD_CANONICAL_COLUMNS
+            | LOD_PLAN_REBUILD_CANONICAL_PROFILE
+            | LOD_PLAN_REBUILD_SURFACE_RESIDENCY
+            | LOD_PLAN_REBUILD_SURFACE_PROFILE;
+        if rebuild_reason & surface_hierarchy_reasons == 0 {
+            let changed_canonical_chunks = self
+                .lod_draw_plan
+                .canonical_chunks
+                .symmetric_difference(&canonical_chunks)
+                .copied()
+                .collect::<HashSet<_>>();
+            for &(x, y, z) in &changed_canonical_chunks {
+                if let Some(mesh) = self.chunks.get_mut(&(0, x, y, z)) {
+                    mesh.lod_ownership_stale = true;
+                }
+            }
+            let previous_plan_resident = self.lod_draw_plan_is_resident();
+            let mut next_plan = self.lod_draw_plan.clone();
+            next_plan.canonical_chunks = canonical_chunks;
+            next_plan.enclosed_view_chunks = self.enclosed_view_ready_chunks.clone();
+            if next_plan != self.lod_draw_plan
+                && self.lod_draw_plan.has_geometry()
+                && previous_plan_resident
+                && self.lod_draw_plan_focus.is_some()
+                && focus.is_some()
+            {
+                self.cut_transition = Some(CutTransition {
+                    from: self.lod_draw_plan.clone(),
+                    from_focus: self.lod_draw_plan_focus,
+                    started_at: self.time,
+                });
+            }
+            self.lod_draw_plan = next_plan;
+            self.lod_draw_plan_focus = focus;
+            self.lod_draw_plan_revision = self.surface_patch_residency_revision;
+            self.lod_draw_plan_dirty_reasons = 0;
+            return rebuild_reason;
+        }
         let canonical_surface_chunks =
             canonical_ready_chunks_for_focus(focus, &self.canonical_surface_ready_chunks);
         let canonical_columns = canonical_surface_chunks

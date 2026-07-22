@@ -331,6 +331,9 @@ export function summarizeRenderPhase(captures: readonly RenderSnapshotCapture[])
           .length,
         surfaceProfiles: samples.filter((sample) => (sample.lodPlanRebuildReason & 16) !== 0)
           .length,
+        enclosedView: samples.filter((sample) => (sample.lodPlanRebuildReason & 32) !== 0).length,
+        canonicalVolume: samples.filter((sample) => (sample.lodPlanRebuildReason & 64) !== 0)
+          .length,
       },
       encodeMs: summary(samples.map((sample) => sample.renderEncodeMs)),
       submitMs: summary(samples.map((sample) => sample.renderSubmitMs)),
