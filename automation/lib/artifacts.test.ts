@@ -44,4 +44,18 @@ describe("automation artifacts", () => {
       manifest: path.join(root, "example", "run-1", "manifest.json"),
     });
   });
+
+  it("rejects non-finite numbers instead of silently writing null", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "voxels-artifacts-"));
+    temporaryDirectories.push(root);
+    const store = await ArtifactStore.create("example", { root, runId: "run-1" });
+
+    await expect(
+      store.writeJson("metrics", "metrics.json", { nested: { p95: Number.NaN } }),
+    ).rejects.toThrow("non-finite number");
+    await expect(
+      store.writeMetadataJson("manifest.json", { result: Number.POSITIVE_INFINITY }),
+    ).rejects.toThrow("non-finite number");
+    expect(store.records).toEqual([]);
+  });
 });

@@ -25,6 +25,21 @@ function timestampRunId(now: Date): string {
   return `${now.toISOString().replaceAll(/[:.]/gu, "-")}-${randomUUID().slice(0, 8)}`;
 }
 
+function jsonDocument(value: unknown): string {
+  const serialized = JSON.stringify(
+    value,
+    (_key, entry: unknown) => {
+      if (typeof entry === "number" && !Number.isFinite(entry)) {
+        throw new Error("automation JSON contains a non-finite number");
+      }
+      return entry;
+    },
+    2,
+  );
+  if (serialized === undefined) throw new Error("automation value is not JSON serializable");
+  return `${serialized}\n`;
+}
+
 export class ArtifactStore {
   readonly directory: string;
   readonly scenarioDirectory: string;
@@ -93,13 +108,13 @@ export class ArtifactStore {
   async writeJson(label: string, filename: string, value: unknown): Promise<string> {
     this.#assertWritable();
     const destination = this.resolve(filename);
-    await writeFile(destination, `${JSON.stringify(value, null, 2)}\n`);
+    await writeFile(destination, jsonDocument(value));
     return this.record(label, destination, "application/json");
   }
 
   async writeMetadataJson(filename: string, value: unknown): Promise<string> {
     const destination = this.resolve(filename);
-    await writeFile(destination, `${JSON.stringify(value, null, 2)}\n`);
+    await writeFile(destination, jsonDocument(value));
     return destination;
   }
 
@@ -137,17 +152,13 @@ export class ArtifactStore {
   async publishLatest(status: "passed" | "failed"): Promise<void> {
     await writeFile(
       path.join(this.scenarioDirectory, "latest.json"),
-      `${JSON.stringify(
-        {
-          schemaVersion: 1,
-          runId: this.runId,
-          status,
-          directory: this.directory,
-          manifest: this.resolve("manifest.json"),
-        },
-        null,
-        2,
-      )}\n`,
+      jsonDocument({
+        schemaVersion: 1,
+        runId: this.runId,
+        status,
+        directory: this.directory,
+        manifest: this.resolve("manifest.json"),
+      }),
     );
   }
 
