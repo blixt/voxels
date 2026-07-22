@@ -47,6 +47,17 @@ export interface CameraLookOptions extends SnapshotWaitOptions {
   readonly tolerance?: number;
 }
 
+export type LodBoundaryHalfExtents = readonly [
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+];
+
 export class EngineClient {
   readonly #page: Page;
   #contract: EngineAutomationContract | undefined;
@@ -193,6 +204,26 @@ export class EngineClient {
       (snapshot) => snapshotValue(snapshot, "materialDetail") === Number(enabled),
       { description: `material detail did not become ${enabled ? "enabled" : "disabled"}` },
     );
+  }
+
+  async setLodBoundaryHalfExtents(extents: LodBoundaryHalfExtents): Promise<void> {
+    const alignments = [32, 32, 64, 128, 256, 512, 1_024, 2_048] as const;
+    if (
+      extents.some(
+        (extent, index) =>
+          !Number.isSafeInteger(extent) ||
+          extent <= 0 ||
+          extent % (alignments[index] ?? 1) !== 0 ||
+          (index > 0 && extent <= (extents[index - 1] ?? 0)),
+      )
+    ) {
+      throw new Error("LOD boundary half extents must be positive, increasing, aligned integers");
+    }
+    const accepted = await this.#page.evaluate(
+      (values) => globalThis.__VOXELS__!.lodBoundaries(values),
+      extents,
+    );
+    if (!accepted) throw new Error("engine rejected the LOD boundary half extents");
   }
 
   async submitPlace(

@@ -139,6 +139,10 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     number,
     { resolve: (active: boolean) => void; reject: (reason: Error) => void }
   >();
+  const lodBoundaryResolvers = new Map<
+    number,
+    { resolve: (accepted: boolean) => void; reject: (reason: Error) => void }
+  >();
   const inventoryResolvers = new Map<
     number,
     { resolve: (values: number[]) => void; reject: (reason: Error) => void }
@@ -164,6 +168,8 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     diagnosticSkyResolvers.clear();
     for (const { reject } of materialDetailResolvers.values()) reject(error);
     materialDetailResolvers.clear();
+    for (const { reject } of lodBoundaryResolvers.values()) reject(error);
+    lodBoundaryResolvers.clear();
     for (const { reject } of inventoryResolvers.values()) reject(error);
     inventoryResolvers.clear();
     for (const { reject } of surfaceEditStateResolvers.values()) reject(error);
@@ -229,6 +235,17 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
         nextSnapshotRequest += 1;
         materialDetailResolvers.set(requestId, { resolve, reject });
         worker.postMessage({ kind: "materialDetail", requestId, enabled });
+      }),
+    lodBoundaries: (halfExtentsVoxels) =>
+      new Promise<boolean>((resolve, reject) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        lodBoundaryResolvers.set(requestId, { resolve, reject });
+        worker.postMessage({
+          kind: "lodBoundaries",
+          requestId,
+          halfExtentsVoxels: [...halfExtentsVoxels],
+        });
       }),
     look: (deltaX, deltaY) => {
       const buffer = packInput([
@@ -353,6 +370,9 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     } else if (event.data.kind === "materialDetail") {
       materialDetailResolvers.get(event.data.requestId)?.resolve(event.data.accepted);
       materialDetailResolvers.delete(event.data.requestId);
+    } else if (event.data.kind === "lodBoundaries") {
+      lodBoundaryResolvers.get(event.data.requestId)?.resolve(event.data.accepted);
+      lodBoundaryResolvers.delete(event.data.requestId);
     } else if (event.data.kind === "submitPlace") {
       editResolvers.get(event.data.requestId)?.resolve(event.data.submitted);
       editResolvers.delete(event.data.requestId);

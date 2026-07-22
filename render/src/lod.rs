@@ -14,6 +14,14 @@ pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 8] = [128, 320, 640, 1_280, 2_560, 4_
 const LOD_BOUNDARY_SNAP: [i32; 8] = [32, 32, 64, 128, 256, 512, 1_024, 2_048];
 const LOD_SNAP_HYSTERESIS_DIVISOR: i32 = 8;
 
+pub fn lod_boundary_half_extents_are_valid(extents: [i32; 8]) -> bool {
+    extents
+        .into_iter()
+        .zip(LOD_BOUNDARY_SNAP)
+        .all(|(extent, alignment)| extent > 0 && extent % alignment == 0)
+        && extents.windows(2).all(|pair| pair[0] < pair[1])
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LodOwner {
     Canonical,
@@ -52,10 +60,7 @@ impl GeometricLodFocus {
             "geometric LOD focus must own at least one known surface level"
         );
         assert!(
-            boundary_half_extents
-                .windows(2)
-                .all(|pair| pair[0] > 0 && pair[0] < pair[1])
-                && boundary_half_extents[7] > 0,
+            lod_boundary_half_extents_are_valid(boundary_half_extents),
             "geometric LOD half extents must be positive and strictly increasing"
         );
         Self {

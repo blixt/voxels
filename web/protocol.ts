@@ -70,6 +70,7 @@ export type ToWorker =
       blue: number;
     }
   | { kind: "materialDetail"; requestId: number; enabled: boolean }
+  | { kind: "lodBoundaries"; requestId: number; halfExtentsVoxels: number[] }
   | { kind: "snapshot"; requestId: number }
   | {
       kind: "submitPlace";
@@ -103,6 +104,7 @@ export type FromWorker =
   | { kind: "spectator"; requestId: number; active: boolean }
   | { kind: "diagnosticSky"; requestId: number; active: boolean }
   | { kind: "materialDetail"; requestId: number; accepted: boolean }
+  | { kind: "lodBoundaries"; requestId: number; accepted: boolean }
   | { kind: "submitPlace"; requestId: number; submitted: boolean }
   | { kind: "submitDig"; requestId: number; submitted: boolean }
   | { kind: "inventory"; requestId: number; values: number[] }

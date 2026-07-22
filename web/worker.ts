@@ -207,6 +207,14 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
         accepted: handle?.set_material_detail(message.enabled) ?? false,
       });
       break;
+    case "lodBoundaries":
+      scope.postMessage({
+        kind: "lodBoundaries",
+        requestId: message.requestId,
+        accepted:
+          handle?.set_lod_boundary_half_extents(new Int32Array(message.halfExtentsVoxels)) ?? false,
+      });
+      break;
     case "snapshot":
       scope.postMessage({
         kind: "snapshot",

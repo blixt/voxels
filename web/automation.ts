@@ -242,6 +242,7 @@ export interface EngineAutomationApi {
   spectator(active: boolean): Promise<boolean>;
   diagnosticSky(rgb: readonly [number, number, number] | null): Promise<boolean>;
   materialDetail(enabled: boolean): Promise<boolean>;
+  lodBoundaries(halfExtentsVoxels: readonly number[]): Promise<boolean>;
   look(deltaX: number, deltaY: number): void;
   submitPlace(
     x: number,

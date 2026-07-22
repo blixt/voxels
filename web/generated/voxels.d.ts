@@ -16,6 +16,7 @@ export class EngineHandle {
     report_mission_control_screenshot_result(saved: boolean): void;
     resize(css_width: number, css_height: number, dpr: number): void;
     set_diagnostic_sky(enabled: boolean, red: number, green: number, blue: number): boolean;
+    set_lod_boundary_half_extents(extents: Int32Array): boolean;
     set_material_detail(enabled: boolean): boolean;
     set_reduced_motion(reduced_motion: boolean): void;
     /**
@@ -86,6 +87,7 @@ export interface InitOutput {
     readonly enginehandle_report_mission_control_screenshot_result: (a: number, b: number) => void;
     readonly enginehandle_resize: (a: number, b: number, c: number, d: number) => void;
     readonly enginehandle_set_diagnostic_sky: (a: number, b: number, c: number, d: number, e: number) => number;
+    readonly enginehandle_set_lod_boundary_half_extents: (a: number, b: number, c: number) => number;
     readonly enginehandle_set_material_detail: (a: number, b: number) => number;
     readonly enginehandle_set_reduced_motion: (a: number, b: number) => void;
     readonly enginehandle_set_spectator: (a: number, b: number) => number;

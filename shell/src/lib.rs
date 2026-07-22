@@ -3364,6 +3364,18 @@ mod web {
             true
         }
 
+        pub fn set_lod_boundary_half_extents(&self, extents: Vec<i32>) -> bool {
+            let Ok(extents) = <[i32; 8]>::try_from(extents) else {
+                return false;
+            };
+            self.engine.as_ref().is_some_and(|engine| {
+                engine
+                    .renderer
+                    .borrow_mut()
+                    .set_lod_boundary_half_extents_voxels(extents)
+            })
+        }
+
         /// `[resident, required, playable]` for the browser's canvas-only startup surface.
         pub fn startup_progress(&self) -> Vec<u32> {
             let Some(engine) = self.engine.as_ref() else {

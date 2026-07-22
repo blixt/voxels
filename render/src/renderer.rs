@@ -9,7 +9,7 @@ use crate::environment::{
 };
 use crate::lod::{
     GeometricLodFocus, LOD_BOUNDARY_HALF_EXTENTS, LodOwner, SurfacePatchSelection,
-    incomplete_resident_parents,
+    incomplete_resident_parents, lod_boundary_half_extents_are_valid,
 };
 use crate::material_detail::MaterialDetailGpu;
 use crate::shadow::{
@@ -1598,12 +1598,7 @@ impl Renderer {
         {
             return Err("renderer view distance must be finite and positive".to_owned());
         }
-        if !runtime_config
-            .lod_boundary_half_extents_voxels
-            .windows(2)
-            .all(|pair| pair[0] > 0 && pair[0] < pair[1])
-            || runtime_config.lod_boundary_half_extents_voxels[7] <= 0
-        {
+        if !lod_boundary_half_extents_are_valid(runtime_config.lod_boundary_half_extents_voxels) {
             return Err(
                 "renderer LOD boundary half extents must be positive and strictly increasing"
                     .to_owned(),
@@ -2579,6 +2574,21 @@ impl Renderer {
     /// developer-only control to the player-facing World Lab.
     pub fn set_material_detail_enabled(&mut self, enabled: bool) {
         self.options.material_detail = enabled;
+    }
+
+    /// Replaces the complete geometric ownership policy for controlled fidelity experiments.
+    /// The currently presented plan stays resident until the next exact plan is built.
+    pub fn set_lod_boundary_half_extents_voxels(&mut self, extents: [i32; 8]) -> bool {
+        if !lod_boundary_half_extents_are_valid(extents) {
+            return false;
+        }
+        if self.runtime_config.lod_boundary_half_extents_voxels == extents {
+            return true;
+        }
+        self.runtime_config.lod_boundary_half_extents_voxels = extents;
+        self.geometric_lod_focus = None;
+        self.invalidate_lod_draw_plan(LOD_PLAN_REBUILD_FOCUS);
+        true
     }
 
     pub const fn ui_open(&self) -> bool {

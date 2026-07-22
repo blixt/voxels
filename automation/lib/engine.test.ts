@@ -99,4 +99,14 @@ describe("typed engine client", () => {
     await engine.setDiagnosticSky(null);
     await expect(engine.setDiagnosticSky([256, 0, 255])).rejects.toThrow("diagnostic sky channels");
   });
+
+  it("validates aligned nonlinear LOD boundaries through the Rust boundary", async () => {
+    const engine = new EngineClient(pageReturning([true]));
+    const extents = [128, 320, 640, 1_280, 2_560, 4_096, 8_192, 16_384] as const;
+
+    await engine.setLodBoundaryHalfExtents(extents);
+    await expect(
+      engine.setLodBoundaryHalfExtents([128, 320, 641, 1_280, 2_560, 4_096, 8_192, 16_384]),
+    ).rejects.toThrow("aligned integers");
+  });
 });
