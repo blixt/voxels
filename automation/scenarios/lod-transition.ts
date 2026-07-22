@@ -23,6 +23,7 @@ type BoundaryCentres = readonly Vector2[];
 interface LodTimings {
   readonly frameIntervals: number[];
   readonly gpu: Map<number, { readonly total: number; readonly world: number }>;
+  readonly incompleteTransitionEdges: number[];
 }
 
 function required(values: ArrayLike<number>, index: number, label: string): number {
@@ -70,6 +71,7 @@ function spatialDistance(left: Vector3, right: Vector3): number {
 
 function collectTiming(snapshot: readonly number[], timings: LodTimings): void {
   timings.frameIntervals.push(...frameSamples(snapshot).map((sample) => sample.intervalMs));
+  timings.incompleteTransitionEdges.push(snapshotValue(snapshot, "lodIncompleteTransitionEdges"));
   for (const sample of gpuFrameSamples(snapshot).samples) {
     timings.gpu.set(sample.frameId, {
       total: sample.total,
@@ -81,6 +83,7 @@ function collectTiming(snapshot: readonly number[], timings: LodTimings): void {
 function resetTimings(timings: LodTimings): void {
   timings.frameIntervals.length = 0;
   timings.gpu.clear();
+  timings.incompleteTransitionEdges.length = 0;
 }
 
 async function sampleStablePerformance(
@@ -473,6 +476,7 @@ function summarizePerformance(timings: LodTimings) {
       gpu.map((sample) => sample.total),
       0.95,
     ),
+    maximumIncompleteTransitionEdges: Math.max(0, ...timings.incompleteTransitionEdges),
   };
 }
 
@@ -583,7 +587,11 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
   const options = parseOptions(arguments_);
   const boundaryCoverage = options.mode === "boundary-coverage";
   const watertight = options.mode !== "transition";
-  const timings: LodTimings = { frameIntervals: [], gpu: new Map() };
+  const timings: LodTimings = {
+    frameIntervals: [],
+    gpu: new Map(),
+    incompleteTransitionEdges: [],
+  };
   const world = await startWorldStack(context, {
     fixture: {
       prefix: "voxels-lod-transition-",

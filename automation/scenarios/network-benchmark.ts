@@ -17,7 +17,7 @@ import {
 } from "../lib/world.ts";
 import type { WorldSource } from "../lib/world.ts";
 
-const RESULT_SCHEMA_VERSION = 11;
+const RESULT_SCHEMA_VERSION = 12;
 const FIXTURE_VERSION = 6;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
@@ -79,6 +79,7 @@ interface ViewportSample {
   readonly allLodsReady: boolean;
   readonly presentedLodStrideVoxels: number;
   readonly lodFocusLagVoxels: number;
+  readonly lodIncompleteTransitionEdges: number;
   readonly canonicalImmediateResident: number;
   readonly canonicalImmediateRequired: number;
   readonly canonicalSurfaceCellsResident: number;
@@ -183,6 +184,9 @@ function cruiseWindow(samples: readonly ViewportSample[]) {
     maximumPresentedStrideVoxels: Math.max(
       0,
       ...samples.map((sample) => sample.presentedLodStrideVoxels),
+    ),
+    incompleteTransitionEdges: numericSummary(
+      samples.map((sample) => sample.lodIncompleteTransitionEdges),
     ),
     surfaceQueue: numericSummary(samples.map((sample) => sample.surfaceQueued)),
     surfaceInFlight: numericSummary(samples.map((sample) => sample.surfaceInFlight)),
@@ -298,6 +302,10 @@ function cruiseQuality(
       ...measured.map((sample) => sample.presentedLodStrideVoxels),
     ),
     maximumFocusLagVoxels: Math.max(0, ...measured.map((sample) => sample.lodFocusLagVoxels)),
+    maximumIncompleteTransitionEdges: Math.max(
+      0,
+      ...measured.map((sample) => sample.lodIncompleteTransitionEdges),
+    ),
     longestDegradedPresentationMs: rounded(longestDegradedPresentationMs),
     surfaceQueue: numericSummary(measured.map((sample) => sample.surfaceQueued)),
     surfaceInFlight: numericSummary(measured.map((sample) => sample.surfaceInFlight)),
@@ -586,6 +594,7 @@ async function runScenario({
       allLodsReady: snapshotValue(current, "allLodsReady") === 1,
       presentedLodStrideVoxels: snapshotValue(current, "presentedLodStrideVoxels"),
       lodFocusLagVoxels: snapshotValue(current, "lodFocusLagVoxels"),
+      lodIncompleteTransitionEdges: snapshotValue(current, "lodIncompleteTransitionEdges"),
       canonicalImmediateResident: snapshotValue(current, "canonicalImmediateResident"),
       canonicalImmediateRequired: snapshotValue(current, "canonicalImmediateRequired"),
       canonicalSurfaceCellsResident: snapshotValue(current, "canonicalSurfaceCellsResident"),

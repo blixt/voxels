@@ -18,6 +18,9 @@ describe("engine automation contract", () => {
     expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.cameraX]).toBe("cameraX");
     expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.arenaPages]).toBe("arenaPages");
     expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.targetVoxelZ]).toBe("targetVoxelZ");
+    expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.lodIncompleteTransitionEdges]).toBe(
+      "lodIncompleteTransitionEdges",
+    );
     expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.schemaVersion]).toBe("schemaVersion");
   });
 
