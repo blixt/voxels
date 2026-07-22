@@ -37,6 +37,16 @@ export interface RenderedImageComparison {
     readonly maskDisagreementFraction: number;
     readonly largestDisagreementComponentPixels: number;
     readonly largestDisagreementComponentFraction: number;
+    readonly leftOccupancyPixels: number;
+    readonly rightOccupancyPixels: number;
+    readonly leftOnlyOccupancyPixels: number;
+    readonly leftOnlyOccupancyFraction: number;
+    readonly largestLeftOnlyComponentPixels: number;
+    readonly largestLeftOnlyComponentFraction: number;
+    readonly rightOnlyOccupancyPixels: number;
+    readonly rightOnlyOccupancyFraction: number;
+    readonly largestRightOnlyComponentPixels: number;
+    readonly largestRightOnlyComponentFraction: number;
     readonly occupancyIntersectionPixels: number;
     readonly occupancyUnionPixels: number;
     readonly occupancyJaccard: number;
@@ -257,7 +267,13 @@ export async function compareRenderedImages(
       let geometry: RenderedImageComparison["diagnosticGeometry"] = null;
       if (compareGeometry) {
         const disagreement = new Uint8Array(sampledPixels);
+        const leftOnly = new Uint8Array(sampledPixels);
+        const rightOnly = new Uint8Array(sampledPixels);
         let maskDisagreementPixels = 0;
+        let leftOccupancyPixels = 0;
+        let rightOccupancyPixels = 0;
+        let leftOnlyOccupancyPixels = 0;
+        let rightOnlyOccupancyPixels = 0;
         let occupancyIntersectionPixels = 0;
         let occupancyUnionPixels = 0;
         for (let y = roi.y0; y < roi.y1; y += 1) {
@@ -265,50 +281,73 @@ export async function compareRenderedImages(
             const source = (x + y * leftImage.width) * 4;
             const leftOccupied = !isDiagnosticSky(leftImage.pixels, source);
             const rightOccupied = !isDiagnosticSky(rightImage.pixels, source);
+            if (leftOccupied) leftOccupancyPixels += 1;
+            if (rightOccupied) rightOccupancyPixels += 1;
             if (leftOccupied && rightOccupied) occupancyIntersectionPixels += 1;
             if (leftOccupied || rightOccupied) occupancyUnionPixels += 1;
             if (leftOccupied === rightOccupied) continue;
-            disagreement[x - roi.x0 + (y - roi.y0) * width] = 1;
+            const target = x - roi.x0 + (y - roi.y0) * width;
+            disagreement[target] = 1;
+            if (leftOccupied) {
+              leftOnly[target] = 1;
+              leftOnlyOccupancyPixels += 1;
+            } else {
+              rightOnly[target] = 1;
+              rightOnlyOccupancyPixels += 1;
+            }
             maskDisagreementPixels += 1;
           }
         }
-        const visited = new Uint8Array(disagreement.length);
-        let largestDisagreementComponentPixels = 0;
-        for (let start = 0; start < disagreement.length; start += 1) {
-          if (disagreement[start] === 0 || visited[start] !== 0) continue;
-          const stack = [start];
-          visited[start] = 1;
-          let componentPixels = 0;
-          while (stack.length > 0) {
-            const current = stack.pop();
-            if (current === undefined) break;
-            componentPixels += 1;
-            const x = current % width;
-            const y = Math.floor(current / width);
-            const neighbors = [
-              x > 0 ? current - 1 : -1,
-              x + 1 < width ? current + 1 : -1,
-              y > 0 ? current - width : -1,
-              y + 1 < height ? current + width : -1,
-            ];
-            for (const neighbor of neighbors) {
-              if (neighbor < 0 || disagreement[neighbor] === 0 || visited[neighbor] !== 0) {
-                continue;
+        const largestComponent = (mask: Uint8Array): number => {
+          const visited = new Uint8Array(mask.length);
+          let largest = 0;
+          for (let start = 0; start < mask.length; start += 1) {
+            if (mask[start] === 0 || visited[start] !== 0) continue;
+            const stack = [start];
+            visited[start] = 1;
+            let componentPixels = 0;
+            while (stack.length > 0) {
+              const current = stack.pop();
+              if (current === undefined) break;
+              componentPixels += 1;
+              const x = current % width;
+              const y = Math.floor(current / width);
+              const neighbors = [
+                x > 0 ? current - 1 : -1,
+                x + 1 < width ? current + 1 : -1,
+                y > 0 ? current - width : -1,
+                y + 1 < height ? current + width : -1,
+              ];
+              for (const neighbor of neighbors) {
+                if (neighbor < 0 || mask[neighbor] === 0 || visited[neighbor] !== 0) continue;
+                visited[neighbor] = 1;
+                stack.push(neighbor);
               }
-              visited[neighbor] = 1;
-              stack.push(neighbor);
             }
+            largest = Math.max(largest, componentPixels);
           }
-          largestDisagreementComponentPixels = Math.max(
-            largestDisagreementComponentPixels,
-            componentPixels,
-          );
-        }
+          return largest;
+        };
+        const largestDisagreementComponentPixels = largestComponent(disagreement);
+        const largestLeftOnlyComponentPixels = largestComponent(leftOnly);
+        const largestRightOnlyComponentPixels = largestComponent(rightOnly);
         geometry = {
           maskDisagreementPixels,
           maskDisagreementFraction: maskDisagreementPixels / sampledPixels,
           largestDisagreementComponentPixels,
           largestDisagreementComponentFraction: largestDisagreementComponentPixels / sampledPixels,
+          leftOccupancyPixels,
+          rightOccupancyPixels,
+          leftOnlyOccupancyPixels,
+          leftOnlyOccupancyFraction:
+            leftOccupancyPixels === 0 ? 0 : leftOnlyOccupancyPixels / leftOccupancyPixels,
+          largestLeftOnlyComponentPixels,
+          largestLeftOnlyComponentFraction: largestLeftOnlyComponentPixels / sampledPixels,
+          rightOnlyOccupancyPixels,
+          rightOnlyOccupancyFraction:
+            rightOccupancyPixels === 0 ? 0 : rightOnlyOccupancyPixels / rightOccupancyPixels,
+          largestRightOnlyComponentPixels,
+          largestRightOnlyComponentFraction: largestRightOnlyComponentPixels / sampledPixels,
           occupancyIntersectionPixels,
           occupancyUnionPixels,
           occupancyJaccard:

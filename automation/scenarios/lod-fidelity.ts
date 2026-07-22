@@ -297,6 +297,19 @@ function worstHeading(comparisons: readonly ComparedHeading[]) {
       (entry) => entry.geometry.diagnosticGeometry?.largestDisagreementComponentFraction ?? 1,
     ),
   );
+  // The candidate is the left image and uniform-150 reference is the right image. Keep this
+  // asymmetric metric separate: a disappearing tree crown, wall, or overhang is more serious than
+  // an equally sized silhouette shift that merely adds candidate geometry.
+  const referenceGeometryMissingFraction = Math.max(
+    ...comparisons.map(
+      (entry) => entry.geometry.diagnosticGeometry?.rightOnlyOccupancyFraction ?? 1,
+    ),
+  );
+  const largestMissingComponentFraction = Math.max(
+    ...comparisons.map(
+      (entry) => entry.geometry.diagnosticGeometry?.largestRightOnlyComponentFraction ?? 1,
+    ),
+  );
   const diagnosticSkyPixels = Math.max(
     ...comparisons.map((entry) => entry.sky.diagnosticSkyPixels),
   );
@@ -305,6 +318,8 @@ function worstHeading(comparisons: readonly ComparedHeading[]) {
     appearanceLumaDelta,
     maskDisagreementFraction,
     largestMaskComponentFraction,
+    referenceGeometryMissingFraction,
+    largestMissingComponentFraction,
     diagnosticSkyPixels,
   };
 }
@@ -430,6 +445,7 @@ async function runLodFidelity(context: ScenarioContext, arguments_: readonly str
       result.worst.diagnosticSkyPixels === 0 &&
       result.worst.appearanceSsim >= 0.9995 &&
       result.worst.maskDisagreementFraction <= 0.00025 &&
+      result.worst.referenceGeometryMissingFraction <= 0.0001 &&
       result.performance.frameP95Ms <= 12 &&
       result.performance.totalGpuP95Ms <= 7.5,
   );
@@ -473,6 +489,7 @@ async function runLodFidelity(context: ScenarioContext, arguments_: readonly str
     criteria: {
       minimumWorstHeadingSsim: 0.9995,
       maximumMaskDisagreementFraction: 0.00025,
+      maximumReferenceGeometryMissingFraction: 0.0001,
       maximumFrameP95Ms: 12,
       maximumTotalGpuP95Ms: 7.5,
       requireZeroDiagnosticSkyPixelsInGroundRoi: true,
