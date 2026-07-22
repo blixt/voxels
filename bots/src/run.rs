@@ -8,6 +8,7 @@ use futures_util::{SinkExt, StreamExt, future::join_all};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
@@ -28,7 +29,7 @@ use voxels_world::protocol::{
 };
 use voxels_world::{
     ChunkCoord, Material, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
-    WorldProductPriority,
+    WorldProductPriority, WorldSourceIdentityHash,
 };
 
 const REPORT_SCHEMA_VERSION: u32 = 4;
@@ -340,6 +341,7 @@ struct BotRuntime {
     world: BotSocket,
     presence: BotSocket,
     connection_id: u64,
+    source_identity_hash: WorldSourceIdentityHash,
     edit_session_id: voxels_world::protocol::EditSessionId,
     camera: CameraState,
     inventory: MaterialInventory,
@@ -495,6 +497,7 @@ impl BotRuntime {
             world: connection.world,
             presence: connection.presence,
             connection_id: connection.opened.connection_id,
+            source_identity_hash: connection.opened.manifest.source_identity_hash(),
             edit_session_id: connection.opened.edit_session_id,
             camera,
             inventory: connection.opened.inventory,
@@ -764,15 +767,23 @@ impl BotRuntime {
                 self.report
                     .chunk_latency_ms
                     .push(pending.submitted.elapsed().as_secs_f64() * 1_000.0);
+                let returned = result
+                    .items
+                    .iter()
+                    .map(|item| item.coord)
+                    .collect::<Vec<_>>();
+                if let Err(error) = validate_result_envelope(
+                    "chunk",
+                    self.source_identity_hash,
+                    result.source_identity_hash,
+                    &pending.coords,
+                    &returned,
+                ) {
+                    self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
+                    self.record_error(format!("request {}: {error}", result.request_id));
+                    return Ok(());
+                }
                 for item in result.items {
-                    if !pending.coords.contains(&item.coord) {
-                        self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
-                        self.record_error(format!(
-                            "request {} returned unrequested chunk {:?}",
-                            result.request_id, item.coord
-                        ));
-                        continue;
-                    }
                     self.report.chunk_results = self.report.chunk_results.saturating_add(1);
                     match item.result {
                         Ok(snapshot)
@@ -796,15 +807,23 @@ impl BotRuntime {
                 self.report
                     .surface_latency_ms
                     .push(pending.submitted.elapsed().as_secs_f64() * 1_000.0);
+                let returned = result
+                    .items
+                    .iter()
+                    .map(|item| item.coord)
+                    .collect::<Vec<_>>();
+                if let Err(error) = validate_result_envelope(
+                    "surface",
+                    self.source_identity_hash,
+                    result.source_identity_hash,
+                    &[pending.coord],
+                    &returned,
+                ) {
+                    self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
+                    self.record_error(format!("request {}: {error}", result.request_id));
+                    return Ok(());
+                }
                 for item in result.items {
-                    if item.coord != pending.coord {
-                        self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
-                        self.record_error(format!(
-                            "request {} returned unrequested surface {:?}",
-                            result.request_id, item.coord
-                        ));
-                        continue;
-                    }
                     self.report.surface_results = self.report.surface_results.saturating_add(1);
                     match item.result {
                         Ok(_)
@@ -1146,6 +1165,30 @@ fn is_edit_conflict_rejection(message: &str) -> bool {
     message == "placement volume is occupied or obstructed"
 }
 
+fn validate_result_envelope<Coord: Copy + Eq + Hash>(
+    label: &str,
+    expected_identity: WorldSourceIdentityHash,
+    returned_identity: WorldSourceIdentityHash,
+    expected_coords: &[Coord],
+    returned_coords: &[Coord],
+) -> Result<()> {
+    if returned_identity != expected_identity {
+        bail!("{label} result source identity differs from WorldOpened");
+    }
+    if returned_coords.len() != expected_coords.len() {
+        bail!("{label} result item count differs from request");
+    }
+    let expected = expected_coords.iter().copied().collect::<HashSet<_>>();
+    let returned = returned_coords.iter().copied().collect::<HashSet<_>>();
+    if expected.len() != expected_coords.len()
+        || returned.len() != returned_coords.len()
+        || returned != expected
+    {
+        bail!("{label} result keys differ from request");
+    }
+    Ok(())
+}
+
 fn position_voxel(position: Vec3) -> VoxelCoord {
     VoxelCoord::new(
         (position.x / VOXEL_SIZE_METRES).floor() as i32,
@@ -1373,6 +1416,39 @@ mod tests {
         assert!(!is_edit_conflict_rejection(
             "world generator stopped unexpectedly"
         ));
+    }
+
+    #[test]
+    fn product_results_match_world_identity_and_exact_requested_keys() -> Result<()> {
+        let identity = WorldSourceIdentityHash::from_bytes([3; 32]);
+        let changed_identity = WorldSourceIdentityHash::from_bytes([4; 32]);
+        let first = ChunkCoord::new(1, 2, 3);
+        let second = ChunkCoord::new(4, 5, 6);
+        let expected = [first, second];
+
+        validate_result_envelope("chunk", identity, identity, &expected, &[second, first])?;
+        assert!(
+            validate_result_envelope("chunk", identity, changed_identity, &expected, &expected)
+                .is_err()
+        );
+        assert!(
+            validate_result_envelope("chunk", identity, identity, &expected, &[first]).is_err()
+        );
+        assert!(
+            validate_result_envelope("chunk", identity, identity, &expected, &[first, first])
+                .is_err()
+        );
+        assert!(
+            validate_result_envelope(
+                "chunk",
+                identity,
+                identity,
+                &expected,
+                &[first, ChunkCoord::new(7, 8, 9)],
+            )
+            .is_err()
+        );
+        Ok(())
     }
 
     #[test]

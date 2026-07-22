@@ -9,8 +9,8 @@ use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use voxels_world::protocol::{
-    OpenPresence, OpenWorld, PlayerIdentity, WorldOpened, decode_presence_opened,
-    decode_world_opened, encode_open_presence, encode_open_world,
+    OpenPresence, OpenWorld, PlayerIdentity, WorldCapabilities, WorldOpened,
+    decode_presence_opened, decode_world_opened, encode_open_presence, encode_open_world,
 };
 
 pub type BotSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -38,13 +38,27 @@ pub async fn connect_bot(
         .context("connect world socket")?;
     let open_world = encode_open_world(&OpenWorld {
         max_in_flight_batches: 16,
-        identity,
+        identity: identity.clone(),
     })?;
     traffic.sent(&open_world)?;
     world.send(Message::Binary(open_world.into())).await?;
     let opened_bytes = next_binary(&mut world).await?;
     traffic.received(&opened_bytes)?;
     let opened = decode_world_opened(&opened_bytes)?;
+    opened
+        .manifest
+        .validate()
+        .context("server returned an invalid world manifest")?;
+    if opened.identity != identity {
+        bail!("world server echoed a different player identity");
+    }
+    let required_capabilities = WorldCapabilities::CANONICAL_CHUNKS
+        .union(WorldCapabilities::SURFACE_LOD)
+        .union(WorldCapabilities::PLAYER_PRESENCE)
+        .union(WorldCapabilities::SERVER_EDITS);
+    if !opened.capabilities.contains(required_capabilities) {
+        bail!("world server lacks a capability required by native bots");
+    }
 
     let mut presence = connect_socket(presence_url, origin, subprotocol, auth_token)
         .await
