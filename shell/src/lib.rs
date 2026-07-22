@@ -998,7 +998,7 @@ mod web {
     );
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
     const SURFACE_HINT_VERTICAL_MARGIN_CHUNKS: i32 = 1;
-    const INTERACTIVE_SURFACE_BATCH: usize = 4;
+    const INTERACTIVE_SURFACE_BATCH: usize = 8;
     const BACKGROUND_SURFACE_BATCH: usize = 2;
     const BACKGROUND_SURFACE_BATCHES_IN_FLIGHT: usize = 4;
     #[derive(Clone, Copy, Debug)]
