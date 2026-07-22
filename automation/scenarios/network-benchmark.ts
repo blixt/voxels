@@ -408,6 +408,7 @@ async function runScenario({
   action,
   errors,
   timeoutMs = SCENARIO_TIMEOUT_MS,
+  waitForSettlement = true,
 }: {
   readonly name: string;
   readonly engine: EngineClient;
@@ -415,6 +416,7 @@ async function runScenario({
   readonly action: (context: BenchmarkActionContext) => unknown;
   readonly errors: readonly BrowserFailure[];
   readonly timeoutMs?: number;
+  readonly waitForSettlement?: boolean;
 }) {
   link.reset();
   const started = performance.now();
@@ -442,6 +444,7 @@ async function runScenario({
     });
   const samples: ViewportSample[] = [];
   let consecutiveReady = 0;
+  let postActionSamples = 0;
   while (performance.now() - started < timeoutMs) {
     if (actionError) throw actionError;
     await sleep(SAMPLE_INTERVAL_MS);
@@ -487,11 +490,17 @@ async function runScenario({
         ? consecutiveReady + 1
         : 1
       : 0;
-    if (consecutiveReady >= READY_STABLE_SAMPLES) break;
+    if (actionFinishedMs !== null) postActionSamples += 1;
+    if (
+      (waitForSettlement && consecutiveReady >= READY_STABLE_SAMPLES) ||
+      (!waitForSettlement && postActionSamples >= READY_STABLE_SAMPLES)
+    ) {
+      break;
+    }
   }
   await actionPromise;
   if (actionError) throw actionError;
-  if (consecutiveReady < READY_STABLE_SAMPLES) {
+  if (waitForSettlement && consecutiveReady < READY_STABLE_SAMPLES) {
     throw new Error(
       `${name} did not reach complete LOD coverage: ${JSON.stringify(samples.at(-1))}`,
     );
@@ -504,16 +513,20 @@ async function runScenario({
   const measurementStartedMs = markedMeasurementStartedMs ?? actionFinishedMs;
   if (measurementStartedMs === null) throw new Error(`${name} action never started measurement`);
   const final = samples.at(-1);
-  const fullCoverage = samples.at(-READY_STABLE_SAMPLES);
-  const informed = firstPermanentlyFinalSample(samples, measurementStartedMs);
-  const interactive = samples.find(
-    (sample) => sample.elapsedMs >= measurementStartedMs && sample.interactiveLodsReady,
-  );
+  const fullCoverage = waitForSettlement ? samples.at(-READY_STABLE_SAMPLES) : samples.at(-1);
+  const informed = waitForSettlement
+    ? firstPermanentlyFinalSample(samples, measurementStartedMs)
+    : samples.at(-1);
+  const interactive =
+    samples.find(
+      (sample) => sample.elapsedMs >= measurementStartedMs && sample.interactiveLodsReady,
+    ) ?? (waitForSettlement ? undefined : samples.at(-1));
   const firstUseful = samples.find((sample) => sample.visibleChunks > 0 && sample.quads > 0);
   if (
     final === undefined ||
     fullCoverage === undefined ||
     informed === null ||
+    informed === undefined ||
     interactive === undefined ||
     actionFinishedMs === null
   ) {
@@ -544,6 +557,7 @@ async function runScenario({
   };
   return {
     name,
+    settled: waitForSettlement && consecutiveReady >= READY_STABLE_SAMPLES,
     action: actionResult ?? {},
     actionFinishedMs: rounded(actionFinishedMs),
     measurementStartedFromStartMs: rounded(measurementStartedMs),
@@ -1014,6 +1028,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
           link,
           errors: viewport.failures,
           timeoutMs: Math.max(SCENARIO_TIMEOUT_MS, (flightSeconds + 45) * 1_000),
+          waitForSettlement: false,
           action: (context) => flyAtCruiseSpeed(page, engine, flightSeconds, context),
         }),
       );
