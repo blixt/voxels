@@ -2022,6 +2022,79 @@ mod tests {
     }
 
     #[test]
+    fn excavated_diffusion_crater_exposes_strata_at_every_surface_lod() {
+        let source = diffusion_heightfield();
+        let reported_position = [2_275, 4_520];
+        for level in SurfaceLodLevel::ALL {
+            let coord =
+                SurfaceTileCoord::containing(level, reported_position[0], reported_position[1]);
+            let stride = coord.stride_voxels();
+            let origin = coord.voxel_origin();
+            let cell = [
+                (reported_position[0] - origin[0]).div_euclid(stride),
+                (reported_position[1] - origin[1]).div_euclid(stride),
+            ];
+            let crater = [
+                origin[0] + cell[0] * stride + stride / 2,
+                origin[1] + cell[1] * stride + stride / 2,
+            ];
+            let sample_region = source
+                .prepare_region(WorldProductPriority::VisibleSurface, crater, [1, 1], 1)
+                .expect("reported-region material sample");
+            let surface = source
+                .surface_sample_from_region(&sample_region, crater[0], crater[1])
+                .expect("reported-region surface");
+            let mut edits = EditMap::default();
+            for y in surface.height.saturating_sub(11)..=surface.height {
+                let generated = source
+                    .material_at(&sample_region, crater[0], y, crater[1])
+                    .expect("reported-region stratum");
+                edits.set_against_generated(
+                    VoxelCoord::new(crater[0], y, crater[1]),
+                    Material::Air,
+                    generated,
+                );
+            }
+            assert_eq!(edits.len(), 12);
+
+            let tile = source
+                .generate_edited_surface_tile(&edits, coord)
+                .expect("edited reported-region diffusion surface tile")
+                .terrain;
+            let mut exposed_substrate = BTreeSet::new();
+            for quad in tile
+                .quads
+                .iter()
+                .chain(tile.morph_closures.iter().map(|closure| &closure.quad))
+                .filter(|quad| quad.face != crate::mesh::FACE_POS_Y)
+            {
+                if matches!(
+                    quad.material,
+                    Material::Grass | Material::Moss | Material::Snow
+                ) {
+                    assert_eq!(
+                        quad.extent[1], 1,
+                        "{level:?} stretched {:?} into the excavated opening at {:?}",
+                        quad.material, quad.origin
+                    );
+                }
+                if matches!(
+                    quad.material,
+                    Material::Dirt | Material::Stone | Material::Basalt | Material::Limestone
+                ) && (quad.origin[0] - crater[0]).abs() <= stride * 2
+                    && (quad.origin[2] - crater[1]).abs() <= stride * 2
+                {
+                    exposed_substrate.insert(quad.material.id());
+                }
+            }
+            assert!(
+                !exposed_substrate.is_empty(),
+                "{level:?} crater must expose a nearby non-surface stratum"
+            );
+        }
+    }
+
+    #[test]
     fn deepest_voxel_below_a_high_provider_surface_uses_deep_geology() {
         let extreme = column(i32::MAX - 127, 0.5, 0.45, 0.4, 0.0);
         assert_eq!(material_for_column(&extreme, 0, i32::MIN), Material::Stone);
