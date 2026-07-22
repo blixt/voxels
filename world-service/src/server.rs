@@ -887,9 +887,18 @@ struct SessionRequests {
     max_in_flight: usize,
     closed: AtomicBool,
     in_flight: Mutex<HashMap<u64, Arc<AtomicBool>>>,
-    generation_permits: Arc<Semaphore>,
+    generation_permits: Arc<PriorityGenerationLimiter>,
     collision_generation_permits: Arc<Semaphore>,
     outbound_bytes: Arc<Semaphore>,
+}
+
+enum SessionGenerationPermit {
+    Collision {
+        _permit: OwnedSemaphorePermit,
+    },
+    Shared {
+        _permit: crate::generation_limiter::PriorityGenerationPermit,
+    },
 }
 
 impl SessionRequests {
@@ -903,7 +912,7 @@ impl SessionRequests {
             max_in_flight: usize::from(max_in_flight),
             closed: AtomicBool::new(false),
             in_flight: Mutex::new(HashMap::new()),
-            generation_permits: Arc::new(Semaphore::new(usize::from(generation_workers))),
+            generation_permits: PriorityGenerationLimiter::new(usize::from(generation_workers)),
             collision_generation_permits: Arc::new(Semaphore::new(usize::from(
                 collision_generation_workers,
             ))),
@@ -914,13 +923,18 @@ impl SessionRequests {
     async fn acquire_generation(
         self: &Arc<Self>,
         priority: WorldProductPriority,
-    ) -> Result<OwnedSemaphorePermit, tokio::sync::AcquireError> {
-        let permits = if priority == WorldProductPriority::CollisionCritical {
-            &self.collision_generation_permits
+    ) -> Option<SessionGenerationPermit> {
+        if priority == WorldProductPriority::CollisionCritical {
+            Arc::clone(&self.collision_generation_permits)
+                .acquire_owned()
+                .await
+                .ok()
+                .map(|permit| SessionGenerationPermit::Collision { _permit: permit })
         } else {
-            &self.generation_permits
-        };
-        Arc::clone(permits).acquire_owned().await
+            Some(SessionGenerationPermit::Shared {
+                _permit: self.generation_permits.acquire(priority).await,
+            })
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<u64, Arc<AtomicBool>>> {
@@ -2645,6 +2659,14 @@ async fn run_generation_dispatcher(
                     jobs_open = false;
                     continue;
                 };
+                // A cancel releases the negotiated request window immediately. Avoid even cache
+                // and single-flight bookkeeping when the dispatcher has not started that request
+                // yet; generation already shared by another live batch remains useful and is not
+                // interrupted.
+                if job.tracked.is_cancelled() {
+                    job.tracked.finish();
+                    continue;
+                }
                 let product_keys = job.request.product_keys();
                 let priority = job.request.priority();
                 let session = Arc::clone(&job.tracked.session);
@@ -2779,7 +2801,7 @@ async fn generate_single_flight_products(
     let _session_permit = session
         .acquire_generation(priority)
         .await
-        .map_err(|_| "world session generation limiter stopped".to_owned())?;
+        .ok_or_else(|| "world session generation limiter stopped".to_owned())?;
     let _global_permit = generation_limiter.acquire(priority).await;
     tokio::task::spawn_blocking(move || match request {
         GenerationRequest::Chunks { request, snapshot } => {
@@ -2855,8 +2877,8 @@ async fn assemble_and_deliver_generation_batch(
     let priority = batch.job.request.priority();
     let session = Arc::clone(&batch.job.tracked.session);
     let session_permit = match session.acquire_generation(priority).await {
-        Ok(permit) => permit,
-        Err(_) => {
+        Some(permit) => permit,
+        None => {
             batch.job.tracked.finish();
             return;
         }
@@ -3532,6 +3554,71 @@ mod tests {
         .await
         .expect("collision lane must reopen")
         .expect("session limiter must remain open");
+    }
+
+    #[tokio::test]
+    async fn each_session_prioritizes_current_surface_over_ordinary_generation() {
+        let session = Arc::new(SessionRequests::new(16, 1, 1, 1_024));
+        let held = session
+            .acquire_generation(WorldProductPriority::Prefetch)
+            .await
+            .expect("held generation permit");
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let ordinary_session = Arc::clone(&session);
+        let ordinary_order = Arc::clone(&order);
+        let ordinary = tokio::spawn(async move {
+            let _permit = ordinary_session
+                .acquire_generation(WorldProductPriority::VisibleSurface)
+                .await
+                .expect("ordinary generation permit");
+            ordinary_order
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push("ordinary");
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while session.generation_permits.waiting().2 != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ordinary waiter must register");
+
+        let immediate_session = Arc::clone(&session);
+        let immediate_order = Arc::clone(&order);
+        let immediate = tokio::spawn(async move {
+            let _permit = immediate_session
+                .acquire_generation(WorldProductPriority::ImmediateSurface)
+                .await
+                .expect("immediate generation permit");
+            immediate_order
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push("immediate");
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while session.generation_permits.waiting().1 != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("immediate waiter must register");
+
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            immediate.await.expect("immediate waiter");
+            ordinary.await.expect("ordinary waiter");
+        })
+        .await
+        .expect("session generation waiters must complete");
+
+        assert_eq!(
+            *order
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ["immediate", "ordinary"]
+        );
     }
 
     fn test_config() -> WorldServiceConfig {
