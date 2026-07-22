@@ -2145,10 +2145,10 @@ mod web {
         }
 
         fn drain_remote_generation(&self) {
-            for completion in self.remote.drain_completions() {
+            if let Some(completion) = self.remote.next_completion() {
                 self.accept_remote_completion(completion);
             }
-            for completion in self.remote.drain_surface_completions() {
+            if let Some(completion) = self.remote.next_surface_completion() {
                 self.accept_remote_surface_completion(completion);
             }
         }
@@ -2444,9 +2444,16 @@ mod web {
                 world_to_surface_tile(position, SurfaceLodLevel::ALL[index])
             });
             if self.surface_focus.get() != Some(focus) {
-                self.surface_focus.set(Some(focus));
+                let previous_focus = self.surface_focus.replace(Some(focus));
+                let changed_levels: [bool; SURFACE_LOD_LEVEL_COUNT] =
+                    std::array::from_fn(|index| {
+                        previous_focus.is_none_or(|previous| previous[index] != focus[index])
+                    });
                 let mut desired = BTreeSet::new();
                 for (index, level) in SurfaceLodLevel::ALL.into_iter().enumerate() {
+                    if !changed_levels[index] {
+                        continue;
+                    }
                     let radius = self.config.surface_load_radius_tiles[index];
                     let level_focus = focus[index];
                     for dz in -radius..=radius {
@@ -2469,6 +2476,9 @@ mod web {
                     .copied()
                     .filter(|coord| {
                         let index = coord.level.index() as usize;
+                        if !changed_levels[index] {
+                            return false;
+                        }
                         let retain = self.config.surface_load_radius_tiles[index]
                             + self.config.surface_retain_margin_tiles;
                         let dx = coord.x - focus[index].x;
@@ -2482,14 +2492,14 @@ mod web {
                     let mut accepted = self.surface_accepted_edit_revisions.borrow_mut();
                     let mut dirty = self.surface_dirty.borrow_mut();
                     let mut renderer = self.renderer.borrow_mut();
-                    for coord in evicted {
+                    for &coord in &evicted {
                         resident.remove(&coord);
                         self.surface_chunk_hints.borrow_mut().remove(&coord);
                         revisions.evict(coord);
                         accepted.remove(&coord);
                         dirty.remove(&coord);
-                        renderer.remove_surface_tile(coord);
                     }
+                    renderer.remove_surface_tiles(evicted);
                 }
 
                 // Edits may have dirtied a tile just before a focus jump. Keep replacement work only
@@ -2497,15 +2507,21 @@ mod web {
                 // samples the authoritative edit map and does not need a stale dirty marker.
                 {
                     let resident = self.surface_resident.borrow();
-                    self.surface_dirty
-                        .borrow_mut()
-                        .retain(|coord| resident.contains(coord) || desired.contains(coord));
+                    self.surface_dirty.borrow_mut().retain(|coord| {
+                        let index = coord.level.index() as usize;
+                        !changed_levels[index]
+                            || resident.contains(coord)
+                            || desired.contains(coord)
+                    });
                 }
 
                 let resident = self.surface_resident.borrow();
                 let mut revisions = self.surface_revisions.borrow_mut();
                 let mut dirty = self.surface_dirty.borrow_mut();
-                revisions.retain(|coord| resident.contains(&coord) || desired.contains(&coord));
+                revisions.retain(|coord| {
+                    let index = coord.level.index() as usize;
+                    !changed_levels[index] || resident.contains(&coord) || desired.contains(&coord)
+                });
                 let mut candidates = Vec::new();
                 for coord in desired {
                     match revisions.prepare_focus(coord) {
@@ -2526,6 +2542,9 @@ mod web {
                 drop(revisions);
                 drop(resident);
                 let initializing_hierarchy = !self.full_lods_initialized.get();
+                let mut queue = self.surface_queue.borrow_mut();
+                queue.retain(|coord| !changed_levels[coord.level.index() as usize]);
+                candidates.extend(queue.iter().copied());
                 candidates.sort_by_key(|coord| {
                     let index = coord.level.index() as usize;
                     let dx = i128::from(coord.x) - i128::from(focus[index].x);
@@ -2542,7 +2561,6 @@ mod web {
                     };
                     (background, level_order, dx * dx + dz * dz, coord.z, coord.x)
                 });
-                let mut queue = self.surface_queue.borrow_mut();
                 queue.clear();
                 queue.extend(candidates);
             }
@@ -2592,6 +2610,7 @@ mod web {
             }
 
             let mut tickets = Vec::with_capacity(batch_limit);
+            let mut replacement_batch = None;
             while tickets.len() < batch_limit {
                 let position = self.surface_queue.borrow().iter().position(|coord| {
                     (usize::from(coord.level.index()) >= INTERACTIVE_SURFACE_LOD_LEVELS)
@@ -2600,15 +2619,21 @@ mod web {
                 let Some(position) = position else {
                     break;
                 };
-                let Some(coord) = self.surface_queue.borrow_mut().remove(position) else {
+                let Some(coord) = self.surface_queue.borrow().get(position).copied() else {
                     break;
                 };
-                if self.surface_in_flight.borrow().contains(&coord)
-                    || (self.surface_resident.borrow().contains(&coord)
-                        && !self.surface_dirty.borrow().contains(&coord))
-                {
+                let resident = self.surface_resident.borrow().contains(&coord);
+                let dirty = self.surface_dirty.borrow().contains(&coord);
+                if self.surface_in_flight.borrow().contains(&coord) || (resident && !dirty) {
+                    self.surface_queue.borrow_mut().remove(position);
                     continue;
                 }
+                let replacement = resident && dirty;
+                if replacement_batch.is_some_and(|batch| batch != replacement) {
+                    break;
+                }
+                replacement_batch = Some(replacement);
+                self.surface_queue.borrow_mut().remove(position);
                 let revision = {
                     let revisions = self.surface_revisions.borrow();
                     revisions
@@ -2616,6 +2641,12 @@ mod web {
                         .unwrap_or_else(|| revisions.epoch())
                 };
                 tickets.push(RemoteSurfaceTicket { coord, revision });
+                // Replacing several visible tiles in one completion concentrates their GPU upload,
+                // profile reconciliation, and connector rebuild into a single long frame. New
+                // coverage still batches for startup throughput; edits publish one tile per frame.
+                if replacement {
+                    break;
+                }
             }
             if tickets.is_empty() {
                 return;

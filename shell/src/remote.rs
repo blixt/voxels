@@ -212,8 +212,8 @@ impl RemoteWorldClient {
         self.inner.cancel(request_id)
     }
 
-    pub fn drain_completions(&self) -> Vec<RemoteChunkCompletion> {
-        self.inner.completions.borrow_mut().drain(..).collect()
+    pub fn next_completion(&self) -> Option<RemoteChunkCompletion> {
+        self.inner.completions.borrow_mut().pop_front()
     }
 
     pub fn submit_surface_batch(
@@ -224,12 +224,8 @@ impl RemoteWorldClient {
         self.inner.send_surface_request(priority, tickets)
     }
 
-    pub fn drain_surface_completions(&self) -> Vec<RemoteSurfaceCompletion> {
-        self.inner
-            .surface_completions
-            .borrow_mut()
-            .drain(..)
-            .collect()
+    pub fn next_surface_completion(&self) -> Option<RemoteSurfaceCompletion> {
+        self.inner.surface_completions.borrow_mut().pop_front()
     }
 
     pub fn submit_edit(&self, action: EditAction) -> Result<RemoteRequestId, RemoteWorldError> {

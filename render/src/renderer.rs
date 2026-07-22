@@ -3163,10 +3163,27 @@ impl Renderer {
     }
 
     pub fn remove_surface_tile(&mut self, coord: SurfaceTileCoord) {
-        self.remove_mesh((coord.level.index() + 1, coord.x, 0, coord.z));
+        self.remove_surface_tiles([coord]);
+    }
+
+    pub fn remove_surface_tiles(&mut self, coords: impl IntoIterator<Item = SurfaceTileCoord>) {
+        let coords = coords.into_iter().collect::<HashSet<_>>();
+        if coords.is_empty() {
+            return;
+        }
+        for coord in &coords {
+            self.remove_mesh((coord.level.index() + 1, coord.x, 0, coord.z));
+        }
         self.surface_patch_profiles
-            .retain(|patch, _| !surface_patch_belongs_to_tile(*patch, coord));
-        self.replace_surface_patch_residency(coord, HashSet::new());
+            .retain(|patch, _| !coords.contains(&surface_tile_for_patch(*patch)));
+        let previous_len = self.surface_patch_residency.len();
+        self.surface_patch_residency
+            .retain(|patch| !coords.contains(&surface_tile_for_patch(*patch)));
+        if self.surface_patch_residency.len() != previous_len {
+            self.surface_incomplete_parents =
+                incomplete_resident_parents(&self.surface_patch_residency);
+            self.invalidate_lod_draw_plan(LOD_PLAN_REBUILD_SURFACE_RESIDENCY);
+        }
     }
 
     fn remove_canonical_surface_profile(&mut self, coord: ChunkCoord) {
@@ -5976,9 +5993,15 @@ fn sampled_surface_slope(
 }
 
 fn surface_patch_belongs_to_tile(patch: SurfacePatchId, tile: SurfaceTileCoord) -> bool {
-    patch.level == tile.level
-        && patch.x.div_euclid(SURFACE_PATCHES_PER_TILE_EDGE) == tile.x
-        && patch.z.div_euclid(SURFACE_PATCHES_PER_TILE_EDGE) == tile.z
+    surface_tile_for_patch(patch) == tile
+}
+
+fn surface_tile_for_patch(patch: SurfacePatchId) -> SurfaceTileCoord {
+    SurfaceTileCoord::new(
+        patch.level,
+        patch.x.div_euclid(SURFACE_PATCHES_PER_TILE_EDGE),
+        patch.z.div_euclid(SURFACE_PATCHES_PER_TILE_EDGE),
+    )
 }
 
 fn changed_surface_patch_profiles(
