@@ -17,8 +17,8 @@ import {
 } from "../lib/world.ts";
 import type { WorldSource } from "../lib/world.ts";
 
-const RESULT_SCHEMA_VERSION = 8;
-const FIXTURE_VERSION = 4;
+const RESULT_SCHEMA_VERSION = 9;
+const FIXTURE_VERSION = 5;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
 const SAMPLE_INTERVAL_MS = 16;
@@ -940,6 +940,12 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
       minimum: 5,
       maximum: 120,
     }) ?? DEFAULT_FLIGHT_SECONDS;
+  const flightOnly = options.flag("flight-only");
+  const generationWorkersPerClient = options.number("generation-workers-per-client", {
+    minimum: 1,
+    maximum: 64,
+    integer: true,
+  });
   options.assertEmpty();
   const proxyPort = await reserveEphemeralPort();
   const previewPort = await reserveEphemeralPort();
@@ -948,6 +954,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
     clientPorts: [proxyPort],
     prefix: "voxels-network-benchmark-",
     source: worldSource,
+    generationWorkersPerClient,
   });
   context.defer("network benchmark fixture", () => fixture.cleanup());
   await startWebPreview(context, {
@@ -990,37 +997,39 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
           },
         }),
       );
-      runs.push(
-        await runScenario({
-          name: "short_walk",
-          engine,
-          link,
-          errors: viewport.failures,
-          // Spawn faces -Z from the exact chunk boundary. Walking backward remains a short,
-          // repeatable movement case while the collision and view corridors may legitimately
-          // fetch adjacent products.
-          action: (context) => walkDistance(page, SHORT_WALK_METRES, { ...context, key: "KeyS" }),
-        }),
-      );
-      runs.push(
-        await runScenario({
-          name: "cached_turn_180",
-          engine,
-          link,
-          errors: viewport.failures,
-          action: (context) => turn(engine, TURN_RADIANS, context),
-        }),
-      );
-      runs.push(
-        await runScenario({
-          name: "streaming_walk",
-          engine,
-          link,
-          errors: viewport.failures,
-          action: (context) =>
-            walkDistance(page, STREAMING_WALK_METRES, { ...context, sprint: true }),
-        }),
-      );
+      if (!flightOnly) {
+        runs.push(
+          await runScenario({
+            name: "short_walk",
+            engine,
+            link,
+            errors: viewport.failures,
+            // Spawn faces -Z from the exact chunk boundary. Walking backward remains a short,
+            // repeatable movement case while the collision and view corridors may legitimately
+            // fetch adjacent products.
+            action: (context) => walkDistance(page, SHORT_WALK_METRES, { ...context, key: "KeyS" }),
+          }),
+        );
+        runs.push(
+          await runScenario({
+            name: "cached_turn_180",
+            engine,
+            link,
+            errors: viewport.failures,
+            action: (context) => turn(engine, TURN_RADIANS, context),
+          }),
+        );
+        runs.push(
+          await runScenario({
+            name: "streaming_walk",
+            engine,
+            link,
+            errors: viewport.failures,
+            action: (context) =>
+              walkDistance(page, STREAMING_WALK_METRES, { ...context, sprint: true }),
+          }),
+        );
+      }
       runs.push(
         await runScenario({
           name: "spectator_cruise",
@@ -1033,6 +1042,8 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         }),
       );
       await viewport.close();
+
+      if (flightOnly) continue;
 
       const pivotViewport = await browser.open({
         url: "about:blank",
@@ -1104,6 +1115,9 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         movementProgressEpsilonMetres: MOVEMENT_PROGRESS_EPSILON_METRES,
         maximumMovementNoProgressMs: MAX_MOVEMENT_NO_PROGRESS_MS,
         turnRadians: TURN_RADIANS,
+        flightOnly,
+        generationWorkers: fixture.generationWorkers,
+        generationWorkersPerClient: fixture.generationWorkersPerClient,
       },
       protocol: {
         name: "VXWP",
@@ -1112,14 +1126,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
       },
       link: { ...profile, ...link.profile },
       repetitions,
-      scenarios: [
-        "cold_spawn",
-        "short_walk",
-        "cached_turn_180",
-        "streaming_walk",
-        "spectator_cruise",
-        "turn_during_spawn",
-      ],
+      scenarios: runs.map((run) => run.name),
       guards: {
         passed: guardViolations.length === 0,
         violations: guardViolations,

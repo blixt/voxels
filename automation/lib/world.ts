@@ -21,7 +21,7 @@ import {
 import type { WorldServiceCargoProfile } from "../../scripts/world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
-const AUTOMATION_FIXTURE_SCHEMA_VERSION = 7;
+const AUTOMATION_FIXTURE_SCHEMA_VERSION = 8;
 
 export type WorldSource = "procedural-v16" | "terrain-diffusion-30m";
 
@@ -35,6 +35,7 @@ export interface WorldFixtureOptions {
   readonly spawnPillarRadiusVoxels?: number;
   readonly spawnProtectionRadiusVoxels?: number;
   readonly generationWorkers?: number;
+  readonly generationWorkersPerClient?: number;
   readonly cascadedShadows?: boolean;
   readonly screenSpaceAmbientOcclusion?: boolean;
   readonly lodBoundaryHalfExtentsVoxels?: readonly [
@@ -83,6 +84,7 @@ export interface WorldFixture {
   readonly spawnPillarRadiusVoxels: number;
   readonly spawnProtectionRadiusVoxels: number;
   readonly generationWorkers: number;
+  readonly generationWorkersPerClient: number;
   readonly cascadedShadows: boolean;
   readonly screenSpaceAmbientOcclusion: boolean;
   readonly lodBoundaryHalfExtentsVoxels: readonly number[];
@@ -171,6 +173,7 @@ const FIXTURE_NUMBER_FIELDS = [
   "spawnPillarRadiusVoxels",
   "spawnProtectionRadiusVoxels",
   "generationWorkers",
+  "generationWorkersPerClient",
   "profilingWarmupSeconds",
   "profilingMeasureSeconds",
   "dayLengthSeconds",
@@ -328,6 +331,7 @@ export async function prepareWorldFixture({
   spawnPillarRadiusVoxels,
   spawnProtectionRadiusVoxels,
   generationWorkers,
+  generationWorkersPerClient,
   cascadedShadows,
   screenSpaceAmbientOcclusion,
   diagnosticSkyRgb,
@@ -368,6 +372,7 @@ export async function prepareWorldFixture({
       spawnPillarRadiusVoxels,
       spawnProtectionRadiusVoxels,
       generationWorkers,
+      generationWorkersPerClient,
       cascadedShadows,
       screenSpaceAmbientOcclusion,
       diagnosticSkyRgb,

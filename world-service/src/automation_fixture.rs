@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use voxels_client_config::{ClientConfig, ClientConfigError};
 
-pub const AUTOMATION_FIXTURE_SCHEMA_VERSION: u32 = 7;
+pub const AUTOMATION_FIXTURE_SCHEMA_VERSION: u32 = 8;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -29,6 +29,7 @@ pub struct AutomationFixtureOverlay {
     pub spawn_pillar_radius_voxels: Option<u8>,
     pub spawn_protection_radius_voxels: Option<u16>,
     pub generation_workers: Option<u16>,
+    pub generation_workers_per_client: Option<u16>,
     pub cascaded_shadows: Option<bool>,
     pub screen_space_ambient_occlusion: Option<bool>,
     pub lod_boundary_half_extents_voxels: Option<[u32; 8]>,
@@ -62,6 +63,7 @@ pub struct AutomationFixtureResolved {
     pub spawn_pillar_radius_voxels: u8,
     pub spawn_protection_radius_voxels: u16,
     pub generation_workers: u16,
+    pub generation_workers_per_client: u16,
     pub cascaded_shadows: bool,
     pub screen_space_ambient_occlusion: bool,
     pub lod_boundary_half_extents_voxels: [u32; 8],
@@ -171,6 +173,9 @@ pub fn build_automation_fixture(
     if let Some(value) = overlay.generation_workers {
         service.transport.generation_workers = value;
     }
+    if let Some(value) = overlay.generation_workers_per_client {
+        service.transport.generation_workers_per_client = value;
+    }
 
     if let Some(value) = overlay.day_length_seconds {
         service.environment.day_length_seconds = value;
@@ -268,6 +273,7 @@ pub fn build_automation_fixture(
         spawn_pillar_radius_voxels: service.spawn.pillar_radius_voxels,
         spawn_protection_radius_voxels: service.spawn.protection_radius_voxels,
         generation_workers: service.transport.generation_workers,
+        generation_workers_per_client: service.transport.generation_workers_per_client,
         cascaded_shadows: client.rendering.features.cascaded_sun_shadows,
         screen_space_ambient_occlusion: client.rendering.features.screen_space_ambient_occlusion,
         lod_boundary_half_extents_voxels: client
@@ -332,6 +338,7 @@ mod tests {
             spawn_pillar_radius_voxels: Some(2),
             spawn_protection_radius_voxels: Some(3),
             generation_workers: Some(12),
+            generation_workers_per_client: Some(5),
             cascaded_shadows: Some(false),
             screen_space_ambient_occlusion: Some(false),
             lod_boundary_half_extents_voxels: Some([
@@ -375,7 +382,9 @@ mod tests {
         assert_eq!(service.transport.listen.port(), 41_235);
         assert_eq!(service.spawn.xz_voxels, [-12_800, 25_600]);
         assert_eq!(service.transport.generation_workers, 12);
+        assert_eq!(service.transport.generation_workers_per_client, 5);
         assert_eq!(fixture.resolved.generation_workers, 12);
+        assert_eq!(fixture.resolved.generation_workers_per_client, 5);
         assert_eq!(
             client.world.endpoint,
             format!("ws://127.0.0.1:41235{WORLD_WEBSOCKET_PATH}")
