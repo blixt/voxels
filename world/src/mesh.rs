@@ -47,10 +47,6 @@ pub struct MeshedChunk {
 }
 
 impl MeshedChunk {
-    pub fn total_quads(&self) -> usize {
-        self.opaque.len() + self.translucent.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.opaque.is_empty() && self.translucent.is_empty()
     }

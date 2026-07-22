@@ -52,13 +52,6 @@ impl TreeSpecies {
             None
         }
     }
-
-    pub const fn is_conifer(self) -> bool {
-        matches!(
-            self,
-            Self::Pine | Self::Spruce | Self::Fir | Self::Larch | Self::Juniper
-        )
-    }
 }
 
 /// Stable procedural identity. The placement cell reconstructs the feature from generator identity.
@@ -142,18 +135,6 @@ impl SkylineFeatureKind {
             Self::ElderCanopy => 6,
             _ => 1,
         }
-    }
-
-    pub const fn is_semantic_hero(self) -> bool {
-        matches!(
-            self,
-            Self::ElderCanopy
-                | Self::TorCircle
-                | Self::NeedleGate
-                | Self::BuriedRibs
-                | Self::BuriedColonnade
-                | Self::BasaltCrown
-        )
     }
 }
 

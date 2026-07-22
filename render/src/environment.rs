@@ -54,21 +54,6 @@ impl DaylightPhase {
         }
     }
 
-    pub fn for_day_fraction(day_fraction: f32) -> Self {
-        let day_fraction = day_fraction.rem_euclid(1.0);
-        if !(0.18..0.84).contains(&day_fraction) {
-            Self::Night
-        } else if day_fraction < 0.29 {
-            Self::Dawn
-        } else if day_fraction < 0.66 {
-            Self::ClearDay
-        } else if day_fraction < 0.77 {
-            Self::GoldenHour
-        } else {
-            Self::BlueHour
-        }
-    }
-
     pub fn for_solar_position(solar_elevation: f32, solar_hour_angle_radians: f64) -> Self {
         if solar_elevation < -0.12 {
             Self::Night
