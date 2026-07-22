@@ -17,7 +17,7 @@ import {
 } from "../lib/world.ts";
 import type { WorldSource } from "../lib/world.ts";
 
-const RESULT_SCHEMA_VERSION = 9;
+const RESULT_SCHEMA_VERSION = 10;
 const FIXTURE_VERSION = 5;
 const PREVIEW_HOST = "127.0.0.1";
 const VIEWPORT = { width: 1280, height: 720 };
@@ -150,6 +150,11 @@ function ratio(samples: readonly ViewportSample[], predicate: (sample: ViewportS
   return rounded(samples.filter(predicate).length / samples.length, 4);
 }
 
+function coverage(resident: number, required: number): number {
+  if (required <= 0) return 0;
+  return Math.min(Math.max(resident / required, 0), 1);
+}
+
 function cruiseQuality(
   samples: readonly ViewportSample[],
   measurementStartedMs: number,
@@ -205,6 +210,21 @@ function cruiseQuality(
         measured,
         (sample) =>
           exactReady(sample) && surfaceReady(sample) && sample.presentedLodStrideVoxels === 1,
+      ),
+    },
+    coverage: {
+      exactNear: numericSummary(
+        measured.map((sample) =>
+          coverage(sample.canonicalImmediateResident, sample.canonicalImmediateRequired),
+        ),
+      ),
+      canonicalSurface: numericSummary(
+        measured.map((sample) =>
+          coverage(sample.canonicalSurfaceCellsResident, sample.canonicalSurfaceCellsRequired),
+        ),
+      ),
+      presentedStrideVoxels: numericSummary(
+        measured.map((sample) => sample.presentedLodStrideVoxels),
       ),
     },
     maximumPresentedStrideVoxels: Math.max(
@@ -754,6 +774,15 @@ function aggregateRuns(runs: readonly NetworkRun[]) {
                   canonicalSurfaceRatio: numericSummary(
                     cruise.map((quality) => quality.readiness.canonicalSurfaceRatio),
                   ),
+                  exactNearCoverage: numericSummary(
+                    cruise.map((quality) => quality.coverage.exactNear.median ?? 0),
+                  ),
+                  canonicalSurfaceCoverage: numericSummary(
+                    cruise.map((quality) => quality.coverage.canonicalSurface.median ?? 0),
+                  ),
+                  presentedStrideVoxels: numericSummary(
+                    cruise.map((quality) => quality.coverage.presentedStrideVoxels.median ?? 0),
+                  ),
                   strideOnePresentationRatio: numericSummary(
                     cruise.map((quality) => quality.readiness.strideOnePresentationRatio),
                   ),
@@ -894,13 +923,13 @@ function markdownReport(result: NetworkMarkdownReport): string {
     const cruise = summary.cruise;
     if (cruise === null) return [];
     return [
-      `| ${name} | ${cruise.meanSpeedMetresPerSecond.median?.toFixed(1) ?? "n/a"} | ${((cruise.exactNearRatio.median ?? 0) * 100).toFixed(1)}% | ${((cruise.canonicalSurfaceRatio.median ?? 0) * 100).toFixed(1)}% | ${((cruise.strideOnePresentationRatio.median ?? 0) * 100).toFixed(1)}% | ${((cruise.fullyHighDetailRatio.median ?? 0) * 100).toFixed(1)}% | ${cruise.maximumPresentedStrideVoxels} | ${cruise.maximumFocusLagVoxels.toFixed(1)} | ${cruise.longestDegradedPresentationMs.toFixed(1)} | ${cruise.medianWorldDownstreamBytes.toLocaleString("en-US")} |`,
+      `| ${name} | ${cruise.meanSpeedMetresPerSecond.median?.toFixed(1) ?? "n/a"} | ${((cruise.exactNearCoverage.median ?? 0) * 100).toFixed(1)}% | ${((cruise.canonicalSurfaceCoverage.median ?? 0) * 100).toFixed(1)}% | ${cruise.presentedStrideVoxels.median?.toFixed(1) ?? "n/a"} | ${((cruise.exactNearRatio.median ?? 0) * 100).toFixed(1)}% | ${((cruise.canonicalSurfaceRatio.median ?? 0) * 100).toFixed(1)}% | ${((cruise.strideOnePresentationRatio.median ?? 0) * 100).toFixed(1)}% | ${((cruise.fullyHighDetailRatio.median ?? 0) * 100).toFixed(1)}% | ${cruise.maximumPresentedStrideVoxels} | ${cruise.maximumFocusLagVoxels.toFixed(1)} | ${cruise.longestDegradedPresentationMs.toFixed(1)} | ${cruise.medianWorldDownstreamBytes.toLocaleString("en-US")} |`,
     ];
   });
   const guardSummary = result.guards.passed
     ? "Passed."
     : `Failed:\n${result.guards.violations.map((violation) => `- ${violation}`).join("\n")}`;
-  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nWorld source: \`${result.world.source}\`; repetitions: ${result.repetitions}; environment: ${result.environment.cpu}, ${result.environment.platform}, Chrome ${result.environment.chrome}, Node ${result.environment.node}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\nStreaming guards: ${guardSummary}\n\n| Scenario | Interactive ready median (ms) | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at interactive | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Interactive ready” is when canonical terrain and the original four surface rings are complete; kilometre horizon prefetch starts only afterward. “Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Full-speed spectator fidelity\n\n| Scenario | Speed (m/s) | Exact near ready | Surface ready | Stride-1 presented | Fully high detail | Max stride | Max focus lag (voxels) | Longest degraded (ms) | World bytes |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${cruiseRows.join("\n")}\n\nThe cruise measurement begins after spectator acceleration reaches its configured maximum. “Fully high detail” requires exact immediate chunks, canonical surface coverage, and a stride-1 presentation in the same sample; the benchmark continues sampling until the stopped viewport settles.\n\n## Movement continuity\n\n| Scenario | Longest no-progress median (ms) | max (ms) |\n| --- | ---: | ---: |\n${movementRows.join("\n")}\n\nA movement sample counts as progress after at least ${MOVEMENT_PROGRESS_EPSILON_METRES} metres of horizontal displacement. Long no-progress intervals while movement input remains held expose collision stalls caused by missing canonical chunks; the fixed route fails at more than ${MAX_MOVEMENT_NO_PROGRESS_MS} ms.\n\n## Realtime control and collision priority\n\n| Scenario | Mean pose interval (ms) | Proxy p95 RTT (ms) | Client max RTT (ms) | Presence upload queue max (ms) | Collision / ordinary requests | Canceled requests |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n${realtimeRows.join("\n")}\n\nPose traffic uses a dedicated WebSocket and coalesces stale samples instead of queueing them. Proxy RTT measures ping-to-pong across the shaped link and server without client scheduling after delivery. Collision requests identify the current support volume and intended movement corridor; canceled requests show collision-critical work preempting an already-full ordinary request window.\n\n## Link pressure\n\n| Scenario | Downstream peak queue delay median/max (ms) | Downstream peak queued median/max (bytes) | Source pauses |\n| --- | ---: | ---: | ---: |\n${pressureRows.join("\n")}\n\nQueue delay excludes configured propagation and each pacing quantum's own serialization. A source pause means the proxy's bounded queue applied TCP backpressure.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
+  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nWorld source: \`${result.world.source}\`; repetitions: ${result.repetitions}; environment: ${result.environment.cpu}, ${result.environment.platform}, Chrome ${result.environment.chrome}, Node ${result.environment.node}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\nStreaming guards: ${guardSummary}\n\n| Scenario | Interactive ready median (ms) | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at interactive | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Interactive ready” is when canonical terrain and the original four surface rings are complete; kilometre horizon prefetch starts only afterward. “Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Full-speed spectator fidelity\n\n| Scenario | Speed (m/s) | Exact coverage median | Surface coverage median | Presented stride median | Exact near ready | Surface ready | Stride-1 presented | Fully high detail | Max stride | Max focus lag (voxels) | Longest degraded (ms) | World bytes |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${cruiseRows.join("\n")}\n\nThe cruise measurement begins after spectator acceleration reaches its configured maximum. Coverage medians preserve partial progress instead of reducing every imperfect sample to zero. “Fully high detail” still requires exact immediate chunks, canonical surface coverage, and a stride-1 presentation in the same sample; the benchmark continues sampling until the stopped viewport settles.\n\n## Movement continuity\n\n| Scenario | Longest no-progress median (ms) | max (ms) |\n| --- | ---: | ---: |\n${movementRows.join("\n")}\n\nA movement sample counts as progress after at least ${MOVEMENT_PROGRESS_EPSILON_METRES} metres of horizontal displacement. Long no-progress intervals while movement input remains held expose collision stalls caused by missing canonical chunks; the fixed route fails at more than ${MAX_MOVEMENT_NO_PROGRESS_MS} ms.\n\n## Realtime control and collision priority\n\n| Scenario | Mean pose interval (ms) | Proxy p95 RTT (ms) | Client max RTT (ms) | Presence upload queue max (ms) | Collision / ordinary requests | Canceled requests |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n${realtimeRows.join("\n")}\n\nPose traffic uses a dedicated WebSocket and coalesces stale samples instead of queueing them. Proxy RTT measures ping-to-pong across the shaped link and server without client scheduling after delivery. Collision requests identify the current support volume and intended movement corridor; canceled requests show collision-critical work preempting an already-full ordinary request window.\n\n## Link pressure\n\n| Scenario | Downstream peak queue delay median/max (ms) | Downstream peak queued median/max (bytes) | Source pauses |\n| --- | ---: | ---: | ---: |\n${pressureRows.join("\n")}\n\nQueue delay excludes configured propagation and each pacing quantum's own serialization. A source pause means the proxy's bounded queue applied TCP backpressure.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
 }
 
 async function main(context: ScenarioContext, arguments_: readonly string[]) {
