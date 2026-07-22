@@ -564,12 +564,9 @@ fn cut_transition_visible(position: vec2<f32>) -> bool {
     15u, 7u, 13u, 5u,
   );
   let threshold = (f32(bayer[x + y * 4u]) + 0.5) / 16.0;
-  if role == 1u {
-    // The outgoing cut remains an intact geometric safety net. Complementary masks assume both
-    // LODs cover identical pixels, which is exactly the assumption a transition must not make.
-    return true;
-  }
-  return threshold < clamp(cut_transition.phase_role.x, 0.0, 1.0);
+  // The ordinary current-cut draw is already complete and opaque. This transition pipeline is
+  // used only for old-only geometry layered over it, so discarding can never uncover the sky.
+  return threshold >= clamp(cut_transition.phase_role.x, 0.0, 1.0);
 }
 
 @fragment

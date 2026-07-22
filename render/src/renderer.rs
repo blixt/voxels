@@ -668,9 +668,7 @@ struct WorldDrawLists {
 
 #[derive(Debug, Default, Eq, PartialEq)]
 struct CutDrawLists {
-    stable: WorldDrawLists,
     outgoing: WorldDrawLists,
-    incoming: WorldDrawLists,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1322,8 +1320,8 @@ pub struct Renderer {
     shadow_direction: ShadowDirectionTracker,
     frame_buffer: Buffer,
     frame_bind_group: BindGroup,
-    cut_transition_buffers: [Buffer; 3],
-    cut_transition_bind_groups: [BindGroup; 3],
+    cut_transition_buffers: [Buffer; 2],
+    cut_transition_bind_groups: [BindGroup; 2],
     local_light_buffer: Buffer,
     material_detail: MaterialDetailGpu,
     chunks: BTreeMap<MeshKey, ChunkMesh>,
@@ -3680,15 +3678,13 @@ impl Renderer {
             }
         }
         if let Some(phase) = phase {
-            for role in 1..=2 {
-                self.queue.write_buffer(
-                    &self.cut_transition_buffers[role],
-                    0,
-                    bytemuck::bytes_of(&GpuCutTransition {
-                        phase_role: [phase, role as f32, 0.0, 0.0],
-                    }),
-                );
-            }
+            self.queue.write_buffer(
+                &self.cut_transition_buffers[1],
+                0,
+                bytemuck::bytes_of(&GpuCutTransition {
+                    phase_role: [phase, 1.0, 0.0, 0.0],
+                }),
+            );
         }
         phase
     }
@@ -4126,19 +4122,16 @@ impl Renderer {
                 });
                 pass.set_pipeline(&self.depth_prepass_fast_pipeline);
                 pass.set_bind_group(0, &self.frame_bind_group, &[]);
+                depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    &world_draw_list.fixed,
+                ));
+                pass.set_pipeline(&self.depth_prepass_morph_pipeline);
+                depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(
+                    draw_morph_spans(&mut pass, &self.arena_buffers, &world_draw_list.morphing),
+                );
                 if let Some(cut_draw_lists) = &cut_draw_lists {
-                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
-                        &mut pass,
-                        &self.arena_buffers,
-                        &cut_draw_lists.stable.fixed,
-                    ));
-                    pass.set_pipeline(&self.depth_prepass_morph_pipeline);
-                    depth_prepass_draw_calls =
-                        depth_prepass_draw_calls.saturating_add(draw_morph_spans(
-                            &mut pass,
-                            &self.arena_buffers,
-                            &cut_draw_lists.stable.morphing,
-                        ));
                     pass.set_pipeline(&self.depth_prepass_transition_fixed_pipeline);
                     pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
                     depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
@@ -4153,30 +4146,6 @@ impl Renderer {
                             &self.arena_buffers,
                             &cut_draw_lists.outgoing.morphing,
                         ));
-                    pass.set_pipeline(&self.depth_prepass_transition_fixed_pipeline);
-                    pass.set_bind_group(3, &self.cut_transition_bind_groups[2], &[]);
-                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
-                        &mut pass,
-                        &self.arena_buffers,
-                        &cut_draw_lists.incoming.fixed,
-                    ));
-                    pass.set_pipeline(&self.depth_prepass_transition_pipeline);
-                    depth_prepass_draw_calls =
-                        depth_prepass_draw_calls.saturating_add(draw_morph_spans(
-                            &mut pass,
-                            &self.arena_buffers,
-                            &cut_draw_lists.incoming.morphing,
-                        ));
-                } else {
-                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
-                        &mut pass,
-                        &self.arena_buffers,
-                        &world_draw_list.fixed,
-                    ));
-                    pass.set_pipeline(&self.depth_prepass_morph_pipeline);
-                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(
-                        draw_morph_spans(&mut pass, &self.arena_buffers, &world_draw_list.morphing),
-                    );
                 }
                 if has_avatars {
                     self.avatar_gpu.draw_depth(&mut pass);
@@ -4285,15 +4254,15 @@ impl Renderer {
                         &self.voxel_morph_transition_flat_pipeline,
                     )
                 };
+            pass.set_pipeline(fixed_pipeline);
+            draw_spans(&mut pass, &self.arena_buffers, &world_draw_list.fixed);
+            pass.set_pipeline(morph_pipeline);
+            draw_morph_spans(
+                &mut pass,
+                &self.arena_buffers,
+                &world_draw_list.morphing,
+            );
             if let Some(cut_draw_lists) = &cut_draw_lists {
-                pass.set_pipeline(fixed_pipeline);
-                draw_spans(&mut pass, &self.arena_buffers, &cut_draw_lists.stable.fixed);
-                pass.set_pipeline(morph_pipeline);
-                draw_morph_spans(
-                    &mut pass,
-                    &self.arena_buffers,
-                    &cut_draw_lists.stable.morphing,
-                );
                 pass.set_pipeline(transition_pipeline);
                 pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
                 draw_spans(
@@ -4307,24 +4276,6 @@ impl Renderer {
                     &self.arena_buffers,
                     &cut_draw_lists.outgoing.morphing,
                 );
-                pass.set_pipeline(transition_pipeline);
-                pass.set_bind_group(3, &self.cut_transition_bind_groups[2], &[]);
-                draw_spans(
-                    &mut pass,
-                    &self.arena_buffers,
-                    &cut_draw_lists.incoming.fixed,
-                );
-                pass.set_pipeline(morph_transition_pipeline);
-                draw_morph_spans(
-                    &mut pass,
-                    &self.arena_buffers,
-                    &cut_draw_lists.incoming.morphing,
-                );
-            } else {
-                pass.set_pipeline(fixed_pipeline);
-                draw_spans(&mut pass, &self.arena_buffers, &world_draw_list.fixed);
-                pass.set_pipeline(morph_pipeline);
-                draw_morph_spans(&mut pass, &self.arena_buffers, &world_draw_list.morphing);
             }
             self.avatar_gpu
                 .draw_scene(&mut pass, self.options.screen_space_ambient_occlusion);
@@ -4956,10 +4907,9 @@ fn collect_opaque_draw_lists(
     ))
 }
 
-/// Splits only the camera-visible geometry whose complete-cut ownership changed. Stable clusters
-/// stay on the ordinary single-draw path; the outgoing cut remains intact while the incoming cut
-/// dithers over it for the short transition interval. This permits brief overdraw but cannot expose
-/// the sky when two independently simplified cuts do not cover exactly the same pixels.
+/// Collects only old-cut geometry that the complete current draw list no longer owns. The current
+/// list remains the single opaque coverage authority; this overlay can therefore dither away
+/// without reconstructing or weakening the incoming cut.
 fn collect_cut_transition_draw_lists(
     chunks: &BTreeMap<MeshKey, ChunkMesh>,
     current_plan: &LodDrawPlan,
@@ -4968,9 +4918,7 @@ fn collect_cut_transition_draw_lists(
     far_terrain: bool,
     view_clip: AabbClipVolume,
 ) -> Result<CutDrawLists, MissingMorphSidecar> {
-    let mut stable = WorldDrawListBuilder::default();
     let mut outgoing = WorldDrawListBuilder::default();
-    let mut incoming = WorldDrawListBuilder::default();
     for (key, chunk) in chunks {
         if !chunk.active()
             || (key.0 != 0 && !far_terrain)
@@ -4978,11 +4926,9 @@ fn collect_cut_transition_draw_lists(
         {
             continue;
         }
-        let mut selected_mesh = [false; 3];
+        let mut selected_mesh = false;
         for slice in &chunk.slices {
-            stable.test_slice();
             outgoing.test_slice();
-            incoming.test_slice();
             if slice.render_layer != RenderLayer::Opaque
                 || !view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
             {
@@ -4991,37 +4937,18 @@ fn collect_cut_transition_draw_lists(
             let was_owned =
                 slice_owned_by_lod(transition.from_focus, Some(&transition.from), key, slice);
             let is_owned = slice_owned_by_lod(current_focus, Some(current_plan), key, slice);
-            let morphing = slice_uses_geometry_morph(key, current_focus, slice);
-            match (was_owned, is_owned) {
-                (true, true) => {
-                    stable.select_slice(chunk, slice, morphing)?;
-                    selected_mesh[0] = true;
-                }
-                (true, false) => {
-                    outgoing.select_slice(chunk, slice, morphing)?;
-                    selected_mesh[1] = true;
-                }
-                (false, true) => {
-                    incoming.select_slice(chunk, slice, morphing)?;
-                    selected_mesh[2] = true;
-                }
-                (false, false) => {}
+            if was_owned && !is_owned {
+                let morphing = slice_uses_geometry_morph(key, current_focus, slice);
+                outgoing.select_slice(chunk, slice, morphing)?;
+                selected_mesh = true;
             }
         }
-        if selected_mesh[0] {
-            stable.select_mesh(*key, chunk);
-        }
-        if selected_mesh[1] {
+        if selected_mesh {
             outgoing.select_mesh(*key, chunk);
-        }
-        if selected_mesh[2] {
-            incoming.select_mesh(*key, chunk);
         }
     }
     Ok(CutDrawLists {
-        stable: stable.finish(),
         outgoing: outgoing.finish(),
-        incoming: incoming.finish(),
     })
 }
 
