@@ -852,8 +852,8 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const AUTOMATION_CONTRACT_VERSION: u32 = 6;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 37;
+    const AUTOMATION_CONTRACT_VERSION: u32 = 7;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 38;
     const FRAME_SAMPLE_WIDTH: u32 = 26;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -871,7 +871,7 @@ mod web {
         "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
         "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
         "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,canonicalSurfaceCellsResident,canonicalSurfaceCellsRequired,",
-        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,schemaVersion,sampleCount,",
+        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,frameSequence,schemaVersion,sampleCount,",
         "droppedSamples",
     );
     const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
@@ -1720,7 +1720,18 @@ mod web {
             let enclosed_interest_ms =
                 (performance_now(performance) - enclosed_interest_start) as f32;
             let surface_interest_start = performance_now(performance);
-            let surface_interest = self.surface_stream_interest(focus, &collision_interest);
+            // The urgent collision set deliberately includes the short aim/edit corridor. That
+            // corridor may prioritize exact chunks, but it must never suppress the complete
+            // heightfield fallback: otherwise turning the camera changes canonical surface
+            // ownership and a large greedy parent quad disappears until the aimed-at chunk loads.
+            // Surface ownership follows support and intended movement only, so looking around is
+            // geometry-invariant while edits and collision still retain their urgent transport.
+            let movement_interest = self.movement_collision_interest(
+                camera,
+                streaming_velocity,
+                self.config.stream_collision_lookahead_seconds,
+            );
+            let surface_interest = self.surface_stream_interest(focus, &movement_interest);
             let surface_interest_ms =
                 (performance_now(performance) - surface_interest_start) as f32;
             let mut urgent_interest = collision_interest.clone();
@@ -3996,6 +4007,7 @@ mod web {
                     enclosed_view.required as f32,
                     enclosed_view_renderable as f32,
                     enclosed_view_owned as f32,
+                    engine.frame_sequence.get() as f32,
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);

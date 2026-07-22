@@ -116,6 +116,34 @@ interface ProfileCapture {
   readonly performance: RenderPhaseSummary;
 }
 
+interface ViewportCompletenessSample {
+  readonly heading: number;
+  readonly atTarget: ReturnType<typeof viewportState>;
+  readonly firstPresented: ReturnType<typeof viewportState>;
+  readonly afterCapture: ReturnType<typeof viewportState>;
+  readonly settled: ReturnType<typeof viewportState>;
+  readonly comparison: RenderedImageComparison;
+}
+
+function viewportState(snapshot: readonly number[]) {
+  return {
+    frameSequence: snapshotValue(snapshot, "frameSequence"),
+    gpuSampleId: snapshotValue(snapshot, "gpuSampleId"),
+    visibleChunks: snapshotValue(snapshot, "visibleChunks"),
+    drawCalls: snapshotValue(snapshot, "drawCalls"),
+    quads: snapshotValue(snapshot, "quads"),
+    selectedSlices: snapshotValue(snapshot, "drawListSelectedSlices"),
+    viewportFingerprint: [
+      snapshotValue(snapshot, "viewportFingerprintLow24"),
+      snapshotValue(snapshot, "viewportFingerprintHigh24"),
+    ] as const,
+    pendingJobs: snapshotValue(snapshot, "pendingJobs"),
+    surfaceInFlight: snapshotValue(snapshot, "surfaceInFlight"),
+    allLodsReady: snapshotValue(snapshot, "allLodsReady"),
+    lodTransitionQuads: snapshotValue(snapshot, "lodTransitionQuads"),
+  };
+}
+
 function parseOptions(arguments_: readonly string[]): Options {
   const reader = new ScenarioArguments(arguments_);
   const arenaId = reader.choice("arena", ["forest", "valley"] as const, "forest");
@@ -284,6 +312,67 @@ async function compareProfile(
   );
 }
 
+async function captureViewportCompleteness(
+  context: ScenarioContext,
+  page: Page,
+  engine: EngineClient,
+  arena: Arena,
+  profile: LodProfile,
+): Promise<readonly ViewportCompletenessSample[]> {
+  await engine.setLodBoundaryHalfExtents(profile.boundaries);
+  await waitForSettledGeometry(engine);
+  await engine.setDiagnosticSky([255, 0, 255]);
+  const samples: ViewportCompletenessSample[] = [];
+  for (const [index, offset] of arena.headingOffsets.entries()) {
+    const heading = arena.look[0] + offset;
+    // Turn a full peripheral field away before returning. The first screenshot at the registered
+    // target must already contain everything that the settled frame contains; otherwise culling or
+    // view-driven streaming still depends on staring at a tree or terrain region.
+    await engine.setCameraLook(heading + 1.15, arena.look[1]);
+    await waitForSettledGeometry(engine);
+    const targetSnapshot = await engine.setCameraLook(heading, arena.look[1]);
+    const firstPresentedSnapshot = await engine.waitForFrameAfter(
+      snapshotValue(targetSnapshot, "frameSequence"),
+      {
+        timeoutMs: 2_000,
+        intervalMs: 4,
+        description: "peripheral target view was not presented",
+      },
+    );
+    const immediate = await page.screenshot();
+    const afterCaptureSnapshot = await engine.snapshot();
+    const settledSnapshot = await waitForSettledGeometry(engine);
+    const settled = await page.screenshot();
+    const comparison = await compareRenderedImages(page, immediate, settled, {
+      region: GEOMETRY_ROI,
+      footprintPixels: 4,
+      diagnosticGeometry: true,
+    });
+    await context.artifacts.write(
+      `viewport completeness ${index + 1} immediate`,
+      `viewport-completeness-${index + 1}-immediate.png`,
+      immediate,
+      "image/png",
+    );
+    await context.artifacts.write(
+      `viewport completeness ${index + 1} settled`,
+      `viewport-completeness-${index + 1}-settled.png`,
+      settled,
+      "image/png",
+    );
+    samples.push({
+      heading,
+      atTarget: viewportState(targetSnapshot),
+      firstPresented: viewportState(firstPresentedSnapshot),
+      afterCapture: viewportState(afterCaptureSnapshot),
+      settled: viewportState(settledSnapshot),
+      comparison,
+    });
+  }
+  await engine.setDiagnosticSky(null);
+  return samples;
+}
+
 function worstHeading(comparisons: readonly ComparedHeading[]) {
   const appearanceSsim = Math.min(...comparisons.map((entry) => entry.appearance.ssim));
   const appearanceLumaDelta = Math.max(
@@ -439,6 +528,23 @@ async function runLodFidelity(context: ScenarioContext, arguments_: readonly str
     });
   }
   const marginals = uniformMarginals(results);
+  const viewportCompleteness = await captureViewportCompleteness(
+    context,
+    page,
+    engine,
+    options.arena,
+    referenceProfile,
+  );
+  const worstViewportMissingPixels = Math.max(
+    ...viewportCompleteness.map(
+      ({ comparison }) => comparison.diagnosticGeometry?.rightOnlyOccupancyPixels ?? 1,
+    ),
+  );
+  const worstViewportMissingComponentPixels = Math.max(
+    ...viewportCompleteness.map(
+      ({ comparison }) => comparison.diagnosticGeometry?.largestRightOnlyComponentPixels ?? 1,
+    ),
+  );
   const eligible = results.filter(
     (result) =>
       result.family === "uniform" &&
@@ -468,6 +574,11 @@ async function runLodFidelity(context: ScenarioContext, arguments_: readonly str
   if (recommendation === undefined) {
     violations.push("no measured LOD profile met the fidelity and 120Hz headroom criteria");
   }
+  if (worstViewportMissingPixels > 0) {
+    violations.push(
+      `first peripheral view omitted ${worstViewportMissingPixels} settled geometry pixels`,
+    );
+  }
   browser.assertHealthy();
   const report = {
     ok: violations.length === 0,
@@ -493,9 +604,15 @@ async function runLodFidelity(context: ScenarioContext, arguments_: readonly str
       maximumFrameP95Ms: 12,
       maximumTotalGpuP95Ms: 7.5,
       requireZeroDiagnosticSkyPixelsInGroundRoi: true,
+      requireZeroGeometryMissingFromFirstPeripheralView: true,
     },
     results,
     uniformMarginals: marginals,
+    viewportCompleteness: {
+      samples: viewportCompleteness,
+      worstMissingPixels: worstViewportMissingPixels,
+      worstMissingComponentPixels: worstViewportMissingComponentPixels,
+    },
     violations,
   };
   await context.artifacts.writeJson("LOD fidelity report", "report.json", report);

@@ -116,6 +116,19 @@ export class EngineClient {
     throw new Error(`${description}: ${JSON.stringify(latest)}`);
   }
 
+  async waitForFrameAfter(
+    frameSequence: number,
+    options: SnapshotWaitOptions = {},
+  ): Promise<readonly number[]> {
+    if (!Number.isSafeInteger(frameSequence) || frameSequence < 0) {
+      throw new Error("frame sequence must be a non-negative integer");
+    }
+    return this.waitForSnapshot(
+      (snapshot) => snapshotValue(snapshot, "frameSequence") !== frameSequence,
+      { ...options, description: options.description ?? "renderer did not advance a frame" },
+    );
+  }
+
   async look(deltaX: number, deltaY: number): Promise<void> {
     await this.#page.evaluate(([x, y]) => globalThis.__VOXELS__!.look(x, y), [
       deltaX,
