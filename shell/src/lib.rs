@@ -197,6 +197,38 @@ fn surface_offset_in_coverage(
         && cross * cross <= i64::from(cross_radius).pow(2) * norm_squared
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SurfaceStreamFocus {
+    current: [voxels_world::SurfaceTileCoord; voxels_world::SURFACE_LOD_LEVEL_COUNT],
+    lead: [voxels_world::SurfaceTileCoord; voxels_world::SURFACE_LOD_LEVEL_COUNT],
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn surface_tile_in_coverage(
+    coord: voxels_world::SurfaceTileCoord,
+    focus: Option<SurfaceStreamFocus>,
+    longitudinal_radii: [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
+    cross_radii: [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
+    motion_axis: [i32; 2],
+) -> bool {
+    let Some(focus) = focus else {
+        return false;
+    };
+    let index = coord.level.index() as usize;
+    [focus.current[index], focus.lead[index]]
+        .into_iter()
+        .any(|center| {
+            surface_offset_in_coverage(
+                coord.x - center.x,
+                coord.z - center.z,
+                longitudinal_radii[index],
+                cross_radii[index],
+                motion_axis,
+            )
+        })
+}
+
 /// Canonical chunks intersecting the current body/support, intended movement sweep, or view/edit
 /// corridor. This bounded secondary interest is both scheduled and transported as collision
 /// critical, keeping physics and rendering ahead of running, gliding, swimming, and edits.
@@ -931,8 +963,9 @@ mod web {
         RemoteWorldClient, RemoteWorldError,
     };
     use crate::{
-        ChunkPortalMask, adaptive_surface_cross_radii, predictive_stream_position,
-        surface_motion_axis, surface_offset_in_coverage, world_environment_at,
+        ChunkPortalMask, SurfaceStreamFocus, adaptive_surface_cross_radii,
+        predictive_stream_position, surface_motion_axis, surface_offset_in_coverage,
+        surface_tile_in_coverage, world_environment_at,
     };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
@@ -1273,7 +1306,7 @@ mod web {
         pending_uploads: RefCell<BTreeMap<(i32, i32, i32), voxels_runtime::WorkTicket>>,
         canonical_publications: RefCell<VecDeque<CanonicalPublication>>,
         binary_mesh_scratch: RefCell<BinaryMeshScratch>,
-        surface_focus: Cell<Option<[SurfaceTileCoord; SURFACE_LOD_LEVEL_COUNT]>>,
+        surface_focus: Cell<Option<SurfaceStreamFocus>>,
         surface_cross_radii: Cell<[i32; SURFACE_LOD_LEVEL_COUNT]>,
         surface_motion_axis: Cell<[i32; 2]>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
@@ -2692,7 +2725,10 @@ mod web {
             } else {
                 surface_motion_axis(streaming_velocity)
             };
-            let focus = std::array::from_fn(|index| {
+            let current_focus = std::array::from_fn(|index| {
+                world_to_surface_tile(position, SurfaceLodLevel::ALL[index])
+            });
+            let lead_focus = std::array::from_fn(|index| {
                 let level = SurfaceLodLevel::ALL[index];
                 let radius = longitudinal_radii[index];
                 let maximum_lead_metres = (radius - 1).max(0) as f32
@@ -2708,6 +2744,10 @@ mod web {
                     level,
                 )
             });
+            let focus = SurfaceStreamFocus {
+                current: current_focus,
+                lead: lead_focus,
+            };
             let directional_priorities: [DirectionalStreamPriority; SURFACE_LOD_LEVEL_COUNT] =
                 std::array::from_fn(|index| {
                     let level = SurfaceLodLevel::ALL[index];
@@ -2728,50 +2768,47 @@ mod web {
                 let previous_focus = self.surface_focus.replace(Some(focus));
                 let changed_levels: [bool; SURFACE_LOD_LEVEL_COUNT] =
                     std::array::from_fn(|index| {
-                        previous_focus.is_none_or(|previous| previous[index] != focus[index])
-                            || previous_radii[index] != cross_radii[index]
+                        previous_focus.is_none_or(|previous| {
+                            previous.current[index] != focus.current[index]
+                                || previous.lead[index] != focus.lead[index]
+                        }) || previous_radii[index] != cross_radii[index]
                             || (previous_axis != motion_axis
                                 && cross_radii[index] < longitudinal_radii[index])
                     });
-                self.remote.cancel_surface_batches_outside(|coord| {
-                    surface_tile_in_coverage(
-                        coord,
-                        Some(focus),
-                        longitudinal_radii,
-                        cross_radii,
-                        motion_axis,
-                    )
-                });
                 let mut desired = BTreeSet::new();
                 for (index, level) in SurfaceLodLevel::ALL.into_iter().enumerate() {
-                    if !changed_levels[index] {
-                        continue;
-                    }
                     let longitudinal_radius = longitudinal_radii[index];
                     let cross_radius = cross_radii[index];
-                    let level_focus = focus[index];
-                    for dz in -longitudinal_radius..=longitudinal_radius {
-                        for dx in -longitudinal_radius..=longitudinal_radius {
-                            if !surface_offset_in_coverage(
-                                dx,
-                                dz,
-                                longitudinal_radius,
-                                cross_radius,
-                                motion_axis,
-                            ) {
-                                continue;
-                            }
-                            let coord = SurfaceTileCoord::new(
-                                level,
-                                level_focus.x + dx,
-                                level_focus.z + dz,
-                            );
-                            if coord.is_world_representable() {
-                                desired.insert(coord);
+                    for level_focus in [focus.current[index], focus.lead[index]] {
+                        for dz in -longitudinal_radius..=longitudinal_radius {
+                            for dx in -longitudinal_radius..=longitudinal_radius {
+                                if !surface_offset_in_coverage(
+                                    dx,
+                                    dz,
+                                    longitudinal_radius,
+                                    cross_radius,
+                                    motion_axis,
+                                ) {
+                                    continue;
+                                }
+                                let coord = SurfaceTileCoord::new(
+                                    level,
+                                    level_focus.x + dx,
+                                    level_focus.z + dz,
+                                );
+                                if coord.is_world_representable() {
+                                    desired.insert(coord);
+                                }
                             }
                         }
                     }
                 }
+                self.remote
+                    .cancel_surface_batches_outside(|coord| desired.contains(&coord));
+                let retain_longitudinal_radii = longitudinal_radii
+                    .map(|radius| radius + self.config.surface_retain_margin_tiles);
+                let retain_cross_radii =
+                    cross_radii.map(|radius| radius + self.config.surface_retain_margin_tiles);
                 let evicted: Vec<_> = self
                     .surface_resident
                     .borrow()
@@ -2782,17 +2819,11 @@ mod web {
                         if !changed_levels[index] {
                             return false;
                         }
-                        let longitudinal_retain =
-                            longitudinal_radii[index] + self.config.surface_retain_margin_tiles;
-                        let cross_retain =
-                            cross_radii[index] + self.config.surface_retain_margin_tiles;
-                        let dx = coord.x - focus[index].x;
-                        let dz = coord.z - focus[index].z;
-                        !surface_offset_in_coverage(
-                            dx,
-                            dz,
-                            longitudinal_retain,
-                            cross_retain,
+                        !surface_tile_in_coverage(
+                            *coord,
+                            Some(focus),
+                            retain_longitudinal_radii,
+                            retain_cross_radii,
                             motion_axis,
                         )
                     })
@@ -2835,6 +2866,9 @@ mod web {
                 });
                 let mut candidates = Vec::new();
                 for coord in desired {
+                    if !changed_levels[coord.level.index() as usize] {
+                        continue;
+                    }
                     match revisions.prepare_focus(coord) {
                         SurfaceFocusAction::Load { .. } => {
                             debug_assert!(!resident.contains(&coord));
@@ -2858,8 +2892,8 @@ mod web {
                 candidates.extend(queue.iter().copied());
                 candidates.sort_by_key(|coord| {
                     let index = coord.level.index() as usize;
-                    let dx = i128::from(coord.x) - i128::from(focus[index].x);
-                    let dz = i128::from(coord.z) - i128::from(focus[index].z);
+                    let dx = i128::from(coord.x) - i128::from(focus.current[index].x);
+                    let dz = i128::from(coord.z) - i128::from(focus.current[index].z);
                     let background = index >= INTERACTIVE_SURFACE_LOD_LEVELS;
                     let directional =
                         directional_priorities[index].rank_offset(dx as i64, dz as i64);
@@ -3506,27 +3540,32 @@ mod web {
                 .take(level_count)
                 .enumerate()
             {
-                let center = focus[index];
                 let longitudinal_radius = longitudinal_radii[index];
-                for dz in -longitudinal_radius..=longitudinal_radius {
-                    for dx in -longitudinal_radius..=longitudinal_radius {
-                        if !surface_offset_in_coverage(
-                            dx,
-                            dz,
-                            longitudinal_radius,
-                            cross_radii[index],
-                            motion_axis,
-                        ) {
-                            continue;
-                        }
-                        let coord = SurfaceTileCoord::new(level, center.x + dx, center.z + dz);
-                        if !coord.is_world_representable() {
-                            continue;
-                        }
-                        if !resident.contains(&coord) || !revisions.is_current(coord) {
-                            return false;
+                let mut required = BTreeSet::new();
+                for center in [focus.current[index], focus.lead[index]] {
+                    for dz in -longitudinal_radius..=longitudinal_radius {
+                        for dx in -longitudinal_radius..=longitudinal_radius {
+                            if !surface_offset_in_coverage(
+                                dx,
+                                dz,
+                                longitudinal_radius,
+                                cross_radii[index],
+                                motion_axis,
+                            ) {
+                                continue;
+                            }
+                            let coord = SurfaceTileCoord::new(level, center.x + dx, center.z + dz);
+                            if coord.is_world_representable() {
+                                required.insert(coord);
+                            }
                         }
                     }
+                }
+                if required
+                    .into_iter()
+                    .any(|coord| !resident.contains(&coord) || !revisions.is_current(coord))
+                {
+                    return false;
                 }
             }
             true
@@ -4666,29 +4705,6 @@ mod web {
         let voxel_z = (position.z / VOXEL_SIZE_METRES).floor() as i32;
         SurfaceTileCoord::containing(level, voxel_x, voxel_z)
     }
-
-    fn surface_tile_in_coverage(
-        coord: SurfaceTileCoord,
-        focus: Option<[SurfaceTileCoord; SURFACE_LOD_LEVEL_COUNT]>,
-        longitudinal_radii: [i32; SURFACE_LOD_LEVEL_COUNT],
-        cross_radii: [i32; SURFACE_LOD_LEVEL_COUNT],
-        motion_axis: [i32; 2],
-    ) -> bool {
-        let Some(focus) = focus else {
-            return false;
-        };
-        let index = coord.level.index() as usize;
-        let center = focus[index];
-        let dx = coord.x - center.x;
-        let dz = coord.z - center.z;
-        surface_offset_in_coverage(
-            dx,
-            dz,
-            longitudinal_radii[index],
-            cross_radii[index],
-            motion_axis,
-        )
-    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -4891,6 +4907,43 @@ mod tests {
         assert!(surface_offset_in_coverage(3, 3, 5, 2, [1, 1]));
         assert!(!surface_offset_in_coverage(3, -3, 5, 2, [1, 1]));
         assert!(surface_offset_in_coverage(5, 5, 5, 5, [0, 0]));
+    }
+
+    #[test]
+    fn fast_travel_surface_coverage_keeps_current_ground_and_forward_lead() {
+        let focus = SurfaceStreamFocus {
+            current: voxels_world::SurfaceLodLevel::ALL
+                .map(|level| voxels_world::SurfaceTileCoord::new(level, 0, 0)),
+            lead: voxels_world::SurfaceLodLevel::ALL
+                .map(|level| voxels_world::SurfaceTileCoord::new(level, 4, 0)),
+        };
+        let longitudinal = [5; voxels_world::SURFACE_LOD_LEVEL_COUNT];
+        let cross = [2; voxels_world::SURFACE_LOD_LEVEL_COUNT];
+        let tile = |x, z| {
+            voxels_world::SurfaceTileCoord::new(voxels_world::SurfaceLodLevel::Stride2, x, z)
+        };
+
+        assert!(surface_tile_in_coverage(
+            tile(-5, 0),
+            Some(focus),
+            longitudinal,
+            cross,
+            [1, 0],
+        ));
+        assert!(surface_tile_in_coverage(
+            tile(9, 0),
+            Some(focus),
+            longitudinal,
+            cross,
+            [1, 0],
+        ));
+        assert!(!surface_tile_in_coverage(
+            tile(0, 3),
+            Some(focus),
+            longitudinal,
+            cross,
+            [1, 0],
+        ));
     }
 
     #[test]
