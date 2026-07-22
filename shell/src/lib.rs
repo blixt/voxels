@@ -845,9 +845,9 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const AUTOMATION_CONTRACT_VERSION: u32 = 3;
+    const AUTOMATION_CONTRACT_VERSION: u32 = 4;
     const SNAPSHOT_SCHEMA_VERSION: u32 = 37;
-    const FRAME_SAMPLE_WIDTH: u32 = 14;
+    const FRAME_SAMPLE_WIDTH: u32 = 20;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
         "cameraX,cameraY,cameraZ,yaw,pitch,grounded,quads,edits,residentChunks,trackedChunks,visibleChunks,drawCalls,",
@@ -962,6 +962,21 @@ mod web {
         lod_ownership_refreshes: u32,
         tested_slices: u32,
         selected_slices: u32,
+        stream_remote_ms: f32,
+        stream_plan_ms: f32,
+        stream_mesh_ms: f32,
+        stream_publish_ms: f32,
+        stream_surface_ms: f32,
+        stream_presence_ms: f32,
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct StreamFrameSample {
+        remote_ms: f32,
+        plan_ms: f32,
+        mesh_ms: f32,
+        publish_ms: f32,
+        surface_ms: f32,
     }
 
     struct FrameHistory {
@@ -1012,6 +1027,12 @@ mod web {
                     sample.lod_ownership_refreshes as f32,
                     sample.tested_slices as f32,
                     sample.selected_slices as f32,
+                    sample.stream_remote_ms,
+                    sample.stream_plan_ms,
+                    sample.stream_mesh_ms,
+                    sample.stream_publish_ms,
+                    sample.stream_surface_ms,
+                    sample.stream_presence_ms,
                 ]);
             }
             self.len = 0;
@@ -1374,7 +1395,9 @@ mod web {
             } else {
                 camera.streaming_velocity(&self.input.borrow())
             };
-            self.stream_world(&camera, streaming_velocity);
+            let stream_breakdown =
+                self.stream_world(&camera, streaming_velocity, performance.as_ref());
+            let presence_start = performance_now(performance.as_ref());
             if let Some(opened) = self.remote.world_opened() {
                 self.presence.ensure_session(&opened, time);
                 self.environment_snapshot.set(opened.environment);
@@ -1386,6 +1409,8 @@ mod web {
             if let Some(error) = self.presence.take_error() {
                 log_gpu_error(&format!("player presence: {error}"));
             }
+            let stream_presence_ms =
+                (performance_now(performance.as_ref()) - presence_start) as f32;
             let stream_ms = (performance_now(performance.as_ref()) - stream_start) as f32;
             self.stream_milliseconds
                 .set(smoothed_ms(self.stream_milliseconds.get(), stream_ms));
@@ -1627,6 +1652,12 @@ mod web {
                 lod_ownership_refreshes: rendered.lod_ownership_refreshes,
                 tested_slices: rendered.draw_list_tested_slices,
                 selected_slices: rendered.draw_list_selected_slices,
+                stream_remote_ms: stream_breakdown.remote_ms,
+                stream_plan_ms: stream_breakdown.plan_ms,
+                stream_mesh_ms: stream_breakdown.mesh_ms,
+                stream_publish_ms: stream_breakdown.publish_ms,
+                stream_surface_ms: stream_breakdown.surface_ms,
+                stream_presence_ms,
             });
             if let Err(error) = self.request_frame() {
                 web_sys::console::error_1(&error);
@@ -1634,8 +1665,16 @@ mod web {
             }
         }
 
-        fn stream_world(&self, camera: &CameraState, streaming_velocity: Vec3) {
+        fn stream_world(
+            &self,
+            camera: &CameraState,
+            streaming_velocity: Vec3,
+            performance: Option<&web_sys::Performance>,
+        ) -> StreamFrameSample {
+            let remote_start = performance_now(performance);
             self.drain_remote_generation();
+            let remote_ms = (performance_now(performance) - remote_start) as f32;
+            let plan_start = performance_now(performance);
             let focus = world_to_chunk(camera.position);
             let collision_interest = self.collision_stream_interest(
                 camera,
@@ -1690,6 +1729,8 @@ mod web {
                 collision_generation,
             );
             self.submit_generation_batch(WorldProductPriority::VisibleChunk, background_generation);
+            let plan_ms = (performance_now(performance) - plan_start) as f32;
+            let mesh_start = performance_now(performance);
             {
                 let chunks = self.chunks.borrow();
                 let halos = self.chunk_halos.borrow();
@@ -1730,6 +1771,8 @@ mod web {
                     let _ = self.scheduler.borrow_mut().complete(ticket);
                 }
             }
+            let mesh_ms = (performance_now(performance) - mesh_start) as f32;
+            let publish_start = performance_now(performance);
             for ticket in work.upload {
                 self.pending_uploads
                     .borrow_mut()
@@ -1763,7 +1806,17 @@ mod web {
                     &surface_interest,
                 );
             }
+            let publish_ms = (performance_now(performance) - publish_start) as f32;
+            let surface_start = performance_now(performance);
             self.stream_surface_lods(camera.position);
+            let surface_ms = (performance_now(performance) - surface_start) as f32;
+            StreamFrameSample {
+                remote_ms,
+                plan_ms,
+                mesh_ms,
+                publish_ms,
+                surface_ms,
+            }
         }
 
         fn register_canonical_publication(
