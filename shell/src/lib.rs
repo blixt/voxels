@@ -138,12 +138,14 @@ fn urgent_stream_interest(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(any(target_arch = "wasm32", test))]
 struct ChunkPortalMask {
     voxel_components: Box<[u16]>,
     component_faces: Vec<u8>,
     component_face_cells: Vec<[[u64; CHUNK_FACE_WORDS]; 6]>,
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
 impl ChunkPortalMask {
     fn from_chunk(chunk: &voxels_world::Chunk) -> Self {
         use std::collections::VecDeque;
