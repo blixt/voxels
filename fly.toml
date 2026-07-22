@@ -13,7 +13,7 @@ RUST_BACKTRACE = "1"
 source = "world_data"
 destination = "/data"
 initial_size = "1GB"
-snapshot_retention = 14
+scheduled_snapshots = false
 auto_extend_size_threshold = 80
 auto_extend_size_increment = "1GB"
 auto_extend_size_limit = "5GB"
@@ -21,9 +21,9 @@ auto_extend_size_limit = "5GB"
 [http_service]
 internal_port = 8080
 force_https = true
-auto_stop_machines = "off"
+auto_stop_machines = "stop"
 auto_start_machines = true
-min_machines_running = 1
+min_machines_running = 0
 
 [http_service.concurrency]
 type = "connections"

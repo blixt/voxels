@@ -5,14 +5,16 @@ The initial production topology deliberately has one authority for one world:
 - Cloudflare Worker `voxels` serves the Vite/WASM assets at `https://voxels.lol` and exposes only
   the same-origin `POST /api/session` credential endpoint.
 - Fly app `voxels-world-blixt` runs one `shared-cpu-2x` Machine with 2 GB RAM in `cdg`.
-- The encrypted `world_data` volume is mounted at `/data`; scheduled snapshots retain 14 days.
+- The encrypted `world_data` volume is mounted at `/data`; automatic snapshots are disabled.
 - Fly Proxy terminates TLS for `wss://voxels-world-blixt.fly.dev` and forwards both WebSockets to
   the Rust service on port 8080.
 
-`auto_stop_machines` is off and `min_machines_running` is one for the first production deployment.
-Do not enable idle stop until graceful shutdown, SQLite persistence, cold start, and browser
-reconnect behavior have been exercised against the live service. A Fly Volume belongs to one
-Machine and region, so this configuration is intentionally not highly available.
+`auto_stop_machines` uses a full stop, `auto_start_machines` is enabled, and
+`min_machines_running` is zero. Fly Proxy can therefore stop the only Machine after several idle
+minutes and cold-start it for the next request; an open WebSocket keeps it active. A Fly Volume
+belongs to one Machine and region, so this configuration is intentionally not highly available.
+Automatic volume snapshots are disabled, so arrange a separate backup before treating the world as
+durable production data.
 
 ## Authentication and secrets
 
@@ -100,5 +102,6 @@ vp run wrangler versions list
 Fly retains release history for `fly releases` and `fly releases rollback`. Cloudflare Worker
 versions are visible through Wrangler and the dashboard. Roll back the Worker and Fly independently:
 the website publish succeeding does not prove the server deploy or its volume migration succeeded.
-Never delete or replace `world_data` as part of a code rollback. Restore a volume snapshot into a new
-volume and inspect it before changing the production mount.
+Never delete or replace `world_data` as part of a code rollback. Automatic snapshots are disabled;
+if a suitable manual or older snapshot exists, restore it into a new volume and inspect it before
+changing the production mount.
