@@ -1,9 +1,9 @@
 #[cfg(not(target_os = "macos"))]
 compile_error!("voxels-terrain-diffusion requires macOS and Apple Metal");
 
-use std::path::PathBuf;
+use std::{collections::VecDeque, path::PathBuf};
 use voxels_world_terrain_diffusion::{
-    MetalTerrainDiffusion, TerrainDiffusionConfig, TerrainPrecision, fetch_pinned_model,
+    DetailTile, MetalTerrainDiffusion, TerrainDiffusionConfig, TerrainPrecision, fetch_pinned_model,
 };
 
 #[allow(
@@ -29,11 +29,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if command != "smoke"
         && command != "base-smoke"
         && command != "detail-smoke"
+        && command != "detail-survey"
         && command != "survey-smoke"
         && command != "counterproof"
     {
         return Err(format!(
-            "unknown command {command}; expected fetch, smoke, base-smoke, detail-smoke, survey-smoke, or counterproof"
+            "unknown command {command}; expected fetch, smoke, base-smoke, detail-smoke, detail-survey, survey-smoke, or counterproof"
         )
         .into());
     }
@@ -57,13 +58,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         latent_window,
         quality_histogram: [0.0, 0.0, 0.0, 1.0, 1.5],
     };
-    let runtime = if command == "detail-smoke" || command == "counterproof" {
-        MetalTerrainDiffusion::load_full(config)?
-    } else if command == "base-smoke" || command == "survey-smoke" {
-        MetalTerrainDiffusion::load_base(config)?
-    } else {
-        MetalTerrainDiffusion::load_coarse(config)?
-    };
+    let runtime =
+        if command == "detail-smoke" || command == "detail-survey" || command == "counterproof" {
+            MetalTerrainDiffusion::load_full(config)?
+        } else if command == "base-smoke" || command == "survey-smoke" {
+            MetalTerrainDiffusion::load_base(config)?
+        } else {
+            MetalTerrainDiffusion::load_coarse(config)?
+        };
     if command == "counterproof" {
         let baseline = vec![0.0_f32; 11 * 64 * 64];
         let mut conditioned = baseline.clone();
@@ -261,15 +263,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
-    if command == "survey-smoke" {
-        let radius = std::env::var("VOXELS_TERRAIN_SURVEY_RADIUS")
-            .ok()
-            .map(|value| value.parse::<i32>())
-            .transpose()?
-            .unwrap_or(2);
-        if !(0..=8).contains(&radius) {
-            return Err("VOXELS_TERRAIN_SURVEY_RADIUS must be in 0..=8".into());
+    if command == "detail-survey" {
+        let radius = survey_radius(1, 3)?;
+        let mut candidates = Vec::new();
+        let first_row = latent_window[0].saturating_sub(radius);
+        let last_row = latent_window[0].saturating_add(radius);
+        let first_column = latent_window[1].saturating_sub(radius);
+        let last_column = latent_window[1].saturating_add(radius);
+        for row in first_row..=last_row {
+            for column in first_column..=last_column {
+                let generated = runtime.generate_full_detail_tile([row, column])?;
+                candidates.push(rank_detail_window(
+                    [row, column],
+                    generated.detail_model_origin,
+                    &generated.detail,
+                    generated.coarse.elapsed_seconds,
+                    generated.latent.elapsed_seconds,
+                )?);
+            }
         }
+        candidates.sort_by(|left, right| right.score.total_cmp(&left.score));
+        println!("device={}", runtime.device_description());
+        println!("precision={:?}", runtime.precision());
+        println!("seed={seed} center={latent_window:?} radius={radius}");
+        for (rank, candidate) in candidates.into_iter().enumerate() {
+            println!(
+                "rank={} latent_window={:?} score={:.3} mountain={:.3} coast={:.3} valley={:.3} playable={:.3} land_fraction={:.3} elevation_p05_m={:.1} elevation_p50_m={:.1} elevation_p95_m={:.1} relief_960m_p90_m={:.1} slope_p90_degrees={:.1} coastline_km_per_100km2={:.2} coastal_relief_p90_m={:.1} sea_inlet_depth_m={:.0} narrow_sea_fraction={:.3} valley_depth_p95_m={:.1} valley_fraction={:.3} center_elevation_m={:.1} center_slope_degrees={:.1} spawn_model={:?} spawn_offset_m={:?} spawn_elevation_m={:.1} spawn_slope_degrees={:.1} spawn_relief_240m_m={:.1} spawn_sea_distance_m={:.0} coarse_ms={:.1} latent_ms={:.1} decoder_ms={:.1}",
+                rank + 1,
+                candidate.latent_window,
+                candidate.score,
+                candidate.mountain_score,
+                candidate.coast_score,
+                candidate.valley_score,
+                candidate.spawn.score,
+                candidate.land_fraction,
+                candidate.elevation_p05_metres,
+                candidate.elevation_p50_metres,
+                candidate.elevation_p95_metres,
+                candidate.relief_960m_p90_metres,
+                candidate.slope_p90_degrees,
+                candidate.coastline_km_per_100_square_km,
+                candidate.coastal_relief_p90_metres,
+                candidate.sea_inlet_depth_metres,
+                candidate.narrow_sea_fraction,
+                candidate.valley_depth_p95_metres,
+                candidate.valley_fraction,
+                candidate.center_elevation_metres,
+                candidate.center_slope_degrees,
+                candidate.spawn.model_coordinate,
+                candidate.spawn.offset_metres,
+                candidate.spawn.elevation_metres,
+                candidate.spawn.slope_degrees,
+                candidate.spawn.local_relief_metres,
+                candidate.spawn.sea_distance_metres,
+                candidate.coarse_seconds * 1_000.0,
+                candidate.latent_seconds * 1_000.0,
+                candidate.decoder_seconds * 1_000.0,
+            );
+        }
+        return Ok(());
+    }
+    if command == "survey-smoke" {
+        let radius = survey_radius(2, 8)?;
         let mut candidates = Vec::new();
         let first_row = latent_window[0].saturating_sub(radius);
         let last_row = latent_window[0].saturating_add(radius);
@@ -421,6 +476,462 @@ fn parse_coordinate_pair(value: &str) -> Result<[i32; 2], Box<dyn std::error::Er
     Ok([row, column])
 }
 
+fn survey_radius(default: i32, maximum: i32) -> Result<i32, Box<dyn std::error::Error>> {
+    let radius = std::env::var("VOXELS_TERRAIN_SURVEY_RADIUS")
+        .ok()
+        .map(|value| value.parse::<i32>())
+        .transpose()?
+        .unwrap_or(default);
+    if !(0..=maximum).contains(&radius) {
+        return Err(format!(
+            "VOXELS_TERRAIN_SURVEY_RADIUS must be in 0..={maximum} for this command"
+        )
+        .into());
+    }
+    Ok(radius)
+}
+
+#[derive(Clone, Debug)]
+struct SpawnRank {
+    score: f32,
+    model_coordinate: [i32; 2],
+    offset_metres: [i32; 2],
+    elevation_metres: f32,
+    slope_degrees: f32,
+    local_relief_metres: f32,
+    sea_distance_metres: f32,
+}
+
+#[derive(Clone, Debug)]
+struct DetailWindowRank {
+    latent_window: [i32; 2],
+    score: f32,
+    mountain_score: f32,
+    coast_score: f32,
+    valley_score: f32,
+    land_fraction: f32,
+    elevation_p05_metres: f32,
+    elevation_p50_metres: f32,
+    elevation_p95_metres: f32,
+    relief_960m_p90_metres: f32,
+    slope_p90_degrees: f32,
+    coastline_km_per_100_square_km: f32,
+    coastal_relief_p90_metres: f32,
+    sea_inlet_depth_metres: f32,
+    narrow_sea_fraction: f32,
+    valley_depth_p95_metres: f32,
+    valley_fraction: f32,
+    center_elevation_metres: f32,
+    center_slope_degrees: f32,
+    spawn: SpawnRank,
+    coarse_seconds: f64,
+    latent_seconds: f64,
+    decoder_seconds: f64,
+}
+
+fn rank_detail_window(
+    latent_window: [i32; 2],
+    detail_model_origin: [i32; 2],
+    detail: &DetailTile,
+    coarse_seconds: f64,
+    latent_seconds: f64,
+) -> Result<DetailWindowRank, Box<dyn std::error::Error>> {
+    let edge = detail.edge;
+    if edge < 3 || detail.elevation_metres.len() != edge * edge {
+        return Err(
+            "detail ranker requires a square elevation tile at least 3 samples wide".into(),
+        );
+    }
+    let resolution = detail.horizontal_resolution_metres as f32;
+    let elevation = &detail.elevation_metres;
+    let mut ordered_elevation = elevation.clone();
+    ordered_elevation.sort_by(f32::total_cmp);
+    let elevation_p05_metres = percentile(&ordered_elevation, 0.05);
+    let elevation_p50_metres = percentile(&ordered_elevation, 0.50);
+    let elevation_p95_metres = percentile(&ordered_elevation, 0.95);
+    let land_fraction = 1.0
+        - ordered_elevation.partition_point(|value| *value <= 0.0) as f32
+            / ordered_elevation.len() as f32;
+
+    let slopes = slope_degrees(elevation, edge, resolution);
+    let mut ordered_slopes = slopes.clone();
+    ordered_slopes.sort_by(f32::total_cmp);
+    let slope_p90_degrees = percentile(&ordered_slopes, 0.90);
+
+    let block_edge = ((960.0 / resolution).round() as usize).max(1);
+    let mut block_relief = Vec::new();
+    for block_row in (0..edge).step_by(block_edge) {
+        for block_column in (0..edge).step_by(block_edge) {
+            let mut minimum = f32::INFINITY;
+            let mut maximum = f32::NEG_INFINITY;
+            for row in block_row..(block_row + block_edge).min(edge) {
+                for column in block_column..(block_column + block_edge).min(edge) {
+                    let value = elevation[row * edge + column];
+                    minimum = minimum.min(value);
+                    maximum = maximum.max(value);
+                }
+            }
+            block_relief.push(maximum - minimum);
+        }
+    }
+    block_relief.sort_by(f32::total_cmp);
+    let relief_960m_p90_metres = percentile(&block_relief, 0.90);
+
+    let sea = boundary_connected_sea(elevation, edge);
+    let sea_count = sea.iter().filter(|value| **value).count();
+    let sea_distance = grid_distance(&sea, edge);
+    let land = elevation
+        .iter()
+        .map(|value| *value > 0.0)
+        .collect::<Vec<_>>();
+    let land_distance = grid_distance(&land, edge);
+    let mut coast_edges = 0_usize;
+    let mut coastal_elevation = Vec::new();
+    let mut sea_inlet_depth_samples = 0_usize;
+    let mut narrow_sea = 0_usize;
+    for row in 0..edge {
+        for column in 0..edge {
+            let index = row * edge + column;
+            if column + 1 < edge {
+                let right = index + 1;
+                coast_edges +=
+                    usize::from((sea[index] && land[right]) || (land[index] && sea[right]));
+            }
+            if row + 1 < edge {
+                let bottom = index + edge;
+                coast_edges +=
+                    usize::from((sea[index] && land[bottom]) || (land[index] && sea[bottom]));
+            }
+            if land[index] && sea_distance[index] <= 8 {
+                coastal_elevation.push(elevation[index]);
+            }
+            if sea[index] {
+                narrow_sea += usize::from(land_distance[index] <= 8);
+                if grid_neighbours(index, edge)
+                    .into_iter()
+                    .flatten()
+                    .any(|neighbour| land[neighbour])
+                {
+                    sea_inlet_depth_samples = sea_inlet_depth_samples
+                        .max(row.min(column).min(edge - 1 - row).min(edge - 1 - column));
+                }
+            }
+        }
+    }
+    coastal_elevation.sort_by(f32::total_cmp);
+    let coastal_relief_p90_metres = percentile_or_zero(&coastal_elevation, 0.90);
+    let tile_side_km = edge as f32 * resolution / 1_000.0;
+    let coastline_km_per_100_square_km = if tile_side_km > 0.0 {
+        (coast_edges as f32 * resolution / 1_000.0) / tile_side_km.powi(2) * 100.0
+    } else {
+        0.0
+    };
+    let sea_inlet_depth_metres = sea_inlet_depth_samples as f32 * resolution;
+    let narrow_sea_fraction = if sea_count == 0 {
+        0.0
+    } else {
+        narrow_sea as f32 / sea_count as f32
+    };
+
+    let integral = integral_image(elevation, edge);
+    let valley_radius = ((480.0 / resolution).round() as usize).max(1);
+    let mut valley_depths = Vec::new();
+    let mut deep_valleys = 0_usize;
+    for row in 0..edge {
+        for column in 0..edge {
+            let index = row * edge + column;
+            if !land[index] || sea_distance[index] <= 4 {
+                continue;
+            }
+            let depth =
+                (box_mean(&integral, edge, row, column, valley_radius) - elevation[index]).max(0.0);
+            deep_valleys += usize::from(depth >= 30.0);
+            valley_depths.push(depth);
+        }
+    }
+    valley_depths.sort_by(f32::total_cmp);
+    let valley_depth_p95_metres = percentile_or_zero(&valley_depths, 0.95);
+    let valley_fraction = if valley_depths.is_empty() {
+        0.0
+    } else {
+        deep_valleys as f32 / valley_depths.len() as f32
+    };
+
+    let mountain_score = (0.55 * range_score(relief_960m_p90_metres, 80.0, 450.0)
+        + 0.30 * range_score(elevation_p95_metres - elevation_p50_metres, 150.0, 1_000.0)
+        + 0.15 * range_score(slope_p90_degrees, 8.0, 28.0))
+    .clamp(0.0, 1.0);
+    let coast_balance = (4.0 * land_fraction * (1.0 - land_fraction))
+        .clamp(0.0, 1.0)
+        .sqrt();
+    let coast_score = coast_balance
+        * (0.30 * range_score(coastline_km_per_100_square_km, 4.0, 22.0)
+            + 0.25 * range_score(coastal_relief_p90_metres, 40.0, 500.0)
+            + 0.25 * range_score(sea_inlet_depth_metres, 300.0, 4_000.0)
+            + 0.20 * range_score(narrow_sea_fraction, 0.05, 0.70));
+    let valley_score = (0.65 * range_score(valley_depth_p95_metres, 12.0, 140.0)
+        + 0.35 * range_score(valley_fraction, 0.02, 0.25))
+    .clamp(0.0, 1.0);
+    let spawn = find_spawn(
+        elevation,
+        &slopes,
+        &sea_distance,
+        edge,
+        resolution,
+        detail_model_origin,
+    );
+    let score = 100.0
+        * mountain_score.max(0.01).powf(0.30)
+        * coast_score.max(0.01).powf(0.30)
+        * valley_score.max(0.01).powf(0.20)
+        * spawn.score.max(0.01).powf(0.20);
+    let center = (edge / 2) * edge + edge / 2;
+    Ok(DetailWindowRank {
+        latent_window,
+        score,
+        mountain_score,
+        coast_score,
+        valley_score,
+        land_fraction,
+        elevation_p05_metres,
+        elevation_p50_metres,
+        elevation_p95_metres,
+        relief_960m_p90_metres,
+        slope_p90_degrees,
+        coastline_km_per_100_square_km,
+        coastal_relief_p90_metres,
+        sea_inlet_depth_metres,
+        narrow_sea_fraction,
+        valley_depth_p95_metres,
+        valley_fraction,
+        center_elevation_metres: elevation[center],
+        center_slope_degrees: slopes[center],
+        spawn,
+        coarse_seconds,
+        latent_seconds,
+        decoder_seconds: detail.elapsed_seconds,
+    })
+}
+
+fn find_spawn(
+    elevation: &[f32],
+    slopes: &[f32],
+    sea_distance: &[u32],
+    edge: usize,
+    resolution: f32,
+    detail_model_origin: [i32; 2],
+) -> SpawnRank {
+    let center = edge / 2;
+    let search_radius = (edge / 8).max(1);
+    let mut best = SpawnRank {
+        score: 0.0,
+        model_coordinate: [
+            detail_model_origin[0] + center as i32,
+            detail_model_origin[1] + center as i32,
+        ],
+        offset_metres: [0, 0],
+        elevation_metres: elevation[center * edge + center],
+        slope_degrees: slopes[center * edge + center],
+        local_relief_metres: local_relief(elevation, edge, center, center, 4),
+        sea_distance_metres: distance_metres(
+            sea_distance[center * edge + center],
+            edge,
+            resolution,
+        ),
+    };
+    for row in center.saturating_sub(search_radius)..=(center + search_radius).min(edge - 1) {
+        for column in center.saturating_sub(search_radius)..=(center + search_radius).min(edge - 1)
+        {
+            let index = row * edge + column;
+            let local_relief_metres = local_relief(elevation, edge, row, column, 4);
+            let sea_distance_metres = distance_metres(sea_distance[index], edge, resolution);
+            let offset_row = row as f32 - center as f32;
+            let offset_column = column as f32 - center as f32;
+            let center_distance =
+                offset_row.hypot(offset_column) / (search_radius as f32 * 2.0_f32.sqrt());
+            let score = spawn_score(
+                elevation[index],
+                slopes[index],
+                local_relief_metres,
+                sea_distance_metres,
+                center_distance,
+            );
+            if score > best.score {
+                best = SpawnRank {
+                    score,
+                    model_coordinate: [
+                        detail_model_origin[0] + row as i32,
+                        detail_model_origin[1] + column as i32,
+                    ],
+                    offset_metres: [
+                        ((row as i32 - center as i32) as f32 * resolution).round() as i32,
+                        ((column as i32 - center as i32) as f32 * resolution).round() as i32,
+                    ],
+                    elevation_metres: elevation[index],
+                    slope_degrees: slopes[index],
+                    local_relief_metres,
+                    sea_distance_metres,
+                };
+            }
+        }
+    }
+    best
+}
+
+fn spawn_score(
+    elevation: f32,
+    slope_degrees: f32,
+    local_relief_metres: f32,
+    sea_distance_metres: f32,
+    center_distance: f32,
+) -> f32 {
+    if elevation <= 2.0 {
+        return 0.0;
+    }
+    let dry = range_score(elevation, 2.0, 20.0) * (1.0 - range_score(elevation, 1_500.0, 2_500.0));
+    let slope = 1.0 - range_score(slope_degrees, 4.0, 16.0);
+    let relief = 1.0 - range_score(local_relief_metres, 8.0, 45.0);
+    let water_safety = range_score(sea_distance_metres, 60.0, 240.0);
+    let coast_access = 1.0 - 0.35 * range_score(sea_distance_metres, 3_000.0, 6_000.0);
+    let centrality = 1.0 - 0.25 * center_distance.clamp(0.0, 1.0);
+    (dry * slope * relief * water_safety).sqrt() * coast_access * centrality
+}
+
+fn slope_degrees(elevation: &[f32], edge: usize, resolution: f32) -> Vec<f32> {
+    let mut slopes = Vec::with_capacity(elevation.len());
+    for row in 0..edge {
+        let top = row.saturating_sub(1);
+        let bottom = (row + 1).min(edge - 1);
+        let vertical_span = (bottom - top).max(1) as f32 * resolution;
+        for column in 0..edge {
+            let left = column.saturating_sub(1);
+            let right = (column + 1).min(edge - 1);
+            let horizontal_span = (right - left).max(1) as f32 * resolution;
+            let horizontal =
+                (elevation[row * edge + right] - elevation[row * edge + left]) / horizontal_span;
+            let vertical = (elevation[bottom * edge + column] - elevation[top * edge + column])
+                / vertical_span;
+            slopes.push(horizontal.hypot(vertical).atan().to_degrees());
+        }
+    }
+    slopes
+}
+
+fn boundary_connected_sea(elevation: &[f32], edge: usize) -> Vec<bool> {
+    let mut sea = vec![false; elevation.len()];
+    let mut queue = VecDeque::new();
+    for coordinate in 0..edge {
+        for index in [
+            coordinate,
+            (edge - 1) * edge + coordinate,
+            coordinate * edge,
+            coordinate * edge + edge - 1,
+        ] {
+            if elevation[index] <= 0.0 && !sea[index] {
+                sea[index] = true;
+                queue.push_back(index);
+            }
+        }
+    }
+    while let Some(index) = queue.pop_front() {
+        for neighbour in grid_neighbours(index, edge).into_iter().flatten() {
+            if elevation[neighbour] <= 0.0 && !sea[neighbour] {
+                sea[neighbour] = true;
+                queue.push_back(neighbour);
+            }
+        }
+    }
+    sea
+}
+
+fn grid_distance(sources: &[bool], edge: usize) -> Vec<u32> {
+    let mut distance = vec![u32::MAX; sources.len()];
+    let mut queue = VecDeque::new();
+    for (index, source) in sources.iter().copied().enumerate() {
+        if source {
+            distance[index] = 0;
+            queue.push_back(index);
+        }
+    }
+    while let Some(index) = queue.pop_front() {
+        let next_distance = distance[index].saturating_add(1);
+        for neighbour in grid_neighbours(index, edge).into_iter().flatten() {
+            if next_distance < distance[neighbour] {
+                distance[neighbour] = next_distance;
+                queue.push_back(neighbour);
+            }
+        }
+    }
+    distance
+}
+
+fn grid_neighbours(index: usize, edge: usize) -> [Option<usize>; 4] {
+    let row = index / edge;
+    let column = index % edge;
+    [
+        (row > 0).then(|| index - edge),
+        (row + 1 < edge).then(|| index + edge),
+        (column > 0).then(|| index - 1),
+        (column + 1 < edge).then(|| index + 1),
+    ]
+}
+
+fn integral_image(values: &[f32], edge: usize) -> Vec<f64> {
+    let integral_edge = edge + 1;
+    let mut integral = vec![0.0_f64; integral_edge * integral_edge];
+    for row in 0..edge {
+        let mut row_sum = 0.0_f64;
+        for column in 0..edge {
+            row_sum += f64::from(values[row * edge + column]);
+            integral[(row + 1) * integral_edge + column + 1] =
+                integral[row * integral_edge + column + 1] + row_sum;
+        }
+    }
+    integral
+}
+
+fn box_mean(integral: &[f64], edge: usize, row: usize, column: usize, radius: usize) -> f32 {
+    let first_row = row.saturating_sub(radius);
+    let last_row = (row + radius + 1).min(edge);
+    let first_column = column.saturating_sub(radius);
+    let last_column = (column + radius + 1).min(edge);
+    let integral_edge = edge + 1;
+    let sum = integral[last_row * integral_edge + last_column]
+        - integral[first_row * integral_edge + last_column]
+        - integral[last_row * integral_edge + first_column]
+        + integral[first_row * integral_edge + first_column];
+    (sum / ((last_row - first_row) * (last_column - first_column)) as f64) as f32
+}
+
+fn local_relief(elevation: &[f32], edge: usize, row: usize, column: usize, radius: usize) -> f32 {
+    let mut minimum = f32::INFINITY;
+    let mut maximum = f32::NEG_INFINITY;
+    for sample_row in row.saturating_sub(radius)..=(row + radius).min(edge - 1) {
+        for sample_column in column.saturating_sub(radius)..=(column + radius).min(edge - 1) {
+            let value = elevation[sample_row * edge + sample_column];
+            minimum = minimum.min(value);
+            maximum = maximum.max(value);
+        }
+    }
+    maximum - minimum
+}
+
+fn distance_metres(distance_samples: u32, edge: usize, resolution: f32) -> f32 {
+    distance_samples.min(edge as u32) as f32 * resolution
+}
+
+fn range_score(value: f32, minimum: f32, maximum: f32) -> f32 {
+    ((value - minimum) / (maximum - minimum)).clamp(0.0, 1.0)
+}
+
+fn percentile_or_zero(sorted: &[f32], fraction: f32) -> f32 {
+    if sorted.is_empty() {
+        0.0
+    } else {
+        percentile(sorted, fraction)
+    }
+}
+
 fn percentile(sorted: &[f32], fraction: f32) -> f32 {
     let position = fraction * (sorted.len() - 1) as f32;
     let lower = position.floor() as usize;
@@ -456,4 +967,88 @@ fn write_hillshade_preview(
     }
     std::fs::write(path, bytes)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sea_mask_excludes_landlocked_water() {
+        let edge = 7;
+        let mut elevation = vec![10.0_f32; edge * edge];
+        for row in 0..edge {
+            elevation[row * edge] = -1.0;
+        }
+        elevation[3 * edge + 3] = -2.0;
+
+        let sea = boundary_connected_sea(&elevation, edge);
+
+        assert!(sea[3 * edge]);
+        assert!(!sea[3 * edge + 3]);
+    }
+
+    #[test]
+    fn spawn_rank_prefers_the_flat_safe_center() {
+        let edge = 64;
+        let elevation = vec![80.0_f32; edge * edge];
+        let slopes = vec![0.0_f32; edge * edge];
+        let mut sea = vec![false; edge * edge];
+        for row in 0..edge {
+            for column in 0..8 {
+                sea[row * edge + column] = true;
+            }
+        }
+
+        let spawn = find_spawn(
+            &elevation,
+            &slopes,
+            &grid_distance(&sea, edge),
+            edge,
+            30.0,
+            [100, 200],
+        );
+
+        assert_eq!(spawn.model_coordinate, [132, 232]);
+        assert_eq!(spawn.offset_metres, [0, 0]);
+        assert!(spawn.score > 0.95);
+        assert!(spawn.sea_distance_metres >= 700.0);
+    }
+
+    #[test]
+    fn detail_ranker_measures_boundary_connected_fjord() {
+        let edge = 64;
+        let mut elevation = vec![60.0_f32; edge * edge];
+        for row in 0..edge {
+            for column in 0..12 {
+                elevation[row * edge + column] = -20.0;
+            }
+        }
+        for row in 29..35 {
+            for column in 12..44 {
+                elevation[row * edge + column] = -5.0;
+            }
+        }
+        for row in 0..edge {
+            for column in 44..edge {
+                elevation[row * edge + column] += (column - 43) as f32 * 18.0;
+            }
+        }
+        let detail = DetailTile {
+            edge,
+            horizontal_resolution_metres: 30,
+            elevation_metres: elevation,
+            residual_sqrt_elevation: vec![0.0; edge * edge],
+            elapsed_seconds: 0.25,
+        };
+
+        let rank = rank_detail_window([-2, -2], [-512, -512], &detail, 0.5, 0.4)
+            .expect("synthetic detail should rank");
+
+        assert!(rank.coastline_km_per_100_square_km > 5.0);
+        assert!(rank.sea_inlet_depth_metres >= 570.0);
+        assert!(rank.coast_score > 0.1);
+        assert!(rank.mountain_score > 0.1);
+        assert!(rank.spawn.score > 0.5);
+    }
 }
