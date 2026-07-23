@@ -2860,13 +2860,19 @@ mod web {
         }
 
         fn enqueue_surface_front(&self, coord: SurfaceTileCoord) {
-            if !surface_tile_in_coverage(
+            let in_active_coverage = surface_tile_in_coverage(
                 coord,
                 self.surface_focus.get(),
                 self.config.surface_load_radius_tiles,
                 self.surface_cross_radii.get(),
                 self.surface_motion_axis.get(),
-            ) {
+            );
+            // Dirty retained tiles are limited below to desired or presented ownership. Let the
+            // latter finish even after it leaves the moving load window: it is still the visible
+            // fallback protecting the frame until the next cut is ready.
+            let presented_dirty_fallback = self.surface_dirty.borrow().contains(&coord)
+                && self.surface_resident.borrow().contains(&coord);
+            if !in_active_coverage && !presented_dirty_fallback {
                 return;
             }
             if self.surface_in_flight.borrow().contains(&coord)
@@ -3207,17 +3213,13 @@ mod web {
                     renderer.remove_surface_tiles(evicted);
                 }
 
-                // Edits may have dirtied a tile just before a focus jump. Keep replacement work only
-                // while the tile is still resident or belongs to the new desired set; a future load
-                // samples the authoritative edit map and does not need a stale dirty marker.
+                // A retained tile remembers its requested revision in `surface_revisions`, but it
+                // is actionable replacement work only while desired or still presented by the
+                // outgoing cut. A future focus load samples the authoritative edit overlay.
                 {
-                    let resident = self.surface_resident.borrow();
-                    self.surface_dirty.borrow_mut().retain(|coord| {
-                        let index = coord.level.index() as usize;
-                        !changed_levels[index]
-                            || resident.contains(coord)
-                            || desired.contains(coord)
-                    });
+                    self.surface_dirty
+                        .borrow_mut()
+                        .retain(|coord| desired.contains(coord) || presented_tiles.contains(coord));
                 }
 
                 let resident = self.surface_resident.borrow();
@@ -3800,16 +3802,28 @@ mod web {
             } else {
                 self.surface_revisions.borrow_mut().begin_edit()
             };
+            let presented_surface_tiles = self
+                .renderer
+                .borrow()
+                .presented_surface_tiles()
+                .into_iter()
+                .collect::<BTreeSet<_>>();
             let mut surface = Vec::new();
             for &coord in affected_surface_tiles {
-                if !self.surface_tile_relevant(coord)
-                    && !self.surface_resident.borrow().contains(&coord)
-                {
+                let active =
+                    self.surface_tile_relevant(coord) || presented_surface_tiles.contains(&coord);
+                let resident = self.surface_resident.borrow().contains(&coord);
+                if !active && !resident {
                     continue;
                 }
                 self.surface_revisions
                     .borrow_mut()
                     .request(coord, surface_revision);
+                // Retained off-cut tiles stay revision-stale without masquerading as queued work.
+                // `prepare_focus` turns them back into a replacement when they become desired.
+                if !active {
+                    continue;
+                }
                 self.surface_dirty.borrow_mut().insert(coord);
                 self.enqueue_surface_front(coord);
                 surface.push(SurfaceRequirement {
@@ -3857,10 +3871,19 @@ mod web {
                 .iter()
                 .copied()
                 .collect::<Vec<_>>();
+            let presented = self
+                .renderer
+                .borrow()
+                .presented_surface_tiles()
+                .into_iter()
+                .collect::<BTreeSet<_>>();
             for coord in retained {
                 self.surface_revisions
                     .borrow_mut()
                     .request(coord, replacement);
+                if !self.surface_tile_relevant(coord) && !presented.contains(&coord) {
+                    continue;
+                }
                 self.surface_dirty.borrow_mut().insert(coord);
                 self.enqueue_surface_front(coord);
             }
