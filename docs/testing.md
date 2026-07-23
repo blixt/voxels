@@ -33,6 +33,9 @@ vp run automation -- run storage-benchmark
 # Edit continuity, underground rendering, or tunnel LOD coverage
 vp run automation -- run digging
 
+# Edited standalone structures and branched exact-to-far geometry
+vp run automation -- run arbitrary-geometry
+
 # Registered forest/valley LOD fidelity, first-view completeness, and 120 Hz cost
 vp run automation -- run lod-fidelity --arena=forest --viewport=1500x1000 --dpr=2
 vp run automation -- run lod-fidelity --arena=valley --viewport=1500x1000 --dpr=2
@@ -63,6 +66,7 @@ behavioral, visual, resource, or transport evidence that the general gate cannot
 | Travel coverage     | `vp run automation -- run lod-transition --mode=travel-coverage --travel-seconds=30`                    | Sustained spectator motion, missing-owner samples, connector state, and magenta-sky exposure     |
 | LOD video           | `vp run automation -- run lod-transition --video`                                                       | The same validated traversal captured as raw WebM                                                |
 | Digging             | `vp run automation -- run digging`                                                                      | Edit replacement continuity, enclosed performance, and tunnel LOD coverage                       |
+| Arbitrary geometry  | `vp run automation -- run arbitrary-geometry`                                                           | Standalone edits and branched tunnels across the exact-to-far handoff                            |
 | World Lab/UI        | `vp run automation -- run world-lab`                                                                    | Rust UI interaction and synchronized world diagnostics                                           |
 | Spectator feed      | `vp run automation -- run spectator-feed`                                                               | Bodyless read-only camera, movement, body restore, screenshots, and video                        |
 | Weather motion      | `vp run automation -- run weather-motion`                                                               | World-anchored clouds and downward precipitation                                                 |
@@ -72,6 +76,7 @@ behavioral, visual, resource, or transport evidence that the general gate cannot
 | Material cost       | `vp run automation -- run render-profile --mode=materials`                                              | Geometry-invariant material-detail A/B                                                           |
 | Day/night cost      | `vp run automation -- run render-profile --mode=atmosphere`                                             | Synchronized celestial anchors and lighting budgets                                              |
 | Weather cost        | `vp run automation -- run render-profile --mode=weather`                                                | Weather anchors, geometry invariants, clouds, rain, and GPU budgets                              |
+| Lighting comparison | `vp run automation -- run terrain-lighting-compare REFERENCE.png CANDIDATE.png`                         | Equal-size image contrast and coarse terrain-gradient ratios                                     |
 | Portable world      | `vp run automation -- run bench-world`                                                                  | Focused generation, stream-codec, meshing, and far-surface Criterion baselines                   |
 | Portable simulation | `vp run automation -- run bench-core`                                                                   | Focused dry/submerged fixed-step simulation baselines                                            |
 | Streaming runtime   | `vp run automation -- run bench-runtime`                                                                | Focused portable scheduler baselines using current client streaming limits                       |

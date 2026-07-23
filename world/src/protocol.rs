@@ -431,8 +431,9 @@ impl EncodedChunkBatchItem {
 pub struct SurfaceTileBatchRequest {
     pub request_id: u64,
     pub priority: WorldProductPriority,
-    /// Ordered coarse-to-fine by the caller. Each tile remains independently useful and
-    /// cancellable; a later finer level replaces geometry rather than changing world truth.
+    /// Ordered by caller priority. Each tile remains independently useful and cacheable; request
+    /// cancellation applies to the whole batch. A finer level replaces geometry rather than
+    /// changing world truth.
     pub coords: Vec<SurfaceTileCoord>,
 }
 
