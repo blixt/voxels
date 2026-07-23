@@ -689,6 +689,7 @@ enum UpwardPortalProbe {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(any(target_arch = "wasm32", test))]
 struct PortalFrontier {
     source: voxels_world::ChunkCoord,
     neighbor: voxels_world::ChunkCoord,
@@ -697,6 +698,7 @@ struct PortalFrontier {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(any(target_arch = "wasm32", test))]
 struct ExactVolumeFrontierCap {
     chunk: voxels_world::ChunkCoord,
     face: u8,
@@ -704,6 +706,7 @@ struct ExactVolumeFrontierCap {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[cfg(any(target_arch = "wasm32", test))]
 struct EnclosedViewStreamPlan {
     chunks: Vec<voxels_world::ChunkCoord>,
     frontiers: Vec<PortalFrontier>,
