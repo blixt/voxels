@@ -5,7 +5,8 @@
 //! learned macro shape. It adds deterministic climate-driven vegetation, but does not invent caves,
 //! routes, or authored atlas content.
 
-use crate::lod::generate_surface_tile_mesh_with_aggregated_ecology_and_shading;
+use crate::lod::generate_surface_tile_mesh_with_materials_and_aggregated_ecology_and_shading;
+use crate::source::exact_detail_chunks_for_surface_tile;
 use crate::{
     AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, ChunkSnapshot, EditMap,
     FEATURE_MAX_RADIUS_VOXELS, MACRO_FIELD_SCHEMA_VERSION, MAX_MACRO_BLOCK_SAMPLES,
@@ -20,7 +21,8 @@ use crate::{
     WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash, generate_water_tile_mesh_with,
     surface_tiles_affected_by_column,
 };
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 const SURFACE_TILE_SAMPLE_EDGE: u32 = 34;
 const ECOLOGY_CELL_VOXELS: i32 = 64;
@@ -501,7 +503,8 @@ impl HeightfieldWorldSource {
                     feature.material_at(coord).unwrap_or(Material::Air)
                 })
         });
-        let terrain = generate_surface_tile_mesh_with_aggregated_ecology_and_shading(
+        let surface_dependency_floors = RefCell::new(BTreeMap::new());
+        let terrain = generate_surface_tile_mesh_with_materials_and_aggregated_ecology_and_shading(
             coord,
             |x, z| {
                 let sampled = self
@@ -512,6 +515,24 @@ impl HeightfieldWorldSource {
                     .copied()
                     .filter(|(height, _)| *height >= sampled.0)
                     .unwrap_or(sampled)
+            },
+            |x, y, z| {
+                let Some(column) = region.column(x, z) else {
+                    return Material::Stone;
+                };
+                let generated = material_for_column(column, self.sea_level_voxels, y);
+                let dependency_floor = *surface_dependency_floors
+                    .borrow_mut()
+                    .entry((x, z))
+                    .or_insert_with(|| {
+                        self.edited_surface(&region, edits, x, z)
+                            .map_or(column.height, |surface| column.height.min(surface.0))
+                    });
+                if coord.level == SurfaceLodLevel::Stride2 || y >= dependency_floor {
+                    edits.resolve_generated(VoxelCoord::new(x, y, z), generated)
+                } else {
+                    generated
+                }
             },
             |x, z| {
                 self.edited_surface(&region, edits, x, z)
@@ -539,6 +560,7 @@ impl HeightfieldWorldSource {
             source_identity_hash: self.identity_hash,
             terrain,
             water,
+            exact_detail_chunks: exact_detail_chunks_for_surface_tile(edits, coord),
         })
     }
 
@@ -769,6 +791,20 @@ impl HeightfieldWorldSource {
         }
         Ok(features)
     }
+
+    fn conservative_surface_tiles_affected_by_voxels(
+        &self,
+        edits: &EditMap,
+        coords: &[VoxelCoord],
+    ) -> Vec<SurfaceTileCoord> {
+        let mut affected = BTreeSet::new();
+        for &coord in coords {
+            for level in SurfaceLodLevel::ALL {
+                affected.extend(self.surface_tiles_affected_by_voxel(edits, level, coord));
+            }
+        }
+        affected.into_iter().collect()
+    }
 }
 
 impl WorldSourceEngine for HeightfieldWorldSource {
@@ -823,11 +859,33 @@ impl WorldSourceEngine for HeightfieldWorldSource {
 
     fn surface_tiles_affected_by_voxel(
         &self,
-        _edits: &EditMap,
+        edits: &EditMap,
         level: SurfaceLodLevel,
         coord: VoxelCoord,
     ) -> Vec<SurfaceTileCoord> {
-        let mut affected = surface_tiles_affected_by_column(level, coord.x, coord.z);
+        let dependency_floor = self
+            .prepare_region(
+                WorldProductPriority::ReplacementSurface,
+                [coord.x, coord.z],
+                [1, 1],
+                1,
+            )
+            .ok()
+            .and_then(|region| {
+                let generated = region.column(coord.x, coord.z)?.height;
+                let edited = self
+                    .edited_surface(&region, edits, coord.x, coord.z)
+                    .ok()?
+                    .0;
+                Some(generated.min(edited))
+            });
+        let affects_terrain_shell = level == SurfaceLodLevel::Stride2
+            || dependency_floor.is_none_or(|surface_y| coord.y >= surface_y);
+        let mut affected = if affects_terrain_shell {
+            surface_tiles_affected_by_column(level, coord.x, coord.z)
+        } else {
+            Vec::new()
+        };
         for feature in self.skyline_features_at(coord) {
             if feature.material_at(coord).is_none() {
                 continue;
@@ -838,6 +896,72 @@ impl WorldSourceEngine for HeightfieldWorldSource {
             }
         }
         affected
+    }
+
+    fn surface_tiles_affected_by_voxels(
+        &self,
+        edits: &EditMap,
+        coords: &[VoxelCoord],
+    ) -> Vec<SurfaceTileCoord> {
+        let Some(min_x) = coords.iter().map(|coord| coord.x).min() else {
+            return Vec::new();
+        };
+        let min_z = coords.iter().map(|coord| coord.z).min().unwrap_or(0);
+        let max_x = coords.iter().map(|coord| coord.x).max().unwrap_or(min_x);
+        let max_z = coords.iter().map(|coord| coord.z).max().unwrap_or(min_z);
+        let Some(width) = max_x
+            .checked_sub(min_x)
+            .and_then(|span| span.checked_add(1))
+            .and_then(|span| u32::try_from(span).ok())
+        else {
+            return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
+        };
+        let Some(depth) = max_z
+            .checked_sub(min_z)
+            .and_then(|span| span.checked_add(1))
+            .and_then(|span| u32::try_from(span).ok())
+        else {
+            return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
+        };
+        let Ok(region) = self.prepare_region(
+            WorldProductPriority::ReplacementSurface,
+            [min_x, min_z],
+            [width, depth],
+            1,
+        ) else {
+            return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
+        };
+        let mut affected = BTreeSet::new();
+        for &coord in coords {
+            let Some(generated_surface_y) =
+                region.column(coord.x, coord.z).map(|column| column.height)
+            else {
+                return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
+            };
+            let Ok((edited_surface_y, _)) = self.edited_surface(&region, edits, coord.x, coord.z)
+            else {
+                return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
+            };
+            let dependency_floor = generated_surface_y.min(edited_surface_y);
+            for level in SurfaceLodLevel::ALL {
+                if level == SurfaceLodLevel::Stride2 || coord.y >= dependency_floor {
+                    affected.extend(surface_tiles_affected_by_column(level, coord.x, coord.z));
+                }
+            }
+            for feature in self.skyline_features_at(coord) {
+                if feature.material_at(coord).is_none() {
+                    continue;
+                }
+                for level in SurfaceLodLevel::ALL {
+                    let owner =
+                        SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
+                    if owner.is_world_representable() {
+                        affected.insert(owner);
+                    }
+                }
+            }
+        }
+        affected.into_iter().collect()
     }
 
     fn atmosphere_sample(&self, x: i32, z: i32) -> (AtmosphereSample, SurfaceRegion) {
@@ -1906,6 +2030,115 @@ mod tests {
     }
 
     #[test]
+    fn diffusion_surface_walls_at_reported_region_keep_surface_cover_one_voxel_deep() {
+        let source = diffusion_heightfield();
+        let edits = EditMap::default();
+        let mut wall_quads = 0_usize;
+        for level in SurfaceLodLevel::ALL {
+            let coord = SurfaceTileCoord::containing(level, 2_275, 4_520);
+            let tile = source
+                .generate_edited_surface_tile(&edits, coord)
+                .expect("reported-region diffusion surface tile")
+                .terrain;
+            for quad in tile
+                .quads
+                .iter()
+                .chain(tile.morph_closures.iter().map(|closure| &closure.quad))
+                .filter(|quad| quad.face != crate::mesh::FACE_POS_Y)
+            {
+                wall_quads += 1;
+                if matches!(
+                    quad.material,
+                    Material::Grass | Material::Moss | Material::Snow
+                ) {
+                    assert_eq!(
+                        quad.extent[1], 1,
+                        "{level:?} stretched {:?} down {} voxels at {:?}",
+                        quad.material, quad.extent[1], quad.origin
+                    );
+                }
+            }
+        }
+        assert!(
+            wall_quads > 0,
+            "fixture must exercise vertical surface walls"
+        );
+    }
+
+    #[test]
+    fn excavated_diffusion_crater_exposes_strata_at_every_surface_lod() {
+        let source = diffusion_heightfield();
+        let reported_position = [2_275, 4_520];
+        for level in SurfaceLodLevel::ALL {
+            let coord =
+                SurfaceTileCoord::containing(level, reported_position[0], reported_position[1]);
+            let stride = coord.stride_voxels();
+            let origin = coord.voxel_origin();
+            let cell = [
+                (reported_position[0] - origin[0]).div_euclid(stride),
+                (reported_position[1] - origin[1]).div_euclid(stride),
+            ];
+            let crater = [
+                origin[0] + cell[0] * stride + stride / 2,
+                origin[1] + cell[1] * stride + stride / 2,
+            ];
+            let sample_region = source
+                .prepare_region(WorldProductPriority::VisibleSurface, crater, [1, 1], 1)
+                .expect("reported-region material sample");
+            let surface = source
+                .surface_sample_from_region(&sample_region, crater[0], crater[1])
+                .expect("reported-region surface");
+            let mut edits = EditMap::default();
+            for y in surface.height.saturating_sub(11)..=surface.height {
+                let generated = source
+                    .material_at(&sample_region, crater[0], y, crater[1])
+                    .expect("reported-region stratum");
+                edits.set_against_generated(
+                    VoxelCoord::new(crater[0], y, crater[1]),
+                    Material::Air,
+                    generated,
+                );
+            }
+            assert_eq!(edits.len(), 12);
+
+            let tile = source
+                .generate_edited_surface_tile(&edits, coord)
+                .expect("edited reported-region diffusion surface tile")
+                .terrain;
+            let mut exposed_substrate = BTreeSet::new();
+            for quad in tile
+                .quads
+                .iter()
+                .chain(tile.morph_closures.iter().map(|closure| &closure.quad))
+                .filter(|quad| quad.face != crate::mesh::FACE_POS_Y)
+            {
+                if matches!(
+                    quad.material,
+                    Material::Grass | Material::Moss | Material::Snow
+                ) {
+                    assert_eq!(
+                        quad.extent[1], 1,
+                        "{level:?} stretched {:?} into the excavated opening at {:?}",
+                        quad.material, quad.origin
+                    );
+                }
+                if matches!(
+                    quad.material,
+                    Material::Dirt | Material::Stone | Material::Basalt | Material::Limestone
+                ) && (quad.origin[0] - crater[0]).abs() <= stride * 2
+                    && (quad.origin[2] - crater[1]).abs() <= stride * 2
+                {
+                    exposed_substrate.insert(quad.material.id());
+                }
+            }
+            assert!(
+                !exposed_substrate.is_empty(),
+                "{level:?} crater must expose a nearby non-surface stratum"
+            );
+        }
+    }
+
+    #[test]
     fn deepest_voxel_below_a_high_provider_surface_uses_deep_geology() {
         let extreme = column(i32::MAX - 127, 0.5, 0.45, 0.4, 0.0);
         assert_eq!(material_for_column(&extreme, 0, i32::MIN), Material::Stone);
@@ -2453,6 +2686,53 @@ mod tests {
             .generate_edited_surface_tile(&edits, coord)
             .expect("edited water tile");
         assert_ne!(drained.water, pristine.water);
+    }
+
+    #[test]
+    fn batched_subsurface_edits_invalidate_only_the_exact_view_surface_shell() {
+        let source = heightfield(FakeBehavior::Valid);
+        let edits = EditMap::default();
+
+        let underground = source.surface_tiles_affected_by_voxels(
+            &edits,
+            &[VoxelCoord::new(1, -4, 1), VoxelCoord::new(2, 0, 2)],
+        );
+        assert!(!underground.is_empty());
+        assert!(
+            underground
+                .iter()
+                .all(|coord| coord.level == SurfaceLodLevel::Stride2)
+        );
+        let surface = source.surface_tiles_affected_by_voxels(&edits, &[VoxelCoord::new(1, 1, 1)]);
+        assert!(
+            SurfaceLodLevel::ALL
+                .into_iter()
+                .all(|level| { surface.contains(&SurfaceTileCoord::containing(level, 1, 1)) })
+        );
+    }
+
+    #[test]
+    fn one_metre_subsurface_edit_has_bounded_surface_replacement_fanout() {
+        let source = heightfield(FakeBehavior::Valid);
+        let edits = EditMap::default();
+        let coords = (1..=10)
+            .flat_map(|z| {
+                (1..=10).flat_map(move |x| (-10..0).map(move |y| VoxelCoord::new(x, y, z)))
+            })
+            .collect::<Vec<_>>();
+        let affected = source.surface_tiles_affected_by_voxels(&edits, &coords);
+
+        assert!(!affected.is_empty());
+        assert!(
+            affected
+                .iter()
+                .all(|coord| coord.level == SurfaceLodLevel::Stride2)
+        );
+        assert!(
+            affected.len() <= 3,
+            "one cubic metre of tunnel edits fanned out to {} surface products",
+            affected.len()
+        );
     }
 
     #[test]

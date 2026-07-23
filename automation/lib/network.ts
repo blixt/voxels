@@ -28,6 +28,7 @@ export const VXWP_KIND = Object.freeze({
   editCommit: 16,
   resyncRequired: 17,
   frameFragment: 18,
+  frameFragmentAbort: 19,
 } as const);
 
 export type VxwpKind = (typeof VXWP_KIND)[keyof typeof VXWP_KIND];
@@ -51,6 +52,7 @@ export const VXWP_KIND_NAMES = Object.freeze({
   [VXWP_KIND.editCommit]: "edit_commit",
   [VXWP_KIND.resyncRequired]: "resync_required",
   [VXWP_KIND.frameFragment]: "frame_fragment",
+  [VXWP_KIND.frameFragmentAbort]: "frame_fragment_abort",
 } satisfies Record<VxwpKind, string>);
 
 export type LinkDirection = "upstream" | "downstream";
@@ -77,6 +79,7 @@ export interface LinkMessageStats {
   lastOutboundRateBytesPerSecond?: number;
   maxOutboundRateBytesPerSecond?: number;
   worldProductPriorityFrames?: Record<string, number>;
+  cancelTargets?: Record<string, number>;
   controlErrors?: Record<string, number>;
 }
 
@@ -196,10 +199,12 @@ function worldProductPriorityName(payload: Buffer): string | null {
     case 2:
       return "visible_chunk";
     case 3:
-      return "visible_surface";
+      return "immediate_surface";
     case 4:
-      return "replacement_surface";
+      return "visible_surface";
     case 5:
+      return "replacement_surface";
+    case 6:
       return "prefetch";
     default:
       return null;
@@ -322,6 +327,7 @@ class ConnectionInspector {
   readonly statsRef: { current: MutableLinkStats };
   readonly now: () => number;
   readonly pendingPresencePings = new Map<number, number>();
+  readonly pendingWorldProducts = new Map<bigint, string>();
   path = "";
   readonly upgraded: Record<LinkDirection, boolean> = { upstream: false, downstream: false };
   readonly http: Record<LinkDirection, Buffer> = {
@@ -345,6 +351,7 @@ class ConnectionInspector {
 
   resetRoundTripState(): void {
     this.pendingPresencePings.clear();
+    this.pendingWorldProducts.clear();
   }
 
   observe(direction: LinkDirection, bytes: Buffer): void {
@@ -418,12 +425,29 @@ class ConnectionInspector {
       direction === "upstream" &&
       (kind === VXWP_KIND.chunkBatch || kind === VXWP_KIND.surfaceTileBatch)
     ) {
+      this.pendingWorldProducts.set(payload.readBigUInt64LE(12), name);
       const priority = worldProductPriorityName(payload);
       if (priority !== null) {
         stats.messages[key].worldProductPriorityFrames ??= {};
         stats.messages[key].worldProductPriorityFrames[priority] =
           (stats.messages[key].worldProductPriorityFrames[priority] ?? 0) + 1;
       }
+    }
+    if (direction === "upstream" && kind === VXWP_KIND.cancel) {
+      const requestId = payload.readBigUInt64LE(12);
+      const target = this.pendingWorldProducts.get(requestId) ?? "unknown";
+      stats.messages[key].cancelTargets ??= {};
+      stats.messages[key].cancelTargets[target] =
+        (stats.messages[key].cancelTargets[target] ?? 0) + 1;
+      this.pendingWorldProducts.delete(requestId);
+    }
+    if (
+      direction === "downstream" &&
+      (kind === VXWP_KIND.chunkBatchResult ||
+        kind === VXWP_KIND.surfaceTileBatchResult ||
+        kind === VXWP_KIND.error)
+    ) {
+      this.pendingWorldProducts.delete(payload.readBigUInt64LE(12));
     }
     if (direction === "downstream" && kind === VXWP_KIND.error) {
       const message = controlErrorMessage(payload) ?? "malformed error frame";
@@ -643,6 +667,7 @@ function clonedStats(stats: MutableLinkStats): LinkStats {
             value.worldProductPriorityFrames === undefined
               ? undefined
               : { ...value.worldProductPriorityFrames },
+          cancelTargets: value.cancelTargets === undefined ? undefined : { ...value.cancelTargets },
           controlErrors: value.controlErrors === undefined ? undefined : { ...value.controlErrors },
         },
       ]),

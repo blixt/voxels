@@ -8,17 +8,17 @@ use crate::{
     ChunkCoord, ChunkSnapshot, Material, MeshingHalo, ModelIdentity, SURFACE_HORIZON_CELL_COUNT,
     SURFACE_PARENT_HORIZON_CELL_COUNT, SURFACE_PARENT_SHADING_EDGE_SAMPLES,
     SURFACE_SHADING_EDGE_SAMPLES, SourceDeviceRequirement, SurfaceBounds, SurfaceLodLevel,
-    SurfacePatch, SurfaceQuad, SurfaceRegion, SurfaceShading, SurfaceTileCoord, SurfaceTileMesh,
-    SurfaceTileSnapshot, VOXEL_SIZE_METRES, VoxelCoord, WaterPatch, WaterTileMesh, WorldId,
-    WorldManifest, WorldProductPriority, WorldSourceError, WorldSourceIdentity,
-    WorldSourceIdentityHash, WorldSourceKind, codec,
+    SurfaceMorphClosure, SurfacePatch, SurfaceQuad, SurfaceRegion, SurfaceShading,
+    SurfaceTileCoord, SurfaceTileMesh, SurfaceTileSnapshot, VOXEL_SIZE_METRES, VoxelCoord,
+    WaterPatch, WaterTileMesh, WorldId, WorldManifest, WorldProductPriority, WorldSourceError,
+    WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind, codec,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 28;
+pub const PROTOCOL_VERSION: u16 = 32;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -34,10 +34,12 @@ pub const MAX_FRAME_FRAGMENT_DATA_BYTES: usize =
 pub const EDIT_SESSION_NOT_CURRENT: &str = "edit session is no longer current";
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
+const MAX_SURFACE_EXACT_DETAIL_CHUNKS: usize = 4_096;
 const MAX_MANIFEST_MODEL_STRING_BYTES: usize = 4_096;
 const MAX_MANIFEST_MODEL_WEIGHT_HASHES: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
-const SURFACE_SNAPSHOT_VERSION: u16 = 7;
+const SURFACE_SNAPSHOT_VERSION: u16 = 10;
+const SURFACE_QUAD_SYNTHETIC_FALLBACK_BIT: u64 = 1 << 19;
 
 const KIND_OPEN_WORLD: u16 = 1;
 const KIND_WORLD_OPENED: u16 = 2;
@@ -57,6 +59,7 @@ const KIND_EDIT_COMMAND: u16 = 15;
 const KIND_EDIT_COMMIT: u16 = 16;
 const KIND_RESYNC_REQUIRED: u16 = 17;
 const KIND_FRAME_FRAGMENT: u16 = 18;
+const KIND_FRAME_FRAGMENT_ABORT: u16 = 19;
 const FLAG_NONE: u16 = 0;
 const RESERVED: u16 = 0;
 const RESULT_CODEC_BROTLI: u8 = 1;
@@ -282,6 +285,9 @@ const PLAYER_POSE_FLAGS: u16 = PLAYER_POSE_GROUNDED
     | PLAYER_POSE_DISCONTINUITY
     | PLAYER_POSE_SPECTATOR
     | PLAYER_POSE_GLIDING;
+// The wire validator only rejects pathological payloads. World-service applies the lower,
+// role-specific authoritative player and spectator limits from server configuration.
+const PLAYER_POSE_WIRE_SPEED_LIMIT_METRES_PER_SECOND: f32 = 600.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpenPresence {
@@ -2263,6 +2269,26 @@ pub fn decode_frame_fragment(bytes: &[u8]) -> Result<FrameFragment, ProtocolErro
     Ok(fragment)
 }
 
+pub fn encode_frame_fragment_abort(transfer_id: u64) -> Result<Vec<u8>, ProtocolError> {
+    if transfer_id == 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "fragment abort transfer id is zero",
+        ));
+    }
+    Ok(encode_frame(KIND_FRAME_FRAGMENT_ABORT, transfer_id, &[]))
+}
+
+pub fn decode_frame_fragment_abort(bytes: &[u8]) -> Result<u64, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_kind(&frame, KIND_FRAME_FRAGMENT_ABORT)?;
+    if frame.request_id == 0 || !frame.payload.is_empty() {
+        return Err(ProtocolError::InvalidPayload(
+            "invalid frame fragment abort",
+        ));
+    }
+    Ok(frame.request_id)
+}
+
 fn validate_frame_fragment(fragment: &FrameFragment) -> Result<(), ProtocolError> {
     validate_frame_fragment_fields(
         fragment.transfer_id,
@@ -2349,6 +2375,10 @@ impl FrameReassembler {
 
     pub fn clear(&mut self) {
         self.transfers.clear();
+    }
+
+    pub fn abort(&mut self, transfer_id: u64) -> bool {
+        self.transfers.remove(&transfer_id).is_some()
     }
 }
 
@@ -2468,6 +2498,10 @@ pub const fn resync_required_kind() -> u16 {
 
 pub const fn frame_fragment_kind() -> u16 {
     KIND_FRAME_FRAGMENT
+}
+
+pub const fn frame_fragment_abort_kind() -> u16 {
+    KIND_FRAME_FRAGMENT_ABORT
 }
 
 fn encode_player_pose_body(output: &mut Vec<u8>, pose: PlayerPoseUpdate) {
@@ -2605,7 +2639,11 @@ fn validate_player_pose(
         .into_iter()
         .map(|value| value * value)
         .sum::<f32>();
-    if !velocity_squared.is_finite() || velocity_squared > 64.0 * 64.0 {
+    if !velocity_squared.is_finite()
+        || velocity_squared
+            > PLAYER_POSE_WIRE_SPEED_LIMIT_METRES_PER_SECOND
+                * PLAYER_POSE_WIRE_SPEED_LIMIT_METRES_PER_SECOND
+    {
         return Err(ProtocolError::InvalidPayload(
             "player velocity is nonfinite or too large",
         ));
@@ -3192,10 +3230,18 @@ fn decode_surface_coord(cursor: &mut Cursor<'_>) -> Result<SurfaceTileCoord, Pro
 fn encode_surface_snapshot(snapshot: &SurfaceTileSnapshot) -> Result<Vec<u8>, ProtocolError> {
     validate_surface_mesh(&snapshot.terrain)?;
     validate_water_mesh(&snapshot.water)?;
+    validate_surface_exact_detail_chunks(&snapshot.terrain, &snapshot.exact_detail_chunks)?;
     let mut bytes = Vec::new();
     bytes.extend_from_slice(SURFACE_SNAPSHOT_MAGIC);
     push_u16(&mut bytes, SURFACE_SNAPSHOT_VERSION);
     push_u16(&mut bytes, 0);
+    push_u16(&mut bytes, snapshot.exact_detail_chunks.len() as u16);
+    push_u16(&mut bytes, 0);
+    for chunk in &snapshot.exact_detail_chunks {
+        push_i32(&mut bytes, chunk.x);
+        push_i32(&mut bytes, chunk.y);
+        push_i32(&mut bytes, chunk.z);
+    }
     encode_surface_mesh(&mut bytes, &snapshot.terrain);
     encode_water_mesh(&mut bytes, &snapshot.water);
     Ok(bytes)
@@ -3221,21 +3267,76 @@ fn decode_surface_snapshot(
             "reserved surface snapshot field is nonzero",
         ));
     }
+    let exact_detail_count = usize::from(cursor.u16()?);
+    if exact_detail_count > MAX_SURFACE_EXACT_DETAIL_CHUNKS || cursor.u16()? != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "invalid surface exact-detail header",
+        ));
+    }
+    let mut exact_detail_chunks = Vec::with_capacity(exact_detail_count);
+    for _ in 0..exact_detail_count {
+        exact_detail_chunks.push(ChunkCoord::new(cursor.i32()?, cursor.i32()?, cursor.i32()?));
+    }
     let terrain = decode_surface_mesh(&mut cursor, coord)?;
     let water = decode_water_mesh(&mut cursor, coord)?;
+    validate_surface_exact_detail_chunks(&terrain, &exact_detail_chunks)?;
     cursor.finish()?;
     Ok(SurfaceTileSnapshot {
         source_identity_hash,
         terrain,
         water,
+        exact_detail_chunks,
     })
+}
+
+fn validate_surface_exact_detail_chunks(
+    terrain: &SurfaceTileMesh,
+    chunks: &[ChunkCoord],
+) -> Result<(), ProtocolError> {
+    if chunks.len() > MAX_SURFACE_EXACT_DETAIL_CHUNKS
+        || (terrain.coord.level != SurfaceLodLevel::Stride2 && !chunks.is_empty())
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "invalid surface exact-detail count",
+        ));
+    }
+    let [origin_x, origin_z] = terrain.coord.voxel_origin();
+    let span = crate::SURFACE_TILE_EDGE_CELLS.saturating_mul(terrain.coord.stride_voxels());
+    let edge = crate::CHUNK_EDGE as i32;
+    let minimum_x = origin_x.div_euclid(edge);
+    let minimum_z = origin_z.div_euclid(edge);
+    let maximum_x = origin_x.saturating_add(span - 1).div_euclid(edge);
+    let maximum_z = origin_z.saturating_add(span - 1).div_euclid(edge);
+    let mut previous = None;
+    for &chunk in chunks {
+        let order = (chunk.x, chunk.z, chunk.y);
+        if !chunk.is_world_representable()
+            || !(minimum_x..=maximum_x).contains(&chunk.x)
+            || !(minimum_z..=maximum_z).contains(&chunk.z)
+            || previous.is_some_and(|previous| previous >= order)
+        {
+            return Err(ProtocolError::InvalidPayload(
+                "invalid surface exact-detail chunk",
+            ));
+        }
+        previous = Some(order);
+    }
+    Ok(())
 }
 
 fn encode_surface_mesh(output: &mut Vec<u8>, mesh: &SurfaceTileMesh) {
     push_u32(output, mesh.quads.len() as u32);
     push_u16(output, mesh.patches.len() as u16);
-    push_u16(output, 0);
+    push_u16(output, mesh.morph_closures.len() as u16);
     encode_surface_quads(output, mesh.coord, &mesh.quads);
+    encode_surface_quad_iter(
+        output,
+        mesh.coord,
+        mesh.morph_closures.iter().map(|closure| closure.quad),
+    );
+    for closure in &mesh.morph_closures {
+        push_i32(output, closure.collapsed_height);
+    }
     for patch in &mesh.patches {
         output.extend_from_slice(&[
             patch.cell_bounds[0][0],
@@ -3245,6 +3346,10 @@ fn encode_surface_mesh(output: &mut Vec<u8>, mesh: &SurfaceTileMesh) {
         ]);
         encode_range(output, &patch.quad_range);
         for range in &patch.edge_ranges {
+            encode_range(output, range);
+        }
+        encode_range(output, &patch.morph_closure_range);
+        for range in &patch.edge_morph_closure_ranges {
             encode_range(output, range);
         }
         encode_surface_bounds(output, patch.bounds);
@@ -3265,14 +3370,25 @@ fn decode_surface_mesh(
 ) -> Result<SurfaceTileMesh, ProtocolError> {
     let quad_count = cursor.u32()? as usize;
     let patch_count = usize::from(cursor.u16()?);
+    let morph_closure_count = usize::from(cursor.u16()?);
     if quad_count > MAX_SURFACE_QUADS_PER_TILE
+        || morph_closure_count > MAX_SURFACE_QUADS_PER_TILE
         || patch_count == 0
         || patch_count > MAX_SURFACE_PATCHES_PER_TILE
-        || cursor.u16()? != 0
     {
         return Err(ProtocolError::LimitExceeded("surface mesh geometry"));
     }
     let quads = decode_surface_quads(cursor, coord, quad_count)?;
+    let closure_quads = decode_surface_quads(cursor, coord, morph_closure_count)?;
+    let morph_closures = closure_quads
+        .into_iter()
+        .map(|quad| {
+            Ok(SurfaceMorphClosure {
+                quad,
+                collapsed_height: cursor.i32()?,
+            })
+        })
+        .collect::<Result<Vec<_>, ProtocolError>>()?;
     let mut patches = Vec::with_capacity(patch_count);
     for _ in 0..patch_count {
         let cell_bounds = [[cursor.u8()?, cursor.u8()?], [cursor.u8()?, cursor.u8()?]];
@@ -3283,11 +3399,20 @@ fn decode_surface_mesh(
             decode_range(cursor)?,
             decode_range(cursor)?,
         ];
+        let morph_closure_range = decode_range(cursor)?;
+        let edge_morph_closure_ranges = [
+            decode_range(cursor)?,
+            decode_range(cursor)?,
+            decode_range(cursor)?,
+            decode_range(cursor)?,
+        ];
         let bounds = decode_surface_bounds(cursor)?;
         patches.push(SurfacePatch {
             cell_bounds,
             quad_range,
             edge_ranges,
+            morph_closure_range,
+            edge_morph_closure_ranges,
             bounds,
         });
     }
@@ -3310,6 +3435,7 @@ fn decode_surface_mesh(
     let mesh = SurfaceTileMesh {
         coord,
         quads,
+        morph_closures,
         patches,
         shading: SurfaceShading {
             heights,
@@ -3373,11 +3499,25 @@ fn decode_water_mesh(
 }
 
 fn encode_surface_quads(output: &mut Vec<u8>, coord: SurfaceTileCoord, quads: &[SurfaceQuad]) {
+    encode_surface_quad_iter(output, coord, quads.iter().copied());
+}
+
+fn encode_surface_quad_iter(
+    output: &mut Vec<u8>,
+    coord: SurfaceTileCoord,
+    quads: impl IntoIterator<Item = SurfaceQuad>,
+) {
     let tile_origin = coord.voxel_origin();
     let mut previous = [i64::from(tile_origin[0]), 0, i64::from(tile_origin[1])];
     for quad in quads {
         encode_delta_coord(output, quad.origin, &mut previous);
-        let metadata = u64::from(quad.face) | (u64::from(quad.material.id()) << 3);
+        let metadata = u64::from(quad.face)
+            | (u64::from(quad.material.id()) << 3)
+            | if quad.synthetic_fallback {
+                SURFACE_QUAD_SYNTHETIC_FALLBACK_BIT
+            } else {
+                0
+            };
         push_var_u64(output, metadata);
         push_var_u64(output, u64::from(quad.extent[0]));
         push_var_u64(output, u64::from(quad.extent[1]));
@@ -3396,11 +3536,10 @@ fn decode_surface_quads(
         let origin = decode_delta_coord(cursor, &mut previous)?;
         let metadata = decode_var_u64(cursor, 3)?;
         let face = (metadata & 0b111) as u8;
-        if face > 5 {
+        if face > 5 || metadata >> 20 != 0 {
             return Err(ProtocolError::InvalidPayload("invalid surface quad face"));
         }
-        let material_id = u16::try_from(metadata >> 3)
-            .map_err(|_| ProtocolError::UnknownEnum("material", metadata >> 3))?;
+        let material_id = ((metadata >> 3) & u64::from(u16::MAX)) as u16;
         let material = Material::from_id(material_id).ok_or(ProtocolError::UnknownEnum(
             "material",
             u64::from(material_id),
@@ -3419,6 +3558,7 @@ fn decode_surface_quads(
             face,
             extent,
             material,
+            synthetic_fallback: metadata & SURFACE_QUAD_SYNTHETIC_FALLBACK_BIT != 0,
         });
     }
     Ok(quads)
@@ -3546,7 +3686,9 @@ fn validate_range(range: &std::ops::Range<u32>, quad_count: usize) -> Result<(),
 fn validate_surface_mesh(mesh: &SurfaceTileMesh) -> Result<(), ProtocolError> {
     let patches_per_edge = crate::SURFACE_PATCHES_PER_TILE_EDGE as usize;
     let expected_patch_count = patches_per_edge * patches_per_edge;
-    if mesh.quads.len() > MAX_SURFACE_QUADS_PER_TILE {
+    if mesh.quads.len() > MAX_SURFACE_QUADS_PER_TILE
+        || mesh.morph_closures.len() > MAX_SURFACE_QUADS_PER_TILE
+    {
         return Err(ProtocolError::LimitExceeded("surface mesh geometry"));
     }
     let expected_parent_heights = if mesh.coord.level.next_coarser().is_some() {
@@ -3589,6 +3731,10 @@ fn validate_surface_mesh(mesh: &SurfaceTileMesh) -> Result<(), ProtocolError> {
         validate_range(&patch.quad_range, mesh.quads.len())?;
         for range in &patch.edge_ranges {
             validate_range(range, mesh.quads.len())?;
+        }
+        validate_range(&patch.morph_closure_range, mesh.morph_closures.len())?;
+        for range in &patch.edge_morph_closure_ranges {
+            validate_range(range, mesh.morph_closures.len())?;
         }
         if (0..3).any(|axis| patch.bounds.min[axis] >= patch.bounds.max[axis]) {
             return Err(ProtocolError::InvalidPayload("invalid surface bounds"));
@@ -3859,9 +4005,10 @@ fn decode_priority(value: u8) -> Result<WorldProductPriority, ProtocolError> {
     Ok(match value {
         1 => WorldProductPriority::CollisionCritical,
         2 => WorldProductPriority::VisibleChunk,
-        3 => WorldProductPriority::VisibleSurface,
-        4 => WorldProductPriority::ReplacementSurface,
-        5 => WorldProductPriority::Prefetch,
+        3 => WorldProductPriority::ImmediateSurface,
+        4 => WorldProductPriority::VisibleSurface,
+        5 => WorldProductPriority::ReplacementSurface,
+        6 => WorldProductPriority::Prefetch,
         _ => return Err(ProtocolError::UnknownEnum("priority", u64::from(value))),
     })
 }
@@ -4336,6 +4483,30 @@ mod tests {
             decode_player_pose(&encode_player_pose(pose).expect("encode pose")),
             Ok(pose)
         );
+        let fast_spectator_pose = PlayerPoseUpdate {
+            linear_velocity_metres_per_second: [128.0, 0.0, 0.0],
+            ..pose
+        };
+        assert_eq!(
+            decode_player_pose(
+                &encode_player_pose(fast_spectator_pose).expect("encode fast spectator pose")
+            ),
+            Ok(fast_spectator_pose)
+        );
+        let excessive_velocity_pose = PlayerPoseUpdate {
+            linear_velocity_metres_per_second: [
+                PLAYER_POSE_WIRE_SPEED_LIMIT_METRES_PER_SECOND + 1.0,
+                0.0,
+                0.0,
+            ],
+            ..pose
+        };
+        assert_eq!(
+            encode_player_pose(excessive_velocity_pose),
+            Err(ProtocolError::InvalidPayload(
+                "player velocity is nonfinite or too large"
+            ))
+        );
 
         let visible_pose = PlayerPoseUpdate {
             flags: PLAYER_POSE_GROUNDED,
@@ -4462,7 +4633,19 @@ mod tests {
         assert_eq!(reassembler.accept(&first_a), Ok(None));
         assert_eq!(reassembler.accept(&second_a), Ok(None));
         assert_eq!(reassembler.accept(&second_b), Ok(Some(second)));
-        assert_eq!(reassembler.accept(&first_b), Ok(Some(first)));
+        assert_eq!(reassembler.accept(&first_b), Ok(Some(first.clone())));
+
+        let abandoned = encode_frame_fragment(103, first.len(), 0, &first[..3_000]).unwrap();
+        assert_eq!(reassembler.accept(&abandoned), Ok(None));
+        let abort = encode_frame_fragment_abort(103).unwrap();
+        assert_eq!(decode_frame_fragment_abort(&abort), Ok(103));
+        assert!(reassembler.abort(103));
+        assert!(!reassembler.abort(103));
+        for transfer_id in 104..=168 {
+            let fragment = encode_frame_fragment(transfer_id, first.len(), 0, &first[..1]).unwrap();
+            assert_eq!(reassembler.accept(&fragment), Ok(None));
+            assert!(reassembler.abort(transfer_id));
+        }
 
         let orphan = encode_frame_fragment(73, 100, 10, &[1; 10]).unwrap();
         assert!(matches!(
@@ -4643,12 +4826,14 @@ mod tests {
                 face: 0,
                 extent: [1, u16::MAX],
                 material: Material::Stone,
+                synthetic_fallback: true,
             },
             SurfaceQuad {
                 origin: [i32::MAX, i32::MIN, i32::MAX],
                 face: 5,
                 extent: [u16::MAX, 1],
                 material: Material::GlowCrystal,
+                synthetic_fallback: false,
             },
         ];
         let mut encoded = Vec::new();
@@ -4731,6 +4916,68 @@ mod tests {
             encode_surface_snapshot(&out_of_order),
             Err(ProtocolError::InvalidPayload(
                 "surface terrain patch grid is incomplete or out of order"
+            ))
+        );
+    }
+
+    #[test]
+    fn surface_snapshot_round_trips_sparse_exact_detail_chunks_and_rejects_bad_order() {
+        let source = ProceduralWorldSource::new(42);
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0);
+        let mut snapshot = source
+            .generate_edited_surface_tile(&crate::EditMap::default(), coord)
+            .expect("surface snapshot");
+        snapshot.exact_detail_chunks = vec![ChunkCoord::new(0, -2, 0), ChunkCoord::new(1, 7, 1)];
+        let encoded = encode_surface_snapshot(&snapshot).expect("encode exact detail");
+        assert_eq!(
+            decode_surface_snapshot(&encoded, coord, source.source_identity_hash()),
+            Ok(snapshot.clone())
+        );
+
+        snapshot.exact_detail_chunks.swap(0, 1);
+        assert_eq!(
+            encode_surface_snapshot(&snapshot),
+            Err(ProtocolError::InvalidPayload(
+                "invalid surface exact-detail chunk"
+            ))
+        );
+        snapshot.exact_detail_chunks = vec![ChunkCoord::new(2, 0, 0)];
+        assert_eq!(
+            encode_surface_snapshot(&snapshot),
+            Err(ProtocolError::InvalidPayload(
+                "invalid surface exact-detail chunk"
+            ))
+        );
+
+        snapshot.exact_detail_chunks = vec![ChunkCoord::new(0, 0, 0); 2];
+        assert_eq!(
+            encode_surface_snapshot(&snapshot),
+            Err(ProtocolError::InvalidPayload(
+                "invalid surface exact-detail chunk"
+            ))
+        );
+
+        snapshot.exact_detail_chunks = (0..=MAX_SURFACE_EXACT_DETAIL_CHUNKS)
+            .map(|chunk_y| ChunkCoord::new(0, chunk_y as i32, 0))
+            .collect();
+        assert_eq!(
+            encode_surface_snapshot(&snapshot),
+            Err(ProtocolError::InvalidPayload(
+                "invalid surface exact-detail count"
+            ))
+        );
+
+        let mut coarse = source
+            .generate_edited_surface_tile(
+                &crate::EditMap::default(),
+                SurfaceTileCoord::new(SurfaceLodLevel::Stride4, 0, 0),
+            )
+            .expect("coarse surface snapshot");
+        coarse.exact_detail_chunks = vec![ChunkCoord::new(0, 0, 0)];
+        assert_eq!(
+            encode_surface_snapshot(&coarse),
+            Err(ProtocolError::InvalidPayload(
+                "invalid surface exact-detail count"
             ))
         );
     }

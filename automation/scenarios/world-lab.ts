@@ -1,5 +1,7 @@
+import { readFile } from "node:fs/promises";
 import { BrowserCapability } from "../lib/browser.ts";
 import { type EngineClient, snapshotValue } from "../lib/engine.ts";
+import { analyzeDiagnosticSky } from "../lib/image.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { startWorldStack } from "../lib/world.ts";
 
@@ -68,6 +70,75 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
   await page.waitForTimeout(250);
   await viewport.screenshot("World Lab", { filename: "world-lab.png" });
 
+  // Toggle the Rust-owned control rather than the automation API, then prove both that the sky
+  // override reached the presented canvas and that the adjacent control downloads that canvas.
+  await page.mouse.click(945, 444); // MAGENTA DEBUG SKY
+  await page.waitForTimeout(150);
+  const diagnosticCapture = await page.screenshot();
+  const diagnosticSky = await analyzeDiagnosticSky(page, diagnosticCapture, {
+    x0: 0.02,
+    x1: 0.7,
+    y0: 0.02,
+    y1: 0.28,
+  });
+  if (diagnosticSky.diagnosticSkyFraction < 0.5) {
+    throw new Error(
+      `World Lab diagnostic-sky toggle did not reach the canvas: ${JSON.stringify(diagnosticSky)}`,
+    );
+  }
+
+  const pendingDownload = page.waitForEvent("download", { timeout: 10_000 });
+  await page.mouse.click(1_172, 444); // TAKE SCREENSHOT
+  const download = await pendingDownload.catch((error: unknown) => {
+    throw new Error(
+      `World Lab did not start a screenshot download: ${String(error)}; browser failures: ${JSON.stringify(browser.failures)}`,
+    );
+  });
+  const downloadPath = await download.path();
+  const downloadFailure = await download.failure();
+  if (downloadFailure !== null || downloadPath === null) {
+    throw new Error(`World Lab screenshot download failed: ${downloadFailure ?? "missing file"}`);
+  }
+  if (
+    !/^voxels-x-?\d+\.\d{2}-y-?\d+\.\d{2}-z-?\d+\.\d{2}-h\d+\.\d-p-?\d+\.\d\.png$/u.test(
+      download.suggestedFilename(),
+    )
+  ) {
+    throw new Error(
+      `World Lab screenshot filename omitted its camera pose: ${download.suggestedFilename()}`,
+    );
+  }
+  const downloadedCapture = await readFile(downloadPath);
+  if (!downloadedCapture.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+    throw new Error("World Lab screenshot download is not a PNG");
+  }
+  const downloadedSky = await analyzeDiagnosticSky(page, downloadedCapture, {
+    x0: 0.02,
+    x1: 0.7,
+    y0: 0.02,
+    y1: 0.28,
+  });
+  if (downloadedSky.diagnosticSkyFraction < 0.5) {
+    throw new Error("downloaded screenshot does not contain the presented diagnostic canvas");
+  }
+  await context.artifacts.write(
+    "Downloaded World Lab screenshot",
+    "world-lab-downloaded.png",
+    downloadedCapture,
+    "image/png",
+  );
+  await page.mouse.click(945, 444); // restore ordinary sky
+  await page.waitForTimeout(100);
+  const restoredSky = await analyzeDiagnosticSky(page, await page.screenshot(), {
+    x0: 0.02,
+    x1: 0.7,
+    y0: 0.02,
+    y1: 0.28,
+  });
+  if (restoredSky.diagnosticSkyPixels !== 0) {
+    throw new Error("World Lab diagnostic-sky toggle did not restore the ordinary atmosphere");
+  }
+
   // Rust owns these hit regions; renderer unit tests cover their responsive layout separately.
   await page.mouse.click(1_044.5, 205); // GOLDEN
   await page.mouse.click(1_198.5, 268); // STORM
@@ -129,6 +200,7 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     metrics: {
       residentChunks: snapshotValue(settled, "residentChunks"),
       ascentMetres: snapshotValue(ascended, "cameraY") - bodyPosition[1],
+      downloadedScreenshotBytes: downloadedCapture.byteLength,
     },
     details: {
       browser: browser.version,

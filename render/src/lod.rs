@@ -7,12 +7,21 @@ use voxels_world::{CHUNK_EDGE, SurfaceLodLevel, SurfacePatchEdge, SurfacePatchId
 
 /// Half extents in canonical 10 cm voxels. Every boundary is a multiple of the patch span on both
 /// sides, so whole patches can change owner without overlap, holes, or fragment clipping.
-pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 8] = [96, 256, 512, 1_024, 2_048, 4_096, 8_192, 16_384];
+pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 8] =
+    [192, 480, 960, 1_920, 3_840, 6_144, 12_288, 24_576];
 // Snap only as coarsely as both adjacent representations require. In particular, the near handoff
-// moves in one 3.2 m chunk rather than a 9.6 m feature cell, cutting its worst visible replacement
+// moves in one 3.2 m chunk rather than a 12.8 m feature cell, cutting its worst visible replacement
 // strip by two thirds while preserving whole-chunk and whole-patch ownership.
 const LOD_BOUNDARY_SNAP: [i32; 8] = [32, 32, 64, 128, 256, 512, 1_024, 2_048];
 const LOD_SNAP_HYSTERESIS_DIVISOR: i32 = 8;
+
+pub fn lod_boundary_half_extents_are_valid(extents: [i32; 8]) -> bool {
+    extents
+        .into_iter()
+        .zip(LOD_BOUNDARY_SNAP)
+        .all(|(extent, alignment)| extent > 0 && extent % alignment == 0)
+        && extents.windows(2).all(|pair| pair[0] < pair[1])
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LodOwner {
@@ -23,6 +32,7 @@ pub enum LodOwner {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GeometricLodFocus {
     boundary_centres: [[i32; 2]; 8],
+    boundary_half_extents: [i32; 8],
     surface_level_count: u8,
 }
 
@@ -32,15 +42,34 @@ impl GeometricLodFocus {
     }
 
     pub fn snapped_for_levels(voxel_x: i32, voxel_z: i32, surface_level_count: usize) -> Self {
+        Self::snapped_with_half_extents_for_levels(
+            voxel_x,
+            voxel_z,
+            surface_level_count,
+            LOD_BOUNDARY_HALF_EXTENTS,
+        )
+    }
+
+    pub fn snapped_with_half_extents_for_levels(
+        voxel_x: i32,
+        voxel_z: i32,
+        surface_level_count: usize,
+        boundary_half_extents: [i32; 8],
+    ) -> Self {
         assert!(
             (1..=SurfaceLodLevel::ALL.len()).contains(&surface_level_count),
             "geometric LOD focus must own at least one known surface level"
+        );
+        assert!(
+            lod_boundary_half_extents_are_valid(boundary_half_extents),
+            "geometric LOD half extents must be positive and strictly increasing"
         );
         Self {
             boundary_centres: std::array::from_fn(|index| {
                 let snap = LOD_BOUNDARY_SNAP[index];
                 [snap_nearest(voxel_x, snap), snap_nearest(voxel_z, snap)]
             }),
+            boundary_half_extents,
             surface_level_count: surface_level_count as u8,
         }
     }
@@ -73,11 +102,16 @@ impl GeometricLodFocus {
         self.boundary_centres
     }
 
+    pub const fn boundary_half_extents(self) -> [i32; 8] {
+        self.boundary_half_extents
+    }
+
     pub fn owner_at(self, voxel_x: i32, voxel_z: i32) -> LodOwner {
         let voxel_x = i64::from(voxel_x);
         let voxel_z = i64::from(voxel_z);
         let surface_level_count = usize::from(self.surface_level_count);
-        for (index, half_extent) in LOD_BOUNDARY_HALF_EXTENTS
+        for (index, half_extent) in self
+            .boundary_half_extents
             .into_iter()
             .take(surface_level_count)
             .enumerate()
@@ -169,6 +203,20 @@ fn surface_patch_is_selected_with_incomplete_parents(
     let Some(center) = patch.voxel_center_xz() else {
         return false;
     };
+    // A complete canonical surface column is an explicit exact owner even when it sits just
+    // outside the radial canonical square. This is how sparse interaction/edit columns cross the
+    // exact-to-stride-two handoff without briefly reverting to a heightfield that cannot represent
+    // overhangs, floating voxels, or excavated openings. Stride-two patches align to half a
+    // canonical chunk, so a ready chunk column replaces four whole patches without clipping.
+    if patch.level == SurfaceLodLevel::Stride2 {
+        let column = (
+            center[0].div_euclid(CHUNK_EDGE as i32),
+            center[1].div_euclid(CHUNK_EDGE as i32),
+        );
+        if canonical_ready_columns.contains(&column) {
+            return false;
+        }
+    }
     let owner = focus.owner_at(center[0], center[1]);
     if owner == LodOwner::Canonical {
         let column = (
@@ -220,7 +268,7 @@ pub fn surface_patch_transition_is_candidate(
 /// construction then performs only constant-time membership checks instead of repeating ancestor
 /// walks for every patch. Transition candidates are geometric adjacencies only: the renderer must
 /// prove and install their complete connector geometry before suppressing either source edge.
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SurfacePatchSelection {
     patches: HashSet<SurfacePatchId>,
     transition_candidates: HashSet<(SurfacePatchId, u8)>,
@@ -262,38 +310,12 @@ impl SurfacePatchSelection {
                 )
             }));
         for patch in self.patches.iter().copied() {
-            for edge in SurfacePatchEdge::ALL {
-                let neighbor = match edge {
-                    SurfacePatchEdge::NegativeX => patch.neighbor(-1, 0),
-                    SurfacePatchEdge::PositiveX => patch.neighbor(1, 0),
-                    SurfacePatchEdge::NegativeZ => patch.neighbor(0, -1),
-                    SurfacePatchEdge::PositiveZ => patch.neighbor(0, 1),
-                };
-                if neighbor.is_some_and(|neighbor| self.patches.contains(&neighbor)) {
-                    continue;
-                }
-                let Some(neighbor_points) = points_across_patch_edge(patch, edge) else {
-                    continue;
-                };
-                let selected_neighbors =
-                    neighbor_points.map(|point| selected_surface_patch_at(&self.patches, point));
-                let borders_finer_surface = selected_neighbors.iter().all(|neighbor| {
-                    neighbor.is_some_and(|neighbor| neighbor.level.index() < patch.level.index())
-                });
-                let borders_ready_canonical = patch.level == SurfaceLodLevel::Stride2
-                    && selected_neighbors.iter().all(Option::is_none)
-                    && neighbor_points.iter().all(|point| {
-                        focus.owner_at(point[0], point[1]) == LodOwner::Canonical
-                            && canonical_ready_columns.contains(&(
-                                point[0].div_euclid(CHUNK_EDGE as i32),
-                                point[1].div_euclid(CHUNK_EDGE as i32),
-                            ))
-                    });
-                if borders_finer_surface || borders_ready_canonical {
-                    self.transition_candidates
-                        .insert((patch, edge.index() as u8));
-                }
-            }
+            insert_transition_candidates(
+                &self.patches,
+                &mut self.transition_candidates,
+                canonical_ready_columns,
+                patch,
+            );
         }
     }
 
@@ -329,6 +351,119 @@ impl SurfacePatchSelection {
 
     pub fn selected_patch_at(&self, point: [i32; 2]) -> Option<SurfacePatchId> {
         selected_surface_patch_at(&self.patches, point)
+    }
+}
+
+/// Incremental equivalent of [`SurfacePatchSelection::rebuild_with_incomplete_parents`].
+///
+/// Canonical surface columns often become ready while the complete previous cut is still resident.
+/// Splitting selection and adjacency work across frames lets the renderer retain that cut until the
+/// replacement is complete instead of spending a long WASM frame rebuilding unrelated rings.
+pub(crate) struct SurfacePatchSelectionBuild {
+    focus: GeometricLodFocus,
+    resident: HashSet<SurfacePatchId>,
+    canonical_ready_columns: HashSet<(i32, i32)>,
+    incomplete_parents: HashSet<SurfacePatchId>,
+    resident_order: Vec<SurfacePatchId>,
+    transition_order: Vec<SurfacePatchId>,
+    selection: SurfacePatchSelection,
+    selection_cursor: usize,
+    transition_cursor: usize,
+}
+
+impl SurfacePatchSelectionBuild {
+    pub(crate) fn new(
+        focus: GeometricLodFocus,
+        resident: &HashSet<SurfacePatchId>,
+        canonical_ready_columns: &HashSet<(i32, i32)>,
+        incomplete_parents: &HashSet<SurfacePatchId>,
+    ) -> Self {
+        Self {
+            focus,
+            resident: resident.clone(),
+            canonical_ready_columns: canonical_ready_columns.clone(),
+            incomplete_parents: incomplete_parents.clone(),
+            resident_order: resident.iter().copied().collect(),
+            transition_order: Vec::new(),
+            selection: SurfacePatchSelection::default(),
+            selection_cursor: 0,
+            transition_cursor: 0,
+        }
+    }
+
+    pub(crate) fn advance(&mut self, work_items: usize) -> Option<SurfacePatchSelection> {
+        let mut remaining = work_items.max(1);
+        while remaining > 0 && self.selection_cursor < self.resident_order.len() {
+            let patch = self.resident_order[self.selection_cursor];
+            self.selection_cursor += 1;
+            remaining -= 1;
+            if surface_patch_is_selected_with_incomplete_parents(
+                self.focus,
+                &self.resident,
+                &self.canonical_ready_columns,
+                &self.incomplete_parents,
+                patch,
+            ) {
+                self.selection.patches.insert(patch);
+            }
+        }
+        if self.selection_cursor < self.resident_order.len() {
+            return None;
+        }
+        if self.transition_order.is_empty() {
+            self.transition_order = self.selection.patches.iter().copied().collect();
+        }
+        while remaining > 0 && self.transition_cursor < self.transition_order.len() {
+            let patch = self.transition_order[self.transition_cursor];
+            self.transition_cursor += 1;
+            remaining -= 1;
+            insert_transition_candidates(
+                &self.selection.patches,
+                &mut self.selection.transition_candidates,
+                &self.canonical_ready_columns,
+                patch,
+            );
+        }
+        (self.transition_cursor == self.transition_order.len())
+            .then(|| std::mem::take(&mut self.selection))
+    }
+}
+
+fn insert_transition_candidates(
+    selected: &HashSet<SurfacePatchId>,
+    transitions: &mut HashSet<(SurfacePatchId, u8)>,
+    canonical_ready_columns: &HashSet<(i32, i32)>,
+    patch: SurfacePatchId,
+) {
+    for edge in SurfacePatchEdge::ALL {
+        let neighbor = match edge {
+            SurfacePatchEdge::NegativeX => patch.neighbor(-1, 0),
+            SurfacePatchEdge::PositiveX => patch.neighbor(1, 0),
+            SurfacePatchEdge::NegativeZ => patch.neighbor(0, -1),
+            SurfacePatchEdge::PositiveZ => patch.neighbor(0, 1),
+        };
+        if neighbor.is_some_and(|neighbor| selected.contains(&neighbor)) {
+            continue;
+        }
+        let Some(neighbor_points) = points_across_patch_edge(patch, edge) else {
+            continue;
+        };
+        let selected_neighbors =
+            neighbor_points.map(|point| selected_surface_patch_at(selected, point));
+        let borders_finer_surface = selected_neighbors.iter().all(|neighbor| {
+            neighbor.is_some_and(|neighbor| neighbor.level.index() < patch.level.index())
+        });
+        let borders_ready_canonical = patch.level == SurfaceLodLevel::Stride2
+            && selected_neighbors.iter().all(Option::is_none)
+            && neighbor_points.iter().all(|point| {
+                canonical_ready_columns.contains(&(
+                    point[0].div_euclid(CHUNK_EDGE as i32),
+                    point[1].div_euclid(CHUNK_EDGE as i32),
+                ))
+            });
+        if borders_finer_surface || borders_ready_canonical {
+            transitions.insert((patch, edge.index() as u8));
+        }
     }
 }
 
@@ -450,7 +585,12 @@ mod tests {
     #[test]
     fn incomplete_child_groups_keep_the_parent_without_overlap() {
         let focus = GeometricLodFocus::snapped(0, 0);
-        let parent = SurfacePatchId::new(SurfaceLodLevel::Stride4, 4, 0);
+        let parent_span = SurfacePatchId::new(SurfaceLodLevel::Stride4, 0, 0).voxel_span();
+        let parent = SurfacePatchId::new(
+            SurfaceLodLevel::Stride4,
+            LOD_BOUNDARY_HALF_EXTENTS[0] / parent_span,
+            0,
+        );
         let children = parent.children().expect("finer children");
         let parent_center = parent.voxel_center_xz().unwrap();
         assert_eq!(
@@ -524,6 +664,50 @@ mod tests {
     }
 
     #[test]
+    fn incremental_selection_exactly_matches_synchronous_selection() {
+        let focus = GeometricLodFocus::snapped(117, -73);
+        let mut resident = HashSet::new();
+        for level in SurfaceLodLevel::ALL {
+            for patch_z in -12..=12 {
+                for patch_x in -12..=12 {
+                    // Leave deterministic holes in otherwise complete sibling groups so the test
+                    // covers ancestor fallback as well as ordinary refinement and transitions.
+                    if (patch_x * 3 + patch_z * 5 + level.index() as i32).rem_euclid(23) != 0 {
+                        resident.insert(SurfacePatchId::new(level, patch_x, patch_z));
+                    }
+                }
+            }
+        }
+        let canonical_ready_columns = (-6_i32..=6)
+            .flat_map(|z| (-6_i32..=6).map(move |x| (x, z)))
+            .filter(|(x, z)| (x + z).rem_euclid(4) != 0)
+            .collect::<HashSet<_>>();
+        let incomplete_parents = incomplete_resident_parents(&resident);
+        let mut expected = SurfacePatchSelection::default();
+        expected.rebuild_with_incomplete_parents(
+            focus,
+            &resident,
+            &canonical_ready_columns,
+            &incomplete_parents,
+        );
+
+        for work_items in [1, 7, 4_096] {
+            let mut build = SurfacePatchSelectionBuild::new(
+                focus,
+                &resident,
+                &canonical_ready_columns,
+                &incomplete_parents,
+            );
+            let actual = loop {
+                if let Some(selection) = build.advance(work_items) {
+                    break selection;
+                }
+            };
+            assert_eq!(actual, expected, "work_items={work_items}");
+        }
+    }
+
+    #[test]
     fn negative_child_groups_refine_with_euclidean_parent_identity() {
         let focus = GeometricLodFocus::snapped(0, 0);
         let parent = SurfacePatchId::new(SurfaceLodLevel::Stride4, -5, 0);
@@ -560,6 +744,65 @@ mod tests {
             &HashSet::from([(0, 0)]),
             patch
         ));
+    }
+
+    #[test]
+    fn complete_sparse_column_replaces_stride_two_surface_outside_radial_exact_cut() {
+        let focus = GeometricLodFocus::snapped_with_half_extents_for_levels(
+            0,
+            0,
+            SurfaceLodLevel::ALL.len(),
+            [32, 64, 128, 256, 512, 1_024, 2_048, 4_096],
+        );
+        let patch = SurfacePatchId::new(SurfaceLodLevel::Stride2, 2, 0);
+        let resident = resident([patch]);
+        assert_eq!(
+            focus.owner_at(40, 8),
+            LodOwner::Surface(SurfaceLodLevel::Stride2)
+        );
+        assert!(surface_patch_is_selected(
+            focus,
+            &resident,
+            &HashSet::new(),
+            patch
+        ));
+        assert!(!surface_patch_is_selected(
+            focus,
+            &resident,
+            &HashSet::from([(1, 0)]),
+            patch
+        ));
+    }
+
+    #[test]
+    fn sparse_exact_column_replaces_exactly_four_aligned_stride_two_patches() {
+        let focus = GeometricLodFocus::snapped_with_half_extents_for_levels(
+            0,
+            0,
+            SurfaceLodLevel::ALL.len(),
+            [32, 64, 128, 256, 512, 1_024, 2_048, 4_096],
+        );
+        for column_x in [-2, 1] {
+            let patches = (-4..=3)
+                .flat_map(|patch_x| {
+                    (0..=1).map(move |patch_z| {
+                        SurfacePatchId::new(SurfaceLodLevel::Stride2, patch_x, patch_z)
+                    })
+                })
+                .collect::<HashSet<_>>();
+            let mut selection = SurfacePatchSelection::default();
+            selection.rebuild(focus, &patches, &HashSet::from([(column_x, 0)]));
+            for patch in patches {
+                let center = patch.voxel_center_xz().unwrap();
+                let belongs_to_replaced_column =
+                    center[0].div_euclid(CHUNK_EDGE as i32) == column_x;
+                assert_eq!(
+                    selection.owns(patch),
+                    !belongs_to_replaced_column,
+                    "patch {patch:?} in column {column_x}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -622,17 +865,18 @@ mod tests {
     #[test]
     fn every_world_point_has_exactly_one_ordered_owner() {
         let focus = GeometricLodFocus::snapped(117, -73);
-        let probes = [
-            ([128, -64], LodOwner::Canonical),
-            ([224, -64], LodOwner::Surface(SurfaceLodLevel::Stride2)),
-            ([384, -64], LodOwner::Surface(SurfaceLodLevel::Stride4)),
-            ([704, -64], LodOwner::Surface(SurfaceLodLevel::Stride8)),
-            ([1_280, -64], LodOwner::Surface(SurfaceLodLevel::Stride16)),
-            ([2_560, -64], LodOwner::Surface(SurfaceLodLevel::Stride32)),
-            ([5_120, -64], LodOwner::Surface(SurfaceLodLevel::Stride64)),
-            ([10_240, -64], LodOwner::Surface(SurfaceLodLevel::Stride128)),
-            ([20_480, -64], LodOwner::Surface(SurfaceLodLevel::Stride256)),
-        ];
+        let centres = focus.boundary_centres();
+        let probes = std::iter::once(([128, -64], LodOwner::Canonical)).chain(
+            LOD_BOUNDARY_HALF_EXTENTS
+                .into_iter()
+                .enumerate()
+                .map(|(index, half_extent)| {
+                    (
+                        [centres[index][0] + half_extent, -64],
+                        LodOwner::Surface(SurfaceLodLevel::ALL[index]),
+                    )
+                }),
+        );
         for (point, expected) in probes {
             assert_eq!(focus.owner_at(point[0], point[1]), expected);
         }
@@ -752,9 +996,15 @@ mod tests {
     #[test]
     fn transitions_are_owned_only_on_resolution_boundaries() {
         let focus = GeometricLodFocus::snapped(0, 0);
+        let canonical_half_extent = LOD_BOUNDARY_HALF_EXTENTS[0];
+        let stride2_patch_span = SurfacePatchId::new(SurfaceLodLevel::Stride2, 0, 0).voxel_span();
         let interior = SurfaceBounds {
-            min: [112, -64, 0],
-            max: [128, 128, 16],
+            min: [canonical_half_extent + stride2_patch_span, -64, 0],
+            max: [
+                canonical_half_extent + stride2_patch_span * 2,
+                128,
+                stride2_patch_span,
+            ],
         };
         assert!(!focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,
@@ -763,8 +1013,12 @@ mod tests {
         ));
 
         let canonical_boundary = SurfaceBounds {
-            min: [96, -64, 0],
-            max: [112, 128, 16],
+            min: [canonical_half_extent, -64, 0],
+            max: [
+                canonical_half_extent + stride2_patch_span,
+                128,
+                stride2_patch_span,
+            ],
         };
         assert!(focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,
@@ -778,8 +1032,13 @@ mod tests {
         ));
 
         let wrong_level = SurfaceBounds {
-            min: [256, -64, 0],
-            max: [288, 128, 32],
+            min: [LOD_BOUNDARY_HALF_EXTENTS[1], -64, 0],
+            max: [
+                LOD_BOUNDARY_HALF_EXTENTS[1]
+                    + SurfacePatchId::new(SurfaceLodLevel::Stride4, 0, 0).voxel_span(),
+                128,
+                SurfacePatchId::new(SurfaceLodLevel::Stride4, 0, 0).voxel_span(),
+            ],
         };
         assert!(!focus.owns_surface_transition(
             SurfaceLodLevel::Stride2,

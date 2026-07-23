@@ -1,4 +1,8 @@
-import init, { create_engine, type EngineHandle } from "./generated/voxels.js";
+import init, {
+  create_engine,
+  type EngineHandle,
+  type MissionControlScreenshot,
+} from "./generated/voxels.js";
 import type { FromWorker, InitMessage, ToWorker } from "./protocol.ts";
 import { disposeWorkerEngine } from "./worker-lifecycle.ts";
 
@@ -13,12 +17,20 @@ let booting: Promise<EngineHandle> | null = null;
 let disposed = false;
 let cursorMode = false;
 let readinessTimer: ReturnType<typeof setInterval> | undefined;
+let screenshotTimer: ReturnType<typeof setInterval> | undefined;
+let screenshotDeadline = 0;
+let screenshotEncoding = false;
 let disposal: Promise<void> | null = null;
 const pending: Exclude<ToWorker, InitMessage>[] = [];
 
 function stopReadinessMonitor(): void {
   if (readinessTimer !== undefined) clearInterval(readinessTimer);
   readinessTimer = undefined;
+}
+
+function stopScreenshotMonitor(): void {
+  if (screenshotTimer !== undefined) clearInterval(screenshotTimer);
+  screenshotTimer = undefined;
 }
 
 function monitorReadiness(engine: EngineHandle): void {
@@ -44,6 +56,7 @@ function beginDisposal(): Promise<void> {
   if (disposal) return disposal;
   disposed = true;
   stopReadinessMonitor();
+  stopScreenshotMonitor();
   pending.length = 0;
   const engine = handle;
   handle = null;
@@ -63,6 +76,64 @@ function fail(message: string): void {
   if (disposed) return;
   scope.postMessage({ kind: "error", message });
   void beginDisposal();
+}
+
+async function encodeScreenshot(capture: MissionControlScreenshot): Promise<void> {
+  try {
+    const width = capture.width;
+    const height = capture.height;
+    const rgba = capture.rgba();
+    if (rgba.byteLength !== width * height * 4) {
+      throw new Error("renderer returned an invalid RGBA screenshot");
+    }
+    const canvas = new OffscreenCanvas(width, height);
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("browser could not create a PNG encoding canvas");
+    const pixels = new Uint8ClampedArray(rgba);
+    context.putImageData(new ImageData(pixels, width, height), 0, 0);
+    const blob = await canvas.convertToBlob({ type: "image/png" });
+    if (blob.type !== "image/png" || blob.size < 8) {
+      throw new Error("browser returned an invalid PNG screenshot");
+    }
+    scope.postMessage({
+      kind: "downloadMissionControlScreenshot",
+      blob,
+      filename: capture.filename,
+    });
+  } catch (error) {
+    console.error(`[voxels] screenshot capture failed: ${String(error)}`);
+    handle?.report_mission_control_screenshot_result(false);
+  } finally {
+    capture.free();
+    screenshotEncoding = false;
+  }
+}
+
+function monitorScreenshot(): void {
+  if (disposed || screenshotTimer !== undefined || screenshotEncoding) return;
+  screenshotDeadline = performance.now() + 10_000;
+  const update = (): void => {
+    if (disposed) {
+      stopScreenshotMonitor();
+      return;
+    }
+    const capture = handle?.take_mission_control_screenshot();
+    if (capture !== undefined) {
+      stopScreenshotMonitor();
+      screenshotEncoding = true;
+      void encodeScreenshot(capture);
+      return;
+    }
+    if (!handle?.mission_control_screenshot_pending() || performance.now() >= screenshotDeadline) {
+      console.error(
+        `[voxels] screenshot readback ended without pixels (pending=${String(handle?.mission_control_screenshot_pending() ?? false)})`,
+      );
+      stopScreenshotMonitor();
+      handle?.report_mission_control_screenshot_result(false);
+    }
+  };
+  screenshotTimer = setInterval(update, 16);
+  update();
 }
 
 self.addEventListener("error", (event) => {
@@ -95,6 +166,7 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
         if (report !== undefined) {
           scope.postMessage({ kind: "copyMissionControl", text: report });
         }
+        if (handle?.mission_control_screenshot_pending()) monitorScreenshot();
       }
       break;
     case "resize":
@@ -105,6 +177,9 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
       break;
     case "missionControlCopyResult":
       handle?.report_mission_control_copy_result(message.copied);
+      break;
+    case "missionControlScreenshotResult":
+      handle?.report_mission_control_screenshot_result(message.saved);
       break;
     case "profile":
       handle?.start_profile(message.profileId);
@@ -123,6 +198,28 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
         active:
           handle?.set_diagnostic_sky(message.enabled, message.red, message.green, message.blue) ??
           false,
+      });
+      break;
+    case "materialDetail":
+      scope.postMessage({
+        kind: "materialDetail",
+        requestId: message.requestId,
+        accepted: handle?.set_material_detail(message.enabled) ?? false,
+      });
+      break;
+    case "lodBoundaries":
+      scope.postMessage({
+        kind: "lodBoundaries",
+        requestId: message.requestId,
+        accepted:
+          handle?.set_lod_boundary_half_extents(new Int32Array(message.halfExtentsVoxels)) ?? false,
+      });
+      break;
+    case "exactVolumePresented":
+      scope.postMessage({
+        kind: "exactVolumePresented",
+        requestId: message.requestId,
+        presented: handle?.exact_volume_presented(message.x, message.y, message.z) ?? false,
       });
       break;
     case "snapshot":

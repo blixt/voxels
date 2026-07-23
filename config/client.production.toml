@@ -1,5 +1,5 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 26
+schema_version = 33
 
 [developer]
 # Enables local-only time/weather visualization overrides and server-authorized spectator mode.
@@ -9,9 +9,9 @@ controls_enabled = false
 # The client knows only where canonical world products come from. The service chooses the
 # procedural or Terrain Diffusion provider in config/world-service.toml.
 [world]
-endpoint = "wss://voxels-world-blixt.fly.dev/v28/world"
-presence_endpoint = "wss://voxels-world-blixt.fly.dev/v28/presence"
-subprotocol = "voxels.world.v28"
+endpoint = "wss://voxels-world-blixt.fly.dev/v32/world"
+presence_endpoint = "wss://voxels-world-blixt.fly.dev/v32/presence"
+subprotocol = "voxels.world.v32"
 # The browser replaces this reserved marker with a short-lived credential from the same-origin
 # Cloudflare session endpoint before the TOML enters the Rust engine.
 auth_subprotocol_token = "session:/api/session"
@@ -42,6 +42,13 @@ fixed_step_seconds = 0.008333334
 max_steps_per_frame = 6
 max_edit_trackers = 128
 
+[runtime.spectator]
+initial_speed_metres_per_second = 8.0
+maximum_speed_metres_per_second = 128.0
+acceleration_metres_per_second_squared = 12.0
+direction_response_per_second = 10.0
+stopping_response_per_second = 14.0
+
 [streaming]
 load_radius_chunks = 5
 vertical_radius_chunks = 1
@@ -60,13 +67,14 @@ collision_lookahead_seconds = 2.5
 # position for ordinary work. Complete surface-LOD levels stay spatially ordered because they
 # activate atomically.
 velocity_lookahead_seconds = 1.5
+# Minimum scheduling cone. Exact enclosed views expand this to cover the live viewport corners,
+# including ultrawide windows.
 view_cone_half_angle_degrees = 55.0
-# Underground views need exact volume beyond the ordinary 9.6 m canonical surface handoff:
-# heightfield LODs cannot represent a tunnel terminator. Five sparse rays extend only through
-# nearby canonical air, keeping this bounded while retaining solid end walls during camera motion.
+# Underground views need exact volume beyond the ordinary 12.8 m canonical surface handoff:
+# heightfield LODs cannot represent a tunnel terminator. Matching air cells on resident chunk faces
+# form a bounded portal graph, retaining visible cave branches and the solid walls that end them
+# throughout the expanded camera view instead of only along sparse crosshair rays.
 enclosed_view_distance_metres = 32.0
-enclosed_view_ray_radius_metres = 0.8
-enclosed_view_threshold = 0.65
 
 [streaming.frame_budget]
 generation = 2
@@ -77,6 +85,11 @@ upload = 3
 # 3.2–25.6 m cells; each fixed-size tile doubles linear coverage without increasing its mesh cost.
 [streaming.surface]
 load_radius_tiles = [4, 4, 4, 5, 4, 5, 4, 3]
+# Sustained flight narrows the cross-track width of fine replacement corridors whose tile-boundary
+# rate outruns useful completion. Their forward/backward lead and coarser parent coverage remain
+# intact; slowing down restores the complete square footprints above.
+fast_travel_min_cross_radius_tiles = [2, 2, 3, 5, 4, 5, 4, 3]
+fast_travel_full_rate_tiles_per_second = 4.0
 retention_margin_tiles = 1
 
 [rendering]

@@ -98,31 +98,16 @@ function requiredGpu(distribution: RenderPhaseSummary["gpu"]["totalMs"], label: 
   return distribution;
 }
 
-async function setMaterialDetail(
-  page: Page,
-  engine: EngineClient,
-  enabled: boolean,
-  viewportWidth: number,
-): Promise<void> {
+async function setMaterialDetail(engine: EngineClient, enabled: boolean): Promise<void> {
   const current = (await engine.value("materialDetail")) === 1;
   if (current === enabled) return;
-  await page.keyboard.press("F3");
-  await page.waitForTimeout(200);
-  // Material detail is the eighth Rust-owned feature row. The click targets the toggle,
-  // exercising the same canvas hit-testing path as a human rather than a JavaScript render option.
-  await page.mouse.click(viewportWidth - 57, 607);
-  await engine.waitForSnapshot(
-    (snapshot) => (snapshotValue(snapshot, "materialDetail") === 1) === enabled,
-    { description: `material detail did not become ${enabled ? "enabled" : "disabled"}` },
-  );
-  await page.keyboard.press("F3");
-  await page.waitForTimeout(800);
+  await engine.setMaterialDetail(enabled);
 }
 
-async function materialDetailProfile(page: Page, engine: EngineClient, viewportWidth: number) {
-  await setMaterialDetail(page, engine, false, viewportWidth);
+async function materialDetailProfile(engine: EngineClient) {
+  await setMaterialDetail(engine, false);
   const off = summarizeRenderPhase(await sampleRenderSnapshots(engine, 5_000));
-  await setMaterialDetail(page, engine, true, viewportWidth);
+  await setMaterialDetail(engine, true);
   const on = summarizeRenderPhase(await sampleRenderSnapshots(engine, 5_000));
   const offWorld = requiredGpu(off.gpu.worldMs, "material detail off world");
   const onWorld = requiredGpu(on.gpu.worldMs, "material detail on world");
@@ -892,7 +877,7 @@ async function runRenderProfile(context: ScenarioContext, arguments_: readonly s
     scenarioViolations.push(...outcome.violations);
   } else if (options.mode === "materials") {
     scenarios = {
-      materials: await materialDetailProfile(page, engine, options.viewport.width),
+      materials: await materialDetailProfile(engine),
     };
   } else if (options.mode === "atmosphere") {
     scenarios = { atmosphere: await atmosphereProfile(page, engine, context) };

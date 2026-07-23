@@ -11,7 +11,7 @@ use voxels_runtime::{
     MAX_LOAD_RADIUS_CHUNKS, MAX_SECONDARY_INTEREST_CHUNKS, MAX_VERTICAL_RADIUS_CHUNKS,
 };
 
-pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 26;
+pub const CLIENT_CONFIG_SCHEMA_VERSION: u32 = 33;
 
 const MAX_FIXED_STEP_SECONDS: f32 = 0.1;
 const MAX_SIMULATION_STEPS_PER_FRAME: u32 = 64;
@@ -20,6 +20,8 @@ const MAX_TRACKED_CHUNKS: u32 = 1_048_576;
 const MAX_SURFACE_RADIUS_TILES: u32 = 64;
 const MAX_FRAME_STAGE_BUDGET: u32 = 65_536;
 const MAX_VIEW_DISTANCE_METRES: f32 = 100_000.0;
+const MAX_LOD_BOUNDARY_HALF_EXTENT_VOXELS: u32 = 1_000_000;
+const LOD_BOUNDARY_ALIGNMENT_VOXELS: [u32; 8] = [32, 32, 64, 128, 256, 512, 1_024, 2_048];
 const MAX_ENCLOSED_VIEW_DISTANCE_METRES: f32 = 128.0;
 const MAX_SHADOW_MAP_RESOLUTION: u32 = 4_096;
 const MAX_DIAGNOSTIC_INTERVAL_MS: u32 = 3_600_000;
@@ -90,6 +92,17 @@ pub struct RuntimeConfig {
     pub fixed_step_seconds: f32,
     pub max_steps_per_frame: u32,
     pub max_edit_trackers: u32,
+    pub spectator: SpectatorFlightConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpectatorFlightConfig {
+    pub initial_speed_metres_per_second: f32,
+    pub maximum_speed_metres_per_second: f32,
+    pub acceleration_metres_per_second_squared: f32,
+    pub direction_response_per_second: f32,
+    pub stopping_response_per_second: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -114,13 +127,8 @@ pub struct StreamingPriorityConfig {
     pub collision_lookahead_seconds: f32,
     pub velocity_lookahead_seconds: f32,
     pub view_cone_half_angle_degrees: f32,
-    /// Full-resolution distance retained through visible openings while the camera is enclosed.
+    /// Full-resolution distance retained through connected openings while the camera is enclosed.
     pub enclosed_view_distance_metres: f32,
-    /// Radius around each sparse view ray. The rays are rejected by nearby solid canonical voxels,
-    /// so this covers tunnel apertures without turning the outdoor view frustum into exact chunks.
-    pub enclosed_view_ray_radius_metres: f32,
-    /// Minimum enclosure fraction before the exact-volume view corridor is enabled.
-    pub enclosed_view_threshold: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -135,6 +143,11 @@ pub struct FrameBudgetConfig {
 #[serde(deny_unknown_fields)]
 pub struct SurfaceStreamingConfig {
     pub load_radius_tiles: [u32; 8],
+    /// Lower per-level cross-track radii used only as travel crosses tiles faster than generation
+    /// can settle. Longitudinal lead and coarser resident parent coverage remain intact.
+    pub fast_travel_min_cross_radius_tiles: [u32; 8],
+    /// Tile-boundary crossings per second at which a level reaches its fast-travel minimum.
+    pub fast_travel_full_rate_tiles_per_second: f32,
     pub retention_margin_tiles: u32,
 }
 
@@ -142,11 +155,21 @@ pub struct SurfaceStreamingConfig {
 #[serde(deny_unknown_fields)]
 pub struct RenderingConfig {
     pub view_distance_metres: f32,
+    pub geometry_lod: GeometryLodConfig,
     pub shadows: ShadowConfig,
     pub volumetric_clouds: VolumetricCloudConfig,
     pub features: RendererFeatureConfig,
     pub diagnostics: RenderingDiagnosticsConfig,
     pub mission_control: MissionControlConfig,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeometryLodConfig {
+    /// Half extent of each nested LOD ownership square in canonical 10 cm voxels. Values are
+    /// intentionally explicit rather than derived from one multiplier: terrain and tree fidelity
+    /// need not have linearly spaced handoffs, and each boundary remains patch-grid aligned.
+    pub boundary_half_extents_voxels: [u32; 8],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -260,6 +283,42 @@ impl ClientConfig {
             1,
             MAX_EDIT_TRACKERS,
         )?;
+        let spectator = self.runtime.spectator;
+        ensure_finite_range(
+            spectator.initial_speed_metres_per_second,
+            "runtime.spectator.initial_speed_metres_per_second",
+            0.0,
+            50.0,
+            false,
+        )?;
+        ensure_finite_range(
+            spectator.maximum_speed_metres_per_second,
+            "runtime.spectator.maximum_speed_metres_per_second",
+            spectator.initial_speed_metres_per_second,
+            250.0,
+            true,
+        )?;
+        ensure_finite_range(
+            spectator.acceleration_metres_per_second_squared,
+            "runtime.spectator.acceleration_metres_per_second_squared",
+            0.0,
+            100.0,
+            false,
+        )?;
+        ensure_finite_range(
+            spectator.direction_response_per_second,
+            "runtime.spectator.direction_response_per_second",
+            0.0,
+            100.0,
+            false,
+        )?;
+        ensure_finite_range(
+            spectator.stopping_response_per_second,
+            "runtime.spectator.stopping_response_per_second",
+            0.0,
+            100.0,
+            false,
+        )?;
 
         ensure_integer_range(
             self.streaming.load_radius_chunks,
@@ -327,20 +386,6 @@ impl ClientConfig {
             MAX_ENCLOSED_VIEW_DISTANCE_METRES,
             false,
         )?;
-        ensure_finite_range(
-            self.streaming.priority.enclosed_view_ray_radius_metres,
-            "streaming.priority.enclosed_view_ray_radius_metres",
-            0.1,
-            6.4,
-            true,
-        )?;
-        ensure_finite_range(
-            self.streaming.priority.enclosed_view_threshold,
-            "streaming.priority.enclosed_view_threshold",
-            0.0,
-            1.0,
-            true,
-        )?;
         for (field, value) in [
             (
                 "streaming.frame_budget.generation",
@@ -365,6 +410,29 @@ impl ClientConfig {
                 MAX_SURFACE_RADIUS_TILES,
             )?;
         }
+        for (minimum, configured) in self
+            .streaming
+            .surface
+            .fast_travel_min_cross_radius_tiles
+            .into_iter()
+            .zip(self.streaming.surface.load_radius_tiles)
+        {
+            ensure_integer_range(
+                minimum,
+                "streaming.surface.fast_travel_min_cross_radius_tiles",
+                0,
+                configured,
+            )?;
+        }
+        ensure_finite_range(
+            self.streaming
+                .surface
+                .fast_travel_full_rate_tiles_per_second,
+            "streaming.surface.fast_travel_full_rate_tiles_per_second",
+            0.1,
+            120.0,
+            false,
+        )?;
         ensure_integer_range(
             self.streaming.surface.retention_margin_tiles,
             "streaming.surface.retention_margin_tiles",
@@ -379,6 +447,26 @@ impl ClientConfig {
             MAX_VIEW_DISTANCE_METRES,
             false,
         )?;
+        let mut previous = 0;
+        for (index, half_extent) in self
+            .rendering
+            .geometry_lod
+            .boundary_half_extents_voxels
+            .into_iter()
+            .enumerate()
+        {
+            let alignment = LOD_BOUNDARY_ALIGNMENT_VOXELS[index];
+            if half_extent <= previous
+                || half_extent > MAX_LOD_BOUNDARY_HALF_EXTENT_VOXELS
+                || !half_extent.is_multiple_of(alignment)
+            {
+                return invalid(
+                    "rendering.geometry_lod.boundary_half_extents_voxels",
+                    "must be strictly increasing, bounded, and aligned to each LOD patch grid",
+                );
+            }
+            previous = half_extent;
+        }
         let shadows = self.rendering.shadows;
         if !shadows.vertical_fov_radians.is_finite()
             || shadows.vertical_fov_radians <= 0.0
@@ -728,9 +816,9 @@ mod tests {
                 controls_enabled: true,
             },
             world: WorldTransportConfig {
-                endpoint: "ws://127.0.0.1:9777/v28/world".to_owned(),
-                presence_endpoint: "ws://127.0.0.1:9777/v28/presence".to_owned(),
-                subprotocol: "voxels.world.v28".to_owned(),
+                endpoint: "ws://127.0.0.1:9777/v32/world".to_owned(),
+                presence_endpoint: "ws://127.0.0.1:9777/v32/presence".to_owned(),
+                subprotocol: "voxels.world.v32".to_owned(),
                 auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
                 max_in_flight_batches: 8,
                 buffered_amount_high_water_bytes: 8 * 1024 * 1024,
@@ -755,6 +843,13 @@ mod tests {
                 fixed_step_seconds: 1.0 / 120.0,
                 max_steps_per_frame: 6,
                 max_edit_trackers: 128,
+                spectator: SpectatorFlightConfig {
+                    initial_speed_metres_per_second: 8.0,
+                    maximum_speed_metres_per_second: 128.0,
+                    acceleration_metres_per_second_squared: 12.0,
+                    direction_response_per_second: 10.0,
+                    stopping_response_per_second: 14.0,
+                },
             },
             streaming: StreamingConfig {
                 load_radius_chunks: 5,
@@ -768,8 +863,6 @@ mod tests {
                     velocity_lookahead_seconds: 1.5,
                     view_cone_half_angle_degrees: 55.0,
                     enclosed_view_distance_metres: 32.0,
-                    enclosed_view_ray_radius_metres: 0.8,
-                    enclosed_view_threshold: 0.65,
                 },
                 frame_budget: FrameBudgetConfig {
                     generation: 2,
@@ -777,12 +870,19 @@ mod tests {
                     upload: 3,
                 },
                 surface: SurfaceStreamingConfig {
-                    load_radius_tiles: [4, 4, 4, 5, 4, 5, 4, 3],
+                    load_radius_tiles: [5, 5, 5, 5, 4, 5, 4, 4],
+                    fast_travel_min_cross_radius_tiles: [2, 2, 4, 5, 4, 5, 4, 4],
+                    fast_travel_full_rate_tiles_per_second: 4.0,
                     retention_margin_tiles: 1,
                 },
             },
             rendering: RenderingConfig {
-                view_distance_metres: 2_400.0,
+                view_distance_metres: 3_200.0,
+                geometry_lod: GeometryLodConfig {
+                    boundary_half_extents_voxels: [
+                        192, 480, 960, 1_920, 3_840, 6_144, 12_288, 24_576,
+                    ],
+                },
                 shadows: ShadowConfig {
                     vertical_fov_radians: 68.0_f32.to_radians(),
                     near_plane: 0.05,
@@ -861,18 +961,18 @@ mod tests {
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
         let fixture = fixture_toml();
-        let wrong_schema = fixture.replace("schema_version = 26", "schema_version = 25");
+        let wrong_schema = fixture.replace("schema_version = 33", "schema_version = 32");
         assert_eq!(
             ClientConfig::from_toml(&wrong_schema),
             Err(ClientConfigError::UnsupportedSchema {
                 expected: CLIENT_CONFIG_SCHEMA_VERSION,
-                found: 25,
+                found: 32,
             })
         );
 
         let unknown_root = fixture.replace(
-            "schema_version = 26",
-            "schema_version = 26\nunknown_root = true",
+            "schema_version = 33",
+            "schema_version = 33\nunknown_root = true",
         );
         assert!(matches!(
             ClientConfig::from_toml(&unknown_root),
@@ -898,6 +998,21 @@ mod tests {
         let mut config = valid_config();
         config.runtime.max_steps_per_frame = 0;
         assert_invalid_field(&config, "runtime.max_steps_per_frame");
+
+        let mut config = valid_config();
+        config.runtime.spectator.maximum_speed_metres_per_second =
+            config.runtime.spectator.initial_speed_metres_per_second - 0.1;
+        assert_invalid_field(&config, "runtime.spectator.maximum_speed_metres_per_second");
+
+        let mut config = valid_config();
+        config
+            .runtime
+            .spectator
+            .acceleration_metres_per_second_squared = f32::NAN;
+        assert_invalid_field(
+            &config,
+            "runtime.spectator.acceleration_metres_per_second_squared",
+        );
 
         let mut config = valid_config();
         config.streaming.load_radius_chunks = MAX_LOAD_RADIUS_CHUNKS as u32 + 1;
@@ -946,17 +1061,6 @@ mod tests {
         config.streaming.priority.enclosed_view_distance_metres =
             MAX_ENCLOSED_VIEW_DISTANCE_METRES + 1.0;
         assert_invalid_field(&config, "streaming.priority.enclosed_view_distance_metres");
-
-        let mut config = valid_config();
-        config.streaming.priority.enclosed_view_ray_radius_metres = 6.5;
-        assert_invalid_field(
-            &config,
-            "streaming.priority.enclosed_view_ray_radius_metres",
-        );
-
-        let mut config = valid_config();
-        config.streaming.priority.enclosed_view_threshold = 1.1;
-        assert_invalid_field(&config, "streaming.priority.enclosed_view_threshold");
 
         let mut config = valid_config();
         config.streaming.frame_budget.meshing = 0;
@@ -1012,6 +1116,13 @@ mod tests {
         let mut config = valid_config();
         config.rendering.view_distance_metres = f32::INFINITY;
         assert_invalid_field(&config, "rendering.view_distance_metres");
+
+        let mut config = valid_config();
+        config.rendering.geometry_lod.boundary_half_extents_voxels[2] = 321;
+        assert_invalid_field(
+            &config,
+            "rendering.geometry_lod.boundary_half_extents_voxels",
+        );
 
         let mut config = valid_config();
         config.rendering.shadows.vertical_fov_radians = std::f32::consts::PI;

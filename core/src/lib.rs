@@ -18,8 +18,6 @@ pub const PLAYER_EYE_HEIGHT_METRES: f32 = 1.54;
 const WALK_SPEED: f32 = 4.6;
 const SPRINT_MULTIPLIER: f32 = 1.55;
 pub const PLAYER_SPRINT_SPEED_METRES_PER_SECOND: f32 = WALK_SPEED * SPRINT_MULTIPLIER;
-const SPECTATOR_SPEED: f32 = 8.0;
-const SPECTATOR_RESPONSE: f32 = 10.0;
 const GLIDER_FORWARD_SPEED: f32 = 8.4;
 const GLIDER_ACCELERATION: f32 = 12.0;
 const GLIDER_TERMINAL_DESCENT_SPEED: f32 = 2.2;
@@ -299,6 +297,45 @@ pub enum LocomotionMode {
     Spectator,
 }
 
+/// Client-owned feel parameters for a bodyless spectator camera. The server separately enforces
+/// authoritative spectator movement limits; keeping this in portable simulation makes native and
+/// browser hosts accelerate identically.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpectatorFlightConfig {
+    pub initial_speed_metres_per_second: f32,
+    pub maximum_speed_metres_per_second: f32,
+    pub acceleration_metres_per_second_squared: f32,
+    pub direction_response_per_second: f32,
+    pub stopping_response_per_second: f32,
+}
+
+impl Default for SpectatorFlightConfig {
+    fn default() -> Self {
+        Self {
+            initial_speed_metres_per_second: 8.0,
+            maximum_speed_metres_per_second: 128.0,
+            acceleration_metres_per_second_squared: 12.0,
+            direction_response_per_second: 10.0,
+            stopping_response_per_second: 14.0,
+        }
+    }
+}
+
+impl SpectatorFlightConfig {
+    pub fn is_valid(self) -> bool {
+        self.initial_speed_metres_per_second.is_finite()
+            && self.initial_speed_metres_per_second > 0.0
+            && self.maximum_speed_metres_per_second.is_finite()
+            && self.maximum_speed_metres_per_second >= self.initial_speed_metres_per_second
+            && self.acceleration_metres_per_second_squared.is_finite()
+            && self.acceleration_metres_per_second_squared > 0.0
+            && self.direction_response_per_second.is_finite()
+            && self.direction_response_per_second > 0.0
+            && self.stopping_response_per_second.is_finite()
+            && self.stopping_response_per_second > 0.0
+    }
+}
+
 impl InputState {
     pub fn set_key(&mut self, code: u8, pressed: bool) {
         match code {
@@ -332,6 +369,8 @@ pub struct CameraState {
     jump_was_down: bool,
     ground_grace_seconds: f32,
     assisted_step_seconds: f32,
+    spectator_flight: SpectatorFlightConfig,
+    spectator_speed_metres_per_second: f32,
     fluid: FluidState,
 }
 
@@ -354,6 +393,8 @@ impl CameraState {
             jump_was_down: false,
             ground_grace_seconds: 0.0,
             assisted_step_seconds: 0.0,
+            spectator_flight: SpectatorFlightConfig::default(),
+            spectator_speed_metres_per_second: 0.0,
             fluid: FluidState::default(),
         }
     }
@@ -379,6 +420,8 @@ impl CameraState {
             jump_was_down: false,
             ground_grace_seconds: 0.0,
             assisted_step_seconds: 0.0,
+            spectator_flight: SpectatorFlightConfig::default(),
+            spectator_speed_metres_per_second: 0.0,
             fluid: FluidState::default(),
         }
     }
@@ -432,7 +475,14 @@ impl CameraState {
             if input.sprint {
                 wish -= Vec3::Y;
             }
-            return wish.normalize_or_zero() * SPECTATOR_SPEED;
+            if wish.length_squared() <= f32::EPSILON {
+                return self.velocity;
+            }
+            let speed = self
+                .spectator_speed_metres_per_second
+                .max(self.spectator_flight.initial_speed_metres_per_second)
+                .max(self.velocity.length());
+            return wish.normalize() * speed;
         }
 
         if self.fluid.swimming {
@@ -500,6 +550,17 @@ impl CameraState {
         }
     }
 
+    pub fn set_spectator_flight_config(&mut self, config: SpectatorFlightConfig) -> bool {
+        if !config.is_valid() {
+            return false;
+        }
+        self.spectator_flight = config;
+        self.spectator_speed_metres_per_second = self
+            .spectator_speed_metres_per_second
+            .min(config.maximum_speed_metres_per_second);
+        true
+    }
+
     pub fn set_locomotion(&mut self, locomotion: LocomotionMode) {
         let locomotion = if locomotion == LocomotionMode::Gliding && !self.gliding_available {
             LocomotionMode::Walking
@@ -518,6 +579,7 @@ impl CameraState {
         self.assisted_step_seconds = 0.0;
         if spectator_transition {
             self.velocity = Vec3::ZERO;
+            self.spectator_speed_metres_per_second = 0.0;
         }
     }
 
@@ -558,8 +620,25 @@ impl CameraState {
             if input.sprint {
                 wish -= Vec3::Y;
             }
-            let target = wish.normalize_or_zero() * SPECTATOR_SPEED;
-            let response = 1.0 - (-SPECTATOR_RESPONSE * dt).exp();
+            let moving = wish.length_squared() > f32::EPSILON;
+            let target = if moving {
+                self.spectator_speed_metres_per_second = self
+                    .spectator_speed_metres_per_second
+                    .max(self.spectator_flight.initial_speed_metres_per_second);
+                self.spectator_speed_metres_per_second = (self.spectator_speed_metres_per_second
+                    + self.spectator_flight.acceleration_metres_per_second_squared * dt)
+                    .min(self.spectator_flight.maximum_speed_metres_per_second);
+                wish.normalize() * self.spectator_speed_metres_per_second
+            } else {
+                self.spectator_speed_metres_per_second = 0.0;
+                Vec3::ZERO
+            };
+            let response_per_second = if moving {
+                self.spectator_flight.direction_response_per_second
+            } else {
+                self.spectator_flight.stopping_response_per_second
+            };
+            let response = 1.0 - (-response_per_second * dt).exp();
             self.velocity += (target - self.velocity) * response;
             self.grounded = false;
             self.jump_was_down = input.jump;
@@ -1327,6 +1406,70 @@ mod tests {
             camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
         }
         assert!(camera.position.y < raised_y - 5.0);
+    }
+
+    #[test]
+    fn spectator_builds_speed_gradually_and_reaches_fast_cruise() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, 8.0, 0.0));
+        assert!(camera.set_spectator_flight_config(SpectatorFlightConfig {
+            initial_speed_metres_per_second: 8.0,
+            maximum_speed_metres_per_second: 60.0,
+            acceleration_metres_per_second_squared: 10.0,
+            direction_response_per_second: 10.0,
+            stopping_response_per_second: 14.0,
+        }));
+        camera.set_locomotion(LocomotionMode::Spectator);
+        let mut input = InputState::default();
+        input.set_key(1, true);
+
+        for _ in 0..120 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+        }
+        let first_second_distance = -camera.position.z;
+        assert!((14.0..19.0).contains(&camera.velocity.length()));
+        for _ in 0..120 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+        }
+        let second_second_distance = -camera.position.z - first_second_distance;
+        assert!(second_second_distance > first_second_distance + 5.0);
+
+        for _ in 0..600 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+        }
+        assert!((59.9..=60.0).contains(&camera.velocity.length()));
+        assert!((camera.streaming_velocity(&input).length() - 60.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn spectator_brakes_quickly_and_restarts_at_precision_speed() {
+        let mut camera = CameraState::spawn(Vec3::new(0.0, 8.0, 0.0));
+        camera.set_locomotion(LocomotionMode::Spectator);
+        let mut input = InputState::default();
+        input.set_key(1, true);
+        for _ in 0..480 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+        }
+        assert!(camera.velocity.length() > 50.0);
+
+        input.clear();
+        for _ in 0..60 {
+            camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+        }
+        assert!(camera.velocity.length() < 0.1);
+        assert_eq!(camera.streaming_velocity(&input), camera.velocity);
+
+        input.set_key(1, true);
+        camera.update(&input, 1.0 / 120.0, 0.1, |_, _, _| VoxelPhysics::EMPTY);
+        assert!(camera.streaming_velocity(&input).length() < 9.0);
+    }
+
+    #[test]
+    fn invalid_spectator_flight_config_is_rejected() {
+        let mut camera = CameraState::default();
+        assert!(!camera.set_spectator_flight_config(SpectatorFlightConfig {
+            maximum_speed_metres_per_second: 4.0,
+            ..SpectatorFlightConfig::default()
+        }));
     }
 
     #[test]

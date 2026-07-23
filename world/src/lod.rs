@@ -3,6 +3,7 @@ use crate::{
     CHUNK_EDGE, EditMap, FEATURE_MAX_RADIUS_VOXELS, Generator, Material, SEA_LEVEL_VOXELS,
     SkylineFeature, SkylineFeatureKind, TreeSpecies, VoxelCoord,
 };
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 
@@ -23,6 +24,40 @@ pub const SURFACE_HORIZON_CELL_COUNT: usize =
 pub const SURFACE_PARENT_HORIZON_CELL_COUNT: usize =
     (SURFACE_TILE_EDGE_CELLS * SURFACE_TILE_EDGE_CELLS / 4) as usize;
 const SURFACE_HORIZON_SAMPLE_RADII: [i32; 6] = [1, 2, 4, 8, 16, 32];
+
+struct SurfaceTileMeshOptions<'a> {
+    vertical_material: Option<&'a dyn Fn(i32, i32, i32) -> Material>,
+    shading_surface: Option<&'a dyn Fn(i32, i32) -> (i32, Material)>,
+    parent_shading_surface: Option<&'a dyn Fn(i32, i32) -> (i32, Material)>,
+    patch_edges: bool,
+    ecology_aggregate_shift: u8,
+    skyline_features: &'a [SkylineFeature],
+}
+
+impl<'a> SurfaceTileMeshOptions<'a> {
+    const fn plain(skyline_features: &'a [SkylineFeature]) -> Self {
+        Self {
+            vertical_material: None,
+            shading_surface: None,
+            parent_shading_surface: None,
+            patch_edges: true,
+            ecology_aggregate_shift: 0,
+            skyline_features,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SurfaceWall {
+    origin: [i32; 3],
+    face: u8,
+    horizontal_extent: i32,
+    lower_height: i32,
+    upper_height: i32,
+    surface_material: Material,
+    sample_xz: [i32; 2],
+    replaceable_air_fallback: bool,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
@@ -269,6 +304,18 @@ pub struct SurfaceQuad {
     pub face: u8,
     pub extent: [u16; 2],
     pub material: Material,
+    /// Synthetic opaque cover used only while the corresponding exact-volume chunk is absent.
+    /// The renderer atomically relinquishes this quad when exact geometry owns its chunk.
+    pub synthetic_fallback: bool,
+}
+
+/// A vertical face that is collapsed onto an exact child surface until that surface geomorphs
+/// toward a parent height discontinuity. Keeping this topology explicit prevents a parent step
+/// from opening a transient aperture between child cells that originally shared one height.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SurfaceMorphClosure {
+    pub quad: SurfaceQuad,
+    pub collapsed_height: i32,
 }
 
 /// Conservative half-open voxel bounds derived from actual surface geometry.
@@ -310,6 +357,10 @@ pub struct SurfacePatch {
     /// them with an exact height-matched connector at a geometric LOD boundary.
     pub quad_range: Range<u32>,
     pub edge_ranges: [Range<u32>; 4],
+    /// Morph closures use their own compact stream because they are absent from the exact child
+    /// cut. Ranges follow the same main/edge ownership split as ordinary surface quads.
+    pub morph_closure_range: Range<u32>,
+    pub edge_morph_closure_ranges: [Range<u32>; 4],
     pub bounds: SurfaceBounds,
 }
 
@@ -334,6 +385,7 @@ impl SurfacePatch {
 pub struct SurfaceTileMesh {
     pub coord: SurfaceTileCoord,
     pub quads: Vec<SurfaceQuad>,
+    pub morph_closures: Vec<SurfaceMorphClosure>,
     pub patches: Vec<SurfacePatch>,
     /// View-independent height samples used to keep lighting continuous across streamed tile and
     /// LOD boundaries. `heights` retains the tile's one-cell halo; `parent_heights` covers the
@@ -380,6 +432,19 @@ impl SurfaceTileMesh {
                     }
                 }
             }
+        }
+        // A skyline proxy can contribute a terrain band and a crown band several chunks above it.
+        // Publishing only those endpoints lets the exact cut omit the trunk or lower crown while
+        // suppressing the complete proxy. Fill the small per-column interval so surface readiness
+        // proves the entire visible feature volume, not just independently sampled top faces.
+        for ys in hints.values_mut() {
+            let Some(minimum) = ys.first().copied() else {
+                continue;
+            };
+            let Some(maximum) = ys.last().copied() else {
+                continue;
+            };
+            ys.extend(minimum..=maximum);
         }
         hints
     }
@@ -530,7 +595,15 @@ pub fn surface_tiles_affected_by_voxel(
     level: SurfaceLodLevel,
     coord: VoxelCoord,
 ) -> Vec<SurfaceTileCoord> {
-    let mut affected = if coord.y >= edits.surface_sample(generator, coord.x, coord.z).0 {
+    // Stride-two is the only heightfield shell that overlaps the exact underground view volume,
+    // so it incorporates subsurface edits to avoid stale synthetic walls in tunnels. Coarser
+    // shells intentionally use pristine subsurface geology and only depend on edits at or above
+    // the lower of the generated and edited surfaces. The latter keeps progressively dug craters
+    // visible without making distant surface products depend on unrelated deep tunnel edits.
+    let generated_surface_y = generator.surface_sample(coord.x, coord.z).height;
+    let edited_surface_y = edits.surface_sample(generator, coord.x, coord.z).0;
+    let dependency_floor = generated_surface_y.min(edited_surface_y);
+    let mut affected = if level == SurfaceLodLevel::Stride2 || coord.y >= dependency_floor {
         surface_tiles_affected_by_column(level, coord.x, coord.z)
     } else {
         Vec::new()
@@ -566,10 +639,38 @@ pub fn generate_edited_surface_tile_mesh(
 ) -> SurfaceTileMesh {
     let features = pristine_skyline_features(generator, edits, coord);
     let shading_surface = |x, z| edits.surface_sample(generator, x, z);
+    let columns = RefCell::new(HashMap::new());
+    let surface_dependency_floors = RefCell::new(HashMap::new());
+    let vertical_material = |x, y, z| {
+        let generated = columns
+            .borrow_mut()
+            .entry((x, z))
+            .or_insert_with(|| generator.column(x, z))
+            .sample(y);
+        let dependency_floor = *surface_dependency_floors
+            .borrow_mut()
+            .entry((x, z))
+            .or_insert_with(|| {
+                generator
+                    .surface_sample(x, z)
+                    .height
+                    .min(edits.surface_sample(generator, x, z).0)
+            });
+        if coord.level == SurfaceLodLevel::Stride2 || y >= dependency_floor {
+            edits.resolve_generated(VoxelCoord::new(x, y, z), generated)
+        } else {
+            generated
+        }
+    };
     if edits.is_empty() {
         let surface = |x, z| edits.surface_sample(generator, x, z);
         return generate_surface_tile_mesh_with_options(
-            coord, &surface, None, None, true, 0, &features,
+            coord,
+            &surface,
+            SurfaceTileMeshOptions {
+                vertical_material: Some(&vertical_material),
+                ..SurfaceTileMeshOptions::plain(&features)
+            },
         );
     }
     let aliases = collidable_edit_aliases(generator, edits, coord);
@@ -584,11 +685,12 @@ pub fn generate_edited_surface_tile_mesh(
     generate_surface_tile_mesh_with_options(
         coord,
         &surface,
-        Some(&shading_surface),
-        Some(&shading_surface),
-        true,
-        0,
-        &features,
+        SurfaceTileMeshOptions {
+            vertical_material: Some(&vertical_material),
+            shading_surface: Some(&shading_surface),
+            parent_shading_surface: Some(&shading_surface),
+            ..SurfaceTileMeshOptions::plain(&features)
+        },
     )
 }
 
@@ -729,6 +831,7 @@ pub fn generate_water_tile_mesh_with(
                         face: FACE_POS_Y,
                         extent: [(width * stride) as u16, (height * stride) as u16],
                         material: Material::Water,
+                        synthetic_fallback: false,
                     };
                     bounds.include_quad(quad);
                     quads.push(quad);
@@ -762,7 +865,7 @@ pub fn generate_surface_tile_mesh_with(
     coord: SurfaceTileCoord,
     surface: impl Fn(i32, i32) -> (i32, Material),
 ) -> SurfaceTileMesh {
-    generate_surface_tile_mesh_with_options(coord, &surface, None, None, true, 0, &[])
+    generate_surface_tile_mesh_with_options(coord, &surface, SurfaceTileMeshOptions::plain(&[]))
 }
 
 pub fn generate_surface_tile_mesh_with_features(
@@ -770,7 +873,11 @@ pub fn generate_surface_tile_mesh_with_features(
     surface: impl Fn(i32, i32) -> (i32, Material),
     skyline_features: &[SkylineFeature],
 ) -> SurfaceTileMesh {
-    generate_surface_tile_mesh_with_options(coord, &surface, None, None, true, 0, skyline_features)
+    generate_surface_tile_mesh_with_options(
+        coord,
+        &surface,
+        SurfaceTileMeshOptions::plain(skyline_features),
+    )
 }
 
 pub fn generate_surface_tile_mesh_with_features_and_shading(
@@ -801,11 +908,34 @@ pub(crate) fn generate_surface_tile_mesh_with_aggregated_ecology_and_shading(
     generate_surface_tile_mesh_with_options(
         coord,
         &surface,
-        Some(&shading_surface),
-        Some(&parent_shading_surface),
-        true,
-        ecology_aggregate_shift,
-        skyline_features,
+        SurfaceTileMeshOptions {
+            shading_surface: Some(&shading_surface),
+            parent_shading_surface: Some(&parent_shading_surface),
+            ecology_aggregate_shift,
+            ..SurfaceTileMeshOptions::plain(skyline_features)
+        },
+    )
+}
+
+pub(crate) fn generate_surface_tile_mesh_with_materials_and_aggregated_ecology_and_shading(
+    coord: SurfaceTileCoord,
+    surface: impl Fn(i32, i32) -> (i32, Material),
+    vertical_material: impl Fn(i32, i32, i32) -> Material,
+    shading_surface: impl Fn(i32, i32) -> (i32, Material),
+    parent_shading_surface: impl Fn(i32, i32) -> (i32, Material),
+    skyline_features: &[SkylineFeature],
+    ecology_aggregate_shift: u8,
+) -> SurfaceTileMesh {
+    generate_surface_tile_mesh_with_options(
+        coord,
+        &surface,
+        SurfaceTileMeshOptions {
+            vertical_material: Some(&vertical_material),
+            shading_surface: Some(&shading_surface),
+            parent_shading_surface: Some(&parent_shading_surface),
+            ecology_aggregate_shift,
+            ..SurfaceTileMeshOptions::plain(skyline_features)
+        },
     )
 }
 
@@ -874,15 +1004,13 @@ fn generate_surface_horizons(
 fn generate_surface_tile_mesh_with_options(
     coord: SurfaceTileCoord,
     surface: &dyn Fn(i32, i32) -> (i32, Material),
-    shading_surface: Option<&dyn Fn(i32, i32) -> (i32, Material)>,
-    parent_shading_surface: Option<&dyn Fn(i32, i32) -> (i32, Material)>,
-    patch_edges: bool,
-    ecology_aggregate_shift: u8,
-    skyline_features: &[SkylineFeature],
+    options: SurfaceTileMeshOptions<'_>,
 ) -> SurfaceTileMesh {
     let [origin_x, origin_z] = coord.voxel_origin();
     let stride = coord.stride_voxels();
     let edge = SURFACE_TILE_EDGE_CELLS;
+    let shading_surface = options.shading_surface.unwrap_or(surface);
+    let parent_surface = options.parent_shading_surface.unwrap_or(shading_surface);
     let sample_edge = edge + 2;
     let mut samples = Vec::with_capacity((sample_edge * sample_edge) as usize);
     for sample_z in -1..=edge {
@@ -918,6 +1046,7 @@ fn generate_surface_tile_mesh_with_options(
                         face: FACE_POS_Y,
                         extent: [stride as u16; 2],
                         material,
+                        synthetic_fallback: false,
                     };
                     bounds.include_quad(top);
                     quads.push(top);
@@ -936,34 +1065,38 @@ fn generate_surface_tile_mesh_with_options(
                             FACE_POS_Z => cell_z == cell_min_z + SURFACE_PATCH_EDGE_CELLS - 1,
                             _ => false,
                         };
-                        if lies_on_patch_edge && patch_edges {
+                        if lies_on_patch_edge && options.patch_edges {
                             continue;
                         }
                         let (neighbor_height, _) = sample(cell_x + dx, cell_z + dz);
                         if height <= neighbor_height {
                             continue;
                         }
-                        let mut side_origin = match face {
+                        let side_origin = match face {
                             FACE_POS_X => [offset_clamped(x, stride - 1), neighbor_height + 1, z],
                             FACE_NEG_X => [x, neighbor_height + 1, z],
                             FACE_POS_Z => [x, neighbor_height + 1, offset_clamped(z, stride - 1)],
                             _ => [x, neighbor_height + 1, z],
                         };
-                        let mut remaining = i64::from(height) - i64::from(neighbor_height);
-                        while remaining > 0 {
-                            let vertical_extent = remaining.min(i64::from(u16::MAX)) as u16;
-                            let side = SurfaceQuad {
+                        let sample_x = offset_clamped(x, stride / 2);
+                        let sample_z = offset_clamped(z, stride / 2);
+                        let side_start = quads.len();
+                        append_surface_wall_quads(
+                            &mut quads,
+                            SurfaceWall {
                                 origin: side_origin,
                                 face,
-                                extent: [stride as u16, vertical_extent],
-                                material,
-                            };
-                            bounds.include_quad(side);
-                            quads.push(side);
-                            remaining -= i64::from(vertical_extent);
-                            if remaining > 0 {
-                                side_origin[1] += i32::from(vertical_extent);
-                            }
+                                horizontal_extent: stride,
+                                lower_height: neighbor_height,
+                                upper_height: height,
+                                surface_material: material,
+                                sample_xz: [sample_x, sample_z],
+                                replaceable_air_fallback: coord.level == SurfaceLodLevel::Stride2,
+                            },
+                            options.vertical_material,
+                        );
+                        for quad in &quads[side_start..] {
+                            bounds.include_quad(*quad);
                         }
                     }
                 }
@@ -972,14 +1105,19 @@ fn generate_surface_tile_mesh_with_options(
             let patch_min_z = offset_clamped(origin_z, cell_min_z * stride);
             let patch_max_x = patch_min_x.saturating_add(SURFACE_PATCH_EDGE_CELLS * stride);
             let patch_max_z = patch_min_z.saturating_add(SURFACE_PATCH_EDGE_CELLS * stride);
-            for feature in skyline_features.iter().copied().filter(|feature| {
+            for feature in options.skyline_features.iter().copied().filter(|feature| {
                 feature.anchor[0] >= patch_min_x
                     && feature.anchor[0] < patch_max_x
                     && feature.anchor[2] >= patch_min_z
                     && feature.anchor[2] < patch_max_z
             }) {
                 let feature_start = quads.len();
-                append_skyline_proxy(&mut quads, coord.level, feature, ecology_aggregate_shift);
+                append_skyline_proxy(
+                    &mut quads,
+                    coord.level,
+                    feature,
+                    options.ecology_aggregate_shift,
+                );
                 for quad in &quads[feature_start..] {
                     bounds.include_quad(*quad);
                 }
@@ -997,11 +1135,13 @@ fn generate_surface_tile_mesh_with_options(
                 ],
                 quad_range,
                 edge_ranges,
+                morph_closure_range: 0..0,
+                edge_morph_closure_ranges: std::array::from_fn(|_| 0..0),
                 bounds,
             });
         }
     }
-    if patch_edges {
+    if options.patch_edges {
         for patch in &mut patches {
             let cell_min_x = i32::from(patch.cell_bounds[0][0]);
             let cell_min_z = i32::from(patch.cell_bounds[0][1]);
@@ -1014,6 +1154,7 @@ fn generate_surface_tile_mesh_with_options(
                     [cell_min_x, cell_min_z],
                     stride,
                     &sample,
+                    options.vertical_material,
                 );
                 for quad in &quads[edge_start as usize..] {
                     patch.bounds.include_quad(*quad);
@@ -1022,7 +1163,54 @@ fn generate_surface_tile_mesh_with_options(
             });
         }
     }
-    let shading_surface = shading_surface.unwrap_or(surface);
+    let mut morph_closures = Vec::new();
+    if coord.level.next_coarser().is_some() {
+        for patch in &mut patches {
+            let cell_min = [
+                i32::from(patch.cell_bounds[0][0]),
+                i32::from(patch.cell_bounds[0][1]),
+            ];
+            let closure_start = morph_closures.len() as u32;
+            append_patch_morph_closures(
+                &mut morph_closures,
+                None,
+                [[origin_x, origin_z], cell_min],
+                stride,
+                &sample,
+                parent_surface,
+                options.vertical_material,
+            );
+            patch.morph_closure_range = closure_start..morph_closures.len() as u32;
+            patch.edge_morph_closure_ranges = std::array::from_fn(|edge_index| {
+                let closure_start = morph_closures.len() as u32;
+                append_patch_morph_closures(
+                    &mut morph_closures,
+                    Some(SurfacePatchEdge::ALL[edge_index]),
+                    [[origin_x, origin_z], cell_min],
+                    stride,
+                    &sample,
+                    parent_surface,
+                    options.vertical_material,
+                );
+                closure_start..morph_closures.len() as u32
+            });
+            for closure in std::iter::once(&patch.morph_closure_range)
+                .chain(&patch.edge_morph_closure_ranges)
+                .flat_map(|range| range.clone())
+            {
+                if let Some(closure) = morph_closures.get(closure as usize) {
+                    let collapsed_plane = closure.collapsed_height.saturating_add(1);
+                    let static_bottom = closure.quad.origin[1];
+                    let static_top =
+                        static_bottom.saturating_add(i32::from(closure.quad.extent[1]));
+                    patch.bounds.min[1] =
+                        patch.bounds.min[1].min(collapsed_plane.min(static_bottom));
+                    patch.bounds.max[1] =
+                        patch.bounds.max[1].max(collapsed_plane.max(static_top).saturating_add(1));
+                }
+            }
+        }
+    }
     let heights = if std::ptr::eq(shading_surface, surface) {
         samples.iter().map(|sample| sample.0).collect()
     } else {
@@ -1038,7 +1226,6 @@ fn generate_surface_tile_mesh_with_options(
             })
             .collect()
     };
-    let parent_surface = parent_shading_surface.unwrap_or(shading_surface);
     let parent_heights = coord.level.next_coarser().map_or_else(Vec::new, |_| {
         let parent_stride = stride * 2;
         (-1..=(SURFACE_TILE_EDGE_CELLS / 2))
@@ -1070,6 +1257,7 @@ fn generate_surface_tile_mesh_with_options(
     SurfaceTileMesh {
         coord,
         quads,
+        morph_closures,
         patches,
         shading: SurfaceShading {
             heights,
@@ -1080,6 +1268,190 @@ fn generate_surface_tile_mesh_with_options(
     }
 }
 
+/// Material used when a synthetic surface wall has no exact collidable sample. Surface-cover
+/// materials occupy one voxel; below that, organic covers become soil and sufficiently deep
+/// fallback walls become rock. Production world sources normally supply exact vertical samples,
+/// while this rule keeps morph-only connector geometry physically plausible. Known air and fluid
+/// spans are emitted as explicitly tagged fallback cover: they keep an asynchronously streamed
+/// heightfield watertight, then disappear only when the corresponding exact-volume chunk is ready.
+pub const fn fallback_surface_wall_material(
+    surface_material: Material,
+    depth_voxels: i64,
+) -> Material {
+    if depth_voxels == 0 {
+        return surface_material;
+    }
+    match surface_material {
+        Material::Grass | Material::Moss | Material::Snow => {
+            if depth_voxels <= 10 {
+                Material::Dirt
+            } else {
+                Material::Stone
+            }
+        }
+        Material::Dirt => {
+            if depth_voxels <= 10 {
+                Material::Dirt
+            } else {
+                Material::Stone
+            }
+        }
+        Material::Sand | Material::RedSand | Material::Clay => {
+            if depth_voxels <= 16 {
+                surface_material
+            } else {
+                Material::Stone
+            }
+        }
+        Material::Air | Material::Water => Material::Stone,
+        _ => surface_material,
+    }
+}
+
+const MAX_EXACT_SURFACE_WALL_DEPTH_VOXELS: i64 = 4_096;
+
+fn append_single_material_wall_run(
+    quads: &mut Vec<SurfaceQuad>,
+    mut origin: [i32; 3],
+    face: u8,
+    horizontal_extent: i32,
+    mut length: i64,
+    material: Material,
+    synthetic_fallback: bool,
+) {
+    while length > 0 {
+        let chunk_remainder = if synthetic_fallback {
+            i64::from(CHUNK_EDGE as i32 - origin[1].rem_euclid(CHUNK_EDGE as i32))
+        } else {
+            i64::from(u16::MAX)
+        };
+        let vertical_extent = length.min(i64::from(u16::MAX)).min(chunk_remainder) as u16;
+        quads.push(SurfaceQuad {
+            origin,
+            face,
+            extent: [horizontal_extent as u16, vertical_extent],
+            material,
+            synthetic_fallback,
+        });
+        length -= i64::from(vertical_extent);
+        origin[1] = origin[1].saturating_add(i32::from(vertical_extent));
+    }
+}
+
+fn append_surface_wall_quads(
+    quads: &mut Vec<SurfaceQuad>,
+    wall: SurfaceWall,
+    vertical_material: Option<&dyn Fn(i32, i32, i32) -> Material>,
+) {
+    let total_height = i64::from(wall.upper_height) - i64::from(wall.lower_height);
+    if total_height <= 0 {
+        return;
+    }
+    let Some(vertical_material) = vertical_material else {
+        append_single_material_wall_run(
+            quads,
+            wall.origin,
+            wall.face,
+            wall.horizontal_extent,
+            total_height,
+            wall.surface_material,
+            false,
+        );
+        return;
+    };
+
+    let first_y = wall.lower_height.saturating_add(1);
+    let exact_height = total_height.min(MAX_EXACT_SURFACE_WALL_DEPTH_VOXELS);
+    let exact_first_y = wall.upper_height.saturating_sub(exact_height as i32 - 1);
+    if exact_first_y > first_y {
+        let sampled = vertical_material(wall.sample_xz[0], first_y, wall.sample_xz[1]);
+        let material = if matches!(sampled, Material::Grass | Material::Moss | Material::Snow) {
+            fallback_surface_wall_material(
+                sampled,
+                i64::from(wall.upper_height) - i64::from(first_y),
+            )
+        } else if sampled.is_collidable() {
+            sampled
+        } else {
+            fallback_surface_wall_material(
+                wall.surface_material,
+                i64::from(wall.upper_height) - i64::from(first_y),
+            )
+        };
+        append_single_material_wall_run(
+            quads,
+            wall.origin,
+            wall.face,
+            wall.horizontal_extent,
+            i64::from(exact_first_y) - i64::from(first_y),
+            material,
+            false,
+        );
+    }
+
+    let material_at = |y: i32| {
+        if y == wall.upper_height {
+            return (wall.surface_material, false);
+        }
+        let sampled = vertical_material(wall.sample_xz[0], y, wall.sample_xz[1]);
+        if matches!(sampled, Material::Grass | Material::Moss | Material::Snow) {
+            (
+                fallback_surface_wall_material(
+                    sampled,
+                    i64::from(wall.upper_height) - i64::from(y),
+                ),
+                false,
+            )
+        } else if sampled.is_collidable() {
+            (sampled, false)
+        } else {
+            (
+                fallback_surface_wall_material(
+                    wall.surface_material,
+                    i64::from(wall.upper_height) - i64::from(y),
+                ),
+                wall.replaceable_air_fallback,
+            )
+        }
+    };
+    let mut run_start = exact_first_y;
+    let mut run_material = material_at(run_start);
+    let mut y = run_start.saturating_add(1);
+    while y <= wall.upper_height {
+        let material = material_at(y);
+        if material != run_material {
+            let mut run_origin = wall.origin;
+            run_origin[1] = run_start;
+            append_single_material_wall_run(
+                quads,
+                run_origin,
+                wall.face,
+                wall.horizontal_extent,
+                i64::from(y) - i64::from(run_start),
+                run_material.0,
+                run_material.1,
+            );
+            run_start = y;
+            run_material = material;
+        }
+        if y == i32::MAX {
+            break;
+        }
+        y += 1;
+    }
+    let mut run_origin = wall.origin;
+    run_origin[1] = run_start;
+    append_single_material_wall_run(
+        quads,
+        run_origin,
+        wall.face,
+        wall.horizontal_extent,
+        i64::from(wall.upper_height) - i64::from(run_start) + 1,
+        run_material.0,
+        run_material.1,
+    );
+}
+
 fn append_patch_edge_faces(
     quads: &mut Vec<SurfaceQuad>,
     edge: SurfacePatchEdge,
@@ -1087,6 +1459,7 @@ fn append_patch_edge_faces(
     patch_cell_min: [i32; 2],
     stride: i32,
     sample: &impl Fn(i32, i32) -> (i32, Material),
+    vertical_material: Option<&dyn Fn(i32, i32, i32) -> Material>,
 ) {
     for edge_cell in 0..SURFACE_PATCH_EDGE_CELLS {
         let (cell_x, cell_z, dx, dz, face) = match edge {
@@ -1126,25 +1499,146 @@ fn append_patch_edge_faces(
         }
         let x = offset_clamped(tile_origin[0], cell_x * stride);
         let z = offset_clamped(tile_origin[1], cell_z * stride);
-        let mut origin = match face {
+        let origin = match face {
             FACE_POS_X => [offset_clamped(x, stride - 1), neighbor_height + 1, z],
             FACE_NEG_X => [x, neighbor_height + 1, z],
             FACE_POS_Z => [x, neighbor_height + 1, offset_clamped(z, stride - 1)],
             FACE_NEG_Z => [x, neighbor_height + 1, z],
             _ => unreachable!(),
         };
-        let mut remaining = i64::from(height) - i64::from(neighbor_height);
-        while remaining > 0 {
-            let vertical_extent = remaining.min(i64::from(u16::MAX)) as u16;
-            quads.push(SurfaceQuad {
+        append_surface_wall_quads(
+            quads,
+            SurfaceWall {
                 origin,
                 face,
-                extent: [stride as u16, vertical_extent],
-                material,
-            });
-            remaining -= i64::from(vertical_extent);
-            if remaining > 0 {
-                origin[1] = origin[1].saturating_add(i32::from(vertical_extent));
+                horizontal_extent: stride,
+                lower_height: neighbor_height,
+                upper_height: height,
+                surface_material: material,
+                sample_xz: [offset_clamped(x, stride / 2), offset_clamped(z, stride / 2)],
+                replaceable_air_fallback: stride == SurfaceLodLevel::Stride2.stride_voxels(),
+            },
+            vertical_material,
+        );
+    }
+}
+
+fn append_patch_morph_closures(
+    closures: &mut Vec<SurfaceMorphClosure>,
+    owned_edge: Option<SurfacePatchEdge>,
+    patch_geometry: [[i32; 2]; 2],
+    stride: i32,
+    sample: &impl Fn(i32, i32) -> (i32, Material),
+    parent_surface: &dyn Fn(i32, i32) -> (i32, Material),
+    vertical_material: Option<&dyn Fn(i32, i32, i32) -> Material>,
+) {
+    let [tile_origin, patch_cell_min] = patch_geometry;
+    let patch_max_x = patch_cell_min[0] + SURFACE_PATCH_EDGE_CELLS;
+    let patch_max_z = patch_cell_min[1] + SURFACE_PATCH_EDGE_CELLS;
+    let parent_stride = stride.saturating_mul(2);
+    let parent_height = |cell_x: i32, cell_z: i32| {
+        let parent_cell_x = cell_x.div_euclid(2);
+        let parent_cell_z = cell_z.div_euclid(2);
+        parent_surface(
+            offset_clamped(
+                tile_origin[0],
+                parent_cell_x
+                    .saturating_mul(parent_stride)
+                    .saturating_add(parent_stride / 2),
+            ),
+            offset_clamped(
+                tile_origin[1],
+                parent_cell_z
+                    .saturating_mul(parent_stride)
+                    .saturating_add(parent_stride / 2),
+            ),
+        )
+        .0
+    };
+    let mut wall_quads = Vec::new();
+
+    for cell_z in patch_cell_min[1]..patch_max_z {
+        for cell_x in patch_cell_min[0]..patch_max_x {
+            for (dx, dz, boundary_edge, positive_face, negative_face) in [
+                (1, 0, SurfacePatchEdge::PositiveX, FACE_POS_X, FACE_NEG_X),
+                (0, 1, SurfacePatchEdge::PositiveZ, FACE_POS_Z, FACE_NEG_Z),
+            ] {
+                let lies_on_patch_edge = (dx != 0 && cell_x + 1 == patch_max_x)
+                    || (dz != 0 && cell_z + 1 == patch_max_z);
+                if match owned_edge {
+                    None => lies_on_patch_edge,
+                    Some(edge) => !lies_on_patch_edge || edge != boundary_edge,
+                } {
+                    continue;
+                }
+
+                let (child_height, child_material) = sample(cell_x, cell_z);
+                let (neighbor_height, neighbor_material) = sample(cell_x + dx, cell_z + dz);
+                if child_height != neighbor_height {
+                    continue;
+                }
+                let own_parent = parent_height(cell_x, cell_z);
+                let neighbor_parent = parent_height(cell_x + dx, cell_z + dz);
+                if own_parent == neighbor_parent {
+                    continue;
+                }
+                let own_parent_is_higher = own_parent > neighbor_parent;
+                let (lower, upper, face, material, material_cell) = if own_parent_is_higher {
+                    (
+                        own_parent,
+                        neighbor_parent,
+                        positive_face,
+                        child_material,
+                        [cell_x, cell_z],
+                    )
+                } else {
+                    (
+                        neighbor_parent,
+                        own_parent,
+                        negative_face,
+                        neighbor_material,
+                        [cell_x + dx, cell_z + dz],
+                    )
+                };
+                let (lower, upper) = (lower.min(upper), lower.max(upper));
+                let x = offset_clamped(tile_origin[0], cell_x.saturating_mul(stride));
+                let z = offset_clamped(tile_origin[1], cell_z.saturating_mul(stride));
+                let origin = match face {
+                    FACE_POS_X => [offset_clamped(x, stride - 1), lower.saturating_add(1), z],
+                    FACE_NEG_X => [offset_clamped(x, stride), lower.saturating_add(1), z],
+                    FACE_POS_Z => [x, lower.saturating_add(1), offset_clamped(z, stride - 1)],
+                    FACE_NEG_Z => [x, lower.saturating_add(1), offset_clamped(z, stride)],
+                    _ => unreachable!(),
+                };
+                wall_quads.clear();
+                append_surface_wall_quads(
+                    &mut wall_quads,
+                    SurfaceWall {
+                        origin,
+                        face,
+                        horizontal_extent: stride,
+                        lower_height: lower,
+                        upper_height: upper,
+                        surface_material: material,
+                        sample_xz: [
+                            offset_clamped(
+                                tile_origin[0],
+                                material_cell[0].saturating_mul(stride) + stride / 2,
+                            ),
+                            offset_clamped(
+                                tile_origin[1],
+                                material_cell[1].saturating_mul(stride) + stride / 2,
+                            ),
+                        ],
+                        replaceable_air_fallback: stride
+                            == SurfaceLodLevel::Stride2.stride_voxels(),
+                    },
+                    vertical_material,
+                );
+                closures.extend(wall_quads.drain(..).map(|quad| SurfaceMorphClosure {
+                    quad,
+                    collapsed_height: child_height,
+                }));
             }
         }
     }
@@ -1614,7 +2108,7 @@ fn append_ecology_tree_proxy(
     // bands; the union bounds preserve aggregate foliage area as detail is removed. This is the
     // voxel-world equivalent of Nanite foliage's area-preserving aggregate representation.
     let maximum_crown_bands = match level {
-        // At the 9.6 m canonical handoff a 10 cm slice is still several pixels tall. Preserve far
+        // At the 12.8 m canonical handoff a 10 cm slice is still several pixels tall. Preserve far
         // more of the canonical crown profile here, while bounding server bytes and GPU quads.
         SurfaceLodLevel::Stride2 => 24,
         SurfaceLodLevel::Stride4 => 14,
@@ -1709,36 +2203,42 @@ fn append_box(quads: &mut Vec<SurfaceQuad>, min: [i32; 3], max: [i32; 3], materi
             face: FACE_POS_X,
             extent: [size[2], size[1]],
             material,
+            synthetic_fallback: false,
         },
         SurfaceQuad {
             origin: min,
             face: FACE_NEG_X,
             extent: [size[2], size[1]],
             material,
+            synthetic_fallback: false,
         },
         SurfaceQuad {
             origin: [min[0], max[1] - 1, min[2]],
             face: FACE_POS_Y,
             extent: [size[0], size[2]],
             material,
+            synthetic_fallback: false,
         },
         SurfaceQuad {
             origin: min,
             face: FACE_NEG_Y,
             extent: [size[0], size[2]],
             material,
+            synthetic_fallback: false,
         },
         SurfaceQuad {
             origin: [min[0], min[1], max[2] - 1],
             face: FACE_POS_Z,
             extent: [size[0], size[1]],
             material,
+            synthetic_fallback: false,
         },
         SurfaceQuad {
             origin: min,
             face: FACE_NEG_Z,
             extent: [size[0], size[1]],
             material,
+            synthetic_fallback: false,
         },
     ]);
 }
@@ -2197,6 +2697,14 @@ mod tests {
             assert!(ys.contains(&surface_y));
             assert!(ys.contains(&surface_y.saturating_add(1)));
         }
+        for ys in hints.values() {
+            let minimum = *ys.first().expect("hint band minimum");
+            let maximum = *ys.last().expect("hint band maximum");
+            assert_eq!(
+                ys.len(),
+                usize::try_from(maximum - minimum + 1).expect("bounded hint band")
+            );
+        }
     }
 
     #[test]
@@ -2450,6 +2958,188 @@ mod tests {
     }
 
     #[test]
+    fn flat_child_surface_emits_collapsed_walls_for_parent_height_steps() {
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0);
+        let child = |_x, _z| (10, Material::Grass);
+        let parent = |x, _z| {
+            if x >= 4 {
+                (12, Material::Grass)
+            } else {
+                (10, Material::Grass)
+            }
+        };
+        let tile =
+            generate_surface_tile_mesh_with_features_and_shading(coord, child, child, parent, &[]);
+
+        assert_eq!(tile.morph_closures.len(), 32);
+        assert!(tile.morph_closures.iter().all(|closure| {
+            closure.collapsed_height == 10
+                && closure.quad.face == FACE_NEG_X
+                && closure.quad.origin[0] == 4
+                && closure.quad.origin[1] == 11
+                && closure.quad.extent == [2, 2]
+        }));
+        let mut owned = vec![0_u8; tile.morph_closures.len()];
+        for range in tile.patches.iter().flat_map(|patch| {
+            std::iter::once(&patch.morph_closure_range).chain(&patch.edge_morph_closure_ranges)
+        }) {
+            for index in range.clone() {
+                owned[index as usize] += 1;
+            }
+        }
+        assert!(owned.into_iter().all(|owners| owners == 1));
+    }
+
+    #[test]
+    fn exact_vertical_samples_prevent_surface_cover_from_stretching_down_coarse_walls() {
+        let surface = |x, z| {
+            let height = if x == 1 && z == 1 { 10 } else { 0 };
+            (height, Material::Grass)
+        };
+        let vertical_material = |_x, y, _z| match y {
+            10 => Material::Grass,
+            8..=9 => Material::Dirt,
+            _ => Material::Stone,
+        };
+        let tile = generate_surface_tile_mesh_with_options(
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
+            &surface,
+            SurfaceTileMeshOptions {
+                vertical_material: Some(&vertical_material),
+                patch_edges: false,
+                ..SurfaceTileMeshOptions::plain(&[])
+            },
+        );
+        let sides = tile
+            .quads
+            .iter()
+            .filter(|quad| quad.face != FACE_POS_Y)
+            .collect::<Vec<_>>();
+
+        for face in [FACE_NEG_X, FACE_POS_X, FACE_NEG_Z, FACE_POS_Z] {
+            let face_sides = sides
+                .iter()
+                .copied()
+                .filter(|quad| quad.face == face)
+                .collect::<Vec<_>>();
+            assert_eq!(face_sides.len(), 3);
+            assert_eq!(
+                face_sides
+                    .iter()
+                    .map(|quad| (quad.origin[1], quad.extent[1], quad.material))
+                    .collect::<Vec<_>>(),
+                [
+                    (1, 7, Material::Stone),
+                    (8, 2, Material::Dirt),
+                    (10, 1, Material::Grass),
+                ]
+            );
+        }
+        assert!(sides.iter().all(|quad| {
+            !matches!(
+                quad.material,
+                Material::Grass | Material::Moss | Material::Snow
+            ) || quad.extent[1] == 1
+        }));
+    }
+
+    #[test]
+    fn exact_vertical_air_gets_watertight_replaceable_surface_cover() {
+        let surface = |x, z| {
+            let height = if x == 1 && z == 1 { 10 } else { 0 };
+            (height, Material::Grass)
+        };
+        let vertical_material = |_x, y, _z| match y {
+            10 => Material::Grass,
+            8..=9 => Material::Dirt,
+            4..=6 => Material::Air,
+            _ => Material::Stone,
+        };
+        let tile = generate_surface_tile_mesh_with_options(
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
+            &surface,
+            SurfaceTileMeshOptions {
+                vertical_material: Some(&vertical_material),
+                patch_edges: false,
+                ..SurfaceTileMeshOptions::plain(&[])
+            },
+        );
+        let sides = tile
+            .quads
+            .iter()
+            .filter(|quad| quad.face != FACE_POS_Y)
+            .collect::<Vec<_>>();
+
+        for face in [FACE_NEG_X, FACE_POS_X, FACE_NEG_Z, FACE_POS_Z] {
+            assert_eq!(
+                sides
+                    .iter()
+                    .copied()
+                    .filter(|quad| quad.face == face)
+                    .map(|quad| {
+                        (
+                            quad.origin[1],
+                            quad.extent[1],
+                            quad.material,
+                            quad.synthetic_fallback,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                [
+                    (1, 3, Material::Stone, false),
+                    (4, 3, Material::Dirt, true),
+                    (7, 1, Material::Stone, false),
+                    (8, 2, Material::Dirt, false),
+                    (10, 1, Material::Grass, false),
+                ],
+                "known tunnel air must remain covered until exact-volume ownership replaces it"
+            );
+        }
+        assert!(
+            sides
+                .iter()
+                .filter(|quad| quad.synthetic_fallback)
+                .all(|quad| quad.origin[1].div_euclid(CHUNK_EDGE as i32)
+                    == (quad.origin[1] + i32::from(quad.extent[1]) - 1)
+                        .div_euclid(CHUNK_EDGE as i32))
+        );
+    }
+
+    #[test]
+    fn replaceable_surface_cover_splits_at_exact_chunk_boundaries() {
+        let surface = |x, z| {
+            let height = if x == 1 && z == 1 { 40 } else { 0 };
+            (height, Material::Grass)
+        };
+        let vertical_material = |_x, y, _z| match y {
+            40 => Material::Grass,
+            30..=34 => Material::Air,
+            _ => Material::Stone,
+        };
+        let tile = generate_surface_tile_mesh_with_options(
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
+            &surface,
+            SurfaceTileMeshOptions {
+                vertical_material: Some(&vertical_material),
+                patch_edges: false,
+                ..SurfaceTileMeshOptions::plain(&[])
+            },
+        );
+
+        for face in [FACE_NEG_X, FACE_POS_X, FACE_NEG_Z, FACE_POS_Z] {
+            assert_eq!(
+                tile.quads
+                    .iter()
+                    .filter(|quad| quad.face == face && quad.synthetic_fallback)
+                    .map(|quad| (quad.origin[1], quad.extent[1]))
+                    .collect::<Vec<_>>(),
+                [(30, 2), (32, 3)],
+                "one fallback slice must never wait on two independently ready exact chunks"
+            );
+        }
+    }
+
+    #[test]
     fn tall_surface_sides_split_without_truncating_vertical_coverage() {
         for (height, segments_per_face) in [(65_535, 1), (65_536, 2), (131_071, 3)] {
             let surface = |x, z| {
@@ -2459,11 +3149,10 @@ mod tests {
             let tile = generate_surface_tile_mesh_with_options(
                 SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
                 &surface,
-                None,
-                None,
-                false,
-                0,
-                &[],
+                SurfaceTileMeshOptions {
+                    patch_edges: false,
+                    ..SurfaceTileMeshOptions::plain(&[])
+                },
             );
             let sides: Vec<_> = tile
                 .quads
@@ -3146,6 +3835,36 @@ mod tests {
     }
 
     #[test]
+    fn cinder_vault_overhang_has_chunk_owned_watertight_surface_fallback() {
+        let generator = Generator::new(0x5eed_cafe);
+        let [entrance_x, _, entrance_z] = crate::CINDER_VAULT.entrance;
+        let owner = SurfaceTileCoord::containing(SurfaceLodLevel::Stride2, entrance_x, entrance_z);
+        let fallbacks = (-1..=1)
+            .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+            .flat_map(|(dx, dz)| {
+                generate_surface_tile_mesh(
+                    generator,
+                    SurfaceTileCoord::new(SurfaceLodLevel::Stride2, owner.x + dx, owner.z + dz),
+                )
+                .quads
+                .into_iter()
+                .filter(|quad| quad.synthetic_fallback)
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            !fallbacks.is_empty(),
+            "the authored cave mouth must exercise exact-volume replacement of its coarse cover"
+        );
+        assert!(fallbacks.iter().all(|quad| {
+            matches!(quad.face, FACE_NEG_X | FACE_POS_X | FACE_NEG_Z | FACE_POS_Z)
+                && quad.origin[1].div_euclid(CHUNK_EDGE as i32)
+                    == (quad.origin[1] + i32::from(quad.extent[1]) - 1)
+                        .div_euclid(CHUNK_EDGE as i32)
+        }));
+    }
+
+    #[test]
     fn edit_outside_analytic_feature_does_not_suppress_proxy() {
         let generator = Generator::new(0x5eed);
         let feature = nearby_skyline_feature(generator);
@@ -3213,7 +3932,7 @@ mod tests {
     }
 
     #[test]
-    fn underground_cave_edits_do_not_rebuild_surface_lods() {
+    fn underground_cave_edits_rebuild_only_the_exact_view_surface_shell() {
         let generator = Generator::new(0x5eed_cafe);
         let chamber = crate::CINDER_VAULT.chamber;
         let target = VoxelCoord::new(chamber[0], chamber[1], chamber[2]);
@@ -3224,7 +3943,12 @@ mod tests {
         let mut edits = EditMap::default();
         edits.set(generator, target, Material::Basalt);
         for level in SurfaceLodLevel::ALL {
-            assert!(surface_tiles_affected_by_voxel(generator, &edits, level, target).is_empty());
+            let affected = surface_tiles_affected_by_voxel(generator, &edits, level, target);
+            assert_eq!(
+                affected.is_empty(),
+                level != SurfaceLodLevel::Stride2,
+                "only stride-two overlaps exact tunnel ownership"
+            );
         }
     }
 }

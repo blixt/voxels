@@ -60,6 +60,9 @@ Scenarios are:
 - `cached_turn_180`: exact 180° look change after full radial coverage and the zero-world-byte
   control;
 - `streaming_walk`: a fixed 35 m sprint followed by post-stop convergence;
+- `spectator_cruise`: accelerates to the configured 128 m/s spectator maximum, then samples partial
+  exact/surface coverage, the terrain stride actually selected by the renderer, focus lag, the
+  longest degraded interval, pending surface work, frames, and bytes during sustained travel;
 - `turn_during_spawn`: exact 180° pivot as soon as first geometry appears, exposing view-priority and
   obsolete-work behavior during a cold load.
 
@@ -73,6 +76,10 @@ vp run automation -- run network-benchmark
 vp run automation -- run network-benchmark --runs=1
 vp run automation -- run network-benchmark --runs=1 --profile=constrained --rtt-ms=80 \
   --downstream-mbps=2 --upstream-mbps=1
+vp run automation -- run network-benchmark --runs=1 --source=procedural-v16 \
+  --flight-seconds=15 --flight-only
+vp run automation -- run network-benchmark --runs=1 --source=procedural-v16 \
+  --flight-only --generation-workers-per-client=7
 vp run automation -- run network-compare target/automation/before/report.json \
   target/automation/after/report.json
 ```
@@ -169,7 +176,7 @@ decode jank on this machine.
 
 ## 2026-07-18 canonical view-and-velocity priority
 
-VXWP v28 preserves the complete immediate 3x3 canonical-chunk vicinity, then reorders unstarted
+VXWP v32 preserves the complete immediate 3x3 canonical-chunk vicinity, then reorders unstarted
 generation, meshing, and upload tickets every frame by a 55-degree camera cone and a 1.5-second
 velocity prediction. This changes request order only: residency, cache identity, product fidelity,
 and every traffic bound remain unchanged. The values are typed client configuration.
@@ -196,10 +203,10 @@ slower and produced a 20.9-second outlier. Surface levels activate atomically, s
 progress cannot be presented; reordering only disrupted spatial generation locality. Surface tiles
 therefore retain their proven coarsest-first radial order.
 
-The next credible gains are not constant changes: they require priority-aware server admission,
-best-effort cancellation of genuinely obsolete focus work, or a bespoke progressive `VXST` surface
-codec. Those need new protocol/scheduler invariants and multi-client fairness tests, so they are the
-boundary beyond this low-hanging optimization pass.
+Later work implemented priority-aware admission, cancellation, and velocity-led surface residency.
+The fixed-ring conclusion in this historical section no longer describes current traversal; see the
+[2026-07-22 fast-travel streaming study](20260722-fast-travel-streaming-study.md) for the measured
+replacement and the remaining progressive-codec boundary.
 
 ## 2026-07-19 swept collision urgency
 

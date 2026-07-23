@@ -47,6 +47,17 @@ export interface CameraLookOptions extends SnapshotWaitOptions {
   readonly tolerance?: number;
 }
 
+export type LodBoundaryHalfExtents = readonly [
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+];
+
 export class EngineClient {
   readonly #page: Page;
   #contract: EngineAutomationContract | undefined;
@@ -103,6 +114,19 @@ export class EngineClient {
       await this.wait(intervalMs);
     }
     throw new Error(`${description}: ${JSON.stringify(latest)}`);
+  }
+
+  async waitForFrameAfter(
+    frameSequence: number,
+    options: SnapshotWaitOptions = {},
+  ): Promise<readonly number[]> {
+    if (!Number.isSafeInteger(frameSequence) || frameSequence < 0) {
+      throw new Error("frame sequence must be a non-negative integer");
+    }
+    return this.waitForSnapshot(
+      (snapshot) => snapshotValue(snapshot, "frameSequence") !== frameSequence,
+      { ...options, description: options.description ?? "renderer did not advance a frame" },
+    );
   }
 
   async look(deltaX: number, deltaY: number): Promise<void> {
@@ -181,6 +205,52 @@ export class EngineClient {
     );
     if (!accepted) throw new Error("engine rejected the diagnostic sky override");
     await this.#page.waitForTimeout(50);
+  }
+
+  async setMaterialDetail(enabled: boolean): Promise<readonly number[]> {
+    const accepted = await this.#page.evaluate(
+      (active) => globalThis.__VOXELS__!.materialDetail(active),
+      enabled,
+    );
+    if (!accepted) throw new Error("engine rejected the material-detail override");
+    return this.waitForSnapshot(
+      (snapshot) => snapshotValue(snapshot, "materialDetail") === Number(enabled),
+      { description: `material detail did not become ${enabled ? "enabled" : "disabled"}` },
+    );
+  }
+
+  async setLodBoundaryHalfExtents(extents: LodBoundaryHalfExtents): Promise<void> {
+    const alignments = [32, 32, 64, 128, 256, 512, 1_024, 2_048] as const;
+    if (
+      extents.some(
+        (extent, index) =>
+          !Number.isSafeInteger(extent) ||
+          extent <= 0 ||
+          extent % (alignments[index] ?? 1) !== 0 ||
+          (index > 0 && extent <= (extents[index - 1] ?? 0)),
+      )
+    ) {
+      throw new Error("LOD boundary half extents must be positive, increasing, aligned integers");
+    }
+    const accepted = await this.#page.evaluate(
+      (values) => globalThis.__VOXELS__!.lodBoundaries(values),
+      extents,
+    );
+    if (!accepted) throw new Error("engine rejected the LOD boundary half extents");
+  }
+
+  async exactVolumePresented(voxel: readonly [number, number, number]): Promise<boolean> {
+    if (
+      voxel.some(
+        (value) => !Number.isSafeInteger(value) || value < -0x8000_0000 || value > 0x7fff_ffff,
+      )
+    ) {
+      throw new Error("exact-volume voxel coordinates must be signed 32-bit integers");
+    }
+    return this.#page.evaluate(
+      ([x, y, z]) => globalThis.__VOXELS__!.exactVolumePresented(x, y, z),
+      voxel,
+    );
   }
 
   async submitPlace(

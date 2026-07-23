@@ -2,6 +2,7 @@ import "./style.css";
 import { authorizeClientBootstrap } from "./client-authorization.ts";
 import { loadClientConfig } from "./client-config.ts";
 import { writeClipboardText } from "./clipboard.ts";
+import { downloadBlob } from "./download.ts";
 import {
   type EngineAutomationApi,
   type EngineAutomationContract,
@@ -134,6 +135,18 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     number,
     { resolve: (active: boolean) => void; reject: (reason: Error) => void }
   >();
+  const materialDetailResolvers = new Map<
+    number,
+    { resolve: (active: boolean) => void; reject: (reason: Error) => void }
+  >();
+  const lodBoundaryResolvers = new Map<
+    number,
+    { resolve: (accepted: boolean) => void; reject: (reason: Error) => void }
+  >();
+  const exactVolumeResolvers = new Map<
+    number,
+    { resolve: (presented: boolean) => void; reject: (reason: Error) => void }
+  >();
   const inventoryResolvers = new Map<
     number,
     { resolve: (values: number[]) => void; reject: (reason: Error) => void }
@@ -157,6 +170,12 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     spectatorResolvers.clear();
     for (const { reject } of diagnosticSkyResolvers.values()) reject(error);
     diagnosticSkyResolvers.clear();
+    for (const { reject } of materialDetailResolvers.values()) reject(error);
+    materialDetailResolvers.clear();
+    for (const { reject } of lodBoundaryResolvers.values()) reject(error);
+    lodBoundaryResolvers.clear();
+    for (const { reject } of exactVolumeResolvers.values()) reject(error);
+    exactVolumeResolvers.clear();
     for (const { reject } of inventoryResolvers.values()) reject(error);
     inventoryResolvers.clear();
     for (const { reject } of surfaceEditStateResolvers.values()) reject(error);
@@ -215,6 +234,31 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
           green: rgb?.[1] ?? 0,
           blue: rgb?.[2] ?? 0,
         });
+      }),
+    materialDetail: (enabled) =>
+      new Promise<boolean>((resolve, reject) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        materialDetailResolvers.set(requestId, { resolve, reject });
+        worker.postMessage({ kind: "materialDetail", requestId, enabled });
+      }),
+    lodBoundaries: (halfExtentsVoxels) =>
+      new Promise<boolean>((resolve, reject) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        lodBoundaryResolvers.set(requestId, { resolve, reject });
+        worker.postMessage({
+          kind: "lodBoundaries",
+          requestId,
+          halfExtentsVoxels: [...halfExtentsVoxels],
+        });
+      }),
+    exactVolumePresented: (x, y, z) =>
+      new Promise<boolean>((resolve, reject) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        exactVolumeResolvers.set(requestId, { resolve, reject });
+        worker.postMessage({ kind: "exactVolumePresented", requestId, x, y, z });
       }),
     look: (deltaX, deltaY) => {
       const buffer = packInput([
@@ -311,6 +355,9 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
       void writeClipboardText(navigator.clipboard, event.data.text).then((copied) => {
         worker.postMessage({ kind: "missionControlCopyResult", copied });
       });
+    } else if (event.data.kind === "downloadMissionControlScreenshot") {
+      const saved = downloadBlob(event.data.blob, event.data.filename);
+      worker.postMessage({ kind: "missionControlScreenshotResult", saved });
     } else if (event.data.kind === "error") {
       failWorker(`The Rust engine could not start.\n${event.data.message}`);
     } else if (event.data.kind === "automationContract") {
@@ -333,6 +380,15 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     } else if (event.data.kind === "diagnosticSky") {
       diagnosticSkyResolvers.get(event.data.requestId)?.resolve(event.data.active);
       diagnosticSkyResolvers.delete(event.data.requestId);
+    } else if (event.data.kind === "materialDetail") {
+      materialDetailResolvers.get(event.data.requestId)?.resolve(event.data.accepted);
+      materialDetailResolvers.delete(event.data.requestId);
+    } else if (event.data.kind === "lodBoundaries") {
+      lodBoundaryResolvers.get(event.data.requestId)?.resolve(event.data.accepted);
+      lodBoundaryResolvers.delete(event.data.requestId);
+    } else if (event.data.kind === "exactVolumePresented") {
+      exactVolumeResolvers.get(event.data.requestId)?.resolve(event.data.presented);
+      exactVolumeResolvers.delete(event.data.requestId);
     } else if (event.data.kind === "submitPlace") {
       editResolvers.get(event.data.requestId)?.resolve(event.data.submitted);
       editResolvers.delete(event.data.requestId);

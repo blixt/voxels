@@ -25,6 +25,18 @@ export interface FrameSample {
   readonly lodOwnershipRefreshes: number;
   readonly testedSlices: number;
   readonly selectedSlices: number;
+  readonly streamRemoteMs: number;
+  readonly streamPlanMs: number;
+  readonly streamMeshMs: number;
+  readonly streamPublishMs: number;
+  readonly streamSurfaceMs: number;
+  readonly streamPresenceMs: number;
+  readonly streamInterestMs: number;
+  readonly streamSchedulerUpdateMs: number;
+  readonly streamSchedulerAdmitMs: number;
+  readonly streamCollisionInterestMs: number;
+  readonly streamEnclosedInterestMs: number;
+  readonly streamSurfaceInterestMs: number;
 }
 
 export interface GpuFrameSample {
@@ -94,6 +106,18 @@ export function frameSamples(snapshot: readonly number[]): FrameSample[] {
       lodOwnershipRefreshes: required(snapshot, start + 11, "frame sample"),
       testedSlices: required(snapshot, start + 12, "frame sample"),
       selectedSlices: required(snapshot, start + 13, "frame sample"),
+      streamRemoteMs: required(snapshot, start + 14, "frame sample"),
+      streamPlanMs: required(snapshot, start + 15, "frame sample"),
+      streamMeshMs: required(snapshot, start + 16, "frame sample"),
+      streamPublishMs: required(snapshot, start + 17, "frame sample"),
+      streamSurfaceMs: required(snapshot, start + 18, "frame sample"),
+      streamPresenceMs: required(snapshot, start + 19, "frame sample"),
+      streamInterestMs: required(snapshot, start + 20, "frame sample"),
+      streamSchedulerUpdateMs: required(snapshot, start + 21, "frame sample"),
+      streamSchedulerAdmitMs: required(snapshot, start + 22, "frame sample"),
+      streamCollisionInterestMs: required(snapshot, start + 23, "frame sample"),
+      streamEnclosedInterestMs: required(snapshot, start + 24, "frame sample"),
+      streamSurfaceInterestMs: required(snapshot, start + 25, "frame sample"),
     });
   }
   return samples;
@@ -315,6 +339,20 @@ export function summarizeRenderPhase(captures: readonly RenderSnapshotCapture[])
     cpuMs: summary(samples.map((sample) => sample.cpuMs)),
     simulationMs: summary(samples.map((sample) => sample.simulationMs)),
     streamingMs: summary(samples.map((sample) => sample.streamingMs)),
+    streamingCpu: {
+      remoteMs: summary(samples.map((sample) => sample.streamRemoteMs)),
+      planMs: summary(samples.map((sample) => sample.streamPlanMs)),
+      meshMs: summary(samples.map((sample) => sample.streamMeshMs)),
+      publishMs: summary(samples.map((sample) => sample.streamPublishMs)),
+      surfaceMs: summary(samples.map((sample) => sample.streamSurfaceMs)),
+      presenceMs: summary(samples.map((sample) => sample.streamPresenceMs)),
+      interestMs: summary(samples.map((sample) => sample.streamInterestMs)),
+      schedulerUpdateMs: summary(samples.map((sample) => sample.streamSchedulerUpdateMs)),
+      schedulerAdmitMs: summary(samples.map((sample) => sample.streamSchedulerAdmitMs)),
+      collisionInterestMs: summary(samples.map((sample) => sample.streamCollisionInterestMs)),
+      enclosedInterestMs: summary(samples.map((sample) => sample.streamEnclosedInterestMs)),
+      surfaceInterestMs: summary(samples.map((sample) => sample.streamSurfaceInterestMs)),
+    },
     renderSubmissionMs: summary(samples.map((sample) => sample.renderSubmissionMs)),
     unattributedCpuMs: summary(unattributedCpu),
     renderCpu: {
@@ -330,6 +368,9 @@ export function summarizeRenderPhase(captures: readonly RenderSnapshotCapture[])
         surfaceResidency: samples.filter((sample) => (sample.lodPlanRebuildReason & 8) !== 0)
           .length,
         surfaceProfiles: samples.filter((sample) => (sample.lodPlanRebuildReason & 16) !== 0)
+          .length,
+        enclosedView: samples.filter((sample) => (sample.lodPlanRebuildReason & 32) !== 0).length,
+        canonicalVolume: samples.filter((sample) => (sample.lodPlanRebuildReason & 64) !== 0)
           .length,
       },
       encodeMs: summary(samples.map((sample) => sample.renderEncodeMs)),

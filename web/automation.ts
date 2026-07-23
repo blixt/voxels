@@ -1,8 +1,8 @@
 import type { BrowserPlayerSession } from "./local-player.ts";
 
-export const AUTOMATION_CONTRACT_VERSION = 3;
-export const SNAPSHOT_SCHEMA_VERSION = 37;
-export const FRAME_SAMPLE_WIDTH = 14;
+export const AUTOMATION_CONTRACT_VERSION = 7;
+export const SNAPSHOT_SCHEMA_VERSION = 39;
+export const FRAME_SAMPLE_WIDTH = 26;
 export const GPU_SAMPLE_WIDTH = 13;
 
 // This map is the compact Rust snapshot ABI. Scenario code imports it from the typed engine
@@ -209,9 +209,11 @@ export const SNAPSHOT = Object.freeze({
   enclosedViewRequired: 198,
   enclosedViewRenderable: 199,
   enclosedViewOwned: 200,
-  schemaVersion: 201,
-  sampleCount: 202,
-  droppedSamples: 203,
+  lodIncompleteTransitionEdges: 201,
+  frameSequence: 202,
+  schemaVersion: 203,
+  sampleCount: 204,
+  droppedSamples: 205,
 } as const);
 
 export type SnapshotField = keyof typeof SNAPSHOT;
@@ -241,6 +243,9 @@ export interface EngineAutomationApi {
   profile(profileId: number): void;
   spectator(active: boolean): Promise<boolean>;
   diagnosticSky(rgb: readonly [number, number, number] | null): Promise<boolean>;
+  materialDetail(enabled: boolean): Promise<boolean>;
+  lodBoundaries(halfExtentsVoxels: readonly number[]): Promise<boolean>;
+  exactVolumePresented(x: number, y: number, z: number): Promise<boolean>;
   look(deltaX: number, deltaY: number): void;
   submitPlace(
     x: number,

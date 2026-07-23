@@ -58,6 +58,7 @@ export type ToWorker =
   | { kind: "resize"; cssWidth: number; cssHeight: number; dpr: number }
   | { kind: "reducedMotion"; reduced: boolean }
   | { kind: "missionControlCopyResult"; copied: boolean }
+  | { kind: "missionControlScreenshotResult"; saved: boolean }
   | { kind: "profile"; profileId: number }
   | { kind: "spectator"; requestId: number; active: boolean }
   | {
@@ -68,6 +69,9 @@ export type ToWorker =
       green: number;
       blue: number;
     }
+  | { kind: "materialDetail"; requestId: number; enabled: boolean }
+  | { kind: "lodBoundaries"; requestId: number; halfExtentsVoxels: number[] }
+  | { kind: "exactVolumePresented"; requestId: number; x: number; y: number; z: number }
   | { kind: "snapshot"; requestId: number }
   | {
       kind: "submitPlace";
@@ -94,11 +98,15 @@ export type FromWorker =
   | { kind: "destroyed" }
   | { kind: "uiMode"; cursor: boolean }
   | { kind: "copyMissionControl"; text: string }
+  | { kind: "downloadMissionControlScreenshot"; blob: Blob; filename: string }
   | { kind: "error"; message: string }
   | { kind: "automationContract"; requestId: number; value: string }
   | { kind: "snapshot"; requestId: number; values: number[] }
   | { kind: "spectator"; requestId: number; active: boolean }
   | { kind: "diagnosticSky"; requestId: number; active: boolean }
+  | { kind: "materialDetail"; requestId: number; accepted: boolean }
+  | { kind: "lodBoundaries"; requestId: number; accepted: boolean }
+  | { kind: "exactVolumePresented"; requestId: number; presented: boolean }
   | { kind: "submitPlace"; requestId: number; submitted: boolean }
   | { kind: "submitDig"; requestId: number; submitted: boolean }
   | { kind: "inventory"; requestId: number; values: number[] }

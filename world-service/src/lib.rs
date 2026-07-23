@@ -36,7 +36,7 @@ pub use server::{
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 24;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 25;
 pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 13;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
@@ -198,10 +198,17 @@ pub struct GameplayConfig {
     pub max_horizontal_speed_centimetres_per_second: u16,
     /// Sustained vertical movement budget, including jumps and falling.
     pub max_vertical_speed_centimetres_per_second: u16,
+    /// Sustained horizontal budget for a bodyless, read-only spectator camera.
+    pub spectator_max_horizontal_speed_centimetres_per_second: u16,
+    /// Sustained vertical budget for a bodyless, read-only spectator camera.
+    pub spectator_max_vertical_speed_centimetres_per_second: u16,
     /// Fixed movement credit that absorbs simulation and packet-timing jitter.
     pub movement_slack_centimetres: u16,
     /// Maximum delayed-motion credit that can accumulate while pose packets are absent.
     pub movement_credit_window_ms: u16,
+    /// Delayed-motion credit window for high-speed spectators. This remains bounded by the pose
+    /// freshness limit, but tolerates an ordinary transient presence-socket stall at cruise speed.
+    pub spectator_movement_credit_window_ms: u16,
 }
 
 impl Default for GameplayConfig {
@@ -214,8 +221,11 @@ impl Default for GameplayConfig {
             interaction_pose_max_age_ms: 1_000,
             max_horizontal_speed_centimetres_per_second: 900,
             max_vertical_speed_centimetres_per_second: 2_000,
+            spectator_max_horizontal_speed_centimetres_per_second: 15_000,
+            spectator_max_vertical_speed_centimetres_per_second: 15_000,
             movement_slack_centimetres: 100,
             movement_credit_window_ms: 500,
+            spectator_movement_credit_window_ms: 2_000,
         }
     }
 }
@@ -686,11 +696,23 @@ impl WorldServiceConfig {
         }
         if !(100..=2_000).contains(&self.gameplay.max_horizontal_speed_centimetres_per_second)
             || !(100..=5_000).contains(&self.gameplay.max_vertical_speed_centimetres_per_second)
+            || !(self.gameplay.max_horizontal_speed_centimetres_per_second..=60_000).contains(
+                &self
+                    .gameplay
+                    .spectator_max_horizontal_speed_centimetres_per_second,
+            )
+            || !(self.gameplay.max_vertical_speed_centimetres_per_second..=60_000).contains(
+                &self
+                    .gameplay
+                    .spectator_max_vertical_speed_centimetres_per_second,
+            )
             || !(1..=300).contains(&self.gameplay.movement_slack_centimetres)
             || !(100..=2_000).contains(&self.gameplay.movement_credit_window_ms)
+            || !(self.gameplay.movement_credit_window_ms..=2_000)
+                .contains(&self.gameplay.spectator_movement_credit_window_ms)
         {
             return Err(WorldServiceConfigError::InvalidGameplay(
-                "movement speeds, slack, or credit window is invalid",
+                "player/spectator movement speeds, slack, or credit window is invalid",
             ));
         }
         if self.spawn.pillar_height_voxels == 0
@@ -1088,7 +1110,7 @@ mod tests {
     };
 
     const CONFIG_TOML: &str = r#"
-schema_version = 24
+schema_version = 25
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -1138,8 +1160,11 @@ interaction_latency_slack_centimetres = 100
 interaction_pose_max_age_ms = 1000
 max_horizontal_speed_centimetres_per_second = 900
 max_vertical_speed_centimetres_per_second = 2000
+spectator_max_horizontal_speed_centimetres_per_second = 15000
+spectator_max_vertical_speed_centimetres_per_second = 15000
 movement_slack_centimetres = 100
 movement_credit_window_ms = 500
+spectator_movement_credit_window_ms = 2000
 
 [environment]
 day_length_seconds = 1200.0
@@ -1272,7 +1297,7 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 24", "schema_version = 23");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 25", "schema_version = 24");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
@@ -1306,6 +1331,9 @@ sea_level_voxels = 52
             "response_cache_bytes = 67108864\n",
             "broadcast_interval_ms = 33\n",
             "interaction_reach_centimetres = 500\n",
+            "spectator_max_horizontal_speed_centimetres_per_second = 15000\n",
+            "spectator_max_vertical_speed_centimetres_per_second = 15000\n",
+            "spectator_movement_credit_window_ms = 2000\n",
             "planet_circumference_metres = 40075016.0\n",
             "xz_voxels = [0, 0]\n",
             "precision = \"float16\"\n",

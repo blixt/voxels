@@ -1,6 +1,7 @@
 //! Deterministic, host-testable voxel world representation, generation, meshing, and storage codecs.
 
 pub mod atlas;
+pub mod binary_mesh;
 pub mod cave;
 pub mod celestial;
 pub mod chunk;
@@ -49,8 +50,9 @@ pub use lod::{
     SURFACE_HORIZON_CELL_COUNT, SURFACE_LOD_LEVEL_COUNT, SURFACE_PARENT_HORIZON_CELL_COUNT,
     SURFACE_PARENT_SHADING_EDGE_SAMPLES, SURFACE_PATCH_EDGE_CELLS, SURFACE_PATCHES_PER_TILE_EDGE,
     SURFACE_SHADING_EDGE_SAMPLES, SURFACE_TILE_EDGE_CELLS, SurfaceBounds, SurfaceLodLevel,
-    SurfacePatch, SurfacePatchEdge, SurfacePatchId, SurfaceQuad, SurfaceShading, SurfaceTileCoord,
-    SurfaceTileMesh, WaterPatch, WaterTileMesh, generate_edited_surface_tile_mesh,
+    SurfaceMorphClosure, SurfacePatch, SurfacePatchEdge, SurfacePatchId, SurfaceQuad,
+    SurfaceShading, SurfaceTileCoord, SurfaceTileMesh, WaterPatch, WaterTileMesh,
+    fallback_surface_wall_material, generate_edited_surface_tile_mesh,
     generate_edited_water_tile_mesh, generate_surface_tile_mesh, generate_surface_tile_mesh_with,
     generate_surface_tile_mesh_with_features, generate_surface_tile_mesh_with_features_and_shading,
     generate_water_tile_mesh_with, surface_tiles_affected_by_column,
@@ -94,3 +96,4 @@ pub use atlas::{
     PILGRIM_CHAPTERS, PILGRIM_DESTINATIONS, RouteChapter, RouteChapterId,
     pilgrim_chapter_at_distance,
 };
+pub use binary_mesh::{BinaryMeshScratch, mesh_chunk_binary, mesh_chunk_binary_with_scratch};

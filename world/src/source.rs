@@ -6,8 +6,8 @@
 use crate::generation::Generator;
 use crate::{
     ATLAS_VERSION, AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, GENERATOR_VERSION, Material,
-    SkylineFeature, SkylineFeatureKind, SurfaceLodLevel, SurfaceRegion, SurfaceSample,
-    SurfaceTileCoord, SurfaceTileMesh, VoxelCoord, WaterTileMesh,
+    SURFACE_TILE_EDGE_CELLS, SkylineFeature, SkylineFeatureKind, SurfaceLodLevel, SurfaceRegion,
+    SurfaceSample, SurfaceTileCoord, SurfaceTileMesh, VoxelCoord, WaterTileMesh,
     generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, generate_surface_tile_mesh,
     generate_water_tile_mesh_with, surface_tiles_affected_by_voxel,
 };
@@ -16,7 +16,7 @@ use std::fmt;
 
 pub const WORLD_SCHEMA_VERSION: u32 = 1;
 pub const MACRO_FIELD_SCHEMA_VERSION: u32 = 1;
-pub const VOXEL_COMPOSER_VERSION: u32 = 7;
+pub const VOXEL_COMPOSER_VERSION: u32 = 8;
 /// Source identity marker for providers that intentionally contain no authored atlas overlays.
 pub const NO_AUTHORED_CONTENT_VERSION: u32 = 0;
 pub const PROCEDURAL_SAMPLER_VERSION: u32 = 1;
@@ -376,9 +376,12 @@ impl WorldManifest {
 pub enum WorldProductPriority {
     CollisionCritical = 1,
     VisibleChunk = 2,
-    VisibleSurface = 3,
-    ReplacementSurface = 4,
-    Prefetch = 5,
+    /// The surface tiles containing the current camera position. This class may preempt older
+    /// visible-ring work so rapid traversal cannot strand the player on an uncovered leading edge.
+    ImmediateSurface = 3,
+    VisibleSurface = 4,
+    ReplacementSurface = 5,
+    Prefetch = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -423,6 +426,29 @@ pub struct SurfaceTileSnapshot {
     pub source_identity_hash: WorldSourceIdentityHash,
     pub terrain: SurfaceTileMesh,
     pub water: WaterTileMesh,
+    /// Canonical chunks containing edits whose topology cannot be represented by a heightfield.
+    ///
+    /// Only the finest surface level carries these sparse hints. They let a client request exact
+    /// volume for nearby floating structures, overhangs, and excavations without expanding the
+    /// entire radial exact cut or guessing from rendered surface geometry.
+    pub exact_detail_chunks: Vec<ChunkCoord>,
+}
+
+pub(crate) fn exact_detail_chunks_for_surface_tile(
+    edits: &crate::EditMap,
+    coord: SurfaceTileCoord,
+) -> Vec<ChunkCoord> {
+    if coord.level != SurfaceLodLevel::Stride2 {
+        return Vec::new();
+    }
+    let [origin_x, origin_z] = coord.voxel_origin();
+    let span = SURFACE_TILE_EDGE_CELLS.saturating_mul(coord.stride_voxels());
+    let chunk_edge = CHUNK_EDGE as i32;
+    let minimum_x = origin_x.div_euclid(chunk_edge);
+    let minimum_z = origin_z.div_euclid(chunk_edge);
+    let maximum_x = origin_x.saturating_add(span - 1).div_euclid(chunk_edge);
+    let maximum_z = origin_z.saturating_add(span - 1).div_euclid(chunk_edge);
+    edits.edited_chunks_in_horizontal_chunk_bounds(minimum_x, maximum_x, minimum_z, maximum_z)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -526,6 +552,23 @@ pub trait WorldSourceEngine: Send + Sync {
         level: SurfaceLodLevel,
         coord: VoxelCoord,
     ) -> Vec<SurfaceTileCoord>;
+
+    /// Returns every derived surface tile affected by a batch of canonical voxel changes.
+    /// Sources with expensive field lookups can override this to sample the edited columns once
+    /// for the whole operation instead of repeating the same query for every LOD level.
+    fn surface_tiles_affected_by_voxels(
+        &self,
+        edits: &crate::EditMap,
+        coords: &[VoxelCoord],
+    ) -> Vec<SurfaceTileCoord> {
+        let mut affected = std::collections::BTreeSet::new();
+        for &coord in coords {
+            for level in SurfaceLodLevel::ALL {
+                affected.extend(self.surface_tiles_affected_by_voxel(edits, level, coord));
+            }
+        }
+        affected.into_iter().collect()
+    }
 
     fn atmosphere_sample(&self, x: i32, z: i32) -> (AtmosphereSample, SurfaceRegion);
 
@@ -1143,6 +1186,7 @@ impl WorldSourceEngine for ProceduralWorldSource {
                             source_identity_hash: self.source_identity_hash(),
                             terrain,
                             water,
+                            exact_detail_chunks: Vec::new(),
                         }))
                     }
                 }
@@ -1167,6 +1211,7 @@ impl WorldSourceEngine for ProceduralWorldSource {
             source_identity_hash: self.source_identity_hash(),
             terrain: generate_edited_surface_tile_mesh(self.generator, edits, coord),
             water: generate_edited_water_tile_mesh(self.generator, edits, coord),
+            exact_detail_chunks: exact_detail_chunks_for_surface_tile(edits, coord),
         })
     }
 
@@ -1319,7 +1364,7 @@ mod tests {
         assert_ne!(first.identity_hash(), other.identity_hash());
         assert_eq!(
             first.identity_hash().to_string(),
-            "eb4c58b761510a84d9d058311228987798525c908407b17ec37e8a732ce6fadd"
+            "5067ad3f2d190a4c4c07ce74ff2a22effef267c6ff9fa7c944d8748d080bd19b"
         );
     }
 
@@ -1332,7 +1377,7 @@ mod tests {
         assert_eq!(first.validate(), Ok(()));
         assert_eq!(
             first.manifest_hash().map(|hash| hash.to_string()),
-            Ok("b788bf9f612f54752222fba71b7c5b1d4edd230f84797b0a4181e5a027a2ebe3".to_owned())
+            Ok("243a693635034d7567e52b56cd336b91bf6b4371de6a9e429aae5c08310f752d".to_owned())
         );
 
         let mut inconsistent = first;
@@ -1842,6 +1887,30 @@ mod tests {
         assert_eq!(result.blocks[0].elevation_voxels.len(), 6);
         assert_eq!(result.blocks[0].validity, vec![true; 6]);
         assert_eq!(result.blocks[0].schema_version, MACRO_FIELD_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn finest_surface_snapshot_identifies_only_its_sparse_exact_edit_chunks() {
+        let source = ProceduralWorldSource::new(9);
+        let mut edits = crate::EditMap::default();
+        edits.insert_override(VoxelCoord::new(40, 170, 45), Material::GlowCrystal);
+        edits.insert_override(VoxelCoord::new(41, 171, 45), Material::Stone);
+        edits.insert_override(VoxelCoord::new(70, 170, 45), Material::GlowCrystal);
+        let finest = source
+            .generate_edited_surface_tile(
+                &edits,
+                SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
+            )
+            .expect("edited finest surface tile");
+        assert_eq!(finest.exact_detail_chunks, vec![ChunkCoord::new(1, 5, 1)]);
+
+        let coarse = source
+            .generate_edited_surface_tile(
+                &edits,
+                SurfaceTileCoord::new(SurfaceLodLevel::Stride4, 0, 0),
+            )
+            .expect("edited coarse surface tile");
+        assert!(coarse.exact_detail_chunks.is_empty());
     }
 
     #[test]

@@ -26,7 +26,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket, WorkerGlobalScope};
 
-use crate::request_window::collision_preemption_candidate;
+use crate::request_window::{batch_has_obsolete_item, priority_preemption_candidate};
 
 pub type RemoteRequestId = u64;
 
@@ -212,8 +212,17 @@ impl RemoteWorldClient {
         self.inner.cancel(request_id)
     }
 
-    pub fn drain_completions(&self) -> Vec<RemoteChunkCompletion> {
-        self.inner.completions.borrow_mut().drain(..).collect()
+    pub fn next_completion(&self) -> Option<RemoteChunkCompletion> {
+        self.inner.completions.borrow_mut().pop_front()
+    }
+
+    /// Cancels scheduler-owned chunk batches once none of their coordinates remain desired.
+    ///
+    /// One-shot bootstrap requests are deliberately excluded: they are not backed by scheduler
+    /// capabilities and their caller owns their lifetime directly. Mixed scheduler batches remain
+    /// alive so a useful coordinate is not discarded with stale siblings.
+    pub fn cancel_chunk_batches_outside(&self, keep: impl Fn(ChunkCoord) -> bool) -> usize {
+        self.inner.cancel_chunk_batches_outside(keep)
     }
 
     pub fn submit_surface_batch(
@@ -224,12 +233,15 @@ impl RemoteWorldClient {
         self.inner.send_surface_request(priority, tickets)
     }
 
-    pub fn drain_surface_completions(&self) -> Vec<RemoteSurfaceCompletion> {
-        self.inner
-            .surface_completions
-            .borrow_mut()
-            .drain(..)
-            .collect()
+    pub fn next_surface_completion(&self) -> Option<RemoteSurfaceCompletion> {
+        self.inner.surface_completions.borrow_mut().pop_front()
+    }
+
+    /// Cancels surface batches as soon as any tile falls outside the caller's current coverage.
+    /// The completion path immediately requeues still-useful siblings, preventing obsolete work
+    /// from occupying an equal-priority request slot during sustained travel.
+    pub fn cancel_surface_batches_outside(&self, keep: impl Fn(SurfaceTileCoord) -> bool) -> usize {
+        self.inner.cancel_surface_batches_outside(keep)
     }
 
     pub fn submit_edit(&self, action: EditAction) -> Result<RemoteRequestId, RemoteWorldError> {
@@ -489,6 +501,15 @@ impl RemoteInner {
                 Ok(None) => {}
                 Err(error) => {
                     self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()))
+                }
+            }
+        } else if kind == protocol::frame_fragment_abort_kind() {
+            match protocol::decode_frame_fragment_abort(&bytes) {
+                Ok(transfer_id) => {
+                    self.frame_reassembler.borrow_mut().abort(transfer_id);
+                }
+                Err(error) => {
+                    self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()));
                 }
             }
         } else if kind == protocol::world_opened_kind() {
@@ -1010,7 +1031,7 @@ impl RemoteInner {
         }
         let candidate = {
             let pending = self.pending.borrow();
-            collision_preemption_candidate(
+            priority_preemption_candidate(
                 priority,
                 pending
                     .iter()
@@ -1042,6 +1063,53 @@ impl RemoteInner {
         self.send_cancel(request_id);
         self.finish_pending_error(request_id, RemoteWorldError::Canceled);
         true
+    }
+
+    fn cancel_surface_batches_outside(&self, keep: impl Fn(SurfaceTileCoord) -> bool) -> usize {
+        let request_ids = self
+            .pending
+            .borrow()
+            .iter()
+            .filter_map(|(&request_id, pending)| match pending {
+                PendingBatch::Surface { tickets, .. }
+                    if batch_has_obsolete_item(tickets.iter().map(|ticket| keep(ticket.coord))) =>
+                {
+                    Some(request_id)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let canceled = request_ids.len();
+        for request_id in request_ids {
+            self.cancel(request_id);
+        }
+        canceled
+    }
+
+    fn cancel_chunk_batches_outside(&self, keep: impl Fn(ChunkCoord) -> bool) -> usize {
+        let request_ids = self
+            .pending
+            .borrow()
+            .iter()
+            .filter_map(|(&request_id, pending)| match pending {
+                PendingBatch::Chunks {
+                    expected_coords,
+                    delivery: ChunkDelivery::Drain(_),
+                    ..
+                } if expected_coords.iter().all(|coord| !keep(*coord)) => Some(request_id),
+                PendingBatch::Chunks {
+                    delivery: ChunkDelivery::OneShot(_),
+                    ..
+                }
+                | PendingBatch::Surface { .. }
+                | PendingBatch::Chunks { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let canceled = request_ids.len();
+        for request_id in request_ids {
+            self.cancel(request_id);
+        }
+        canceled
     }
 
     fn send_cancel(&self, request_id: u64) {

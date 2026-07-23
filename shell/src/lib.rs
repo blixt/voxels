@@ -8,19 +8,18 @@ const INTERACTION_REACH_METRES: f32 = 5.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const INTERACTION_STREAM_MARGIN_METRES: f32 = 0.7;
 #[cfg(any(target_arch = "wasm32", test))]
-const ENCLOSED_VIEW_CLEARANCE_METRES: f32 = 8.0;
+const CHUNK_FACE_WORDS: usize = voxels_world::CHUNK_EDGE * voxels_world::CHUNK_EDGE / 64;
 #[cfg(any(target_arch = "wasm32", test))]
-const ENCLOSED_VIEW_RAY_OFFSETS: [[f32; 2]; 5] = [
-    [0.0, 0.0],
-    [-0.18, 0.0],
-    [0.18, 0.0],
-    [0.0, -0.14],
-    [0.0, 0.14],
-];
+const CAMERA_VERTICAL_FOV_RADIANS: f32 = 68.0_f32.to_radians();
+#[cfg(any(target_arch = "wasm32", test))]
+const SKY_ESCAPE_MIN_FACE_CELLS: u32 =
+    (voxels_world::CHUNK_EDGE * voxels_world::CHUNK_EDGE / 2) as u32;
 #[cfg(target_arch = "wasm32")]
 const COLLISION_READINESS_RESERVE_SECONDS: f32 = 1.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const INVENTORY_SWIPE_THRESHOLD_CSS_PIXELS: f32 = 34.0;
+#[cfg(any(target_arch = "wasm32", test))]
+const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
 
 #[cfg(any(target_arch = "wasm32", test))]
 fn inventory_swipe(anchor: [f32; 2], current: [f32; 2]) -> Option<(i32, [f32; 2])> {
@@ -117,6 +116,167 @@ fn movement_stream_interest(
     chunks.into_iter().collect()
 }
 
+/// Spectators are collisionless and read-only, so their high cruise velocity must not turn a
+/// several-hundred-metre flight path into collision-critical exact-chunk traffic. Their current
+/// focus still updates normally, and the full velocity continues to prioritize forward desired
+/// work; walking, swimming, and gliding retain their swept collision corridor.
+#[cfg(any(target_arch = "wasm32", test))]
+fn exact_streaming_velocity(camera: &CameraState, streaming_velocity: glam::Vec3) -> glam::Vec3 {
+    if camera.locomotion() == voxels_core::LocomotionMode::Spectator {
+        glam::Vec3::ZERO
+    } else {
+        streaming_velocity
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn predictive_stream_position(
+    position: glam::Vec3,
+    velocity: glam::Vec3,
+    lookahead_seconds: f32,
+    maximum_lead_metres: f32,
+) -> glam::Vec3 {
+    let horizontal = glam::Vec2::new(velocity.x, velocity.z) * lookahead_seconds.max(0.0);
+    let lead = if horizontal.length_squared() > maximum_lead_metres * maximum_lead_metres {
+        horizontal.normalize_or_zero() * maximum_lead_metres
+    } else {
+        horizontal
+    };
+    position + glam::Vec3::new(lead.x, 0.0, lead.y)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn predictive_surface_position(
+    position: glam::Vec3,
+    velocity: glam::Vec3,
+    nominal_lookahead_seconds: f32,
+    maximum_lead_metres: f32,
+    fast_travel_threshold_metres_per_second: f32,
+) -> glam::Vec3 {
+    let horizontal = glam::Vec2::new(velocity.x, velocity.z);
+    if horizontal.length() < fast_travel_threshold_metres_per_second || maximum_lead_metres <= 0.0 {
+        return predictive_stream_position(
+            position,
+            velocity,
+            nominal_lookahead_seconds,
+            maximum_lead_metres,
+        );
+    }
+    let lead = horizontal.normalize_or_zero() * maximum_lead_metres;
+    position + glam::Vec3::new(lead.x, 0.0, lead.y)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn adaptive_surface_cross_radii(
+    configured: [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
+    minimum: [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
+    full_rate_tiles_per_second: f32,
+    velocity: glam::Vec3,
+) -> [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT] {
+    let speed_metres_per_second = glam::Vec2::new(velocity.x, velocity.z).length();
+    std::array::from_fn(|index| {
+        let level = voxels_world::SurfaceLodLevel::ALL[index];
+        let tile_span_metres = level.tile_span_voxels() as f32 * voxels_world::VOXEL_SIZE_METRES;
+        let rate = speed_metres_per_second / tile_span_metres;
+        let blend = (rate / full_rate_tiles_per_second).clamp(0.0, 1.0);
+        (configured[index] as f32 - (configured[index] - minimum[index]) as f32 * blend).ceil()
+            as i32
+    })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn surface_motion_axis(velocity: glam::Vec3) -> [i32; 2] {
+    let x = velocity.x;
+    let z = velocity.z;
+    if x * x + z * z < 0.25 {
+        return [0, 0];
+    }
+    let absolute_x = x.abs();
+    let absolute_z = z.abs();
+    if absolute_x > absolute_z * 2.0 {
+        [x.signum() as i32, 0]
+    } else if absolute_z > absolute_x * 2.0 {
+        [0, z.signum() as i32]
+    } else {
+        [x.signum() as i32, z.signum() as i32]
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn surface_offset_in_coverage(
+    dx: i32,
+    dz: i32,
+    longitudinal_radius: i32,
+    cross_radius: i32,
+    motion_axis: [i32; 2],
+) -> bool {
+    if motion_axis == [0, 0] || cross_radius >= longitudinal_radius {
+        return dx.abs().max(dz.abs()) <= longitudinal_radius;
+    }
+    let [axis_x, axis_z] = motion_axis;
+    let norm_squared = i64::from(axis_x * axis_x + axis_z * axis_z);
+    let dx = i64::from(dx);
+    let dz = i64::from(dz);
+    let axis_x = i64::from(axis_x);
+    let axis_z = i64::from(axis_z);
+    let along = dx * axis_x + dz * axis_z;
+    let cross = -dx * axis_z + dz * axis_x;
+    along * along <= i64::from(longitudinal_radius).pow(2) * norm_squared
+        && cross * cross <= i64::from(cross_radius).pow(2) * norm_squared
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SurfaceStreamFocus {
+    current: [voxels_world::SurfaceTileCoord; voxels_world::SURFACE_LOD_LEVEL_COUNT],
+    lead: [voxels_world::SurfaceTileCoord; voxels_world::SURFACE_LOD_LEVEL_COUNT],
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn surface_product_priority(
+    coord: voxels_world::SurfaceTileCoord,
+    focus: SurfaceStreamFocus,
+    interactive_level_count: usize,
+) -> voxels_world::WorldProductPriority {
+    // The full current ancestor chain is a bounded set of eight tiles. If any intermediate parent
+    // waits in prefetch, a fast camera can be forced to display a dramatically coarser ancestor
+    // even though the missing tile is directly under it. The current and predicted ancestor chains
+    // contain at most sixteen tiles together, so both may preempt obsolete breadth without turning
+    // the entire visible corridor into urgent work. Wider background cover stays throttled.
+    if focus.current.contains(&coord) || focus.lead.contains(&coord) {
+        voxels_world::WorldProductPriority::ImmediateSurface
+    } else if usize::from(coord.level.index()) < interactive_level_count {
+        voxels_world::WorldProductPriority::VisibleSurface
+    } else {
+        voxels_world::WorldProductPriority::Prefetch
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn surface_tile_in_coverage(
+    coord: voxels_world::SurfaceTileCoord,
+    focus: Option<SurfaceStreamFocus>,
+    longitudinal_radii: [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
+    cross_radii: [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
+    motion_axis: [i32; 2],
+) -> bool {
+    let Some(focus) = focus else {
+        return false;
+    };
+    let index = coord.level.index() as usize;
+    [focus.current[index], focus.lead[index]]
+        .into_iter()
+        .any(|center| {
+            surface_offset_in_coverage(
+                coord.x - center.x,
+                coord.z - center.z,
+                longitudinal_radii[index],
+                cross_radii[index],
+                motion_axis,
+            )
+        })
+}
+
 /// Canonical chunks intersecting the current body/support, intended movement sweep, or view/edit
 /// corridor. This bounded secondary interest is both scheduled and transported as collision
 /// critical, keeping physics and rendering ahead of running, gliding, swimming, and edits.
@@ -145,61 +305,713 @@ fn urgent_stream_interest(
     chunks.into_iter().collect()
 }
 
-/// Sparse exact-volume interest through visible tunnel apertures.
-///
-/// The ordinary distant representation is a height surface and therefore cannot represent a
-/// player-made tunnel terminator. Nearby canonical occupancy rejects rays that already hit a wall;
-/// only openings receive a narrow full-resolution corridor. Five deterministic rays cover the
-/// central tunnel aperture without paying for an outdoor full-frustum volume.
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg(any(target_arch = "wasm32", test))]
-fn enclosed_view_stream_interest(
+struct ChunkPortalMask {
+    voxel_components: Box<[u16]>,
+    component_faces: Vec<u8>,
+    component_face_cells: Vec<[[u64; CHUNK_FACE_WORDS]; 6]>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl ChunkPortalMask {
+    fn from_chunk(chunk: &voxels_world::Chunk) -> Self {
+        use std::collections::VecDeque;
+
+        let edge = voxels_world::CHUNK_EDGE;
+        let mut voxel_components = vec![0_u16; edge * edge * edge];
+        let mut component_faces = vec![0_u8];
+        let mut component_face_cells = vec![[[0_u64; CHUNK_FACE_WORDS]; 6]];
+        let mut queue = VecDeque::new();
+        for face in 0..6 {
+            for face_index in 0..edge * edge {
+                let [x, y, z] = Self::face_voxel(face, face_index);
+                let seed = Self::voxel_index(x, y, z);
+                if voxel_components[seed] != 0 || chunk.get(x, y, z).occludes_ambient() {
+                    continue;
+                }
+                let Ok(component) = u16::try_from(component_faces.len()) else {
+                    // A 32-cubed chunk cannot exhaust the label space, but keep malformed future
+                    // chunk dimensions fail-closed: unlabelled air is culled rather than panicking.
+                    return Self {
+                        voxel_components: voxel_components.into(),
+                        component_faces,
+                        component_face_cells,
+                    };
+                };
+                component_faces.push(0);
+                component_face_cells.push([[0; CHUNK_FACE_WORDS]; 6]);
+                voxel_components[seed] = component;
+                queue.push_back([x, y, z]);
+                while let Some([cell_x, cell_y, cell_z]) = queue.pop_front() {
+                    let faces = &mut component_faces[usize::from(component)];
+                    if cell_x == 0 {
+                        *faces |= 1 << 0;
+                        Self::mark_face_cell(
+                            &mut component_face_cells[usize::from(component)][0],
+                            cell_y + cell_z * edge,
+                        );
+                    }
+                    if cell_x + 1 == edge {
+                        *faces |= 1 << 1;
+                        Self::mark_face_cell(
+                            &mut component_face_cells[usize::from(component)][1],
+                            cell_y + cell_z * edge,
+                        );
+                    }
+                    if cell_y == 0 {
+                        *faces |= 1 << 2;
+                        Self::mark_face_cell(
+                            &mut component_face_cells[usize::from(component)][2],
+                            cell_x + cell_z * edge,
+                        );
+                    }
+                    if cell_y + 1 == edge {
+                        *faces |= 1 << 3;
+                        Self::mark_face_cell(
+                            &mut component_face_cells[usize::from(component)][3],
+                            cell_x + cell_z * edge,
+                        );
+                    }
+                    if cell_z == 0 {
+                        *faces |= 1 << 4;
+                        Self::mark_face_cell(
+                            &mut component_face_cells[usize::from(component)][4],
+                            cell_x + cell_y * edge,
+                        );
+                    }
+                    if cell_z + 1 == edge {
+                        *faces |= 1 << 5;
+                        Self::mark_face_cell(
+                            &mut component_face_cells[usize::from(component)][5],
+                            cell_x + cell_y * edge,
+                        );
+                    }
+                    for [next_x, next_y, next_z] in [
+                        cell_x.checked_sub(1).map(|x| [x, cell_y, cell_z]),
+                        (cell_x + 1 < edge).then_some([cell_x + 1, cell_y, cell_z]),
+                        cell_y.checked_sub(1).map(|y| [cell_x, y, cell_z]),
+                        (cell_y + 1 < edge).then_some([cell_x, cell_y + 1, cell_z]),
+                        cell_z.checked_sub(1).map(|z| [cell_x, cell_y, z]),
+                        (cell_z + 1 < edge).then_some([cell_x, cell_y, cell_z + 1]),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let next = Self::voxel_index(next_x, next_y, next_z);
+                        if voxel_components[next] == 0
+                            && !chunk.get(next_x, next_y, next_z).occludes_ambient()
+                        {
+                            voxel_components[next] = component;
+                            queue.push_back([next_x, next_y, next_z]);
+                        }
+                    }
+                }
+            }
+        }
+        Self {
+            voxel_components: voxel_components.into_boxed_slice(),
+            component_faces,
+            component_face_cells,
+        }
+    }
+
+    fn mark_face_cell(words: &mut [u64; CHUNK_FACE_WORDS], index: usize) {
+        words[index / 64] |= 1_u64 << (index % 64);
+    }
+
+    const fn voxel_index(x: usize, y: usize, z: usize) -> usize {
+        x + y * voxels_world::CHUNK_EDGE + z * voxels_world::CHUNK_EDGE * voxels_world::CHUNK_EDGE
+    }
+
+    fn face_voxel(face: usize, index: usize) -> [usize; 3] {
+        let edge = voxels_world::CHUNK_EDGE;
+        let horizontal = index % edge;
+        let vertical = index / edge;
+        match face {
+            0 => [0, horizontal, vertical],
+            1 => [edge - 1, horizontal, vertical],
+            2 => [horizontal, 0, vertical],
+            3 => [horizontal, edge - 1, vertical],
+            4 => [horizontal, vertical, 0],
+            5 => [horizontal, vertical, edge - 1],
+            _ => unreachable!("a chunk has six faces"),
+        }
+    }
+
+    fn component_at(&self, x: usize, y: usize, z: usize) -> u16 {
+        self.voxel_components[Self::voxel_index(x, y, z)]
+    }
+
+    fn component_at_face(&self, face: usize, index: usize) -> u16 {
+        let [x, y, z] = Self::face_voxel(face, index);
+        self.component_at(x, y, z)
+    }
+
+    fn component_opens_face(&self, component: u16, face: usize) -> bool {
+        component != 0
+            && self
+                .component_faces
+                .get(usize::from(component))
+                .is_some_and(|faces| faces & (1 << face) != 0)
+    }
+
+    fn connected_neighbor_components(
+        &self,
+        component: u16,
+        face: usize,
+        neighbor: &Self,
+        visible_cells: &[u64; CHUNK_FACE_WORDS],
+    ) -> Vec<u16> {
+        let opposite = [1, 0, 3, 2, 5, 4][face];
+        let mut connected = Vec::new();
+        let Some(component_cells) = self
+            .component_face_cells
+            .get(usize::from(component))
+            .map(|faces| &faces[face])
+        else {
+            return connected;
+        };
+        for (word_index, (&component_word, &visible_word)) in
+            component_cells.iter().zip(visible_cells).enumerate()
+        {
+            let mut candidates = component_word & visible_word;
+            while candidates != 0 {
+                let bit = candidates.trailing_zeros() as usize;
+                let index = word_index * 64 + bit;
+                let neighbor_component = neighbor.component_at_face(opposite, index);
+                if neighbor.component_opens_face(neighbor_component, opposite)
+                    && !connected.contains(&neighbor_component)
+                {
+                    connected.push(neighbor_component);
+                }
+                candidates &= candidates - 1;
+            }
+        }
+        connected
+    }
+
+    fn component_visible_face_cells(
+        &self,
+        component: u16,
+        face: usize,
+        visible_cells: &[u64; CHUNK_FACE_WORDS],
+    ) -> [u64; CHUNK_FACE_WORDS] {
+        let mut cells = [0_u64; CHUNK_FACE_WORDS];
+        if let Some(component_faces) = self.component_face_cells.get(usize::from(component)) {
+            for (output, (&component, &visible)) in cells
+                .iter_mut()
+                .zip(component_faces[face].iter().zip(visible_cells))
+            {
+                *output = component & visible;
+            }
+        }
+        cells
+    }
+
+    fn component_face_cell_count(&self, component: u16, face: usize) -> u32 {
+        self.component_face_cells
+            .get(usize::from(component))
+            .map_or(0, |faces| {
+                faces[face].iter().map(|word| word.count_ones()).sum()
+            })
+    }
+
+    /// Extends portal components after solid voxels become non-occluding without rescanning the
+    /// entire chunk. Removing solids can only join air regions; it cannot split one. Newly exposed
+    /// interior air therefore stays unlabeled until it reaches a boundary-connected component,
+    /// while a newly opened boundary propagates through the complete connected cavity at once.
+    fn add_non_occluding_voxels(
+        &mut self,
+        chunk: &voxels_world::Chunk,
+        local_voxels: &[[usize; 3]],
+    ) {
+        use std::collections::VecDeque;
+
+        let edge = voxels_world::CHUNK_EDGE;
+        let mut visited = vec![false; edge * edge * edge];
+        let mut queue = VecDeque::new();
+        for &[start_x, start_y, start_z] in local_voxels {
+            let start = Self::voxel_index(start_x, start_y, start_z);
+            if visited[start]
+                || self.voxel_components[start] != 0
+                || chunk.get(start_x, start_y, start_z).occludes_ambient()
+            {
+                continue;
+            }
+            visited[start] = true;
+            queue.push_back([start_x, start_y, start_z]);
+            let mut region = Vec::new();
+            let mut neighboring_components = Vec::new();
+            let mut touches_boundary = false;
+            while let Some([x, y, z]) = queue.pop_front() {
+                region.push([x, y, z]);
+                touches_boundary |=
+                    x == 0 || x + 1 == edge || y == 0 || y + 1 == edge || z == 0 || z + 1 == edge;
+                for [next_x, next_y, next_z] in [
+                    x.checked_sub(1).map(|next| [next, y, z]),
+                    (x + 1 < edge).then_some([x + 1, y, z]),
+                    y.checked_sub(1).map(|next| [x, next, z]),
+                    (y + 1 < edge).then_some([x, y + 1, z]),
+                    z.checked_sub(1).map(|next| [x, y, next]),
+                    (z + 1 < edge).then_some([x, y, z + 1]),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let next = Self::voxel_index(next_x, next_y, next_z);
+                    let component = self.voxel_components[next];
+                    if component != 0 {
+                        if !neighboring_components.contains(&component) {
+                            neighboring_components.push(component);
+                        }
+                    } else if !visited[next]
+                        && !chunk.get(next_x, next_y, next_z).occludes_ambient()
+                    {
+                        visited[next] = true;
+                        queue.push_back([next_x, next_y, next_z]);
+                    }
+                }
+            }
+            if neighboring_components.is_empty() && !touches_boundary {
+                continue;
+            }
+            neighboring_components.sort_unstable();
+            let component = if let Some(component) = neighboring_components.first().copied() {
+                component
+            } else {
+                let Ok(component) = u16::try_from(self.component_faces.len()) else {
+                    // See `from_chunk`: leave this newly opened region unlabelled if a future
+                    // chunk size ever exceeds the compact component-label representation.
+                    continue;
+                };
+                self.component_faces.push(0);
+                self.component_face_cells.push([[0; CHUNK_FACE_WORDS]; 6]);
+                component
+            };
+            for &merged in neighboring_components.iter().skip(1) {
+                for label in &mut self.voxel_components {
+                    if *label == merged {
+                        *label = component;
+                    }
+                }
+                let merged_index = usize::from(merged);
+                self.component_faces[usize::from(component)] |= self.component_faces[merged_index];
+                self.component_faces[merged_index] = 0;
+                for face in 0..6 {
+                    for word in 0..CHUNK_FACE_WORDS {
+                        self.component_face_cells[usize::from(component)][face][word] |=
+                            self.component_face_cells[merged_index][face][word];
+                        self.component_face_cells[merged_index][face][word] = 0;
+                    }
+                }
+            }
+            for [x, y, z] in region {
+                self.voxel_components[Self::voxel_index(x, y, z)] = component;
+                let faces = &mut self.component_faces[usize::from(component)];
+                if x == 0 {
+                    *faces |= 1 << 0;
+                    Self::mark_face_cell(
+                        &mut self.component_face_cells[usize::from(component)][0],
+                        y + z * edge,
+                    );
+                }
+                if x + 1 == edge {
+                    *faces |= 1 << 1;
+                    Self::mark_face_cell(
+                        &mut self.component_face_cells[usize::from(component)][1],
+                        y + z * edge,
+                    );
+                }
+                if y == 0 {
+                    *faces |= 1 << 2;
+                    Self::mark_face_cell(
+                        &mut self.component_face_cells[usize::from(component)][2],
+                        x + z * edge,
+                    );
+                }
+                if y + 1 == edge {
+                    *faces |= 1 << 3;
+                    Self::mark_face_cell(
+                        &mut self.component_face_cells[usize::from(component)][3],
+                        x + z * edge,
+                    );
+                }
+                if z == 0 {
+                    *faces |= 1 << 4;
+                    Self::mark_face_cell(
+                        &mut self.component_face_cells[usize::from(component)][4],
+                        x + y * edge,
+                    );
+                }
+                if z + 1 == edge {
+                    *faces |= 1 << 5;
+                    Self::mark_face_cell(
+                        &mut self.component_face_cells[usize::from(component)][5],
+                        x + y * edge,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn viewport_view_cone_tangent(
+    minimum_half_angle_degrees: f32,
+    vertical_fov_radians: f32,
+    viewport_width: u32,
+    viewport_height: u32,
+) -> Option<f32> {
+    if !minimum_half_angle_degrees.is_finite()
+        || !(0.0..90.0).contains(&minimum_half_angle_degrees)
+        || !vertical_fov_radians.is_finite()
+        || !(0.0..std::f32::consts::PI).contains(&vertical_fov_radians)
+        || viewport_width == 0
+        || viewport_height == 0
+    {
+        return None;
+    }
+    let vertical_tangent = (vertical_fov_radians * 0.5).tan();
+    let horizontal_tangent = vertical_tangent * viewport_width as f32 / viewport_height as f32;
+    let viewport_corner_tangent = vertical_tangent.hypot(horizontal_tangent);
+    Some(viewport_corner_tangent.max(minimum_half_angle_degrees.to_radians().tan()))
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+enum UpwardPortalProbe {
+    Bounded,
+    Pending {
+        chunks: Vec<voxels_world::ChunkCoord>,
+        frontiers: Vec<PortalFrontier>,
+    },
+    Escapes(Vec<voxels_world::ChunkCoord>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(any(target_arch = "wasm32", test))]
+struct PortalFrontier {
+    source: voxels_world::ChunkCoord,
+    neighbor: voxels_world::ChunkCoord,
+    face: u8,
+    cells: [u64; CHUNK_FACE_WORDS],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(any(target_arch = "wasm32", test))]
+struct ExactVolumeFrontierCap {
+    chunk: voxels_world::ChunkCoord,
+    face: u8,
+    cells: [u64; CHUNK_FACE_WORDS],
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[cfg(any(target_arch = "wasm32", test))]
+struct EnclosedViewStreamPlan {
+    chunks: Vec<voxels_world::ChunkCoord>,
+    frontiers: Vec<PortalFrontier>,
+}
+
+/// Follows only broad upward portals far enough to distinguish a bounded cavern from open sky.
+///
+/// This is deliberately independent of the lighting enclosure sample. A tall cavern can have an
+/// unobstructed lighting probe while still requiring exact walls and a ceiling. Conversely, an
+/// outdoor component must not activate a view-cone-sized exact-volume flood. Narrow shafts are
+/// treated as bounded because the ordinary view-cone traversal is already tightly constrained for
+/// them; the sky probe is solely an outdoor-work bound, not a visibility oracle.
+#[cfg(any(target_arch = "wasm32", test))]
+fn probe_upward_portals(
+    origin: voxels_world::ChunkCoord,
+    origin_component: u16,
+    radius_chunks: i32,
+    portals: &std::collections::BTreeMap<(i32, i32, i32), ChunkPortalMask>,
+) -> UpwardPortalProbe {
+    use std::collections::{BTreeSet, VecDeque};
+
+    let mut visited = BTreeSet::from([(origin, origin_component)]);
+    let mut queue = VecDeque::from([(origin, origin_component)]);
+    let mut pending = BTreeSet::new();
+    let mut probe_chunks = BTreeSet::from([origin]);
+    let mut frontiers = Vec::new();
+    let all_face_cells = [u64::MAX; CHUNK_FACE_WORDS];
+    while let Some((current, component)) = queue.pop_front() {
+        let Some(current_portals) = portals.get(&(current.x, current.y, current.z)) else {
+            continue;
+        };
+        if current_portals.component_face_cell_count(component, 3) < SKY_ESCAPE_MIN_FACE_CELLS {
+            continue;
+        }
+        let Some(y) = current.y.checked_add(1) else {
+            continue;
+        };
+        let neighbor = voxels_world::ChunkCoord::new(current.x, y, current.z);
+        if !neighbor.is_world_representable() {
+            continue;
+        }
+        if y - origin.y > radius_chunks {
+            return UpwardPortalProbe::Escapes(probe_chunks.into_iter().collect());
+        }
+        probe_chunks.insert(neighbor);
+        frontiers.push(PortalFrontier {
+            source: current,
+            neighbor,
+            face: 3,
+            cells: current_portals.component_visible_face_cells(component, 3, &all_face_cells),
+        });
+        let Some(neighbor_portals) = portals.get(&(neighbor.x, neighbor.y, neighbor.z)) else {
+            pending.insert(neighbor);
+            continue;
+        };
+        for neighbor_component in current_portals.connected_neighbor_components(
+            component,
+            3,
+            neighbor_portals,
+            &all_face_cells,
+        ) {
+            if visited.insert((neighbor, neighbor_component)) {
+                queue.push_back((neighbor, neighbor_component));
+            }
+        }
+    }
+    if pending.is_empty() {
+        UpwardPortalProbe::Bounded
+    } else {
+        probe_chunks.extend(pending);
+        UpwardPortalProbe::Pending {
+            chunks: probe_chunks.into_iter().collect(),
+            frontiers,
+        }
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn visible_portal_cells(
+    camera: &CameraState,
+    chunk: voxels_world::ChunkCoord,
+    face: usize,
+    distance_metres: f32,
+    cone_tangent: f32,
+) -> [u64; CHUNK_FACE_WORDS] {
+    use voxels_world::{CHUNK_EDGE, VOXEL_SIZE_METRES};
+
+    let mut visible = [0_u64; CHUNK_FACE_WORDS];
+    let cell_radius = VOXEL_SIZE_METRES * 3.0_f32.sqrt() * 0.5;
+    let forward = camera.forward();
+    let distance_limit_squared = (distance_metres + cell_radius).powi(2);
+    for face_index in 0..CHUNK_EDGE * CHUNK_EDGE {
+        let [local_x, local_y, local_z] = ChunkPortalMask::face_voxel(face, face_index);
+        let world_voxel = glam::IVec3::new(
+            chunk.x * CHUNK_EDGE as i32 + local_x as i32,
+            chunk.y * CHUNK_EDGE as i32 + local_y as i32,
+            chunk.z * CHUNK_EDGE as i32 + local_z as i32,
+        );
+        let center = (world_voxel.as_vec3() + glam::Vec3::splat(0.5)) * VOXEL_SIZE_METRES;
+        let camera_to_center = center - camera.position;
+        let axial = camera_to_center.dot(forward);
+        let distance_squared = camera_to_center.length_squared();
+        if axial < -cell_radius || distance_squared > distance_limit_squared {
+            continue;
+        }
+        let perpendicular_squared = (distance_squared - axial * axial).max(0.0);
+        let cone_radius = axial.max(0.0) * cone_tangent + cell_radius;
+        if perpendicular_squared <= cone_radius * cone_radius {
+            ChunkPortalMask::mark_face_cell(&mut visible, face_index);
+        }
+    }
+    visible
+}
+
+/// Exact-volume interest through the connected resident cave/tunnel portal graph.
+///
+/// A view-ray fan makes residency depend on the crosshair: a terminator or side wall disappears as
+/// soon as it moves between rays even while it remains in the viewport. Instead, flood through
+/// matching air cells on resident chunk faces, retaining each reachable chunk plus the immediate
+/// neighbor that closes an opening. Unknown neighbors become the next streamed frontier; solid
+/// neighbors remain exact occluders and stop traversal. An expanded view cone keeps the graph
+/// bounded and stable beyond every screen edge, without following a shaft into outdoor air.
+#[cfg(any(target_arch = "wasm32", test))]
+fn enclosed_view_stream_plan(
     camera: &CameraState,
     distance_metres: f32,
-    ray_radius_metres: f32,
-    mut is_opaque: impl FnMut(i32, i32, i32) -> bool,
-) -> Vec<voxels_world::ChunkCoord> {
-    use std::collections::BTreeSet;
-    use voxels_core::raycast_voxels;
+    cone_tangent: f32,
+    portals: &std::collections::BTreeMap<(i32, i32, i32), ChunkPortalMask>,
+) -> EnclosedViewStreamPlan {
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use voxels_world::{CHUNK_EDGE, VOXEL_SIZE_METRES};
 
     if !distance_metres.is_finite()
         || distance_metres <= 0.0
-        || !ray_radius_metres.is_finite()
-        || ray_radius_metres <= 0.0
+        || !cone_tangent.is_finite()
+        || cone_tangent <= 0.0
     {
-        return Vec::new();
+        return EnclosedViewStreamPlan::default();
     }
-    let forward = camera.forward();
-    let right = forward.cross(glam::Vec3::Y).normalize_or(glam::Vec3::X);
-    let up = right.cross(forward).normalize_or(glam::Vec3::Y);
-    let clearance = distance_metres.min(ENCLOSED_VIEW_CLEARANCE_METRES);
     let chunk_size = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
-    let steps = (distance_metres / (chunk_size * 0.5)).ceil().max(1.0) as u32;
+    let chunk_radius = chunk_size * 3.0_f32.sqrt() * 0.5;
+    let forward = camera.forward();
+    let origin = (camera.position / chunk_size).floor().as_ivec3();
+    let origin = voxels_world::ChunkCoord::new(origin.x, origin.y, origin.z);
+    let radius_chunks = (distance_metres / chunk_size).ceil().max(1.0) as i32;
+    let radius_squared = i64::from(radius_chunks) * i64::from(radius_chunks);
+    let directions = [
+        ([-1, 0, 0], 0),
+        ([1, 0, 0], 1),
+        ([0, -1, 0], 2),
+        ([0, 1, 0], 3),
+        ([0, 0, -1], 4),
+        ([0, 0, 1], 5),
+    ];
     let mut chunks = BTreeSet::new();
-    for [horizontal, vertical] in ENCLOSED_VIEW_RAY_OFFSETS {
-        let direction = (forward + right * horizontal + up * vertical).normalize_or(forward);
-        if raycast_voxels(
-            camera.position,
-            direction,
-            clearance,
-            VOXEL_SIZE_METRES,
-            &mut is_opaque,
-        )
-        .is_some()
-        {
-            continue;
-        }
-        for step in 0..=steps {
-            let distance = distance_metres * step as f32 / steps as f32;
-            let centre = camera.position + direction * distance;
-            insert_chunk_aabb(
-                &mut chunks,
-                centre - glam::Vec3::splat(ray_radius_metres),
-                centre + glam::Vec3::splat(ray_radius_metres),
-            );
+    let mut visited = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    let mut visible_face_cells = BTreeMap::new();
+    let mut frontiers = BTreeMap::<
+        (voxels_world::ChunkCoord, voxels_world::ChunkCoord, u8),
+        [u64; CHUNK_FACE_WORDS],
+    >::new();
+    let camera_voxel = (camera.position / VOXEL_SIZE_METRES).floor().as_ivec3();
+    let mut origin_component = 0;
+    if let Some(origin_portals) = portals.get(&(origin.x, origin.y, origin.z)) {
+        let component = origin_portals.component_at(
+            camera_voxel.x.rem_euclid(CHUNK_EDGE as i32) as usize,
+            camera_voxel.y.rem_euclid(CHUNK_EDGE as i32) as usize,
+            camera_voxel.z.rem_euclid(CHUNK_EDGE as i32) as usize,
+        );
+        if component != 0 {
+            origin_component = component;
+            visited.insert((origin, component));
+            queue.push_back((origin, component));
         }
     }
-    chunks.into_iter().collect()
+    if origin_component == 0 {
+        return EnclosedViewStreamPlan {
+            chunks: vec![origin],
+            frontiers: Vec::new(),
+        };
+    }
+    match probe_upward_portals(origin, origin_component, radius_chunks, portals) {
+        UpwardPortalProbe::Bounded => {}
+        UpwardPortalProbe::Pending { chunks, frontiers } => {
+            return EnclosedViewStreamPlan { chunks, frontiers };
+        }
+        UpwardPortalProbe::Escapes(chunks) => {
+            // Retain the narrow probe column as streaming metadata. Dropping it would evict the
+            // very portal masks that proved this component reaches sky, causing an endless
+            // request/classify/evict loop outdoors. This stays O(radius), never floods the cone,
+            // and contributes no frontier cover once the sky escape is known.
+            return EnclosedViewStreamPlan {
+                chunks,
+                frontiers: Vec::new(),
+            };
+        }
+    }
+    chunks.insert(origin);
+    while let Some((current, current_component)) = queue.pop_front() {
+        chunks.insert(current);
+        let Some(current_portals) = portals.get(&(current.x, current.y, current.z)) else {
+            continue;
+        };
+        for ([dx, dy, dz], face) in directions {
+            if !current_portals.component_opens_face(current_component, face) {
+                continue;
+            }
+            let visible_cells = visible_face_cells
+                .entry((current, face))
+                .or_insert_with(|| {
+                    visible_portal_cells(camera, current, face, distance_metres, cone_tangent)
+                });
+            let frontier_cells = current_portals.component_visible_face_cells(
+                current_component,
+                face,
+                visible_cells,
+            );
+            if frontier_cells.iter().all(|word| *word == 0) {
+                continue;
+            }
+            let (Some(x), Some(y), Some(z)) = (
+                current.x.checked_add(dx),
+                current.y.checked_add(dy),
+                current.z.checked_add(dz),
+            ) else {
+                continue;
+            };
+            let neighbor = voxels_world::ChunkCoord::new(x, y, z);
+            if !neighbor.is_world_representable() {
+                continue;
+            }
+            let center = glam::Vec3::new(
+                (x as f32 + 0.5) * chunk_size,
+                (y as f32 + 0.5) * chunk_size,
+                (z as f32 + 0.5) * chunk_size,
+            );
+            let camera_to_center = center - camera.position;
+            let axial = camera_to_center.dot(forward);
+            if axial < -chunk_radius {
+                continue;
+            }
+            let perpendicular_squared =
+                (camera_to_center.length_squared() - axial * axial).max(0.0);
+            let cone_radius = axial.max(0.0) * cone_tangent + chunk_radius;
+            if perpendicular_squared > cone_radius * cone_radius {
+                continue;
+            }
+            let distance_squared = [
+                i64::from(x) - i64::from(origin.x),
+                i64::from(y) - i64::from(origin.y),
+                i64::from(z) - i64::from(origin.z),
+            ]
+            .into_iter()
+            .map(|axis| axis * axis)
+            .sum::<i64>();
+            if distance_squared > radius_squared {
+                continue;
+            }
+            // Always retain the first chunk across an opening. If it is solid, it is the exact
+            // wall that terminates the visible cave rather than a portal to traverse.
+            chunks.insert(neighbor);
+            let frontier = frontiers
+                .entry((current, neighbor, face as u8))
+                .or_insert([0; CHUNK_FACE_WORDS]);
+            for (output, cells) in frontier.iter_mut().zip(frontier_cells) {
+                *output |= cells;
+            }
+            let Some(neighbor_portals) = portals.get(&(x, y, z)) else {
+                continue;
+            };
+            for neighbor_component in current_portals.connected_neighbor_components(
+                current_component,
+                face,
+                neighbor_portals,
+                visible_cells,
+            ) {
+                if visited.insert((neighbor, neighbor_component)) {
+                    queue.push_back((neighbor, neighbor_component));
+                }
+            }
+        }
+    }
+    EnclosedViewStreamPlan {
+        chunks: chunks.into_iter().collect(),
+        frontiers: frontiers
+            .into_iter()
+            .map(|((source, neighbor, face), cells)| PortalFrontier {
+                source,
+                neighbor,
+                face,
+                cells,
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+fn enclosed_view_stream_interest(
+    camera: &CameraState,
+    distance_metres: f32,
+    cone_tangent: f32,
+    portals: &std::collections::BTreeMap<(i32, i32, i32), ChunkPortalMask>,
+) -> Vec<voxels_world::ChunkCoord> {
+    enclosed_view_stream_plan(camera, distance_metres, cone_tangent, portals).chunks
 }
 
 /// Activates an exact interest column only after every originally requested vertical chunk can
@@ -227,6 +1039,41 @@ fn complete_renderable_interest_columns(
         }
     }
     complete
+}
+
+/// Activates every independently renderable chunk in an exact three-dimensional interest set.
+///
+/// Unlike a terrain-surface replacement, tunnel and cavern geometry does not claim an X/Z column:
+/// each chunk supplements the heightfield hierarchy only at its own Y coordinate. Requiring every
+/// newly discovered sibling in a column to be ready would revoke already presented tunnel walls
+/// while the portal frontier streams, exposing the atmospheric background for one or more frames.
+#[cfg(any(target_arch = "wasm32", test))]
+fn renderable_exact_interest_chunks(
+    interest: &[voxels_world::ChunkCoord],
+    mut is_renderable: impl FnMut(voxels_world::ChunkCoord) -> bool,
+) -> std::collections::BTreeSet<(i32, i32, i32)> {
+    interest
+        .iter()
+        .copied()
+        .filter(|coord| is_renderable(*coord))
+        .map(|coord| (coord.x, coord.y, coord.z))
+        .collect()
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn exact_volume_frontier_faces(
+    frontiers: &[PortalFrontier],
+    mut is_renderable: impl FnMut(voxels_world::ChunkCoord) -> bool,
+) -> Vec<ExactVolumeFrontierCap> {
+    frontiers
+        .iter()
+        .filter(|frontier| is_renderable(frontier.source) && !is_renderable(frontier.neighbor))
+        .map(|frontier| ExactVolumeFrontierCap {
+            chunk: frontier.source,
+            face: frontier.face,
+            cells: frontier.cells,
+        })
+        .collect()
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -372,7 +1219,12 @@ mod web {
         RemoteChunkCompletion, RemoteEditEvent, RemoteSurfaceCompletion, RemoteSurfaceTicket,
         RemoteWorldClient, RemoteWorldError,
     };
-    use crate::world_environment_at;
+    use crate::{
+        ChunkPortalMask, INTERACTIVE_SURFACE_LOD_LEVELS, SurfaceStreamFocus,
+        adaptive_surface_cross_radii, predictive_stream_position, predictive_surface_position,
+        surface_motion_axis, surface_offset_in_coverage, surface_product_priority,
+        surface_tile_in_coverage, world_environment_at,
+    };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
     use std::cell::{Cell, RefCell};
@@ -382,12 +1234,12 @@ mod web {
     use voxels_core::{
         CameraState, EnclosureSample, InputState, LocomotionMode, PLAYER_EYE_HEIGHT_METRES,
         PLAYER_HEIGHT_METRES, PLAYER_RADIUS_METRES, PLAYER_SPRINT_SPEED_METRES_PER_SECOND,
-        ProfileAutomation, ProfileConfig, ProfilePhase, ProfileRoute, VoxelHit, VoxelPhysics,
-        probe_enclosure, raycast_voxels, voxel_segment_is_clear,
+        ProfileAutomation, ProfileConfig, ProfilePhase, ProfileRoute, SpectatorFlightConfig,
+        VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels, voxel_segment_is_clear,
     };
     use voxels_render::renderer::{
         ChunkActivationReason, HostUiAction, LocalLightVisibility, MissionControlConfig, Renderer,
-        RendererConfig, RendererFeatureConfig, VolumetricCloudConfig,
+        RendererConfig, RendererFeatureConfig, ScreenshotCapture, VolumetricCloudConfig,
     };
     use voxels_render::shadow::DirectionalShadowConfig;
     use voxels_render::ui::{LiveStats, NavigationTelemetry};
@@ -402,20 +1254,20 @@ mod web {
         PlayerIdentity, VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
     };
     use voxels_world::{
-        AtmosphereSample, CHUNK_EDGE, CHUNK_VOXEL_BYTES, CINDER_VAULT_PORTAL_COUNT,
-        CaveStreamInterest, Chunk, ChunkCoord, EditMap, Material, MeshedChunk, MeshingHalo,
-        PortalState, SURFACE_LOD_LEVEL_COUNT, SurfaceLodLevel, SurfaceRegion, SurfaceSample,
-        SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord, WorldProductPriority,
-        WorldSourceIdentityHash, mesh_chunk,
+        AtmosphereSample, BinaryMeshScratch, CHUNK_EDGE, CHUNK_VOXEL_BYTES,
+        CINDER_VAULT_PORTAL_COUNT, CaveStreamInterest, Chunk, ChunkCoord, EditMap, Material,
+        MeshedChunk, MeshingHalo, PortalState, SURFACE_LOD_LEVEL_COUNT, SurfaceLodLevel,
+        SurfaceRegion, SurfaceSample, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
+        WorldProductPriority, WorldSourceIdentityHash, mesh_chunk_binary_with_scratch,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const AUTOMATION_CONTRACT_VERSION: u32 = 3;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 37;
-    const FRAME_SAMPLE_WIDTH: u32 = 14;
+    const AUTOMATION_CONTRACT_VERSION: u32 = 7;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 39;
+    const FRAME_SAMPLE_WIDTH: u32 = 26;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
         "cameraX,cameraY,cameraZ,yaw,pitch,grounded,quads,edits,residentChunks,trackedChunks,visibleChunks,drawCalls,",
@@ -432,10 +1284,9 @@ mod web {
         "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
         "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
         "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,canonicalSurfaceCellsResident,canonicalSurfaceCellsRequired,",
-        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,schemaVersion,sampleCount,",
+        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,lodIncompleteTransitionEdges,frameSequence,schemaVersion,sampleCount,",
         "droppedSamples",
     );
-    const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
     const SURFACE_HINT_VERTICAL_MARGIN_CHUNKS: i32 = 1;
     const INTERACTIVE_SURFACE_BATCH: usize = 4;
     const BACKGROUND_SURFACE_BATCH: usize = 2;
@@ -452,9 +1303,9 @@ mod web {
         stream_velocity_lookahead_seconds: f32,
         stream_view_cone_half_angle_degrees: f32,
         stream_enclosed_view_distance_metres: f32,
-        stream_enclosed_view_ray_radius_metres: f32,
-        stream_enclosed_view_threshold: f32,
         surface_load_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
+        surface_fast_travel_min_cross_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
+        surface_fast_travel_full_rate_tiles_per_second: f32,
         surface_retain_margin_tiles: i32,
         enclosure_probe_interval_ms: f64,
         enclosure_probe_distance_metres: f32,
@@ -463,6 +1314,7 @@ mod web {
     type FrameCallback = Closure<dyn FnMut(f64)>;
     type SurfaceChunkColumnHints = BTreeMap<(i32, i32), BTreeSet<i32>>;
     type SurfaceChunkHintIndex = BTreeMap<SurfaceTileCoord, SurfaceChunkColumnHints>;
+    type SurfaceExactDetailIndex = BTreeMap<SurfaceTileCoord, Vec<ChunkCoord>>;
 
     fn resident_material(
         chunks: &BTreeMap<(i32, i32, i32), Chunk>,
@@ -531,6 +1383,33 @@ mod web {
         lod_ownership_refreshes: u32,
         tested_slices: u32,
         selected_slices: u32,
+        stream_remote_ms: f32,
+        stream_plan_ms: f32,
+        stream_mesh_ms: f32,
+        stream_publish_ms: f32,
+        stream_surface_ms: f32,
+        stream_presence_ms: f32,
+        stream_interest_ms: f32,
+        stream_scheduler_update_ms: f32,
+        stream_scheduler_admit_ms: f32,
+        stream_collision_interest_ms: f32,
+        stream_enclosed_interest_ms: f32,
+        stream_surface_interest_ms: f32,
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct StreamFrameSample {
+        remote_ms: f32,
+        plan_ms: f32,
+        mesh_ms: f32,
+        publish_ms: f32,
+        surface_ms: f32,
+        interest_ms: f32,
+        scheduler_update_ms: f32,
+        scheduler_admit_ms: f32,
+        collision_interest_ms: f32,
+        enclosed_interest_ms: f32,
+        surface_interest_ms: f32,
     }
 
     struct FrameHistory {
@@ -581,6 +1460,18 @@ mod web {
                     sample.lod_ownership_refreshes as f32,
                     sample.tested_slices as f32,
                     sample.selected_slices as f32,
+                    sample.stream_remote_ms,
+                    sample.stream_plan_ms,
+                    sample.stream_mesh_ms,
+                    sample.stream_publish_ms,
+                    sample.stream_surface_ms,
+                    sample.stream_presence_ms,
+                    sample.stream_interest_ms,
+                    sample.stream_scheduler_update_ms,
+                    sample.stream_scheduler_admit_ms,
+                    sample.stream_collision_interest_ms,
+                    sample.stream_enclosed_interest_ms,
+                    sample.stream_surface_interest_ms,
                 ]);
             }
             self.len = 0;
@@ -610,6 +1501,17 @@ mod web {
         target: VoxelCoord,
         started_ms: f64,
         requirements: EditRequirements,
+    }
+
+    struct PendingCanonicalMesh {
+        revision: u64,
+        mesh: MeshedChunk,
+    }
+
+    #[derive(Clone)]
+    struct CanonicalPublication {
+        server_revision: u64,
+        requirements: BTreeMap<(i32, i32, i32), u64>,
     }
 
     #[repr(C)]
@@ -642,6 +1544,7 @@ mod web {
     struct Engine {
         config: EngineConfig,
         renderer: RefCell<Renderer>,
+        viewport_size: Cell<[u32; 2]>,
         camera: RefCell<CameraState>,
         spectator_body: Cell<Option<CameraState>>,
         input: RefCell<InputState>,
@@ -655,11 +1558,18 @@ mod web {
         edit_revisions: RefCell<AuthoritativeEditRevisions>,
         scheduler: RefCell<StreamScheduler>,
         chunks: RefCell<BTreeMap<(i32, i32, i32), Chunk>>,
+        chunk_portals: RefCell<BTreeMap<(i32, i32, i32), ChunkPortalMask>>,
         chunk_halos: RefCell<BTreeMap<(i32, i32, i32), MeshingHalo>>,
-        pending_meshes: RefCell<BTreeMap<(i32, i32, i32), MeshedChunk>>,
-        surface_focus: Cell<Option<[SurfaceTileCoord; SURFACE_LOD_LEVEL_COUNT]>>,
+        pending_meshes: RefCell<BTreeMap<(i32, i32, i32), PendingCanonicalMesh>>,
+        pending_uploads: RefCell<BTreeMap<(i32, i32, i32), voxels_runtime::WorkTicket>>,
+        canonical_publications: RefCell<VecDeque<CanonicalPublication>>,
+        binary_mesh_scratch: RefCell<BinaryMeshScratch>,
+        surface_focus: Cell<Option<SurfaceStreamFocus>>,
+        surface_cross_radii: Cell<[i32; SURFACE_LOD_LEVEL_COUNT]>,
+        surface_motion_axis: Cell<[i32; 2]>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
         surface_chunk_hints: RefCell<SurfaceChunkHintIndex>,
+        surface_exact_detail_chunks: RefCell<SurfaceExactDetailIndex>,
         surface_revisions: RefCell<SurfaceRevisionCache>,
         surface_accepted_edit_revisions: RefCell<BTreeMap<SurfaceTileCoord, u64>>,
         surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
@@ -928,7 +1838,9 @@ mod web {
             } else {
                 camera.streaming_velocity(&self.input.borrow())
             };
-            self.stream_world(&camera, streaming_velocity);
+            let stream_breakdown =
+                self.stream_world(&camera, streaming_velocity, performance.as_ref());
+            let presence_start = performance_now(performance.as_ref());
             if let Some(opened) = self.remote.world_opened() {
                 self.presence.ensure_session(&opened, time);
                 self.environment_snapshot.set(opened.environment);
@@ -940,6 +1852,8 @@ mod web {
             if let Some(error) = self.presence.take_error() {
                 log_gpu_error(&format!("player presence: {error}"));
             }
+            let stream_presence_ms =
+                (performance_now(performance.as_ref()) - presence_start) as f32;
             let stream_ms = (performance_now(performance.as_ref()) - stream_start) as f32;
             self.stream_milliseconds
                 .set(smoothed_ms(self.stream_milliseconds.get(), stream_ms));
@@ -1031,10 +1945,7 @@ mod web {
                         eye_chunk: [eye_chunk.x, eye_chunk.y, eye_chunk.z],
                         heading_degrees: camera.yaw.to_degrees().rem_euclid(360.0),
                         pitch_degrees: camera.pitch.to_degrees(),
-                        horizontal_speed_metres_per_second: camera
-                            .velocity
-                            .x
-                            .hypot(camera.velocity.z),
+                        speed_metres_per_second: camera.velocity.length(),
                         grounded: camera.grounded,
                         spectator: camera.locomotion() == LocomotionMode::Spectator,
                     },
@@ -1181,6 +2092,18 @@ mod web {
                 lod_ownership_refreshes: rendered.lod_ownership_refreshes,
                 tested_slices: rendered.draw_list_tested_slices,
                 selected_slices: rendered.draw_list_selected_slices,
+                stream_remote_ms: stream_breakdown.remote_ms,
+                stream_plan_ms: stream_breakdown.plan_ms,
+                stream_mesh_ms: stream_breakdown.mesh_ms,
+                stream_publish_ms: stream_breakdown.publish_ms,
+                stream_surface_ms: stream_breakdown.surface_ms,
+                stream_presence_ms,
+                stream_interest_ms: stream_breakdown.interest_ms,
+                stream_scheduler_update_ms: stream_breakdown.scheduler_update_ms,
+                stream_scheduler_admit_ms: stream_breakdown.scheduler_admit_ms,
+                stream_collision_interest_ms: stream_breakdown.collision_interest_ms,
+                stream_enclosed_interest_ms: stream_breakdown.enclosed_interest_ms,
+                stream_surface_interest_ms: stream_breakdown.surface_interest_ms,
             });
             if let Err(error) = self.request_frame() {
                 web_sys::console::error_1(&error);
@@ -1188,20 +2111,91 @@ mod web {
             }
         }
 
-        fn stream_world(&self, camera: &CameraState, streaming_velocity: Vec3) {
+        fn stream_world(
+            &self,
+            camera: &CameraState,
+            streaming_velocity: Vec3,
+            performance: Option<&web_sys::Performance>,
+        ) -> StreamFrameSample {
+            let remote_start = performance_now(performance);
             self.drain_remote_generation();
-            let focus = world_to_chunk(camera.position);
-            let collision_interest = self.collision_stream_interest(
-                camera,
+            let remote_ms = (performance_now(performance) - remote_start) as f32;
+            let plan_start = performance_now(performance);
+            // Lead the desired cylinder rather than only sorting it toward a prediction outside
+            // the window. The current camera remains at least one chunk inside the trailing edge,
+            // while newly exposed forward chunks receive real network and generation lead time.
+            let exact_load_radius = self.scheduler.borrow().config().load_radius_chunks;
+            let exact_lead_metres =
+                (exact_load_radius - 1).max(0) as f32 * CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
+            let focus = world_to_chunk(predictive_stream_position(
+                camera.position,
                 streaming_velocity,
+                self.config.stream_velocity_lookahead_seconds,
+                exact_lead_metres,
+            ));
+            let exact_streaming_velocity =
+                crate::exact_streaming_velocity(camera, streaming_velocity);
+            let collision_interest_start = performance_now(performance);
+            let collision_interest = if camera.locomotion() == LocomotionMode::Spectator {
+                Vec::new()
+            } else {
+                self.collision_stream_interest(
+                    camera,
+                    exact_streaming_velocity,
+                    self.config.stream_collision_lookahead_seconds,
+                )
+            };
+            let collision_interest_ms =
+                (performance_now(performance) - collision_interest_start) as f32;
+            let enclosed_interest_start = performance_now(performance);
+            let enclosed_view_plan = self.enclosed_view_stream_plan(camera);
+            let enclosed_view_interest = &enclosed_view_plan.chunks;
+            let enclosed_interest_ms =
+                (performance_now(performance) - enclosed_interest_start) as f32;
+            let surface_interest_start = performance_now(performance);
+            // The urgent collision set deliberately includes the short aim/edit corridor. That
+            // corridor may prioritize exact chunks, but it must never suppress the complete
+            // heightfield fallback: otherwise turning the camera changes canonical surface
+            // ownership and a large greedy parent quad disappears until the aimed-at chunk loads.
+            // Surface ownership follows support and intended movement only, so looking around is
+            // geometry-invariant while edits and collision still retain their urgent transport.
+            let movement_interest = self.movement_collision_interest(
+                camera,
+                exact_streaming_velocity,
                 self.config.stream_collision_lookahead_seconds,
             );
-            let enclosed_view_interest = self.enclosed_view_stream_interest(camera);
-            let surface_interest = self.surface_stream_interest(focus, &collision_interest);
+            let mut surface_interest = self.surface_stream_interest(focus, &movement_interest);
+            let exact_detail_interest = self.surface_exact_detail_stream_interest(camera);
+            if !exact_detail_interest.is_empty() {
+                let detail_columns = exact_detail_interest
+                    .iter()
+                    .map(|coord| (coord.x, coord.z))
+                    .collect::<BTreeSet<_>>();
+                surface_interest.extend(self.surface_hint_stream_interest(&detail_columns));
+                surface_interest.extend(exact_detail_interest);
+                surface_interest.sort_unstable();
+                surface_interest.dedup();
+            }
+            // A spectator has no collision body, but its configured cruise speed can cross the
+            // ordinary exact radius before one server round trip. Admit a thin, capacity-bounded
+            // visual corridor ahead as ordinary work so those chunks are ready when the camera
+            // reaches them without misclassifying the entire path as collision-critical.
+            let spectator_visual_interest = if camera.locomotion() == LocomotionMode::Spectator {
+                self.movement_collision_interest(
+                    camera,
+                    streaming_velocity,
+                    self.config.stream_velocity_lookahead_seconds,
+                )
+            } else {
+                Vec::new()
+            };
+            let surface_interest_ms =
+                (performance_now(performance) - surface_interest_start) as f32;
             let mut urgent_interest = collision_interest.clone();
             urgent_interest.extend(enclosed_view_interest.iter().copied());
             let mut interest = urgent_interest.clone();
             interest.extend(surface_interest.iter().copied());
+            interest.extend(spectator_visual_interest);
             let priority_hint = directional_stream_priority(
                 camera,
                 streaming_velocity,
@@ -1209,18 +2203,31 @@ mod web {
                 self.config.stream_velocity_lookahead_seconds,
                 self.config.stream_view_cone_half_angle_degrees,
             );
-            let (focus_changed, work) = {
+            let interest_ms = (performance_now(performance) - plan_start) as f32;
+            let (focus_changed, scheduler_update_ms, work, scheduler_admit_ms) = {
                 let mut scheduler = self.scheduler.borrow_mut();
+                let update_start = performance_now(performance);
                 let changed = scheduler.update_focus_with_interest(focus, &interest);
+                let scheduler_update_ms = (performance_now(performance) - update_start) as f32;
+                let admit_start = performance_now(performance);
+                let work = scheduler.schedule_frame_prioritized_with_urgency(
+                    self.config.stream_frame_budget,
+                    priority_hint,
+                    &urgent_interest,
+                );
                 (
                     changed,
-                    scheduler.schedule_frame_prioritized_with_urgency(
-                        self.config.stream_frame_budget,
-                        priority_hint,
-                        &urgent_interest,
-                    ),
+                    scheduler_update_ms,
+                    work,
+                    (performance_now(performance) - admit_start) as f32,
                 )
             };
+            if focus_changed {
+                let scheduler = self.scheduler.borrow();
+                self.remote.cancel_chunk_batches_outside(|coord| {
+                    scheduler.status(coord).is_some_and(|status| status.desired)
+                });
+            }
             let mut uploaded = false;
 
             let urgent_interest_keys: BTreeSet<_> =
@@ -1244,6 +2251,8 @@ mod web {
                 collision_generation,
             );
             self.submit_generation_batch(WorldProductPriority::VisibleChunk, background_generation);
+            let plan_ms = (performance_now(performance) - plan_start) as f32;
+            let mesh_start = performance_now(performance);
             {
                 let chunks = self.chunks.borrow();
                 let halos = self.chunk_halos.borrow();
@@ -1256,13 +2265,17 @@ mod web {
                         continue;
                     };
                     let mut halo_contract_valid = true;
-                    let mesh = mesh_chunk(chunk, |x, y, z| {
-                        let Some(material) = halo.sample_world(x, y, z) else {
-                            halo_contract_valid = false;
-                            return Material::Stone;
-                        };
-                        material
-                    });
+                    let mesh = mesh_chunk_binary_with_scratch(
+                        chunk,
+                        |x, y, z| {
+                            let Some(material) = halo.sample_world(x, y, z) else {
+                                halo_contract_valid = false;
+                                return Material::Stone;
+                            };
+                            material
+                        },
+                        &mut self.binary_mesh_scratch.borrow_mut(),
+                    );
                     if !halo_contract_valid {
                         let _ = self.scheduler.borrow_mut().retry(ticket);
                         web_sys::console::error_1(&JsValue::from_str(
@@ -1270,49 +2283,40 @@ mod web {
                         ));
                         continue;
                     }
-                    self.pending_meshes
-                        .borrow_mut()
-                        .insert(coord_key(ticket.coord), mesh);
+                    self.pending_meshes.borrow_mut().insert(
+                        coord_key(ticket.coord),
+                        PendingCanonicalMesh {
+                            revision: ticket.revision,
+                            mesh,
+                        },
+                    );
                     let _ = self.scheduler.borrow_mut().complete(ticket);
                 }
             }
+            let mesh_ms = (performance_now(performance) - mesh_start) as f32;
+            let publish_start = performance_now(performance);
             for ticket in work.upload {
-                let mesh = self
-                    .pending_meshes
+                self.pending_uploads
                     .borrow_mut()
-                    .remove(&coord_key(ticket.coord));
-                let Some(mesh) = mesh else {
-                    continue;
-                };
-                let uploaded_mesh = self
-                    .chunks
-                    .borrow()
-                    .get(&coord_key(ticket.coord))
-                    .is_some_and(|chunk| self.renderer.borrow_mut().upload_chunk(chunk, &mesh));
-                if uploaded_mesh {
-                    let _ = self.scheduler.borrow_mut().complete(ticket);
-                    uploaded = true;
-                } else {
-                    self.pending_meshes
-                        .borrow_mut()
-                        .insert(coord_key(ticket.coord), mesh);
-                    let _ = self.scheduler.borrow_mut().retry(ticket);
-                    web_sys::console::error_1(&JsValue::from_str(
-                        "voxel mesh arena allocation failed; upload requeued",
-                    ));
-                }
+                    .insert(coord_key(ticket.coord), ticket);
             }
+            uploaded |= self.publish_ready_canonical_cuts();
             let evictions = self.scheduler.borrow_mut().drain_evictions();
             let evicted = !evictions.is_empty();
             if !evictions.is_empty() {
                 let mut chunks = self.chunks.borrow_mut();
+                let mut portals = self.chunk_portals.borrow_mut();
                 let mut halos = self.chunk_halos.borrow_mut();
                 let mut pending = self.pending_meshes.borrow_mut();
+                let mut pending_uploads = self.pending_uploads.borrow_mut();
                 let mut renderer = self.renderer.borrow_mut();
                 for eviction in evictions {
-                    chunks.remove(&coord_key(eviction.coord));
-                    halos.remove(&coord_key(eviction.coord));
-                    pending.remove(&coord_key(eviction.coord));
+                    let key = coord_key(eviction.coord);
+                    chunks.remove(&key);
+                    portals.remove(&key);
+                    halos.remove(&key);
+                    pending.remove(&key);
+                    pending_uploads.remove(&key);
                     renderer.remove_chunk(eviction.coord);
                 }
             }
@@ -1320,11 +2324,227 @@ mod web {
                 self.reconcile_chunk_activation(
                     focus,
                     &collision_interest,
-                    &enclosed_view_interest,
+                    enclosed_view_interest,
+                    &enclosed_view_plan.frontiers,
                     &surface_interest,
                 );
             }
-            self.stream_surface_lods(camera.position);
+            let publish_ms = (performance_now(performance) - publish_start) as f32;
+            let surface_start = performance_now(performance);
+            self.stream_surface_lods(camera, streaming_velocity);
+            let surface_ms = (performance_now(performance) - surface_start) as f32;
+            StreamFrameSample {
+                remote_ms,
+                plan_ms,
+                mesh_ms,
+                publish_ms,
+                surface_ms,
+                interest_ms,
+                scheduler_update_ms,
+                scheduler_admit_ms,
+                collision_interest_ms,
+                enclosed_interest_ms,
+                surface_interest_ms,
+            }
+        }
+
+        fn register_canonical_publication(
+            &self,
+            server_revision: u64,
+            requirements: &[CanonicalRequirement],
+        ) {
+            if requirements.is_empty() {
+                return;
+            }
+            let replacement = requirements
+                .iter()
+                .map(|requirement| (coord_key(requirement.coord), requirement.revision))
+                .collect::<BTreeMap<_, _>>();
+            let replacement_keys = replacement.keys().copied().collect::<BTreeSet<_>>();
+            let mut merged = BTreeMap::new();
+            let mut publications = self.canonical_publications.borrow_mut();
+            publications.retain(|publication| {
+                let overlaps = publication
+                    .requirements
+                    .keys()
+                    .any(|key| replacement_keys.contains(key));
+                if overlaps {
+                    merged.extend(
+                        publication
+                            .requirements
+                            .iter()
+                            .map(|(key, revision)| (*key, *revision)),
+                    );
+                }
+                !overlaps
+            });
+            // The newest scheduler capability wins for overlapping chunks. Non-overlapping chunks
+            // from an unfinished older edit remain in the same atomic cut.
+            merged.extend(replacement);
+            publications.push_back(CanonicalPublication {
+                server_revision,
+                requirements: merged,
+            });
+        }
+
+        fn publish_ready_canonical_cuts(&self) -> bool {
+            let publications = self
+                .canonical_publications
+                .borrow()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut uploaded_any = false;
+
+            for publication in publications {
+                let current = {
+                    let scheduler = self.scheduler.borrow();
+                    publication
+                        .requirements
+                        .iter()
+                        .filter_map(|(key, revision)| {
+                            let coord = ChunkCoord::new(key.0, key.1, key.2);
+                            scheduler
+                                .status(coord)
+                                .is_some_and(|status| status.revision == *revision)
+                                .then_some((*key, *revision))
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                };
+                if current.is_empty() {
+                    self.canonical_publications
+                        .borrow_mut()
+                        .retain(|candidate| {
+                            candidate.server_revision != publication.server_revision
+                        });
+                    continue;
+                }
+                if current != publication.requirements
+                    && let Some(candidate) = self
+                        .canonical_publications
+                        .borrow_mut()
+                        .iter_mut()
+                        .find(|candidate| candidate.server_revision == publication.server_revision)
+                {
+                    candidate.requirements.clone_from(&current);
+                }
+
+                let ready = {
+                    let meshes = self.pending_meshes.borrow();
+                    let uploads = self.pending_uploads.borrow();
+                    current.iter().all(|(key, revision)| {
+                        meshes
+                            .get(key)
+                            .is_some_and(|mesh| mesh.revision == *revision)
+                            && uploads
+                                .get(key)
+                                .is_some_and(|ticket| ticket.revision == *revision)
+                    })
+                };
+                if !ready {
+                    continue;
+                }
+
+                let uploaded = {
+                    let chunks = self.chunks.borrow();
+                    let meshes = self.pending_meshes.borrow();
+                    let mut cut = Vec::with_capacity(current.len());
+                    for key in current.keys() {
+                        let Some(chunk) = chunks.get(key) else {
+                            cut.clear();
+                            break;
+                        };
+                        let Some(mesh) = meshes.get(key) else {
+                            cut.clear();
+                            break;
+                        };
+                        cut.push((chunk, &mesh.mesh));
+                    }
+                    cut.len() == current.len()
+                        && self.renderer.borrow_mut().upload_chunks_atomic(cut)
+                };
+                if uploaded {
+                    let mut uploads = self.pending_uploads.borrow_mut();
+                    let mut meshes = self.pending_meshes.borrow_mut();
+                    let mut scheduler = self.scheduler.borrow_mut();
+                    for key in current.keys() {
+                        if let Some(ticket) = uploads.remove(key) {
+                            let _ = scheduler.complete(ticket);
+                        }
+                        meshes.remove(key);
+                    }
+                    self.canonical_publications
+                        .borrow_mut()
+                        .retain(|candidate| {
+                            candidate.server_revision != publication.server_revision
+                        });
+                    uploaded_any = true;
+                } else {
+                    let mut uploads = self.pending_uploads.borrow_mut();
+                    let mut scheduler = self.scheduler.borrow_mut();
+                    for key in current.keys() {
+                        if let Some(ticket) = uploads.remove(key) {
+                            let _ = scheduler.retry(ticket);
+                        }
+                    }
+                    log_gpu_error("canonical cut allocation failed; complete cut requeued");
+                }
+            }
+
+            let grouped = self
+                .canonical_publications
+                .borrow()
+                .iter()
+                .flat_map(|publication| publication.requirements.keys().copied())
+                .collect::<BTreeSet<_>>();
+            let individual = self
+                .pending_uploads
+                .borrow()
+                .iter()
+                .filter_map(|(key, ticket)| (!grouped.contains(key)).then_some((*key, *ticket)))
+                .collect::<Vec<_>>();
+            for (key, ticket) in individual {
+                let ticket_current =
+                    self.scheduler
+                        .borrow()
+                        .status(ticket.coord)
+                        .is_some_and(|status| {
+                            status.revision == ticket.revision
+                                && status.state == ChunkState::Uploading
+                        });
+                let mesh_current = self
+                    .pending_meshes
+                    .borrow()
+                    .get(&key)
+                    .is_some_and(|mesh| mesh.revision == ticket.revision);
+                if !ticket_current || !mesh_current {
+                    self.pending_uploads.borrow_mut().remove(&key);
+                    if ticket_current {
+                        let _ = self.scheduler.borrow_mut().retry(ticket);
+                    }
+                    continue;
+                }
+                let uploaded = {
+                    let chunks = self.chunks.borrow();
+                    let meshes = self.pending_meshes.borrow();
+                    chunks.get(&key).is_some_and(|chunk| {
+                        meshes.get(&key).is_some_and(|mesh| {
+                            self.renderer.borrow_mut().upload_chunk(chunk, &mesh.mesh)
+                        })
+                    })
+                };
+                if uploaded {
+                    self.pending_uploads.borrow_mut().remove(&key);
+                    self.pending_meshes.borrow_mut().remove(&key);
+                    let _ = self.scheduler.borrow_mut().complete(ticket);
+                    uploaded_any = true;
+                } else {
+                    self.pending_uploads.borrow_mut().remove(&key);
+                    let _ = self.scheduler.borrow_mut().retry(ticket);
+                    log_gpu_error("voxel mesh arena allocation failed; upload requeued");
+                }
+            }
+            uploaded_any
         }
 
         fn collision_stream_interest(
@@ -1366,21 +2586,26 @@ mod web {
             interest.into_iter().collect()
         }
 
-        fn enclosed_view_stream_interest(&self, camera: &CameraState) -> Vec<ChunkCoord> {
-            if self.enclosure.get().enclosure < self.config.stream_enclosed_view_threshold {
-                return Vec::new();
-            }
-            let chunks = self.chunks.borrow();
-            crate::enclosed_view_stream_interest(
+        fn enclosed_view_stream_plan(&self, camera: &CameraState) -> crate::EnclosedViewStreamPlan {
+            let [width, height] = self.viewport_size.get();
+            let Some(cone_tangent) = crate::viewport_view_cone_tangent(
+                self.config.stream_view_cone_half_angle_degrees,
+                crate::CAMERA_VERTICAL_FOV_RADIANS,
+                width,
+                height,
+            ) else {
+                return crate::EnclosedViewStreamPlan::default();
+            };
+            crate::enclosed_view_stream_plan(
                 camera,
                 self.config.stream_enclosed_view_distance_metres,
-                self.config.stream_enclosed_view_ray_radius_metres,
-                |x, y, z| {
-                    resident_material(&chunks, VoxelCoord::new(x, y, z))
-                        .unwrap_or(Material::Stone)
-                        .occludes_ambient()
-                },
+                cone_tangent,
+                &self.chunk_portals.borrow(),
             )
+        }
+
+        fn enclosed_view_stream_interest(&self, camera: &CameraState) -> Vec<ChunkCoord> {
+            self.enclosed_view_stream_plan(camera).chunks
         }
 
         fn surface_stream_interest(
@@ -1435,6 +2660,43 @@ mod web {
             interest.into_iter().collect()
         }
 
+        fn surface_exact_detail_stream_interest(&self, camera: &CameraState) -> Vec<ChunkCoord> {
+            let maximum_distance_chunks = self.config.stream_enclosed_view_distance_metres
+                / (CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
+            let camera_chunk_x = camera.position.x / (CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
+            let camera_chunk_z = camera.position.z / (CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
+            let maximum_distance_squared = maximum_distance_chunks * maximum_distance_chunks;
+            let renderer = self.renderer.borrow();
+            let mut chunks = self
+                .surface_exact_detail_chunks
+                .borrow()
+                .values()
+                .flatten()
+                .copied()
+                .filter_map(|chunk| {
+                    if !renderer.supports_sparse_exact_surface_column(chunk.x, chunk.z) {
+                        return None;
+                    }
+                    let delta_x = chunk.x as f32 + 0.5 - camera_chunk_x;
+                    let delta_z = chunk.z as f32 + 0.5 - camera_chunk_z;
+                    let distance_squared = delta_x * delta_x + delta_z * delta_z;
+                    (distance_squared <= maximum_distance_squared)
+                        .then_some((distance_squared, chunk))
+                })
+                .collect::<Vec<_>>();
+            drop(renderer);
+            chunks.sort_by(|(left_distance, left), (right_distance, right)| {
+                left_distance
+                    .total_cmp(right_distance)
+                    .then_with(|| left.cmp(right))
+            });
+            chunks.dedup_by_key(|(_, chunk)| *chunk);
+            // Preserve the complete server-declared interest set here. The scheduler applies its
+            // own bounded request window, while readiness deliberately considers this full set so
+            // a truncated vertical column cannot replace its watertight surface fallback.
+            chunks.into_iter().map(|(_, chunk)| chunk).collect()
+        }
+
         fn submit_generation_batch(
             &self,
             priority: WorldProductPriority,
@@ -1459,10 +2721,10 @@ mod web {
         }
 
         fn drain_remote_generation(&self) {
-            for completion in self.remote.drain_completions() {
+            if let Some(completion) = self.remote.next_completion() {
                 self.accept_remote_completion(completion);
             }
-            for completion in self.remote.drain_surface_completions() {
+            if let Some(completion) = self.remote.next_surface_completion() {
                 self.accept_remote_surface_completion(completion);
             }
         }
@@ -1561,6 +2823,7 @@ mod web {
                         .terrain
                         .canonical_surface_chunk_hints(SURFACE_HINT_VERTICAL_MARGIN_CHUNKS)
                 });
+                let exact_detail_chunks = snapshot.exact_detail_chunks.clone();
                 if self
                     .renderer
                     .borrow_mut()
@@ -1571,6 +2834,15 @@ mod web {
                         self.surface_chunk_hints
                             .borrow_mut()
                             .insert(ticket.coord, hints);
+                    }
+                    if exact_detail_chunks.is_empty() {
+                        self.surface_exact_detail_chunks
+                            .borrow_mut()
+                            .remove(&ticket.coord);
+                    } else {
+                        self.surface_exact_detail_chunks
+                            .borrow_mut()
+                            .insert(ticket.coord, exact_detail_chunks);
                     }
                     let committed = self
                         .surface_revisions
@@ -1588,6 +2860,21 @@ mod web {
         }
 
         fn enqueue_surface_front(&self, coord: SurfaceTileCoord) {
+            let in_active_coverage = surface_tile_in_coverage(
+                coord,
+                self.surface_focus.get(),
+                self.config.surface_load_radius_tiles,
+                self.surface_cross_radii.get(),
+                self.surface_motion_axis.get(),
+            );
+            // Dirty retained tiles are limited below to desired or presented ownership. Let the
+            // latter finish even after it leaves the moving load window: it is still the visible
+            // fallback protecting the frame until the next cut is ready.
+            let presented_dirty_fallback = self.surface_dirty.borrow().contains(&coord)
+                && self.surface_resident.borrow().contains(&coord);
+            if !in_active_coverage && !presented_dirty_fallback {
+                return;
+            }
             if self.surface_in_flight.borrow().contains(&coord)
                 || self.surface_queue.borrow().contains(&coord)
             {
@@ -1623,12 +2910,14 @@ mod web {
             if self.scheduler.borrow_mut().complete(ticket) != CompletionStatus::Accepted {
                 return;
             }
-            self.chunks
+            let key = coord_key(ticket.coord);
+            self.chunk_portals
                 .borrow_mut()
-                .insert(coord_key(ticket.coord), snapshot.chunk);
+                .insert(key, ChunkPortalMask::from_chunk(&snapshot.chunk));
+            self.chunks.borrow_mut().insert(key, snapshot.chunk);
             self.chunk_halos
                 .borrow_mut()
-                .insert(coord_key(ticket.coord), snapshot.meshing_halo);
+                .insert(key, snapshot.meshing_halo);
         }
 
         fn reconcile_chunk_activation(
@@ -1636,6 +2925,7 @@ mod web {
             focus: ChunkCoord,
             collision_interest: &[ChunkCoord],
             enclosed_view_interest: &[ChunkCoord],
+            enclosed_view_frontiers: &[crate::PortalFrontier],
             surface_interest: &[ChunkCoord],
         ) {
             let scheduler = self.scheduler.borrow();
@@ -1688,9 +2978,29 @@ mod web {
                 })
             };
             let interaction = complete_interest(collision_interest);
-            let enclosed_view = complete_interest(enclosed_view_interest);
+            // Exact cave/tunnel chunks supplement the surface hierarchy independently in 3D.
+            // Do not apply the surface cut's all-Y-siblings rule here: portal discovery can add a
+            // pending chunk to an already visible column, and that must not revoke its ready wall.
+            let enclosed_view =
+                crate::renderable_exact_interest_chunks(enclosed_view_interest, |coord| {
+                    scheduler.desired_chunk_renderable(coord)
+                });
+            let frontier_faces =
+                crate::exact_volume_frontier_faces(enclosed_view_frontiers, |coord| {
+                    scheduler.desired_chunk_renderable(coord)
+                })
+                .into_iter()
+                .map(
+                    |frontier| voxels_render::renderer::ExactVolumeFrontierFace {
+                        chunk: frontier.chunk,
+                        face: frontier.face,
+                        cells: frontier.cells,
+                    },
+                )
+                .collect::<Vec<_>>();
             let surface = complete_interest(surface_interest);
             canonical_ready_chunks.extend(surface.iter().copied());
+            let canonical_surface_ready_chunks = surface.clone();
             drop(scheduler);
             self.reconcile_activation_reason(
                 &self.radial_active_chunks,
@@ -1713,8 +3023,12 @@ mod web {
                 ChunkActivationReason::Surface,
             );
             let mut renderer = self.renderer.borrow_mut();
-            renderer.set_canonical_ready_chunks(canonical_ready_chunks);
+            renderer.set_canonical_cut_ready_chunks(
+                canonical_ready_chunks,
+                canonical_surface_ready_chunks,
+            );
             renderer.set_enclosed_view_ready_chunks(enclosed_view);
+            renderer.set_exact_volume_frontier_faces(&frontier_faces);
         }
 
         fn reconcile_activation_reason(
@@ -1749,29 +3063,119 @@ mod web {
             counts
         }
 
-        fn stream_surface_lods(&self, position: glam::Vec3) {
-            let focus = std::array::from_fn(|index| {
+        fn stream_surface_lods(&self, camera: &CameraState, streaming_velocity: glam::Vec3) {
+            let position = camera.position;
+            let longitudinal_radii = self.config.surface_load_radius_tiles;
+            let cross_radii = adaptive_surface_cross_radii(
+                longitudinal_radii,
+                self.config.surface_fast_travel_min_cross_radius_tiles,
+                self.config.surface_fast_travel_full_rate_tiles_per_second,
+                streaming_velocity,
+            );
+            let motion_axis = if cross_radii == longitudinal_radii {
+                [0, 0]
+            } else {
+                surface_motion_axis(streaming_velocity)
+            };
+            let current_focus = std::array::from_fn(|index| {
                 world_to_surface_tile(position, SurfaceLodLevel::ALL[index])
             });
-            if self.surface_focus.get() != Some(focus) {
-                self.surface_focus.set(Some(focus));
+            // Once travel outruns the finest tile budget, use the entire configured overlapping
+            // window as generation lead at every level. A fixed wall-clock prediction can be
+            // shorter than accumulated service latency and request a coarse parent only after the
+            // camera has nearly crossed into it.
+            let fast_travel_threshold_metres_per_second =
+                self.config.surface_fast_travel_full_rate_tiles_per_second
+                    * SurfaceLodLevel::Stride2.tile_span_voxels() as f32
+                    * VOXEL_SIZE_METRES;
+            let lead_focus = std::array::from_fn(|index| {
+                let level = SurfaceLodLevel::ALL[index];
+                let radius = longitudinal_radii[index];
+                let maximum_lead_metres = (radius - 1).max(0) as f32
+                    * level.tile_span_voxels() as f32
+                    * VOXEL_SIZE_METRES;
+                world_to_surface_tile(
+                    predictive_surface_position(
+                        position,
+                        streaming_velocity,
+                        self.config.stream_velocity_lookahead_seconds,
+                        maximum_lead_metres,
+                        fast_travel_threshold_metres_per_second,
+                    ),
+                    level,
+                )
+            });
+            let focus = SurfaceStreamFocus {
+                current: current_focus,
+                lead: lead_focus,
+            };
+            let directional_priorities: [DirectionalStreamPriority; SURFACE_LOD_LEVEL_COUNT] =
+                std::array::from_fn(|index| {
+                    let level = SurfaceLodLevel::ALL[index];
+                    directional_stream_priority(
+                        camera,
+                        streaming_velocity,
+                        level.tile_span_voxels() as f32 * VOXEL_SIZE_METRES,
+                        self.config.stream_velocity_lookahead_seconds,
+                        self.config.stream_view_cone_half_angle_degrees,
+                    )
+                });
+            let previous_radii = self.surface_cross_radii.replace(cross_radii);
+            let previous_axis = self.surface_motion_axis.replace(motion_axis);
+            if self.surface_focus.get() != Some(focus)
+                || previous_radii != cross_radii
+                || previous_axis != motion_axis
+            {
+                let previous_focus = self.surface_focus.replace(Some(focus));
+                let changed_levels: [bool; SURFACE_LOD_LEVEL_COUNT] =
+                    std::array::from_fn(|index| {
+                        previous_focus.is_none_or(|previous| {
+                            previous.current[index] != focus.current[index]
+                                || previous.lead[index] != focus.lead[index]
+                        }) || previous_radii[index] != cross_radii[index]
+                            || (previous_axis != motion_axis
+                                && cross_radii[index] < longitudinal_radii[index])
+                    });
                 let mut desired = BTreeSet::new();
                 for (index, level) in SurfaceLodLevel::ALL.into_iter().enumerate() {
-                    let radius = self.config.surface_load_radius_tiles[index];
-                    let level_focus = focus[index];
-                    for dz in -radius..=radius {
-                        for dx in -radius..=radius {
-                            let coord = SurfaceTileCoord::new(
-                                level,
-                                level_focus.x + dx,
-                                level_focus.z + dz,
-                            );
-                            if coord.is_world_representable() {
-                                desired.insert(coord);
+                    let longitudinal_radius = longitudinal_radii[index];
+                    let cross_radius = cross_radii[index];
+                    for level_focus in [focus.current[index], focus.lead[index]] {
+                        for dz in -longitudinal_radius..=longitudinal_radius {
+                            for dx in -longitudinal_radius..=longitudinal_radius {
+                                if !surface_offset_in_coverage(
+                                    dx,
+                                    dz,
+                                    longitudinal_radius,
+                                    cross_radius,
+                                    motion_axis,
+                                ) {
+                                    continue;
+                                }
+                                let coord = SurfaceTileCoord::new(
+                                    level,
+                                    level_focus.x + dx,
+                                    level_focus.z + dz,
+                                );
+                                if coord.is_world_representable() {
+                                    desired.insert(coord);
+                                }
                             }
                         }
                     }
                 }
+                self.remote
+                    .cancel_surface_batches_outside(|coord| desired.contains(&coord));
+                let retain_longitudinal_radii = longitudinal_radii
+                    .map(|radius| radius + self.config.surface_retain_margin_tiles);
+                let retain_cross_radii =
+                    cross_radii.map(|radius| radius + self.config.surface_retain_margin_tiles);
+                let presented_tiles = self
+                    .renderer
+                    .borrow()
+                    .presented_surface_tiles()
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
                 let evicted: Vec<_> = self
                     .surface_resident
                     .borrow()
@@ -1779,11 +3183,17 @@ mod web {
                     .copied()
                     .filter(|coord| {
                         let index = coord.level.index() as usize;
-                        let retain = self.config.surface_load_radius_tiles[index]
-                            + self.config.surface_retain_margin_tiles;
-                        let dx = coord.x - focus[index].x;
-                        let dz = coord.z - focus[index].z;
-                        dx.abs().max(dz.abs()) > retain
+                        if !changed_levels[index] {
+                            return false;
+                        }
+                        !presented_tiles.contains(coord)
+                            && !surface_tile_in_coverage(
+                                *coord,
+                                Some(focus),
+                                retain_longitudinal_radii,
+                                retain_cross_radii,
+                                motion_axis,
+                            )
                     })
                     .collect();
                 if !evicted.is_empty() {
@@ -1792,32 +3202,38 @@ mod web {
                     let mut accepted = self.surface_accepted_edit_revisions.borrow_mut();
                     let mut dirty = self.surface_dirty.borrow_mut();
                     let mut renderer = self.renderer.borrow_mut();
-                    for coord in evicted {
+                    for &coord in &evicted {
                         resident.remove(&coord);
                         self.surface_chunk_hints.borrow_mut().remove(&coord);
+                        self.surface_exact_detail_chunks.borrow_mut().remove(&coord);
                         revisions.evict(coord);
                         accepted.remove(&coord);
                         dirty.remove(&coord);
-                        renderer.remove_surface_tile(coord);
                     }
+                    renderer.remove_surface_tiles(evicted);
                 }
 
-                // Edits may have dirtied a tile just before a focus jump. Keep replacement work only
-                // while the tile is still resident or belongs to the new desired set; a future load
-                // samples the authoritative edit map and does not need a stale dirty marker.
+                // A retained tile remembers its requested revision in `surface_revisions`, but it
+                // is actionable replacement work only while desired or still presented by the
+                // outgoing cut. A future focus load samples the authoritative edit overlay.
                 {
-                    let resident = self.surface_resident.borrow();
                     self.surface_dirty
                         .borrow_mut()
-                        .retain(|coord| resident.contains(coord) || desired.contains(coord));
+                        .retain(|coord| desired.contains(coord) || presented_tiles.contains(coord));
                 }
 
                 let resident = self.surface_resident.borrow();
                 let mut revisions = self.surface_revisions.borrow_mut();
                 let mut dirty = self.surface_dirty.borrow_mut();
-                revisions.retain(|coord| resident.contains(&coord) || desired.contains(&coord));
+                revisions.retain(|coord| {
+                    let index = coord.level.index() as usize;
+                    !changed_levels[index] || resident.contains(&coord) || desired.contains(&coord)
+                });
                 let mut candidates = Vec::new();
                 for coord in desired {
+                    if !changed_levels[coord.level.index() as usize] {
+                        continue;
+                    }
                     match revisions.prepare_focus(coord) {
                         SurfaceFocusAction::Load { .. } => {
                             debug_assert!(!resident.contains(&coord));
@@ -1836,11 +3252,18 @@ mod web {
                 drop(revisions);
                 drop(resident);
                 let initializing_hierarchy = !self.full_lods_initialized.get();
+                let mut queue = self.surface_queue.borrow_mut();
+                queue.retain(|coord| !changed_levels[coord.level.index() as usize]);
+                candidates.extend(queue.iter().copied());
                 candidates.sort_by_key(|coord| {
                     let index = coord.level.index() as usize;
-                    let dx = i128::from(coord.x) - i128::from(focus[index].x);
-                    let dz = i128::from(coord.z) - i128::from(focus[index].z);
-                    let background = index >= INTERACTIVE_SURFACE_LOD_LEVELS;
+                    let dx = i128::from(coord.x) - i128::from(focus.current[index].x);
+                    let dz = i128::from(coord.z) - i128::from(focus.current[index].z);
+                    let priority =
+                        surface_product_priority(*coord, focus, INTERACTIVE_SURFACE_LOD_LEVELS);
+                    let background = priority == WorldProductPriority::Prefetch;
+                    let directional =
+                        directional_priorities[index].rank_offset(dx as i64, dz as i64);
                     // Startup establishes broad parent cover before refining it. During traversal,
                     // the hierarchy already has retained parents, so finest visible replacements
                     // must win; repeatedly loading each newly exposed coarse strip first otherwise
@@ -1850,13 +3273,23 @@ mod web {
                     } else {
                         u8::MAX - coord.level.index()
                     };
-                    (background, level_order, dx * dx + dz * dz, coord.z, coord.x)
+                    (
+                        priority,
+                        level_order,
+                        directional,
+                        dx * dx + dz * dz,
+                        coord.z,
+                        coord.x,
+                    )
                 });
-                let mut queue = self.surface_queue.borrow_mut();
                 queue.clear();
                 queue.extend(candidates);
             }
 
+            self.submit_surface_lane(
+                WorldProductPriority::ImmediateSurface,
+                INTERACTIVE_SURFACE_LOD_LEVELS,
+            );
             self.submit_surface_lane(
                 WorldProductPriority::VisibleSurface,
                 INTERACTIVE_SURFACE_BATCH,
@@ -1902,23 +3335,33 @@ mod web {
             }
 
             let mut tickets = Vec::with_capacity(batch_limit);
+            let mut replacement_batch = None;
+            let focus = self.surface_focus.get();
             while tickets.len() < batch_limit {
                 let position = self.surface_queue.borrow().iter().position(|coord| {
-                    (usize::from(coord.level.index()) >= INTERACTIVE_SURFACE_LOD_LEVELS)
-                        == background
+                    focus.is_some_and(|focus| {
+                        surface_product_priority(*coord, focus, INTERACTIVE_SURFACE_LOD_LEVELS)
+                            == priority
+                    })
                 });
                 let Some(position) = position else {
                     break;
                 };
-                let Some(coord) = self.surface_queue.borrow_mut().remove(position) else {
+                let Some(coord) = self.surface_queue.borrow().get(position).copied() else {
                     break;
                 };
-                if self.surface_in_flight.borrow().contains(&coord)
-                    || (self.surface_resident.borrow().contains(&coord)
-                        && !self.surface_dirty.borrow().contains(&coord))
-                {
+                let resident = self.surface_resident.borrow().contains(&coord);
+                let dirty = self.surface_dirty.borrow().contains(&coord);
+                if self.surface_in_flight.borrow().contains(&coord) || (resident && !dirty) {
+                    self.surface_queue.borrow_mut().remove(position);
                     continue;
                 }
+                let replacement = resident && dirty;
+                if replacement_batch.is_some_and(|batch| batch != replacement) {
+                    break;
+                }
+                replacement_batch = Some(replacement);
+                self.surface_queue.borrow_mut().remove(position);
                 let revision = {
                     let revisions = self.surface_revisions.borrow();
                     revisions
@@ -1926,6 +3369,12 @@ mod web {
                         .unwrap_or_else(|| revisions.epoch())
                 };
                 tickets.push(RemoteSurfaceTicket { coord, revision });
+                // Replacing several visible tiles in one completion concentrates their GPU upload,
+                // profile reconciliation, and connector rebuild into a single long frame. New
+                // coverage still batches for startup throughput; edits publish one tile per frame.
+                if replacement {
+                    break;
+                }
             }
             if tickets.is_empty() {
                 return;
@@ -2308,9 +3757,31 @@ mod web {
                 &accepted_mutations,
             );
             if !accepted_mutations.is_empty() {
+                let mut changed_chunks = BTreeMap::<ChunkCoord, (Vec<[usize; 3]>, bool)>::new();
+                for mutation in &accepted_mutations {
+                    let entry = changed_chunks
+                        .entry(mutation.coord.chunk())
+                        .or_insert_with(|| (Vec::new(), false));
+                    entry.0.push(mutation.coord.local());
+                    entry.1 |= mutation.material.occludes_ambient();
+                }
+                let chunks = self.chunks.borrow();
+                let mut portals = self.chunk_portals.borrow_mut();
+                for (coord, (local_voxels, added_occluder)) in changed_chunks {
+                    let key = coord_key(coord);
+                    if let Some(chunk) = chunks.get(&key) {
+                        if !added_occluder && let Some(mask) = portals.get_mut(&key) {
+                            mask.add_non_occluding_voxels(chunk, &local_voxels);
+                        } else {
+                            // Adding an occluder can split a component, which requires a fresh
+                            // connected-component analysis. This path is intentionally exact.
+                            portals.insert(key, ChunkPortalMask::from_chunk(chunk));
+                        }
+                    }
+                }
                 self.last_enclosure_probe.set(f64::NEG_INFINITY);
             }
-            let canonical = {
+            let canonical: Vec<CanonicalRequirement> = {
                 let mut scheduler = self.scheduler.borrow_mut();
                 let report = scheduler.mark_voxels_edited(&coords);
                 report
@@ -2325,21 +3796,34 @@ mod web {
                     })
                     .collect()
             };
+            self.register_canonical_publication(server_revision, &canonical);
             let surface_revision = if affected_surface_tiles.is_empty() {
                 self.surface_revisions.borrow().epoch()
             } else {
                 self.surface_revisions.borrow_mut().begin_edit()
             };
+            let presented_surface_tiles = self
+                .renderer
+                .borrow()
+                .presented_surface_tiles()
+                .into_iter()
+                .collect::<BTreeSet<_>>();
             let mut surface = Vec::new();
             for &coord in affected_surface_tiles {
-                if !self.surface_tile_relevant(coord)
-                    && !self.surface_resident.borrow().contains(&coord)
-                {
+                let active =
+                    self.surface_tile_relevant(coord) || presented_surface_tiles.contains(&coord);
+                let resident = self.surface_resident.borrow().contains(&coord);
+                if !active && !resident {
                     continue;
                 }
                 self.surface_revisions
                     .borrow_mut()
                     .request(coord, surface_revision);
+                // Retained off-cut tiles stay revision-stale without masquerading as queued work.
+                // `prepare_focus` turns them back into a replacement when they become desired.
+                if !active {
+                    continue;
+                }
                 self.surface_dirty.borrow_mut().insert(coord);
                 self.enqueue_surface_front(coord);
                 surface.push(SurfaceRequirement {
@@ -2376,6 +3860,9 @@ mod web {
             *self.edits.borrow_mut() = EditMap::default();
             self.edit_revisions.borrow_mut().clear();
             self.surface_accepted_edit_revisions.borrow_mut().clear();
+            self.pending_meshes.borrow_mut().clear();
+            self.pending_uploads.borrow_mut().clear();
+            self.canonical_publications.borrow_mut().clear();
             self.scheduler.borrow_mut().invalidate_all_generation();
             let replacement = self.surface_revisions.borrow_mut().begin_edit();
             let retained = self
@@ -2384,10 +3871,19 @@ mod web {
                 .iter()
                 .copied()
                 .collect::<Vec<_>>();
+            let presented = self
+                .renderer
+                .borrow()
+                .presented_surface_tiles()
+                .into_iter()
+                .collect::<BTreeSet<_>>();
             for coord in retained {
                 self.surface_revisions
                     .borrow_mut()
                     .request(coord, replacement);
+                if !self.surface_tile_relevant(coord) && !presented.contains(&coord) {
+                    continue;
+                }
                 self.surface_dirty.borrow_mut().insert(coord);
                 self.enqueue_surface_front(coord);
             }
@@ -2399,6 +3895,8 @@ mod web {
                     coord,
                     self.surface_focus.get(),
                     self.config.surface_load_radius_tiles,
+                    self.surface_cross_radii.get(),
+                    self.surface_motion_axis.get(),
                 )
         }
 
@@ -2429,23 +3927,40 @@ mod web {
             };
             let resident = self.surface_resident.borrow();
             let revisions = self.surface_revisions.borrow();
+            let longitudinal_radii = self.config.surface_load_radius_tiles;
+            let cross_radii = self.surface_cross_radii.get();
+            let motion_axis = self.surface_motion_axis.get();
             for (index, level) in SurfaceLodLevel::ALL
                 .into_iter()
                 .take(level_count)
                 .enumerate()
             {
-                let center = focus[index];
-                let radius = self.config.surface_load_radius_tiles[index];
-                for dz in -radius..=radius {
-                    for dx in -radius..=radius {
-                        let coord = SurfaceTileCoord::new(level, center.x + dx, center.z + dz);
-                        if !coord.is_world_representable() {
-                            continue;
-                        }
-                        if !resident.contains(&coord) || !revisions.is_current(coord) {
-                            return false;
+                let longitudinal_radius = longitudinal_radii[index];
+                let mut required = BTreeSet::new();
+                for center in [focus.current[index], focus.lead[index]] {
+                    for dz in -longitudinal_radius..=longitudinal_radius {
+                        for dx in -longitudinal_radius..=longitudinal_radius {
+                            if !surface_offset_in_coverage(
+                                dx,
+                                dz,
+                                longitudinal_radius,
+                                cross_radii[index],
+                                motion_axis,
+                            ) {
+                                continue;
+                            }
+                            let coord = SurfaceTileCoord::new(level, center.x + dx, center.z + dz);
+                            if coord.is_world_representable() {
+                                required.insert(coord);
+                            }
                         }
                     }
+                }
+                if required
+                    .into_iter()
+                    .any(|coord| !resident.contains(&coord) || !revisions.is_current(coord))
+                {
+                    return false;
                 }
             }
             true
@@ -2543,6 +4058,47 @@ mod web {
     }
 
     #[wasm_bindgen]
+    pub struct MissionControlScreenshot {
+        filename: String,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    }
+
+    impl From<ScreenshotCapture> for MissionControlScreenshot {
+        fn from(capture: ScreenshotCapture) -> Self {
+            Self {
+                filename: capture.filename,
+                width: capture.width,
+                height: capture.height,
+                rgba: capture.rgba,
+            }
+        }
+    }
+
+    #[wasm_bindgen]
+    impl MissionControlScreenshot {
+        #[wasm_bindgen(getter)]
+        pub fn filename(&self) -> String {
+            self.filename.clone()
+        }
+
+        #[wasm_bindgen(getter)]
+        pub fn width(&self) -> u32 {
+            self.width
+        }
+
+        #[wasm_bindgen(getter)]
+        pub fn height(&self) -> u32 {
+            self.height
+        }
+
+        pub fn rgba(&mut self) -> Vec<u8> {
+            std::mem::take(&mut self.rgba)
+        }
+    }
+
+    #[wasm_bindgen]
     pub struct EngineHandle {
         engine: Option<Rc<Engine>>,
     }
@@ -2603,10 +4159,30 @@ mod web {
             }
         }
 
+        pub fn mission_control_screenshot_pending(&self) -> bool {
+            self.engine
+                .as_ref()
+                .is_some_and(|engine| engine.renderer.borrow().screenshot_pending())
+        }
+
+        pub fn take_mission_control_screenshot(&self) -> Option<MissionControlScreenshot> {
+            self.engine
+                .as_ref()
+                .and_then(|engine| engine.renderer.borrow_mut().take_screenshot_capture())
+                .map(Into::into)
+        }
+
+        pub fn report_mission_control_screenshot_result(&self, saved: bool) {
+            if let Some(engine) = self.engine.as_ref() {
+                engine.renderer.borrow_mut().report_screenshot_result(saved);
+            }
+        }
+
         pub fn resize(&self, css_width: f32, css_height: f32, dpr: f32) {
             if let Some(engine) = self.engine.as_ref() {
                 let width = (css_width * dpr).round().max(1.0) as u32;
                 let height = (css_height * dpr).round().max(1.0) as u32;
+                engine.viewport_size.set([width, height]);
                 engine.renderer.borrow_mut().resize(width, height, dpr);
             }
         }
@@ -2628,6 +4204,39 @@ mod web {
                 .then(|| [red, green, blue].map(|channel| f32::from(channel) / f32::from(u8::MAX)));
             engine.renderer.borrow_mut().set_diagnostic_sky_color(color);
             true
+        }
+
+        pub fn set_material_detail(&self, enabled: bool) -> bool {
+            let Some(engine) = self.engine.as_ref() else {
+                return false;
+            };
+            engine
+                .renderer
+                .borrow_mut()
+                .set_material_detail_enabled(enabled);
+            true
+        }
+
+        pub fn set_lod_boundary_half_extents(&self, extents: Vec<i32>) -> bool {
+            let Ok(extents) = <[i32; 8]>::try_from(extents) else {
+                return false;
+            };
+            self.engine.as_ref().is_some_and(|engine| {
+                engine
+                    .renderer
+                    .borrow_mut()
+                    .set_lod_boundary_half_extents_voxels(extents)
+            })
+        }
+
+        /// Reports actual current/outgoing cut ownership for one canonical voxel. This is a
+        /// read-only automation assertion over renderer state, not an alternate streaming path.
+        pub fn exact_volume_presented(&self, voxel_x: i32, voxel_y: i32, voxel_z: i32) -> bool {
+            self.engine.as_ref().is_some_and(|engine| {
+                engine.renderer.borrow().exact_volume_chunk_presented(
+                    VoxelCoord::new(voxel_x, voxel_y, voxel_z).chunk(),
+                )
+            })
         }
 
         /// `[resident, required, playable]` for the browser's canvas-only startup surface.
@@ -2743,13 +4352,18 @@ mod web {
                 let diagnostics = engine.scheduler.borrow().diagnostics();
                 let profile = *engine.profile.borrow();
                 let camera_voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
+                let camera_voxel_y = (camera.position.y / VOXEL_SIZE_METRES).floor() as i32;
                 let camera_voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
                 let (render, target, presented_lod_stride_voxels, canonical_surface_coverage) = {
                     let renderer = engine.renderer.borrow();
                     (
                         renderer.diagnostics(),
                         renderer.target_voxel(),
-                        renderer.presented_lod_stride_voxels(camera_voxel_x, camera_voxel_z),
+                        renderer.presented_lod_stride_voxels(
+                            camera_voxel_x,
+                            camera_voxel_y,
+                            camera_voxel_z,
+                        ),
                         renderer.canonical_surface_coverage_at(camera_voxel_x, camera_voxel_z),
                     )
                 };
@@ -2758,15 +4372,17 @@ mod web {
                 } else {
                     camera.streaming_velocity(&engine.input.borrow())
                 };
+                let exact_streaming_velocity =
+                    crate::exact_streaming_velocity(&camera, streaming_velocity);
                 let collision_immediate_interest =
-                    engine.movement_collision_interest(&camera, streaming_velocity, 0.1);
+                    engine.movement_collision_interest(&camera, exact_streaming_velocity, 0.1);
                 let collision_lookahead_seconds =
                     (engine.config.stream_collision_lookahead_seconds
                         - crate::COLLISION_READINESS_RESERVE_SECONDS)
                         .max(0.1);
                 let collision_lookahead_interest = engine.movement_collision_interest(
                     &camera,
-                    streaming_velocity,
+                    exact_streaming_velocity,
                     collision_lookahead_seconds,
                 );
                 let enclosed_view_interest = engine.enclosed_view_stream_interest(&camera);
@@ -2779,7 +4395,7 @@ mod web {
                 ) = {
                     let scheduler = engine.scheduler.borrow();
                     (
-                        scheduler.vicinity_readiness(1),
+                        scheduler.vicinity_readiness_at(world_to_chunk(camera.position), 1),
                         scheduler.interest_readiness(&collision_immediate_interest),
                         scheduler.interest_readiness(&collision_lookahead_interest),
                         scheduler.interest_readiness(&enclosed_view_interest),
@@ -2819,7 +4435,7 @@ mod web {
                     let renderer = engine.renderer.borrow();
                     edit_canonical_coords
                         .iter()
-                        .filter(|coord| renderer.canonical_chunk_owned(**coord))
+                        .filter(|coord| renderer.exact_volume_chunk_presented(**coord))
                         .count()
                 };
                 let lod_focus_lag_voxels = i64::from(camera_voxel_x)
@@ -2846,7 +4462,7 @@ mod web {
                     .pending_meshes
                     .borrow()
                     .values()
-                    .map(MeshedChunk::retained_bytes)
+                    .map(|pending| pending.mesh.retained_bytes())
                     .sum::<usize>();
                 let edit_logical_bytes = engine.edits.borrow().logical_bytes();
                 let stream_interest = engine.cinder_stream_interest.get();
@@ -3108,6 +4724,8 @@ mod web {
                     enclosed_view.required as f32,
                     enclosed_view_renderable as f32,
                     enclosed_view_owned as f32,
+                    render.lod_incomplete_transition_edges as f32,
+                    engine.frame_sequence.get() as f32,
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);
                 engine.frame_history.borrow_mut().drain_into(&mut values);
@@ -3215,14 +4833,17 @@ mod web {
             stream_velocity_lookahead_seconds: streaming.priority.velocity_lookahead_seconds,
             stream_view_cone_half_angle_degrees: streaming.priority.view_cone_half_angle_degrees,
             stream_enclosed_view_distance_metres: streaming.priority.enclosed_view_distance_metres,
-            stream_enclosed_view_ray_radius_metres: streaming
-                .priority
-                .enclosed_view_ray_radius_metres,
-            stream_enclosed_view_threshold: streaming.priority.enclosed_view_threshold,
             surface_load_radius_tiles: streaming
                 .surface
                 .load_radius_tiles
                 .map(|radius| radius as i32),
+            surface_fast_travel_min_cross_radius_tiles: streaming
+                .surface
+                .fast_travel_min_cross_radius_tiles
+                .map(|radius| radius as i32),
+            surface_fast_travel_full_rate_tiles_per_second: streaming
+                .surface
+                .fast_travel_full_rate_tiles_per_second,
             surface_retain_margin_tiles: streaming.surface.retention_margin_tiles as i32,
             enclosure_probe_interval_ms: f64::from(diagnostics.enclosure_probe_interval_ms),
             enclosure_probe_distance_metres: diagnostics.enclosure_probe_distance_metres,
@@ -3247,6 +4868,10 @@ mod web {
                 spectator_available: false,
             },
             view_distance_metres: rendering.view_distance_metres,
+            lod_boundary_half_extents_voxels: rendering
+                .geometry_lod
+                .boundary_half_extents_voxels
+                .map(|extent| extent as i32),
             directional_shadows: DirectionalShadowConfig {
                 vertical_fov_radians: rendering.shadows.vertical_fov_radians,
                 near_plane: rendering.shadows.near_plane,
@@ -3286,13 +4911,26 @@ mod web {
         let edits = EditMap::default();
         let spawn = opened.spawn;
         let resume = opened.player_resume;
-        let camera = crate::camera_from_resume_values([
+        let mut camera = crate::camera_from_resume_values([
             resume.eye_position_metres[0],
             resume.eye_position_metres[1],
             resume.eye_position_metres[2],
             resume.look_yaw_radians,
             resume.look_pitch_radians,
         ]);
+        let spectator = runtime.spectator;
+        if !camera.set_spectator_flight_config(SpectatorFlightConfig {
+            initial_speed_metres_per_second: spectator.initial_speed_metres_per_second,
+            maximum_speed_metres_per_second: spectator.maximum_speed_metres_per_second,
+            acceleration_metres_per_second_squared: spectator
+                .acceleration_metres_per_second_squared,
+            direction_response_per_second: spectator.direction_response_per_second,
+            stopping_response_per_second: spectator.stopping_response_per_second,
+        }) {
+            return Err(JsValue::from_str(
+                "validated spectator flight configuration was rejected by simulation",
+            ));
+        }
         let presence =
             RemotePresenceClient::start(world_transport, client_config.multiplayer, &opened)
                 .map_err(|error| JsValue::from_str(&format!("connect player presence: {error}")))?;
@@ -3332,6 +4970,7 @@ mod web {
         let engine = Rc::new(Engine {
             config: engine_config,
             renderer: RefCell::new(renderer),
+            viewport_size: Cell::new([width, height]),
             camera: RefCell::new(camera),
             spectator_body: Cell::new(None),
             input: RefCell::new(InputState::default()),
@@ -3345,11 +4984,18 @@ mod web {
             edit_revisions: RefCell::new(AuthoritativeEditRevisions::default()),
             scheduler: RefCell::new(scheduler),
             chunks: RefCell::new(BTreeMap::new()),
+            chunk_portals: RefCell::new(BTreeMap::new()),
             chunk_halos: RefCell::new(BTreeMap::new()),
             pending_meshes: RefCell::new(BTreeMap::new()),
+            pending_uploads: RefCell::new(BTreeMap::new()),
+            canonical_publications: RefCell::new(VecDeque::new()),
+            binary_mesh_scratch: RefCell::new(BinaryMeshScratch::default()),
             surface_focus: Cell::new(None),
+            surface_cross_radii: Cell::new(engine_config.surface_load_radius_tiles),
+            surface_motion_axis: Cell::new([0, 0]),
             surface_resident: RefCell::new(BTreeSet::new()),
             surface_chunk_hints: RefCell::new(BTreeMap::new()),
+            surface_exact_detail_chunks: RefCell::new(BTreeMap::new()),
             surface_revisions: RefCell::new(SurfaceRevisionCache::new()),
             surface_accepted_edit_revisions: RefCell::new(BTreeMap::new()),
             surface_queue: RefCell::new(VecDeque::new()),
@@ -3467,21 +5113,6 @@ mod web {
         let voxel_z = (position.z / VOXEL_SIZE_METRES).floor() as i32;
         SurfaceTileCoord::containing(level, voxel_x, voxel_z)
     }
-
-    fn surface_tile_in_coverage(
-        coord: SurfaceTileCoord,
-        focus: Option<[SurfaceTileCoord; SURFACE_LOD_LEVEL_COUNT]>,
-        load_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
-    ) -> bool {
-        let Some(focus) = focus else {
-            return false;
-        };
-        let index = coord.level.index() as usize;
-        let center = focus[index];
-        let dx = (coord.x - center.x).abs();
-        let dz = (coord.z - center.z).abs();
-        dx.max(dz) <= load_radius_tiles[index]
-    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -3490,7 +5121,34 @@ pub use web::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn portal_mask(open_faces: &[usize]) -> ChunkPortalMask {
+        let mut faces = 0_u8;
+        let mut face_cells = [[0_u64; CHUNK_FACE_WORDS]; 6];
+        for face in open_faces {
+            faces |= 1 << face;
+            face_cells[*face].fill(u64::MAX);
+        }
+        ChunkPortalMask {
+            voxel_components: vec![1; voxels_world::CHUNK_EDGE.pow(3)].into_boxed_slice(),
+            component_faces: vec![0, faces],
+            component_face_cells: vec![[[0; CHUNK_FACE_WORDS]; 6], face_cells],
+        }
+    }
+
+    fn straight_tunnel_portals(
+        min_z: i32,
+        max_z: i32,
+    ) -> BTreeMap<(i32, i32, i32), ChunkPortalMask> {
+        (min_z..=max_z)
+            .map(|z| ((0, 1, z), portal_mask(&[4, 5])))
+            .collect()
+    }
+
+    fn test_view_cone_tangent() -> f32 {
+        viewport_view_cone_tangent(55.0, CAMERA_VERTICAL_FOV_RADIANS, 1_920, 1_080).unwrap()
+    }
 
     #[test]
     fn server_resume_values_are_sanitized_before_use() {
@@ -3582,33 +5240,483 @@ mod tests {
     }
 
     #[test]
+    fn fast_spectator_flight_does_not_create_a_collision_critical_chunk_trail() {
+        let mut camera = CameraState::spawn(glam::Vec3::new(1.6, 80.0, 1.6));
+        let velocity = glam::Vec3::new(128.0, 20.0, -32.0);
+        assert_eq!(exact_streaming_velocity(&camera, velocity), velocity);
+
+        camera.set_locomotion(voxels_core::LocomotionMode::Spectator);
+        assert_eq!(
+            exact_streaming_velocity(&camera, velocity),
+            glam::Vec3::ZERO
+        );
+        let interest = movement_stream_interest(
+            camera.position,
+            exact_streaming_velocity(&camera, velocity),
+            2.5,
+        );
+        assert!(
+            interest.len() <= 8,
+            "bodyless flight must not spend exact-chunk urgency along its entire cruise path"
+        );
+        let visual_interest = movement_stream_interest(camera.position, velocity, 1.5);
+        assert!(
+            visual_interest.iter().any(|coord| coord.x >= 20),
+            "ordinary visual interest must still lead a fast spectator by several round trips"
+        );
+        assert!(
+            visual_interest.len() <= 192,
+            "visual lookahead must fit the scheduler's hard secondary-interest bound"
+        );
+
+        let led = predictive_stream_position(camera.position, velocity, 1.5, 12.8);
+        let horizontal_lead = glam::Vec2::new(led.x - camera.position.x, led.z - camera.position.z);
+        assert!((horizontal_lead.length() - 12.8).abs() < 0.001);
+        assert_eq!(led.y, camera.position.y);
+        assert_eq!(
+            predictive_stream_position(camera.position, glam::Vec3::ZERO, 1.5, 12.8),
+            camera.position
+        );
+    }
+
+    #[test]
+    fn fast_travel_reduces_only_surface_levels_crossed_faster_than_the_budget() {
+        let configured = [5, 5, 5, 5, 4, 5, 4, 4];
+        let minimum = [2, 2, 4, 5, 4, 5, 4, 4];
+        assert_eq!(
+            adaptive_surface_cross_radii(configured, minimum, 4.0, glam::Vec3::ZERO),
+            configured
+        );
+        assert_eq!(
+            adaptive_surface_cross_radii(configured, minimum, 4.0, glam::Vec3::new(8.0, 0.0, 0.0),),
+            configured,
+            "ordinary sprinting must retain the complete configured footprint"
+        );
+        assert_eq!(
+            adaptive_surface_cross_radii(
+                configured,
+                minimum,
+                4.0,
+                glam::Vec3::new(128.0, 0.0, 0.0),
+            ),
+            minimum
+        );
+    }
+
+    #[test]
+    fn fast_travel_surface_corridor_preserves_lead_while_narrowing_cross_track_work() {
+        assert_eq!(surface_motion_axis(glam::Vec3::ZERO), [0, 0]);
+        assert_eq!(surface_motion_axis(glam::Vec3::new(8.0, 0.0, 1.0)), [1, 0]);
+        assert_eq!(
+            surface_motion_axis(glam::Vec3::new(-3.0, 0.0, 5.0)),
+            [-1, 1]
+        );
+
+        assert!(surface_offset_in_coverage(5, 2, 5, 2, [1, 0]));
+        assert!(surface_offset_in_coverage(-5, 0, 5, 2, [1, 0]));
+        assert!(!surface_offset_in_coverage(0, 3, 5, 2, [1, 0]));
+
+        assert!(surface_offset_in_coverage(3, 3, 5, 2, [1, 1]));
+        assert!(!surface_offset_in_coverage(3, -3, 5, 2, [1, 1]));
+        assert!(surface_offset_in_coverage(5, 5, 5, 5, [0, 0]));
+    }
+
+    #[test]
+    fn fast_travel_uses_the_full_bounded_surface_lead() {
+        let position = glam::Vec3::new(10.0, 7.0, -4.0);
+        let ordinary =
+            predictive_surface_position(position, glam::Vec3::new(8.0, 0.0, 0.0), 1.5, 100.0, 25.6);
+        assert_eq!(ordinary, glam::Vec3::new(22.0, 7.0, -4.0));
+
+        let fast = predictive_surface_position(
+            position,
+            glam::Vec3::new(128.0, 0.0, 0.0),
+            1.5,
+            100.0,
+            25.6,
+        );
+        assert_eq!(fast, glam::Vec3::new(110.0, 7.0, -4.0));
+        assert_eq!(
+            predictive_surface_position(position, glam::Vec3::ZERO, 1.5, 100.0, 25.6,),
+            position
+        );
+    }
+
+    #[test]
+    fn fast_travel_surface_coverage_keeps_current_ground_and_forward_lead() {
+        let focus = SurfaceStreamFocus {
+            current: voxels_world::SurfaceLodLevel::ALL
+                .map(|level| voxels_world::SurfaceTileCoord::new(level, 0, 0)),
+            lead: voxels_world::SurfaceLodLevel::ALL
+                .map(|level| voxels_world::SurfaceTileCoord::new(level, 4, 0)),
+        };
+        let longitudinal = [5; voxels_world::SURFACE_LOD_LEVEL_COUNT];
+        let cross = [2; voxels_world::SURFACE_LOD_LEVEL_COUNT];
+        let tile = |x, z| {
+            voxels_world::SurfaceTileCoord::new(voxels_world::SurfaceLodLevel::Stride2, x, z)
+        };
+
+        assert!(surface_tile_in_coverage(
+            tile(-5, 0),
+            Some(focus),
+            longitudinal,
+            cross,
+            [1, 0],
+        ));
+        assert!(surface_tile_in_coverage(
+            tile(9, 0),
+            Some(focus),
+            longitudinal,
+            cross,
+            [1, 0],
+        ));
+        assert!(!surface_tile_in_coverage(
+            tile(0, 3),
+            Some(focus),
+            longitudinal,
+            cross,
+            [1, 0],
+        ));
+    }
+
+    #[test]
+    fn current_interactive_tiles_have_a_preemptive_surface_priority() {
+        let focus = SurfaceStreamFocus {
+            current: voxels_world::SurfaceLodLevel::ALL
+                .map(|level| voxels_world::SurfaceTileCoord::new(level, 7, -3)),
+            lead: voxels_world::SurfaceLodLevel::ALL
+                .map(|level| voxels_world::SurfaceTileCoord::new(level, 11, -3)),
+        };
+        assert_eq!(
+            surface_product_priority(focus.current[0], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
+            voxels_world::WorldProductPriority::ImmediateSurface
+        );
+        assert_eq!(
+            surface_product_priority(focus.lead[0], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
+            voxels_world::WorldProductPriority::ImmediateSurface
+        );
+        assert_eq!(
+            surface_product_priority(focus.current[4], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
+            voxels_world::WorldProductPriority::ImmediateSurface
+        );
+        assert_eq!(
+            surface_product_priority(focus.lead[4], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
+            voxels_world::WorldProductPriority::ImmediateSurface
+        );
+    }
+
+    #[test]
     fn enclosed_view_interest_reaches_beyond_the_surface_handoff() {
         let camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
-        let interest = enclosed_view_stream_interest(&camera, 32.0, 0.8, |_, _, _| false);
+        let portals = straight_tunnel_portals(-9, 0);
+        let interest =
+            enclosed_view_stream_interest(&camera, 32.0, test_view_cone_tangent(), &portals);
 
         assert!(
             interest.iter().any(|coord| coord.z <= -4),
-            "the exact corridor must cross the 9.6m canonical-to-surface handoff"
+            "the exact corridor must cross the 12.8m canonical-to-surface handoff"
         );
         assert!(
             interest.iter().any(|coord| coord.z <= -9),
             "the configured corridor must retain a terminator near 32m"
         );
         assert!(
-            interest.len() <= 96,
-            "sparse aperture rays must stay below the secondary-interest budget"
+            interest.len() <= 24,
+            "a straight portal corridor must stay well below the secondary-interest budget"
         );
     }
 
     #[test]
-    fn enclosed_view_interest_stops_at_nearby_canonical_walls() {
+    fn unknown_tunnel_frontier_is_opaque_until_its_exact_mesh_is_renderable() {
         let camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
-        let interest = enclosed_view_stream_interest(&camera, 32.0, 0.8, |_, _, z| z <= -16);
+        let current = voxels_world::ChunkCoord::new(0, 1, 0);
+        let neighbor = voxels_world::ChunkCoord::new(0, 1, -1);
+        let portals = BTreeMap::from([((0, 1, 0), portal_mask(&[4, 5]))]);
+        let plan = enclosed_view_stream_plan(&camera, 32.0, test_view_cone_tangent(), &portals);
+
+        assert!(plan.chunks.contains(&neighbor));
+        let caps = exact_volume_frontier_faces(&plan.frontiers, |coord| coord == current);
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].chunk, current);
+        assert_eq!(caps[0].face, 4);
+        assert!(caps[0].cells.iter().any(|word| *word != 0));
+
+        let settled = exact_volume_frontier_faces(&plan.frontiers, |coord| {
+            coord == current || coord == neighbor
+        });
+        assert!(
+            settled.is_empty(),
+            "the conservative wall must disappear when the exact neighbor owns the opening"
+        );
+    }
+
+    #[test]
+    fn enclosed_view_interest_owns_nearby_occluders_without_streaming_behind_them() {
+        let camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
+        let portals = BTreeMap::from([
+            ((0, 1, 0), portal_mask(&[4, 5])),
+            ((0, 1, -1), portal_mask(&[])),
+        ]);
+        let interest =
+            enclosed_view_stream_interest(&camera, 32.0, test_view_cone_tangent(), &portals);
 
         assert!(
-            interest.is_empty(),
-            "a wall inside the canonical clearance span needs no distant volume"
+            !interest.is_empty(),
+            "a wall used to reject a view ray must remain an exact render owner"
         );
+        assert!(
+            interest.iter().all(|coord| coord.z >= -1),
+            "a nearby wall must stop exact-volume interest from extending behind it"
+        );
+    }
+
+    #[test]
+    fn enclosed_view_interest_stays_complete_across_the_visible_heading_range() {
+        let mut camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
+        let portals = straight_tunnel_portals(-6, 2);
+        let first =
+            enclosed_view_stream_interest(&camera, 24.0, test_view_cone_tangent(), &portals);
+
+        camera.yaw += 0.55;
+        let turned =
+            enclosed_view_stream_interest(&camera, 24.0, test_view_cone_tangent(), &portals);
+
+        for z in -6..=0 {
+            let coord = voxels_world::ChunkCoord::new(0, 1, z);
+            assert!(first.contains(&coord));
+            assert!(
+                turned.contains(&coord),
+                "visible tunnel chunk {z} was revoked"
+            );
+        }
+    }
+
+    #[test]
+    fn enclosed_view_cone_covers_ultrawide_viewport_corners() {
+        let ultrawide =
+            viewport_view_cone_tangent(55.0, CAMERA_VERTICAL_FOV_RADIANS, 3_440, 1_440).unwrap();
+        let vertical = (CAMERA_VERTICAL_FOV_RADIANS * 0.5).tan();
+        let horizontal = vertical * (3_440.0 / 1_440.0);
+        let viewport_corner = vertical.hypot(horizontal);
+
+        assert!(
+            ultrawide >= viewport_corner,
+            "the circular portal cone must enclose every viewport corner"
+        );
+        assert!(
+            ultrawide > 55.0_f32.to_radians().tan(),
+            "a fixed 55 degree cone clips an ultrawide viewport"
+        );
+        assert!(viewport_view_cone_tangent(55.0, CAMERA_VERTICAL_FOV_RADIANS, 0, 1_440).is_none());
+    }
+
+    #[test]
+    fn tall_cavern_keeps_exact_view_interest_without_lighting_enclosure() {
+        let camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
+        let mut portals = straight_tunnel_portals(-6, 0);
+        portals.insert((0, 1, 0), portal_mask(&[3, 4, 5]));
+        for y in 2..=5 {
+            portals.insert((0, y, 0), portal_mask(&[2, 3]));
+        }
+        portals.insert((0, 6, 0), portal_mask(&[]));
+
+        let interest =
+            enclosed_view_stream_interest(&camera, 32.0, test_view_cone_tangent(), &portals);
+
+        assert!(
+            interest.contains(&voxels_world::ChunkCoord::new(0, 1, -6)),
+            "a ceiling more than the 12m lighting-probe distance above the camera must not disable exact cavern geometry"
+        );
+    }
+
+    #[test]
+    fn broad_portal_to_open_sky_does_not_flood_the_view_cone() {
+        let camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
+        let mut portals = BTreeMap::new();
+        for y in 1..=11 {
+            portals.insert((0, y, 0), portal_mask(&[2, 3, 4, 5]));
+            portals.insert((0, y, -1), portal_mask(&[4, 5]));
+        }
+
+        let interest =
+            enclosed_view_stream_interest(&camera, 32.0, test_view_cone_tangent(), &portals);
+
+        assert!(
+            interest.iter().all(|coord| coord.x == 0 && coord.z == 0),
+            "an outdoor proof may retain its narrow probe column but must never flood the view cone"
+        );
+        assert!(interest.len() <= 11);
+    }
+
+    #[test]
+    fn enclosed_view_interest_does_not_follow_connected_air_behind_the_camera() {
+        let mut camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
+        camera.yaw = std::f32::consts::PI;
+        let portals = straight_tunnel_portals(-9, 0);
+        let interest =
+            enclosed_view_stream_interest(&camera, 32.0, test_view_cone_tangent(), &portals);
+
+        assert!(interest.iter().all(|coord| coord.z >= 0));
+    }
+
+    #[test]
+    fn enclosed_view_interest_keeps_shallow_tunnels_separate_from_sky_in_the_same_chunk() {
+        let split_portals = |coord| {
+            let mut chunk = voxels_world::Chunk::filled(coord, voxels_world::Material::Stone);
+            for z in 0..voxels_world::CHUNK_EDGE {
+                chunk.set(16, 16, z, voxels_world::Material::Air);
+            }
+            for z in 0..voxels_world::CHUNK_EDGE {
+                for x in 0..voxels_world::CHUNK_EDGE {
+                    chunk.set(
+                        x,
+                        voxels_world::CHUNK_EDGE - 1,
+                        z,
+                        voxels_world::Material::Air,
+                    );
+                }
+            }
+            ChunkPortalMask::from_chunk(&chunk)
+        };
+        let current = split_portals(voxels_world::ChunkCoord::new(0, 0, 0));
+        assert_ne!(
+            current.component_at(16, 16, 0),
+            current.component_at(16, voxels_world::CHUNK_EDGE - 1, 0),
+            "the tunnel and outdoor layer must remain separate portal components"
+        );
+        let portals = BTreeMap::from([
+            ((0, 0, 0), current),
+            (
+                (0, 0, -1),
+                split_portals(voxels_world::ChunkCoord::new(0, 0, -1)),
+            ),
+            ((1, 0, -1), portal_mask(&[0, 1, 4, 5])),
+        ]);
+        let camera = CameraState::spawn(glam::Vec3::new(1.65, 1.65, 1.65));
+
+        let interest =
+            enclosed_view_stream_interest(&camera, 32.0, test_view_cone_tangent(), &portals);
+
+        assert!(interest.contains(&voxels_world::ChunkCoord::new(0, 0, -1)));
+        assert!(interest.contains(&voxels_world::ChunkCoord::new(0, 0, -2)));
+        assert!(
+            !interest.contains(&voxels_world::ChunkCoord::new(1, 0, -1)),
+            "outdoor air sharing the chunk must not widen the tunnel component into the sky"
+        );
+    }
+
+    #[test]
+    fn enclosed_view_interest_does_not_turn_up_a_shaft_outside_the_view_cone() {
+        let coord = voxels_world::ChunkCoord::new(0, 0, 0);
+        let mut chunk = voxels_world::Chunk::filled(coord, voxels_world::Material::Stone);
+        for z in 0..voxels_world::CHUNK_EDGE {
+            chunk.set(16, 16, z, voxels_world::Material::Air);
+        }
+        for y in 16..voxels_world::CHUNK_EDGE {
+            chunk.set(16, y, 16, voxels_world::Material::Air);
+        }
+        let portals = BTreeMap::from([
+            ((0, 0, 0), ChunkPortalMask::from_chunk(&chunk)),
+            ((0, 1, 0), portal_mask(&[2, 3])),
+        ]);
+        let camera = CameraState::spawn(glam::Vec3::new(1.65, 1.65, 1.65));
+
+        let interest =
+            enclosed_view_stream_interest(&camera, 32.0, test_view_cone_tangent(), &portals);
+
+        assert!(interest.contains(&voxels_world::ChunkCoord::new(0, 0, -1)));
+        assert!(
+            !interest.contains(&voxels_world::ChunkCoord::new(0, 1, 0)),
+            "a connected shaft above the camera must not redirect a forward tunnel view"
+        );
+    }
+
+    #[test]
+    fn chunk_portals_require_matching_air_cells() {
+        let mut current = voxels_world::Chunk::filled(
+            voxels_world::ChunkCoord::new(0, 0, 0),
+            voxels_world::Material::Stone,
+        );
+        let mut neighbor = voxels_world::Chunk::filled(
+            voxels_world::ChunkCoord::new(0, 0, -1),
+            voxels_world::Material::Stone,
+        );
+        current.set(4, 7, 0, voxels_world::Material::Air);
+        neighbor.set(
+            5,
+            7,
+            voxels_world::CHUNK_EDGE - 1,
+            voxels_world::Material::Air,
+        );
+        let current = ChunkPortalMask::from_chunk(&current);
+        let mismatched = ChunkPortalMask::from_chunk(&neighbor);
+        let tunnel_component = current.component_at(4, 7, 0);
+        let visible = [u64::MAX; CHUNK_FACE_WORDS];
+        assert!(
+            current
+                .connected_neighbor_components(tunnel_component, 4, &mismatched, &visible)
+                .is_empty()
+        );
+
+        neighbor.set(
+            4,
+            7,
+            voxels_world::CHUNK_EDGE - 1,
+            voxels_world::Material::Air,
+        );
+        let matching = ChunkPortalMask::from_chunk(&neighbor);
+        assert!(
+            !current
+                .connected_neighbor_components(tunnel_component, 4, &matching, &visible)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn incremental_portals_label_an_interior_tunnel_when_it_reaches_a_boundary() {
+        let coord = voxels_world::ChunkCoord::new(0, 0, 0);
+        let mut chunk = voxels_world::Chunk::filled(coord, voxels_world::Material::Stone);
+        let mut mask = ChunkPortalMask::from_chunk(&chunk);
+        let interior = (8..16).map(|z| [16, 16, z]).collect::<Vec<_>>();
+        for &[x, y, z] in &interior {
+            chunk.set(x, y, z, voxels_world::Material::Air);
+        }
+        mask.add_non_occluding_voxels(&chunk, &interior);
+        assert_eq!(mask.component_at(16, 16, 8), 0);
+
+        let opening = (0..8).map(|z| [16, 16, z]).collect::<Vec<_>>();
+        for &[x, y, z] in &opening {
+            chunk.set(x, y, z, voxels_world::Material::Air);
+        }
+        mask.add_non_occluding_voxels(&chunk, &opening);
+
+        let component = mask.component_at(16, 16, 0);
+        assert_ne!(component, 0);
+        assert_eq!(mask.component_at(16, 16, 15), component);
+        assert!(mask.component_opens_face(component, 4));
+    }
+
+    #[test]
+    fn incremental_portals_merge_components_joined_by_digging() {
+        let coord = voxels_world::ChunkCoord::new(0, 0, 0);
+        let mut chunk = voxels_world::Chunk::filled(coord, voxels_world::Material::Stone);
+        for x in 0..15 {
+            chunk.set(x, 16, 16, voxels_world::Material::Air);
+        }
+        for x in 16..voxels_world::CHUNK_EDGE {
+            chunk.set(x, 16, 16, voxels_world::Material::Air);
+        }
+        let mut mask = ChunkPortalMask::from_chunk(&chunk);
+        assert_ne!(mask.component_at(0, 16, 16), mask.component_at(31, 16, 16));
+
+        chunk.set(15, 16, 16, voxels_world::Material::Air);
+        mask.add_non_occluding_voxels(&chunk, &[[15, 16, 16]]);
+
+        let component = mask.component_at(0, 16, 16);
+        assert_ne!(component, 0);
+        assert_eq!(mask.component_at(31, 16, 16), component);
+        assert!(mask.component_opens_face(component, 0));
+        assert!(mask.component_opens_face(component, 1));
     }
 
     #[test]
@@ -3641,6 +5749,24 @@ mod tests {
             truncated_column
                 .into_iter()
                 .all(|coord| { !ready.contains(&(coord.x, coord.y, coord.z)) })
+        );
+    }
+
+    #[test]
+    fn pending_portal_frontier_does_not_revoke_ready_tunnel_sibling() {
+        let visible_wall = voxels_world::ChunkCoord::new(69, 42, 137);
+        let pending_frontier = voxels_world::ChunkCoord::new(69, 43, 137);
+        let interest = [visible_wall, pending_frontier];
+        let renderable = BTreeSet::from([visible_wall]);
+
+        let active =
+            renderable_exact_interest_chunks(&interest, |coord| renderable.contains(&coord));
+
+        assert_eq!(active, BTreeSet::from([(69, 42, 137)]));
+        assert!(
+            complete_renderable_interest_columns(&interest, |coord| renderable.contains(&coord))
+                .is_empty(),
+            "the surface-column rule reproduces the tunnel flicker when one Y sibling is pending"
         );
     }
 

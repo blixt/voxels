@@ -8,6 +8,69 @@ Performance changes must keep a reproducible before/after number beside the arch
 the change. Native Criterion results are stable microbenchmarks for portable Rust algorithms; browser
 World Lab and `window.__VOXELS__.snapshot()` cover integrated frame pacing and residency.
 
+## 2026-07-22: watertight LOD fidelity and view-invariant ownership
+
+The browser LOD gate now sweeps five geometric boundary policies in one deterministic Terrain
+Diffusion world. It captures the `uniform-150` policy first as the high-detail reference, keeps the
+world/camera/browser fixed, and compares three registered headings per policy. Linear-light SSIM is
+paired with exact diagnostic-sky masks, including an asymmetric count of pixels present in the
+reference but absent from the candidate. This prevents a high average score from hiding a vanished
+tree crown, terrain wall, or overhang.
+
+The measured default is the nonlinear eight-boundary sequence below (canonical voxel half extents):
+
+```text
+192, 480, 960, 1920, 3840, 6144, 12288, 24576
+```
+
+The forest reaches diminishing returns one step earlier: `uniform-125` has SSIM 0.999993 and zero
+silhouette or missing-reference pixels; `uniform-150` gains only 0.000007 SSIM. The valley remains the
+deciding arena. There, the final step removes the remaining 0.000179 silhouette disagreement and
+0.0000368 missing-reference fraction for 0.131 ms world-GPU p95. A near-biased profile did not improve
+the valley over `uniform-125`, so production retains one evidence-backed policy rather than an
+arena-specific heuristic.
+
+Current release results used Chrome 150, native Terrain Diffusion/Metal, and a 1500x1000 CSS viewport
+at DPR 2 (3000x2000 physical pixels):
+
+| Arena / policy       | Worst SSIM | Mask disagreement | Reference geometry missing | Frame p95 | Total GPU p95 |
+| -------------------- | ---------: | ----------------: | -------------------------: | --------: | ------------: |
+| Forest / uniform-125 |   0.999993 |                 0 |                          0 |    9.4 ms |       5.70 ms |
+| Forest / uniform-150 |   1.000000 |                 0 |                          0 |    9.7 ms |       5.90 ms |
+| Valley / uniform-125 |   0.999076 |          0.000179 |                  0.0000368 |    8.6 ms |       5.83 ms |
+| Valley / uniform-150 |   1.000000 |                 0 |                          0 |    8.7 ms |       5.83 ms |
+
+An adversarial look-away/look-back test originally found one reproducible 11,466-pixel connected
+region missing from the first forest frame. Telemetry showed that the short aim/edit prefetch ray was
+incorrectly participating in canonical surface-cut ownership: turning queued one to three chunks,
+changed the selected-slice fingerprint, and replaced one large greedy parent quad when the exact
+chunk arrived. Surface ownership now follows only support and intended movement. The aim corridor
+remains collision-critical for interaction, but completing it no longer changes quad count, selected
+slices, or the viewport fingerprint. The same three first-presented/settled comparisons now have
+zero missing pixels and identical geometry masks, even while aim-prefetch jobs are outstanding.
+
+Independent seam and tunnel gates at the same 3000x2000 framebuffer reported:
+
+- ten moving LOD captures with 2,995,200 sampled ground pixels each and zero diagnostic-sky pixels;
+  frame p95 9.4 ms, total GPU p95 5.83 ms, and no frame over 16.67 ms;
+- five static watertight headings with zero diagnostic-sky pixels;
+- a 48-step dug tunnel followed by a 12.06 m step-back and 41-heading sweep with zero sky leaks;
+  all 10 terminator chunks resident, renderable, and exact-owned; underground frame p95 9.8 ms and
+  total GPU p95 5.37 ms.
+
+The renderer keeps the last complete surface cut active while the next patch selection and exact
+connectors build incrementally. Sparse underground membership changes no longer start global surface
+transitions. Surface completion is bounded per frame, and exact tunnel visibility follows the
+camera's connected air component rather than sparse crosshair rays. These are ownership invariants,
+not post-hoc hole covers: incomplete replacement geometry never becomes authoritative.
+
+The retained reports are under:
+
+- `target/automation/lod-fidelity/2026-07-22T02-46-53-441Z-0f4db77d/` (forest, full clean-tree measurement);
+- `target/automation/lod-fidelity/2026-07-22T02-30-13-171Z-d758ccc2/` (valley);
+- `target/automation/lod-transition/2026-07-22T02-04-35-293Z-b4aced18/` (moving handoff);
+- `target/automation/digging/2026-07-22T02-32-16-601Z-1a456018/` (tunnel).
+
 ## 2026-07-20: two-minute cold-frontier exploration
 
 The directional browser profile now runs for a configurable 60–600 seconds, with 120 seconds as the

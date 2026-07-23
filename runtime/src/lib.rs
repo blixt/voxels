@@ -842,6 +842,17 @@ impl StreamScheduler {
     /// The configured vertical span is included so the renderer can activate every counted X/Z
     /// column atomically and collision never begins against missing data.
     pub fn vicinity_readiness(&self, radius_chunks: i32) -> VicinityReadiness {
+        self.vicinity_readiness_at(self.focus, radius_chunks)
+    }
+
+    /// Reports complete uploaded coverage around an explicit world-space chunk. This differs from
+    /// [`Self::vicinity_readiness`] when streaming deliberately leads its scheduling focus ahead of
+    /// a fast camera; gameplay and diagnostics can still ask about the camera's actual vicinity.
+    pub fn vicinity_readiness_at(
+        &self,
+        focus: ChunkCoord,
+        radius_chunks: i32,
+    ) -> VicinityReadiness {
         if !self.focus_initialized || radius_chunks < 0 {
             return VicinityReadiness::default();
         }
@@ -856,9 +867,9 @@ impl StreamScheduler {
                 }
                 for dy in -self.config.vertical_radius_chunks..=self.config.vertical_radius_chunks {
                     let (Some(x), Some(y), Some(z)) = (
-                        self.focus.x.checked_add(dx),
-                        self.focus.y.checked_add(dy),
-                        self.focus.z.checked_add(dz),
+                        focus.x.checked_add(dx),
+                        focus.y.checked_add(dy),
+                        focus.z.checked_add(dz),
                     ) else {
                         continue;
                     };
@@ -976,11 +987,16 @@ impl StreamScheduler {
         }
         candidates.sort_by_key(|coord| priority(focus, *coord));
         candidates.truncate(self.config.max_tracked_chunks);
+        let mut candidate_keys = candidates
+            .iter()
+            .copied()
+            .map(coord_key)
+            .collect::<BTreeSet<_>>();
         for coord in &self.secondary_interest {
             if candidates.len() == self.config.max_tracked_chunks {
                 break;
             }
-            if !candidates.contains(coord) {
+            if candidate_keys.insert(coord_key(*coord)) {
                 candidates.push(*coord);
             }
         }
@@ -1098,32 +1114,20 @@ fn normalized_interest(
     interest: &[ChunkCoord],
     limit: usize,
 ) -> (Vec<ChunkCoord>, usize) {
-    let mut normalized = Vec::with_capacity(interest.len().min(limit));
-    let mut truncated = 0usize;
-    for coord in interest.iter().copied() {
-        if !coord.is_world_representable() {
-            continue;
-        }
-        if normalized.contains(&coord) {
-            continue;
-        }
-        if normalized.len() < limit {
-            normalized.push(coord);
-            continue;
-        }
-        let farthest = normalized
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, candidate)| priority(focus, **candidate))
-            .map(|(index, _)| index);
-        if let Some(farthest) = farthest
-            && priority(focus, coord) < priority(focus, normalized[farthest])
-        {
-            normalized[farthest] = coord;
-        }
-        truncated = truncated.saturating_add(1);
-    }
+    let unique = interest
+        .iter()
+        .copied()
+        .filter(|coord| coord.is_world_representable())
+        .map(coord_key)
+        .collect::<BTreeSet<_>>();
+    let mut normalized = unique
+        .iter()
+        .copied()
+        .map(coord_from_key)
+        .collect::<Vec<_>>();
     normalized.sort_unstable_by_key(|coord| priority(focus, *coord));
+    let truncated = normalized.len().saturating_sub(limit);
+    normalized.truncate(limit);
     (normalized, truncated)
 }
 
