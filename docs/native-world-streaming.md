@@ -65,9 +65,10 @@ Rust enum layout and Serde output are not wire formats.
    residency bound, quality level, or bandwidth ceiling.
 5. Each successful near item carries the existing palette/bit-packed VXCH chunk plus an exact,
    palette/bit-packed meshing halo. Both are integrity checked before meshing.
-6. Surface meshes use a separate `VXST` v9 payload containing bounded terrain, water, patch
+6. Surface meshes use a separate `VXST` v10 payload containing bounded terrain, water, patch
    boundary-face ranges, exact-chunk-tagged vertical fallback spans, explicit parent-height morph
-   closures, child/parent shading-height grids, and compact cardinal landscape-horizon profiles.
+   closures, child/parent shading-height grids, compact cardinal landscape-horizon profiles, and
+   bounded sparse exact-detail chunk hints for edited topology that a heightfield cannot preserve.
    Interactive and horizon ownership activate at their own complete-level boundaries; the coarse
    parent remains resident until its replacement is complete, and tagged vertical fallback remains
    resident until its one exact 3D chunk is renderable. The renderer derives exact height-matched
