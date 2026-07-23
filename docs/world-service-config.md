@@ -120,9 +120,9 @@ pillar_material = "Stone"
 
 [terrain_diffusion]
 precision = "float16"
-world_origin_voxels = [-76800, -76800]
+world_origin_voxels = [-72600, -83700]
 horizontal_scale = 1
-latent_window = [-2, -1]
+latent_window = [-2, -2]
 quality_histogram = [0.0, 0.0, 0.0, 1.0, 1.5]
 sea_level_voxels = 52
 # model_cache = "/an/optional/cache/root"
@@ -197,13 +197,15 @@ protocol negotiation.
 corner. `horizontal_scale = 1` maps each native 30 m model pixel across 30 m of world space. This
 preserves physical slopes because canonical voxels have a fixed 10 cm size; Minecraft's recommended
 scale changes both axes through the size represented by one cubic block.
-`[-76800, -76800]` therefore centers the 15.36 km tile on the default `[0, 0]` spawn and leaves room
-for the exact one-voxel meshing halo around spawn. The server validates the actual spawn chunk at startup.
+The checked-in `[-72600, -83700]` placement puts the default `[0, 0]` spawn on a gently sloped
+159.7 m shelf about 630 m from connected sea, with mountains, valleys, and fjord-like inlets in the
+same tile. The server validates the actual spawn chunk at startup.
 `latent_window` is the Terrain Diffusion latent-window row/column used to key spatial sampling and
 noise. Each step advances 32 latent pixels, or 7.68 km for the 30 m checkpoint.
-The checked-in `[-2, -1]` window is a fixed, reproducible showcase start for the checked-in seed: it
-puts the spawn on land amid the rugged fjord and plateau structure learned by the model. Runtime
-generation never searches for or substitutes a more dramatic window.
+The checked-in `[-2, -2]` window is a fixed, reproducible showcase start for the checked-in seed. Its
+decoded tile is 88.4% land, has 161.1 m of 90th-percentile relief per 960 m window, 25.3-degree
+90th-percentile slopes, and 6.72 km of connected-sea inlet reach. Runtime generation never searches
+for or substitutes a more dramatic window.
 `quality_histogram` is the five-bin learned terrain-quality conditioning vector. The checked-in
 `[0, 0, 0, 1, 1.5]` preset is the upstream showcase setting and favors the two highest-rated bins;
 all zeros selects the unsteered checkpoint default.

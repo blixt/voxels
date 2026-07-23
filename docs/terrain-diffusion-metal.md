@@ -117,15 +117,18 @@ client.
   an aridity estimate before publishing normalized climate. Infinite overlap blending remains future
   work and is source-identity versioned when added.
 - The canonical composer adds a deterministic, source-identity-bound subgrid relief signal after
-  model inference. Its amplitude follows physical presented slope and stays below 6 m even on steep
-  terrain, so it breaks up 30 m bilinear planes without replacing the learned macro shape. Climate,
-  altitude, slope, and coherent geology choose biome surfaces and shallow/deep strata. Chunks,
-  collision blocks, edited surfaces, and far LODs all use the same composition function.
+  model inference. It is pinned to zero at every learned 30 m sample, so it breaks up bilinear planes
+  without moving any elevation actually supplied by the model. Its slope-aware 60 m, 17 m, 3.7 m,
+  and 1.9 m bands add metre-to-submetre structure while bounding adjacent 10 cm column steps.
+  Diffusion climate, altitude, and slope choose biome regions; coherent geology only chooses surface
+  rock and strata. Chunks, collision blocks, edited surfaces, and far LODs all use the same
+  composition function.
 
 `vp run automation -- run terrain-diffusion --mode=survey` compares coordinate-stable latent windows
-without changing runtime selection. The checked-in `[-2, -1]` window for seed `1592642302` is 88%
-land after decoding, places the centered spawn at roughly 132 m, and contains rugged fjord and
-plateau structure with about 115 m median relief per 960 m diagnostic block.
+without changing runtime selection. The checked-in `[-2, -2]` window for seed `1592642302` is 88.4%
+land after decoding and combines 161.1 m 90th-percentile relief per 960 m diagnostic block with
+6.72 km of connected-sea inlet reach. Its explicit world placement puts spawn on a 159.7 m,
+2.8-degree shelf rather than selecting a convenient point at runtime.
 `vp run automation -- run world-source` samples the configured tile and reports its height, climate,
 ridge, region, and material ranges. These are regression diagnostics rather than promises that every
 seed has the same histogram.
