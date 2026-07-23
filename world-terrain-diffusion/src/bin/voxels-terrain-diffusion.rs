@@ -764,8 +764,8 @@ fn find_spawn(
                         detail_model_origin[1] + column as i32,
                     ],
                     offset_metres: [
-                        ((row as i32 - center as i32) as f32 * resolution).round() as i32,
                         ((column as i32 - center as i32) as f32 * resolution).round() as i32,
+                        ((row as i32 - center as i32) as f32 * resolution).round() as i32,
                     ],
                     elevation_metres: elevation[index],
                     slope_degrees: slopes[index],
@@ -1013,6 +1013,38 @@ mod tests {
         assert_eq!(spawn.offset_metres, [0, 0]);
         assert!(spawn.score > 0.95);
         assert!(spawn.sea_distance_metres >= 700.0);
+    }
+
+    #[test]
+    fn spawn_offsets_are_reported_in_world_xz_order() {
+        let edge = 64;
+        let center = edge / 2;
+        let target_row = center + 4;
+        let target_column = center + 7;
+        let mut elevation = vec![-20.0_f32; edge * edge];
+        let slopes = vec![0.0_f32; edge * edge];
+        let mut sea = vec![true; edge * edge];
+        for row in target_row - 4..=target_row + 4 {
+            for column in target_column - 4..=target_column + 4 {
+                elevation[row * edge + column] = 80.0;
+                sea[row * edge + column] = false;
+            }
+        }
+
+        let spawn = find_spawn(
+            &elevation,
+            &slopes,
+            &grid_distance(&sea, edge),
+            edge,
+            30.0,
+            [100, 200],
+        );
+
+        assert_eq!(
+            spawn.model_coordinate,
+            [100 + target_row as i32, 200 + target_column as i32]
+        );
+        assert_eq!(spawn.offset_metres, [210, 120]);
     }
 
     #[test]

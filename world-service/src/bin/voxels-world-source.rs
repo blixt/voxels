@@ -4,8 +4,8 @@ compile_error!("voxels-world-source with terrain-metal requires macOS and Apple 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use voxels_world::{
-    SurfaceSampleBlockRequest, TreeSpecies, WorldProduct, WorldProductBatch, WorldProductPriority,
-    WorldProductRequest, WorldSourceEngine,
+    SurfaceRegion, SurfaceSampleBlockRequest, TreeSpecies, WorldProduct, WorldProductBatch,
+    WorldProductPriority, WorldProductRequest, WorldSourceEngine,
 };
 use voxels_world_service::{LoadedWorldServiceConfig, WorldSourceMode};
 
@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut moistures = Vec::with_capacity(result.items.len());
     let mut ridges = Vec::with_capacity(result.items.len());
     let mut materials = BTreeMap::<u16, usize>::new();
-    let mut regions = BTreeMap::<u8, usize>::new();
+    let mut regions = BTreeMap::<SurfaceRegion, usize>::new();
     for item in result.items {
         let WorldProduct::SurfaceSampleBlock(block) = item.result? else {
             return Err(
@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         moistures.push(sample.moisture);
         ridges.push(sample.ridge);
         *materials.entry(sample.material.id()).or_default() += 1;
-        *regions.entry(sample.region as u8).or_default() += 1;
+        *regions.entry(sample.region).or_default() += 1;
     }
 
     println!("config={}", config_path.display());
@@ -106,9 +106,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         maximum(&temperatures),
     );
     println!(
+        "sample_temperature_p05={:.3} sample_temperature_median={:.3} sample_temperature_p95={:.3}",
+        percentile(&temperatures, 0.05),
+        percentile(&temperatures, 0.50),
+        percentile(&temperatures, 0.95),
+    );
+    println!(
         "sample_moisture_min={:.3} sample_moisture_max={:.3}",
         minimum(&moistures),
         maximum(&moistures),
+    );
+    println!(
+        "sample_moisture_p05={:.3} sample_moisture_median={:.3} sample_moisture_p95={:.3}",
+        percentile(&moistures, 0.05),
+        percentile(&moistures, 0.50),
+        percentile(&moistures, 0.95),
     );
     println!(
         "sample_ridge_min={:.3} sample_ridge_max={:.3}",
@@ -117,6 +129,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("sample_material_histogram={materials:?}");
     println!("sample_region_histogram={regions:?}");
+    let sample_count = regions.values().sum::<usize>();
+    let entropy = regions
+        .values()
+        .map(|count| *count as f64 / sample_count as f64)
+        .map(|fraction| -fraction * fraction.ln())
+        .sum::<f64>();
+    let largest_region_fraction =
+        regions.values().copied().max().unwrap_or_default() as f64 / sample_count.max(1) as f64;
+    println!(
+        "sample_effective_regions={:.3} sample_largest_region_fraction={largest_region_fraction:.3}",
+        entropy.exp(),
+    );
+    let spawn = loaded.config().spawn.xz_voxels;
+    let spawn_result = source.generate_batch(WorldProductBatch {
+        priority: WorldProductPriority::CollisionCritical,
+        requests: vec![WorldProductRequest::SurfaceSampleBlock(
+            SurfaceSampleBlockRequest {
+                origin: spawn,
+                sample_shape: [1, 1],
+            },
+        )],
+    })?;
+    let spawn_item = spawn_result.items.into_iter().next().ok_or_else(|| {
+        std::io::Error::other("configured source returned no spawn sample result")
+    })?;
+    let WorldProduct::SurfaceSampleBlock(spawn_block) = spawn_item.result? else {
+        return Err(std::io::Error::other(
+            "configured source returned the wrong spawn sample product",
+        )
+        .into());
+    };
+    let spawn_sample = spawn_block
+        .samples()
+        .first()
+        .ok_or_else(|| std::io::Error::other("configured source returned an empty spawn sample"))?;
+    println!(
+        "spawn_xz_voxels={spawn:?} spawn_height_voxels={} spawn_temperature={:.3} spawn_moisture={:.3} spawn_slope={:.3} spawn_region={:?} spawn_material={:?}",
+        spawn_sample.height,
+        spawn_sample.temperature,
+        spawn_sample.moisture,
+        spawn_sample.ridge,
+        spawn_sample.region,
+        spawn_sample.material,
+    );
     if ecology_survey {
         print_ecology_survey(source.as_ref(), loaded.config().spawn.xz_voxels);
     }
@@ -212,4 +268,13 @@ fn minimum(values: &[f32]) -> f32 {
 
 fn maximum(values: &[f32]) -> f32 {
     values.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+}
+
+fn percentile(values: &[f32], fraction: f32) -> f32 {
+    let mut ordered = values.to_vec();
+    ordered.sort_by(f32::total_cmp);
+    let position = fraction * (ordered.len() - 1) as f32;
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    ordered[lower] + position.fract() * (ordered[upper] - ordered[lower])
 }
