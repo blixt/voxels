@@ -95,6 +95,11 @@ retention_margin_tiles = 1
 [rendering]
 view_distance_metres = 2400.0
 
+[rendering.geometry_lod]
+# Keep the evidence-backed geometric fidelity policy used by the release profiles. The outer
+# boundary remains inside the production view distance while every handoff stays patch-grid aligned.
+boundary_half_extents_voxels = [192, 480, 960, 1920, 3840, 6144, 12288, 24576]
+
 [rendering.shadows]
 vertical_fov_radians = 1.1868238 # 68 degrees
 near_plane = 0.05

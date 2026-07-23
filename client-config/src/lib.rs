@@ -808,6 +808,8 @@ mod tests {
     use super::*;
 
     const COMMITTED_CLIENT_CONFIG: &str = include_str!("../../config/client.toml");
+    const COMMITTED_PRODUCTION_CLIENT_CONFIG: &str =
+        include_str!("../../config/client.production.toml");
 
     fn valid_config() -> ClientConfig {
         ClientConfig {
@@ -949,6 +951,13 @@ mod tests {
             ClientConfig::from_toml(COMMITTED_CLIENT_CONFIG),
             Ok(valid_config())
         );
+    }
+
+    #[test]
+    fn committed_production_config_is_valid_after_session_authorization() {
+        let authorized = COMMITTED_PRODUCTION_CLIENT_CONFIG
+            .replace("session:/api/session", "valid-deployment-token");
+        assert!(ClientConfig::from_toml(&authorized).is_ok());
     }
 
     #[test]
