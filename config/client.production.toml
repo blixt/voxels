@@ -1,5 +1,5 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 32
+schema_version = 33
 
 [developer]
 # Enables local-only time/weather visualization overrides and server-authorized spectator mode.
@@ -67,13 +67,14 @@ collision_lookahead_seconds = 2.5
 # position for ordinary work. Complete surface-LOD levels stay spatially ordered because they
 # activate atomically.
 velocity_lookahead_seconds = 1.5
+# Minimum scheduling cone. Exact enclosed views expand this to cover the live viewport corners,
+# including ultrawide windows.
 view_cone_half_angle_degrees = 55.0
-# Underground views need exact volume beyond the ordinary 9.6 m canonical surface handoff:
-# heightfield LODs cannot represent a tunnel terminator. Five sparse rays extend only through
-# nearby canonical air, keeping this bounded while retaining solid end walls during camera motion.
+# Underground views need exact volume beyond the ordinary 12.8 m canonical surface handoff:
+# heightfield LODs cannot represent a tunnel terminator. Matching air cells on resident chunk faces
+# form a bounded portal graph, retaining visible cave branches and the solid walls that end them
+# throughout the expanded camera view instead of only along sparse crosshair rays.
 enclosed_view_distance_metres = 32.0
-enclosed_view_ray_radius_metres = 0.8
-enclosed_view_threshold = 0.65
 
 [streaming.frame_budget]
 generation = 2
