@@ -2691,12 +2691,9 @@ mod web {
                     .then_with(|| left.cmp(right))
             });
             chunks.dedup_by_key(|(_, chunk)| *chunk);
-            chunks.truncate(
-                self.scheduler
-                    .borrow()
-                    .config()
-                    .max_secondary_interest_chunks,
-            );
+            // Preserve the complete server-declared interest set here. The scheduler applies its
+            // own bounded request window, while readiness deliberately considers this full set so
+            // a truncated vertical column cannot replace its watertight surface fallback.
             chunks.into_iter().map(|(_, chunk)| chunk).collect()
         }
 

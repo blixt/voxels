@@ -3301,9 +3301,7 @@ fn validate_surface_exact_detail_chunks(
         ));
     }
     let [origin_x, origin_z] = terrain.coord.voxel_origin();
-    let span = i32::try_from(crate::SURFACE_TILE_EDGE_CELLS)
-        .map_err(|_| ProtocolError::InvalidPayload("invalid surface exact-detail bounds"))?
-        .saturating_mul(terrain.coord.stride_voxels());
+    let span = crate::SURFACE_TILE_EDGE_CELLS.saturating_mul(terrain.coord.stride_voxels());
     let edge = crate::CHUNK_EDGE as i32;
     let minimum_x = origin_x.div_euclid(edge);
     let minimum_z = origin_z.div_euclid(edge);
@@ -4956,6 +4954,16 @@ mod tests {
             encode_surface_snapshot(&snapshot),
             Err(ProtocolError::InvalidPayload(
                 "invalid surface exact-detail chunk"
+            ))
+        );
+
+        snapshot.exact_detail_chunks = (0..=MAX_SURFACE_EXACT_DETAIL_CHUNKS)
+            .map(|chunk_y| ChunkCoord::new(0, chunk_y as i32, 0))
+            .collect();
+        assert_eq!(
+            encode_surface_snapshot(&snapshot),
+            Err(ProtocolError::InvalidPayload(
+                "invalid surface exact-detail count"
             ))
         );
 

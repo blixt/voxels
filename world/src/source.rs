@@ -442,9 +442,7 @@ pub(crate) fn exact_detail_chunks_for_surface_tile(
         return Vec::new();
     }
     let [origin_x, origin_z] = coord.voxel_origin();
-    let span = i32::try_from(SURFACE_TILE_EDGE_CELLS)
-        .expect("surface tile edge fits i32")
-        .saturating_mul(coord.stride_voxels());
+    let span = SURFACE_TILE_EDGE_CELLS.saturating_mul(coord.stride_voxels());
     let chunk_edge = CHUNK_EDGE as i32;
     let minimum_x = origin_x.div_euclid(chunk_edge);
     let minimum_z = origin_z.div_euclid(chunk_edge);
