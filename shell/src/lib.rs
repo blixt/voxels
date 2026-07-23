@@ -712,6 +712,19 @@ struct EnclosedViewStreamPlan {
     frontiers: Vec<PortalFrontier>,
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn replace_portal_frontiers(
+    current: &mut Vec<PortalFrontier>,
+    replacement: &[PortalFrontier],
+) -> bool {
+    if current == replacement {
+        return false;
+    }
+    current.clear();
+    current.extend_from_slice(replacement);
+    true
+}
+
 /// Follows only broad upward portals far enough to distinguish a bounded cavern from open sky.
 ///
 /// This is deliberately independent of the lighting enclosure sample. A tall cavern can have an
@@ -1604,6 +1617,7 @@ mod web {
         portal_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         interaction_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         enclosed_view_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
+        enclosed_view_frontiers: RefCell<Vec<crate::PortalFrontier>>,
         surface_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         touch_inventory_drag: Cell<Option<[f32; 2]>>,
         profile: RefCell<ProfileAutomation>,
@@ -2150,6 +2164,10 @@ mod web {
             let enclosed_interest_start = performance_now(performance);
             let enclosed_view_plan = self.enclosed_view_stream_plan(camera);
             let enclosed_view_interest = &enclosed_view_plan.chunks;
+            let enclosed_view_frontiers_changed = crate::replace_portal_frontiers(
+                &mut self.enclosed_view_frontiers.borrow_mut(),
+                &enclosed_view_plan.frontiers,
+            );
             let enclosed_interest_ms =
                 (performance_now(performance) - enclosed_interest_start) as f32;
             let surface_interest_start = performance_now(performance);
@@ -2320,7 +2338,7 @@ mod web {
                     renderer.remove_chunk(eviction.coord);
                 }
             }
-            if focus_changed || uploaded || evicted {
+            if focus_changed || uploaded || evicted || enclosed_view_frontiers_changed {
                 self.reconcile_chunk_activation(
                     focus,
                     &collision_interest,
@@ -5030,6 +5048,7 @@ mod web {
             portal_active_chunks: RefCell::new(BTreeSet::new()),
             interaction_active_chunks: RefCell::new(BTreeSet::new()),
             enclosed_view_active_chunks: RefCell::new(BTreeSet::new()),
+            enclosed_view_frontiers: RefCell::new(Vec::new()),
             surface_active_chunks: RefCell::new(BTreeSet::new()),
             touch_inventory_drag: Cell::new(None),
             profile: RefCell::new(ProfileAutomation::with_config(ProfileConfig {
@@ -5448,6 +5467,29 @@ mod tests {
             settled.is_empty(),
             "the conservative wall must disappear when the exact neighbor owns the opening"
         );
+    }
+
+    #[test]
+    fn rotating_in_place_republishes_changed_portal_frontier_cells() {
+        let mut camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
+        let portals = BTreeMap::from([((0, 1, 0), portal_mask(&[4]))]);
+        let first = enclosed_view_stream_plan(&camera, 32.0, test_view_cone_tangent(), &portals);
+
+        camera.yaw += 0.35;
+        let turned = enclosed_view_stream_plan(&camera, 32.0, test_view_cone_tangent(), &portals);
+
+        assert_eq!(
+            first.chunks, turned.chunks,
+            "this regression requires unchanged scheduler interest"
+        );
+        assert_ne!(
+            first.frontiers, turned.frontiers,
+            "camera rotation must change the visible face-cell mask"
+        );
+        let mut published = first.frontiers;
+        assert!(replace_portal_frontiers(&mut published, &turned.frontiers));
+        assert_eq!(published, turned.frontiers);
+        assert!(!replace_portal_frontiers(&mut published, &turned.frontiers));
     }
 
     #[test]
