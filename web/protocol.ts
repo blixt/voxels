@@ -71,6 +71,7 @@ export type ToWorker =
     }
   | { kind: "materialDetail"; requestId: number; enabled: boolean }
   | { kind: "lodBoundaries"; requestId: number; halfExtentsVoxels: number[] }
+  | { kind: "exactVolumePresented"; requestId: number; x: number; y: number; z: number }
   | { kind: "snapshot"; requestId: number }
   | {
       kind: "submitPlace";
@@ -105,6 +106,7 @@ export type FromWorker =
   | { kind: "diagnosticSky"; requestId: number; active: boolean }
   | { kind: "materialDetail"; requestId: number; accepted: boolean }
   | { kind: "lodBoundaries"; requestId: number; accepted: boolean }
+  | { kind: "exactVolumePresented"; requestId: number; presented: boolean }
   | { kind: "submitPlace"; requestId: number; submitted: boolean }
   | { kind: "submitDig"; requestId: number; submitted: boolean }
   | { kind: "inventory"; requestId: number; values: number[] }

@@ -6,8 +6,8 @@
 use crate::generation::Generator;
 use crate::{
     ATLAS_VERSION, AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, GENERATOR_VERSION, Material,
-    SkylineFeature, SkylineFeatureKind, SurfaceLodLevel, SurfaceRegion, SurfaceSample,
-    SurfaceTileCoord, SurfaceTileMesh, VoxelCoord, WaterTileMesh,
+    SURFACE_TILE_EDGE_CELLS, SkylineFeature, SkylineFeatureKind, SurfaceLodLevel, SurfaceRegion,
+    SurfaceSample, SurfaceTileCoord, SurfaceTileMesh, VoxelCoord, WaterTileMesh,
     generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, generate_surface_tile_mesh,
     generate_water_tile_mesh_with, surface_tiles_affected_by_voxel,
 };
@@ -426,6 +426,31 @@ pub struct SurfaceTileSnapshot {
     pub source_identity_hash: WorldSourceIdentityHash,
     pub terrain: SurfaceTileMesh,
     pub water: WaterTileMesh,
+    /// Canonical chunks containing edits whose topology cannot be represented by a heightfield.
+    ///
+    /// Only the finest surface level carries these sparse hints. They let a client request exact
+    /// volume for nearby floating structures, overhangs, and excavations without expanding the
+    /// entire radial exact cut or guessing from rendered surface geometry.
+    pub exact_detail_chunks: Vec<ChunkCoord>,
+}
+
+pub(crate) fn exact_detail_chunks_for_surface_tile(
+    edits: &crate::EditMap,
+    coord: SurfaceTileCoord,
+) -> Vec<ChunkCoord> {
+    if coord.level != SurfaceLodLevel::Stride2 {
+        return Vec::new();
+    }
+    let [origin_x, origin_z] = coord.voxel_origin();
+    let span = i32::try_from(SURFACE_TILE_EDGE_CELLS)
+        .expect("surface tile edge fits i32")
+        .saturating_mul(coord.stride_voxels());
+    let chunk_edge = CHUNK_EDGE as i32;
+    let minimum_x = origin_x.div_euclid(chunk_edge);
+    let minimum_z = origin_z.div_euclid(chunk_edge);
+    let maximum_x = origin_x.saturating_add(span - 1).div_euclid(chunk_edge);
+    let maximum_z = origin_z.saturating_add(span - 1).div_euclid(chunk_edge);
+    edits.edited_chunks_in_horizontal_chunk_bounds(minimum_x, maximum_x, minimum_z, maximum_z)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1163,6 +1188,7 @@ impl WorldSourceEngine for ProceduralWorldSource {
                             source_identity_hash: self.source_identity_hash(),
                             terrain,
                             water,
+                            exact_detail_chunks: Vec::new(),
                         }))
                     }
                 }
@@ -1187,6 +1213,7 @@ impl WorldSourceEngine for ProceduralWorldSource {
             source_identity_hash: self.source_identity_hash(),
             terrain: generate_edited_surface_tile_mesh(self.generator, edits, coord),
             water: generate_edited_water_tile_mesh(self.generator, edits, coord),
+            exact_detail_chunks: exact_detail_chunks_for_surface_tile(edits, coord),
         })
     }
 
@@ -1862,6 +1889,30 @@ mod tests {
         assert_eq!(result.blocks[0].elevation_voxels.len(), 6);
         assert_eq!(result.blocks[0].validity, vec![true; 6]);
         assert_eq!(result.blocks[0].schema_version, MACRO_FIELD_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn finest_surface_snapshot_identifies_only_its_sparse_exact_edit_chunks() {
+        let source = ProceduralWorldSource::new(9);
+        let mut edits = crate::EditMap::default();
+        edits.insert_override(VoxelCoord::new(40, 170, 45), Material::GlowCrystal);
+        edits.insert_override(VoxelCoord::new(41, 171, 45), Material::Stone);
+        edits.insert_override(VoxelCoord::new(70, 170, 45), Material::GlowCrystal);
+        let finest = source
+            .generate_edited_surface_tile(
+                &edits,
+                SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
+            )
+            .expect("edited finest surface tile");
+        assert_eq!(finest.exact_detail_chunks, vec![ChunkCoord::new(1, 5, 1)]);
+
+        let coarse = source
+            .generate_edited_surface_tile(
+                &edits,
+                SurfaceTileCoord::new(SurfaceLodLevel::Stride4, 0, 0),
+            )
+            .expect("edited coarse surface tile");
+        assert!(coarse.exact_detail_chunks.is_empty());
     }
 
     #[test]

@@ -34,10 +34,11 @@ pub const MAX_FRAME_FRAGMENT_DATA_BYTES: usize =
 pub const EDIT_SESSION_NOT_CURRENT: &str = "edit session is no longer current";
 const MAX_SURFACE_QUADS_PER_TILE: usize = 65_535;
 const MAX_SURFACE_PATCHES_PER_TILE: usize = 64;
+const MAX_SURFACE_EXACT_DETAIL_CHUNKS: usize = 4_096;
 const MAX_MANIFEST_MODEL_STRING_BYTES: usize = 4_096;
 const MAX_MANIFEST_MODEL_WEIGHT_HASHES: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
-const SURFACE_SNAPSHOT_VERSION: u16 = 9;
+const SURFACE_SNAPSHOT_VERSION: u16 = 10;
 const SURFACE_QUAD_SYNTHETIC_FALLBACK_BIT: u64 = 1 << 19;
 
 const KIND_OPEN_WORLD: u16 = 1;
@@ -3229,10 +3230,18 @@ fn decode_surface_coord(cursor: &mut Cursor<'_>) -> Result<SurfaceTileCoord, Pro
 fn encode_surface_snapshot(snapshot: &SurfaceTileSnapshot) -> Result<Vec<u8>, ProtocolError> {
     validate_surface_mesh(&snapshot.terrain)?;
     validate_water_mesh(&snapshot.water)?;
+    validate_surface_exact_detail_chunks(&snapshot.terrain, &snapshot.exact_detail_chunks)?;
     let mut bytes = Vec::new();
     bytes.extend_from_slice(SURFACE_SNAPSHOT_MAGIC);
     push_u16(&mut bytes, SURFACE_SNAPSHOT_VERSION);
     push_u16(&mut bytes, 0);
+    push_u16(&mut bytes, snapshot.exact_detail_chunks.len() as u16);
+    push_u16(&mut bytes, 0);
+    for chunk in &snapshot.exact_detail_chunks {
+        push_i32(&mut bytes, chunk.x);
+        push_i32(&mut bytes, chunk.y);
+        push_i32(&mut bytes, chunk.z);
+    }
     encode_surface_mesh(&mut bytes, &snapshot.terrain);
     encode_water_mesh(&mut bytes, &snapshot.water);
     Ok(bytes)
@@ -3258,14 +3267,63 @@ fn decode_surface_snapshot(
             "reserved surface snapshot field is nonzero",
         ));
     }
+    let exact_detail_count = usize::from(cursor.u16()?);
+    if exact_detail_count > MAX_SURFACE_EXACT_DETAIL_CHUNKS || cursor.u16()? != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "invalid surface exact-detail header",
+        ));
+    }
+    let mut exact_detail_chunks = Vec::with_capacity(exact_detail_count);
+    for _ in 0..exact_detail_count {
+        exact_detail_chunks.push(ChunkCoord::new(cursor.i32()?, cursor.i32()?, cursor.i32()?));
+    }
     let terrain = decode_surface_mesh(&mut cursor, coord)?;
     let water = decode_water_mesh(&mut cursor, coord)?;
+    validate_surface_exact_detail_chunks(&terrain, &exact_detail_chunks)?;
     cursor.finish()?;
     Ok(SurfaceTileSnapshot {
         source_identity_hash,
         terrain,
         water,
+        exact_detail_chunks,
     })
+}
+
+fn validate_surface_exact_detail_chunks(
+    terrain: &SurfaceTileMesh,
+    chunks: &[ChunkCoord],
+) -> Result<(), ProtocolError> {
+    if chunks.len() > MAX_SURFACE_EXACT_DETAIL_CHUNKS
+        || (terrain.coord.level != SurfaceLodLevel::Stride2 && !chunks.is_empty())
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "invalid surface exact-detail count",
+        ));
+    }
+    let [origin_x, origin_z] = terrain.coord.voxel_origin();
+    let span = i32::try_from(crate::SURFACE_TILE_EDGE_CELLS)
+        .map_err(|_| ProtocolError::InvalidPayload("invalid surface exact-detail bounds"))?
+        .saturating_mul(terrain.coord.stride_voxels());
+    let edge = crate::CHUNK_EDGE as i32;
+    let minimum_x = origin_x.div_euclid(edge);
+    let minimum_z = origin_z.div_euclid(edge);
+    let maximum_x = origin_x.saturating_add(span - 1).div_euclid(edge);
+    let maximum_z = origin_z.saturating_add(span - 1).div_euclid(edge);
+    let mut previous = None;
+    for &chunk in chunks {
+        let order = (chunk.x, chunk.z, chunk.y);
+        if !chunk.is_world_representable()
+            || !(minimum_x..=maximum_x).contains(&chunk.x)
+            || !(minimum_z..=maximum_z).contains(&chunk.z)
+            || previous.is_some_and(|previous| previous >= order)
+        {
+            return Err(ProtocolError::InvalidPayload(
+                "invalid surface exact-detail chunk",
+            ));
+        }
+        previous = Some(order);
+    }
+    Ok(())
 }
 
 fn encode_surface_mesh(output: &mut Vec<u8>, mesh: &SurfaceTileMesh) {
@@ -4860,6 +4918,58 @@ mod tests {
             encode_surface_snapshot(&out_of_order),
             Err(ProtocolError::InvalidPayload(
                 "surface terrain patch grid is incomplete or out of order"
+            ))
+        );
+    }
+
+    #[test]
+    fn surface_snapshot_round_trips_sparse_exact_detail_chunks_and_rejects_bad_order() {
+        let source = ProceduralWorldSource::new(42);
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0);
+        let mut snapshot = source
+            .generate_edited_surface_tile(&crate::EditMap::default(), coord)
+            .expect("surface snapshot");
+        snapshot.exact_detail_chunks = vec![ChunkCoord::new(0, -2, 0), ChunkCoord::new(1, 7, 1)];
+        let encoded = encode_surface_snapshot(&snapshot).expect("encode exact detail");
+        assert_eq!(
+            decode_surface_snapshot(&encoded, coord, source.source_identity_hash()),
+            Ok(snapshot.clone())
+        );
+
+        snapshot.exact_detail_chunks.swap(0, 1);
+        assert_eq!(
+            encode_surface_snapshot(&snapshot),
+            Err(ProtocolError::InvalidPayload(
+                "invalid surface exact-detail chunk"
+            ))
+        );
+        snapshot.exact_detail_chunks = vec![ChunkCoord::new(2, 0, 0)];
+        assert_eq!(
+            encode_surface_snapshot(&snapshot),
+            Err(ProtocolError::InvalidPayload(
+                "invalid surface exact-detail chunk"
+            ))
+        );
+
+        snapshot.exact_detail_chunks = vec![ChunkCoord::new(0, 0, 0); 2];
+        assert_eq!(
+            encode_surface_snapshot(&snapshot),
+            Err(ProtocolError::InvalidPayload(
+                "invalid surface exact-detail chunk"
+            ))
+        );
+
+        let mut coarse = source
+            .generate_edited_surface_tile(
+                &crate::EditMap::default(),
+                SurfaceTileCoord::new(SurfaceLodLevel::Stride4, 0, 0),
+            )
+            .expect("coarse surface snapshot");
+        coarse.exact_detail_chunks = vec![ChunkCoord::new(0, 0, 0)];
+        assert_eq!(
+            encode_surface_snapshot(&coarse),
+            Err(ProtocolError::InvalidPayload(
+                "invalid surface exact-detail count"
             ))
         );
     }

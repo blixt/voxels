@@ -215,6 +215,13 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
           handle?.set_lod_boundary_half_extents(new Int32Array(message.halfExtentsVoxels)) ?? false,
       });
       break;
+    case "exactVolumePresented":
+      scope.postMessage({
+        kind: "exactVolumePresented",
+        requestId: message.requestId,
+        presented: handle?.exact_volume_presented(message.x, message.y, message.z) ?? false,
+      });
+      break;
     case "snapshot":
       scope.postMessage({
         kind: "snapshot",

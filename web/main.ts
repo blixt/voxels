@@ -143,6 +143,10 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     number,
     { resolve: (accepted: boolean) => void; reject: (reason: Error) => void }
   >();
+  const exactVolumeResolvers = new Map<
+    number,
+    { resolve: (presented: boolean) => void; reject: (reason: Error) => void }
+  >();
   const inventoryResolvers = new Map<
     number,
     { resolve: (values: number[]) => void; reject: (reason: Error) => void }
@@ -170,6 +174,8 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     materialDetailResolvers.clear();
     for (const { reject } of lodBoundaryResolvers.values()) reject(error);
     lodBoundaryResolvers.clear();
+    for (const { reject } of exactVolumeResolvers.values()) reject(error);
+    exactVolumeResolvers.clear();
     for (const { reject } of inventoryResolvers.values()) reject(error);
     inventoryResolvers.clear();
     for (const { reject } of surfaceEditStateResolvers.values()) reject(error);
@@ -246,6 +252,13 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
           requestId,
           halfExtentsVoxels: [...halfExtentsVoxels],
         });
+      }),
+    exactVolumePresented: (x, y, z) =>
+      new Promise<boolean>((resolve, reject) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        exactVolumeResolvers.set(requestId, { resolve, reject });
+        worker.postMessage({ kind: "exactVolumePresented", requestId, x, y, z });
       }),
     look: (deltaX, deltaY) => {
       const buffer = packInput([
@@ -373,6 +386,9 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     } else if (event.data.kind === "lodBoundaries") {
       lodBoundaryResolvers.get(event.data.requestId)?.resolve(event.data.accepted);
       lodBoundaryResolvers.delete(event.data.requestId);
+    } else if (event.data.kind === "exactVolumePresented") {
+      exactVolumeResolvers.get(event.data.requestId)?.resolve(event.data.presented);
+      exactVolumeResolvers.delete(event.data.requestId);
     } else if (event.data.kind === "submitPlace") {
       editResolvers.get(event.data.requestId)?.resolve(event.data.submitted);
       editResolvers.delete(event.data.requestId);

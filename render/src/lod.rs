@@ -203,6 +203,20 @@ fn surface_patch_is_selected_with_incomplete_parents(
     let Some(center) = patch.voxel_center_xz() else {
         return false;
     };
+    // A complete canonical surface column is an explicit exact owner even when it sits just
+    // outside the radial canonical square. This is how sparse interaction/edit columns cross the
+    // exact-to-stride-two handoff without briefly reverting to a heightfield that cannot represent
+    // overhangs, floating voxels, or excavated openings. Stride-two patches align to half a
+    // canonical chunk, so a ready chunk column replaces four whole patches without clipping.
+    if patch.level == SurfaceLodLevel::Stride2 {
+        let column = (
+            center[0].div_euclid(CHUNK_EDGE as i32),
+            center[1].div_euclid(CHUNK_EDGE as i32),
+        );
+        if canonical_ready_columns.contains(&column) {
+            return false;
+        }
+    }
     let owner = focus.owner_at(center[0], center[1]);
     if owner == LodOwner::Canonical {
         let column = (
@@ -299,7 +313,6 @@ impl SurfacePatchSelection {
             insert_transition_candidates(
                 &self.patches,
                 &mut self.transition_candidates,
-                focus,
                 canonical_ready_columns,
                 patch,
             );
@@ -407,7 +420,6 @@ impl SurfacePatchSelectionBuild {
             insert_transition_candidates(
                 &self.selection.patches,
                 &mut self.selection.transition_candidates,
-                self.focus,
                 &self.canonical_ready_columns,
                 patch,
             );
@@ -420,7 +432,6 @@ impl SurfacePatchSelectionBuild {
 fn insert_transition_candidates(
     selected: &HashSet<SurfacePatchId>,
     transitions: &mut HashSet<(SurfacePatchId, u8)>,
-    focus: GeometricLodFocus,
     canonical_ready_columns: &HashSet<(i32, i32)>,
     patch: SurfacePatchId,
 ) {
@@ -445,11 +456,10 @@ fn insert_transition_candidates(
         let borders_ready_canonical = patch.level == SurfaceLodLevel::Stride2
             && selected_neighbors.iter().all(Option::is_none)
             && neighbor_points.iter().all(|point| {
-                focus.owner_at(point[0], point[1]) == LodOwner::Canonical
-                    && canonical_ready_columns.contains(&(
-                        point[0].div_euclid(CHUNK_EDGE as i32),
-                        point[1].div_euclid(CHUNK_EDGE as i32),
-                    ))
+                canonical_ready_columns.contains(&(
+                    point[0].div_euclid(CHUNK_EDGE as i32),
+                    point[1].div_euclid(CHUNK_EDGE as i32),
+                ))
             });
         if borders_finer_surface || borders_ready_canonical {
             transitions.insert((patch, edge.index() as u8));
@@ -734,6 +744,65 @@ mod tests {
             &HashSet::from([(0, 0)]),
             patch
         ));
+    }
+
+    #[test]
+    fn complete_sparse_column_replaces_stride_two_surface_outside_radial_exact_cut() {
+        let focus = GeometricLodFocus::snapped_with_half_extents_for_levels(
+            0,
+            0,
+            SurfaceLodLevel::ALL.len(),
+            [32, 64, 128, 256, 512, 1_024, 2_048, 4_096],
+        );
+        let patch = SurfacePatchId::new(SurfaceLodLevel::Stride2, 2, 0);
+        let resident = resident([patch]);
+        assert_eq!(
+            focus.owner_at(40, 8),
+            LodOwner::Surface(SurfaceLodLevel::Stride2)
+        );
+        assert!(surface_patch_is_selected(
+            focus,
+            &resident,
+            &HashSet::new(),
+            patch
+        ));
+        assert!(!surface_patch_is_selected(
+            focus,
+            &resident,
+            &HashSet::from([(1, 0)]),
+            patch
+        ));
+    }
+
+    #[test]
+    fn sparse_exact_column_replaces_exactly_four_aligned_stride_two_patches() {
+        let focus = GeometricLodFocus::snapped_with_half_extents_for_levels(
+            0,
+            0,
+            SurfaceLodLevel::ALL.len(),
+            [32, 64, 128, 256, 512, 1_024, 2_048, 4_096],
+        );
+        for column_x in [-2, 1] {
+            let patches = (-4..=3)
+                .flat_map(|patch_x| {
+                    (0..=1).map(move |patch_z| {
+                        SurfacePatchId::new(SurfaceLodLevel::Stride2, patch_x, patch_z)
+                    })
+                })
+                .collect::<HashSet<_>>();
+            let mut selection = SurfacePatchSelection::default();
+            selection.rebuild(focus, &patches, &HashSet::from([(column_x, 0)]));
+            for patch in patches {
+                let center = patch.voxel_center_xz().unwrap();
+                let belongs_to_replaced_column =
+                    center[0].div_euclid(CHUNK_EDGE as i32) == column_x;
+                assert_eq!(
+                    selection.owns(patch),
+                    !belongs_to_replaced_column,
+                    "patch {patch:?} in column {column_x}"
+                );
+            }
+        }
     }
 
     #[test]

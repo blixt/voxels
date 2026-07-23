@@ -2490,71 +2490,46 @@ impl Renderer {
         }
     }
 
-    /// Replaces the exact canonical chunks in complete current vertical bands.
+    /// Atomically replaces the exact-volume set and the independently complete surface columns.
     ///
-    /// This set owns only exact-volume meshes. It does not suppress whole heightfield patches: an
-    /// all-air band around a high spectator or a deep tunnel says nothing about the terrain surface
-    /// in the same X/Z column. It may replace explicitly tagged vertical fallback spans in the
-    /// exact same 3D chunk, since those spans exist solely until exact volume is renderable.
-    pub fn set_canonical_ready_chunks(
+    /// Installing these together is the renderer's coverage transaction: a stride-two patch is
+    /// never suppressed before every exact chunk intended to replace it is renderable, and those
+    /// exact meshes are never withheld for a frame after the fallback is removed.
+    pub fn set_canonical_cut_ready_chunks(
         &mut self,
-        chunks: impl IntoIterator<Item = (i32, i32, i32)>,
+        canonical_chunks: impl IntoIterator<Item = (i32, i32, i32)>,
+        surface_chunks: impl IntoIterator<Item = (i32, i32, i32)>,
     ) {
-        let replacement = chunks.into_iter().collect::<HashSet<_>>();
-        if replacement == self.canonical_ready_chunks {
+        let canonical_replacement = canonical_chunks.into_iter().collect::<HashSet<_>>();
+        let surface_replacement = surface_chunks.into_iter().collect::<HashSet<_>>();
+        if canonical_replacement == self.canonical_ready_chunks
+            && surface_replacement == self.canonical_surface_ready_chunks
+        {
             return;
         }
-        let mut changed_chunks = self
-            .canonical_ready_chunks
-            .symmetric_difference(&replacement)
+        let focus = self.lod_draw_plan_focus;
+        let previous_surface =
+            canonical_surface_ready_chunks_for_focus(focus, &self.canonical_surface_ready_chunks);
+        let next_surface = canonical_surface_ready_chunks_for_focus(focus, &surface_replacement);
+        let previous_columns = canonical_ready_columns(&previous_surface);
+        let next_columns = canonical_ready_columns(&next_surface);
+        self.canonical_ready_chunks = canonical_replacement;
+        self.canonical_surface_ready_chunks = surface_replacement;
+
+        let changed_columns = previous_columns
+            .symmetric_difference(&next_columns)
             .copied()
             .collect::<HashSet<_>>();
-        self.canonical_ready_chunks = replacement;
-        changed_chunks.retain(|&(x, _, z)| {
-            self.lod_draw_plan_focus
-                .is_some_and(|focus| focus.owns_canonical_chunk(x, z))
-        });
-        if changed_chunks.is_empty() {
-            return;
-        }
-        for (key, mesh) in &mut self.chunks {
-            if key.0 == 0 && changed_chunks.contains(&(key.1, key.2, key.3)) {
-                mesh.lod_ownership_stale = true;
-            }
-        }
-        self.invalidate_lod_draw_plan(LOD_PLAN_REBUILD_CANONICAL_VOLUME);
-    }
-
-    /// Replaces the exact chunks that form a complete terrain-following surface cut.
-    ///
-    /// Only this independently proven set may suppress stride-two fallback patches. The shell
-    /// derives it from surface-height hints and publishes a column only after every requested Y
-    /// chunk is renderable, so unrelated air, tunnel, and interaction bands cannot punch square
-    /// holes through the terrain when viewed from above.
-    pub fn set_canonical_surface_ready_chunks(
-        &mut self,
-        chunks: impl IntoIterator<Item = (i32, i32, i32)>,
-    ) {
-        let replacement = chunks.into_iter().collect::<HashSet<_>>();
-        if replacement == self.canonical_surface_ready_chunks {
-            return;
-        }
-        let mut changed_columns =
-            changed_canonical_ready_columns(&self.canonical_surface_ready_chunks, &replacement);
-        self.canonical_surface_ready_chunks = replacement;
-        changed_columns.retain(|(x, z)| {
-            self.lod_draw_plan_focus
-                .is_some_and(|focus| focus.owns_canonical_chunk(*x, *z))
-        });
-        if changed_columns.is_empty() {
-            return;
-        }
         for (key, mesh) in &mut self.chunks {
             if key.0 == 0 && changed_columns.contains(&(key.1, key.3)) {
                 mesh.lod_ownership_stale = true;
             }
         }
-        self.invalidate_lod_draw_plan(LOD_PLAN_REBUILD_CANONICAL_COLUMNS);
+        self.invalidate_lod_draw_plan(if changed_columns.is_empty() {
+            LOD_PLAN_REBUILD_CANONICAL_VOLUME
+        } else {
+            LOD_PLAN_REBUILD_CANONICAL_COLUMNS | LOD_PLAN_REBUILD_CANONICAL_VOLUME
+        });
     }
 
     /// Whether an exact-volume chunk is part of a LOD cut currently reaching the screen.
@@ -2570,6 +2545,22 @@ impl Renderer {
                 .cut_transition
                 .as_ref()
                 .is_some_and(|transition| transition.from.owns_exact_volume_coord(coord))
+    }
+
+    /// Whether a sparse exact surface column can replace a whole resident stride-two column in
+    /// the current geometric cut. Callers use this before requesting detail chunks so an
+    /// artificially narrow debug cut cannot create unused exact-volume traffic farther out.
+    pub fn supports_sparse_exact_surface_column(&self, chunk_x: i32, chunk_z: i32) -> bool {
+        self.lod_draw_plan_focus.is_some_and(|focus| {
+            matches!(
+                focus.owner_at(
+                    chunk_x * CHUNK_EDGE as i32 + CHUNK_EDGE as i32 / 2,
+                    chunk_z * CHUNK_EDGE as i32 + CHUNK_EDGE as i32 / 2,
+                ),
+                crate::lod::LodOwner::Canonical
+                    | crate::lod::LodOwner::Surface(SurfaceLodLevel::Stride2)
+            )
+        })
     }
 
     /// Tiles referenced by the complete cut currently reaching the screen.
@@ -3496,10 +3487,11 @@ impl Renderer {
             } else {
                 0
             };
-        let canonical_chunks =
+        let mut canonical_chunks =
             canonical_ready_chunks_for_focus(focus, &self.canonical_ready_chunks);
         let canonical_surface_chunks =
-            canonical_ready_chunks_for_focus(focus, &self.canonical_surface_ready_chunks);
+            canonical_surface_ready_chunks_for_focus(focus, &self.canonical_surface_ready_chunks);
+        canonical_chunks.extend(canonical_surface_chunks.iter().copied());
         let canonical_columns = canonical_surface_chunks
             .iter()
             .map(|&(x, _, z)| (x, z))
@@ -5803,6 +5795,30 @@ fn canonical_ready_chunks_for_focus(
         .collect()
 }
 
+fn canonical_surface_ready_chunks_for_focus(
+    focus: Option<GeometricLodFocus>,
+    ready_chunks: &HashSet<(i32, i32, i32)>,
+) -> HashSet<(i32, i32, i32)> {
+    let Some(focus) = focus else {
+        return HashSet::new();
+    };
+    ready_chunks
+        .iter()
+        .copied()
+        .filter(|&(x, _, z)| {
+            matches!(
+                focus.owner_at(
+                    x * CHUNK_EDGE as i32 + CHUNK_EDGE as i32 / 2,
+                    z * CHUNK_EDGE as i32 + CHUNK_EDGE as i32 / 2,
+                ),
+                crate::lod::LodOwner::Canonical
+                    | crate::lod::LodOwner::Surface(SurfaceLodLevel::Stride2)
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
 fn changed_canonical_ready_columns(
     previous: &HashSet<(i32, i32, i32)>,
     replacement: &HashSet<(i32, i32, i32)>,
@@ -8227,6 +8243,21 @@ mod tests {
             HashSet::from([(0, 0, 0), (0, 1, 0)])
         );
         assert!(canonical_ready_chunks_for_focus(None, &ready).is_empty());
+    }
+
+    #[test]
+    fn canonical_surface_plan_keeps_ready_stride_two_handoff_chunks() {
+        let focus = GeometricLodFocus::snapped_with_half_extents_for_levels(
+            0,
+            0,
+            SurfaceLodLevel::ALL.len(),
+            [32, 64, 128, 256, 512, 1_024, 2_048, 4_096],
+        );
+        let ready = HashSet::from([(1, 4, 0), (2, 4, 0)]);
+        assert_eq!(
+            canonical_surface_ready_chunks_for_focus(Some(focus), &ready),
+            HashSet::from([(1, 4, 0)])
+        );
     }
 
     #[test]

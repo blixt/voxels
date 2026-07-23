@@ -6,6 +6,7 @@
 //! routes, or authored atlas content.
 
 use crate::lod::generate_surface_tile_mesh_with_materials_and_aggregated_ecology_and_shading;
+use crate::source::exact_detail_chunks_for_surface_tile;
 use crate::{
     AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, ChunkSnapshot, EditMap,
     FEATURE_MAX_RADIUS_VOXELS, MACRO_FIELD_SCHEMA_VERSION, MAX_MACRO_BLOCK_SAMPLES,
@@ -559,6 +560,7 @@ impl HeightfieldWorldSource {
             source_identity_hash: self.identity_hash,
             terrain,
             water,
+            exact_detail_chunks: exact_detail_chunks_for_surface_tile(edits, coord),
         })
     }
 

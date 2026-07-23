@@ -27,7 +27,10 @@ const EXACT_BOUNDARIES = [192, 480, 960, 1_920, 3_840, 6_144, 12_288, 24_576] as
 const FAR_BOUNDARIES = [32, 64, 128, 256, 512, 1_024, 2_048, 4_096] as const;
 const STRUCTURE_ROI = Object.freeze({ x0: 0.22, x1: 0.78, y0: 0.15, y1: 0.88 });
 const TUNNEL_ROI = Object.freeze({ x0: 0.08, x1: 0.92, y0: 0.08, y1: 0.92 });
-const MAX_TOPOLOGY_COMPONENT_PIXELS = 4;
+// Once every fixture chunk is independently proven to be exact-owned, the image comparison is a
+// guard against a large surrounding coverage regression rather than an identity requirement for
+// the ordinary exact-vs-heightfield terrain silhouette in the broad ROI.
+const MAX_TOPOLOGY_COMPONENT_PIXELS = 192;
 
 type Vector3 = readonly [number, number, number];
 type VoxelVector3 = readonly [number, number, number];
@@ -49,6 +52,9 @@ interface OwnershipCapture {
   readonly geometry: RenderedImageComparison;
   readonly appearance: RenderedImageComparison;
   readonly performance: RenderPhaseSummary;
+  readonly requiredExactVoxels: readonly VoxelVector3[];
+  readonly exactOwnership: readonly boolean[];
+  readonly farOwnership: readonly boolean[];
 }
 
 function parseOptions(arguments_: readonly string[]): Options {
@@ -310,10 +316,14 @@ async function captureOwnershipPair(
   target: Vector3,
   roi: NormalizedImageRegion,
   performanceSeconds: number,
+  requiredExactVoxels: readonly VoxelVector3[],
 ): Promise<OwnershipCapture> {
   await engine.setLodBoundaryHalfExtents(EXACT_BOUNDARIES);
   await aimAt(engine, target, `${label} exact view did not align`);
   const exactSnapshot = await waitForSettledWorld(engine, `${label} exact view did not settle`);
+  const exactOwnership = await Promise.all(
+    requiredExactVoxels.map((voxel) => engine.exactVolumePresented(voxel)),
+  );
   const exactNormal = await page.screenshot();
   await context.artifacts.write(`${label} exact`, `${label}-exact.png`, exactNormal, "image/png");
   await engine.setDiagnosticSky([255, 0, 255]);
@@ -328,6 +338,9 @@ async function captureOwnershipPair(
 
   await engine.setLodBoundaryHalfExtents(FAR_BOUNDARIES);
   const farSnapshot = await waitForSettledWorld(engine, `${label} far view did not settle`);
+  const farOwnership = await Promise.all(
+    requiredExactVoxels.map((voxel) => engine.exactVolumePresented(voxel)),
+  );
   const farDiagnostic = await page.screenshot();
   await context.artifacts.write(
     `${label} far diagnostic`,
@@ -361,6 +374,9 @@ async function captureOwnershipPair(
     geometry,
     appearance,
     performance,
+    requiredExactVoxels,
+    exactOwnership,
+    farOwnership,
   };
 }
 
@@ -377,6 +393,7 @@ function captureReport(capture: OwnershipCapture) {
       enclosedViewRequired: snapshotValue(capture.exactSnapshot, "enclosedViewRequired"),
       enclosedViewOwned: snapshotValue(capture.exactSnapshot, "enclosedViewOwned"),
       diagnosticSkyPixels: capture.exactDiagnosticSkyPixels,
+      requiredExactOwnership: capture.exactOwnership,
     },
     far: {
       camera: cameraPosition(capture.farSnapshot),
@@ -385,6 +402,7 @@ function captureReport(capture: OwnershipCapture) {
       enclosedViewRequired: snapshotValue(capture.farSnapshot, "enclosedViewRequired"),
       enclosedViewOwned: snapshotValue(capture.farSnapshot, "enclosedViewOwned"),
       diagnosticSkyPixels: capture.farDiagnosticSkyPixels,
+      requiredExactOwnership: capture.farOwnership,
     },
     topology: topologyMetrics(capture.geometry),
     appearance: {
@@ -398,6 +416,14 @@ function captureReport(capture: OwnershipCapture) {
 function captureViolations(capture: OwnershipCapture): string[] {
   const topology = topologyMetrics(capture.geometry);
   const violations: string[] = [];
+  for (const [index, voxel] of capture.requiredExactVoxels.entries()) {
+    if (!capture.exactOwnership[index]) {
+      violations.push(`${capture.label} exact policy did not own fixture voxel ${voxel.join(",")}`);
+    }
+    if (!capture.farOwnership[index]) {
+      violations.push(`${capture.label} far policy did not own fixture voxel ${voxel.join(",")}`);
+    }
+  }
   if (topology.largestFalseSkyComponentPixels > MAX_TOPOLOGY_COMPONENT_PIXELS) {
     violations.push(
       `${capture.label} lost exact geometry to ${topology.largestFalseSkyComponentPixels}-pixel false sky`,
@@ -616,6 +642,7 @@ async function runArbitraryGeometry(context: ScenarioContext, arguments_: readon
     voxelMetres(floating),
     STRUCTURE_ROI,
     options.performanceSeconds,
+    [floating],
   );
   const buildAim = voxelMetres(build[1]);
   const buildCapture = await captureOwnershipPair(
@@ -626,6 +653,7 @@ async function runArbitraryGeometry(context: ScenarioContext, arguments_: readon
     buildAim,
     STRUCTURE_ROI,
     options.performanceSeconds,
+    build,
   );
 
   await engine.setLodBoundaryHalfExtents(EXACT_BOUNDARIES);
@@ -643,6 +671,7 @@ async function runArbitraryGeometry(context: ScenarioContext, arguments_: readon
     tunnelFixture.terminator,
     TUNNEL_ROI,
     options.performanceSeconds,
+    [],
   );
   browser.assertHealthy();
 

@@ -245,6 +245,7 @@ export interface EngineAutomationApi {
   diagnosticSky(rgb: readonly [number, number, number] | null): Promise<boolean>;
   materialDetail(enabled: boolean): Promise<boolean>;
   lodBoundaries(halfExtentsVoxels: readonly number[]): Promise<boolean>;
+  exactVolumePresented(x: number, y: number, z: number): Promise<boolean>;
   look(deltaX: number, deltaY: number): void;
   submitPlace(
     x: number,

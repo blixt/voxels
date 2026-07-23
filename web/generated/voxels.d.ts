@@ -6,6 +6,11 @@ export class EngineHandle {
     free(): void;
     automation_contract(): string;
     destroy(): Promise<void>;
+    /**
+     * Reports actual current/outgoing cut ownership for one canonical voxel. This is a
+     * read-only automation assertion over renderer state, not an alternate streaming path.
+     */
+    exact_volume_presented(voxel_x: number, voxel_y: number, voxel_z: number): boolean;
     feed_input(bytes: Uint8Array): boolean;
     /**
      * `[inventory_revision, air, grass, ..., glow_crystal]` in stable material-ID order.
@@ -80,6 +85,7 @@ export interface InitOutput {
     readonly create_engine: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: any) => any;
     readonly enginehandle_automation_contract: (a: number) => [number, number];
     readonly enginehandle_destroy: (a: number) => any;
+    readonly enginehandle_exact_volume_presented: (a: number, b: number, c: number, d: number) => number;
     readonly enginehandle_feed_input: (a: number, b: number, c: number) => number;
     readonly enginehandle_inventory: (a: number) => [number, number];
     readonly enginehandle_mission_control_screenshot_pending: (a: number) => number;

@@ -239,6 +239,20 @@ export class EngineClient {
     if (!accepted) throw new Error("engine rejected the LOD boundary half extents");
   }
 
+  async exactVolumePresented(voxel: readonly [number, number, number]): Promise<boolean> {
+    if (
+      voxel.some(
+        (value) => !Number.isSafeInteger(value) || value < -0x8000_0000 || value > 0x7fff_ffff,
+      )
+    ) {
+      throw new Error("exact-volume voxel coordinates must be signed 32-bit integers");
+    }
+    return this.#page.evaluate(
+      ([x, y, z]) => globalThis.__VOXELS__!.exactVolumePresented(x, y, z),
+      voxel,
+    );
+  }
+
   async submitPlace(
     x: number,
     y: number,

@@ -1311,6 +1311,7 @@ mod web {
     type FrameCallback = Closure<dyn FnMut(f64)>;
     type SurfaceChunkColumnHints = BTreeMap<(i32, i32), BTreeSet<i32>>;
     type SurfaceChunkHintIndex = BTreeMap<SurfaceTileCoord, SurfaceChunkColumnHints>;
+    type SurfaceExactDetailIndex = BTreeMap<SurfaceTileCoord, Vec<ChunkCoord>>;
 
     fn resident_material(
         chunks: &BTreeMap<(i32, i32, i32), Chunk>,
@@ -1565,6 +1566,7 @@ mod web {
         surface_motion_axis: Cell<[i32; 2]>,
         surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
         surface_chunk_hints: RefCell<SurfaceChunkHintIndex>,
+        surface_exact_detail_chunks: RefCell<SurfaceExactDetailIndex>,
         surface_revisions: RefCell<SurfaceRevisionCache>,
         surface_accepted_edit_revisions: RefCell<BTreeMap<SurfaceTileCoord, u64>>,
         surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
@@ -2159,7 +2161,18 @@ mod web {
                 exact_streaming_velocity,
                 self.config.stream_collision_lookahead_seconds,
             );
-            let surface_interest = self.surface_stream_interest(focus, &movement_interest);
+            let mut surface_interest = self.surface_stream_interest(focus, &movement_interest);
+            let exact_detail_interest = self.surface_exact_detail_stream_interest(camera);
+            if !exact_detail_interest.is_empty() {
+                let detail_columns = exact_detail_interest
+                    .iter()
+                    .map(|coord| (coord.x, coord.z))
+                    .collect::<BTreeSet<_>>();
+                surface_interest.extend(self.surface_hint_stream_interest(&detail_columns));
+                surface_interest.extend(exact_detail_interest);
+                surface_interest.sort_unstable();
+                surface_interest.dedup();
+            }
             // A spectator has no collision body, but its configured cruise speed can cross the
             // ordinary exact radius before one server round trip. Admit a thin, capacity-bounded
             // visual corridor ahead as ordinary work so those chunks are ready when the camera
@@ -2644,6 +2657,46 @@ mod web {
             interest.into_iter().collect()
         }
 
+        fn surface_exact_detail_stream_interest(&self, camera: &CameraState) -> Vec<ChunkCoord> {
+            let maximum_distance_chunks = self.config.stream_enclosed_view_distance_metres
+                / (CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
+            let camera_chunk_x = camera.position.x / (CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
+            let camera_chunk_z = camera.position.z / (CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
+            let maximum_distance_squared = maximum_distance_chunks * maximum_distance_chunks;
+            let renderer = self.renderer.borrow();
+            let mut chunks = self
+                .surface_exact_detail_chunks
+                .borrow()
+                .values()
+                .flatten()
+                .copied()
+                .filter_map(|chunk| {
+                    if !renderer.supports_sparse_exact_surface_column(chunk.x, chunk.z) {
+                        return None;
+                    }
+                    let delta_x = chunk.x as f32 + 0.5 - camera_chunk_x;
+                    let delta_z = chunk.z as f32 + 0.5 - camera_chunk_z;
+                    let distance_squared = delta_x * delta_x + delta_z * delta_z;
+                    (distance_squared <= maximum_distance_squared)
+                        .then_some((distance_squared, chunk))
+                })
+                .collect::<Vec<_>>();
+            drop(renderer);
+            chunks.sort_by(|(left_distance, left), (right_distance, right)| {
+                left_distance
+                    .total_cmp(right_distance)
+                    .then_with(|| left.cmp(right))
+            });
+            chunks.dedup_by_key(|(_, chunk)| *chunk);
+            chunks.truncate(
+                self.scheduler
+                    .borrow()
+                    .config()
+                    .max_secondary_interest_chunks,
+            );
+            chunks.into_iter().map(|(_, chunk)| chunk).collect()
+        }
+
         fn submit_generation_batch(
             &self,
             priority: WorldProductPriority,
@@ -2770,6 +2823,7 @@ mod web {
                         .terrain
                         .canonical_surface_chunk_hints(SURFACE_HINT_VERTICAL_MARGIN_CHUNKS)
                 });
+                let exact_detail_chunks = snapshot.exact_detail_chunks.clone();
                 if self
                     .renderer
                     .borrow_mut()
@@ -2780,6 +2834,15 @@ mod web {
                         self.surface_chunk_hints
                             .borrow_mut()
                             .insert(ticket.coord, hints);
+                    }
+                    if exact_detail_chunks.is_empty() {
+                        self.surface_exact_detail_chunks
+                            .borrow_mut()
+                            .remove(&ticket.coord);
+                    } else {
+                        self.surface_exact_detail_chunks
+                            .borrow_mut()
+                            .insert(ticket.coord, exact_detail_chunks);
                     }
                     let committed = self
                         .surface_revisions
@@ -2954,8 +3017,10 @@ mod web {
                 ChunkActivationReason::Surface,
             );
             let mut renderer = self.renderer.borrow_mut();
-            renderer.set_canonical_ready_chunks(canonical_ready_chunks);
-            renderer.set_canonical_surface_ready_chunks(canonical_surface_ready_chunks);
+            renderer.set_canonical_cut_ready_chunks(
+                canonical_ready_chunks,
+                canonical_surface_ready_chunks,
+            );
             renderer.set_enclosed_view_ready_chunks(enclosed_view);
             renderer.set_exact_volume_frontier_faces(&frontier_faces);
         }
@@ -3134,6 +3199,7 @@ mod web {
                     for &coord in &evicted {
                         resident.remove(&coord);
                         self.surface_chunk_hints.borrow_mut().remove(&coord);
+                        self.surface_exact_detail_chunks.borrow_mut().remove(&coord);
                         revisions.evict(coord);
                         accepted.remove(&coord);
                         dirty.remove(&coord);
@@ -4140,6 +4206,16 @@ mod web {
             })
         }
 
+        /// Reports actual current/outgoing cut ownership for one canonical voxel. This is a
+        /// read-only automation assertion over renderer state, not an alternate streaming path.
+        pub fn exact_volume_presented(&self, voxel_x: i32, voxel_y: i32, voxel_z: i32) -> bool {
+            self.engine.as_ref().is_some_and(|engine| {
+                engine.renderer.borrow().exact_volume_chunk_presented(
+                    VoxelCoord::new(voxel_x, voxel_y, voxel_z).chunk(),
+                )
+            })
+        }
+
         /// `[resident, required, playable]` for the browser's canvas-only startup surface.
         pub fn startup_progress(&self) -> Vec<u32> {
             let Some(engine) = self.engine.as_ref() else {
@@ -4896,6 +4972,7 @@ mod web {
             surface_motion_axis: Cell::new([0, 0]),
             surface_resident: RefCell::new(BTreeSet::new()),
             surface_chunk_hints: RefCell::new(BTreeMap::new()),
+            surface_exact_detail_chunks: RefCell::new(BTreeMap::new()),
             surface_revisions: RefCell::new(SurfaceRevisionCache::new()),
             surface_accepted_edit_revisions: RefCell::new(BTreeMap::new()),
             surface_queue: RefCell::new(VecDeque::new()),
