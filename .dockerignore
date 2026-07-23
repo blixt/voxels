@@ -1,5 +1,7 @@
 .git
 .gitignore
+.cache
+.tmp
 .wrangler
 .wrangler-local
 .env*
