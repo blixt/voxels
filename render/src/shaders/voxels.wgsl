@@ -53,6 +53,10 @@ const INTERNAL_SEAM_LOW_U_FLAG: u32 = 0x00000100u;
 const INTERNAL_SEAM_HIGH_U_FLAG: u32 = 0x00000200u;
 const INTERNAL_SEAM_LOW_V_FLAG: u32 = 0x00000400u;
 const INTERNAL_SEAM_HIGH_V_FLAG: u32 = 0x00000800u;
+// Perspective-projected greedy T-junctions can disagree by more than two samples at canonical
+// chunk boundaries. Three pixels was the smallest overlap with zero diagnostic-sky samples in the
+// 15 km fast-flight gate; flags keep this expansion away from true terrain silhouettes.
+const INTERNAL_SEAM_EXPANSION_PIXELS: f32 = 3.0;
 
 fn corner_ao(packed: u32, corner: u32) -> f32 {
   return f32((packed >> (corner * 2u)) & 3u) / 3.0;
@@ -254,7 +258,10 @@ fn projected_axis_pixel(
   if pixel_length <= 0.00001 {
     return vec2<f32>(0.0);
   }
-  return pixel_delta / pixel_length * direction * 2.0 / frame.viewport_voxel.xy;
+  return pixel_delta / pixel_length
+    * direction
+    * (INTERNAL_SEAM_EXPANSION_PIXELS * 2.0)
+    / frame.viewport_voxel.xy;
 }
 
 fn close_internal_raster_seams(
