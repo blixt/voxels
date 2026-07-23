@@ -3662,30 +3662,12 @@ impl Renderer {
     }
 
     fn lod_draw_plan_is_resident(&self) -> bool {
-        let surface_resident = self
-            .lod_draw_plan
-            .patches
-            .owned_patches()
-            .all(|patch| self.surface_patch_residency.contains(&patch));
-        let canonical_resident = self
-            .lod_draw_plan
-            .canonical_chunks
-            .iter()
-            .all(|&(x, y, z)| {
-                self.chunks
-                    .get(&(0, x, y, z))
-                    .is_some_and(ChunkMesh::active)
-            });
-        let enclosed_resident = self
-            .lod_draw_plan
-            .enclosed_view_chunks
-            .iter()
-            .all(|key| self.chunks.contains_key(&(0, key.0, key.1, key.2)));
-        let connector_resident = self
-            .lod_draw_plan
-            .transition_mesh_key
-            .is_none_or(|key| self.chunks.contains_key(&key));
-        surface_resident && canonical_resident && enclosed_resident && connector_resident
+        lod_draw_plan_resident(
+            &self.lod_draw_plan,
+            &self.surface_patch_residency,
+            &self.chunks,
+            &self.canonical_surface_profiles,
+        )
     }
 
     fn publish_lod_transition_mesh(
@@ -4979,6 +4961,35 @@ fn collect_opaque_draw_lists(
         world_builder.finish(),
         lod_ownership_refreshes,
     ))
+}
+
+fn lod_draw_plan_resident(
+    plan: &LodDrawPlan,
+    surface_patch_residency: &HashSet<SurfacePatchId>,
+    chunks: &BTreeMap<MeshKey, ChunkMesh>,
+    canonical_surface_profiles: &CanonicalColumnProfiles,
+) -> bool {
+    let committed_without_opaque_mesh = |x, y, z| {
+        canonical_surface_profiles
+            .get(&(x, z))
+            .is_some_and(|profiles| profiles.contains_key(&y))
+    };
+    let surface_resident = plan
+        .patches
+        .owned_patches()
+        .all(|patch| surface_patch_residency.contains(&patch));
+    let canonical_resident = plan.canonical_chunks.iter().all(|&(x, y, z)| {
+        chunks
+            .get(&(0, x, y, z))
+            .map_or_else(|| committed_without_opaque_mesh(x, y, z), ChunkMesh::active)
+    });
+    let enclosed_resident = plan.enclosed_view_chunks.iter().all(|&(x, y, z)| {
+        chunks.contains_key(&(0, x, y, z)) || committed_without_opaque_mesh(x, y, z)
+    });
+    let connector_resident = plan
+        .transition_mesh_key
+        .is_none_or(|key| chunks.contains_key(&key));
+    surface_resident && canonical_resident && enclosed_resident && connector_resident
 }
 
 /// Collects only old-cut geometry that the complete current draw list no longer owns. The current
@@ -8219,6 +8230,69 @@ mod tests {
         let ready = HashSet::from([(column.0, 41, column.1), (column.0, 42, column.1)]);
         assert!(canonical_ready_columns(&ready).contains(&column));
         assert_eq!(canonical_surface_cell_coverage(column, &ready), cell_count);
+    }
+
+    #[test]
+    fn draw_plan_residency_accepts_committed_chunks_without_opaque_geometry() {
+        let coord = (4, 5, 6);
+        let key = (0, coord.0, coord.1, coord.2);
+        let mut plan = LodDrawPlan {
+            canonical_chunks: HashSet::from([coord]),
+            ..LodDrawPlan::default()
+        };
+        let surface_residency = HashSet::new();
+        let mut profiles = CanonicalColumnProfiles::from([(
+            (coord.0, coord.2),
+            BTreeMap::from([(
+                coord.1,
+                CanonicalChunkProfile {
+                    cells: vec![None; CHUNK_EDGE * CHUNK_EDGE],
+                },
+            )]),
+        )]);
+        let mut chunks = BTreeMap::new();
+
+        assert!(
+            lod_draw_plan_resident(&plan, &surface_residency, &chunks, &profiles),
+            "an empty or water-only committed chunk has no opaque mesh but is still resident"
+        );
+        profiles.clear();
+        assert!(
+            !lod_draw_plan_resident(&plan, &surface_residency, &chunks, &profiles),
+            "evicting the upload marker must make the plan nonresident"
+        );
+
+        let mut arena = ArenaAllocator::new(64, 1);
+        let allocation = arena
+            .allocate(size_of::<GpuQuad>() as u32)
+            .expect("test allocation");
+        chunks.insert(
+            key,
+            ChunkMesh {
+                allocation,
+                morph_allocation: None,
+                quad_count: 1,
+                content_fingerprint: 0,
+                slices: Vec::new(),
+                lod_ownership_focus: None,
+                lod_ownership_stale: true,
+                lod_owned_slices: Vec::new(),
+                bounds_min: glam::Vec3::ZERO,
+                bounds_max: glam::Vec3::ONE,
+                activation_mask: 0,
+            },
+        );
+        assert!(
+            !lod_draw_plan_resident(&plan, &surface_residency, &chunks, &profiles),
+            "inactive opaque geometry cannot be replaced by a stale profile marker"
+        );
+
+        plan.canonical_chunks.clear();
+        plan.enclosed_view_chunks.insert(coord);
+        assert!(
+            lod_draw_plan_resident(&plan, &surface_residency, &chunks, &profiles),
+            "enclosed residency preserves the existing uploaded-mesh contract"
+        );
     }
 
     #[test]
