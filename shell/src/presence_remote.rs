@@ -79,6 +79,7 @@ impl RemotePresenceClient {
             last_pose_send_ms: Cell::new(f64::NEG_INFINITY),
             pose_schedule_ms: Cell::new(f64::NEG_INFINITY),
             last_ping_send_ms: Cell::new(f64::NEG_INFINITY),
+            unanswered_ping_since_ms: Cell::new(f64::NEG_INFINITY),
             reconnect_after_ms: Cell::new(0.0),
             clock: Cell::new(clock),
             timeline: RefCell::new(timeline),
@@ -116,6 +117,7 @@ impl RemotePresenceClient {
         frame_delta_seconds: f32,
         send_local_pose: bool,
     ) -> Vec<RemoteAvatarPose> {
+        self.inner.check_liveness(local_time_ms);
         if self.inner.state.get() == PresenceConnectionState::Open {
             self.inner.maybe_send_ping(local_time_ms);
             if send_local_pose {
@@ -180,6 +182,7 @@ struct PresenceInner {
     last_pose_send_ms: Cell<f64>,
     pose_schedule_ms: Cell<f64>,
     last_ping_send_ms: Cell<f64>,
+    unanswered_ping_since_ms: Cell<f64>,
     reconnect_after_ms: Cell<f64>,
     clock: Cell<ClockSync>,
     timeline: RefCell<RemotePresenceTimeline>,
@@ -319,6 +322,22 @@ impl PresenceInner {
             _error: error,
             _close: close,
         });
+        let weak = Rc::downgrade(inner);
+        if let Err(error) = schedule_after(inner.transport.request_timeout_ms, move || {
+            if let Some(inner) = weak.upgrade()
+                && inner.generation.get() == generation
+                && matches!(
+                    inner.state.get(),
+                    PresenceConnectionState::Connecting | PresenceConnectionState::Handshaking
+                )
+            {
+                inner.disconnect(generation, "presence handshake timed out".to_owned());
+            }
+        }) {
+            inner.detach_socket(1011, "presence timeout setup failed");
+            inner.state.set(PresenceConnectionState::WaitingToReconnect);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -386,6 +405,7 @@ impl PresenceInner {
             self.clock.set(clock);
             self.state.set(PresenceConnectionState::Open);
             self.last_ping_send_ms.set(f64::NEG_INFINITY);
+            self.unanswered_ping_since_ms.set(f64::NEG_INFINITY);
             self.last_pose_send_ms.set(f64::NEG_INFINITY);
             self.pose_schedule_ms.set(f64::NEG_INFINITY);
         } else if kind == protocol::presence_delta_kind() {
@@ -459,8 +479,10 @@ impl PresenceInner {
                 }
             };
             let mut clock = self.clock.get();
-            clock.observe_pong(local_now_ms(), pong);
+            let now = local_now_ms();
+            clock.observe_pong(now, pong);
             self.clock.set(clock);
+            self.unanswered_ping_since_ms.set(f64::NEG_INFINITY);
         } else if kind == protocol::error_kind() {
             let message = protocol::decode_error(&bytes)
                 .map(|(_, message)| message)
@@ -567,6 +589,24 @@ impl PresenceInner {
         }
         self.next_ping_sequence.set(sequence.wrapping_add(1).max(1));
         self.last_ping_send_ms.set(local_time_ms);
+        if !self.unanswered_ping_since_ms.get().is_finite() {
+            self.unanswered_ping_since_ms.set(local_time_ms);
+        }
+    }
+
+    fn check_liveness(&self, local_time_ms: f64) {
+        if self.state.get() == PresenceConnectionState::Open
+            && crate::presence_heartbeat_expired(
+                local_time_ms,
+                self.unanswered_ping_since_ms.get(),
+                self.transport.request_timeout_ms,
+            )
+        {
+            self.disconnect(
+                self.generation.get(),
+                "presence heartbeat timed out".to_owned(),
+            );
+        }
     }
 
     fn replace_session(&self, opened: &WorldOpened, local_time_ms: f64) {
@@ -691,6 +731,18 @@ fn periodic_send_marker(previous_ms: f64, local_time_ms: f64, interval_ms: f64) 
     }
     let elapsed_ms = (local_time_ms - previous_ms).max(0.0);
     previous_ms + (elapsed_ms / interval_ms).floor() * interval_ms
+}
+
+fn schedule_after(milliseconds: u32, callback: impl FnOnce() + 'static) -> Result<(), String> {
+    let scope: WorkerGlobalScope = js_sys::global().unchecked_into();
+    let callback = Closure::once_into_js(callback);
+    scope
+        .set_timeout_with_callback_and_timeout_and_arguments_0(
+            callback.unchecked_ref(),
+            i32::try_from(milliseconds).unwrap_or(i32::MAX),
+        )
+        .map(|_| ())
+        .map_err(js_reason)
 }
 
 fn timeout(milliseconds: i32) -> Promise {

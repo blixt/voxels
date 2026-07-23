@@ -22,6 +22,17 @@ const INVENTORY_SWIPE_THRESHOLD_CSS_PIXELS: f32 = 34.0;
 const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn presence_heartbeat_expired(
+    local_time_ms: f64,
+    unanswered_ping_since_ms: f64,
+    timeout_ms: u32,
+) -> bool {
+    local_time_ms.is_finite()
+        && unanswered_ping_since_ms.is_finite()
+        && local_time_ms - unanswered_ping_since_ms >= f64::from(timeout_ms)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn inventory_swipe(anchor: [f32; 2], current: [f32; 2]) -> Option<(i32, [f32; 2])> {
     if !anchor.into_iter().chain(current).all(f32::is_finite) {
         return None;
@@ -5194,6 +5205,18 @@ mod tests {
             assert!(camera.yaw.is_finite());
             assert!(camera.pitch.is_finite());
         }
+    }
+
+    #[test]
+    fn presence_heartbeat_expires_only_after_a_complete_timeout_window() {
+        assert!(!presence_heartbeat_expired(10_249.0, 250.0, 10_000));
+        assert!(presence_heartbeat_expired(10_250.0, 250.0, 10_000));
+        assert!(!presence_heartbeat_expired(
+            10_250.0,
+            f64::NEG_INFINITY,
+            10_000
+        ));
+        assert!(!presence_heartbeat_expired(f64::NAN, 250.0, 10_000));
     }
 
     #[test]
