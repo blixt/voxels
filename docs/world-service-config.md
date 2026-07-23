@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 24
+schema_version = 25
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -79,8 +79,11 @@ interaction_latency_slack_centimetres = 100
 interaction_pose_max_age_ms = 1000
 max_horizontal_speed_centimetres_per_second = 900
 max_vertical_speed_centimetres_per_second = 2000
+spectator_max_horizontal_speed_centimetres_per_second = 15000
+spectator_max_vertical_speed_centimetres_per_second = 15000
 movement_slack_centimetres = 100
 movement_credit_window_ms = 500
+spectator_movement_credit_window_ms = 2000
 
 [environment]
 day_length_seconds = 1200.0
@@ -106,12 +109,12 @@ weather_revision = 1
 
 [edits]
 database = "../tmp/world-state/schema-{edit_schema}/{world_id}-{source_hash}.sqlite3"
-change_queue_capacity = 256
+change_queue_capacity = 1024
 
 [spawn]
 xz_voxels = [0, 0]
-pillar_height_voxels = 40
-pillar_radius_voxels = 3
+pillar_height_voxels = 50
+pillar_radius_voxels = 25
 protection_radius_voxels = 64
 pillar_material = "Stone"
 
@@ -177,9 +180,11 @@ snapshot without per-frame network messages.
 `allow_spectator_mode` advertises a world capability and accepts the corresponding player-pose
 flag. A spectator has no replicated avatar and cannot dig or place, but its camera retains ordinary
 world-stream and edit-notification interest. The parked body remains the reconnect resume point.
-Camera flight remains subject to the same horizontal/vertical speed and movement-credit budgets;
-leaving spectator mode restores the authoritative body pose instead of accepting a client-proposed
-return location. Disabling the setting removes the capability and rejects spectator poses.
+Camera flight uses the separately bounded `spectator_max_*_speed` ceilings and
+`spectator_movement_credit_window_ms`; these allow fast read-only travel without granting normal
+player movement or interaction authority. Leaving spectator mode restores the authoritative body
+pose instead of accepting a client-proposed return location. Disabling the setting removes the
+capability and rejects spectator poses.
 
 `float16` is the high-performance default; `float32` is available for diagnostics. If
 `model_cache` is omitted on macOS, the service loads the immutable pinned revision from

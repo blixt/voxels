@@ -1236,6 +1236,24 @@ sea_level_voxels = 52
     }
 
     #[test]
+    fn documented_complete_schema_matches_checked_in_development_config() {
+        let documentation = include_str!("../../docs/world-service-config.md");
+        let (_, documented_schema) = documentation
+            .split_once("The complete schema is:\n\n```toml\n")
+            .expect("complete schema heading and TOML fence");
+        let (documented_schema, _) = documented_schema
+            .split_once("\n```")
+            .expect("closing TOML fence");
+
+        let documented =
+            WorldServiceConfig::from_toml(documented_schema).expect("documented complete schema");
+        let checked_in =
+            WorldServiceConfig::from_toml(include_str!("../../config/world-service.toml"))
+                .expect("checked-in development config");
+        assert_eq!(documented, checked_in);
+    }
+
+    #[test]
     fn checked_in_production_config_requires_signed_sessions_and_public_https_origins() {
         let config = WorldServiceConfig::from_toml(include_str!(
             "../../config/world-service.production.toml"
