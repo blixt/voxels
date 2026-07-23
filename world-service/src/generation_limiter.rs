@@ -4,6 +4,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::Notify;
 use voxels_world::WorldProductPriority;
 
+// Immediate surface work protects the ground beneath a moving player, but it must not turn the
+// shared worker pool into a permanent priority inversion for every other visible product. Eight
+// grants preserve up to four full two-worker waves of urgent work while putting a finite bound on
+// ordinary wait time.
+const MAX_CONSECUTIVE_IMMEDIATE_GRANTS: usize = 8;
+
 /// Keeps the configured generation capacity while waking collision work first, then the bounded
 /// current-surface ancestor chain, before queued ordinary generation. Already-executing work is
 /// never interrupted.
@@ -21,6 +27,7 @@ struct State {
     collision_waiters: usize,
     immediate_waiters: usize,
     ordinary_waiters: usize,
+    consecutive_immediate_grants: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,11 +75,15 @@ impl PriorityGenerationLimiter {
     fn signal(&self) {
         let state = self.lock();
         let wake_collision = state.available > 0 && state.collision_waiters > 0;
-        let wake_immediate =
-            state.available > 0 && state.collision_waiters == 0 && state.immediate_waiters > 0;
+        let wake_immediate = state.available > 0
+            && state.collision_waiters == 0
+            && state.immediate_waiters > 0
+            && (state.ordinary_waiters == 0
+                || state.consecutive_immediate_grants < MAX_CONSECUTIVE_IMMEDIATE_GRANTS);
         let wake_ordinary = state.available > 0
             && state.collision_waiters == 0
-            && state.immediate_waiters == 0
+            && (state.immediate_waiters == 0
+                || state.consecutive_immediate_grants >= MAX_CONSECUTIVE_IMMEDIATE_GRANTS)
             && state.ordinary_waiters > 0;
         drop(state);
         if wake_collision {
@@ -148,9 +159,17 @@ impl Waiter {
         let eligible = state.available > 0
             && match self.lane {
                 GenerationLane::Collision => true,
-                GenerationLane::Immediate => state.collision_waiters == 0,
+                GenerationLane::Immediate => {
+                    state.collision_waiters == 0
+                        && (state.ordinary_waiters == 0
+                            || state.consecutive_immediate_grants
+                                < MAX_CONSECUTIVE_IMMEDIATE_GRANTS)
+                }
                 GenerationLane::Ordinary => {
-                    state.collision_waiters == 0 && state.immediate_waiters == 0
+                    state.collision_waiters == 0
+                        && (state.immediate_waiters == 0
+                            || state.consecutive_immediate_grants
+                                >= MAX_CONSECUTIVE_IMMEDIATE_GRANTS)
                 }
             };
         if !eligible {
@@ -159,8 +178,21 @@ impl Waiter {
         state.available -= 1;
         match self.lane {
             GenerationLane::Collision => state.collision_waiters -= 1,
-            GenerationLane::Immediate => state.immediate_waiters -= 1,
-            GenerationLane::Ordinary => state.ordinary_waiters -= 1,
+            GenerationLane::Immediate => {
+                state.immediate_waiters -= 1;
+                if state.ordinary_waiters == 0 {
+                    state.consecutive_immediate_grants = 0;
+                } else {
+                    state.consecutive_immediate_grants = state
+                        .consecutive_immediate_grants
+                        .saturating_add(1)
+                        .min(MAX_CONSECUTIVE_IMMEDIATE_GRANTS);
+                }
+            }
+            GenerationLane::Ordinary => {
+                state.ordinary_waiters -= 1;
+                state.consecutive_immediate_grants = 0;
+            }
         }
         self.registered = false;
         drop(state);
@@ -382,5 +414,69 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             ["collision", "immediate"]
         );
+    }
+
+    #[tokio::test]
+    async fn ordinary_generation_has_a_bounded_turn_during_sustained_immediate_work() {
+        let limiter = PriorityGenerationLimiter::new(1);
+        let held = limiter.acquire(WorldProductPriority::VisibleSurface).await;
+        let (order_tx, mut order_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let ordinary_limiter = Arc::clone(&limiter);
+        let ordinary_tx = order_tx.clone();
+        let ordinary = tokio::spawn(async move {
+            let _permit = ordinary_limiter
+                .acquire(WorldProductPriority::VisibleSurface)
+                .await;
+            let _ = ordinary_tx.send("ordinary");
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while limiter.waiting().2 != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ordinary waiter must register");
+
+        let mut immediate = Vec::new();
+        for _ in 0..(MAX_CONSECUTIVE_IMMEDIATE_GRANTS * 3) {
+            let immediate_limiter = Arc::clone(&limiter);
+            let immediate_tx = order_tx.clone();
+            immediate.push(tokio::spawn(async move {
+                let _permit = immediate_limiter
+                    .acquire(WorldProductPriority::ImmediateSurface)
+                    .await;
+                let _ = immediate_tx.send("immediate");
+            }));
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while limiter.waiting().1 != MAX_CONSECUTIVE_IMMEDIATE_GRANTS * 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("immediate waiters must register");
+
+        drop(held);
+        let mut grants_before_ordinary = 0;
+        loop {
+            let lane = tokio::time::timeout(Duration::from_secs(1), order_rx.recv())
+                .await
+                .expect("a generation waiter must advance")
+                .expect("generation order channel must remain open");
+            if lane == "ordinary" {
+                break;
+            }
+            grants_before_ordinary += 1;
+        }
+        assert!(
+            grants_before_ordinary <= MAX_CONSECUTIVE_IMMEDIATE_GRANTS,
+            "ordinary work waited behind {grants_before_ordinary} immediate grants"
+        );
+
+        ordinary.await.expect("ordinary waiter");
+        for waiter in immediate {
+            waiter.await.expect("immediate waiter");
+        }
     }
 }
