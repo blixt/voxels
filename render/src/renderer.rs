@@ -68,7 +68,12 @@ const FAR_MATERIAL_FLAG: u32 = 1 << 31;
 const SURFACE_LOD_SHIFT: u32 = 27;
 const GPU_FACE_SHIFT: u32 = 16;
 const GPU_FACE_MASK: u32 = 0b111 << GPU_FACE_SHIFT;
-const CANONICAL_RASTER_COVERAGE_FLAG: u32 = 1 << 23;
+const EXACT_VOLUME_FRONTIER_MESH_KEY: MeshKey = (u8::MAX, 2, 0, 0);
+pub const EXACT_VOLUME_FRONTIER_FACE_WORDS: usize = CHUNK_EDGE * CHUNK_EDGE / 64;
+const INTERNAL_SEAM_LOW_U_FLAG: u32 = 1 << 8;
+const INTERNAL_SEAM_HIGH_U_FLAG: u32 = 1 << 9;
+const INTERNAL_SEAM_LOW_V_FLAG: u32 = 1 << 10;
+const INTERNAL_SEAM_HIGH_V_FLAG: u32 = 1 << 11;
 const SURFACE_MACRO_NORMAL_FLAG: u32 = 1 << 24;
 // Sixteen horizon bits occupy otherwise unused material and AO bits: eight cardinal 2-bit angles
 // (own + parent LOD). Keeping the parent profile lets the shader use the same geomorph band as
@@ -319,7 +324,7 @@ const _: () = assert!(std::mem::offset_of!(ShadowFrameUniform, lod_boundary_cent
 const _: () = assert!(std::mem::offset_of!(ShadowFrameUniform, lod_boundary_half_extents) == 160);
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 struct GpuQuad {
     origin: [i32; 3],
     extent_voxels: [u16; 2],
@@ -327,14 +332,31 @@ struct GpuQuad {
     ao: u32,
 }
 
+/// A visible opening from a resident exact-volume chunk into a chunk whose mesh is not ready.
+///
+/// Unknown data is not empty space. The renderer temporarily closes only these reachable portal
+/// cells until the requested neighbor has an exact mesh, preventing atmospheric background from
+/// leaking through a tunnel frontier without inventing coverage at exterior silhouettes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExactVolumeFrontierFace {
+    pub chunk: ChunkCoord,
+    /// Portal face order: -X, +X, -Y, +Y, -Z, +Z.
+    pub face: u8,
+    pub cells: [u64; EXACT_VOLUME_FRONTIER_FACE_WORDS],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuCutTransition {
     /// x is the normalized transition phase; y is 0 stable, 1 outgoing, or 2 incoming.
     phase_role: [f32; 4],
+    /// The outgoing cut must keep the LOD coordinate system in which it was selected. Otherwise
+    /// moving the focus changes its vertex morph on the first transition frame before it fades.
+    lod_boundary_centres: [[f32; 4]; 4],
+    lod_boundary_half_extents: [[f32; 4]; 2],
 }
 
-const _: () = assert!(size_of::<GpuCutTransition>() == 16);
+const _: () = assert!(size_of::<GpuCutTransition>() == 112);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SurfaceCell {
@@ -1888,7 +1910,7 @@ impl Renderer {
                 label: Some("complete cut transition layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -1900,9 +1922,7 @@ impl Renderer {
         let cut_transition_buffers = std::array::from_fn(|role| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("complete cut transition uniform"),
-                contents: bytemuck::bytes_of(&GpuCutTransition {
-                    phase_role: [1.0, role as f32, 0.0, 0.0],
-                }),
+                contents: bytemuck::bytes_of(&gpu_cut_transition(1.0, role as f32, None)),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             })
         });
@@ -2603,6 +2623,63 @@ impl Renderer {
         self.invalidate_lod_draw_plan(LOD_PLAN_REBUILD_ENCLOSED_VIEW);
     }
 
+    /// Replaces the conservative terminators for visible exact-volume streaming frontiers.
+    ///
+    /// The mesh is one greedily merged face mask, independent of the canonical/surface LOD cut.
+    /// It disappears atomically as soon as the shell stops reporting that neighbor as unknown.
+    pub fn set_exact_volume_frontier_faces(
+        &mut self,
+        frontiers: &[ExactVolumeFrontierFace],
+    ) -> bool {
+        let gpu_quads = frontiers
+            .iter()
+            .flat_map(frontier_face_gpu_quads)
+            .collect::<Vec<_>>();
+        if gpu_quads.is_empty() {
+            let existed = self.chunks.contains_key(&EXACT_VOLUME_FRONTIER_MESH_KEY);
+            self.remove_opaque_mesh(EXACT_VOLUME_FRONTIER_MESH_KEY);
+            return existed;
+        }
+        if gpu_quads_match_resident(
+            self.chunks.get(&EXACT_VOLUME_FRONTIER_MESH_KEY),
+            &gpu_quads,
+            None,
+        ) {
+            return false;
+        }
+        let Some((bounds_min, bounds_max)) = gpu_quad_bounds(&gpu_quads) else {
+            return false;
+        };
+        let quad_count = gpu_quads.len() as u32;
+        let slice = MeshSlice {
+            relative_offset: 0,
+            size: quad_count * size_of::<GpuQuad>() as u32,
+            quad_count,
+            bounds_min,
+            bounds_max,
+            surface_patch_id: None,
+            boundary_edge: None,
+            morph_closure: false,
+            exact_replacement_chunk: None,
+            render_layer: RenderLayer::Opaque,
+        };
+        let Some(prepared) = self.prepare_mesh_sliced(
+            EXACT_VOLUME_FRONTIER_MESH_KEY,
+            &gpu_quads,
+            None,
+            vec![slice],
+        ) else {
+            return false;
+        };
+        commit_prepared_mesh(
+            &mut self.arena,
+            &mut self.chunks,
+            EXACT_VOLUME_FRONTIER_MESH_KEY,
+            Some(prepared),
+        );
+        true
+    }
+
     pub fn enclosed_view_chunk_owned(&self, coord: ChunkCoord) -> bool {
         self.enclosed_view_ready_chunks
             .contains(&(coord.x, coord.y, coord.z))
@@ -2844,7 +2921,7 @@ impl Renderer {
         let key = (0, coord.x, coord.y, coord.z);
         let surface_profile = canonical_chunk_profile(chunk);
         let origin = coord.world_origin();
-        let convert = |quad: &Quad, conservative_coverage: bool| GpuQuad {
+        let convert = |quad: &Quad, internal_seam_flags: u32| GpuQuad {
             origin: [
                 origin[0] + i32::from(quad.origin[0]),
                 origin[1] + i32::from(quad.origin[1]),
@@ -2852,21 +2929,19 @@ impl Renderer {
             ],
             extent_voxels: quad.extent.map(u16::from),
             material_face: pack_gpu_material_face(u32::from(quad.material), quad.face),
-            ao: u32::from(quad.ao)
-                | if conservative_coverage {
-                    CANONICAL_RASTER_COVERAGE_FLAG
-                } else {
-                    0
-                },
+            ao: u32::from(quad.ao) | internal_seam_flags,
         };
-        // Greedy canonical terrain has intentional T-junctions where one long quad meets several
-        // shorter neighbors. Mark only its opaque faces for subpixel conservative coverage; water
-        // remains translucent and must not overlap its own alpha edges.
-        let opaque_quads: Vec<_> = mesh.opaque.iter().map(|quad| convert(quad, true)).collect();
+        let opaque_seam_flags = canonical_internal_seam_flags(&mesh.opaque);
+        let opaque_quads: Vec<_> = mesh
+            .opaque
+            .iter()
+            .zip(opaque_seam_flags)
+            .map(|(quad, flags)| convert(quad, flags))
+            .collect();
         let water_quads: Vec<_> = mesh
             .translucent
             .iter()
-            .map(|quad| convert(quad, false))
+            .map(|quad| convert(quad, 0))
             .collect();
         let min = glam::Vec3::from_array(origin.map(|value| value as f32 * VOXEL_SIZE_METRES));
         let max = min + glam::Vec3::splat(CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
@@ -3687,9 +3762,13 @@ impl Renderer {
             self.queue.write_buffer(
                 &self.cut_transition_buffers[1],
                 0,
-                bytemuck::bytes_of(&GpuCutTransition {
-                    phase_role: [phase, 1.0, 0.0, 0.0],
-                }),
+                bytemuck::bytes_of(&gpu_cut_transition(
+                    phase,
+                    1.0,
+                    self.cut_transition
+                        .as_ref()
+                        .and_then(|transition| transition.from_focus),
+                )),
             );
         }
         phase
@@ -4823,7 +4902,8 @@ fn collect_opaque_draw_lists(
     let mut lod_ownership_refreshes = 0u32;
 
     for (key, chunk) in chunks {
-        if !chunk.active() || (key.0 != 0 && !far_terrain) {
+        if !chunk.active() || (key.0 != 0 && *key != EXACT_VOLUME_FRONTIER_MESH_KEY && !far_terrain)
+        {
             continue;
         }
         let world_chunk_clip = view_clip.classify_aabb(chunk.bounds_min, chunk.bounds_max);
@@ -4923,7 +5003,7 @@ fn collect_cut_transition_draw_lists(
     let mut outgoing = WorldDrawListBuilder::default();
     for (key, chunk) in chunks {
         if !chunk.active()
-            || (key.0 != 0 && !far_terrain)
+            || (key.0 != 0 && *key != EXACT_VOLUME_FRONTIER_MESH_KEY && !far_terrain)
             || !view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max)
         {
             continue;
@@ -4940,7 +5020,7 @@ fn collect_cut_transition_draw_lists(
                 slice_owned_by_lod(transition.from_focus, Some(&transition.from), key, slice);
             let is_owned = slice_owned_by_lod(current_focus, Some(current_plan), key, slice);
             if was_owned && !is_owned {
-                let morphing = slice_uses_geometry_morph(key, current_focus, slice);
+                let morphing = slice_uses_geometry_morph(key, transition.from_focus, slice);
                 outgoing.select_slice(chunk, slice, morphing)?;
                 selected_mesh = true;
             }
@@ -6295,6 +6375,9 @@ fn slice_owned_by_lod(
     key: &MeshKey,
     slice: &MeshSlice,
 ) -> bool {
+    if *key == EXACT_VOLUME_FRONTIER_MESH_KEY {
+        return true;
+    }
     let Some(focus) = focus else {
         return key.0 == 0;
     };
@@ -6329,6 +6412,193 @@ fn slice_owned_by_lod(
         || plan.owns_patch(patch_id),
         |edge| plan.owns_source_edge(patch_id, edge),
     )
+}
+
+fn frontier_face_gpu_quads(frontier: &ExactVolumeFrontierFace) -> Vec<GpuQuad> {
+    if frontier.face >= 6 || frontier.cells.iter().all(|word| *word == 0) {
+        return Vec::new();
+    }
+    let edge = CHUNK_EDGE;
+    let occupied = |u: usize, v: usize| {
+        let index = if frontier.face <= 1 {
+            // Portal X faces are indexed y + z * edge, while voxel quad U/V are Z/Y.
+            v + u * edge
+        } else {
+            u + v * edge
+        };
+        frontier.cells[index / 64] & (1_u64 << (index % 64)) != 0
+    };
+    let mut consumed = vec![false; edge * edge];
+    let world = frontier.chunk.world_origin();
+    let material_face = pack_gpu_material_face(u32::from(Material::Stone.id()), frontier.face);
+    let mut quads = Vec::new();
+    for v in 0..edge {
+        for u in 0..edge {
+            let index = u + v * edge;
+            if consumed[index] || !occupied(u, v) {
+                continue;
+            }
+            let mut width = 1;
+            while u + width < edge && !consumed[u + width + v * edge] && occupied(u + width, v) {
+                width += 1;
+            }
+            let mut height = 1;
+            'height: while v + height < edge {
+                for offset in 0..width {
+                    if consumed[u + offset + (v + height) * edge]
+                        || !occupied(u + offset, v + height)
+                    {
+                        break 'height;
+                    }
+                }
+                height += 1;
+            }
+            for clear_v in v..v + height {
+                for clear_u in u..u + width {
+                    consumed[clear_u + clear_v * edge] = true;
+                }
+            }
+            let origin = match frontier.face {
+                0 => [world[0] - 1, world[1] + v as i32, world[2] + u as i32],
+                1 => [
+                    world[0] + edge as i32,
+                    world[1] + v as i32,
+                    world[2] + u as i32,
+                ],
+                2 => [world[0] + u as i32, world[1] - 1, world[2] + v as i32],
+                3 => [
+                    world[0] + u as i32,
+                    world[1] + edge as i32,
+                    world[2] + v as i32,
+                ],
+                4 => [world[0] + u as i32, world[1] + v as i32, world[2] - 1],
+                5 => [
+                    world[0] + u as i32,
+                    world[1] + v as i32,
+                    world[2] + edge as i32,
+                ],
+                _ => unreachable!(),
+            };
+            quads.push(GpuQuad {
+                origin,
+                extent_voxels: [width as u16, height as u16],
+                material_face,
+                ao: 0xff,
+            });
+        }
+    }
+    quads
+}
+
+/// Marks coplanar edges covered by adjacent quads and edges whose continuation crosses a chunk.
+///
+/// Greedy rectangles intentionally meet at T-junctions. Hardware rasterization can round the
+/// independently projected edge equations to opposite subpixels and leave an isolated background
+/// sample. Encoding the genuinely internal edges lets the vertex shader overlap those seams by one
+/// pixel. Chunk-boundary edges receive the same treatment because independently meshed neighbors
+/// cannot share a long-edge subdivision; any exposed turn there is still backed by the closed
+/// voxel surface's perpendicular face rather than open space.
+fn canonical_internal_seam_flags(quads: &[Quad]) -> Vec<u32> {
+    // key: (varying world axis, first fixed coordinate, second fixed coordinate). Unit counts let
+    // several short coplanar or perpendicular neighbors prove complete coverage of one long edge.
+    let mut edge_counts = BTreeMap::<(u8, u8, u8), [u8; CHUNK_EDGE]>::new();
+    let edges = quads
+        .iter()
+        .map(|quad| {
+            [
+                canonical_quad_edge(quad, [0, 0], [0, 1]),
+                canonical_quad_edge(quad, [1, 0], [1, 1]),
+                canonical_quad_edge(quad, [0, 0], [1, 0]),
+                canonical_quad_edge(quad, [0, 1], [1, 1]),
+            ]
+        })
+        .collect::<Vec<_>>();
+    for quad_edges in &edges {
+        for edge in quad_edges.iter().flatten() {
+            let counts = edge_counts.entry(edge.0).or_insert([0; CHUNK_EDGE]);
+            for count in &mut counts[usize::from(edge.1)..usize::from(edge.2)] {
+                *count = count.saturating_add(1);
+            }
+        }
+    }
+    quads
+        .iter()
+        .zip(edges)
+        .map(|(quad, quad_edges)| {
+            if quad.face >= 6 || quad.extent.contains(&0) {
+                return 0;
+            }
+            let shared = |edge: Option<((u8, u8, u8), u8, u8)>| {
+                edge.is_some_and(|(key, start, end)| {
+                    edge_counts.get(&key).is_some_and(|counts| {
+                        counts[usize::from(start)..usize::from(end)]
+                            .iter()
+                            .all(|count| *count >= 2)
+                    })
+                })
+            };
+            let (u, v) = canonical_quad_uv_origin(quad);
+            let [width, height] = quad.extent;
+            (if u == 0 || shared(quad_edges[0]) {
+                INTERNAL_SEAM_LOW_U_FLAG
+            } else {
+                0
+            }) | (if u + width == CHUNK_EDGE as u8 || shared(quad_edges[1]) {
+                INTERNAL_SEAM_HIGH_U_FLAG
+            } else {
+                0
+            }) | (if v == 0 || shared(quad_edges[2]) {
+                INTERNAL_SEAM_LOW_V_FLAG
+            } else {
+                0
+            }) | (if v + height == CHUNK_EDGE as u8 || shared(quad_edges[3]) {
+                INTERNAL_SEAM_HIGH_V_FLAG
+            } else {
+                0
+            })
+        })
+        .collect()
+}
+
+fn canonical_quad_uv_origin(quad: &Quad) -> (u8, u8) {
+    match quad.face {
+        0 | 1 => (quad.origin[2], quad.origin[1]),
+        2 | 3 => (quad.origin[0], quad.origin[2]),
+        4 | 5 => (quad.origin[0], quad.origin[1]),
+        _ => (0, 0),
+    }
+}
+
+fn canonical_quad_edge(quad: &Quad, from: [u8; 2], to: [u8; 2]) -> Option<((u8, u8, u8), u8, u8)> {
+    if quad.face >= 6 || quad.extent.contains(&0) {
+        return None;
+    }
+    let corner = |uv: [u8; 2]| {
+        let u = uv[0] * quad.extent[0];
+        let v = uv[1] * quad.extent[1];
+        match quad.face {
+            0 => [quad.origin[0] + 1, quad.origin[1] + v, quad.origin[2] + u],
+            1 => [quad.origin[0], quad.origin[1] + v, quad.origin[2] + u],
+            2 => [quad.origin[0] + u, quad.origin[1] + 1, quad.origin[2] + v],
+            3 => [quad.origin[0] + u, quad.origin[1], quad.origin[2] + v],
+            4 => [quad.origin[0] + u, quad.origin[1] + v, quad.origin[2] + 1],
+            5 => [quad.origin[0] + u, quad.origin[1] + v, quad.origin[2]],
+            _ => unreachable!(),
+        }
+    };
+    let a = corner(from);
+    let b = corner(to);
+    let axis = (0..3).find(|&axis| a[axis] != b[axis])?;
+    let fixed = match axis {
+        0 => [a[1], a[2]],
+        1 => [a[0], a[2]],
+        _ => [a[0], a[1]],
+    };
+    Some((
+        (axis as u8, fixed[0], fixed[1]),
+        a[axis].min(b[axis]),
+        a[axis].max(b[axis]),
+    ))
 }
 
 fn surface_patch_intersects_morph_band(focus: GeometricLodFocus, patch: SurfacePatchId) -> bool {
@@ -6819,6 +7089,18 @@ fn lod_boundary_half_extents_uniform(lod_focus: Option<GeometricLodFocus>) -> [[
     })
 }
 
+fn gpu_cut_transition(
+    phase: f32,
+    role: f32,
+    lod_focus: Option<GeometricLodFocus>,
+) -> GpuCutTransition {
+    GpuCutTransition {
+        phase_role: [phase, role, 0.0, 0.0],
+        lod_boundary_centres: lod_boundary_centres_uniform(lod_focus),
+        lod_boundary_half_extents: lod_boundary_half_extents_uniform(lod_focus),
+    }
+}
+
 fn directional_shadow_cascades(
     config: &SurfaceConfiguration,
     camera: &CameraState,
@@ -6973,7 +7255,13 @@ fn create_voxel_pipeline(
         },
         PipelineOptions {
             vertex_entry: if variant.morph_geometry {
-                "vs_main_morph"
+                if variant.cut_transition {
+                    "vs_transition_morph"
+                } else {
+                    "vs_main_morph"
+                }
+            } else if variant.cut_transition {
+                "vs_transition_fixed"
             } else {
                 "vs_main_fixed"
             },
@@ -7091,9 +7379,9 @@ fn transition_depth_pipeline(
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some(if morph_geometry {
-                "vs_main_morph"
+                "vs_transition_morph"
             } else {
-                "vs_main_fixed"
+                "vs_transition_fixed"
             }),
             buffers: if morph_geometry {
                 &morph_buffers
@@ -7474,6 +7762,120 @@ mod tests {
             })
         });
         assert_eq!(lod_boundary_half_extents_uniform(Some(focus)), expected);
+    }
+
+    #[test]
+    fn outgoing_cut_uniform_freezes_the_previous_lod_coordinate_system() {
+        let previous = GeometricLodFocus::snapped(1_614, 294);
+        let uniform = gpu_cut_transition(0.25, 1.0, Some(previous));
+        assert_eq!(uniform.phase_role, [0.25, 1.0, 0.0, 0.0]);
+        assert_eq!(
+            uniform.lod_boundary_centres,
+            lod_boundary_centres_uniform(Some(previous))
+        );
+        assert_eq!(
+            uniform.lod_boundary_half_extents,
+            lod_boundary_half_extents_uniform(Some(previous))
+        );
+    }
+
+    #[test]
+    fn exact_volume_frontier_caps_only_the_reported_portal_cells() {
+        let coord = ChunkCoord::new(3, -2, 5);
+        let mut x_cells = [0_u64; EXACT_VOLUME_FRONTIER_FACE_WORDS];
+        for z in 4..6 {
+            for y in 7..10 {
+                let index = y + z * CHUNK_EDGE;
+                x_cells[index / 64] |= 1_u64 << (index % 64);
+            }
+        }
+        let x_quads = frontier_face_gpu_quads(&ExactVolumeFrontierFace {
+            chunk: coord,
+            face: 0,
+            cells: x_cells,
+        });
+        assert_eq!(x_quads.len(), 1);
+        assert_eq!(
+            x_quads[0].origin,
+            [
+                coord.world_origin()[0] - 1,
+                coord.world_origin()[1] + 7,
+                coord.world_origin()[2] + 4,
+            ]
+        );
+        assert_eq!(x_quads[0].extent_voxels, [2, 3]);
+        assert_eq!(x_quads[0].material_face >> GPU_FACE_SHIFT & 7, 0);
+
+        let mut z_cells = [0_u64; EXACT_VOLUME_FRONTIER_FACE_WORDS];
+        for y in 10..12 {
+            for x in 2..5 {
+                let index = x + y * CHUNK_EDGE;
+                z_cells[index / 64] |= 1_u64 << (index % 64);
+            }
+        }
+        let z_quads = frontier_face_gpu_quads(&ExactVolumeFrontierFace {
+            chunk: coord,
+            face: 5,
+            cells: z_cells,
+        });
+        assert_eq!(z_quads.len(), 1);
+        assert_eq!(
+            z_quads[0].origin,
+            [
+                coord.world_origin()[0] + 2,
+                coord.world_origin()[1] + 10,
+                coord.world_origin()[2] + CHUNK_EDGE as i32,
+            ]
+        );
+        assert_eq!(z_quads[0].extent_voxels, [3, 2]);
+        assert_eq!(z_quads[0].material_face >> GPU_FACE_SHIFT & 7, 5);
+
+        assert!(
+            frontier_face_gpu_quads(&ExactVolumeFrontierFace {
+                chunk: coord,
+                face: 6,
+                cells: [u64::MAX; EXACT_VOLUME_FRONTIER_FACE_WORDS],
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn canonical_seam_flags_cover_only_shared_coplanar_edges() {
+        let quad = |origin: [u8; 3], extent: [u8; 2]| Quad {
+            origin,
+            face: 2,
+            extent,
+            material: Material::Stone.id(),
+            ao: 0xff,
+            _pad: 0,
+        };
+        let quads = [
+            quad([4, 4, 4], [4, 2]),
+            quad([4, 4, 6], [2, 2]),
+            quad([6, 4, 6], [2, 2]),
+        ];
+        let flags = canonical_internal_seam_flags(&quads);
+        assert_eq!(flags[0], INTERNAL_SEAM_HIGH_V_FLAG);
+        assert_eq!(
+            flags[1] & INTERNAL_SEAM_LOW_V_FLAG,
+            INTERNAL_SEAM_LOW_V_FLAG
+        );
+        assert_eq!(
+            flags[2] & INTERNAL_SEAM_LOW_V_FLAG,
+            INTERNAL_SEAM_LOW_V_FLAG
+        );
+        assert_eq!(flags[0] & INTERNAL_SEAM_LOW_U_FLAG, 0);
+        assert_eq!(flags[0] & INTERNAL_SEAM_HIGH_U_FLAG, 0);
+        assert_eq!(flags[0] & INTERNAL_SEAM_LOW_V_FLAG, 0);
+
+        let boundary = canonical_internal_seam_flags(&[quad([0, 4, 0], [4, 2])]);
+        assert_eq!(
+            boundary[0] & (INTERNAL_SEAM_LOW_U_FLAG | INTERNAL_SEAM_LOW_V_FLAG),
+            INTERNAL_SEAM_LOW_U_FLAG | INTERNAL_SEAM_LOW_V_FLAG
+        );
+        assert_eq!(boundary[0] & INTERNAL_SEAM_HIGH_U_FLAG, 0);
+        assert_eq!(boundary[0] & INTERNAL_SEAM_HIGH_V_FLAG, 0);
     }
 
     #[test]

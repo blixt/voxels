@@ -405,18 +405,27 @@ mod tests {
     }
 
     #[test]
-    fn greedy_terrain_faces_expand_raster_coverage_without_stretching_world_space() {
+    fn terrain_faces_preserve_exact_projected_silhouettes() {
         let voxels = include_str!("shaders/voxels.wgsl");
-        assert!(voxels.contains("let far_surface = (material & 0x80000000u) != 0u"));
-        assert!(voxels.contains("let canonical_opaque = (ao & 0x00800000u) != 0u"));
-        assert!(voxels.contains("fn conservative_surface_clip("));
-        assert!(voxels.contains("const CONSERVATIVE_EXPANSION_PIXELS: f32 = 3.0"));
-        assert!(voxels.contains("fn conservative_axis_offset("));
-        assert!(voxels.contains("CONSERVATIVE_EXPANSION_PIXELS * 2.0"));
-        assert!(voxels.contains("out.position = conservative_surface_clip("));
+        assert!(!voxels.contains("CONSERVATIVE_EXPANSION_PIXELS"));
+        assert!(!voxels.contains("conservative_surface_clip"));
+        assert!(!voxels.contains("conservative_axis_offset"));
+        assert!(voxels.contains("fn close_internal_raster_seams("));
+        assert!(voxels.contains("INTERNAL_SEAM_LOW_U_FLAG"));
+        assert!(voxels.contains("out.position = close_internal_raster_seams("));
         assert!(voxels.contains("out.world = world"));
         assert!(voxels.contains("if role == 0u"));
         assert!(voxels.contains("return threshold >= clamp(cut_transition.phase_role.x"));
+    }
+
+    #[test]
+    fn outgoing_cut_uses_its_frozen_lod_coordinate_system() {
+        let voxels = include_str!("shaders/voxels.wgsl");
+        assert!(voxels.contains("cut_transition.lod_boundary_centres"));
+        assert!(voxels.contains("cut_transition.lod_boundary_half_extents"));
+        assert!(voxels.contains("fn vs_transition_fixed("));
+        assert!(voxels.contains("fn vs_transition_morph("));
+        assert!(voxels.contains("if cut_transition.phase_role.y == 1.0"));
     }
 
     #[test]
