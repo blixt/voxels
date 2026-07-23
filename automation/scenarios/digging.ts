@@ -222,6 +222,8 @@ async function performDig(
       `dig replacement did not settle at ${target.join(",")}: ${JSON.stringify({
         pendingJobs: snapshotValue(latest, "pendingJobs"),
         surfaceInFlight: snapshotValue(latest, "surfaceInFlight"),
+        surfaceQueued: snapshotValue(latest, "surfaceQueued"),
+        surfaceDirty: snapshotValue(latest, "surfaceDirty"),
         required: snapshotValue(latest, "editCanonicalRequired"),
         renderable: snapshotValue(latest, "editCanonicalRenderable"),
         owned: snapshotValue(latest, "editCanonicalOwned"),
