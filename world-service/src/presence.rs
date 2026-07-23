@@ -491,7 +491,6 @@ impl PresenceHub {
             let Some(prior) = player.pose else {
                 return PoseAdmission::SessionClosed;
             };
-            let entering_spectator = !is_spectator(prior) && is_spectator(pose);
             let leaving_spectator = is_spectator(prior) && !is_spectator(pose);
             if leaving_spectator {
                 pose.eye_position_metres = player.body_pose.eye_position_metres;
@@ -545,14 +544,7 @@ impl PresenceHub {
             let old_cell = player.cell;
             let new_cell = Some(cell_for_pose(pose, self.config.spatial_cell_metres));
             player.pose = Some(pose);
-            if entering_spectator {
-                player.body_pose = PlayerPoseUpdate {
-                    linear_velocity_metres_per_second: prior.linear_velocity_metres_per_second,
-                    flags: prior.flags,
-                    ..pose
-                };
-                player.resume_revision = player.resume_revision.saturating_add(1);
-            } else if !is_spectator(pose) {
+            if !is_spectator(pose) {
                 player.body_pose = pose;
                 player.resume_revision = player.resume_revision.saturating_add(1);
             }
@@ -1406,9 +1398,11 @@ mod tests {
                 .expect("subject")
                 .last_pose_receipt_ms = 0;
         }
-        let mut spectator = pose(2, 0.5, 0.0);
+        let mut spectator = pose(2, 0.6, 0.0);
         spectator.flags = PLAYER_POSE_SPECTATOR;
         spectator.linear_velocity_metres_per_second = [0.0; 3];
+        spectator.look_yaw_radians = 0.75;
+        spectator.look_pitch_radians = -0.25;
         assert_eq!(
             hub.accept_pose(&subject, spectator),
             PoseAdmission::Accepted
@@ -1424,7 +1418,7 @@ mod tests {
             spectator_resume.eye_position_metres,
             body_resume.eye_position_metres
         );
-        assert_eq!(spectator_resume.revision, body_resume.revision + 1);
+        assert_eq!(spectator_resume.revision, body_resume.revision);
         let leave = decode_presence_delta(
             &hub.build_delta(&viewer, &mut viewer_stream)
                 .expect("build spectator leave")
@@ -1477,7 +1471,7 @@ mod tests {
             restored_resume.eye_position_metres,
             body_resume.eye_position_metres
         );
-        assert_eq!(restored_resume.revision, spectator_resume.revision + 1);
+        assert_eq!(restored_resume.revision, body_resume.revision + 1);
     }
 
     #[test]
