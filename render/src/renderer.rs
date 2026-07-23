@@ -2537,13 +2537,19 @@ impl Renderer {
         self.invalidate_lod_draw_plan(LOD_PLAN_REBUILD_CANONICAL_COLUMNS);
     }
 
-    /// Whether an exact canonical chunk currently owns its LOD cells.
+    /// Whether an exact-volume chunk is part of a LOD cut currently reaching the screen.
     ///
-    /// Automation uses this to verify that an edit replacement never relinquishes render
-    /// ownership while its previous uploaded mesh is still the correct transactional fallback.
-    pub fn canonical_chunk_owned(&self, coord: ChunkCoord) -> bool {
-        self.canonical_ready_chunks
-            .contains(&(coord.x, coord.y, coord.z))
+    /// Canonical surface bands and enclosed tunnel/cavern interest are independent exact-volume
+    /// ownership reasons. During a short geometric handoff, either the incoming or outgoing
+    /// complete cut remains presented. Reporting only the canonical-ready input set would
+    /// incorrectly call a resident tunnel chunk unowned even while the renderer draws it.
+    pub fn exact_volume_chunk_presented(&self, coord: ChunkCoord) -> bool {
+        let coord = (coord.x, coord.y, coord.z);
+        self.lod_draw_plan.owns_exact_volume_coord(coord)
+            || self
+                .cut_transition
+                .as_ref()
+                .is_some_and(|transition| transition.from.owns_exact_volume_coord(coord))
     }
 
     /// Tiles referenced by the complete cut currently reaching the screen.
@@ -8896,6 +8902,9 @@ mod tests {
         ));
         plan.enclosed_view_chunks
             .extend([(7, -3, 0), (7, -2, 0), (7, -1, 0)]);
+        assert!(plan.owns_exact_volume_coord((0, 0, 0)));
+        assert!(plan.owns_exact_volume_coord((7, -2, 0)));
+        assert!(!plan.owns_exact_volume_coord((7, 0, 0)));
         for y in -3..=-1 {
             assert!(
                 slice_owned_by_lod(Some(focus), Some(&plan), &(0, 7, y, 0), &test_slice()),

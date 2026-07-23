@@ -4097,7 +4097,7 @@ mod web {
                     let renderer = engine.renderer.borrow();
                     edit_canonical_coords
                         .iter()
-                        .filter(|coord| renderer.canonical_chunk_owned(**coord))
+                        .filter(|coord| renderer.exact_volume_chunk_presented(**coord))
                         .count()
                 };
                 let lod_focus_lag_voxels = i64::from(camera_voxel_x)
