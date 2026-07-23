@@ -1,8 +1,18 @@
-import { issueSessionCredentials } from "./session.ts";
+import { isValidPlayerName, issueSessionCredentials } from "./session.ts";
 
 const PUBLIC_ORIGIN = "https://voxels.lol";
 const MAX_SESSION_REQUEST_BYTES = 4_096;
 const RATE_LIMIT_WINDOW_SECONDS = 60;
+
+class SessionRequestError extends Error {
+  readonly status: 400 | 413;
+
+  constructor(status: 400 | 413, message: string) {
+    super(message);
+    this.name = "SessionRequestError";
+    this.status = status;
+  }
+}
 
 export default {
   async fetch(request, env): Promise<Response> {
@@ -14,6 +24,9 @@ export default {
       }
       return withSecurityHeaders(await env.ASSETS.fetch(request));
     } catch (error) {
+      if (error instanceof SessionRequestError) {
+        return Response.json({ error: error.message }, { status: error.status });
+      }
       console.error(
         JSON.stringify({
           message: "request failed",
@@ -39,8 +52,15 @@ async function createSession(request: Request, env: Env): Promise<Response> {
   ) {
     return Response.json({ error: "Origin not allowed" }, { status: 403 });
   }
+  if (!isJsonContentType(request.headers.get("Content-Type"))) {
+    return Response.json({ error: "Content-Type must be application/json" }, { status: 415 });
+  }
   const body = await readBoundedJson(request);
-  if (!isRecord(body) || typeof body.playerName !== "string") {
+  if (
+    !isRecord(body) ||
+    typeof body.playerName !== "string" ||
+    !isValidPlayerName(body.playerName)
+  ) {
     return Response.json({ error: "Invalid session request" }, { status: 400 });
   }
   const identityCredential =
@@ -93,7 +113,7 @@ async function createSession(request: Request, env: Env): Promise<Response> {
 async function readBoundedJson(request: Request): Promise<unknown> {
   const declaredLength = Number(request.headers.get("Content-Length") ?? "0");
   if (Number.isFinite(declaredLength) && declaredLength > MAX_SESSION_REQUEST_BYTES) {
-    throw new Error("session request is too large");
+    throw new SessionRequestError(413, "Session request is too large");
   }
   if (request.body === null) return null;
   const reader = request.body.getReader();
@@ -104,7 +124,10 @@ async function readBoundedJson(request: Request): Promise<unknown> {
       const { done, value } = await reader.read();
       if (done) break;
       length += value.length;
-      if (length > MAX_SESSION_REQUEST_BYTES) throw new Error("session request is too large");
+      if (length > MAX_SESSION_REQUEST_BYTES) {
+        await reader.cancel();
+        throw new SessionRequestError(413, "Session request is too large");
+      }
       chunks.push(value);
     }
   } finally {
@@ -116,7 +139,11 @@ async function readBoundedJson(request: Request): Promise<unknown> {
     bytes.set(chunk, offset);
     offset += chunk.length;
   }
-  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } catch {
+    throw new SessionRequestError(400, "Invalid session request");
+  }
 }
 
 function withSecurityHeaders(response: Response): Response {
@@ -140,4 +167,8 @@ function withSecurityHeaders(response: Response): Response {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isJsonContentType(value: string | null): boolean {
+  return value?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
 }

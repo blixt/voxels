@@ -72,4 +72,10 @@ describe("public session credentials", () => {
       issueSessionCredentials(SESSION_SIGNING_KEY, IDENTITY_SIGNING_KEY, "Alice", undefined, NOW),
     ).resolves.toBeNull();
   });
+
+  it("treats invalid signing-key configuration as an operational failure", async () => {
+    await expect(
+      issueSessionCredentials("too-short", IDENTITY_SIGNING_KEY, "default", undefined, NOW),
+    ).rejects.toThrow("session signing keys must be at least 32 characters");
+  });
 });

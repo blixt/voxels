@@ -4,6 +4,10 @@ const IDENTITY_LIFETIME_SECONDS = 366 * 24 * 60 * 60;
 const SESSION_LIFETIME_SECONDS = 12 * 60 * 60;
 const PLAYER_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/u;
 
+export function isValidPlayerName(value: string): boolean {
+  return PLAYER_NAME_PATTERN.test(value);
+}
+
 interface IdentityClaims {
   browserUserId: string;
   playerId: string;
@@ -23,12 +27,9 @@ export async function issueSessionCredentials(
   identityCredential: string | undefined,
   nowSeconds = Math.floor(Date.now() / 1_000),
 ): Promise<SessionCredentials | null> {
-  if (
-    !PLAYER_NAME_PATTERN.test(playerName) ||
-    sessionSigningKey.length < 32 ||
-    identitySigningKey.length < 32
-  ) {
-    return null;
+  if (!isValidPlayerName(playerName)) return null;
+  if (sessionSigningKey.length < 32 || identitySigningKey.length < 32) {
+    throw new Error("session signing keys must be at least 32 characters");
   }
   const [sessionKey, identityKey] = await Promise.all([
     importSigningKey(sessionSigningKey),
@@ -64,7 +65,9 @@ export async function issueSessionCredentials(
     bytesToBase64Url(nonce),
   ].join(".");
   const authSubprotocolToken = `${sessionPayload}.${await sign(sessionKey, sessionPayload)}`;
-  if (authSubprotocolToken.length > 128) return null;
+  if (authSubprotocolToken.length > 128) {
+    throw new Error("generated session token exceeds the protocol limit");
+  }
 
   return {
     ...identity,
@@ -91,7 +94,7 @@ async function verifyIdentityCredential(
     const browserUserId = base64UrlToUuid(browserText ?? "");
     const playerId = base64UrlToUuid(playerText ?? "");
     const playerName = base64UrlToText(nameText ?? "");
-    if (playerName !== requestedPlayerName || !PLAYER_NAME_PATTERN.test(playerName)) return null;
+    if (playerName !== requestedPlayerName || !isValidPlayerName(playerName)) return null;
     return { browserUserId, playerId, playerName };
   } catch {
     return null;
