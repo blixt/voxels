@@ -113,9 +113,9 @@ weather_seed = 1474984685
 weather_revision = 1
 
 [edits]
-# Native server authority lives on the mounted encrypted Fly Volume. This explicit path is strict:
-# schema, world, or source changes require an intentional migration or a new volume/database.
-database = "/data/world-state.sqlite3"
+# Native server authority lives on the mounted encrypted Fly Volume. Compatibility inputs select a
+# new database without deleting the previous world's state; migrations are intentionally unsupported.
+database = "/data/world-state/schema-{edit_schema}/{world_id}-{source_hash}.sqlite3"
 change_queue_capacity = 1024
 
 [spawn]

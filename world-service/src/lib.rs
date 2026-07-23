@@ -1273,7 +1273,9 @@ sea_level_voxels = 52
         );
         assert_eq!(
             config.edits.database.as_path(),
-            std::path::Path::new("/data/world-state.sqlite3")
+            std::path::Path::new(
+                "/data/world-state/schema-{edit_schema}/{world_id}-{source_hash}.sqlite3"
+            )
         );
     }
 

@@ -16,6 +16,11 @@ belongs to one Machine and region, so this configuration is intentionally not hi
 Automatic volume snapshots are disabled, so arrange a separate backup before treating the world as
 durable production data.
 
+Authoritative edit databases are namespaced on that volume by edit schema, world ID, and immutable
+source hash. An intentionally incompatible world release therefore starts with a new empty database
+while retaining older world state for inspection or explicit recovery; startup never migrates or
+overwrites an incompatible database.
+
 ## Authentication and secrets
 
 Cloudflare and Fly must hold the same `VOXELS_SESSION_SIGNING_KEY`. Cloudflare also holds a separate
