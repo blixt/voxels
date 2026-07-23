@@ -14,6 +14,7 @@ use voxels_world_service::{LoadedWorldServiceConfig, WorldSourceMode};
     reason = "this diagnostic service bootstrap reports its selected source and sample"
 )]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    const SAMPLE_EDGE: i32 = 16;
     let config_path = std::env::args_os()
         .nth(1)
         .map_or_else(|| PathBuf::from("config/world-service.toml"), PathBuf::from);
@@ -21,10 +22,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(2)
         .is_some_and(|argument| argument == "--ecology-survey");
     let loaded = LoadedWorldServiceConfig::load(&config_path)?;
-    let sample_origin = match loaded.config().source {
-        WorldSourceMode::ProceduralV16 => [0, 0],
+    let (sample_origin, sample_spacing_voxels) = match loaded.config().source {
+        WorldSourceMode::ProceduralV16 => ([0, 0], 2_400),
         WorldSourceMode::TerrainDiffusion30m => {
-            loaded.config().terrain_diffusion.world_origin_voxels
+            const DETAIL_TILE_EDGE: i32 = 512;
+            const MODEL_SAMPLE_VOXELS: i32 = 300;
+            let tile_span_voxels = DETAIL_TILE_EDGE
+                * MODEL_SAMPLE_VOXELS
+                * loaded.config().terrain_diffusion.horizontal_scale as i32;
+            let spacing = tile_span_voxels / SAMPLE_EDGE;
+            (
+                loaded
+                    .config()
+                    .terrain_diffusion
+                    .world_origin_voxels
+                    .map(|origin| origin + spacing / 2),
+                spacing,
+            )
         }
     };
     let model_root = (loaded.config().source == WorldSourceMode::TerrainDiffusion30m)
@@ -32,13 +46,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?;
     let source = loaded.build_world_source()?;
     let identity = source.identity();
-    const SAMPLE_EDGE: i32 = 16;
-    let sample_spacing_voxels = match loaded.config().source {
-        WorldSourceMode::ProceduralV16 => 2_400,
-        WorldSourceMode::TerrainDiffusion30m => {
-            2_400 * loaded.config().terrain_diffusion.horizontal_scale as i32
-        }
-    };
     let requests = (0..SAMPLE_EDGE)
         .flat_map(|z| {
             (0..SAMPLE_EDGE).map(move |x| {
