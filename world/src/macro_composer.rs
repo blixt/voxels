@@ -27,7 +27,14 @@ use std::collections::{BTreeMap, BTreeSet};
 const SURFACE_TILE_SAMPLE_EDGE: u32 = 34;
 const ECOLOGY_CELL_VOXELS: i32 = 64;
 const ECOLOGY_MIN_TREE_SPACING_VOXELS: i32 = 30;
+const CANONICAL_VOXEL_EDGE_MILLIMETRES: u32 = 100;
 type SurfaceAliasMap = BTreeMap<(i32, i32), (i32, Material)>;
+
+#[derive(Clone, Copy, Debug)]
+struct SubgridLattice {
+    origin: [i64; 2],
+    stride_voxels: i64,
+}
 
 /// Deterministic field-to-voxel adapter for non-procedural macro sources.
 pub struct HeightfieldWorldSource {
@@ -36,6 +43,7 @@ pub struct HeightfieldWorldSource {
     identity_hash: WorldSourceIdentityHash,
     composer_seed: u64,
     add_subgrid_relief: bool,
+    subgrid_lattice: Option<SubgridLattice>,
     sea_level_voxels: i32,
 }
 
@@ -61,12 +69,29 @@ impl HeightfieldWorldSource {
             identity.source_kind,
             crate::WorldSourceKind::TerrainDiffusion30m
         );
+        let subgrid_lattice = if add_subgrid_relief {
+            if !transform
+                .horizontal_unit_millimetres
+                .is_multiple_of(CANONICAL_VOXEL_EDGE_MILLIMETRES)
+            {
+                return Err(WorldSourceError::MalformedMacroBlock);
+            }
+            Some(SubgridLattice {
+                origin: transform.origin_voxels,
+                stride_voxels: i64::from(
+                    transform.horizontal_unit_millimetres / CANONICAL_VOXEL_EDGE_MILLIMETRES,
+                ),
+            })
+        } else {
+            None
+        };
         Ok(Self {
             source,
             identity,
             identity_hash,
             composer_seed,
             add_subgrid_relief,
+            subgrid_lattice,
             sea_level_voxels,
         })
     }
@@ -183,11 +208,9 @@ impl HeightfieldWorldSource {
                 return Err(WorldSourceError::MalformedMacroBlock);
             }
             let ridge = block.ridge[index];
-            let relief = if self.add_subgrid_relief {
-                micro_relief_voxels(self.composer_seed, world_x, world_z, ridge)
-            } else {
-                0.0
-            };
+            let relief = self.subgrid_lattice.map_or(0.0, |lattice| {
+                micro_relief_voxels(self.composer_seed, world_x, world_z, ridge, lattice)
+            });
             let height = f64::from(elevation + relief).floor();
             if height < f64::from(i32::MIN) || height > f64::from(i32::MAX) {
                 return Err(WorldSourceError::MalformedMacroBlock);
@@ -1652,33 +1675,35 @@ fn surface_profile(column: &PreparedColumn, sea_level_voxels: i32) -> (Material,
 fn surface_region(column: &PreparedColumn, sea_level_voxels: i32) -> SurfaceRegion {
     let temperature = column.temperature;
     let moisture = column.moisture;
-    let ridge = column.ridge;
-    let altitude = smooth_rise(
-        column.height.saturating_sub(sea_level_voxels) as f32,
-        9_000.0,
-        13_000.0,
-    );
-    let temperate = smooth_rise(temperature, 0.22, 0.42) * smooth_fall(temperature, 0.72, 0.92);
-    let cold = smooth_fall(temperature, 0.24, 0.42);
-    let dry = smooth_fall(moisture, 0.12, 0.40);
-    let hot = smooth_rise(temperature, 0.50, 0.78);
+    let slope = column.ridge;
+    let elevation = column.height.saturating_sub(sea_level_voxels).max(0) as f32;
+    let lowland = smooth_fall(elevation, 80.0, 600.0);
+    let upland = smooth_rise(elevation, 300.0, 1_200.0);
+    let alpine_altitude = smooth_rise(elevation, 900.0, 2_200.0);
+    let temperate = smooth_rise(temperature, 0.25, 0.44) * smooth_fall(temperature, 0.72, 0.90);
+    let cold = smooth_fall(temperature, 0.32, 0.54);
+    let hot = smooth_rise(temperature, 0.50, 0.76);
+    let scorching = smooth_rise(temperature, 0.70, 0.88);
+    let warm = smooth_rise(temperature, 0.48, 0.65) * smooth_fall(temperature, 0.74, 0.88);
+    let wet = smooth_rise(moisture, 0.30, 0.58);
+    let dry = smooth_fall(moisture, 0.22, 0.46);
+    let steep = smooth_rise(slope, 0.34, 0.78);
+    let sheltered = smooth_fall(slope, 0.22, 0.68);
 
     // These are overlapping ecological affinities rather than ordered thresholds. The learned
-    // climate remains the dominant signal, while continuous world-space variation bends broad
-    // boundaries into ecotones instead of exposing the source model's sampling lattice.
+    // climate and terrain remain the dominant signals. Continuous world-space variation only
+    // resolves close boundaries into ecotones; identity-seeded substrate variation deliberately
+    // does not manufacture macro biomes.
     let scores = [
-        smooth_rise(moisture, 0.38, 0.68) * temperate * smooth_fall(ridge, 0.30, 0.72) * 1.24
-            + column.ecotone * 0.12,
-        0.43 + temperate * 0.18 + smooth_rise(moisture, 0.24, 0.52) * 0.10 - column.ecotone * 0.04,
-        cold * 1.36
-            + smooth_rise(ridge, 0.56, 0.92) * smooth_fall(temperature, 0.42, 0.68) * 0.76
-            + altitude * 1.40
-            - column.ecotone * 0.05,
-        hot * dry * 1.25 - column.ecotone * 0.08,
-        smooth_rise(temperature, 0.44, 0.68) * smooth_fall(moisture, 0.20, 0.48) * 0.96
-            + column.geology.max(0.0) * 0.08
-            + column.ecotone * 0.06,
-        smooth_rise(ridge, 0.50, 0.86) * smooth_fall(column.geology, -0.44, 0.10) * 1.38,
+        wet * temperate * (0.35 + sheltered * 0.65) * 0.92 + column.ecotone * 0.05,
+        0.31 + temperate * 0.14 + (1.0 - wet) * 0.10 + steep * 0.17 - column.ecotone * 0.025,
+        cold * 1.25 + alpine_altitude * 1.05 + steep * smooth_fall(temperature, 0.50, 0.70) * 0.30
+            - column.ecotone * 0.025,
+        hot * dry * (0.65 + upland * 0.35) + scorching * dry * 0.45 - column.ecotone * 0.04,
+        warm * dry * (0.55 + lowland * 0.45) * (0.40 + sheltered * 0.60) * 1.02
+            + lowland * sheltered * dry * 0.10
+            + column.ecotone * 0.04,
+        steep * hot * (0.55 + dry * 0.25) * 1.05,
     ];
     let index = scores
         .into_iter()
@@ -1736,12 +1761,45 @@ fn downscaled_climate(
     (temperature, moisture, ecotone)
 }
 
-fn micro_relief_voxels(seed: u64, x: i32, z: i32, ridge: f32) -> f32 {
+fn micro_relief_voxels(seed: u64, x: i32, z: i32, ridge: f32, lattice: SubgridLattice) -> f32 {
     let ridge = ridge.clamp(0.0, 1.0).powf(1.35);
-    let broad = coherent_noise(seed ^ 0x6a09_e667, x, z, 600);
-    let medium = coherent_noise(seed ^ 0xbb67_ae85, x, z, 170);
-    let fine = coherent_noise(seed ^ 0x3c6e_f372, x, z, 55);
-    broad * (3.0 + ridge * 18.0) + medium * (1.0 + ridge * 5.0) + fine * (0.25 + ridge * 1.5)
+    let broad = lattice_residual_noise(seed ^ 0x6a09_e667, x, z, 600, lattice);
+    let medium = lattice_residual_noise(seed ^ 0xbb67_ae85, x, z, 170, lattice);
+    let detail = lattice_residual_noise(seed ^ 0x3c6e_f372, x, z, 37, lattice);
+    let fine = lattice_residual_noise(seed ^ 0xa54f_f53a, x, z, 19, lattice);
+    broad * (3.0 + ridge * 18.0)
+        + medium * (1.5 + ridge * 5.0)
+        + detail * (4.0 + ridge * 3.0)
+        + fine * (2.2 + ridge * 1.8)
+}
+
+fn lattice_residual_noise(seed: u64, x: i32, z: i32, period: i32, lattice: SubgridLattice) -> f32 {
+    let x = i64::from(x);
+    let z = i64::from(z);
+    let local_x = x - lattice.origin[0];
+    let local_z = z - lattice.origin[1];
+    let cell_x = local_x.div_euclid(lattice.stride_voxels);
+    let cell_z = local_z.div_euclid(lattice.stride_voxels);
+    let left = lattice.origin[0] + cell_x * lattice.stride_voxels;
+    let top = lattice.origin[1] + cell_z * lattice.stride_voxels;
+    let right = left + lattice.stride_voxels;
+    let bottom = top + lattice.stride_voxels;
+    let fraction_x =
+        local_x.rem_euclid(lattice.stride_voxels) as f32 / lattice.stride_voxels as f32;
+    let fraction_z =
+        local_z.rem_euclid(lattice.stride_voxels) as f32 / lattice.stride_voxels as f32;
+    let period = i64::from(period);
+    let upper = lerp_noise(
+        coherent_noise_i64(seed, left, top, period),
+        coherent_noise_i64(seed, right, top, period),
+        fraction_x,
+    );
+    let lower = lerp_noise(
+        coherent_noise_i64(seed, left, bottom, period),
+        coherent_noise_i64(seed, right, bottom, period),
+        fraction_x,
+    );
+    coherent_noise_i64(seed, x, z, period) - lerp_noise(upper, lower, fraction_z)
 }
 
 fn geology_signal(seed: u64, x: i32, z: i32) -> f32 {
@@ -1751,6 +1809,10 @@ fn geology_signal(seed: u64, x: i32, z: i32) -> f32 {
 }
 
 fn coherent_noise(seed: u64, x: i32, z: i32, period: i32) -> f32 {
+    coherent_noise_i64(seed, i64::from(x), i64::from(z), i64::from(period))
+}
+
+fn coherent_noise_i64(seed: u64, x: i64, z: i64, period: i64) -> f32 {
     let cell_x = x.div_euclid(period);
     let cell_z = z.div_euclid(period);
     let fraction_x = x.rem_euclid(period) as f32 / period as f32;
@@ -1770,7 +1832,7 @@ fn coherent_noise(seed: u64, x: i32, z: i32, period: i32) -> f32 {
     lerp_noise(upper, lower, weight_z)
 }
 
-fn hash_noise(seed: u64, x: i32, z: i32) -> f32 {
+fn hash_noise(seed: u64, x: i64, z: i64) -> f32 {
     let mut value = seed
         ^ (x as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
         ^ (z as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -1853,10 +1915,7 @@ fn validate_surface_block_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        MESHING_HALO_VOXELS, MacroBlockBatchResult, MacroCoordinateTransform,
-        WorldSourceIdentityHash,
-    };
+    use crate::{MESHING_HALO_VOXELS, MacroBlockBatchResult, WorldSourceIdentityHash};
     use std::collections::BTreeSet;
 
     #[derive(Clone, Copy)]
@@ -1891,6 +1950,10 @@ mod tests {
         fn terrain_diffusion(elevation: f32, temperature: f32, moisture: f32, ridge: f32) -> Self {
             let mut source = Self::new(FakeBehavior::Valid, elevation);
             source.identity.source_kind = crate::WorldSourceKind::TerrainDiffusion30m;
+            source
+                .identity
+                .macro_coordinate_transform
+                .horizontal_unit_millimetres = 30_000;
             source.temperature = temperature;
             source.moisture = moisture;
             source.ridge = ridge;
@@ -1918,7 +1981,7 @@ mod tests {
                 blocks.push(MacroBlock {
                     schema_version: MACRO_FIELD_SCHEMA_VERSION,
                     request,
-                    coordinate_transform: MacroCoordinateTransform::CANONICAL_VOXELS,
+                    coordinate_transform: self.identity.macro_coordinate_transform,
                     elevation_voxels,
                     temperature: vec![self.temperature; sample_count],
                     moisture: vec![self.moisture; sample_count],
@@ -1997,7 +2060,7 @@ mod tests {
             (
                 column(100, 0.58, 0.40, 0.90, -0.50),
                 Material::Basalt,
-                SurfaceRegion::Volcanic,
+                SurfaceRegion::WindMoor,
             ),
             (
                 column(100, 0.50, 0.45, 0.30, 0.70),
@@ -2023,10 +2086,43 @@ mod tests {
         let meadow = column(100, 0.60, 0.82, 0.20, 0.25);
         assert_eq!(material_for_column(&meadow, 0, 99), Material::Dirt);
         assert_eq!(material_for_column(&meadow, 0, 80), Material::Stone);
-        let lava_field = column(100, 0.58, 0.40, 0.90, -0.70);
-        assert_eq!(material_for_column(&lava_field, 0, 80), Material::Basalt);
+        let basaltic_strata = column(200, 0.58, 0.40, 0.90, -0.70);
+        assert_eq!(
+            material_for_column(&basaltic_strata, 0, 144),
+            Material::Basalt
+        );
         let shore = column(1, 0.60, 0.82, 0.20, -0.60);
         assert_eq!(surface_profile(&shore, 3).0, Material::Clay);
+    }
+
+    #[test]
+    fn substrate_variation_does_not_manufacture_macro_biomes() {
+        let basaltic = column(100, 0.58, 0.40, 0.90, -1.0);
+        let calcareous = column(100, 0.58, 0.40, 0.90, 1.0);
+        assert_eq!(surface_region(&basaltic, 0), surface_region(&calcareous, 0));
+        assert_ne!(
+            surface_profile(&basaltic, 0).0,
+            surface_profile(&calcareous, 0).0
+        );
+    }
+
+    #[test]
+    fn climate_affinities_respond_monotonically_to_heat_and_moisture() {
+        let hot_dry = surface_region(&column(100, 0.82, 0.12, 0.25, 0.0), 0);
+        assert!(matches!(
+            hot_dry,
+            SurfaceRegion::RedBadlands | SurfaceRegion::PaleDunes
+        ));
+        let cool_dry = surface_region(&column(100, 0.30, 0.12, 0.25, 0.0), 0);
+        assert!(!matches!(
+            cool_dry,
+            SurfaceRegion::RedBadlands | SurfaceRegion::PaleDunes
+        ));
+        let hot_wet = surface_region(&column(100, 0.82, 0.72, 0.25, 0.0), 0);
+        assert!(!matches!(
+            hot_wet,
+            SurfaceRegion::RedBadlands | SurfaceRegion::PaleDunes
+        ));
     }
 
     #[test]
@@ -2147,20 +2243,113 @@ mod tests {
     #[test]
     fn subgrid_relief_is_continuous_deterministic_and_slope_sensitive() {
         let seed = 0xfeed_beef;
-        let first = micro_relief_voxels(seed, -321, 654, 0.8);
-        assert_eq!(first, micro_relief_voxels(seed, -321, 654, 0.8));
-        assert!((first - micro_relief_voxels(seed, -320, 654, 0.8)).abs() < 4.0);
+        let lattice = SubgridLattice {
+            origin: [-76_800, -76_800],
+            stride_voxels: 300,
+        };
+        let first = micro_relief_voxels(seed, -321, 654, 0.8, lattice);
+        assert_eq!(first, micro_relief_voxels(seed, -321, 654, 0.8, lattice));
+        assert!((first - micro_relief_voxels(seed, -320, 654, 0.8, lattice)).abs() < 4.0);
 
         let range = |ridge| {
             let values = (0..200)
-                .map(|step| micro_relief_voxels(seed, step * 7 - 500, step * 3 + 100, ridge))
+                .map(|step| {
+                    micro_relief_voxels(seed, step * 7 - 500, step * 3 + 100, ridge, lattice)
+                })
                 .collect::<Vec<_>>();
             let minimum = values.iter().copied().fold(f32::INFINITY, f32::min);
             let maximum = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             maximum - minimum
         };
-        assert!(range(0.9) > range(0.0) * 3.0);
-        assert!(range(0.9) < 60.0, "micro relief must remain below 6 metres");
+        assert!(range(0.9) > range(0.0) * 1.4);
+        assert!(range(0.9) < 80.0, "micro relief must remain below 8 metres");
+    }
+
+    #[test]
+    fn subgrid_relief_preserves_learned_samples_and_breaks_chunk_scale_planes() {
+        let seed = 0xfeed_beef;
+        let lattice = SubgridLattice {
+            origin: [-76_800, -76_800],
+            stride_voxels: 300,
+        };
+        for lattice_z in -3..=3 {
+            for lattice_x in -3..=3 {
+                let x = (lattice.origin[0] + i64::from(lattice_x) * lattice.stride_voxels) as i32;
+                let z = (lattice.origin[1] + i64::from(lattice_z) * lattice.stride_voxels) as i32;
+                assert_eq!(micro_relief_voxels(seed, x, z, 0.65, lattice), 0.0);
+            }
+        }
+
+        let mut detrended_rms = Vec::new();
+        for window_z in 0..4 {
+            for window_x in 0..4 {
+                let origin_x = -76_800 + 29 + window_x * 61;
+                let origin_z = -76_800 + 37 + window_z * 57;
+                let mut values = Vec::with_capacity(CHUNK_EDGE * CHUNK_EDGE);
+                for z in 0..CHUNK_EDGE as i32 {
+                    for x in 0..CHUNK_EDGE as i32 {
+                        values.push(micro_relief_voxels(
+                            seed,
+                            origin_x + x,
+                            origin_z + z,
+                            0.2,
+                            lattice,
+                        ));
+                    }
+                }
+                detrended_rms.push(chunk_plane_residual_rms(&values, CHUNK_EDGE));
+            }
+        }
+        detrended_rms.sort_by(f32::total_cmp);
+        assert!(
+            detrended_rms[detrended_rms.len() / 2] >= 0.5,
+            "ordinary exact chunks still collapse to planes: {detrended_rms:?}"
+        );
+
+        let mut maximum_adjacent_delta = 0.0_f32;
+        for z in -76_650..-76_350 {
+            for x in -76_650..-76_350 {
+                let height = micro_relief_voxels(seed, x, z, 0.9, lattice);
+                maximum_adjacent_delta = maximum_adjacent_delta
+                    .max((height - micro_relief_voxels(seed, x + 1, z, 0.9, lattice)).abs());
+                maximum_adjacent_delta = maximum_adjacent_delta
+                    .max((height - micro_relief_voxels(seed, x, z + 1, 0.9, lattice)).abs());
+            }
+        }
+        assert!(
+            maximum_adjacent_delta < 4.0,
+            "subgrid detail creates abrupt voxel-column steps: {maximum_adjacent_delta}"
+        );
+    }
+
+    fn chunk_plane_residual_rms(values: &[f32], edge: usize) -> f32 {
+        let mean_coordinate = (edge - 1) as f32 * 0.5;
+        let mean = values.iter().sum::<f32>() / values.len() as f32;
+        let coordinate_variance = (0..edge)
+            .map(|coordinate| (coordinate as f32 - mean_coordinate).powi(2))
+            .sum::<f32>()
+            * edge as f32;
+        let mut covariance_x = 0.0;
+        let mut covariance_z = 0.0;
+        for z in 0..edge {
+            for x in 0..edge {
+                let centered = values[z * edge + x] - mean;
+                covariance_x += (x as f32 - mean_coordinate) * centered;
+                covariance_z += (z as f32 - mean_coordinate) * centered;
+            }
+        }
+        let slope_x = covariance_x / coordinate_variance;
+        let slope_z = covariance_z / coordinate_variance;
+        let squared_error = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let x = (index % edge) as f32 - mean_coordinate;
+                let z = (index / edge) as f32 - mean_coordinate;
+                (value - (mean + slope_x * x + slope_z * z)).powi(2)
+            })
+            .sum::<f32>();
+        (squared_error / values.len() as f32).sqrt()
     }
 
     #[test]
@@ -2195,7 +2384,7 @@ mod tests {
 
     #[test]
     fn overlapping_affinities_form_an_ecotone_instead_of_a_straight_threshold() {
-        let mut sheltered = column(100, 0.58, 0.55, 0.20, 0.0);
+        let mut sheltered = column(100, 0.58, 0.45, 0.20, 0.0);
         sheltered.ecotone = 1.0;
         let mut exposed = sheltered;
         exposed.ecotone = -1.0;

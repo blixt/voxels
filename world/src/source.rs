@@ -16,7 +16,7 @@ use std::fmt;
 
 pub const WORLD_SCHEMA_VERSION: u32 = 1;
 pub const MACRO_FIELD_SCHEMA_VERSION: u32 = 1;
-pub const VOXEL_COMPOSER_VERSION: u32 = 8;
+pub const VOXEL_COMPOSER_VERSION: u32 = 9;
 /// Source identity marker for providers that intentionally contain no authored atlas overlays.
 pub const NO_AUTHORED_CONTENT_VERSION: u32 = 0;
 pub const PROCEDURAL_SAMPLER_VERSION: u32 = 1;
@@ -1364,7 +1364,7 @@ mod tests {
         assert_ne!(first.identity_hash(), other.identity_hash());
         assert_eq!(
             first.identity_hash().to_string(),
-            "5067ad3f2d190a4c4c07ce74ff2a22effef267c6ff9fa7c944d8748d080bd19b"
+            "54bc1aa309e23013427bb1bc2777f2347197988b4a8b286186f1dcbffa93c22b"
         );
     }
 
@@ -1377,7 +1377,7 @@ mod tests {
         assert_eq!(first.validate(), Ok(()));
         assert_eq!(
             first.manifest_hash().map(|hash| hash.to_string()),
-            Ok("243a693635034d7567e52b56cd336b91bf6b4371de6a9e429aae5c08310f752d".to_owned())
+            Ok("0bdcaa241156bfcc29c9a7b5af45409bac3380d082be3855cb2db11c1ea03991".to_owned())
         );
 
         let mut inconsistent = first;
