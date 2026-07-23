@@ -22,15 +22,15 @@ use futures_util::stream::{FuturesUnordered, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, mpsc, watch};
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use voxels_core::{PLAYER_EYE_HEIGHT_METRES, PLAYER_RADIUS_METRES};
 #[cfg(test)]
 use voxels_world::protocol::EditShape;
@@ -114,6 +114,7 @@ impl WorldServer {
         edits.install_protected_spawn(world.protected_spawn.clone());
         let capacity = usize::from(config.transport.global_queue_capacity);
         let (generation_tx, generation_rx) = mpsc::channel(capacity);
+        let generation_cancellations = Arc::new(Notify::new());
         let generation_limiter =
             PriorityGenerationLimiter::new(usize::from(config.transport.generation_workers));
         let prefetch_workers =
@@ -121,12 +122,15 @@ impl WorldServer {
         let prefetch_semaphore = Arc::new(Semaphore::new(prefetch_workers));
         tokio::spawn(run_generation_dispatcher(
             generation_rx,
+            Arc::clone(&generation_cancellations),
             Arc::clone(&source),
             generation_limiter,
             prefetch_semaphore,
-            config.transport.max_frame_bytes,
-            config.transport.product_cache_bytes,
-            config.transport.response_cache_bytes,
+            GenerationDispatcherLimits {
+                max_frame_bytes: config.transport.max_frame_bytes,
+                product_cache_bytes: config.transport.product_cache_bytes,
+                response_cache_bytes: config.transport.response_cache_bytes,
+            },
         ));
 
         let presence = PresenceHub::new(config.presence, config.gameplay)
@@ -167,6 +171,7 @@ impl WorldServer {
             source,
             edits: Arc::clone(&edits),
             generation_tx,
+            generation_cancellations,
             process_shutdown: shutdown_rx,
         });
         let router = Router::new()
@@ -679,6 +684,7 @@ struct ServerState {
     source: Arc<dyn WorldSourceEngine>,
     edits: Arc<EditAuthority>,
     generation_tx: mpsc::Sender<GenerationJob>,
+    generation_cancellations: Arc<Notify>,
     process_shutdown: watch::Receiver<bool>,
 }
 
@@ -886,7 +892,8 @@ fn decode_uuid(value: &str) -> Option<[u8; 16]> {
 struct SessionRequests {
     max_in_flight: usize,
     closed: AtomicBool,
-    in_flight: Mutex<HashMap<u64, Arc<AtomicBool>>>,
+    in_flight: Mutex<HashMap<u64, Arc<CancellationSignal>>>,
+    generation_cancellations: Arc<Notify>,
     generation_permits: Arc<PriorityGenerationLimiter>,
     collision_generation_permits: Arc<Semaphore>,
     outbound_bytes: Arc<Semaphore>,
@@ -907,11 +914,13 @@ impl SessionRequests {
         generation_workers: u16,
         collision_generation_workers: u16,
         max_outbound_bytes: usize,
+        generation_cancellations: Arc<Notify>,
     ) -> Self {
         Self {
             max_in_flight: usize::from(max_in_flight),
             closed: AtomicBool::new(false),
             in_flight: Mutex::new(HashMap::new()),
+            generation_cancellations,
             generation_permits: PriorityGenerationLimiter::new(usize::from(generation_workers)),
             collision_generation_permits: Arc::new(Semaphore::new(usize::from(
                 collision_generation_workers,
@@ -937,14 +946,14 @@ impl SessionRequests {
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<u64, Arc<AtomicBool>>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<u64, Arc<CancellationSignal>>> {
         match self.in_flight.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
     }
 
-    fn insert(&self, request_id: u64) -> Result<Arc<AtomicBool>, RequestAdmissionError> {
+    fn insert(&self, request_id: u64) -> Result<Arc<CancellationSignal>, RequestAdmissionError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(RequestAdmissionError::Closed);
         }
@@ -954,12 +963,12 @@ impl SessionRequests {
         }
         let active = in_flight
             .values()
-            .filter(|cancelled| !cancelled.load(Ordering::Acquire))
+            .filter(|cancelled| !cancelled.is_cancelled())
             .count();
         if active >= self.max_in_flight {
             return Err(RequestAdmissionError::WindowFull);
         }
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(CancellationSignal::default());
         in_flight.insert(request_id, Arc::clone(&cancelled));
         Ok(cancelled)
     }
@@ -967,12 +976,14 @@ impl SessionRequests {
     fn cancel(&self, request_id: u64) -> bool {
         let cancelled = self.lock().get(&request_id).cloned();
         cancelled.is_some_and(|cancelled| {
-            cancelled.store(true, Ordering::Release);
+            if cancelled.cancel() {
+                self.generation_cancellations.notify_one();
+            }
             true
         })
     }
 
-    fn finish(&self, request_id: u64, cancelled: &Arc<AtomicBool>) {
+    fn finish(&self, request_id: u64, cancelled: &Arc<CancellationSignal>) {
         let mut in_flight = self.lock();
         let is_current = in_flight
             .get(&request_id)
@@ -984,8 +995,44 @@ impl SessionRequests {
 
     fn cancel_all(&self) {
         self.closed.store(true, Ordering::Release);
+        let mut changed = false;
         for cancelled in self.lock().values() {
-            cancelled.store(true, Ordering::Release);
+            changed |= cancelled.cancel();
+        }
+        if changed {
+            self.generation_cancellations.notify_one();
+        }
+    }
+}
+
+#[derive(Default)]
+struct CancellationSignal {
+    cancelled: AtomicBool,
+    changed: Notify,
+}
+
+impl CancellationSignal {
+    fn cancel(&self) -> bool {
+        let changed = !self.cancelled.swap(true, Ordering::AcqRel);
+        if changed {
+            self.changed.notify_waiters();
+        }
+        changed
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    async fn cancelled(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            changed.await;
         }
     }
 }
@@ -999,13 +1046,17 @@ enum RequestAdmissionError {
 
 struct TrackedRequest {
     request_id: u64,
-    cancelled: Arc<AtomicBool>,
+    cancelled: Arc<CancellationSignal>,
     session: Arc<SessionRequests>,
 }
 
 impl TrackedRequest {
     fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.cancelled.is_cancelled()
+    }
+
+    async fn cancelled(&self) {
+        self.cancelled.cancelled().await;
     }
 
     fn finish(&self) {
@@ -1245,6 +1296,7 @@ impl EncodedProduct {
 }
 
 struct ProductGenerationCompletion {
+    generation_id: u64,
     keys: Vec<ProductFlightKey>,
     result: Result<Vec<EncodedProduct>, String>,
 }
@@ -1470,6 +1522,34 @@ struct ProductWaiter {
     item_index: usize,
 }
 
+struct ProductFlight {
+    waiters: Vec<ProductWaiter>,
+    generation: Arc<ProductGenerationFlight>,
+}
+
+struct ProductGenerationFlight {
+    id: u64,
+    live_products: AtomicUsize,
+    cancellation: CancellationSignal,
+}
+
+impl ProductGenerationFlight {
+    fn new(id: u64, product_count: usize) -> Arc<Self> {
+        debug_assert!(product_count > 0);
+        Arc::new(Self {
+            id,
+            live_products: AtomicUsize::new(product_count),
+            cancellation: CancellationSignal::default(),
+        })
+    }
+
+    fn abandon_product(&self) {
+        if self.live_products.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.cancellation.cancel();
+        }
+    }
+}
+
 struct PendingGenerationBatch {
     job: GenerationJob,
     items: Vec<Option<Result<Arc<EncodedProduct>, String>>>,
@@ -1576,6 +1656,7 @@ async fn run_session(
         state.generation_workers_per_client,
         state.collision_generation_workers_per_client,
         state.max_queued_outbound_bytes_per_client,
+        Arc::clone(&state.generation_cancellations),
     ));
     let (sink, stream) = socket.split();
     let outbound_capacity = usize::from(state.max_in_flight_batches).saturating_add(2);
@@ -2634,26 +2715,32 @@ async fn write_presence_frames(
 
 async fn run_generation_dispatcher(
     mut jobs: mpsc::Receiver<GenerationJob>,
+    cancellations: Arc<Notify>,
     source: Arc<dyn WorldSourceEngine>,
     generation_limiter: Arc<PriorityGenerationLimiter>,
     prefetch_semaphore: Arc<Semaphore>,
-    max_frame_bytes: usize,
-    product_cache_bytes: usize,
-    response_cache_bytes: usize,
+    limits: GenerationDispatcherLimits,
 ) {
     let (completion_tx, mut completions) = mpsc::unbounded_channel();
     let source_identity_hash = source.identity().identity_hash();
-    let mut in_flight = HashMap::<ProductFlightKey, Vec<ProductWaiter>>::new();
+    let mut in_flight = HashMap::<ProductFlightKey, ProductFlight>::new();
     let mut pending = HashMap::<u64, PendingGenerationBatch>::new();
-    let mut cache = ProductCache::new(product_cache_bytes);
-    let response_cache = Arc::new(Mutex::new(BatchResponseCache::new(response_cache_bytes)));
+    let mut cache = ProductCache::new(limits.product_cache_bytes);
+    let response_cache = Arc::new(Mutex::new(BatchResponseCache::new(
+        limits.response_cache_bytes,
+    )));
     let mut next_batch_id = 1_u64;
+    let mut next_generation_id = 1_u64;
     let mut jobs_open = true;
     loop {
         if !jobs_open && in_flight.is_empty() {
             break;
         }
         tokio::select! {
+            biased;
+            _ = cancellations.notified() => {
+                prune_cancelled_generation_batches(&mut pending, &mut in_flight);
+            }
             job = jobs.recv(), if jobs_open => {
                 let Some(job) = job else {
                     jobs_open = false;
@@ -2682,10 +2769,9 @@ async fn run_generation_dispatcher(
                     }
                     let flight = ProductFlightKey { product, priority };
                     let waiter = ProductWaiter { batch_id, item_index };
-                    if let Some(waiters) = in_flight.get_mut(&flight) {
-                        waiters.push(waiter);
+                    if let Some(product_flight) = in_flight.get_mut(&flight) {
+                        product_flight.waiters.push(waiter);
                     } else {
-                        in_flight.insert(flight, vec![waiter]);
                         miss_indices.push(item_index);
                         miss_keys.push(flight);
                     }
@@ -2696,17 +2782,35 @@ async fn run_generation_dispatcher(
                         source_identity_hash,
                         Arc::clone(&generation_limiter),
                         Arc::clone(&response_cache),
-                        max_frame_bytes,
+                        limits.max_frame_bytes,
                     );
                     continue;
                 }
                 let miss_request = batch.job.request.select(&miss_indices);
                 pending.insert(batch_id, batch);
                 if !miss_indices.is_empty() {
+                    let generation = ProductGenerationFlight::new(
+                        next_generation_id,
+                        miss_keys.len(),
+                    );
+                    next_generation_id = next_generation_id.wrapping_add(1).max(1);
+                    for (&flight, &item_index) in miss_keys.iter().zip(&miss_indices) {
+                        in_flight.insert(
+                            flight,
+                            ProductFlight {
+                                waiters: vec![ProductWaiter {
+                                    batch_id,
+                                    item_index,
+                                }],
+                                generation: Arc::clone(&generation),
+                            },
+                        );
+                    }
                     let source = Arc::clone(&source);
                     let generation_limiter = Arc::clone(&generation_limiter);
                     let prefetch_semaphore = Arc::clone(&prefetch_semaphore);
                     let completion_tx = completion_tx.clone();
+                    let generation_id = generation.id;
                     tokio::spawn(async move {
                         let result = generate_single_flight_products(
                             miss_request,
@@ -2714,9 +2818,11 @@ async fn run_generation_dispatcher(
                             session,
                             generation_limiter,
                             prefetch_semaphore,
+                            &generation.cancellation,
                         )
                         .await;
                         let _ = completion_tx.send(ProductGenerationCompletion {
+                            generation_id,
                             keys: miss_keys,
                             result,
                         });
@@ -2747,14 +2853,20 @@ async fn run_generation_dispatcher(
                 };
                 let mut ready = BTreeSet::new();
                 for (flight, result) in completion.keys.into_iter().zip(results) {
-                    let Some(waiters) = in_flight.remove(&flight) else {
+                    let matching_generation = in_flight
+                        .get(&flight)
+                        .is_some_and(|current| current.generation.id == completion.generation_id);
+                    if !matching_generation {
+                        continue;
+                    }
+                    let Some(product_flight) = in_flight.remove(&flight) else {
                         continue;
                     };
                     let result = result.map(Arc::new);
                     if let Ok(product) = &result {
                         cache.insert(flight.product, Arc::clone(product));
                     }
-                    for waiter in waiters {
+                    for waiter in product_flight.waiters {
                         let Some(batch) = pending.get_mut(&waiter.batch_id) else {
                             continue;
                         };
@@ -2772,12 +2884,53 @@ async fn run_generation_dispatcher(
                         source_identity_hash,
                         Arc::clone(&generation_limiter),
                         Arc::clone(&response_cache),
-                        max_frame_bytes,
+                        limits.max_frame_bytes,
                     );
                 }
             }
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct GenerationDispatcherLimits {
+    max_frame_bytes: usize,
+    product_cache_bytes: usize,
+    response_cache_bytes: usize,
+}
+
+fn prune_cancelled_generation_batches(
+    pending: &mut HashMap<u64, PendingGenerationBatch>,
+    in_flight: &mut HashMap<ProductFlightKey, ProductFlight>,
+) -> usize {
+    let cancelled = pending
+        .iter()
+        .filter_map(|(&batch_id, batch)| batch.job.tracked.is_cancelled().then_some(batch_id))
+        .collect::<HashSet<_>>();
+    for batch_id in &cancelled {
+        if let Some(batch) = pending.remove(batch_id) {
+            batch.job.tracked.finish();
+        }
+    }
+    if cancelled.is_empty() {
+        return 0;
+    }
+
+    let orphaned = in_flight
+        .iter_mut()
+        .filter_map(|(&key, flight)| {
+            flight
+                .waiters
+                .retain(|waiter| !cancelled.contains(&waiter.batch_id));
+            flight.waiters.is_empty().then_some(key)
+        })
+        .collect::<Vec<_>>();
+    for key in orphaned {
+        if let Some(flight) = in_flight.remove(&key) {
+            flight.generation.abandon_product();
+        }
+    }
+    cancelled.len()
 }
 
 async fn generate_single_flight_products(
@@ -2786,23 +2939,33 @@ async fn generate_single_flight_products(
     session: Arc<SessionRequests>,
     generation_limiter: Arc<PriorityGenerationLimiter>,
     prefetch_semaphore: Arc<Semaphore>,
+    cancellation: &CancellationSignal,
 ) -> Result<Vec<EncodedProduct>, String> {
     let priority = request.priority();
     let _prefetch_permit = if priority == WorldProductPriority::Prefetch {
-        Some(
-            prefetch_semaphore
-                .acquire_owned()
-                .await
+        Some(tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err("world generation cancelled".to_owned()),
+            permit = prefetch_semaphore.acquire_owned() => permit
                 .map_err(|_| "world prefetch generation limiter stopped".to_owned())?,
-        )
+        })
     } else {
         None
     };
-    let _session_permit = session
-        .acquire_generation(priority)
-        .await
-        .ok_or_else(|| "world session generation limiter stopped".to_owned())?;
-    let _global_permit = generation_limiter.acquire(priority).await;
+    let _session_permit = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err("world generation cancelled".to_owned()),
+        permit = session.acquire_generation(priority) => permit
+            .ok_or_else(|| "world session generation limiter stopped".to_owned())?,
+    };
+    let _global_permit = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err("world generation cancelled".to_owned()),
+        permit = generation_limiter.acquire(priority) => permit,
+    };
+    if cancellation.is_cancelled() {
+        return Err("world generation cancelled".to_owned());
+    }
     tokio::task::spawn_blocking(move || match request {
         GenerationRequest::Chunks { request, snapshot } => {
             generate_chunk_products(source.as_ref(), request, snapshot)
@@ -2876,18 +3039,25 @@ async fn assemble_and_deliver_generation_batch(
     }
     let priority = batch.job.request.priority();
     let session = Arc::clone(&batch.job.tracked.session);
-    let session_permit = match session.acquire_generation(priority).await {
+    let session_permit = match tokio::select! {
+        biased;
+        _ = batch.job.tracked.cancelled() => None,
+        permit = session.acquire_generation(priority) => permit,
+    } {
         Some(permit) => permit,
         None => {
             batch.job.tracked.finish();
             return;
         }
     };
-    let global_permit = generation_limiter.acquire(priority).await;
-    if batch.job.tracked.is_cancelled() {
-        batch.job.tracked.finish();
-        return;
-    }
+    let global_permit = tokio::select! {
+        biased;
+        _ = batch.job.tracked.cancelled() => {
+            batch.job.tracked.finish();
+            return;
+        }
+        permit = generation_limiter.acquire(priority) => permit,
+    };
     match get_cached_batch_response(&response_cache, &response_key, request_id) {
         Ok(Some(response)) => {
             drop(global_permit);
@@ -2904,12 +3074,16 @@ async fn assemble_and_deliver_generation_batch(
         }
     }
     let response_flight = { lock_batch_response_cache(&response_cache).flight_lock(&response_key) };
-    let response_flight_guard = response_flight.lock().await;
-    if batch.job.tracked.is_cancelled() {
-        lock_batch_response_cache(&response_cache).abandon_flight(&response_key, &response_flight);
-        batch.job.tracked.finish();
-        return;
-    }
+    let response_flight_guard = tokio::select! {
+        biased;
+        _ = batch.job.tracked.cancelled() => {
+            lock_batch_response_cache(&response_cache)
+                .abandon_flight(&response_key, &response_flight);
+            batch.job.tracked.finish();
+            return;
+        }
+        guard = response_flight.lock() => guard,
+    };
     match get_cached_batch_response(&response_cache, &response_key, request_id) {
         Ok(Some(response)) => {
             lock_batch_response_cache(&response_cache)
@@ -3014,12 +3188,26 @@ async fn deliver_generation_job(
             return;
         }
     };
-    let byte_permit = match Arc::clone(&job.tracked.session.outbound_bytes)
-        .acquire_many_owned(byte_count)
-        .await
-    {
-        Ok(permit) => permit,
-        Err(_) => {
+    let byte_permit = match tokio::select! {
+        biased;
+        _ = job.tracked.cancelled() => None,
+        permit = Arc::clone(&job.tracked.session.outbound_bytes).acquire_many_owned(byte_count) => {
+            permit.ok()
+        }
+    } {
+        Some(permit) => permit,
+        None => {
+            job.tracked.finish();
+            return;
+        }
+    };
+    let outbound_permit = match tokio::select! {
+        biased;
+        _ = job.tracked.cancelled() => None,
+        permit = job.outbound.reserve() => permit.ok(),
+    } {
+        Some(permit) => permit,
+        None => {
             job.tracked.finish();
             return;
         }
@@ -3032,11 +3220,7 @@ async fn deliver_generation_job(
         tracked: Some(job.tracked),
         _byte_permit: Some(byte_permit),
     };
-    if let Err(error) = job.outbound.send(frame).await
-        && let Some(tracked) = error.0.tracked
-    {
-        tracked.finish();
-    }
+    outbound_permit.send(frame);
 }
 
 fn traffic_priority(priority: WorldProductPriority) -> TrafficPriority {
@@ -3201,7 +3385,7 @@ mod tests {
         error_kind, frame_fragment_kind, presence_delta_kind,
     };
     use voxels_world::{
-        ChunkCoord, ProceduralWorldSource, SurfaceLodLevel, SurfaceTileCoord, VoxelCoord,
+        ChunkCoord, EditMap, ProceduralWorldSource, SurfaceLodLevel, SurfaceTileCoord, VoxelCoord,
         WorldProductPriority,
     };
 
@@ -3520,9 +3704,193 @@ mod tests {
         }
     }
 
+    fn test_generation_job(
+        session: Arc<SessionRequests>,
+        request_id: u64,
+        coord: ChunkCoord,
+    ) -> GenerationJob {
+        let cancelled = session.insert(request_id).ok().expect("request admission");
+        let (outbound, _outbound_rx) = mpsc::channel(1);
+        GenerationJob {
+            request: GenerationRequest::Chunks {
+                request: ChunkBatchRequest {
+                    request_id,
+                    priority: WorldProductPriority::VisibleSurface,
+                    coords: vec![coord],
+                },
+                snapshot: ChunkEditSnapshot {
+                    edits: EditMap::default(),
+                    revisions: vec![0],
+                },
+            },
+            outbound,
+            tracked: TrackedRequest {
+                request_id,
+                cancelled,
+                session,
+            },
+        }
+    }
+
+    #[test]
+    fn cancellation_churn_prunes_dispatcher_batches_and_orphan_flights() {
+        let cancellation_notify = Arc::new(Notify::new());
+        let session = Arc::new(SessionRequests::new(1, 1, 1, 1_024, cancellation_notify));
+        let mut pending = HashMap::new();
+        let mut in_flight = HashMap::new();
+
+        for request_id in 1..=4_096 {
+            let coord = ChunkCoord::new(request_id as i32, 0, 0);
+            let job = test_generation_job(Arc::clone(&session), request_id, coord);
+            let batch_id = request_id;
+            pending.insert(batch_id, PendingGenerationBatch::new(job, 1));
+            let generation = ProductGenerationFlight::new(request_id, 1);
+            in_flight.insert(
+                ProductFlightKey {
+                    product: ProductKey::Chunk {
+                        coord,
+                        edit_revision: 0,
+                    },
+                    priority: WorldProductPriority::VisibleSurface,
+                },
+                ProductFlight {
+                    waiters: vec![ProductWaiter {
+                        batch_id,
+                        item_index: 0,
+                    }],
+                    generation: Arc::clone(&generation),
+                },
+            );
+
+            assert!(session.cancel(request_id));
+            assert_eq!(
+                prune_cancelled_generation_batches(&mut pending, &mut in_flight),
+                1
+            );
+            assert!(pending.is_empty());
+            assert!(in_flight.is_empty());
+            assert!(session.lock().is_empty());
+            assert!(generation.cancellation.is_cancelled());
+        }
+    }
+
+    #[test]
+    fn cancelled_product_owner_preserves_a_shared_flight_for_live_waiters() {
+        let session = Arc::new(SessionRequests::new(
+            2,
+            1,
+            1,
+            1_024,
+            Arc::new(Notify::new()),
+        ));
+        let coord = ChunkCoord::new(17, 0, -4);
+        let cancelled = test_generation_job(Arc::clone(&session), 1, coord);
+        let live = test_generation_job(Arc::clone(&session), 2, coord);
+        let mut pending = HashMap::from([
+            (1, PendingGenerationBatch::new(cancelled, 1)),
+            (2, PendingGenerationBatch::new(live, 1)),
+        ]);
+        let generation = ProductGenerationFlight::new(1, 1);
+        let key = ProductFlightKey {
+            product: ProductKey::Chunk {
+                coord,
+                edit_revision: 0,
+            },
+            priority: WorldProductPriority::VisibleSurface,
+        };
+        let mut in_flight = HashMap::from([(
+            key,
+            ProductFlight {
+                waiters: vec![
+                    ProductWaiter {
+                        batch_id: 1,
+                        item_index: 0,
+                    },
+                    ProductWaiter {
+                        batch_id: 2,
+                        item_index: 0,
+                    },
+                ],
+                generation: Arc::clone(&generation),
+            },
+        )]);
+
+        assert!(session.cancel(1));
+        assert_eq!(
+            prune_cancelled_generation_batches(&mut pending, &mut in_flight),
+            1
+        );
+        assert_eq!(pending.len(), 1);
+        assert_eq!(in_flight[&key].waiters.len(), 1);
+        assert_eq!(in_flight[&key].waiters[0].batch_id, 2);
+        assert!(!generation.cancellation.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn orphan_generation_stops_waiting_for_a_global_worker() {
+        let global = PriorityGenerationLimiter::new(1);
+        let held = global.acquire(WorldProductPriority::VisibleSurface).await;
+        let session = Arc::new(SessionRequests::new(
+            1,
+            1,
+            1,
+            1_024,
+            Arc::new(Notify::new()),
+        ));
+        let request = GenerationRequest::Chunks {
+            request: ChunkBatchRequest {
+                request_id: 1,
+                priority: WorldProductPriority::VisibleSurface,
+                coords: vec![ChunkCoord::new(2, 0, 3)],
+            },
+            snapshot: ChunkEditSnapshot {
+                edits: EditMap::default(),
+                revisions: vec![0],
+            },
+        };
+        let source: Arc<dyn WorldSourceEngine> = Arc::new(ProceduralWorldSource::new(42));
+        let prefetch = Arc::new(Semaphore::new(1));
+        let generation = ProductGenerationFlight::new(1, 1);
+        let task_generation = Arc::clone(&generation);
+        let task_global = Arc::clone(&global);
+        let task = tokio::spawn(async move {
+            generate_single_flight_products(
+                request,
+                source,
+                session,
+                task_global,
+                prefetch,
+                &task_generation.cancellation,
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while global.waiting().2 != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("generation must wait for the occupied global worker");
+
+        generation.abandon_product();
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("orphan generation must stop promptly")
+            .expect("generation task");
+        assert!(result.is_err());
+        assert_eq!(global.waiting(), (0, 0, 0));
+        drop(held);
+    }
+
     #[tokio::test]
     async fn each_session_has_one_bounded_collision_generation_lane() {
-        let session = Arc::new(SessionRequests::new(16, 2, 1, 1_024));
+        let session = Arc::new(SessionRequests::new(
+            16,
+            2,
+            1,
+            1_024,
+            Arc::new(Notify::new()),
+        ));
         let _ordinary_a = session
             .acquire_generation(WorldProductPriority::VisibleSurface)
             .await
@@ -3558,7 +3926,13 @@ mod tests {
 
     #[tokio::test]
     async fn each_session_prioritizes_current_surface_over_ordinary_generation() {
-        let session = Arc::new(SessionRequests::new(16, 1, 1, 1_024));
+        let session = Arc::new(SessionRequests::new(
+            16,
+            1,
+            1,
+            1_024,
+            Arc::new(Notify::new()),
+        ));
         let held = session
             .acquire_generation(WorldProductPriority::Prefetch)
             .await
@@ -3731,7 +4105,7 @@ mod tests {
 
     #[test]
     fn cancellation_releases_capacity_but_keeps_the_request_id_stale() {
-        let session = SessionRequests::new(1, 1, 1, 1024);
+        let session = SessionRequests::new(1, 1, 1, 1024, Arc::new(Notify::new()));
         let cancelled = session.insert(7).ok();
         assert!(cancelled.is_some());
         assert!(session.cancel(7));
@@ -3744,7 +4118,7 @@ mod tests {
             .ok()
             .expect("ordered cancellation must release negotiated capacity");
         if let Some(cancelled) = cancelled {
-            assert!(cancelled.load(Ordering::Acquire));
+            assert!(cancelled.is_cancelled());
             session.finish(7, &cancelled);
         }
         assert!(matches!(
