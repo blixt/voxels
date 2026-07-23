@@ -491,20 +491,22 @@ impl ChunkPortalMask {
         connected
     }
 
-    fn component_has_visible_face_cell(
+    fn component_visible_face_cells(
         &self,
         component: u16,
         face: usize,
         visible_cells: &[u64; CHUNK_FACE_WORDS],
-    ) -> bool {
-        self.component_face_cells
-            .get(usize::from(component))
-            .is_some_and(|faces| {
-                faces[face]
-                    .iter()
-                    .zip(visible_cells)
-                    .any(|(component, visible)| component & visible != 0)
-            })
+    ) -> [u64; CHUNK_FACE_WORDS] {
+        let mut cells = [0_u64; CHUNK_FACE_WORDS];
+        if let Some(component_faces) = self.component_face_cells.get(usize::from(component)) {
+            for (output, (&component, &visible)) in cells
+                .iter_mut()
+                .zip(component_faces[face].iter().zip(visible_cells))
+            {
+                *output = component & visible;
+            }
+        }
+        cells
     }
 
     fn component_face_cell_count(&self, component: u16, face: usize) -> u32 {
@@ -679,8 +681,32 @@ fn viewport_view_cone_tangent(
 #[cfg(any(target_arch = "wasm32", test))]
 enum UpwardPortalProbe {
     Bounded,
-    Pending(Vec<voxels_world::ChunkCoord>),
-    Escapes,
+    Pending {
+        chunks: Vec<voxels_world::ChunkCoord>,
+        frontiers: Vec<PortalFrontier>,
+    },
+    Escapes(Vec<voxels_world::ChunkCoord>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PortalFrontier {
+    source: voxels_world::ChunkCoord,
+    neighbor: voxels_world::ChunkCoord,
+    face: u8,
+    cells: [u64; CHUNK_FACE_WORDS],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExactVolumeFrontierCap {
+    chunk: voxels_world::ChunkCoord,
+    face: u8,
+    cells: [u64; CHUNK_FACE_WORDS],
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct EnclosedViewStreamPlan {
+    chunks: Vec<voxels_world::ChunkCoord>,
+    frontiers: Vec<PortalFrontier>,
 }
 
 /// Follows only broad upward portals far enough to distinguish a bounded cavern from open sky.
@@ -703,6 +729,7 @@ fn probe_upward_portals(
     let mut queue = VecDeque::from([(origin, origin_component)]);
     let mut pending = BTreeSet::new();
     let mut probe_chunks = BTreeSet::from([origin]);
+    let mut frontiers = Vec::new();
     let all_face_cells = [u64::MAX; CHUNK_FACE_WORDS];
     while let Some((current, component)) = queue.pop_front() {
         let Some(current_portals) = portals.get(&(current.x, current.y, current.z)) else {
@@ -719,9 +746,15 @@ fn probe_upward_portals(
             continue;
         }
         if y - origin.y > radius_chunks {
-            return UpwardPortalProbe::Escapes;
+            return UpwardPortalProbe::Escapes(probe_chunks.into_iter().collect());
         }
         probe_chunks.insert(neighbor);
+        frontiers.push(PortalFrontier {
+            source: current,
+            neighbor,
+            face: 3,
+            cells: current_portals.component_visible_face_cells(component, 3, &all_face_cells),
+        });
         let Some(neighbor_portals) = portals.get(&(neighbor.x, neighbor.y, neighbor.z)) else {
             pending.insert(neighbor);
             continue;
@@ -741,7 +774,10 @@ fn probe_upward_portals(
         UpwardPortalProbe::Bounded
     } else {
         probe_chunks.extend(pending);
-        UpwardPortalProbe::Pending(probe_chunks.into_iter().collect())
+        UpwardPortalProbe::Pending {
+            chunks: probe_chunks.into_iter().collect(),
+            frontiers,
+        }
     }
 }
 
@@ -791,12 +827,12 @@ fn visible_portal_cells(
 /// neighbors remain exact occluders and stop traversal. An expanded view cone keeps the graph
 /// bounded and stable beyond every screen edge, without following a shaft into outdoor air.
 #[cfg(any(target_arch = "wasm32", test))]
-fn enclosed_view_stream_interest(
+fn enclosed_view_stream_plan(
     camera: &CameraState,
     distance_metres: f32,
     cone_tangent: f32,
     portals: &std::collections::BTreeMap<(i32, i32, i32), ChunkPortalMask>,
-) -> Vec<voxels_world::ChunkCoord> {
+) -> EnclosedViewStreamPlan {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use voxels_world::{CHUNK_EDGE, VOXEL_SIZE_METRES};
 
@@ -805,7 +841,7 @@ fn enclosed_view_stream_interest(
         || !cone_tangent.is_finite()
         || cone_tangent <= 0.0
     {
-        return Vec::new();
+        return EnclosedViewStreamPlan::default();
     }
     let chunk_size = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
     let chunk_radius = chunk_size * 3.0_f32.sqrt() * 0.5;
@@ -826,6 +862,10 @@ fn enclosed_view_stream_interest(
     let mut visited = BTreeSet::new();
     let mut queue = VecDeque::new();
     let mut visible_face_cells = BTreeMap::new();
+    let mut frontiers = BTreeMap::<
+        (voxels_world::ChunkCoord, voxels_world::ChunkCoord, u8),
+        [u64; CHUNK_FACE_WORDS],
+    >::new();
     let camera_voxel = (camera.position / VOXEL_SIZE_METRES).floor().as_ivec3();
     let mut origin_component = 0;
     if let Some(origin_portals) = portals.get(&(origin.x, origin.y, origin.z)) {
@@ -841,12 +881,26 @@ fn enclosed_view_stream_interest(
         }
     }
     if origin_component == 0 {
-        return vec![origin];
+        return EnclosedViewStreamPlan {
+            chunks: vec![origin],
+            frontiers: Vec::new(),
+        };
     }
     match probe_upward_portals(origin, origin_component, radius_chunks, portals) {
         UpwardPortalProbe::Bounded => {}
-        UpwardPortalProbe::Pending(probe) => return probe,
-        UpwardPortalProbe::Escapes => return Vec::new(),
+        UpwardPortalProbe::Pending { chunks, frontiers } => {
+            return EnclosedViewStreamPlan { chunks, frontiers };
+        }
+        UpwardPortalProbe::Escapes(chunks) => {
+            // Retain the narrow probe column as streaming metadata. Dropping it would evict the
+            // very portal masks that proved this component reaches sky, causing an endless
+            // request/classify/evict loop outdoors. This stays O(radius), never floods the cone,
+            // and contributes no frontier cover once the sky escape is known.
+            return EnclosedViewStreamPlan {
+                chunks,
+                frontiers: Vec::new(),
+            };
+        }
     }
     chunks.insert(origin);
     while let Some((current, current_component)) = queue.pop_front() {
@@ -863,11 +917,12 @@ fn enclosed_view_stream_interest(
                 .or_insert_with(|| {
                     visible_portal_cells(camera, current, face, distance_metres, cone_tangent)
                 });
-            if !current_portals.component_has_visible_face_cell(
+            let frontier_cells = current_portals.component_visible_face_cells(
                 current_component,
                 face,
                 visible_cells,
-            ) {
+            );
+            if frontier_cells.iter().all(|word| *word == 0) {
                 continue;
             }
             let (Some(x), Some(y), Some(z)) = (
@@ -911,6 +966,12 @@ fn enclosed_view_stream_interest(
             // Always retain the first chunk across an opening. If it is solid, it is the exact
             // wall that terminates the visible cave rather than a portal to traverse.
             chunks.insert(neighbor);
+            let frontier = frontiers
+                .entry((current, neighbor, face as u8))
+                .or_insert([0; CHUNK_FACE_WORDS]);
+            for (output, cells) in frontier.iter_mut().zip(frontier_cells) {
+                *output |= cells;
+            }
             let Some(neighbor_portals) = portals.get(&(x, y, z)) else {
                 continue;
             };
@@ -926,7 +987,28 @@ fn enclosed_view_stream_interest(
             }
         }
     }
-    chunks.into_iter().collect()
+    EnclosedViewStreamPlan {
+        chunks: chunks.into_iter().collect(),
+        frontiers: frontiers
+            .into_iter()
+            .map(|((source, neighbor, face), cells)| PortalFrontier {
+                source,
+                neighbor,
+                face,
+                cells,
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+fn enclosed_view_stream_interest(
+    camera: &CameraState,
+    distance_metres: f32,
+    cone_tangent: f32,
+    portals: &std::collections::BTreeMap<(i32, i32, i32), ChunkPortalMask>,
+) -> Vec<voxels_world::ChunkCoord> {
+    enclosed_view_stream_plan(camera, distance_metres, cone_tangent, portals).chunks
 }
 
 /// Activates an exact interest column only after every originally requested vertical chunk can
@@ -972,6 +1054,22 @@ fn renderable_exact_interest_chunks(
         .copied()
         .filter(|coord| is_renderable(*coord))
         .map(|coord| (coord.x, coord.y, coord.z))
+        .collect()
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn exact_volume_frontier_faces(
+    frontiers: &[PortalFrontier],
+    mut is_renderable: impl FnMut(voxels_world::ChunkCoord) -> bool,
+) -> Vec<ExactVolumeFrontierCap> {
+    frontiers
+        .iter()
+        .filter(|frontier| is_renderable(frontier.source) && !is_renderable(frontier.neighbor))
+        .map(|frontier| ExactVolumeFrontierCap {
+            chunk: frontier.source,
+            face: frontier.face,
+            cells: frontier.cells,
+        })
         .collect()
 }
 
@@ -2045,7 +2143,8 @@ mod web {
             let collision_interest_ms =
                 (performance_now(performance) - collision_interest_start) as f32;
             let enclosed_interest_start = performance_now(performance);
-            let enclosed_view_interest = self.enclosed_view_stream_interest(camera);
+            let enclosed_view_plan = self.enclosed_view_stream_plan(camera);
+            let enclosed_view_interest = &enclosed_view_plan.chunks;
             let enclosed_interest_ms =
                 (performance_now(performance) - enclosed_interest_start) as f32;
             let surface_interest_start = performance_now(performance);
@@ -2209,7 +2308,8 @@ mod web {
                 self.reconcile_chunk_activation(
                     focus,
                     &collision_interest,
-                    &enclosed_view_interest,
+                    enclosed_view_interest,
+                    &enclosed_view_plan.frontiers,
                     &surface_interest,
                 );
             }
@@ -2470,7 +2570,7 @@ mod web {
             interest.into_iter().collect()
         }
 
-        fn enclosed_view_stream_interest(&self, camera: &CameraState) -> Vec<ChunkCoord> {
+        fn enclosed_view_stream_plan(&self, camera: &CameraState) -> crate::EnclosedViewStreamPlan {
             let [width, height] = self.viewport_size.get();
             let Some(cone_tangent) = crate::viewport_view_cone_tangent(
                 self.config.stream_view_cone_half_angle_degrees,
@@ -2478,14 +2578,18 @@ mod web {
                 width,
                 height,
             ) else {
-                return Vec::new();
+                return crate::EnclosedViewStreamPlan::default();
             };
-            crate::enclosed_view_stream_interest(
+            crate::enclosed_view_stream_plan(
                 camera,
                 self.config.stream_enclosed_view_distance_metres,
                 cone_tangent,
                 &self.chunk_portals.borrow(),
             )
+        }
+
+        fn enclosed_view_stream_interest(&self, camera: &CameraState) -> Vec<ChunkCoord> {
+            self.enclosed_view_stream_plan(camera).chunks
         }
 
         fn surface_stream_interest(
@@ -2752,6 +2856,7 @@ mod web {
             focus: ChunkCoord,
             collision_interest: &[ChunkCoord],
             enclosed_view_interest: &[ChunkCoord],
+            enclosed_view_frontiers: &[crate::PortalFrontier],
             surface_interest: &[ChunkCoord],
         ) {
             let scheduler = self.scheduler.borrow();
@@ -2811,6 +2916,19 @@ mod web {
                 crate::renderable_exact_interest_chunks(enclosed_view_interest, |coord| {
                     scheduler.desired_chunk_renderable(coord)
                 });
+            let frontier_faces =
+                crate::exact_volume_frontier_faces(enclosed_view_frontiers, |coord| {
+                    scheduler.desired_chunk_renderable(coord)
+                })
+                .into_iter()
+                .map(
+                    |frontier| voxels_render::renderer::ExactVolumeFrontierFace {
+                        chunk: frontier.chunk,
+                        face: frontier.face,
+                        cells: frontier.cells,
+                    },
+                )
+                .collect::<Vec<_>>();
             let surface = complete_interest(surface_interest);
             canonical_ready_chunks.extend(surface.iter().copied());
             let canonical_surface_ready_chunks = surface.clone();
@@ -2839,6 +2957,7 @@ mod web {
             renderer.set_canonical_ready_chunks(canonical_ready_chunks);
             renderer.set_canonical_surface_ready_chunks(canonical_surface_ready_chunks);
             renderer.set_enclosed_view_ready_chunks(enclosed_view);
+            renderer.set_exact_volume_frontier_faces(&frontier_faces);
         }
 
         fn reconcile_activation_reason(
@@ -5208,6 +5327,30 @@ mod tests {
     }
 
     #[test]
+    fn unknown_tunnel_frontier_is_opaque_until_its_exact_mesh_is_renderable() {
+        let camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
+        let current = voxels_world::ChunkCoord::new(0, 1, 0);
+        let neighbor = voxels_world::ChunkCoord::new(0, 1, -1);
+        let portals = BTreeMap::from([((0, 1, 0), portal_mask(&[4, 5]))]);
+        let plan = enclosed_view_stream_plan(&camera, 32.0, test_view_cone_tangent(), &portals);
+
+        assert!(plan.chunks.contains(&neighbor));
+        let caps = exact_volume_frontier_faces(&plan.frontiers, |coord| coord == current);
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].chunk, current);
+        assert_eq!(caps[0].face, 4);
+        assert!(caps[0].cells.iter().any(|word| *word != 0));
+
+        let settled = exact_volume_frontier_faces(&plan.frontiers, |coord| {
+            coord == current || coord == neighbor
+        });
+        assert!(
+            settled.is_empty(),
+            "the conservative wall must disappear when the exact neighbor owns the opening"
+        );
+    }
+
+    #[test]
     fn enclosed_view_interest_owns_nearby_occluders_without_streaming_behind_them() {
         let camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
         let portals = BTreeMap::from([
@@ -5299,9 +5442,10 @@ mod tests {
             enclosed_view_stream_interest(&camera, 32.0, test_view_cone_tangent(), &portals);
 
         assert!(
-            interest.is_empty(),
-            "a broad portal that remains open above the exact-view radius is outdoor sky, not an enclosed-volume request"
+            interest.iter().all(|coord| coord.x == 0 && coord.z == 0),
+            "an outdoor proof may retain its narrow probe column but must never flood the view cone"
         );
+        assert!(interest.len() <= 11);
     }
 
     #[test]
