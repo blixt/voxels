@@ -36,7 +36,7 @@ fn vs_trace(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
 
 @vertex
 fn vs_composite(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
-  return screen_triangle(index, 1.0);
+  return screen_triangle(index, 0.0);
 }
 
 fn camera_ray(position: vec2<f32>, viewport: vec2<f32>) -> vec3<f32> {

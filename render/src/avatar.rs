@@ -97,7 +97,7 @@ impl AvatarGpu {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth_format,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -243,9 +243,9 @@ fn avatar_scene_pipeline(
             format: depth_format,
             depth_write_enabled: Some(write_depth),
             depth_compare: Some(if write_depth {
-                wgpu::CompareFunction::Less
+                wgpu::CompareFunction::Greater
             } else {
-                wgpu::CompareFunction::LessEqual
+                wgpu::CompareFunction::GreaterEqual
             }),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),

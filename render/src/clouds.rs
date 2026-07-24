@@ -199,7 +199,7 @@ impl VolumetricCloudGpu {
             Some(DepthStencilState {
                 format: depth_format,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(CompareFunction::LessEqual),
+                depth_compare: Some(CompareFunction::GreaterEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: DepthBiasState::default(),
             }),

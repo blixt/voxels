@@ -73,7 +73,7 @@ fn fs_evaluate(@builtin(position) position: vec4<f32>) -> @location(0) vec2<f32>
   let dimensions = textureDimensions(world_depth);
   let pixel = clamp_pixel(vec2<i32>(position.xy) * 2 + vec2<i32>(1), dimensions);
   let center = load_position(pixel, dimensions);
-  if center.w >= 0.999999 {
+  if center.w <= 0.000001 {
     return vec2<f32>(1.0, 0.0);
   }
   let normal = reconstructed_normal(center, pixel, dimensions);
@@ -101,7 +101,7 @@ fn fs_evaluate(@builtin(position) position: vec4<f32>) -> @location(0) vec2<f32>
           dimensions,
         );
         let sample_value = load_position(sample_pixel, dimensions);
-        if sample_value.w < 0.999999 {
+        if sample_value.w > 0.000001 {
           let delta = sample_value.xyz - center.xyz;
           let distance_to_sample = length(delta);
           let horizon = max(dot(normal, delta / max(distance_to_sample, 0.0001)) - 0.045, 0.0)

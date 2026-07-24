@@ -1990,7 +1990,7 @@ impl Renderer {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
                     depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
@@ -2018,7 +2018,7 @@ impl Renderer {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
                     depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
@@ -2188,7 +2188,7 @@ impl Renderer {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
                     depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    depth_compare: Some(wgpu::CompareFunction::Greater),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
@@ -4201,7 +4201,7 @@ impl Renderer {
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &self.depth_view,
                         depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
+                            load: wgpu::LoadOp::Clear(0.0),
                             store: wgpu::StoreOp::Store,
                         }),
                         stencil_ops: None,
@@ -4299,7 +4299,7 @@ impl Renderer {
                         load: if self.options.screen_space_ambient_occlusion {
                             wgpu::LoadOp::Load
                         } else {
-                            wgpu::LoadOp::Clear(1.0)
+                            wgpu::LoadOp::Clear(0.0)
                         },
                         store: wgpu::StoreOp::Store,
                     }),
@@ -7231,15 +7231,30 @@ fn view_projection(
     view_distance_metres: f32,
 ) -> glam::Mat4 {
     let aspect = config.width as f32 / config.height.max(1) as f32;
-    let projection = glam::camera::rh::proj::directx::perspective(
-        68.0f32.to_radians(),
-        aspect,
-        0.05,
-        view_distance_metres,
-    );
+    let projection =
+        reverse_z_perspective(68.0f32.to_radians(), aspect, 0.05, view_distance_metres);
     let view =
         glam::camera::rh::view::look_to_mat4(camera.position, camera.forward(), glam::Vec3::Y);
     projection * view
+}
+
+/// Finite right-handed DirectX/WebGPU projection with near -> 1 and far -> 0.
+///
+/// Floating-point precision is concentrated near zero, so reversing depth retains useful
+/// separation between distant water and terrain instead of quantizing both onto the same plane.
+fn reverse_z_perspective(vertical_fov: f32, aspect: f32, near: f32, far: f32) -> glam::Mat4 {
+    debug_assert!(vertical_fov > 0.0 && vertical_fov < std::f32::consts::PI);
+    debug_assert!(aspect > 0.0);
+    debug_assert!(near > 0.0 && far > near);
+    let half_fov_tangent = (vertical_fov * 0.5).tan();
+    let height = 1.0 / half_fov_tangent;
+    let depth_range = far - near;
+    glam::Mat4::from_cols(
+        glam::Vec4::new(height / aspect, 0.0, 0.0, 0.0),
+        glam::Vec4::new(0.0, height, 0.0, 0.0),
+        glam::Vec4::new(0.0, 0.0, near / depth_range, -1.0),
+        glam::Vec4::new(0.0, 0.0, near * far / depth_range, 0.0),
+    )
 }
 
 struct PipelineOptions<'a> {
@@ -7333,9 +7348,9 @@ fn create_voxel_pipeline(
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(!variant.spatial_ao),
                 depth_compare: Some(if variant.spatial_ao {
-                    wgpu::CompareFunction::LessEqual
+                    wgpu::CompareFunction::GreaterEqual
                 } else {
-                    wgpu::CompareFunction::Less
+                    wgpu::CompareFunction::Greater
                 }),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -7415,7 +7430,7 @@ fn fragmentless_depth_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Less),
+            depth_compare: Some(wgpu::CompareFunction::Greater),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
@@ -7464,7 +7479,7 @@ fn transition_depth_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Less),
+            depth_compare: Some(wgpu::CompareFunction::Greater),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
@@ -8937,8 +8952,26 @@ mod tests {
     }
 
     fn test_view_projection(camera: &CameraState) -> glam::Mat4 {
-        glam::camera::rh::proj::directx::perspective(68.0f32.to_radians(), 1.0, 0.01, 80.0)
+        reverse_z_perspective(68.0f32.to_radians(), 1.0, 0.01, 80.0)
             * glam::camera::rh::view::look_to_mat4(camera.position, camera.forward(), glam::Vec3::Y)
+    }
+
+    #[test]
+    fn reverse_z_projection_maps_near_and_far_to_the_webgpu_depth_interval() {
+        let near = 0.05;
+        let far = 3_200.0;
+        let projection = reverse_z_perspective(68.0f32.to_radians(), 16.0 / 9.0, near, far);
+        let depth = |distance: f32| {
+            let clip = projection * glam::Vec4::new(0.0, 0.0, -distance, 1.0);
+            clip.z / clip.w
+        };
+
+        assert!((depth(near) - 1.0).abs() <= f32::EPSILON * 2.0);
+        assert!(depth(far).abs() <= f32::EPSILON);
+        assert!(depth(1.0) > depth(10.0));
+        assert!(depth(10.0) > depth(1_000.0));
+        assert!(depth(near * 0.5) > 1.0);
+        assert!(depth(far * 2.0) < 0.0);
     }
 
     #[test]
