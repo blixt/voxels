@@ -754,7 +754,7 @@ pub fn generate_edited_water_tile_mesh(
     edits: &EditMap,
     coord: SurfaceTileCoord,
 ) -> WaterTileMesh {
-    generate_water_tile_mesh_with(coord, |x, z| {
+    generate_water_tile_mesh_with(coord, SEA_LEVEL_VOXELS, |x, z| {
         edits
             .override_at(VoxelCoord::new(x, SEA_LEVEL_VOXELS, z))
             .map_or_else(
@@ -766,6 +766,7 @@ pub fn generate_edited_water_tile_mesh(
 
 pub fn generate_water_tile_mesh_with(
     coord: SurfaceTileCoord,
+    water_level_voxels: i32,
     water_at: impl Fn(i32, i32) -> bool,
 ) -> WaterTileMesh {
     let [origin_x, origin_z] = coord.voxel_origin();
@@ -825,7 +826,7 @@ pub fn generate_water_tile_mesh_with(
                     let quad = SurfaceQuad {
                         origin: [
                             offset_clamped(origin_x, (cell_min_x + local_x) * stride),
-                            SEA_LEVEL_VOXELS,
+                            water_level_voxels,
                             offset_clamped(origin_z, (cell_min_z + local_z) * stride),
                         ],
                         face: FACE_POS_Y,
@@ -2852,9 +2853,10 @@ mod tests {
 
     #[test]
     fn full_water_tiles_merge_once_per_patch_at_one_canonical_level() {
+        let water_level_voxels = 52;
         for level in SurfaceLodLevel::ALL {
             let coord = SurfaceTileCoord::new(level, -2, 3);
-            let tile = generate_water_tile_mesh_with(coord, |_, _| true);
+            let tile = generate_water_tile_mesh_with(coord, water_level_voxels, |_, _| true);
             assert_eq!(tile.patches.len(), 16);
             assert_eq!(tile.quads.len(), 16);
             assert!(
@@ -2877,7 +2879,7 @@ mod tests {
                 );
             }
             assert!(tile.quads.iter().all(|quad| {
-                quad.origin[1] == SEA_LEVEL_VOXELS
+                quad.origin[1] == water_level_voxels
                     && quad.face == FACE_POS_Y
                     && quad.material == Material::Water
                     && quad.extent == [(SURFACE_PATCH_EDGE_CELLS * level.stride_voxels()) as u16; 2]

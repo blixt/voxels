@@ -28,6 +28,8 @@ const SURFACE_TILE_SAMPLE_EDGE: u32 = 34;
 const ECOLOGY_CELL_VOXELS: i32 = 64;
 const ECOLOGY_MIN_TREE_SPACING_VOXELS: i32 = 30;
 const CANONICAL_VOXEL_EDGE_MILLIMETRES: u32 = 100;
+const HEIGHTFIELD_COMPOSER_CONFIGURATION_DOMAIN: &[u8] =
+    b"voxels-heightfield-composer-configuration-v1\0";
 type SurfaceAliasMap = BTreeMap<(i32, i32), (i32, Material)>;
 
 #[derive(Clone, Copy, Debug)]
@@ -40,6 +42,7 @@ struct SubgridLattice {
 pub struct HeightfieldWorldSource {
     source: Box<dyn MacroTerrainSource>,
     identity: WorldSourceIdentity,
+    macro_source_identity_hash: WorldSourceIdentityHash,
     identity_hash: WorldSourceIdentityHash,
     composer_seed: u64,
     add_subgrid_relief: bool,
@@ -52,7 +55,8 @@ impl HeightfieldWorldSource {
         source: Box<dyn MacroTerrainSource>,
         sea_level_voxels: i32,
     ) -> Result<Self, WorldSourceError> {
-        let identity = source.identity().clone();
+        let mut identity = source.identity().clone();
+        let macro_source_identity_hash = identity.identity_hash();
         let transform = identity.macro_coordinate_transform;
         if identity.macro_field_schema_version != MACRO_FIELD_SCHEMA_VERSION
             || transform.horizontal_unit_millimetres == 0
@@ -61,9 +65,15 @@ impl HeightfieldWorldSource {
         {
             return Err(WorldSourceError::MalformedMacroBlock);
         }
+        let mut configuration = blake3::Hasher::new();
+        configuration.update(HEIGHTFIELD_COMPOSER_CONFIGURATION_DOMAIN);
+        configuration.update(identity.configuration_hash.as_bytes());
+        configuration.update(&sea_level_voxels.to_le_bytes());
+        identity.configuration_hash =
+            WorldSourceIdentityHash::from_bytes(*configuration.finalize().as_bytes());
         let identity_hash = identity.identity_hash();
         let mut composer_seed_bytes = [0_u8; 8];
-        composer_seed_bytes.copy_from_slice(&identity_hash.as_bytes()[..8]);
+        composer_seed_bytes.copy_from_slice(&macro_source_identity_hash.as_bytes()[..8]);
         let composer_seed = u64::from_le_bytes(composer_seed_bytes);
         let add_subgrid_relief = matches!(
             identity.source_kind,
@@ -88,6 +98,7 @@ impl HeightfieldWorldSource {
         Ok(Self {
             source,
             identity,
+            macro_source_identity_hash,
             identity_hash,
             composer_seed,
             add_subgrid_relief,
@@ -148,7 +159,7 @@ impl HeightfieldWorldSource {
             priority,
             requests: requests.clone(),
         })?;
-        if result.source_identity_hash != self.identity_hash
+        if result.source_identity_hash != self.macro_source_identity_hash
             || result.blocks.len() != requests.len()
         {
             return Err(WorldSourceError::MalformedMacroBlock);
@@ -570,7 +581,7 @@ impl HeightfieldWorldSource {
             &features,
             ecology_aggregate_shift,
         );
-        let water = generate_water_tile_mesh_with(coord, |x, z| {
+        let water = generate_water_tile_mesh_with(coord, self.sea_level_voxels, |x, z| {
             region.column(x, z).is_some_and(|column| {
                 edits
                     .override_at(VoxelCoord::new(x, self.sea_level_voxels, z))
@@ -621,7 +632,7 @@ impl HeightfieldWorldSource {
                 priority,
                 requests: requests.clone(),
             })?;
-            if result.source_identity_hash != self.identity_hash
+            if result.source_identity_hash != self.macro_source_identity_hash
                 || result.blocks.len() != requests.len()
             {
                 return Err(WorldSourceError::MalformedMacroBlock);
@@ -786,7 +797,7 @@ impl HeightfieldWorldSource {
                 priority,
                 requests: requests.clone(),
             })?;
-            if result.source_identity_hash != self.identity_hash
+            if result.source_identity_hash != self.macro_source_identity_hash
                 || result.blocks.len() != requests.len()
             {
                 return Err(WorldSourceError::MalformedMacroBlock);
@@ -2799,7 +2810,47 @@ mod tests {
         assert_eq!(tile.water.coord, tile_coord);
         assert!(!tile.terrain.quads.is_empty());
         assert!(!tile.water.quads.is_empty());
+        assert!(
+            tile.water
+                .quads
+                .iter()
+                .all(|quad| quad.origin[1] == source.sea_level_voxels())
+        );
+        assert_eq!(
+            tile.water.quads[0].origin[1] + 1,
+            4,
+            "streamed and exact water must share the same free-surface plane"
+        );
         assert_eq!(tile.source_identity_hash, source.identity().identity_hash());
+    }
+
+    #[test]
+    fn sea_level_changes_composed_identity_without_rephasing_macro_sampling() {
+        let low = HeightfieldWorldSource::new(
+            Box::new(FakeMacroSource::new(FakeBehavior::Valid, 1.75)),
+            3,
+        )
+        .expect("valid low sea level");
+        let high = HeightfieldWorldSource::new(
+            Box::new(FakeMacroSource::new(FakeBehavior::Valid, 1.75)),
+            4,
+        )
+        .expect("valid high sea level");
+
+        assert_ne!(low.identity_hash, high.identity_hash);
+        assert_eq!(low.composer_seed, high.composer_seed);
+        assert!(
+            product(
+                &low,
+                WorldProductRequest::SurfaceTile(SurfaceTileCoord::new(
+                    SurfaceLodLevel::Stride2,
+                    0,
+                    0,
+                )),
+            )
+            .is_ok(),
+            "derived identity must not reject upstream macro blocks"
+        );
     }
 
     fn chunk_material_at(chunk: &ChunkSnapshot, x: i32, y: i32, z: i32) -> Material {

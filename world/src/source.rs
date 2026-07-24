@@ -16,7 +16,7 @@ use std::fmt;
 
 pub const WORLD_SCHEMA_VERSION: u32 = 1;
 pub const MACRO_FIELD_SCHEMA_VERSION: u32 = 1;
-pub const VOXEL_COMPOSER_VERSION: u32 = 9;
+pub const VOXEL_COMPOSER_VERSION: u32 = 10;
 /// Source identity marker for providers that intentionally contain no authored atlas overlays.
 pub const NO_AUTHORED_CONTENT_VERSION: u32 = 0;
 pub const PROCEDURAL_SAMPLER_VERSION: u32 = 1;
@@ -1178,10 +1178,14 @@ impl WorldSourceEngine for ProceduralWorldSource {
                         Err(WorldSourceError::InvalidSurfaceTileCoordinate)
                     } else {
                         let terrain = generate_surface_tile_mesh(self.generator, coord);
-                        let water = generate_water_tile_mesh_with(coord, |x, z| {
-                            self.generator.surface_sample(x, z).water_level
-                                == Some(crate::SEA_LEVEL_VOXELS)
-                        });
+                        let water = generate_water_tile_mesh_with(
+                            coord,
+                            crate::SEA_LEVEL_VOXELS,
+                            |x, z| {
+                                self.generator.surface_sample(x, z).water_level
+                                    == Some(crate::SEA_LEVEL_VOXELS)
+                            },
+                        );
                         Ok(WorldProduct::SurfaceTile(SurfaceTileSnapshot {
                             source_identity_hash: self.source_identity_hash(),
                             terrain,
@@ -1364,7 +1368,7 @@ mod tests {
         assert_ne!(first.identity_hash(), other.identity_hash());
         assert_eq!(
             first.identity_hash().to_string(),
-            "54bc1aa309e23013427bb1bc2777f2347197988b4a8b286186f1dcbffa93c22b"
+            "012aa85549b15be04029033fcc5ca0220bfbd3c513fcecd360c02e7b96aae2e8"
         );
     }
 
@@ -1377,7 +1381,7 @@ mod tests {
         assert_eq!(first.validate(), Ok(()));
         assert_eq!(
             first.manifest_hash().map(|hash| hash.to_string()),
-            Ok("0bdcaa241156bfcc29c9a7b5af45409bac3380d082be3855cb2db11c1ea03991".to_owned())
+            Ok("2fa8f9b7136599244ab743d415b2ba76d02c034547a002118125a3e7d011a252".to_owned())
         );
 
         let mut inconsistent = first;
@@ -1671,9 +1675,9 @@ mod tests {
         );
         assert_eq!(
             snapshot.water,
-            generate_water_tile_mesh_with(surface_coord, |x, z| {
+            generate_water_tile_mesh_with(surface_coord, crate::SEA_LEVEL_VOXELS, |x, z| {
                 source.generator.surface_sample(x, z).water_level == Some(crate::SEA_LEVEL_VOXELS)
-            })
+            },)
         );
     }
 

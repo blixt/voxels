@@ -641,6 +641,9 @@ struct MeshSlice {
     morph_closure: bool,
     /// Synthetic heightfield cover is owned until this exact-volume chunk is resident.
     exact_replacement_chunk: Option<(i32, i32, i32)>,
+    /// Canonical water top faces follow the 2D surface cut. Enclosed-view chunks may still own
+    /// their volume faces without drawing a second coplanar free surface over streamed water.
+    canonical_water_surface: bool,
     render_layer: RenderLayer,
 }
 
@@ -2652,6 +2655,7 @@ impl Renderer {
             boundary_edge: None,
             morph_closure: false,
             exact_replacement_chunk: None,
+            canonical_water_surface: false,
             render_layer: RenderLayer::Opaque,
         };
         let Some(prepared) = self.prepare_mesh_sliced(
@@ -2929,9 +2933,16 @@ impl Renderer {
             .zip(opaque_seam_flags)
             .map(|(quad, flags)| convert(quad, flags))
             .collect();
+        let water_surface_count = mesh
+            .translucent
+            .iter()
+            .filter(|quad| quad.face == 2)
+            .count() as u32;
         let water_quads: Vec<_> = mesh
             .translucent
             .iter()
+            .filter(|quad| quad.face == 2)
+            .chain(mesh.translucent.iter().filter(|quad| quad.face != 2))
             .map(|quad| convert(quad, 0))
             .collect();
         let min = glam::Vec3::from_array(origin.map(|value| value as f32 * VOXEL_SIZE_METRES));
@@ -2955,6 +2966,7 @@ impl Renderer {
                     boundary_edge: None,
                     morph_closure: false,
                     exact_replacement_chunk: None,
+                    canonical_water_surface: false,
                     render_layer: RenderLayer::Opaque,
                 }],
             )?;
@@ -2964,22 +2976,39 @@ impl Renderer {
         let water_update = if translucent_count == 0 {
             None
         } else {
-            let Some(prepared) = self.prepare_water_mesh_sliced(
-                key,
-                &water_quads,
-                vec![MeshSlice {
+            let mut slices = Vec::with_capacity(2);
+            if water_surface_count != 0 {
+                slices.push(MeshSlice {
                     relative_offset: 0,
-                    size: translucent_count * quad_bytes,
-                    quad_count: translucent_count,
+                    size: water_surface_count * quad_bytes,
+                    quad_count: water_surface_count,
                     bounds_min: min,
                     bounds_max: max,
                     surface_patch_id: None,
                     boundary_edge: None,
                     morph_closure: false,
                     exact_replacement_chunk: None,
+                    canonical_water_surface: true,
                     render_layer: RenderLayer::Translucent,
-                }],
-            ) else {
+                });
+            }
+            let volume_count = translucent_count - water_surface_count;
+            if volume_count != 0 {
+                slices.push(MeshSlice {
+                    relative_offset: water_surface_count * quad_bytes,
+                    size: volume_count * quad_bytes,
+                    quad_count: volume_count,
+                    bounds_min: min,
+                    bounds_max: max,
+                    surface_patch_id: None,
+                    boundary_edge: None,
+                    morph_closure: false,
+                    exact_replacement_chunk: None,
+                    canonical_water_surface: false,
+                    render_layer: RenderLayer::Translucent,
+                });
+            }
+            let Some(prepared) = self.prepare_water_mesh_sliced(key, &water_quads, slices) else {
                 discard_prepared_mesh(&mut self.arena, opaque_update);
                 return None;
             };
@@ -3091,7 +3120,6 @@ impl Renderer {
                 extent_voxels: quad.extent,
                 material_face: pack_gpu_material_face(
                     u32::from(quad.material.id())
-                        | FAR_MATERIAL_FLAG
                         | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
                     quad.face,
                 ),
@@ -3129,6 +3157,7 @@ impl Renderer {
                 boundary_edge,
                 morph_closure,
                 exact_replacement_chunk: None,
+                canonical_water_surface: false,
                 render_layer: RenderLayer::Opaque,
             };
             append_surface_slices(
@@ -3196,6 +3225,7 @@ impl Renderer {
                     boundary_edge: None,
                     morph_closure: false,
                     exact_replacement_chunk: None,
+                    canonical_water_surface: false,
                     render_layer: RenderLayer::Translucent,
                 }
             })
@@ -3701,6 +3731,7 @@ impl Renderer {
             boundary_edge: None,
             morph_closure: false,
             exact_replacement_chunk: None,
+            canonical_water_surface: false,
             render_layer: RenderLayer::Opaque,
         };
         let Some(prepared) =
@@ -6415,6 +6446,9 @@ fn slice_owned_by_lod(
         return plan.transition_mesh_key == Some(*key);
     }
     if key.0 == 0 {
+        if slice.canonical_water_surface {
+            return plan.owns_canonical_chunk(key);
+        }
         return plan.owns_enclosed_view_chunk(key) || plan.owns_canonical_chunk(key);
     }
     if slice
@@ -8028,6 +8062,7 @@ mod tests {
             boundary_edge: None,
             morph_closure: false,
             exact_replacement_chunk: None,
+            canonical_water_surface: false,
             render_layer: RenderLayer::Opaque,
         };
         let edge = MeshSlice {
@@ -8869,8 +8904,36 @@ mod tests {
             boundary_edge: None,
             morph_closure: false,
             exact_replacement_chunk: None,
+            canonical_water_surface: false,
             render_layer: RenderLayer::Opaque,
         }
+    }
+
+    #[test]
+    fn enclosed_volume_does_not_double_own_the_streamed_water_surface() {
+        let key = (0, 3, 1, -2);
+        let mut plan = LodDrawPlan::default();
+        plan.enclosed_view_chunks.insert((key.1, key.2, key.3));
+        let volume = MeshSlice {
+            render_layer: RenderLayer::Translucent,
+            ..test_slice()
+        };
+        let surface = MeshSlice {
+            canonical_water_surface: true,
+            ..volume
+        };
+        let focus = GeometricLodFocus::snapped(0, 0);
+
+        assert!(slice_owned_by_lod(Some(focus), Some(&plan), &key, &volume));
+        assert!(!slice_owned_by_lod(
+            Some(focus),
+            Some(&plan),
+            &key,
+            &surface
+        ));
+
+        plan.canonical_chunks.insert((key.1, key.2, key.3));
+        assert!(slice_owned_by_lod(Some(focus), Some(&plan), &key, &surface));
     }
 
     fn test_view_projection(camera: &CameraState) -> glam::Mat4 {
@@ -9189,6 +9252,7 @@ mod tests {
             boundary_edge: None,
             morph_closure: false,
             exact_replacement_chunk: None,
+            canonical_water_surface: false,
             render_layer: RenderLayer::Opaque,
         };
         let surface_slice = MeshSlice {
@@ -9201,6 +9265,7 @@ mod tests {
             boundary_edge: None,
             morph_closure: false,
             exact_replacement_chunk: None,
+            canonical_water_surface: false,
             render_layer: RenderLayer::Opaque,
         };
         let surface_edge_slice = MeshSlice {
