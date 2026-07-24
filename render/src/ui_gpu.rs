@@ -425,14 +425,30 @@ impl UiGpu {
         self.opaque_scene.copy_to(encoder, &self.scene);
     }
 
-    pub fn refraction_bind_group(&self, device: &Device, layout: &BindGroupLayout) -> BindGroup {
-        texture_sampler_bind_group(
-            device,
-            "water refraction scene bind group",
+    pub fn water_scene_bind_group(
+        &self,
+        device: &Device,
+        layout: &BindGroupLayout,
+        depth_view: &TextureView,
+    ) -> BindGroup {
+        device.create_bind_group(&BindGroupDescriptor {
+            label: Some("water scene color and depth bind group"),
             layout,
-            &self.opaque_scene.view,
-            &self.opaque_scene.sampler,
-        )
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(&self.opaque_scene.view),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Sampler(&self.opaque_scene.sampler),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: BindingResource::TextureView(depth_view),
+                },
+            ],
+        })
     }
 
     pub fn resize(

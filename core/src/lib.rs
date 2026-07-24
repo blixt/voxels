@@ -156,7 +156,11 @@ pub struct FluidState {
     pub immersion: f32,
     pub eyes_submerged: bool,
     pub eye_depth_metres: f32,
+    /// Positive below the local free surface and negative above it. Only meaningful when
+    /// `surface_known` is true.
+    pub signed_eye_depth_metres: f32,
     pub surface_y_metres: f32,
+    pub surface_known: bool,
     pub swimming: bool,
 }
 
@@ -750,12 +754,17 @@ impl CameraState {
                     PLAYER_SPRINT_SPEED_METRES_PER_SECOND
                 } else {
                     WALK_SPEED
-                } * assisted_scale;
+                } * assisted_scale
+                    * (1.0 - self.fluid.immersion * 0.38);
                 let target = wish.normalize_or_zero() * speed;
-                let response = 1.0 - (-(if self.grounded { 18.0 } else { 5.0 }) * dt).exp();
+                let response_per_second =
+                    (if self.grounded { 18.0 } else { 5.0 }) + self.fluid.immersion * 4.0;
+                let response = 1.0 - (-response_per_second * dt).exp();
                 self.velocity.x += (target.x - self.velocity.x) * response;
                 self.velocity.z += (target.z - self.velocity.z) * response;
-                self.velocity.y = (self.velocity.y - GRAVITY * dt).max(-WALK_TERMINAL_FALL_SPEED);
+                let gravity_scale = 1.0 - self.fluid.immersion * 0.78;
+                self.velocity.y =
+                    (self.velocity.y - GRAVITY * gravity_scale * dt).max(-WALK_TERMINAL_FALL_SPEED);
             }
             horizontal_grounded = self.grounded || self.ground_grace_seconds > 0.0;
         }
@@ -865,8 +874,10 @@ impl CameraState {
         let eyes_submerged = sample_voxel(eye_voxel.x, eye_voxel.y, eye_voxel.z).fluid;
         let surface_y_metres = if eyes_submerged {
             let mut first_air = eye_voxel.y;
+            let mut surface = None;
             for _ in 0..MAX_FLUID_SURFACE_SCAN_VOXELS {
                 if !sample_voxel(eye_voxel.x, first_air, eye_voxel.z).fluid {
+                    surface = Some(first_air as f32 * voxel_size);
                     break;
                 }
                 let Some(next) = first_air.checked_add(1) else {
@@ -874,11 +885,18 @@ impl CameraState {
                 };
                 first_air = next;
             }
-            first_air as f32 * voxel_size
+            surface
         } else if highest_surface.is_finite() {
-            highest_surface
+            Some(highest_surface)
         } else {
-            self.position.y
+            None
+        };
+        let surface_known = surface_y_metres.is_some();
+        let surface_y_metres = surface_y_metres.unwrap_or(self.position.y);
+        let signed_eye_depth_metres = if surface_known {
+            surface_y_metres - self.position.y
+        } else {
+            0.0
         };
         let swimming = if previous_swimming {
             eyes_submerged || immersion > SWIM_EXIT_IMMERSION
@@ -888,12 +906,10 @@ impl CameraState {
         self.fluid = FluidState {
             immersion,
             eyes_submerged,
-            eye_depth_metres: if eyes_submerged {
-                (surface_y_metres - self.position.y).max(0.0)
-            } else {
-                0.0
-            },
+            eye_depth_metres: signed_eye_depth_metres.max(0.0),
+            signed_eye_depth_metres,
             surface_y_metres,
+            surface_known,
             swimming,
         };
     }
@@ -1991,6 +2007,7 @@ mod tests {
         let fluid = camera.fluid_state();
         assert!((fluid.immersion - 1.0).abs() < 0.0001);
         assert!(fluid.eyes_submerged);
+        assert!(fluid.surface_known);
         assert!((fluid.surface_y_metres - 1.8).abs() < 0.0001);
         assert!(
             (fluid.eye_depth_metres - (fluid.surface_y_metres - PLAYER_EYE_HEIGHT_METRES)).abs()
@@ -2000,12 +2017,34 @@ mod tests {
     }
 
     #[test]
+    fn signed_eye_depth_is_continuous_across_the_water_surface() {
+        let sample = |_: i32, y: i32, _: i32| {
+            if (0..=17).contains(&y) {
+                VoxelPhysics::FLUID
+            } else {
+                VoxelPhysics::EMPTY
+            }
+        };
+        let mut below = CameraState::spawn(Vec3::new(0.05, 1.799, 0.05));
+        below.refresh_fluid_state(0.1, sample);
+        let mut above = CameraState::spawn(Vec3::new(0.05, 1.801, 0.05));
+        above.refresh_fluid_state(0.1, sample);
+
+        assert!(below.fluid.surface_known);
+        assert!(above.fluid.surface_known);
+        assert!((below.fluid.signed_eye_depth_metres - 0.001).abs() < 0.0001);
+        assert!((above.fluid.signed_eye_depth_metres + 0.001).abs() < 0.0001);
+        assert_eq!(below.fluid.surface_y_metres, above.fluid.surface_y_metres);
+    }
+
+    #[test]
     fn fluid_surface_scan_stops_at_the_canonical_grid_limit() {
         let mut camera = CameraState::spawn(Vec3::new(0.0, i32::MAX as f32, 0.0));
         camera.refresh_fluid_state(1.0, |_, _, _| VoxelPhysics::FLUID);
 
         let fluid = camera.fluid_state();
         assert!(fluid.eyes_submerged);
+        assert!(!fluid.surface_known);
         assert!(fluid.surface_y_metres.is_finite());
         assert!(fluid.eye_depth_metres.is_finite());
         assert!((0.0..=1.0).contains(&fluid.immersion));

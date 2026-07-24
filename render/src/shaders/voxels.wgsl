@@ -17,6 +17,7 @@ struct LocalLightUniform {
 @group(0) @binding(6) var<uniform> local_light_uniform: LocalLightUniform;
 @group(1) @binding(0) var opaque_scene: texture_2d<f32>;
 @group(1) @binding(1) var opaque_scene_sampler: sampler;
+@group(1) @binding(2) var opaque_depth: texture_depth_2d;
 @group(2) @binding(0) var filtered_spatial_ao: texture_2d<f32>;
 
 struct CutTransitionUniform {
@@ -758,14 +759,66 @@ fn sun_visibility(world: vec3<f32>, normal: vec3<f32>) -> f32 {
   return mix(visibility, cascade_shadow(world, normal, cascade + 1u), blend);
 }
 
-fn water_wave_normal(world: vec3<f32>) -> vec3<f32> {
-  let time = frame.camera_time.w;
-  let phase_a = dot(world.xz, vec2<f32>(1.08, 0.46)) * 2.1 + time * 0.82;
-  let phase_b = dot(world.xz, vec2<f32>(-0.38, 1.27)) * 3.4 - time * 0.57;
-  let phase_c = dot(world.xz, vec2<f32>(0.82, -1.11)) * 6.8 + time * 1.16;
-  let slope = vec2<f32>(1.08, 0.46) * cos(phase_a) * 0.075
-    + vec2<f32>(-0.38, 1.27) * cos(phase_b) * 0.048
-    + vec2<f32>(0.82, -1.11) * cos(phase_c) * 0.018;
+fn scene_sample(uv: vec2<f32>) -> vec4<f32> {
+  let dimensions = textureDimensions(opaque_depth);
+  let pixel = clamp(
+    vec2<i32>(uv * vec2<f32>(dimensions)),
+    vec2<i32>(0),
+    vec2<i32>(dimensions) - vec2<i32>(1),
+  );
+  let depth = textureLoad(opaque_depth, pixel, 0);
+  if depth <= 0.000001 {
+    return vec4<f32>(0.0);
+  }
+  let ndc = vec2<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0);
+  let homogeneous = frame.inverse_view_projection * vec4<f32>(ndc, depth, 1.0);
+  let world = homogeneous.xyz
+    / max(abs(homogeneous.w), 0.000001) * sign(homogeneous.w);
+  return vec4<f32>(world, depth);
+}
+
+fn filtered_wave_slope(
+  position: vec2<f32>,
+  direction: vec2<f32>,
+  wavelength: f32,
+  slope_amplitude: f32,
+  speed: f32,
+  phase_offset: f32,
+  pixel_footprint: f32,
+) -> vec2<f32> {
+  // A projected wavelength needs several pixels to remain a stable normal cue. Smoothly removing
+  // unresolved bands prevents distant water from sparkling or collapsing into a repetitive moire.
+  let resolved = 1.0 - smoothstep(wavelength * 0.12, wavelength * 0.32, pixel_footprint);
+  let wave_number = 6.28318530718 / wavelength;
+  let phase = dot(position, direction) * wave_number
+    + frame.atmosphere_motion.x * speed + phase_offset;
+  return direction * cos(phase) * slope_amplitude * resolved;
+}
+
+fn water_wave_normal(world: vec3<f32>, water_depth: f32) -> vec3<f32> {
+  let footprint = max(length(fwidth(world.xz)), 0.001);
+  let position = world.xz;
+  var slope = filtered_wave_slope(
+    position, normalize(vec2<f32>(0.91, 0.42)), 17.3, 0.080, 0.39, 0.7, footprint,
+  );
+  slope += filtered_wave_slope(
+    position, normalize(vec2<f32>(-0.34, 0.94)), 9.1, 0.061, -0.57, 2.1, footprint,
+  );
+  slope += filtered_wave_slope(
+    position, normalize(vec2<f32>(0.68, -0.73)), 4.7, 0.043, 0.83, 4.4, footprint,
+  );
+  slope += filtered_wave_slope(
+    position, normalize(vec2<f32>(-0.82, -0.57)), 2.6, 0.028, -1.14, 1.3, footprint,
+  );
+  slope += filtered_wave_slope(
+    position, normalize(vec2<f32>(0.23, 0.97)), 1.37, 0.017, 1.61, 5.2, footprint,
+  );
+  slope += filtered_wave_slope(
+    position, normalize(vec2<f32>(0.99, -0.12)), 0.73, 0.009, -2.05, 3.5, footprint,
+  );
+  // Shallow water transfers less energy into free-surface waves and converges continuously on the
+  // bank instead of intersecting it.
+  slope *= smoothstep(0.08, 1.15, water_depth);
   return normalize(vec3<f32>(-slope.x, 1.0, -slope.y));
 }
 
@@ -777,10 +830,7 @@ fn environment_radiance(direction: vec3<f32>) -> vec3<f32> {
 }
 
 fn reflected_environment(direction: vec3<f32>) -> vec3<f32> {
-  var radiance = environment_radiance(direction);
-  let sun = normalize(frame.key_light_direction.xyz);
-  radiance += frame.key_light_radiance.rgb * pow(max(dot(direction, sun), 0.0), 420.0) * 0.72;
-  return radiance;
+  return environment_radiance(direction);
 }
 
 @fragment
@@ -789,62 +839,94 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   if material != 13u {
     discard;
   }
+  if !cut_transition_visible(input.position.xy) {
+    discard;
+  }
+  let base_uv = input.position.xy / frame.viewport_voxel.xy;
+  let base_background = scene_sample(base_uv);
+  let top_water_depth = select(
+    12.0,
+    max(input.world.y - base_background.y, 0.0),
+    base_background.w > 0.000001,
+  );
   let view_direction = normalize(frame.camera_time.xyz - input.world);
-  var normal = select(input.normal, water_wave_normal(input.world), input.normal.y > 0.5);
+  var normal = select(
+    input.normal,
+    water_wave_normal(input.world, top_water_depth),
+    input.normal.y > 0.5,
+  );
   if dot(normal, view_direction) < 0.0 {
     normal = -normal;
   }
   let facing = clamp(dot(normal, view_direction), 0.0, 1.0);
-  var fresnel = 0.02037 + 0.97963 * pow(1.0 - facing, 5.0);
-  // Hide the discrete air/water eta switch behind reflection while the Rust medium state eases
-  // through the 10 cm surface boundary.
-  fresnel = max(fresnel, 1.0 - abs(frame.medium.x * 2.0 - 1.0));
+  let fresnel = fresnel_schlick(facing, vec3<f32>(0.02037));
   let reflection = reflected_environment(reflect(-view_direction, normal));
   let camera_to_surface = input.world - frame.camera_time.xyz;
   let distance_to_camera = length(camera_to_surface);
-  // Until opaque depth is sampled separately, distance is a conservative attenuation proxy rather
-  // than a claim about physical water thickness.
-  let absorption = 1.0 - exp(-distance_to_camera * 0.055);
-  let base_uv = input.position.xy / frame.viewport_voxel.xy;
-  let below_surface = frame.medium.x > 0.5;
+  let below_surface = frame.medium.y > 0.0;
   let refraction_ratio = select(1.0 / 1.333, 1.333, below_surface);
   var transmitted_ray = refract(-view_direction, normal, refraction_ratio);
   if dot(transmitted_ray, transmitted_ray) < 0.000001 {
     transmitted_ray = reflect(-view_direction, normal);
-    fresnel = 1.0;
   }
-  let sample_world = input.world + transmitted_ray * mix(0.35, 1.6, absorption);
+  let sample_world = input.world + transmitted_ray * mix(0.28, 1.25, smoothstep(0.2, 6.0, top_water_depth));
   let sample_clip = frame.view_projection * vec4<f32>(sample_world, 1.0);
   let projected_uv = sample_clip.xy / max(sample_clip.w, 0.0001)
     * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
-  let max_refraction_offset = vec2<f32>(14.0) / frame.viewport_voxel.xy;
+  let max_refraction_offset = vec2<f32>(9.0) / frame.viewport_voxel.xy;
   let projected_offset = clamp(
     projected_uv - base_uv,
     -max_refraction_offset,
     max_refraction_offset,
   );
-  let refraction_uv = clamp(
+  var refraction_uv = clamp(
     base_uv + select(vec2<f32>(0.0), projected_offset, sample_clip.w > 0.0),
     vec2<f32>(0.001),
     vec2<f32>(0.999),
   );
+  var refracted_background = scene_sample(refraction_uv);
+  // A screen-space offset must never pull foreground geometry through the water. Falling back to
+  // the unperturbed ray is stable and preserves the true shoreline silhouette.
+  if refracted_background.w > input.position.z + 0.000001 {
+    refraction_uv = base_uv;
+    refracted_background = base_background;
+  }
   let refracted_scene = max(
     textureSampleLevel(opaque_scene, opaque_scene_sampler, refraction_uv, 0.0).rgb,
     vec3<f32>(0.0),
   );
-  let deep = srgb_to_linear(vec3<f32>(0.018, 0.14, 0.22));
-  let shallow = srgb_to_linear(vec3<f32>(0.075, 0.34, 0.41));
-  let wave_light = sin(input.world.x * 2.7 + frame.camera_time.w * 0.9)
-    * sin(input.world.z * 2.2 - frame.camera_time.w * 0.7) * 0.5 + 0.5;
-  var local_light = mix(deep, shallow, 0.28 + wave_light * 0.18);
-  local_light = mix(local_light, reflection, clamp(fresnel * 0.88 + 0.08, 0.0, 0.92));
+  let optical_path = select(
+    28.0,
+    clamp(distance(refracted_background.xyz, input.world), 0.0, 80.0),
+    refracted_background.w > 0.000001,
+  );
+  // Single-layer participating medium: Beer-Lambert extinction preserves shallow bottom color,
+  // while out-scattering supplies the familiar blue-green body color only as path length grows.
+  let absorption_coefficient = vec3<f32>(0.31, 0.075, 0.028);
+  let scattering_coefficient = vec3<f32>(0.012, 0.038, 0.052);
+  let extinction = absorption_coefficient + scattering_coefficient;
+  let water_transmittance = exp(-extinction * optical_path);
+  let water_radiance = srgb_to_linear(vec3<f32>(0.055, 0.29, 0.34))
+    * (0.34 + max(normalize(frame.key_light_direction.xyz).y, 0.0) * 0.36);
+  let in_scattering = water_radiance
+    * (scattering_coefficient / extinction)
+    * (vec3<f32>(1.0) - water_transmittance);
+  let transmitted = refracted_scene * water_transmittance + in_scattering;
+
+  var surface_radiance = reflection * fresnel;
   let sun = normalize(frame.key_light_direction.xyz);
-  let half_direction = normalize(sun + view_direction);
   let visibility = sun_visibility(input.world, normal) * cloud_surface_weather(input.world).x;
-  local_light += frame.key_light_radiance.rgb
-    * pow(max(dot(normal, half_direction), 0.0), 260.0)
-    * mix(0.18, 1.0, visibility)
-    * 0.34;
+  surface_radiance += frame.key_light_radiance.rgb
+    * evaluate_direct_dielectric_f0(
+      vec3<f32>(0.0),
+      0.075,
+      vec3<f32>(0.02037),
+      normal,
+      view_direction,
+      sun,
+    )
+    * visibility;
+  var color = surface_radiance + transmitted * (vec3<f32>(1.0) - fresnel);
 
   let fog_view_direction = camera_to_surface / max(distance_to_camera, 0.0001);
   let average_height = max((input.world.y + frame.camera_time.y) * 0.5, 0.0);
@@ -854,17 +936,8 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   let transmittance = exp(-optical_depth);
   let sky_factor = pow(max(fog_view_direction.y, 0.0), 0.42);
   let fog_radiance = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, sky_factor);
-  local_light = local_light * transmittance + fog_radiance * (1.0 - transmittance);
-  local_light = max(local_light * frame.fog_exposure.y * frame.interior.y, vec3<f32>(0.0));
-  let transmission_tint = mix(vec3<f32>(0.86, 0.97, 0.98), vec3<f32>(0.38, 0.72, 0.76), absorption);
-  let transmitted = refracted_scene * transmission_tint + deep * absorption * 0.18;
-  let transmission_weight = (1.0 - fresnel) * mix(0.86, 0.42, absorption);
-  var color = mix(local_light, transmitted, transmission_weight);
-  let water_transmittance = exp(-vec3<f32>(0.34, 0.13, 0.065) * distance_to_camera);
-  let water_scattering = srgb_to_linear(vec3<f32>(0.025, 0.24, 0.30));
-  let underwater_color = color * water_transmittance
-    + water_scattering * (vec3<f32>(1.0) - water_transmittance);
-  color = mix(color, underwater_color, frame.medium.x);
+  color = color * transmittance + fog_radiance * (1.0 - transmittance);
+  color = max(color * frame.fog_exposure.y * frame.interior.y, vec3<f32>(0.0));
   return vec4<f32>(color, 1.0);
 }
 
@@ -963,11 +1036,23 @@ fn transport_surface_radiance(color: vec3<f32>, world: vec3<f32>, sun: vec3<f32>
   let cave_transmittance = exp(-distance_to_camera * frame.interior.z);
   let cave_air = vec3<f32>(0.010, 0.014, 0.020);
   transported = mix(cave_air, transported, cave_transmittance);
-  let water_transmittance = exp(-vec3<f32>(0.36, 0.14, 0.07) * distance_to_camera);
+  var underwater_path = 0.0;
+  if frame.medium.y > 0.0 {
+    let endpoint_depth = frame.medium.w - world.y;
+    if endpoint_depth >= 0.0 {
+      underwater_path = distance_to_camera;
+    } else {
+      // The camera-to-fragment ray exits the horizontal free surface. Only attenuate the segment
+      // below that plane, so above-water geometry remains clear during partial submersion.
+      underwater_path = distance_to_camera
+        * frame.medium.y / max(frame.medium.y - endpoint_depth, 0.0001);
+    }
+  }
+  underwater_path *= frame.medium.x;
+  let water_transmittance = exp(-vec3<f32>(0.36, 0.14, 0.07) * underwater_path);
   let water_scattering = srgb_to_linear(vec3<f32>(0.018, 0.20, 0.27));
-  let underwater_color = transported * water_transmittance
+  transported = transported * water_transmittance
     + water_scattering * (vec3<f32>(1.0) - water_transmittance);
-  transported = mix(transported, underwater_color, frame.medium.x);
   return max(transported * frame.fog_exposure.y * frame.interior.y, vec3<f32>(0.0));
 }
 

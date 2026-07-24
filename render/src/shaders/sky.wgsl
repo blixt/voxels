@@ -188,7 +188,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let wave = sin(interface_xz.x * 3.1 + frame.camera_time.w * 1.3)
     * sin(interface_xz.y * 2.7 - frame.camera_time.w * 0.9) * 0.025;
   let snell_window = smoothstep(0.61, 0.72, ray.y + wave);
-  let path_to_surface = frame.medium.y / max(ray.y, 0.08);
+  let path_to_surface = max(frame.medium.y, 0.0) / max(ray.y, 0.08);
   let water_transmittance = exp(-vec3<f32>(0.42, 0.16, 0.075) * path_to_surface);
   let water_scattering = vec3<f32>(0.010, 0.105, 0.145);
   let window_color = color * water_transmittance

@@ -139,6 +139,41 @@ mod tests {
     }
 
     #[test]
+    fn water_uses_depth_resolved_single_layer_transport_and_filtered_world_waves() {
+        let voxels = include_str!("shaders/voxels.wgsl");
+        assert!(voxels.contains("@group(1) @binding(2) var opaque_depth: texture_depth_2d;"));
+        assert!(voxels.contains("fn scene_sample("));
+        assert!(voxels.contains("frame.inverse_view_projection"));
+        assert!(voxels.contains("let optical_path = select("));
+        assert!(voxels.contains("let water_transmittance = exp(-extinction * optical_path);"));
+        assert!(voxels.contains("let in_scattering = water_radiance"));
+        assert!(voxels.contains("evaluate_direct_dielectric_f0("));
+        assert!(voxels.contains("fn filtered_wave_slope("));
+        assert!(voxels.contains("length(fwidth(world.xz))"));
+        assert!(voxels.contains("slope *= smoothstep(0.08, 1.15, water_depth);"));
+        let water_fragment = voxels
+            .split_once("fn fs_water")
+            .expect("water fragment entry point")
+            .1
+            .split_once("fn screen_space_ambient_visibility")
+            .expect("water fragment terminator")
+            .0;
+        assert!(water_fragment.contains("if !cut_transition_visible(input.position.xy)"));
+        assert!(voxels.contains("if refracted_background.w > input.position.z + 0.000001"));
+        assert!(!voxels.contains("1.0 - abs(frame.medium.x * 2.0 - 1.0)"));
+        assert!(!voxels.contains("sin(input.world.x * 2.7"));
+
+        let extinction = [0.322_f32, 0.113, 0.080];
+        for coefficient in extinction {
+            let clear = (-coefficient * 0.0).exp();
+            let shallow = (-coefficient * 0.5).exp();
+            let deep = (-coefficient * 20.0).exp();
+            assert!((clear - 1.0).abs() < f32::EPSILON);
+            assert!(clear > shallow && shallow > deep && deep >= 0.0);
+        }
+    }
+
+    #[test]
     fn terrain_fog_integrates_physical_distance_without_a_horizon_knee() {
         let voxels = include_str!("shaders/voxels.wgsl");
         assert!(!voxels.contains("fn atmospheric_path_length("));

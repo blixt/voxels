@@ -19,13 +19,13 @@ use crate::shadow::{
 };
 use crate::ui::{Color, InventoryItem, LiveStats, MissionControlUi, UiAction, UiKey, Viewport};
 pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
-use crate::ui_gpu::{SCENE_FORMAT, UiGpu, texture_sampler_layout};
+use crate::ui_gpu::{SCENE_FORMAT, UiGpu};
 use bytemuck::{Pod, Zeroable};
 use hashbrown::{HashMap, HashSet};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use voxels_core::{CameraState, EnclosureSample, RemoteAvatarPose};
+use voxels_core::{CameraState, EnclosureSample, FluidState, RemoteAvatarPose};
 use voxels_world::protocol::{EditShape, EditVolume};
 use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, Material, MeshedChunk,
@@ -1336,6 +1336,7 @@ pub struct Renderer {
     voxel_morph_transition_ambient_occlusion_pipeline: RenderPipeline,
     voxel_morph_transition_ambient_occlusion_flat_pipeline: RenderPipeline,
     water_pipeline: RenderPipeline,
+    water_transition_pipeline: RenderPipeline,
     weather_pipeline: RenderPipeline,
     avatar_gpu: AvatarGpu,
     remote_avatars: Vec<RemoteAvatarPose>,
@@ -1400,7 +1401,6 @@ pub struct Renderer {
     screenshot_requested: bool,
     screenshot_readback: Arc<Mutex<ScreenshotReadbackState>>,
     host_ui_action: Option<HostUiAction>,
-    underwater_blend: f32,
     interior: InteriorEnvironment,
     interior_target: InteriorEnvironment,
     directional_light_occluded: bool,
@@ -1445,7 +1445,6 @@ struct FrameState {
     environment: OutdoorEnvironment,
     world_environment: WorldEnvironmentState,
     celestial_observation: CelestialObservation,
-    underwater_blend: f32,
     interior: InteriorEnvironment,
     direct_light_visibility: f32,
 }
@@ -1760,7 +1759,6 @@ impl Renderer {
                 environment,
                 world_environment,
                 celestial_observation,
-                underwater_blend: 0.0,
                 interior: InteriorEnvironment::default(),
                 direct_light_visibility: 1.0,
             },
@@ -1966,11 +1964,16 @@ impl Renderer {
                 ],
                 immediate_size: 0,
             });
-        let water_scene_layout = texture_sampler_layout(&device, "water refraction scene layout");
+        let water_scene_layout = water_scene_layout(&device);
         let water_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("water pipeline layout"),
-                bind_group_layouts: &[Some(&frame_layout), Some(&water_scene_layout)],
+                bind_group_layouts: &[
+                    Some(&frame_layout),
+                    Some(&water_scene_layout),
+                    None,
+                    Some(&cut_transition_layout),
+                ],
                 immediate_size: 0,
             });
         let sky_shader =
@@ -2195,9 +2198,32 @@ impl Renderer {
                 fragment_constants: &[],
             },
         );
+        let water_transition_pipeline = pipeline(
+            &device,
+            "outgoing water transition pipeline",
+            &water_pipeline_layout,
+            &voxel_shader,
+            SCENE_FORMAT,
+            &[Some(quad_layout())],
+            PipelineOptions {
+                vertex_entry: "vs_main_fixed",
+                fragment_entry: "fs_water",
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Greater),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                fragment_constants: &[("CUT_TRANSITION", 1.0)],
+            },
+        );
 
         let ui_gpu = UiGpu::new(&device, format, config.width, config.height, dpr)?;
-        let water_scene_bind_group = ui_gpu.refraction_bind_group(&device, &water_scene_layout);
+        let water_scene_bind_group =
+            ui_gpu.water_scene_bind_group(&device, &water_scene_layout, &depth_view);
 
         let placement_inventory = PlacementInventory::new();
         let mut ui = MissionControlUi::new(runtime_config.mission_control);
@@ -2242,6 +2268,7 @@ impl Renderer {
             voxel_morph_transition_ambient_occlusion_pipeline,
             voxel_morph_transition_ambient_occlusion_flat_pipeline,
             water_pipeline,
+            water_transition_pipeline,
             weather_pipeline,
             avatar_gpu,
             remote_avatars: Vec::new(),
@@ -2306,7 +2333,6 @@ impl Renderer {
             screenshot_requested: false,
             screenshot_readback: Arc::new(Mutex::new(ScreenshotReadbackState::default())),
             host_ui_action: None,
-            underwater_blend: 0.0,
             interior: InteriorEnvironment::default(),
             interior_target: InteriorEnvironment::default(),
             directional_light_occluded: false,
@@ -2346,9 +2372,11 @@ impl Renderer {
             .ui_gpu
             .resize(&self.device, &self.queue, width, height, self.dpr)
         {
-            self.water_scene_bind_group = self
-                .ui_gpu
-                .refraction_bind_group(&self.device, &self.water_scene_layout);
+            self.water_scene_bind_group = self.ui_gpu.water_scene_bind_group(
+                &self.device,
+                &self.water_scene_layout,
+                &self.depth_view,
+            );
         }
     }
 
@@ -3950,17 +3978,6 @@ impl Renderer {
         if !self.refresh_effective_environment() {
             return false;
         }
-        let target_underwater = f32::from(camera.fluid_state().eyes_submerged);
-        let response_seconds = if target_underwater > self.underwater_blend {
-            0.12
-        } else {
-            0.22
-        };
-        let response = 1.0 - (-dt / response_seconds).exp();
-        self.underwater_blend += (target_underwater - self.underwater_blend) * response;
-        if (target_underwater - self.underwater_blend).abs() < 0.000_5 {
-            self.underwater_blend = target_underwater;
-        }
         let interior_seconds = if self.interior_target.enclosure > self.interior.enclosure {
             0.25
         } else {
@@ -4031,7 +4048,6 @@ impl Renderer {
                 environment: self.environment,
                 world_environment: self.world_environment,
                 celestial_observation: self.celestial_observation,
-                underwater_blend: self.underwater_blend,
                 interior: self.interior,
                 direct_light_visibility,
             },
@@ -4101,13 +4117,43 @@ impl Renderer {
                     && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
             },
         );
+        let outgoing_water_draw_list =
+            self.cut_transition
+                .as_ref()
+                .map_or_else(DrawList::default, |transition| {
+                    self.collect_draw_list(
+                        &self.water_chunks,
+                        |key, chunk| {
+                            self.options.water
+                                && (key.0 == 0 || self.options.far_terrain)
+                                && view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max)
+                        },
+                        |key, slice| {
+                            slice.render_layer == RenderLayer::Translucent
+                                && slice_owned_by_lod(
+                                    transition.from_focus,
+                                    Some(&transition.from),
+                                    key,
+                                    slice,
+                                )
+                                && !slice_owned_by_lod(
+                                    geometric_lod_focus,
+                                    lod_draw_plan,
+                                    key,
+                                    slice,
+                                )
+                                && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
+                        },
+                    )
+                });
         let cpu_cull_ms = (now_ms() - cull_started).max(0.0) as f32;
         let encode_started = now_ms();
         self.avatar_gpu
             .prepare(&self.queue, &self.remote_avatars, self.time);
         let avatar_instances = self.avatar_gpu.instance_count();
         let has_avatars = avatar_instances != 0;
-        let refract_water = !water_draw_list.spans.is_empty();
+        let refract_water =
+            !water_draw_list.spans.is_empty() || !outgoing_water_draw_list.spans.is_empty();
         let diagnostic_sky = self.runtime_config.diagnostic_sky_color.is_some();
         let clouds_active = self.volumetric_cloud_gpu.enabled() && !diagnostic_sky;
         let weather_active = self.environment.precipitation > 0.002 && !diagnostic_sky;
@@ -4416,6 +4462,7 @@ impl Renderer {
             pass.set_pipeline(&self.water_pipeline);
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
             pass.set_bind_group(1, &self.water_scene_bind_group, &[]);
+            pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
             for span in &water_draw_list.spans {
                 let Some(buffer) = self.water_arena_buffers.get(span.page as usize) else {
                     continue;
@@ -4424,6 +4471,19 @@ impl Renderer {
                 let end = start + u64::from(span.size);
                 pass.set_vertex_buffer(0, buffer.slice(start..end));
                 pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
+            }
+            if !outgoing_water_draw_list.spans.is_empty() {
+                pass.set_pipeline(&self.water_transition_pipeline);
+                pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                for span in &outgoing_water_draw_list.spans {
+                    let Some(buffer) = self.water_arena_buffers.get(span.page as usize) else {
+                        continue;
+                    };
+                    let start = u64::from(span.offset);
+                    let end = start + u64::from(span.size);
+                    pass.set_vertex_buffer(0, buffer.slice(start..end));
+                    pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
+                }
             }
         }
         if weather_active {
@@ -4473,8 +4533,13 @@ impl Renderer {
                 .len()
                 .saturating_add(world_draw_list.morphing.spans.len())
                 .saturating_add(water_draw_list.spans.len())
+                .saturating_add(outgoing_water_draw_list.spans.len())
                 .saturating_add(usize::from(has_avatars)) as u32,
-            water_draw_calls: water_draw_list.spans.len() as u32,
+            water_draw_calls: water_draw_list
+                .spans
+                .len()
+                .saturating_add(outgoing_water_draw_list.spans.len())
+                as u32,
             shadow_draw_calls,
             shadow_cascades: if shadows_active {
                 CASCADE_COUNT as u32
@@ -4483,11 +4548,17 @@ impl Renderer {
             },
             quads: world_draw_list
                 .quad_count
-                .saturating_add(water_draw_list.quad_count),
-            water_quads: water_draw_list.quad_count,
+                .saturating_add(water_draw_list.quad_count)
+                .saturating_add(outgoing_water_draw_list.quad_count),
+            water_quads: water_draw_list
+                .quad_count
+                .saturating_add(outgoing_water_draw_list.quad_count),
             viewport_fingerprint: fingerprint_value(
-                fingerprint_value(FINGERPRINT_OFFSET, world_draw_list.fingerprint),
-                water_draw_list.fingerprint,
+                fingerprint_value(
+                    fingerprint_value(FINGERPRINT_OFFSET, world_draw_list.fingerprint),
+                    water_draw_list.fingerprint,
+                ),
+                outgoing_water_draw_list.fingerprint,
             ),
             refraction_copy_bytes: refraction_copy_bytes(
                 self.config.width,
@@ -4537,13 +4608,15 @@ impl Renderer {
                 .map(|draw_list| draw_list.tested_slices)
                 .sum::<u32>()
                 .saturating_add(world_draw_list.tested_slices)
-                .saturating_add(water_draw_list.tested_slices),
+                .saturating_add(water_draw_list.tested_slices)
+                .saturating_add(outgoing_water_draw_list.tested_slices),
             draw_list_selected_slices: shadow_draw_lists
                 .iter()
                 .map(|draw_list| draw_list.selected_slices)
                 .sum::<u32>()
                 .saturating_add(world_draw_list.selected_slices)
-                .saturating_add(water_draw_list.selected_slices),
+                .saturating_add(water_draw_list.selected_slices)
+                .saturating_add(outgoing_water_draw_list.selected_slices),
             lod_transition_quads: self
                 .lod_draw_plan
                 .transition_mesh_key
@@ -6936,7 +7009,6 @@ fn frame_uniform(
         environment,
         world_environment,
         celestial_observation,
-        underwater_blend,
         interior,
         direct_light_visibility,
     } = state;
@@ -7081,8 +7153,8 @@ fn frame_uniform(
             world_environment.cloud_velocity_metres_per_second[1],
         ],
         medium: [
-            underwater_blend.clamp(0.0, 1.0),
-            fluid.eye_depth_metres.max(0.0),
+            water_optical_immersion(fluid),
+            fluid.signed_eye_depth_metres,
             fluid.immersion.clamp(0.0, 1.0),
             fluid.surface_y_metres,
         ],
@@ -7255,6 +7327,48 @@ fn reverse_z_perspective(vertical_fov: f32, aspect: f32, near: f32, far: f32) ->
         glam::Vec4::new(0.0, 0.0, near / depth_range, -1.0),
         glam::Vec4::new(0.0, 0.0, near * far / depth_range, 0.0),
     )
+}
+
+fn water_optical_immersion(fluid: FluidState) -> f32 {
+    if !fluid.surface_known || fluid.signed_eye_depth_metres <= 0.0 {
+        return 0.0;
+    }
+    let normalized = (fluid.signed_eye_depth_metres / 0.04).clamp(0.0, 1.0);
+    normalized * normalized * (3.0 - 2.0 * normalized)
+}
+
+fn water_scene_layout(device: &Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("water scene color and depth layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+        ],
+    })
 }
 
 struct PipelineOptions<'a> {
@@ -8972,6 +9086,24 @@ mod tests {
         assert!(depth(10.0) > depth(1_000.0));
         assert!(depth(near * 0.5) > 1.0);
         assert!(depth(far * 2.0) < 0.0);
+    }
+
+    #[test]
+    fn optical_immersion_is_spatial_and_continuous_at_the_free_surface() {
+        let fluid = |signed_eye_depth_metres| FluidState {
+            signed_eye_depth_metres,
+            surface_known: true,
+            ..FluidState::default()
+        };
+
+        assert_eq!(water_optical_immersion(FluidState::default()), 0.0);
+        assert_eq!(water_optical_immersion(fluid(-0.001)), 0.0);
+        assert_eq!(water_optical_immersion(fluid(0.0)), 0.0);
+        let just_below = water_optical_immersion(fluid(0.001));
+        assert!(just_below > 0.0 && just_below < 0.01);
+        assert!((water_optical_immersion(fluid(0.02)) - 0.5).abs() < 0.0001);
+        assert_eq!(water_optical_immersion(fluid(0.04)), 1.0);
+        assert_eq!(water_optical_immersion(fluid(0.4)), 1.0);
     }
 
     #[test]
