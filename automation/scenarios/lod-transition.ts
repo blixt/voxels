@@ -507,7 +507,12 @@ function summarizePerformance(timings: LodTimings) {
   };
 }
 
-type LodMode = "transition" | "watertight" | "boundary-coverage" | "travel-coverage";
+type LodMode =
+  | "transition"
+  | "watertight"
+  | "boundary-coverage"
+  | "travel-coverage"
+  | "descent-coverage";
 
 interface LodOptions {
   readonly mode: LodMode;
@@ -531,7 +536,13 @@ function parseOptions(arguments_: readonly string[]): LodOptions {
   const argumentsReader = new ScenarioArguments(arguments_);
   const mode = argumentsReader.choice(
     "mode",
-    ["transition", "watertight", "boundary-coverage", "travel-coverage"] as const,
+    [
+      "transition",
+      "watertight",
+      "boundary-coverage",
+      "travel-coverage",
+      "descent-coverage",
+    ] as const,
     "transition",
   );
   const boundaryCoverage = mode === "boundary-coverage";
@@ -623,7 +634,8 @@ function parseOptions(arguments_: readonly string[]): LodOptions {
 async function runLodTransition(context: ScenarioContext, arguments_: readonly string[]) {
   const options = parseOptions(arguments_);
   const boundaryCoverage = options.mode === "boundary-coverage";
-  const travelCoverage = options.mode === "travel-coverage";
+  const descentCoverage = options.mode === "descent-coverage";
+  const travelCoverage = options.mode === "travel-coverage" || descentCoverage;
   const watertight = options.mode !== "transition";
   const timings: LodTimings = {
     frameIntervals: [],
@@ -685,8 +697,25 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
 
   if (travelCoverage) {
     await engine.setSpectator(true);
+    const groundPose = cameraPosition(await readSnapshot(engine, timings));
+    if (descentCoverage) {
+      // Build a real continuous sky-to-ground trajectory instead of teleporting. The ascent
+      // changes no X/Z ownership; the diagonal descent then exercises surface readiness, cut
+      // transitions, raster seams, and view-dependent culling together.
+      await page.keyboard.down("Space");
+      await page.waitForTimeout(6_000);
+      await page.keyboard.up("Space");
+      await page.waitForTimeout(500);
+      beforeSnapshot = await setCameraLook(
+        engine,
+        options.look[0],
+        Math.min(options.look[1], -0.65),
+        timings,
+      );
+    }
     const travelStartedAt = Date.now();
     const travelStartedPose = cameraPosition(await readSnapshot(engine, timings));
+    const descentStopHeight = groundPose[1] + 30;
     const samples: Array<{
       readonly elapsedMs: number;
       readonly camera: Vector3;
@@ -701,6 +730,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     let worst = await analyzeWatertightTerrain(page, before);
     let worstScreenshot = before;
     await page.keyboard.down("KeyW");
+    if (descentCoverage) await page.keyboard.down("ShiftLeft");
     try {
       while (Date.now() - travelStartedAt < options.travelSeconds * 1_000) {
         await page.waitForTimeout(200);
@@ -727,10 +757,13 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
           worstScreenshot = screenshot;
         }
         if (analysis.enclosedPixels > 0) break;
+        if (descentCoverage && cameraPosition(snapshot)[1] <= descentStopHeight) break;
       }
     } finally {
       await page.keyboard.up("KeyW");
+      if (descentCoverage) await page.keyboard.up("ShiftLeft");
     }
+    if (descentCoverage) await page.waitForTimeout(500);
     const stoppedImmediateSnapshot = await readSnapshot(engine, timings);
     const travelFinishedPose = cameraPosition(stoppedImmediateSnapshot);
     const stoppedImmediateScreenshot = await page.screenshot();
@@ -791,6 +824,9 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     if (uncoveredOwnerSamples > 0) {
       violations.push("sustained travel sampled a world point without an LOD owner");
     }
+    if (descentCoverage && travelFinishedPose[1] > descentStopHeight + 5) {
+      violations.push("spectator descent did not reach the registered near-ground handoff");
+    }
     browser.assertHealthy();
     const result = {
       ok: violations.length === 0,
@@ -800,9 +836,15 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       source: options.source,
       browser: browser.version,
       travel: {
+        trajectory: descentCoverage ? "diagonal-descent" : "horizontal-flight",
         requestedSeconds: options.travelSeconds,
         samples: samples.length,
         distanceMetres: spatialDistance(travelStartedPose, travelFinishedPose),
+        altitude: {
+          startedMetres: travelStartedPose[1],
+          finishedMetres: travelFinishedPose[1],
+          verticalDropMetres: Math.max(0, travelStartedPose[1] - travelFinishedPose[1]),
+        },
         uncoveredOwnerSamples,
         maximumPresentedStrideVoxels: Math.max(
           0,
@@ -849,7 +891,9 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     await context.artifacts.writeJson("LOD report", "report.json", result);
     if (!result.ok) throw new Error(`LOD travel coverage violations: ${violations.join(", ")}`);
     return {
-      summary: "Sustained LOD travel coverage passed.",
+      summary: descentCoverage
+        ? "Diagonal sky-to-ground LOD coverage passed."
+        : "Sustained LOD travel coverage passed.",
       metrics: result.travel,
       details: result,
     };
