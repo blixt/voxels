@@ -71,12 +71,13 @@ water voxels, uses hysteretic swim state and buoyancy while retaining solid coll
 restored underwater cameras. The shell caches generated columns across fixed-step collision/fluid
 queries so the richer probe does not recompute climate fields per voxel.
 
-The frame uniform appends a version-asserted medium vector containing smoothed underwater blend, eye
-depth, physical immersion, and local surface height. Opaque and sky shaders apply wavelength-dependent
-absorption and in-scattering, terrain caustics, and a world-anchored Snell window; the water shader
-handles underside refraction and total internal reflection. Simulation values remain fixed-step and
-unsmoothed. Rust/WGPU chrome reports immersion/depth and re-opens a Rust-rendered swim-help toast on
-entry. Disabling animated water changes rendering only, never authoritative fluid physics.
+The frame uniform appends a version-asserted medium vector containing spatial optical immersion,
+signed eye depth, physical immersion, and local surface height. Opaque and sky shaders apply
+wavelength-dependent absorption and in-scattering over the submerged path, terrain caustics, and a
+world-anchored Snell window; the water shader handles depth-resolved underside refraction and total
+internal reflection. Simulation values remain fixed-step and unsmoothed. Rust/WGPU chrome reports
+immersion/depth and re-opens a Rust-rendered swim-help toast on entry. Disabling animated water
+changes rendering only, never authoritative fluid physics.
 
 Eight independently streamable surface levels derive from the same generator and sparse edit overlay
 at 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, and 25.6 m sampling strides. The first four are interactive
@@ -89,11 +90,11 @@ the generator, 10 cm voxels, and sparse edits stay authoritative.
 
 Each surface level also derives an edit-aware, 2D-greedy water mask at the exact canonical sea Y.
 Water patches use the same CPU ownership bounds as terrain, but never inherit the lowered crack-hiding
-terrain underlay. Opaque terrain and translucent water use independent GPU arenas. A depth-only water
-prepass followed by a premultiplied-alpha color pass gives overlapping wave surfaces deterministic
-visibility without letting water cast solid shadows. The shader combines multi-directional procedural
-wave normals, Schlick Fresnel reflection, the shared sky/sun environment, distance absorption, HDR
-fog, and the same presentation transform as land.
+terrain underlay. Opaque terrain and water use independent GPU arenas. One refractive, depth-writing
+water pass samples the copied opaque color and reverse-Z depth without alpha blending; a matching
+transition variant preserves ownership handoffs. The shader combines multi-directional procedural
+wave normals, Schlick Fresnel reflection, the shared sky/sun environment, bottom-resolved
+Beer-Lambert absorption and scattering, HDR fog, and the same presentation transform as land.
 
 Every terrain surface tile is one opaque-arena allocation partitioned into sixteen contiguous
 8x8-cell draw patches; a non-empty water derivative uses the parallel water arena. Each terrain patch
