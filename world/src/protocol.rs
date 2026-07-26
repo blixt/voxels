@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 32;
+pub const PROTOCOL_VERSION: u16 = 33;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -70,6 +70,8 @@ const BROTLI_WINDOW_BITS: u32 = 20;
 const HALO_HASH_DOMAIN: &[u8] = b"voxels-wire-halo-v1\0";
 const EDIT_MUTATIONS_ORDINALS: u8 = 0;
 const EDIT_MUTATIONS_BITSET: u8 = 1;
+const SURFACE_TILE_RESULT_FINAL_ITEM: u16 = 1 << 0;
+const SURFACE_TILE_RESULT_FLAGS: u16 = SURFACE_TILE_RESULT_FINAL_ITEM;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WorldCapabilities(u64);
@@ -449,6 +451,8 @@ pub struct SurfaceTileBatchItem {
 pub struct SurfaceTileBatchResult {
     pub request_id: u64,
     pub source_identity_hash: WorldSourceIdentityHash,
+    /// True when this is the final one-item result for the request.
+    pub final_item: bool,
     pub items: Vec<SurfaceTileBatchItem>,
 }
 
@@ -1381,10 +1385,7 @@ pub fn decode_surface_tile_batch(bytes: &[u8]) -> Result<SurfaceTileBatchRequest
 pub fn encode_surface_tile_batch_result(
     result: &SurfaceTileBatchResult,
 ) -> Result<Vec<u8>, ProtocolError> {
-    if result.request_id == 0
-        || result.items.is_empty()
-        || result.items.len() > MAX_SURFACE_TILES_PER_BATCH
-    {
+    if result.request_id == 0 || result.items.len() != 1 {
         return Err(ProtocolError::LimitExceeded("surface tile result batch"));
     }
     let items = result
@@ -1396,6 +1397,7 @@ pub fn encode_surface_tile_batch_result(
         result.request_id,
         result.source_identity_hash,
         items.iter(),
+        result.final_item,
     )
 }
 
@@ -1445,15 +1447,23 @@ pub fn encode_surface_tile_batch_result_from_items<'a>(
     request_id: u64,
     source_identity_hash: WorldSourceIdentityHash,
     items: impl IntoIterator<Item = &'a EncodedSurfaceTileBatchItem>,
+    final_item: bool,
 ) -> Result<Vec<u8>, ProtocolError> {
     let items = items.into_iter().collect::<Vec<_>>();
-    if request_id == 0 || items.is_empty() || items.len() > MAX_SURFACE_TILES_PER_BATCH {
+    if request_id == 0 || items.len() != 1 {
         return Err(ProtocolError::LimitExceeded("surface tile result batch"));
     }
     let mut payload = Vec::new();
     payload.extend_from_slice(source_identity_hash.as_bytes());
     push_u16(&mut payload, items.len() as u16);
-    push_u16(&mut payload, 0);
+    push_u16(
+        &mut payload,
+        if final_item {
+            SURFACE_TILE_RESULT_FINAL_ITEM
+        } else {
+            0
+        },
+    );
     for (index, item) in items.iter().enumerate() {
         if item.source_identity_hash != source_identity_hash {
             return Err(ProtocolError::InvalidPayload(
@@ -1487,11 +1497,18 @@ pub fn decode_surface_tile_batch_result(
     let mut cursor = Cursor::new(&payload);
     let source_identity_hash = WorldSourceIdentityHash::from_bytes(cursor.array()?);
     let count = usize::from(cursor.u16()?);
-    if count == 0 || count > MAX_SURFACE_TILES_PER_BATCH || cursor.u16()? != 0 {
+    if count != 1 {
         return Err(ProtocolError::InvalidPayload(
             "invalid surface result item count",
         ));
     }
+    let flags = cursor.u16()?;
+    if flags & !SURFACE_TILE_RESULT_FLAGS != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "surface result has unknown flags",
+        ));
+    }
+    let final_item = flags & SURFACE_TILE_RESULT_FINAL_ITEM != 0;
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
         let coord = decode_surface_coord(&mut cursor)?;
@@ -1533,6 +1550,7 @@ pub fn decode_surface_tile_batch_result(
     Ok(SurfaceTileBatchResult {
         request_id: frame.request_id,
         source_identity_hash,
+        final_item,
         items,
     })
 }
@@ -4791,6 +4809,7 @@ mod tests {
         let response = SurfaceTileBatchResult {
             request_id: 10,
             source_identity_hash: source.source_identity_hash(),
+            final_item: false,
             items: vec![SurfaceTileBatchItem {
                 coord,
                 edit_revision: 11,
@@ -4808,6 +4827,7 @@ mod tests {
                 response.request_id,
                 response.source_identity_hash,
                 [&item],
+                response.final_item,
             ),
             Ok(encoded.clone())
         );
@@ -4815,7 +4835,102 @@ mod tests {
             encoded.len() < 50_000,
             "compressed surface result should stay compact"
         );
-        assert_eq!(decode_surface_tile_batch_result(&encoded), Ok(response));
+        assert_eq!(
+            decode_surface_tile_batch_result(&encoded),
+            Ok(response.clone())
+        );
+
+        let final_response = SurfaceTileBatchResult {
+            final_item: true,
+            ..response
+        };
+        let final_encoded =
+            encode_surface_tile_batch_result(&final_response).expect("encode final item");
+        assert_eq!(
+            decode_surface_tile_batch_result(&final_encoded),
+            Ok(final_response)
+        );
+        assert_ne!(encoded, final_encoded);
+    }
+
+    #[test]
+    fn surface_results_require_one_item_and_known_flags() {
+        let source_identity_hash = WorldSourceIdentityHash::from_bytes([7; 32]);
+        let item = SurfaceTileBatchItem {
+            coord: SurfaceTileCoord::new(SurfaceLodLevel::Stride64, 0, 0),
+            edit_revision: 11,
+            result: Err(WorldSourceError::SourceCoverageUnavailable),
+        };
+        let encoded_item =
+            encode_surface_tile_batch_item(source_identity_hash, &item).expect("encode item");
+
+        assert_eq!(
+            encode_surface_tile_batch_result(&SurfaceTileBatchResult {
+                request_id: 10,
+                source_identity_hash,
+                final_item: true,
+                items: Vec::new(),
+            }),
+            Err(ProtocolError::LimitExceeded("surface tile result batch"))
+        );
+        assert_eq!(
+            encode_surface_tile_batch_result(&SurfaceTileBatchResult {
+                request_id: 10,
+                source_identity_hash,
+                final_item: true,
+                items: vec![item.clone(), item],
+            }),
+            Err(ProtocolError::LimitExceeded("surface tile result batch"))
+        );
+        assert_eq!(
+            encode_surface_tile_batch_result_from_items(
+                10,
+                source_identity_hash,
+                std::iter::empty(),
+                true,
+            ),
+            Err(ProtocolError::LimitExceeded("surface tile result batch"))
+        );
+        assert_eq!(
+            encode_surface_tile_batch_result_from_items(
+                10,
+                source_identity_hash,
+                [&encoded_item, &encoded_item],
+                true,
+            ),
+            Err(ProtocolError::LimitExceeded("surface tile result batch"))
+        );
+
+        let invalid_frame = |count, flags| {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(source_identity_hash.as_bytes());
+            push_u16(&mut payload, count);
+            push_u16(&mut payload, flags);
+            payload.extend_from_slice(&encoded_item.bytes);
+            let payload = encode_result_payload(&payload).expect("compress test payload");
+            encode_frame(KIND_SURFACE_TILE_BATCH_RESULT, 10, &payload)
+        };
+        assert_eq!(
+            decode_surface_tile_batch_result(&invalid_frame(0, 0)),
+            Err(ProtocolError::InvalidPayload(
+                "invalid surface result item count"
+            ))
+        );
+        assert_eq!(
+            decode_surface_tile_batch_result(&invalid_frame(2, 0)),
+            Err(ProtocolError::InvalidPayload(
+                "invalid surface result item count"
+            ))
+        );
+        assert_eq!(
+            decode_surface_tile_batch_result(&invalid_frame(
+                1,
+                SURFACE_TILE_RESULT_FINAL_ITEM << 1,
+            )),
+            Err(ProtocolError::InvalidPayload(
+                "surface result has unknown flags"
+            ))
+        );
     }
 
     #[test]

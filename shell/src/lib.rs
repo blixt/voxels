@@ -2761,7 +2761,13 @@ mod web {
             if let Some(completion) = self.remote.next_completion() {
                 self.accept_remote_completion(completion);
             }
-            if let Some(completion) = self.remote.next_surface_completion() {
+            // Surface batches arrive as ordered one-tile frames. Preserve the former four-tile
+            // publication ceiling while allowing the first useful tile to reach the renderer
+            // without waiting for its siblings to cross the wire.
+            for _ in 0..INTERACTIVE_SURFACE_BATCH {
+                let Some(completion) = self.remote.next_surface_completion() else {
+                    break;
+                };
                 self.accept_remote_surface_completion(completion);
             }
         }

@@ -713,7 +713,12 @@ impl RemoteInner {
             .as_ref()
             .map(|opened| opened.manifest.source_identity_hash());
         let validation = validate_surface_result(&result, &expected, expected_identity);
-        self.finish_surface_request(result.request_id, validation.map(|()| result));
+        if let Err(error) = validation {
+            self.send_cancel(result.request_id);
+            self.finish_surface_request(result.request_id, Err(error));
+            return;
+        }
+        self.accept_surface_item(result);
     }
 
     fn handle_edit_commit(self: &Rc<Self>, generation: u64, bytes: &[u8]) {
@@ -1164,6 +1169,31 @@ impl RemoteInner {
             });
     }
 
+    fn accept_surface_item(&self, result: SurfaceTileBatchResult) {
+        let request_id = result.request_id;
+        let ticket = {
+            let mut pending = self.pending.borrow_mut();
+            let Some(PendingBatch::Surface { tickets, .. }) = pending.get_mut(&request_id) else {
+                return;
+            };
+            tickets.remove(0)
+        };
+        if result.final_item {
+            let removed = self.pending.borrow_mut().remove(&request_id);
+            debug_assert!(matches!(
+                removed,
+                Some(PendingBatch::Surface { tickets, .. }) if tickets.is_empty()
+            ));
+        }
+        self.surface_completions
+            .borrow_mut()
+            .push_back(RemoteSurfaceCompletion {
+                request_id,
+                tickets: vec![ticket],
+                result: Ok(result),
+            });
+    }
+
     fn finish_pending_error(&self, request_id: u64, error: RemoteWorldError) {
         let is_surface = self
             .pending
@@ -1325,24 +1355,27 @@ fn validate_surface_result(
             "source identity changed",
         ));
     }
-    if result.items.len() != expected_coords.len() {
+    if result.items.len() != 1 {
         return Err(RemoteWorldError::ResponseMismatch(
-            "surface item count differs from request",
+            "surface result must contain exactly one item",
         ));
     }
-    let expected = expected_coords.iter().copied().collect::<BTreeSet<_>>();
-    let returned = result
-        .items
-        .iter()
-        .map(|item| item.coord)
-        .collect::<BTreeSet<_>>();
-    if expected.len() != expected_coords.len()
-        || returned.len() != result.items.len()
-        || returned != expected
-    {
+    let Some(expected_coord) = expected_coords.first() else {
         return Err(RemoteWorldError::ResponseMismatch(
-            "returned surface keys differ from request",
+            "surface result has no remaining request item",
         ));
+    };
+    if result.items[0].coord != *expected_coord {
+        return Err(RemoteWorldError::ResponseMismatch(
+            "surface result is out of request order",
+        ));
+    }
+    if result.final_item != (expected_coords.len() == 1) {
+        return Err(RemoteWorldError::ResponseMismatch(if result.final_item {
+            "surface result ended before every requested item"
+        } else {
+            "surface result omitted its final marker"
+        }));
     }
     for item in &result.items {
         if let Ok(snapshot) = &item.result

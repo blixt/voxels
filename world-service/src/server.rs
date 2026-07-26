@@ -56,9 +56,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v32/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v32/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v32";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v33/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v33/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v33";
 pub const HEALTH_PATH: &str = "/healthz";
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
@@ -1069,6 +1069,11 @@ struct OutboundFrame {
     offset: usize,
     fragment_transfer_id: Option<u64>,
     priority: TrafficPriority,
+    cancellation: Option<Arc<CancellationSignal>>,
+    /// Present only on the terminal frame for a tracked request.
+    ///
+    /// Progressive surface results share one negotiated request-window slot. Intermediate frames
+    /// must observe cancellation without releasing that slot before the final item is written.
     tracked: Option<TrackedRequest>,
     _byte_permit: Option<OwnedSemaphorePermit>,
 }
@@ -1376,17 +1381,28 @@ impl ProductCache {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct BatchResponseKey(Box<[ProductKey]>);
+struct BatchResponseKey {
+    products: Box<[ProductKey]>,
+    final_surface_item: bool,
+}
 
 impl BatchResponseKey {
     fn from_products(products: &[Arc<EncodedProduct>]) -> Self {
-        Self(
-            products
+        Self {
+            products: products
                 .iter()
                 .map(|product| product.key())
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
-        )
+            final_surface_item: false,
+        }
+    }
+
+    fn from_surface_product(product: &Arc<EncodedProduct>, final_item: bool) -> Self {
+        Self {
+            products: vec![product.key()].into_boxed_slice(),
+            final_surface_item: final_item,
+        }
     }
 }
 
@@ -1685,6 +1701,7 @@ async fn run_session(
             offset: 0,
             fragment_transfer_id: None,
             priority: TrafficPriority::Critical,
+            cancellation: None,
             tracked: None,
             _byte_permit: None,
         })
@@ -2389,6 +2406,7 @@ async fn send_control_error(
             offset: 0,
             fragment_transfer_id: None,
             priority: TrafficPriority::Critical,
+            cancellation: None,
             tracked: None,
             _byte_permit: None,
         })
@@ -2406,6 +2424,7 @@ async fn send_frame(
             offset: 0,
             fragment_transfer_id: None,
             priority,
+            cancellation: None,
             tracked: None,
             _byte_permit: None,
         })
@@ -2429,8 +2448,8 @@ async fn write_frames(
         for queue in &mut queues {
             while queue
                 .front()
-                .and_then(|frame| frame.tracked.as_ref())
-                .is_some_and(TrackedRequest::is_cancelled)
+                .and_then(|frame| frame.cancellation.as_ref())
+                .is_some_and(|cancellation| cancellation.is_cancelled())
             {
                 let Some(frame) = queue.pop_front() else {
                     break;
@@ -2482,9 +2501,9 @@ async fn write_frames(
                     };
                     drop(permits);
                     if frame
-                        .tracked
+                        .cancellation
                         .as_ref()
-                        .is_some_and(TrackedRequest::is_cancelled)
+                        .is_some_and(|cancellation| cancellation.is_cancelled())
                     {
                         if !abort_partial_frame(&mut sink, &frame).await {
                             if let Some(tracked) = frame.tracked {
@@ -3025,6 +3044,18 @@ async fn assemble_and_deliver_generation_batch(
             return;
         }
     };
+    if matches!(batch.job.request, GenerationRequest::SurfaceTiles { .. }) {
+        assemble_and_deliver_surface_generation_batch(
+            batch.job,
+            source_identity_hash,
+            products,
+            generation_limiter,
+            response_cache,
+            max_frame_bytes,
+        )
+        .await;
+        return;
+    }
     let response_key = BatchResponseKey::from_products(&products);
     match get_cached_batch_response(&response_cache, &response_key, request_id) {
         Ok(Some(response)) => {
@@ -3127,6 +3158,150 @@ async fn assemble_and_deliver_generation_batch(
     deliver_generation_job(batch.job, response, max_frame_bytes).await;
 }
 
+async fn assemble_and_deliver_surface_generation_batch(
+    job: GenerationJob,
+    source_identity_hash: voxels_world::WorldSourceIdentityHash,
+    products: Vec<Arc<EncodedProduct>>,
+    generation_limiter: Arc<PriorityGenerationLimiter>,
+    response_cache: Arc<Mutex<BatchResponseCache>>,
+    max_frame_bytes: usize,
+) {
+    let request_id = job.request.request_id();
+    let response_keys = products
+        .iter()
+        .enumerate()
+        .map(|(index, product)| {
+            BatchResponseKey::from_surface_product(product, index + 1 == products.len())
+        })
+        .collect::<Vec<_>>();
+    let mut responses = Vec::with_capacity(products.len());
+    let mut missing = false;
+    for key in &response_keys {
+        match get_cached_batch_response(&response_cache, key, request_id) {
+            Ok(response) => {
+                missing |= response.is_none();
+                responses.push(response);
+            }
+            Err(message) => {
+                deliver_generation_job(job, Err(message), max_frame_bytes).await;
+                return;
+            }
+        }
+    }
+    if missing {
+        let priority = job.request.priority();
+        let session = Arc::clone(&job.tracked.session);
+        let session_permit = match tokio::select! {
+            biased;
+            _ = job.tracked.cancelled() => None,
+            permit = session.acquire_generation(priority) => permit,
+        } {
+            Some(permit) => permit,
+            None => {
+                job.tracked.finish();
+                return;
+            }
+        };
+        let global_permit = tokio::select! {
+            biased;
+            _ = job.tracked.cancelled() => {
+                job.tracked.finish();
+                return;
+            }
+            permit = generation_limiter.acquire(priority) => permit,
+        };
+        for (index, product) in products.iter().enumerate() {
+            if responses[index].is_some() {
+                continue;
+            }
+            let response_key = &response_keys[index];
+            let response_flight =
+                { lock_batch_response_cache(&response_cache).flight_lock(response_key) };
+            let response_flight_guard = tokio::select! {
+                biased;
+                _ = job.tracked.cancelled() => {
+                    lock_batch_response_cache(&response_cache)
+                        .abandon_flight(response_key, &response_flight);
+                    job.tracked.finish();
+                    return;
+                }
+                guard = response_flight.lock() => guard,
+            };
+            let response =
+                match get_cached_batch_response(&response_cache, response_key, request_id) {
+                    Ok(Some(response)) => Ok(response),
+                    Ok(None) => {
+                        let product = Arc::clone(product);
+                        let final_item = index + 1 == products.len();
+                        tokio::task::spawn_blocking(move || {
+                            assemble_surface_item_response(
+                                request_id,
+                                source_identity_hash,
+                                product.as_ref(),
+                                final_item,
+                            )
+                        })
+                        .await
+                        .map_err(|_| "world response assembly task failed".to_owned())
+                        .and_then(|result| result)
+                    }
+                    Err(message) => Err(message),
+                };
+            match response {
+                Ok(response) => {
+                    if response.len() <= max_frame_bytes {
+                        lock_batch_response_cache(&response_cache)
+                            .insert(response_key.clone(), Arc::from(response.clone()));
+                    }
+                    lock_batch_response_cache(&response_cache)
+                        .finish_flight(response_key, &response_flight);
+                    responses[index] = Some(response);
+                }
+                Err(message) => {
+                    lock_batch_response_cache(&response_cache)
+                        .abandon_flight(response_key, &response_flight);
+                    drop(response_flight_guard);
+                    drop(global_permit);
+                    drop(session_permit);
+                    deliver_generation_job(job, Err(message), max_frame_bytes).await;
+                    return;
+                }
+            }
+            drop(response_flight_guard);
+        }
+        drop(global_permit);
+        drop(session_permit);
+    }
+    let Some(responses) = responses.into_iter().collect::<Option<Vec<_>>>() else {
+        deliver_generation_job(
+            job,
+            Err("surface response cache omitted a completed item".to_owned()),
+            max_frame_bytes,
+        )
+        .await;
+        return;
+    };
+    deliver_generation_frames(job, Ok(responses), max_frame_bytes).await;
+}
+
+fn assemble_surface_item_response(
+    request_id: u64,
+    source_identity_hash: voxels_world::WorldSourceIdentityHash,
+    product: &EncodedProduct,
+    final_item: bool,
+) -> Result<Vec<u8>, String> {
+    let EncodedProduct::SurfaceTile(item) = product else {
+        return Err("chunk product cannot satisfy a surface batch".to_owned());
+    };
+    encode_surface_tile_batch_result_from_items(
+        request_id,
+        source_identity_hash,
+        std::iter::once(item),
+        final_item,
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn assemble_generation_response(
     request: &GenerationRequest,
     source_identity_hash: voxels_world::WorldSourceIdentityHash,
@@ -3146,22 +3321,8 @@ fn assemble_generation_response(
             encode_chunk_batch_result_from_items(request.request_id, source_identity_hash, items)
                 .map_err(|error| error.to_string())
         }
-        GenerationRequest::SurfaceTiles { request, .. } => {
-            let items = products
-                .iter()
-                .map(|product| match product.as_ref() {
-                    EncodedProduct::SurfaceTile(item) => Ok(item),
-                    EncodedProduct::Chunk(_) => {
-                        Err("chunk product cannot satisfy a surface batch".to_owned())
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            encode_surface_tile_batch_result_from_items(
-                request.request_id,
-                source_identity_hash,
-                items,
-            )
-            .map_err(|error| error.to_string())
+        GenerationRequest::SurfaceTiles { .. } => {
+            Err("surface batches require progressive item assembly".to_owned())
         }
     }
 }
@@ -3171,56 +3332,90 @@ async fn deliver_generation_job(
     response: Result<Vec<u8>, String>,
     max_frame_bytes: usize,
 ) {
+    deliver_generation_frames(
+        job,
+        response.map(|response| vec![response]),
+        max_frame_bytes,
+    )
+    .await;
+}
+
+async fn deliver_generation_frames(
+    job: GenerationJob,
+    responses: Result<Vec<Vec<u8>>, String>,
+    max_frame_bytes: usize,
+) {
     if job.tracked.is_cancelled() {
         job.tracked.finish();
         return;
     }
     let request_id = job.request.request_id();
-    let bytes = match response {
-        Ok(bytes) if bytes.len() <= max_frame_bytes => bytes,
-        Ok(_) => encode_error(request_id, "chunk result exceeds configured frame limit"),
-        Err(message) => encode_error(request_id, &message),
-    };
-    let byte_count = match u32::try_from(bytes.len()) {
-        Ok(count) => count,
-        Err(_) => {
-            job.tracked.finish();
-            return;
+    let frames = match responses {
+        Ok(frames)
+            if !frames.is_empty() && frames.iter().all(|frame| frame.len() <= max_frame_bytes) =>
+        {
+            frames
         }
+        Ok(_) => vec![encode_error(
+            request_id,
+            "world result exceeds configured frame limit",
+        )],
+        Err(message) => vec![encode_error(request_id, &message)],
     };
-    let byte_permit = match tokio::select! {
-        biased;
-        _ = job.tracked.cancelled() => None,
-        permit = Arc::clone(&job.tracked.session.outbound_bytes).acquire_many_owned(byte_count) => {
-            permit.ok()
-        }
-    } {
-        Some(permit) => permit,
-        None => {
-            job.tracked.finish();
-            return;
-        }
-    };
-    let outbound_permit = match tokio::select! {
-        biased;
-        _ = job.tracked.cancelled() => None,
-        permit = job.outbound.reserve() => permit.ok(),
-    } {
-        Some(permit) => permit,
-        None => {
-            job.tracked.finish();
-            return;
-        }
-    };
-    let frame = OutboundFrame {
-        bytes,
-        offset: 0,
-        fragment_transfer_id: None,
-        priority: traffic_priority(job.request.priority()),
-        tracked: Some(job.tracked),
-        _byte_permit: Some(byte_permit),
-    };
-    outbound_permit.send(frame);
+    let cancellation = Arc::clone(&job.tracked.cancelled);
+    let outbound_bytes = Arc::clone(&job.tracked.session.outbound_bytes);
+    let mut tracked = Some(job.tracked);
+    let priority = traffic_priority(job.request.priority());
+    let frame_count = frames.len();
+    for (index, bytes) in frames.into_iter().enumerate() {
+        let byte_count = match u32::try_from(bytes.len()) {
+            Ok(count) => count,
+            Err(_) => {
+                if let Some(tracked) = tracked.take() {
+                    tracked.finish();
+                }
+                return;
+            }
+        };
+        let byte_permit = match tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => None,
+            permit = Arc::clone(&outbound_bytes).acquire_many_owned(byte_count) => permit.ok(),
+        } {
+            Some(permit) => permit,
+            None => {
+                if let Some(tracked) = tracked.take() {
+                    tracked.finish();
+                }
+                return;
+            }
+        };
+        let outbound_permit = match tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => None,
+            permit = job.outbound.reserve() => permit.ok(),
+        } {
+            Some(permit) => permit,
+            None => {
+                if let Some(tracked) = tracked.take() {
+                    tracked.finish();
+                }
+                return;
+            }
+        };
+        let terminal = index + 1 == frame_count;
+        let frame_tracker = if terminal { tracked.take() } else { None };
+        outbound_permit.send(OutboundFrame {
+            bytes,
+            offset: 0,
+            fragment_transfer_id: None,
+            priority,
+            cancellation: Some(Arc::clone(&cancellation)),
+            tracked: frame_tracker,
+            _byte_permit: Some(byte_permit),
+        });
+    }
+    debug_assert!(tracked.is_none());
 }
 
 fn traffic_priority(priority: WorldProductPriority) -> TrafficPriority {
@@ -3377,12 +3572,13 @@ mod tests {
     use voxels_world::protocol::{
         BrowserUserId, ChunkBatchRequest, EditCommand, EditCommit, FrameReassembler, OpenPresence,
         OpenWorld, PLAYER_POSE_GROUNDED, PlayerId, PlayerIdentity, PlayerPoseUpdate, PresenceDelta,
-        PresenceOpened, PresenceSessionId, SurfaceTileBatchRequest, decode_chunk_batch_result,
-        decode_edit_commit, decode_error, decode_frame_fragment, decode_frame_fragment_abort,
-        decode_presence_delta, decode_presence_opened, decode_surface_tile_batch_result,
-        decode_world_opened, edit_commit_kind, encode_chunk_batch, encode_edit_command,
-        encode_open_presence, encode_open_world, encode_player_pose, encode_surface_tile_batch,
-        error_kind, frame_fragment_kind, presence_delta_kind,
+        PresenceOpened, PresenceSessionId, SurfaceTileBatchRequest, SurfaceTileBatchResult,
+        decode_chunk_batch_result, decode_edit_commit, decode_error, decode_frame_fragment,
+        decode_frame_fragment_abort, decode_presence_delta, decode_presence_opened,
+        decode_surface_tile_batch_result, decode_world_opened, edit_commit_kind,
+        encode_chunk_batch, encode_edit_command, encode_open_presence, encode_open_world,
+        encode_player_pose, encode_surface_tile_batch, error_kind, frame_fragment_kind,
+        presence_delta_kind,
     };
     use voxels_world::{
         ChunkCoord, EditMap, ProceduralWorldSource, SurfaceLodLevel, SurfaceTileCoord, VoxelCoord,
@@ -3461,6 +3657,7 @@ mod tests {
             offset: 0,
             fragment_transfer_id: None,
             priority: TrafficPriority::WorldChange,
+            cancellation: None,
             tracked: None,
             _byte_permit: None,
         };
@@ -3469,6 +3666,7 @@ mod tests {
             offset: 0,
             fragment_transfer_id: None,
             priority: TrafficPriority::Critical,
+            cancellation: None,
             tracked: None,
             _byte_permit: None,
         };
@@ -3505,6 +3703,83 @@ mod tests {
             }
         }
         assert!(second_reassembled);
+    }
+
+    #[tokio::test]
+    async fn progressive_frames_keep_the_request_window_until_the_terminal_item() {
+        let session = Arc::new(SessionRequests::new(
+            1,
+            1,
+            1,
+            4_096,
+            Arc::new(Notify::new()),
+        ));
+        let Ok(cancellation) = session.insert(7) else {
+            panic!("first request must fit the empty window");
+        };
+        let tracked = TrackedRequest {
+            request_id: 7,
+            cancelled: Arc::clone(&cancellation),
+            session: Arc::clone(&session),
+        };
+        let (outbound, mut receiver) = mpsc::channel(4);
+        let job = GenerationJob {
+            request: GenerationRequest::SurfaceTiles {
+                request: SurfaceTileBatchRequest {
+                    request_id: 7,
+                    priority: WorldProductPriority::VisibleSurface,
+                    coords: vec![
+                        SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 0, 0),
+                        SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 1, 0),
+                    ],
+                },
+                snapshot: SurfaceEditSnapshot {
+                    edits: EditMap::default(),
+                    revisions: vec![1, 1],
+                },
+            },
+            outbound,
+            tracked,
+        };
+
+        deliver_generation_frames(
+            job,
+            Ok(vec![encode_error(7, "first"), encode_error(7, "final")]),
+            4_096,
+        )
+        .await;
+        let first = receiver.recv().await.expect("intermediate frame");
+        assert!(first.tracked.is_none());
+        assert!(Arc::ptr_eq(
+            first.cancellation.as_ref().expect("cancellation"),
+            &cancellation
+        ));
+        assert!(matches!(
+            session.insert(8),
+            Err(RequestAdmissionError::WindowFull)
+        ));
+
+        let final_frame = receiver.recv().await.expect("terminal frame");
+        assert!(Arc::ptr_eq(
+            final_frame.cancellation.as_ref().expect("cancellation"),
+            &cancellation
+        ));
+        let terminal = final_frame.tracked.expect("terminal tracker");
+        assert!(session.cancel(7));
+        assert!(
+            first
+                .cancellation
+                .as_ref()
+                .is_some_and(|signal| signal.is_cancelled())
+        );
+        assert!(
+            final_frame
+                .cancellation
+                .as_ref()
+                .is_some_and(|signal| signal.is_cancelled())
+        );
+        terminal.finish();
+        assert!(session.insert(8).is_ok());
     }
 
     #[test]
@@ -4170,13 +4445,14 @@ mod tests {
     #[test]
     fn compressed_batch_cache_is_byte_bounded_lru_and_request_id_agnostic() {
         fn key(x: i32) -> BatchResponseKey {
-            BatchResponseKey(
-                vec![ProductKey::Chunk {
+            BatchResponseKey {
+                products: vec![ProductKey::Chunk {
                     coord: ChunkCoord::new(x, 0, 0),
                     edit_revision: 1,
                 }]
                 .into_boxed_slice(),
-            )
+                final_surface_item: false,
+            }
         }
 
         let bytes1 = Arc::<[u8]>::from(encode_error(1, "one"));
@@ -4205,30 +4481,50 @@ mod tests {
         );
 
         let old_revision = key(1);
-        let new_revision = BatchResponseKey(
-            vec![ProductKey::Chunk {
+        let new_revision = BatchResponseKey {
+            products: vec![ProductKey::Chunk {
                 coord: ChunkCoord::new(1, 0, 0),
                 edit_revision: 2,
             }]
             .into_boxed_slice(),
-        );
+            final_surface_item: false,
+        };
         assert_ne!(old_revision, new_revision);
         assert!(
             get_cached_batch_response(&cache, &new_revision, 100)
                 .expect("cache lookup")
                 .is_none()
         );
+
+        let surface_products = vec![ProductKey::SurfaceTile {
+            coord: SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 3, -4),
+            edit_revision: 7,
+        }]
+        .into_boxed_slice();
+        let intermediate = BatchResponseKey {
+            products: surface_products.clone(),
+            final_surface_item: false,
+        };
+        let terminal = BatchResponseKey {
+            products: surface_products,
+            final_surface_item: true,
+        };
+        assert_ne!(
+            intermediate, terminal,
+            "the compressed cache must not reuse a terminal item as an intermediate item"
+        );
     }
 
     #[test]
     fn compressed_batch_cache_serializes_assembly_per_product_sequence() {
-        let key = BatchResponseKey(
-            vec![ProductKey::Chunk {
+        let key = BatchResponseKey {
+            products: vec![ProductKey::Chunk {
                 coord: ChunkCoord::new(1, 0, 0),
                 edit_revision: 1,
             }]
             .into_boxed_slice(),
-        );
+            final_surface_item: false,
+        };
         let mut cache = BatchResponseCache::new(1024);
         let first = cache.flight_lock(&key);
         let second = cache.flight_lock(&key);
@@ -4240,13 +4536,14 @@ mod tests {
 
     #[test]
     fn cancelled_batch_owner_preserves_the_single_flight_for_waiters() {
-        let key = BatchResponseKey(
-            vec![ProductKey::Chunk {
+        let key = BatchResponseKey {
+            products: vec![ProductKey::Chunk {
                 coord: ChunkCoord::new(2, 0, 0),
                 edit_revision: 1,
             }]
             .into_boxed_slice(),
-        );
+            final_surface_item: false,
+        };
         let mut cache = BatchResponseCache::new(1024);
         let owner = cache.flight_lock(&key);
         let waiter = cache.flight_lock(&key);
@@ -4303,7 +4600,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v32, test-local-token"),
+            HeaderValue::from_static("voxels.world.v33, test-local-token"),
         );
         let (socket, response) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -4480,26 +4777,26 @@ mod tests {
                 ))
                 .await?;
         }
-        let first_surface =
-            decode_surface_tile_batch_result(&next_client_binary(&mut first).await?)?;
-        let second_surface =
-            decode_surface_tile_batch_result(&next_client_binary(&mut second).await?)?;
+        let first_surface = next_surface_sequence(&mut first, 43, 2).await?;
+        let second_surface = next_surface_sequence(&mut second, 100, 2).await?;
         assert_eq!(
             first_surface
-                .items
                 .iter()
-                .map(|item| item.coord)
+                .flat_map(|result| result.items.iter().map(|item| item.coord))
                 .collect::<Vec<_>>(),
             vec![surface_a, surface_b]
         );
+        assert!(!first_surface[0].final_item);
+        assert!(first_surface[1].final_item);
         assert_eq!(
             second_surface
-                .items
                 .iter()
-                .map(|item| item.coord)
+                .flat_map(|result| result.items.iter().map(|item| item.coord))
                 .collect::<Vec<_>>(),
             vec![surface_b, surface_c]
         );
+        assert!(!second_surface[0].final_item);
+        assert!(second_surface[1].final_item);
         assert_eq!(batch_calls.load(Ordering::Relaxed), 4);
         {
             let counts = product_calls
@@ -4523,15 +4820,20 @@ mod tests {
                 .into(),
             ))
             .await?;
-        let cached_surface =
-            decode_surface_tile_batch_result(&next_client_binary(&mut first).await?)?;
+        let cached_surface = next_surface_sequence(&mut first, 44, 3).await?;
         assert_eq!(
             cached_surface
-                .items
                 .iter()
-                .map(|item| item.coord)
+                .flat_map(|result| result.items.iter().map(|item| item.coord))
                 .collect::<Vec<_>>(),
             vec![surface_c, surface_b, surface_a]
+        );
+        assert_eq!(
+            cached_surface
+                .iter()
+                .map(|result| result.final_item)
+                .collect::<Vec<_>>(),
+            vec![false, false, true]
         );
         assert_eq!(batch_calls.load(Ordering::Relaxed), 4);
 
@@ -5336,7 +5638,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v32, test-local-token"),
+            HeaderValue::from_static("voxels.world.v33, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -5370,7 +5672,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v32, test-local-token"),
+            HeaderValue::from_static("voxels.world.v33, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -5476,5 +5778,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    async fn next_surface_sequence<S>(
+        socket: &mut TestClient<S>,
+        request_id: u64,
+        item_count: usize,
+    ) -> Result<Vec<SurfaceTileBatchResult>, Box<dyn std::error::Error>>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let mut results = Vec::with_capacity(item_count);
+        for index in 0..item_count {
+            let result = decode_surface_tile_batch_result(&next_client_binary(socket).await?)?;
+            if result.request_id != request_id
+                || result.items.len() != 1
+                || result.final_item != (index + 1 == item_count)
+            {
+                return Err("server returned an invalid progressive surface sequence".into());
+            }
+            results.push(result);
+        }
+        Ok(results)
     }
 }

@@ -295,15 +295,7 @@ fn streaming_codec(criterion: &mut Criterion) {
     });
     group.finish();
 
-    let surface_coords = SurfaceLodLevel::ALL
-        .into_iter()
-        .flat_map(|level| {
-            [
-                SurfaceTileCoord::new(level, 0, 0),
-                SurfaceTileCoord::new(level, 1, 0),
-            ]
-        })
-        .collect::<Vec<_>>();
+    let surface_coords = [SurfaceTileCoord::new(SurfaceLodLevel::Stride64, 0, 0)];
     let surface_products = source
         .generate_batch(WorldProductBatch {
             priority: WorldProductPriority::VisibleSurface,
@@ -317,6 +309,7 @@ fn streaming_codec(criterion: &mut Criterion) {
     let surface_response = SurfaceTileBatchResult {
         request_id: 3,
         source_identity_hash: identity,
+        final_item: true,
         items: surface_products
             .items
             .into_iter()
@@ -335,9 +328,9 @@ fn streaming_codec(criterion: &mut Criterion) {
     };
     assert_eq!(surface_response.items.len(), surface_coords.len());
     let surface_wire = encode_surface_tile_batch_result(&surface_response)
-        .expect("fixed horizon surface stream must encode");
+        .expect("progressive surface result must encode");
     let mut group = criterion.benchmark_group(format!(
-        "VXWP 16-tile horizon stream ({} wire bytes)",
+        "VXWP progressive surface result ({} wire bytes)",
         surface_wire.len()
     ));
     group.throughput(criterion::Throughput::Bytes(surface_wire.len() as u64));

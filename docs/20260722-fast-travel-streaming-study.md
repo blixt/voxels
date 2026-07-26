@@ -114,10 +114,12 @@ per-player CPU consumption under load.
    process-wide, so canceled or historical breadth cannot sit ahead of terrain beneath the camera.
 5. Canceling a fragmented response emits an explicit VXWP fragment-abort frame. Without it, the
    client retained a partial reassembly slot forever; repeated fast-travel cancellation exhausted
-   all 32 slots and disconnected the world socket. VXWP v32 deliberately has no legacy path.
-6. Four surface tiles remain one generation request. Coarser parents remain rendered until their
-   exact replacement cut is ready. The connector builder joins any selected finer level directly,
-   not only the adjacent level, using the child product's embedded immediate-parent height. A
+   all 32 slots and disconnected the world socket. VXWP v33 deliberately has no legacy path.
+6. Four surface tiles remain one generation request and one local generation batch, while VXWP v33
+   returns them as ordered one-tile result frames so useful siblings can publish before the whole
+   request crosses the wire. Coarser parents remain rendered until their exact replacement cut is
+   ready. The connector builder joins any selected finer level directly, not only the adjacent
+   level, using the child product's embedded immediate-parent height. A
    30-second diagnostic-sky run covered 3.25 km in 80 captured frames with zero exposed sky pixels,
    zero ownerless camera samples, and zero incomplete connector edges.
 
