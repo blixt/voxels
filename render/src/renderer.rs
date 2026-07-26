@@ -1309,6 +1309,89 @@ impl GpuTimer {
     }
 }
 
+struct DepthTarget {
+    texture: Texture,
+    view: TextureView,
+    width: u32,
+    height: u32,
+}
+
+impl DepthTarget {
+    fn new(
+        device: &Device,
+        label: &'static str,
+        width: u32,
+        height: u32,
+        usage: TextureUsages,
+    ) -> Self {
+        let width = width.max(1);
+        let height = height.max(1);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            texture,
+            view,
+            width,
+            height,
+        }
+    }
+
+    fn world(device: &Device, width: u32, height: u32) -> Self {
+        Self::new(device, "world depth", width, height, world_depth_usage())
+    }
+
+    fn opaque_snapshot(device: &Device, width: u32, height: u32) -> Self {
+        Self::new(
+            device,
+            "opaque world depth",
+            width,
+            height,
+            opaque_depth_usage(),
+        )
+    }
+
+    const fn view(&self) -> &TextureView {
+        &self.view
+    }
+
+    fn copy_to(&self, encoder: &mut wgpu::CommandEncoder, destination: &Self) {
+        debug_assert_eq!(
+            (self.width, self.height),
+            (destination.width, destination.height)
+        );
+        encoder.copy_texture_to_texture(
+            self.texture.as_image_copy(),
+            destination.texture.as_image_copy(),
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+}
+
+fn world_depth_usage() -> TextureUsages {
+    TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC
+}
+
+fn opaque_depth_usage() -> TextureUsages {
+    TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST
+}
+
 pub struct Renderer {
     surface: Surface<'static>,
     device: Device,
@@ -1372,7 +1455,8 @@ pub struct Renderer {
     arena_buffers: Vec<Buffer>,
     water_arena: ArenaAllocator,
     water_arena_buffers: Vec<Buffer>,
-    depth_view: TextureView,
+    depth: DepthTarget,
+    opaque_depth: DepthTarget,
     ambient_occlusion_gpu: AmbientOcclusionGpu,
     volumetric_cloud_gpu: VolumetricCloudGpu,
     time: f32,
@@ -1881,11 +1965,12 @@ impl Renderer {
                 },
             ],
         });
-        let depth_view = depth_view(&device, config.width, config.height);
+        let depth = DepthTarget::world(&device, config.width, config.height);
+        let opaque_depth = DepthTarget::opaque_snapshot(&device, config.width, config.height);
         let ambient_occlusion_gpu = AmbientOcclusionGpu::new(
             &device,
             &frame_layout,
-            &depth_view,
+            depth.view(),
             config.width,
             config.height,
         );
@@ -2223,7 +2308,7 @@ impl Renderer {
 
         let ui_gpu = UiGpu::new(&device, format, config.width, config.height, dpr)?;
         let water_scene_bind_group =
-            ui_gpu.water_scene_bind_group(&device, &water_scene_layout, &depth_view);
+            ui_gpu.water_scene_bind_group(&device, &water_scene_layout, opaque_depth.view());
 
         let placement_inventory = PlacementInventory::new();
         let mut ui = MissionControlUi::new(runtime_config.mission_control);
@@ -2304,7 +2389,8 @@ impl Renderer {
             arena_buffers: Vec::new(),
             water_arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuQuad>() as u32),
             water_arena_buffers: Vec::new(),
-            depth_view,
+            depth,
+            opaque_depth,
             ambient_occlusion_gpu,
             volumetric_cloud_gpu,
             time: 0.0,
@@ -2361,9 +2447,10 @@ impl Renderer {
             self.config.width = width;
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
-            self.depth_view = depth_view(&self.device, width, height);
+            self.depth = DepthTarget::world(&self.device, width, height);
+            self.opaque_depth = DepthTarget::opaque_snapshot(&self.device, width, height);
             self.ambient_occlusion_gpu
-                .resize(&self.device, &self.depth_view, width, height);
+                .resize(&self.device, self.depth.view(), width, height);
             self.volumetric_cloud_gpu
                 .resize(&self.device, width, height);
         }
@@ -2375,7 +2462,7 @@ impl Renderer {
             self.water_scene_bind_group = self.ui_gpu.water_scene_bind_group(
                 &self.device,
                 &self.water_scene_layout,
-                &self.depth_view,
+                self.opaque_depth.view(),
             );
         }
     }
@@ -4245,7 +4332,7 @@ impl Renderer {
                     label: Some("spatial AO depth ownership pass"),
                     color_attachments: &[],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.depth_view,
+                        view: self.depth.view(),
                         depth_ops: Some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(0.0),
                             store: wgpu::StoreOp::Store,
@@ -4340,7 +4427,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
+                    view: self.depth.view(),
                     depth_ops: Some(wgpu::Operations {
                         load: if self.options.screen_space_ambient_occlusion {
                             wgpu::LoadOp::Load
@@ -4421,7 +4508,7 @@ impl Renderer {
                 &mut encoder,
                 &self.frame_bind_group,
                 opaque_scene_view,
-                &self.depth_view,
+                self.depth.view(),
                 if refract_water || weather_active {
                     wgpu::StoreOp::Store
                 } else {
@@ -4432,6 +4519,10 @@ impl Renderer {
         }
         if refract_water {
             self.ui_gpu.copy_opaque_to_scene(&mut encoder);
+            // Water samples the opaque depth for screen-space refraction while writing its own
+            // depth for the later precipitation pass. WebGPU forbids sampling a writable depth
+            // attachment in the same pass, so preserve the pre-water depth in a separate texture.
+            self.depth.copy_to(&mut encoder, &self.opaque_depth);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("refractive water color pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -4444,7 +4535,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
+                    view: self.depth.view(),
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: if weather_active {
@@ -4499,7 +4590,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
+                    view: self.depth.view(),
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Discard,
@@ -4575,7 +4666,8 @@ impl Renderer {
             core_gpu_bytes: arena
                 .capacity_bytes
                 .saturating_add(water_arena.capacity_bytes)
-                .saturating_add(scene_pixels.saturating_mul(20))
+                // Two RGBA16F scene targets plus writable and sampled Depth32Float targets.
+                .saturating_add(scene_pixels.saturating_mul(24))
                 .saturating_add(shadow_bytes)
                 .saturating_add(self.ambient_occlusion_gpu.bytes())
                 .saturating_add(self.volumetric_cloud_gpu.bytes())
@@ -7291,7 +7383,8 @@ fn resize_changes(
 
 const fn refraction_copy_bytes(width: u32, height: u32, active: bool) -> u64 {
     if active {
-        width as u64 * height as u64 * 8
+        // Snapshot both RGBA16F scene color and Depth32Float opaque depth before water writes.
+        width as u64 * height as u64 * 12
     } else {
         0
     }
@@ -7676,25 +7769,6 @@ fn quad_primitive_state() -> wgpu::PrimitiveState {
         topology: wgpu::PrimitiveTopology::TriangleStrip,
         ..Default::default()
     }
-}
-
-fn depth_view(device: &Device, width: u32, height: u32) -> TextureView {
-    device
-        .create_texture(&wgpu::TextureDescriptor {
-            label: Some("world depth"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        })
-        .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 fn preferred_format(formats: &[TextureFormat]) -> TextureFormat {
@@ -9144,7 +9218,19 @@ mod tests {
     #[test]
     fn refraction_bandwidth_is_paid_only_for_visible_water() {
         assert_eq!(refraction_copy_bytes(1_280, 720, false), 0);
-        assert_eq!(refraction_copy_bytes(1_280, 720, true), 7_372_800);
+        assert_eq!(refraction_copy_bytes(1_280, 720, true), 11_059_200);
+    }
+
+    #[test]
+    fn water_samples_a_separate_non_attachment_depth_snapshot() {
+        let world = world_depth_usage();
+        assert!(world.contains(TextureUsages::RENDER_ATTACHMENT));
+        assert!(world.contains(TextureUsages::COPY_SRC));
+
+        let opaque = opaque_depth_usage();
+        assert!(opaque.contains(TextureUsages::TEXTURE_BINDING));
+        assert!(opaque.contains(TextureUsages::COPY_DST));
+        assert!(!opaque.contains(TextureUsages::RENDER_ATTACHMENT));
     }
 
     #[test]
