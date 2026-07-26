@@ -308,7 +308,15 @@ impl ClientTrafficShaper {
     }
 
     pub(crate) fn frame_fragment_bytes(&self, frame_bytes: usize) -> Option<usize> {
-        let rate = self.lock().current_bytes_per_second;
+        let mut state = self.lock();
+        state.prepare(
+            Instant::now(),
+            self.floor_bytes_per_second,
+            self.burst_bytes,
+            self.queue_delay_target,
+            self.feedback_timeout,
+        );
+        let rate = state.current_bytes_per_second;
         let delay_budget_bytes = (rate * self.queue_delay_target.as_secs_f64()).floor() as usize;
         let fragment_bytes = delay_budget_bytes
             .max(MIN_PACING_QUANTUM_BYTES)
@@ -722,5 +730,27 @@ mod tests {
         assert_eq!(shaper.frame_fragment_bytes(2_500), None);
         assert_eq!(shaper.frame_fragment_bytes(2_501), Some(2_500));
         assert_eq!(shaper.frame_fragment_bytes(12 * 1024), Some(2_500));
+    }
+
+    #[test]
+    fn stale_feedback_resets_rate_before_sizing_the_next_fragment() {
+        let floor = 96 * 1024;
+        let shaper = ClientTrafficShaper::new(
+            floor,
+            4 * 1024 * 1024,
+            64 * 1024,
+            Duration::from_millis(25),
+            Duration::from_secs(3),
+            32 * 1024,
+        );
+        {
+            let mut state = shaper.lock();
+            state.current_bytes_per_second = 4.0 * 1024.0 * 1024.0;
+            state.minimum_round_trip = Some(Duration::from_millis(40));
+            state.last_feedback = Some(Instant::now() - Duration::from_secs(4));
+        }
+
+        assert_eq!(shaper.frame_fragment_bytes(64 * 1024), Some(2_457));
+        assert_eq!(shaper.current_rate_bytes_per_second(), floor);
     }
 }
