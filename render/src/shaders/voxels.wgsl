@@ -298,35 +298,13 @@ fn quad_world(
   return MorphedQuadPosition(world, parent_blend);
 }
 
-fn projected_axis_pixel(
-  clip: vec4<f32>,
-  axis: vec3<f32>,
-  direction: f32,
-) -> vec2<f32> {
-  let endpoint = clip + frame.view_projection * vec4<f32>(axis, 0.0);
-  if clip.w <= 0.00001 || endpoint.w <= 0.00001 {
-    return vec2<f32>(0.0);
-  }
-  let pixel_delta = (endpoint.xy / endpoint.w - clip.xy / clip.w)
-    * frame.viewport_voxel.xy * 0.5;
-  let pixel_length = length(pixel_delta);
-  if pixel_length <= 0.00001 {
-    return vec2<f32>(0.0);
-  }
-  return pixel_delta / pixel_length
-    * direction
-    * (INTERNAL_SEAM_EXPANSION_PIXELS * 2.0)
-    / frame.viewport_voxel.xy;
-}
-
-fn close_internal_raster_seams(
-  clip: vec4<f32>,
+fn internal_raster_seam_edges(
   face: u32,
   uv: vec2<i32>,
   ao: u32,
   material: u32,
   surface_shape: u32,
-) -> vec4<f32> {
+) -> vec2<bool> {
   // Streamed surface tiles use AO bits 8..11 for their packed macro normal and are meshed in
   // independent patches, so every one of their edges receives conservative raster coverage.
   // Canonical greedy meshes instead carry exact internal-edge flags in those bits; restricting
@@ -338,33 +316,67 @@ fn close_internal_raster_seams(
   let streamed_surface = (material & 0x80000000u) != 0u;
   let far_surface = streamed_surface && surface_shape == 0u;
   let streamed_top_surface = streamed_surface && face == 2u;
-  var axis_u = vec3<f32>(1.0, 0.0, 0.0);
-  var axis_v = vec3<f32>(0.0, 1.0, 0.0);
-  switch face {
-    case 0u, 1u: {
-      axis_u = vec3<f32>(0.0, 0.0, 1.0);
-      axis_v = vec3<f32>(0.0, 1.0, 0.0);
-    }
-    case 2u, 3u: {
-      axis_u = vec3<f32>(1.0, 0.0, 0.0);
-      axis_v = vec3<f32>(0.0, 0.0, 1.0);
-    }
-    default: {}
-  }
   let u_flag = select(INTERNAL_SEAM_LOW_U_FLAG, INTERNAL_SEAM_HIGH_U_FLAG, uv.x != 0);
   let v_flag = select(INTERNAL_SEAM_LOW_V_FLAG, INTERNAL_SEAM_HIGH_V_FLAG, uv.y != 0);
-  let u_direction = select(
-    0.0,
-    select(-1.0, 1.0, uv.x != 0),
+  return vec2<bool>(
     far_surface || streamed_top_surface || (!streamed_surface && (ao & u_flag) != 0u),
-  );
-  let v_direction = select(
-    0.0,
-    select(-1.0, 1.0, uv.y != 0),
     far_surface || streamed_top_surface || (!streamed_surface && (ao & v_flag) != 0u),
   );
-  let ndc_offset = projected_axis_pixel(clip, axis_u, u_direction)
-    + projected_axis_pixel(clip, axis_v, v_direction);
+}
+
+fn outward_edge_normal(
+  current: vec2<f32>,
+  along_edge: vec2<f32>,
+  inside: vec2<f32>,
+) -> vec2<f32> {
+  let edge = along_edge - current;
+  let edge_length = length(edge);
+  if edge_length <= 0.00001 {
+    return vec2<f32>(0.0);
+  }
+  var normal = vec2<f32>(-edge.y, edge.x) / edge_length;
+  if dot(normal, inside - current) > 0.0 {
+    normal = -normal;
+  }
+  return normal;
+}
+
+fn close_internal_raster_seams(
+  clip: vec4<f32>,
+  same_u_clip: vec4<f32>,
+  same_v_clip: vec4<f32>,
+  edges: vec2<bool>,
+) -> vec4<f32> {
+  if clip.w <= 0.00001 || same_u_clip.w <= 0.00001 || same_v_clip.w <= 0.00001 {
+    return clip;
+  }
+  let viewport_half = frame.viewport_voxel.xy * 0.5;
+  let current = clip.xy / clip.w * viewport_half;
+  let same_u = same_u_clip.xy / same_u_clip.w * viewport_half;
+  let same_v = same_v_clip.xy / same_v_clip.w * viewport_half;
+  // A constant-u edge runs toward same_u; same_v points into the quad. The inverse applies to the
+  // constant-v edge. This follows the real shaped and morphed edge after perspective projection
+  // instead of assuming that it remains parallel to projected world X/Z.
+  let u_normal = outward_edge_normal(current, same_u, same_v);
+  let v_normal = outward_edge_normal(current, same_v, same_u);
+  var pixel_offset = vec2<f32>(0.0);
+  if edges.x && edges.y {
+    let normal_sum = u_normal + v_normal;
+    let normal_sum_length = length(normal_sum);
+    if normal_sum_length > 0.00001 {
+      let miter = normal_sum / normal_sum_length;
+      let perpendicular = max(min(dot(miter, u_normal), dot(miter, v_normal)), 0.25);
+      pixel_offset = miter * min(
+        INTERNAL_SEAM_EXPANSION_PIXELS / perpendicular,
+        INTERNAL_SEAM_EXPANSION_PIXELS * 4.0,
+      );
+    }
+  } else if edges.x {
+    pixel_offset = u_normal * INTERNAL_SEAM_EXPANSION_PIXELS;
+  } else if edges.y {
+    pixel_offset = v_normal * INTERNAL_SEAM_EXPANSION_PIXELS;
+  }
+  let ndc_offset = pixel_offset * 2.0 / frame.viewport_voxel.xy;
   return vec4<f32>(clip.xy + ndc_offset * clip.w, clip.zw);
 }
 
@@ -444,14 +456,49 @@ fn voxel_vertex(
     terrain_lighting = mix(vec2<f32>(1.0), resolved_horizon_lighting, horizon_strength);
   }
   var out: VertexOut;
-  out.position = close_internal_raster_seams(
-    frame.view_projection * vec4<f32>(world, 1.0),
-    face,
-    uv,
-    ao,
-    material,
-    surface_shape,
-  );
+  var clip = frame.view_projection * vec4<f32>(world, 1.0);
+  let seam_edges = internal_raster_seam_edges(face, uv, ao, material, surface_shape);
+  if seam_edges.x || seam_edges.y {
+    let same_u_corner = 3u - corner;
+    let same_v_corner = corner ^ 1u;
+    let same_u_world = quad_world(
+      origin,
+      face,
+      same_u_corner,
+      CORNERS[same_u_corner],
+      extent,
+      material,
+      ao,
+      surface_shape,
+      morph_heights,
+      morph_closure,
+      morph_geometry,
+      boundary_centres,
+      boundary_half_extents,
+    ).world;
+    let same_v_world = quad_world(
+      origin,
+      face,
+      same_v_corner,
+      CORNERS[same_v_corner],
+      extent,
+      material,
+      ao,
+      surface_shape,
+      morph_heights,
+      morph_closure,
+      morph_geometry,
+      boundary_centres,
+      boundary_half_extents,
+    ).world;
+    clip = close_internal_raster_seams(
+      clip,
+      frame.view_projection * vec4<f32>(same_u_world, 1.0),
+      frame.view_projection * vec4<f32>(same_v_world, 1.0),
+      seam_edges,
+    );
+  }
+  out.position = clip;
   out.world = world;
   out.normal = normal;
   out.material = material;

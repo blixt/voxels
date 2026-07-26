@@ -505,7 +505,10 @@ mod tests {
         assert!(voxels.contains(
             "far_surface || streamed_top_surface || (!streamed_surface && (ao & u_flag) != 0u)"
         ));
-        assert!(voxels.contains("out.position = close_internal_raster_seams("));
+        assert!(voxels.contains("fn outward_edge_normal("));
+        assert!(voxels.contains("let same_u_world = quad_world("));
+        assert!(voxels.contains("clip = close_internal_raster_seams("));
+        assert!(voxels.contains("out.position = clip"));
         assert!(voxels.contains("out.world = world"));
         assert!(voxels.contains("if role == 0u"));
         assert!(voxels.contains("return threshold >= clamp(cut_transition.phase_role.x"));
