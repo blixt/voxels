@@ -10,6 +10,13 @@ describe("browser automation defaults", () => {
     expect(isBrowserConsoleFailure("log", "sqlite", warnings)).toBe(false);
   });
 
+  it("does not let stateful warning patterns skip repeated failures", () => {
+    const warnings = /webgpu/giu;
+    expect(isBrowserConsoleFailure("warning", "WebGPU validation", warnings)).toBe(true);
+    expect(isBrowserConsoleFailure("warning", "WebGPU validation", warnings)).toBe(true);
+    expect(warnings.lastIndex).toBe(0);
+  });
+
   it("pre-authorizes the hermetic loopback daemon in headless Chrome", () => {
     expect(chromeWebGpuLaunchOptions().args).toContain(
       "--disable-features=LocalNetworkAccessChecks",

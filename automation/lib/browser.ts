@@ -235,5 +235,10 @@ export function isBrowserConsoleFailure(
   text: string,
   warningPattern: RegExp,
 ): boolean {
-  return type === "error" || (type === "warning" && warningPattern.test(text));
+  if (type === "error") return true;
+  if (type !== "warning") return false;
+  warningPattern.lastIndex = 0;
+  const matched = warningPattern.test(text);
+  warningPattern.lastIndex = 0;
+  return matched;
 }
