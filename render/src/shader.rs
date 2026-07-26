@@ -499,9 +499,9 @@ mod tests {
         assert!(voxels.contains("fn close_internal_raster_seams("));
         assert!(voxels.contains("INTERNAL_SEAM_LOW_U_FLAG"));
         assert!(voxels.contains("const INTERNAL_SEAM_EXPANSION_PIXELS: f32 = 3.0"));
-        assert!(voxels.contains("let far_surface = (material & 0x80000000u) != 0u"));
-        assert!(voxels.contains("&& surface_shape == 0u"));
-        assert!(voxels.contains("far_surface || (ao & u_flag) != 0u"));
+        assert!(voxels.contains("let streamed_surface = (material & 0x80000000u) != 0u"));
+        assert!(voxels.contains("let far_surface = streamed_surface && surface_shape == 0u"));
+        assert!(voxels.contains("far_surface || (!streamed_surface && (ao & u_flag) != 0u)"));
         assert!(voxels.contains("out.position = close_internal_raster_seams("));
         assert!(voxels.contains("out.world = world"));
         assert!(voxels.contains("if role == 0u"));

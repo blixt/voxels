@@ -328,10 +328,12 @@ fn close_internal_raster_seams(
   // Streamed surface tiles use AO bits 8..11 for their packed macro normal and are meshed in
   // independent patches, so every one of their edges receives conservative raster coverage.
   // Canonical greedy meshes instead carry exact internal-edge flags in those bits; restricting
-  // their expansion preserves true cave and terrain silhouettes. Shaped neighbors already share
-  // exact world-space vertices. Expanding a wall collapsed by interpolation would resurrect it as
-  // a several-pixel dark streak, so shaped quads deliberately use ordinary raster ownership.
-  let far_surface = (material & 0x80000000u) != 0u && surface_shape == 0u;
+  // their expansion preserves true cave and terrain silhouettes. Shaped streamed quads deliberately
+  // use ordinary raster ownership: expanding a wall collapsed by interpolation would resurrect it
+  // as a several-pixel dark streak. Do not interpret streamed macro-normal bits as canonical edge
+  // flags when shaping is active.
+  let streamed_surface = (material & 0x80000000u) != 0u;
+  let far_surface = streamed_surface && surface_shape == 0u;
   var axis_u = vec3<f32>(1.0, 0.0, 0.0);
   var axis_v = vec3<f32>(0.0, 1.0, 0.0);
   switch face {
@@ -350,12 +352,12 @@ fn close_internal_raster_seams(
   let u_direction = select(
     0.0,
     select(-1.0, 1.0, uv.x != 0),
-    far_surface || (ao & u_flag) != 0u,
+    far_surface || (!streamed_surface && (ao & u_flag) != 0u),
   );
   let v_direction = select(
     0.0,
     select(-1.0, 1.0, uv.y != 0),
-    far_surface || (ao & v_flag) != 0u,
+    far_surface || (!streamed_surface && (ao & v_flag) != 0u),
   );
   let ndc_offset = projected_axis_pixel(clip, axis_u, u_direction)
     + projected_axis_pixel(clip, axis_v, v_direction);
