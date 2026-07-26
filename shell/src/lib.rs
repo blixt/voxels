@@ -264,6 +264,27 @@ fn surface_product_priority(
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn initialized_surface_level_prefix(previous: usize, ready: usize) -> usize {
+    previous
+        .max(ready)
+        .min(voxels_world::SURFACE_LOD_LEVEL_COUNT)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn surface_stream_level_order(
+    coord: voxels_world::SurfaceTileCoord,
+    priority: voxels_world::WorldProductPriority,
+    initialized_level_count: usize,
+) -> u8 {
+    let interactive_initialized = initialized_level_count >= INTERACTIVE_SURFACE_LOD_LEVELS;
+    if priority == voxels_world::WorldProductPriority::Prefetch || interactive_initialized {
+        coord.level.index()
+    } else {
+        u8::MAX - coord.level.index()
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn surface_tile_in_coverage(
     coord: voxels_world::SurfaceTileCoord,
     focus: Option<SurfaceStreamFocus>,
@@ -692,10 +713,7 @@ fn viewport_view_cone_tangent(
 #[cfg(any(target_arch = "wasm32", test))]
 enum UpwardPortalProbe {
     Bounded,
-    Pending {
-        chunks: Vec<voxels_world::ChunkCoord>,
-        frontiers: Vec<PortalFrontier>,
-    },
+    Pending(Vec<voxels_world::ChunkCoord>),
     Escapes(Vec<voxels_world::ChunkCoord>),
 }
 
@@ -756,7 +774,6 @@ fn probe_upward_portals(
     let mut queue = VecDeque::from([(origin, origin_component)]);
     let mut pending = BTreeSet::new();
     let mut probe_chunks = BTreeSet::from([origin]);
-    let mut frontiers = Vec::new();
     let all_face_cells = [u64::MAX; CHUNK_FACE_WORDS];
     while let Some((current, component)) = queue.pop_front() {
         let Some(current_portals) = portals.get(&(current.x, current.y, current.z)) else {
@@ -776,12 +793,6 @@ fn probe_upward_portals(
             return UpwardPortalProbe::Escapes(probe_chunks.into_iter().collect());
         }
         probe_chunks.insert(neighbor);
-        frontiers.push(PortalFrontier {
-            source: current,
-            neighbor,
-            face: 3,
-            cells: current_portals.component_visible_face_cells(component, 3, &all_face_cells),
-        });
         let Some(neighbor_portals) = portals.get(&(neighbor.x, neighbor.y, neighbor.z)) else {
             pending.insert(neighbor);
             continue;
@@ -801,10 +812,7 @@ fn probe_upward_portals(
         UpwardPortalProbe::Bounded
     } else {
         probe_chunks.extend(pending);
-        UpwardPortalProbe::Pending {
-            chunks: probe_chunks.into_iter().collect(),
-            frontiers,
-        }
+        UpwardPortalProbe::Pending(probe_chunks.into_iter().collect())
     }
 }
 
@@ -915,8 +923,15 @@ fn enclosed_view_stream_plan(
     }
     match probe_upward_portals(origin, origin_component, radius_chunks, portals) {
         UpwardPortalProbe::Bounded => {}
-        UpwardPortalProbe::Pending { chunks, frontiers } => {
-            return EnclosedViewStreamPlan { chunks, frontiers };
+        UpwardPortalProbe::Pending(chunks) => {
+            // A broad upward opening may be outdoors or a tall cavern. Keep streaming the narrow
+            // proof column, but do not turn classification uncertainty into an opaque Stone
+            // ceiling. If the probe later proves bounded, the ordinary portal traversal below
+            // publishes conservative terminators while the surface LOD remains visual authority.
+            return EnclosedViewStreamPlan {
+                chunks,
+                frontiers: Vec::new(),
+            };
         }
         UpwardPortalProbe::Escapes(chunks) => {
             // Retain the narrow probe column as streaming metadata. Dropping it would evict the
@@ -1245,9 +1260,10 @@ mod web {
     };
     use crate::{
         ChunkPortalMask, INTERACTIVE_SURFACE_LOD_LEVELS, SurfaceStreamFocus,
-        adaptive_surface_cross_radii, predictive_stream_position, predictive_surface_position,
-        surface_motion_axis, surface_offset_in_coverage, surface_product_priority,
-        surface_tile_in_coverage, world_environment_at,
+        adaptive_surface_cross_radii, initialized_surface_level_prefix, predictive_stream_position,
+        predictive_surface_position, surface_motion_axis, surface_offset_in_coverage,
+        surface_product_priority, surface_stream_level_order, surface_tile_in_coverage,
+        world_environment_at,
     };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
@@ -1601,7 +1617,7 @@ mod web {
         surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
         all_lods_ready: Cell<bool>,
         interactive_lods_ready: Cell<bool>,
-        full_lods_initialized: Cell<bool>,
+        initialized_surface_level_count: Cell<usize>,
         startup_ready: Cell<bool>,
         scope: DedicatedWorkerGlobalScope,
         callback: RefCell<Option<FrameCallback>>,
@@ -1912,10 +1928,10 @@ mod web {
                 && stream.meshing.in_flight == 0
                 && stream.upload.queued == 0
                 && stream.upload.in_flight == 0;
-            // Coverage controls startup readiness, not runtime geometric ownership. After the
-            // hierarchy has initialized, its boundaries follow the camera continuously and each
-            // missing child independently keeps its best resident parent. Holding an older,
-            // whole-ring focus until every replacement settles cannot converge while moving.
+            // Coverage controls how many surface levels may first enter the cut, not whether an
+            // already-established boundary may continue following the camera. The initialized
+            // prefix is monotonic: newly pending children independently keep their best resident
+            // parent instead of freezing the whole cut at an obsolete position.
             let ready_surface_levels = self.ready_surface_level_prefix();
             let interactive_lods_ready =
                 fine_coverage_ready && ready_surface_levels >= INTERACTIVE_SURFACE_LOD_LEVELS;
@@ -1929,27 +1945,19 @@ mod web {
             );
             let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
             let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
-            if self.full_lods_initialized.get() {
+            let initialized_surface_level_count = initialized_surface_level_prefix(
+                self.initialized_surface_level_count.get(),
+                ready_surface_levels,
+            );
+            self.initialized_surface_level_count
+                .set(initialized_surface_level_count);
+            if initialized_surface_level_count > 0 {
                 renderer.advance_geometric_lod_focus(
                     voxel_x,
                     voxel_z,
-                    SURFACE_LOD_LEVEL_COUNT,
-                    SURFACE_LOD_LEVEL_COUNT,
+                    initialized_surface_level_count,
+                    initialized_surface_level_count,
                 );
-            } else if ready_surface_levels > 0 {
-                renderer.advance_geometric_lod_focus(
-                    voxel_x,
-                    voxel_z,
-                    ready_surface_levels,
-                    if all_lods_ready {
-                        SURFACE_LOD_LEVEL_COUNT
-                    } else {
-                        ready_surface_levels
-                    },
-                );
-                if all_lods_ready {
-                    self.full_lods_initialized.set(true);
-                }
             }
             let render_start = performance_now(performance.as_ref());
             let chunks = self.chunks.borrow();
@@ -3280,7 +3288,7 @@ mod web {
                 drop(dirty);
                 drop(revisions);
                 drop(resident);
-                let initializing_hierarchy = !self.full_lods_initialized.get();
+                let initialized_level_count = self.initialized_surface_level_count.get();
                 let mut queue = self.surface_queue.borrow_mut();
                 queue.retain(|coord| !changed_levels[coord.level.index() as usize]);
                 candidates.extend(queue.iter().copied());
@@ -3290,18 +3298,13 @@ mod web {
                     let dz = i128::from(coord.z) - i128::from(focus.current[index].z);
                     let priority =
                         surface_product_priority(*coord, focus, INTERACTIVE_SURFACE_LOD_LEVELS);
-                    let background = priority == WorldProductPriority::Prefetch;
                     let directional =
                         directional_priorities[index].rank_offset(dx as i64, dz as i64);
-                    // Startup establishes broad parent cover before refining it. During traversal,
-                    // the hierarchy already has retained parents, so finest visible replacements
-                    // must win; repeatedly loading each newly exposed coarse strip first otherwise
-                    // starves near detail forever at sustained speed.
-                    let level_order = if background || !initializing_hierarchy {
-                        coord.level.index()
-                    } else {
-                        u8::MAX - coord.level.index()
-                    };
+                    // Startup establishes broad parent cover before refining it. Once the
+                    // interactive prefix has been complete once, retained parents already provide
+                    // that cover and newly exposed visible replacements must stay finest-first.
+                    let level_order =
+                        surface_stream_level_order(*coord, priority, initialized_level_count);
                     (
                         priority,
                         level_order,
@@ -3323,25 +3326,26 @@ mod web {
                 WorldProductPriority::VisibleSurface,
                 INTERACTIVE_SURFACE_BATCH,
             );
-            let bootstrap_ready_for_background = if self.full_lods_initialized.get() {
-                true
-            } else {
-                let diagnostics = self.scheduler.borrow().diagnostics();
-                let fine_current = diagnostics.generation.queued == 0
-                    && diagnostics.generation.in_flight == 0
-                    && diagnostics.meshing.queued == 0
-                    && diagnostics.meshing.in_flight == 0
-                    && diagnostics.upload.queued == 0
-                    && diagnostics.upload.in_flight == 0;
-                fine_current
-                    && self.surface_coverage_current_through(INTERACTIVE_SURFACE_LOD_LEVELS)
-                    && !self.surface_dirty.borrow().iter().any(|coord| {
-                        usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
-                    })
-                    && !self.surface_in_flight.borrow().iter().any(|coord| {
-                        usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
-                    })
-            };
+            let bootstrap_ready_for_background =
+                if self.initialized_surface_level_count.get() >= INTERACTIVE_SURFACE_LOD_LEVELS {
+                    true
+                } else {
+                    let diagnostics = self.scheduler.borrow().diagnostics();
+                    let fine_current = diagnostics.generation.queued == 0
+                        && diagnostics.generation.in_flight == 0
+                        && diagnostics.meshing.queued == 0
+                        && diagnostics.meshing.in_flight == 0
+                        && diagnostics.upload.queued == 0
+                        && diagnostics.upload.in_flight == 0;
+                    fine_current
+                        && self.surface_coverage_current_through(INTERACTIVE_SURFACE_LOD_LEVELS)
+                        && !self.surface_dirty.borrow().iter().any(|coord| {
+                            usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
+                        })
+                        && !self.surface_in_flight.borrow().iter().any(|coord| {
+                            usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
+                        })
+                };
             if bootstrap_ready_for_background {
                 self.submit_surface_lane(WorldProductPriority::Prefetch, BACKGROUND_SURFACE_BATCH);
             }
@@ -5032,7 +5036,7 @@ mod web {
             surface_dirty: RefCell::new(BTreeSet::new()),
             all_lods_ready: Cell::new(false),
             interactive_lods_ready: Cell::new(false),
-            full_lods_initialized: Cell::new(false),
+            initialized_surface_level_count: Cell::new(0),
             startup_ready: Cell::new(false),
             scope,
             callback: RefCell::new(None),
@@ -5448,6 +5452,37 @@ mod tests {
     }
 
     #[test]
+    fn initialized_surface_prefix_never_regresses_while_traversing() {
+        assert_eq!(initialized_surface_level_prefix(0, 4), 4);
+        assert_eq!(
+            initialized_surface_level_prefix(4, 0),
+            4,
+            "newly pending children must not freeze an already-established cut"
+        );
+        assert_eq!(initialized_surface_level_prefix(4, 6), 6);
+    }
+
+    #[test]
+    fn surface_streaming_becomes_fine_first_after_interactive_bootstrap() {
+        let fine =
+            voxels_world::SurfaceTileCoord::new(voxels_world::SurfaceLodLevel::Stride2, 0, 0);
+        let coarse =
+            voxels_world::SurfaceTileCoord::new(voxels_world::SurfaceLodLevel::Stride256, 0, 0);
+        let immediate = voxels_world::WorldProductPriority::ImmediateSurface;
+
+        assert!(
+            surface_stream_level_order(coarse, immediate, 0)
+                < surface_stream_level_order(fine, immediate, 0),
+            "initial bootstrap must establish coarse parent cover first"
+        );
+        assert!(
+            surface_stream_level_order(fine, immediate, INTERACTIVE_SURFACE_LOD_LEVELS)
+                < surface_stream_level_order(coarse, immediate, INTERACTIVE_SURFACE_LOD_LEVELS),
+            "traversal must prioritize nearby fine replacements without waiting for every horizon ring"
+        );
+    }
+
+    #[test]
     fn enclosed_view_interest_reaches_beyond_the_surface_handoff() {
         let camera = CameraState::spawn(glam::Vec3::new(1.6, 3.25, 1.6));
         let portals = straight_tunnel_portals(-9, 0);
@@ -5611,6 +5646,57 @@ mod tests {
             "an outdoor proof may retain its narrow probe column but must never flood the view cone"
         );
         assert!(interest.len() <= 11);
+    }
+
+    #[test]
+    fn stepping_from_proven_sky_into_a_pending_sky_probe_does_not_publish_a_stone_cap() {
+        let mut portals = BTreeMap::new();
+        for y in 1..=11 {
+            portals.insert((0, y, 0), portal_mask(&[2, 3, 4, 5]));
+        }
+        portals.insert((0, 1, -1), portal_mask(&[2, 3, 4, 5]));
+
+        let proven_camera = CameraState::spawn(glam::Vec3::new(0.05, 3.25, 0.05));
+        let proven =
+            enclosed_view_stream_plan(&proven_camera, 32.0, test_view_cone_tangent(), &portals);
+        assert!(proven.frontiers.is_empty());
+
+        let stepped_camera = CameraState::spawn(glam::Vec3::new(0.05, 3.25, -0.01));
+        let pending =
+            enclosed_view_stream_plan(&stepped_camera, 32.0, test_view_cone_tangent(), &portals);
+        assert!(
+            pending
+                .chunks
+                .contains(&voxels_world::ChunkCoord::new(0, 2, -1)),
+            "the sky probe must keep streaming after the chunk-boundary step"
+        );
+        assert!(
+            pending.frontiers.is_empty(),
+            "an unresolved broad sky probe must not become opaque Stone geometry"
+        );
+    }
+
+    #[test]
+    fn narrow_upward_shaft_keeps_its_bounded_frontier_cap() {
+        let coord = voxels_world::ChunkCoord::new(0, 1, 0);
+        let mut chunk = voxels_world::Chunk::filled(coord, voxels_world::Material::Stone);
+        for y in 0..voxels_world::CHUNK_EDGE {
+            chunk.set(16, y, 16, voxels_world::Material::Air);
+        }
+        let portals = BTreeMap::from([((coord.x, coord.y, coord.z), {
+            ChunkPortalMask::from_chunk(&chunk)
+        })]);
+        let mut camera = CameraState::spawn(glam::Vec3::new(1.65, 3.25, 1.65));
+        camera.pitch = std::f32::consts::FRAC_PI_2;
+
+        let plan = enclosed_view_stream_plan(&camera, 32.0, 100.0, &portals);
+
+        assert!(
+            plan.frontiers
+                .iter()
+                .any(|frontier| frontier.source == coord && frontier.face == 3),
+            "the fix must preserve conservative ceilings for genuinely bounded narrow shafts"
+        );
     }
 
     #[test]
