@@ -147,13 +147,14 @@ more bandwidth.
 
 World-product frames larger than `outbound_max_frame_fragment_bytes` are transmitted as strict VXWP
 fragments. The actual fragment size is the smaller of that cap and the bytes the current selected
-rate can send within `outbound_queue_delay_target_ms`, with an 8 KiB lower bound. Each fragment is an
-independent priority-scheduler unit; latency-sensitive control, collision, edit, and presence traffic
-can therefore preempt a large terrain response between fragments. The client accepts only bounded,
-contiguous fragments and validates the reconstructed VXWP frame and request identity before decode.
+rate can send within `outbound_queue_delay_target_ms`, with a 2 KiB pacing-quantum lower bound. The
+configured hard cap itself remains at least 8 KiB. Each fragment is an independent priority-scheduler
+unit; latency-sensitive control, collision, edit, and presence traffic can therefore preempt a large
+terrain response between fragments. The client accepts only bounded, contiguous fragments and
+validates the reconstructed VXWP frame and request identity before decode.
 
 `outbound_bandwidth_burst_bytes` caps startup credit. The effective credit is also bounded to one
-selected-rate queue-delay target, subject to the 8 KiB pacing minimum. A frame larger than that
+selected-rate queue-delay target, subject to the 2 KiB pacing minimum. A frame larger than that
 effective credit is sent whole once the credit is available, and its full byte debt delays later
 traffic. Control and authoritative acknowledgements preempt other traffic.
 Collision/startup data, authoritative world changes, realtime presence, visible terrain, and
