@@ -432,8 +432,14 @@ mod tests {
             assert!(shader.contains("@location(4) morph_heights: u32"));
             assert!(shader.contains("unpack_signed_i3(surface_shape >> (corner * 3u))"));
             assert!(shader.contains("surface_morph_delta(morph_heights, uv.y)"));
+            assert!(shader.contains("let flip = surface_quad_flip(face, surface_shape, ao);"));
             assert!(
                 shader.contains("select(STANDARD_STRIP[vertex_index], FLIPPED_STRIP[vertex_index]")
+            );
+            assert!(
+                !shader.contains(
+                    "let flip = corner_ao(ao, 0u) + corner_ao(ao, 2u) > corner_ao(ao, 1u)"
+                )
             );
             assert!(!shader.contains("let world = origin + local"));
         }
@@ -443,6 +449,44 @@ mod tests {
         for shader in [voxels, shadows] {
             assert!(shader.contains("const MORPH_CLOSURE_EXTENT_FLAG: u32 = 0x8000u"));
             assert!(shader.contains("select(parent_blend, 1.0 - parent_blend, morph_closure)"));
+        }
+    }
+
+    #[test]
+    fn shaped_surface_diagonals_follow_the_smaller_height_discontinuity() {
+        let voxels = include_str!("shaders/voxels.wgsl");
+        let shadows = include_str!("shaders/shadow.wgsl");
+        for shader in [voxels, shadows] {
+            assert!(shader.contains(
+                "fn surface_quad_flip(face: u32, surface_shape: u32, packed_ao: u32) -> bool"
+            ));
+            assert!(shader.contains("if face == 2u && surface_shape != 0u"));
+            assert!(shader.contains("return diagonal_02 > diagonal_13;"));
+        }
+
+        let signed_corner = |shape: u16, corner: usize| {
+            let bits = i32::from((shape >> (corner * 3)) & 0b111);
+            if bits >= 4 { bits - 8 } else { bits }
+        };
+        for shape in 1_u16..=0x0fff {
+            let diagonal_02 = (signed_corner(shape, 0) - signed_corner(shape, 2)).abs();
+            let diagonal_13 = (signed_corner(shape, 1) - signed_corner(shape, 3)).abs();
+            let flipped = diagonal_02 > diagonal_13;
+            let (chosen, alternative) = if flipped {
+                (diagonal_13, diagonal_02)
+            } else {
+                (diagonal_02, diagonal_13)
+            };
+            assert!(
+                chosen <= alternative,
+                "shape {shape:#05x} selected a steeper diagonal"
+            );
+            if diagonal_02 == diagonal_13 {
+                assert!(
+                    !flipped,
+                    "shape {shape:#05x} must keep the stable tie break"
+                );
+            }
         }
     }
 

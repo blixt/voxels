@@ -73,6 +73,20 @@ fn unpack_signed_i3(value: u32) -> f32 {
   return f32(select(i32(bits), i32(bits) - 8, bits >= 4u));
 }
 
+fn surface_quad_flip(face: u32, surface_shape: u32, packed_ao: u32) -> bool {
+  if face == 2u && surface_shape != 0u {
+    let diagonal_02 = abs(
+      unpack_signed_i3(surface_shape) - unpack_signed_i3(surface_shape >> 6u),
+    );
+    let diagonal_13 = abs(
+      unpack_signed_i3(surface_shape >> 3u) - unpack_signed_i3(surface_shape >> 9u),
+    );
+    return diagonal_02 > diagonal_13;
+  }
+  return corner_ao(packed_ao, 0u) + corner_ao(packed_ao, 2u)
+    > corner_ao(packed_ao, 1u) + corner_ao(packed_ao, 3u);
+}
+
 fn surface_morph_delta(morph_heights: u32, vertical_corner: i32) -> f32 {
   let bottom = unpack_signed_i16(morph_heights);
   let top = unpack_signed_i16(morph_heights >> 16u);
@@ -368,7 +382,7 @@ fn voxel_vertex(
     extent_voxels.x & ~MORPH_CLOSURE_EXTENT_FLAG,
     extent_voxels.y,
   ));
-  let flip = corner_ao(ao, 0u) + corner_ao(ao, 2u) > corner_ao(ao, 1u) + corner_ao(ao, 3u);
+  let flip = surface_quad_flip(face, surface_shape, ao);
   let corner = select(STANDARD_STRIP[vertex_index], FLIPPED_STRIP[vertex_index], flip);
   let uv = CORNERS[corner];
   var normal = vec3<f32>(0.0);
