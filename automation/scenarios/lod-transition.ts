@@ -269,88 +269,6 @@ async function waitForCentreChange(
   throw new Error("walking forward did not cross an LOD snap boundary");
 }
 
-async function returnToPose(
-  page: Page,
-  engine: EngineClient,
-  target: Vector3,
-  initialCentres: BoundaryCentres,
-  timings: LodTimings,
-): Promise<readonly number[]> {
-  const correctionHistory: {
-    readonly correction: number;
-    readonly distance: number;
-    readonly position: Vector3;
-  }[] = [];
-  const brake = async (duration: number): Promise<void> => {
-    const keys = ["KeyW", "KeyS", "KeyA", "KeyD"];
-    for (const key of keys) await page.keyboard.down(key);
-    try {
-      const deadline = Date.now() + duration;
-      while (Date.now() < deadline) {
-        await readSnapshot(engine, timings);
-        await page.waitForTimeout(16);
-      }
-    } finally {
-      for (const key of keys) await page.keyboard.up(key);
-    }
-  };
-  await brake(300);
-  let latest = await readSnapshot(engine, timings);
-  for (let correction = 0; correction < 80; correction += 1) {
-    const position = cameraPosition(latest);
-    const distance = planarDistance(position, target);
-    correctionHistory.push({ correction, distance, position });
-    if (distance <= 0.008) {
-      await brake(200);
-      latest = await readSnapshot(engine, timings);
-      if (planarDistance(cameraPosition(latest), target) <= 0.015) break;
-      continue;
-    }
-    const yaw = snapshotValue(latest, "yaw");
-    const forward: Vector2 = [Math.sin(yaw), -Math.cos(yaw)];
-    const right: Vector2 = [-forward[1], forward[0]];
-    const error: Vector2 = [target[0] - position[0], target[2] - position[2]];
-    const candidates: readonly (readonly [string, Vector2])[] = [
-      ["KeyW", forward],
-      ["KeyS", [-forward[0], -forward[1]]],
-      ["KeyD", right],
-      ["KeyA", [-right[0], -right[1]]],
-    ];
-    const candidate = candidates.toSorted(
-      (left, rightCandidate) =>
-        rightCandidate[1][0] * error[0] +
-        rightCandidate[1][1] * error[1] -
-        (left[1][0] * error[0] + left[1][1] * error[1]),
-    )[0];
-    if (candidate === undefined) throw new Error("camera correction has no movement candidate");
-    const [key] = candidate;
-    await page.keyboard.down(key);
-    try {
-      const deadline = Date.now() + Math.min(40, Math.max(8, distance * 80));
-      while (Date.now() < deadline) {
-        latest = await readSnapshot(engine, timings);
-        await page.waitForTimeout(4);
-      }
-    } finally {
-      await page.keyboard.up(key);
-    }
-    await brake(48);
-    latest = await readSnapshot(engine, timings);
-  }
-  const error = planarDistance(cameraPosition(latest), target);
-  if (error > 0.025) {
-    throw new Error(
-      `could not return to camera pose; planar error ${error}m; final corrections ${JSON.stringify(correctionHistory.slice(-8))}`,
-    );
-  }
-  if (sameCentres(boundaryCentres(latest), initialCentres)) {
-    throw new Error(
-      `LOD focus returned to its initial state at the comparison pose: ${JSON.stringify(initialCentres)}`,
-    );
-  }
-  return latest;
-}
-
 async function waitForStableFrame(
   page: Page,
   engine: EngineClient,
@@ -659,15 +577,16 @@ function parseOptions(arguments_: readonly string[]): LodOptions {
     look,
     pillarHeight:
       argumentsReader.number("pillar-height", {
-        fallback: boundaryCoverage ? 1 : 40,
+        // Keep the moving gate on the surrounding terrain. A four-metre isolated pedestal exposes
+        // legitimate open air in the lower-screen ROI as the camera moves, which is not a cut hole.
+        fallback: boundaryCoverage ? 1 : watertight ? 40 : 1,
         integer: true,
         minimum: 1,
         maximum: 1_000,
       }) ?? 1,
     pillarRadius:
       argumentsReader.number("pillar-radius", {
-        // The transition fixture needs to cross an eight-voxel snap threshold and physically
-        // return to the comparison pose without stepping off its isolated spawn pedestal.
+        // The transition fixture needs room to cross an eight-voxel snap threshold.
         fallback: boundaryCoverage ? 1 : watertight ? 3 : 12,
         integer: true,
         minimum: 1,
@@ -1039,6 +958,10 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     let transitionCompletionObserved = false;
     let minimumTransitionPhase = Number.POSITIVE_INFINITY;
     let maximumTransitionPhase = Number.NEGATIVE_INFINITY;
+    // Spectator flight drives the same moving-camera LOD focus and cut renderer, then restores the
+    // saved body pose exactly when disabled. The old keyboard braking loop varied by centimetres
+    // and introduced enough parallax to hide the cut comparison behind a positioning error.
+    await engine.setSpectator(true);
     const presentedFrames = await capturePresentedFrames(page, async () => {
       crossedSnapshot = await waitForCentreChange(
         page,
@@ -1114,7 +1037,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     if (!transitionCompletionObserved) {
       throw new Error("LOD cut transition did not complete within the capture window");
     }
-    await returnToPose(page, engine, beforePose, initialCentres, timings);
+    await engine.setSpectator(false);
     const afterSnapshot = await waitForStableChangedFrame(page, engine, initialCentres, timings);
     const afterCentres = boundaryCentres(afterSnapshot);
     const afterPose = cameraPosition(afterSnapshot);

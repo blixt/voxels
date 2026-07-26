@@ -68,6 +68,11 @@ fn unpack_signed_i16(value: u32) -> f32 {
   return f32(select(i32(bits), i32(bits) - 65536, bits >= 32768u));
 }
 
+fn unpack_signed_i3(value: u32) -> f32 {
+  let bits = value & 7u;
+  return f32(select(i32(bits), i32(bits) - 8, bits >= 4u));
+}
+
 fn surface_morph_delta(morph_heights: u32, vertical_corner: i32) -> f32 {
   let bottom = unpack_signed_i16(morph_heights);
   let top = unpack_signed_i16(morph_heights >> 16u);
@@ -75,9 +80,9 @@ fn surface_morph_delta(morph_heights: u32, vertical_corner: i32) -> f32 {
 }
 
 fn unpack_surface_macro_normal(packed: u32, parent: bool) -> vec3<f32> {
-  let shift = select(vec2<u32>(0u, 6u), vec2<u32>(12u, 18u), parent);
-  let x = f32((packed >> shift.x) & 63u) * (2.0 / 63.0) - 1.0;
-  let z = f32((packed >> shift.y) & 63u) * (2.0 / 63.0) - 1.0;
+  let shift = select(vec2<u32>(0u, 5u), vec2<u32>(10u, 15u), parent);
+  let x = f32((packed >> shift.x) & 31u) * (2.0 / 31.0) - 1.0;
+  let z = f32((packed >> shift.y) & 31u) * (2.0 / 31.0) - 1.0;
   let y = sqrt(max(1.0 - x * x - z * z, 0.01));
   return normalize(vec3<f32>(x, y, z));
 }
@@ -189,6 +194,32 @@ fn surface_parent_normal_blend(
   return 1.0 - smoothstep(0.0, width, inside);
 }
 
+fn surface_shape_blend(
+  world: vec3<f32>,
+  material: u32,
+  boundary_centres: array<vec4<f32>, 4>,
+  boundary_half_extents: array<vec4<f32>, 2>,
+) -> f32 {
+  if frame.lod_options.w < 0.5 || (material & 0x80000000u) == 0u {
+    return 0.0;
+  }
+  let level = (material >> 27u) & 7u;
+  let inner_half_extent = lod_boundary_half_extent(level, boundary_half_extents);
+  let inner_delta = abs(world.xz - lod_boundary_center(level, boundary_centres));
+  let inner_inside = inner_half_extent - max(inner_delta.x, inner_delta.y);
+  let inner_width = max(1.6, inner_half_extent * 0.02);
+  let inner_blend = smoothstep(0.0, inner_width, -inner_inside);
+  if level >= 7u {
+    return inner_blend;
+  }
+  let outer_boundary = level + 1u;
+  let outer_half_extent = lod_boundary_half_extent(outer_boundary, boundary_half_extents);
+  let outer_delta = abs(world.xz - lod_boundary_center(outer_boundary, boundary_centres));
+  let outer_inside = outer_half_extent - max(outer_delta.x, outer_delta.y);
+  let outer_width = max(1.6, outer_half_extent * 0.02);
+  return min(inner_blend, smoothstep(0.0, outer_width, outer_inside));
+}
+
 fn surface_wall_macro_blend(world: vec3<f32>) -> f32 {
   // The canonical square reaches 12.8m along its axes and 18.1m at its corners. Start close enough
   // that every first coarse wall still uses almost exactly its voxel-face normal, then converge
@@ -217,10 +248,12 @@ struct MorphedQuadPosition {
 fn quad_world(
   origin: vec3<i32>,
   face: u32,
+  corner: u32,
   uv: vec2<i32>,
   extent: vec2<i32>,
   material: u32,
   ao: u32,
+  surface_shape: u32,
   morph_heights: u32,
   morph_closure: bool,
   morph_geometry: bool,
@@ -228,6 +261,11 @@ fn quad_world(
   boundary_half_extents: array<vec4<f32>, 2>,
 ) -> MorphedQuadPosition {
   var world = vec3<f32>(origin + quad_local(face, uv, extent)) * frame.viewport_voxel.z;
+  if surface_shape != 0u {
+    world.y += unpack_signed_i3(surface_shape >> (corner * 3u))
+      * frame.viewport_voxel.z
+      * surface_shape_blend(world, material, boundary_centres, boundary_half_extents);
+  }
   var parent_blend = 0.0;
   if morph_geometry && (ao & 0x01000000u) != 0u {
     parent_blend = surface_parent_normal_blend(
@@ -271,12 +309,15 @@ fn close_internal_raster_seams(
   uv: vec2<i32>,
   ao: u32,
   material: u32,
+  surface_shape: u32,
 ) -> vec4<f32> {
   // Streamed surface tiles use AO bits 8..11 for their packed macro normal and are meshed in
   // independent patches, so every one of their edges receives conservative raster coverage.
   // Canonical greedy meshes instead carry exact internal-edge flags in those bits; restricting
-  // their expansion preserves true cave and terrain silhouettes.
-  let far_surface = (material & 0x80000000u) != 0u;
+  // their expansion preserves true cave and terrain silhouettes. Shaped neighbors already share
+  // exact world-space vertices. Expanding a wall collapsed by interpolation would resurrect it as
+  // a several-pixel dark streak, so shaped quads deliberately use ordinary raster ownership.
+  let far_surface = (material & 0x80000000u) != 0u && surface_shape == 0u;
   var axis_u = vec3<f32>(1.0, 0.0, 0.0);
   var axis_v = vec3<f32>(0.0, 1.0, 0.0);
   switch face {
@@ -319,7 +360,9 @@ fn voxel_vertex(
   boundary_half_extents: array<vec4<f32>, 2>,
 ) -> VertexOut {
   let face = (material_face >> 16u) & 7u;
-  let material = material_face & 0xfff8ffffu;
+  let packed_material = material_face & 0xfff8ffffu;
+  let surface_shape = ((packed_material >> 8u) & 255u) | (((ao >> 20u) & 15u) << 8u);
+  let material = packed_material & 0xffff00ffu;
   let morph_closure = (extent_voxels.x & MORPH_CLOSURE_EXTENT_FLAG) != 0u;
   let extent = vec2<i32>(vec2<u32>(
     extent_voxels.x & ~MORPH_CLOSURE_EXTENT_FLAG,
@@ -340,10 +383,12 @@ fn voxel_vertex(
   let morphed_position = quad_world(
     origin,
     face,
+    corner,
     uv,
     extent,
     material,
     ao,
+    surface_shape,
     morph_heights,
     morph_closure,
     morph_geometry,
@@ -384,6 +429,7 @@ fn voxel_vertex(
     uv,
     ao,
     material,
+    surface_shape,
   );
   out.world = world;
   out.normal = normal;

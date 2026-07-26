@@ -428,8 +428,13 @@ mod tests {
         let shadows = include_str!("shaders/shadow.wgsl");
         for shader in [voxels, shadows] {
             assert!(shader.contains("@location(0) origin: vec3<i32>"));
+            assert!(shader.contains("@location(3) ao: u32"));
             assert!(shader.contains("@location(4) morph_heights: u32"));
+            assert!(shader.contains("unpack_signed_i3(surface_shape >> (corner * 3u))"));
             assert!(shader.contains("surface_morph_delta(morph_heights, uv.y)"));
+            assert!(
+                shader.contains("select(STANDARD_STRIP[vertex_index], FLIPPED_STRIP[vertex_index]")
+            );
             assert!(!shader.contains("let world = origin + local"));
         }
         assert!(voxels.contains("vec3<f32>(origin + quad_local(face, uv, extent))"));
@@ -451,6 +456,7 @@ mod tests {
         assert!(voxels.contains("INTERNAL_SEAM_LOW_U_FLAG"));
         assert!(voxels.contains("const INTERNAL_SEAM_EXPANSION_PIXELS: f32 = 3.0"));
         assert!(voxels.contains("let far_surface = (material & 0x80000000u) != 0u"));
+        assert!(voxels.contains("&& surface_shape == 0u"));
         assert!(voxels.contains("far_surface || (ao & u_flag) != 0u"));
         assert!(voxels.contains("out.position = close_internal_raster_seams("));
         assert!(voxels.contains("out.world = world"));

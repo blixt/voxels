@@ -29,9 +29,9 @@ use voxels_core::{CameraState, EnclosureSample, FluidState, RemoteAvatarPose};
 use voxels_world::protocol::{EditShape, EditVolume};
 use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, Material, MeshedChunk,
-    Quad, RenderLayer, SURFACE_PATCHES_PER_TILE_EDGE, SurfaceLodLevel, SurfacePatchEdge,
-    SurfacePatchId, SurfaceQuad, SurfaceRegion, SurfaceTileCoord, SurfaceTileMesh,
-    VOXEL_SIZE_METRES, WaterTileMesh, fallback_surface_wall_material,
+    Quad, RenderLayer, SURFACE_PATCHES_PER_TILE_EDGE, SurfaceLodLevel, SurfacePatch,
+    SurfacePatchEdge, SurfacePatchId, SurfaceQuad, SurfaceRegion, SurfaceTileCoord,
+    SurfaceTileMesh, VOXEL_SIZE_METRES, WaterTileMesh, fallback_surface_wall_material,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -75,6 +75,10 @@ const INTERNAL_SEAM_HIGH_U_FLAG: u32 = 1 << 9;
 const INTERNAL_SEAM_LOW_V_FLAG: u32 = 1 << 10;
 const INTERNAL_SEAM_HIGH_V_FLAG: u32 = 1 << 11;
 const SURFACE_MACRO_NORMAL_FLAG: u32 = 1 << 24;
+const SURFACE_SHAPE_MATERIAL_SHIFT: u32 = 8;
+const SURFACE_SHAPE_AO_SHIFT: u32 = 20;
+const SURFACE_SHAPE_MIN_DELTA_VOXELS: i32 = -4;
+const SURFACE_SHAPE_MAX_DELTA_VOXELS: i32 = 3;
 // Sixteen horizon bits occupy otherwise unused material and AO bits: eight cardinal 2-bit angles
 // (own + parent LOD). Keeping the parent profile lets the shader use the same geomorph band as
 // macro normals instead of popping lighting at a surface-ring handoff.
@@ -3189,7 +3193,7 @@ impl Renderer {
                 )
             })
             .collect::<HashSet<_>>();
-        let macro_normals = surface_macro_normals(tile);
+        let (macro_normals, geometry_shapes) = surface_macro_normals_and_shapes(tile);
         let horizon_profiles = surface_horizon_profiles(tile);
         let geometry_morphs = surface_geometry_morphs(tile, &macro_normals);
         let patch_profiles = surface_patch_profiles(tile, &macro_normals, &horizon_profiles);
@@ -3198,20 +3202,27 @@ impl Renderer {
             .iter()
             .zip(macro_normals.iter().copied())
             .zip(horizon_profiles.iter().copied())
-            .map(|((quad, macro_normal), horizon_profile)| GpuQuad {
-                origin: quad.origin,
-                extent_voxels: quad.extent,
-                material_face: pack_surface_horizon_material(
-                    pack_gpu_material_face(
-                        u32::from(quad.material.id())
-                            | FAR_MATERIAL_FLAG
-                            | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
-                        quad.face,
+            .zip(geometry_shapes)
+            .map(
+                |(((quad, macro_normal), horizon_profile), surface_shape)| GpuQuad {
+                    origin: quad.origin,
+                    extent_voxels: quad.extent,
+                    material_face: pack_surface_horizon_material(
+                        pack_gpu_material_face(
+                            u32::from(quad.material.id())
+                                | FAR_MATERIAL_FLAG
+                                | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
+                            quad.face,
+                        ),
+                        horizon_profile,
+                    ) | (u32::from(surface_shape & 0xff)
+                        << SURFACE_SHAPE_MATERIAL_SHIFT),
+                    ao: pack_surface_horizon_ao(
+                        macro_normal | (u32::from(surface_shape >> 8) << SURFACE_SHAPE_AO_SHIFT),
+                        horizon_profile,
                     ),
-                    horizon_profile,
-                ),
-                ao: pack_surface_horizon_ao(macro_normal, horizon_profile),
-            })
+                },
+            )
             .collect();
         let mut gpu_morph_heights = geometry_morphs;
         let closure_base = gpu_quads.len() as u32;
@@ -3254,18 +3265,7 @@ impl Renderer {
             ) else {
                 continue;
             };
-            let bounds_min = glam::Vec3::from_array(
-                patch
-                    .bounds
-                    .min
-                    .map(|value| value as f32 * VOXEL_SIZE_METRES),
-            );
-            let bounds_max = glam::Vec3::from_array(
-                patch
-                    .bounds
-                    .max
-                    .map(|value| value as f32 * VOXEL_SIZE_METRES),
-            );
+            let (bounds_min, bounds_max) = surface_patch_render_bounds(patch, coord.level);
             let slice_template = |boundary_edge, morph_closure| MeshSlice {
                 relative_offset: 0,
                 size: 0,
@@ -5440,7 +5440,26 @@ fn commit_prepared_mesh(
     }
 }
 
-fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
+fn surface_patch_render_bounds(
+    patch: &SurfacePatch,
+    level: SurfaceLodLevel,
+) -> (glam::Vec3, glam::Vec3) {
+    let mut minimum = patch.bounds.min;
+    let mut maximum = patch.bounds.max;
+    if level != SurfaceLodLevel::Stride2 {
+        // Coarse surface shaping displaces existing vertices vertically without changing the
+        // streamed patch bounds. Keep culling conservative for the full signed three-bit range;
+        // otherwise an edge-on patch can disappear while its deformed vertices remain on screen.
+        minimum[1] = minimum[1].saturating_add(SURFACE_SHAPE_MIN_DELTA_VOXELS);
+        maximum[1] = maximum[1].saturating_add(SURFACE_SHAPE_MAX_DELTA_VOXELS);
+    }
+    (
+        glam::Vec3::from_array(minimum.map(|value| value as f32 * VOXEL_SIZE_METRES)),
+        glam::Vec3::from_array(maximum.map(|value| value as f32 * VOXEL_SIZE_METRES)),
+    )
+}
+
+fn surface_macro_normals_and_shapes(tile: &SurfaceTileMesh) -> (Vec<u32>, Vec<u16>) {
     let stride = tile.coord.stride_voxels();
     let span = tile.coord.voxel_span();
     let [origin_x, origin_z] = tile.coord.voxel_origin();
@@ -5470,6 +5489,17 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
     }
 
     let mut packed = vec![0xff; tile.quads.len()];
+    let mut packed_shapes = vec![0_u16; tile.quads.len()];
+    let shape_heights = if tile.coord.level == SurfaceLodLevel::Stride2 {
+        Vec::new()
+    } else {
+        let grid_edge = voxels_world::SURFACE_TILE_EDGE_CELLS + 1;
+        (0..grid_edge)
+            .flat_map(|grid_z| {
+                (0..grid_edge).map(move |grid_x| surface_shape_vertex_height(tile, grid_x, grid_z))
+            })
+            .collect::<Vec<_>>()
+    };
     let mut cell_normals = vec![None::<u32>; edge * edge];
     for z in 0..edge {
         for x in 0..edge {
@@ -5496,6 +5526,10 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
             };
             let value = pack_surface_macro_normals(normal, parent_normal);
             packed[quad_index] = value;
+            if !shape_heights.is_empty() {
+                packed_shapes[quad_index] =
+                    surface_top_shape(tile, &shape_heights, &tile.quads[quad_index]);
+            }
             cell_normals[x + z * edge] = Some(value);
         }
     }
@@ -5508,13 +5542,17 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
         for range in std::iter::once(&patch.quad_range).chain(&patch.edge_ranges) {
             let start = range.start as usize;
             let end = range.end as usize;
-            for (quad, packed_normal) in tile.quads[start..end]
+            for (offset, (quad, packed_normal)) in tile.quads[start..end]
                 .iter()
                 .copied()
                 .zip(&mut packed[start..end])
+                .enumerate()
             {
                 if quad.face == 2 || i32::from(quad.extent[0]) != stride {
                     continue;
+                }
+                if !shape_heights.is_empty() {
+                    packed_shapes[start + offset] = surface_wall_shape(tile, &shape_heights, &quad);
                 }
                 let adjusted_x = i64::from(quad.origin[0])
                     - if quad.face == 0 {
@@ -5554,7 +5592,12 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
             }
         }
     }
-    packed
+    (packed, packed_shapes)
+}
+
+#[cfg(test)]
+fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
+    surface_macro_normals_and_shapes(tile).0
 }
 
 fn pack_surface_morph_heights(bottom_delta: i32, top_delta: i32) -> u32 {
@@ -5564,6 +5607,200 @@ fn pack_surface_morph_heights(bottom_delta: i32, top_delta: i32) -> u32 {
         return 0;
     };
     u32::from(bottom as u16) | (u32::from(top as u16) << 16)
+}
+
+fn pack_surface_shape_deltas(deltas: [i32; 4]) -> u16 {
+    let mut packed = 0_u16;
+    for (corner, delta) in deltas.into_iter().enumerate() {
+        if !(-4..=3).contains(&delta) {
+            return 0;
+        }
+        packed |= ((delta as u16) & 0b111) << (corner * 3);
+    }
+    packed
+}
+
+fn surface_shading_height(tile: &SurfaceTileMesh, cell_x: i32, cell_z: i32) -> Option<i32> {
+    let edge = voxels_world::SURFACE_SHADING_EDGE_SAMPLES as i32;
+    let sample_x = cell_x.checked_add(1)?;
+    let sample_z = cell_z.checked_add(1)?;
+    if !(0..edge).contains(&sample_x) || !(0..edge).contains(&sample_z) {
+        return None;
+    }
+    tile.shading
+        .heights
+        .get((sample_x + sample_z * edge) as usize)
+        .copied()
+}
+
+/// Returns the common height for a coarse heightfield grid vertex.
+///
+/// The four surrounding cell-centre samples already travel with every surface tile for lighting.
+/// Reusing them here makes gentle terrain continuous without requesting finer world data. The
+/// one-cell shading halo gives neighboring patches and tiles the same world-space answer at shared
+/// vertices; the shader independently fades displacement to zero at true LOD ownership cuts.
+/// Steep height ranges stay voxel cliffs instead of being rounded away.
+fn surface_shape_vertex_height(tile: &SurfaceTileMesh, grid_x: i32, grid_z: i32) -> Option<i32> {
+    let tile_edge = voxels_world::SURFACE_TILE_EDGE_CELLS;
+    if !(0..=tile_edge).contains(&grid_x) || !(0..=tile_edge).contains(&grid_z) {
+        return None;
+    }
+    let heights = [
+        surface_shading_height(tile, grid_x - 1, grid_z - 1)?,
+        surface_shading_height(tile, grid_x, grid_z - 1)?,
+        surface_shading_height(tile, grid_x, grid_z)?,
+        surface_shading_height(tile, grid_x - 1, grid_z)?,
+    ];
+    let minimum = *heights.iter().min()?;
+    let maximum = *heights.iter().max()?;
+    // Three signed bits per corner keep the base GPU instance at 24 bytes. A six-voxel local
+    // range covers the natural slopes where interpolation removes visible stairs; steeper relief
+    // remains an intentional voxel cliff.
+    let maximum_range = tile.coord.stride_voxels().saturating_mul(2).min(6);
+    if maximum.saturating_sub(minimum) > maximum_range {
+        return None;
+    }
+    let target = heights
+        .into_iter()
+        .map(i64::from)
+        .sum::<i64>()
+        .saturating_add(2)
+        .div_euclid(4) as i32;
+    heights
+        .into_iter()
+        .all(|height| (-4..=3).contains(&target.saturating_sub(height)))
+        .then_some(target)
+}
+
+fn cached_surface_shape_vertex_height(
+    heights: &[Option<i32>],
+    grid_x: i32,
+    grid_z: i32,
+) -> Option<i32> {
+    let edge = voxels_world::SURFACE_TILE_EDGE_CELLS + 1;
+    if !(0..edge).contains(&grid_x) || !(0..edge).contains(&grid_z) {
+        return None;
+    }
+    heights[(grid_x + grid_z * edge) as usize]
+}
+
+fn surface_top_shape(
+    tile: &SurfaceTileMesh,
+    shape_heights: &[Option<i32>],
+    quad: &SurfaceQuad,
+) -> u16 {
+    let stride = tile.coord.stride_voxels();
+    if quad.face != 2 || quad.extent != [stride as u16; 2] {
+        return 0;
+    }
+    let [origin_x, origin_z] = tile.coord.voxel_origin();
+    let local_x = i64::from(quad.origin[0]) - i64::from(origin_x);
+    let local_z = i64::from(quad.origin[2]) - i64::from(origin_z);
+    let span = i64::from(tile.coord.voxel_span());
+    let stride_i64 = i64::from(stride);
+    if local_x < 0
+        || local_z < 0
+        || local_x >= span
+        || local_z >= span
+        || local_x % stride_i64 != 0
+        || local_z % stride_i64 != 0
+    {
+        return 0;
+    }
+    let cell_x = (local_x / stride_i64) as i32;
+    let cell_z = (local_z / stride_i64) as i32;
+    if surface_shading_height(tile, cell_x, cell_z) != Some(quad.origin[1]) {
+        return 0;
+    }
+    let target_delta = |grid_x, grid_z| {
+        cached_surface_shape_vertex_height(shape_heights, grid_x, grid_z)
+            .map_or(0, |height| height.saturating_sub(quad.origin[1]))
+    };
+    pack_surface_shape_deltas([
+        target_delta(cell_x, cell_z),
+        target_delta(cell_x + 1, cell_z),
+        target_delta(cell_x + 1, cell_z + 1),
+        target_delta(cell_x, cell_z + 1),
+    ])
+}
+
+fn surface_wall_shape(
+    tile: &SurfaceTileMesh,
+    shape_heights: &[Option<i32>],
+    quad: &SurfaceQuad,
+) -> u16 {
+    let stride = tile.coord.stride_voxels();
+    if !matches!(quad.face, 0 | 1 | 4 | 5)
+        || i32::from(quad.extent[0]) != stride
+        || quad.synthetic_fallback
+    {
+        return 0;
+    }
+    let [origin_x, origin_z] = tile.coord.voxel_origin();
+    let own_x = quad.origin[0] - if quad.face == 0 { stride - 1 } else { 0 };
+    let own_z = quad.origin[2] - if quad.face == 4 { stride - 1 } else { 0 };
+    let local_x = i64::from(own_x) - i64::from(origin_x);
+    let local_z = i64::from(own_z) - i64::from(origin_z);
+    let span = i64::from(tile.coord.voxel_span());
+    let stride_i64 = i64::from(stride);
+    if local_x < 0
+        || local_z < 0
+        || local_x >= span
+        || local_z >= span
+        || local_x % stride_i64 != 0
+        || local_z % stride_i64 != 0
+    {
+        return 0;
+    }
+    let cell_x = (local_x / stride_i64) as i32;
+    let cell_z = (local_z / stride_i64) as i32;
+    let (neighbor_x, neighbor_z) = match quad.face {
+        0 => (cell_x + 1, cell_z),
+        1 => (cell_x - 1, cell_z),
+        4 => (cell_x, cell_z + 1),
+        5 => (cell_x, cell_z - 1),
+        _ => unreachable!(),
+    };
+    let (Some(own_height), Some(neighbor_height)) = (
+        surface_shading_height(tile, cell_x, cell_z),
+        surface_shading_height(tile, neighbor_x, neighbor_z),
+    ) else {
+        return 0;
+    };
+    let bottom_height = quad.origin[1].saturating_sub(1);
+    let top_height = quad.origin[1]
+        .saturating_add(i32::from(quad.extent[1]))
+        .saturating_sub(1);
+    if own_height <= neighbor_height
+        || bottom_height < neighbor_height
+        || top_height > own_height
+        || bottom_height >= top_height
+    {
+        return 0;
+    }
+    let endpoints = match quad.face {
+        0 => [(cell_x + 1, cell_z), (cell_x + 1, cell_z + 1)],
+        1 => [(cell_x, cell_z), (cell_x, cell_z + 1)],
+        4 => [(cell_x, cell_z + 1), (cell_x + 1, cell_z + 1)],
+        5 => [(cell_x, cell_z), (cell_x + 1, cell_z)],
+        _ => unreachable!(),
+    };
+    let endpoint = |index: usize| {
+        cached_surface_shape_vertex_height(shape_heights, endpoints[index].0, endpoints[index].1)
+    };
+    let first = endpoint(0);
+    let second = endpoint(1);
+    pack_surface_shape_deltas([
+        first.map_or(0, |height| height.saturating_sub(bottom_height)),
+        second.map_or(0, |height| height.saturating_sub(bottom_height)),
+        second.map_or(0, |height| height.saturating_sub(top_height)),
+        first.map_or(0, |height| height.saturating_sub(top_height)),
+    ])
+}
+
+#[cfg(test)]
+fn surface_geometry_shapes(tile: &SurfaceTileMesh) -> Vec<u16> {
+    surface_macro_normals_and_shapes(tile).1
 }
 
 fn surface_parent_height(tile: &SurfaceTileMesh, x: i32, z: i32) -> Option<i32> {
@@ -5789,13 +6026,14 @@ fn sampled_shading_normal(
 }
 
 fn pack_surface_macro_normals(normal: glam::Vec3, parent: glam::Vec3) -> u32 {
-    // Six bits per horizontal component are ample for the deliberately band-limited terrain
-    // slopes and free the high seven AO bits for the parent-aware horizon profile.
-    let encode = |component: f32| ((component.clamp(-1.0, 1.0) * 0.5 + 0.5) * 63.0).round() as u32;
+    // Five bits per horizontal component are ample for the deliberately band-limited terrain
+    // slopes. The freed four bits carry the high bit of each signed three-bit corner offset while
+    // the high seven AO bits remain the parent-aware horizon profile.
+    let encode = |component: f32| ((component.clamp(-1.0, 1.0) * 0.5 + 0.5) * 31.0).round() as u32;
     encode(normal.x)
-        | (encode(normal.z) << 6)
-        | (encode(parent.x) << 12)
-        | (encode(parent.z) << 18)
+        | (encode(normal.z) << 5)
+        | (encode(parent.x) << 10)
+        | (encode(parent.z) << 15)
         | SURFACE_MACRO_NORMAL_FLAG
 }
 
@@ -7910,13 +8148,13 @@ mod tests {
             .expect("interior terrain top exists");
         let value = packed[quad_index];
         assert_ne!(value & SURFACE_MACRO_NORMAL_FLAG, 0);
-        let normal_x = (value & 63) as f32 * (2.0 / 63.0) - 1.0;
-        let normal_z = ((value >> 6) & 63) as f32 * (2.0 / 63.0) - 1.0;
+        let normal_x = (value & 31) as f32 * (2.0 / 31.0) - 1.0;
+        let normal_z = ((value >> 5) & 31) as f32 * (2.0 / 31.0) - 1.0;
         assert!(
             (-0.23..-0.18).contains(&normal_x),
             "uphill +X must retain a gentle, stable tilt toward -X: {normal_x}"
         );
-        assert!(normal_z.abs() < 0.02);
+        assert!(normal_z.abs() < 0.04);
         let side_index = tile
             .quads
             .iter()
@@ -7927,6 +8165,162 @@ mod tests {
             "terrain wall shares its cell's macro normal"
         );
         assert_eq!(size_of::<GpuQuad>(), 24);
+    }
+
+    #[test]
+    fn coarse_surface_shapes_share_exact_interpolated_corners_without_extra_quads() {
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride4, 0, 0);
+        let tile = voxels_world::generate_surface_tile_mesh_with(coord, |x, z| {
+            (x.div_euclid(4) + z.div_euclid(8), Material::Grass)
+        });
+        let shapes = surface_geometry_shapes(&tile);
+        assert_eq!(shapes.len(), tile.quads.len());
+        let top = |origin: [i32; 3]| {
+            tile.quads
+                .iter()
+                .position(|quad| quad.origin == origin && quad.face == 2)
+                .expect("terrain top exists")
+        };
+        let left = top([4, 1, 4]);
+        let right = top([8, 2, 4]);
+        let signed_corner = |shape: u16, corner: usize| {
+            let bits = i32::from((shape >> (corner * 3)) & 0b111);
+            if bits >= 4 { bits - 8 } else { bits }
+        };
+        let left_high = tile.quads[left].origin[1] + signed_corner(shapes[left], 1);
+        let left_low = tile.quads[left].origin[1] + signed_corner(shapes[left], 2);
+        let right_high = tile.quads[right].origin[1] + signed_corner(shapes[right], 0);
+        let right_low = tile.quads[right].origin[1] + signed_corner(shapes[right], 3);
+        assert_eq!([left_high, left_low], [right_high, right_low]);
+        assert!(
+            shapes.iter().any(|shape| *shape != 0),
+            "gentle coarse relief must use the existing quad vertices for interpolation"
+        );
+        assert_eq!(tile.quads.len(), shapes.len());
+    }
+
+    #[test]
+    fn coarse_surface_shapes_preserve_cliffs_and_stride_two_voxels() {
+        let cliff = voxels_world::generate_surface_tile_mesh_with(
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride4, 0, 0),
+            |x, _| (if x < 8 { 0 } else { 100 }, Material::Stone),
+        );
+        let cliff_shapes = surface_geometry_shapes(&cliff);
+        let cliff_top = cliff
+            .quads
+            .iter()
+            .position(|quad| quad.origin == [4, 0, 4] && quad.face == 2)
+            .expect("top before cliff");
+        assert_eq!(
+            (cliff_shapes[cliff_top] >> 3) & 0b111,
+            0,
+            "a steep shared corner stays on its voxel height"
+        );
+
+        let slope = voxels_world::generate_surface_tile_mesh_with(
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride4, 0, 0),
+            |x, _| (x.div_euclid(4), Material::Grass),
+        );
+        let slope_shapes = surface_geometry_shapes(&slope);
+        let left_patch_top = slope
+            .quads
+            .iter()
+            .position(|quad| quad.origin == [28, 7, 4] && quad.face == 2)
+            .expect("top beside patch boundary");
+        let right_patch_top = slope
+            .quads
+            .iter()
+            .position(|quad| quad.origin == [32, 8, 4] && quad.face == 2)
+            .expect("top across patch boundary");
+        let signed_corner = |shape: u16, corner: usize| {
+            let bits = i32::from((shape >> (corner * 3)) & 0b111);
+            if bits >= 4 { bits - 8 } else { bits }
+        };
+        assert_eq!(
+            slope.quads[left_patch_top].origin[1] + signed_corner(slope_shapes[left_patch_top], 1),
+            slope.quads[right_patch_top].origin[1]
+                + signed_corner(slope_shapes[right_patch_top], 0),
+            "internal patch ownership must not create a geometric step"
+        );
+
+        let neighbor = voxels_world::generate_surface_tile_mesh_with(
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride4, 1, 0),
+            |x, _| (x.div_euclid(4), Material::Grass),
+        );
+        let neighbor_shapes = surface_geometry_shapes(&neighbor);
+        let left_tile_top = slope
+            .quads
+            .iter()
+            .position(|quad| quad.origin == [124, 31, 4] && quad.face == 2)
+            .expect("top beside tile boundary");
+        let right_tile_top = neighbor
+            .quads
+            .iter()
+            .position(|quad| quad.origin == [128, 32, 4] && quad.face == 2)
+            .expect("top across tile boundary");
+        assert_eq!(
+            slope.quads[left_tile_top].origin[1] + signed_corner(slope_shapes[left_tile_top], 1),
+            neighbor.quads[right_tile_top].origin[1]
+                + signed_corner(neighbor_shapes[right_tile_top], 0),
+            "the shading halo must give neighboring tiles the same shared vertex"
+        );
+
+        let stride_two = voxels_world::generate_surface_tile_mesh_with(
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
+            |x, _| (x.div_euclid(2), Material::Grass),
+        );
+        assert!(
+            surface_geometry_shapes(&stride_two)
+                .into_iter()
+                .all(|shape| shape == 0),
+            "the nearest fallback remains literal twenty-centimetre voxels"
+        );
+    }
+
+    #[test]
+    fn coarse_surface_patch_bounds_cover_every_shaped_vertex_delta() {
+        let coarse = voxels_world::generate_surface_tile_mesh_with(
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride4, 0, 0),
+            |x, z| (x.div_euclid(4) + z.div_euclid(8), Material::Grass),
+        );
+        let patch = &coarse.patches[0];
+        let (minimum, maximum) = surface_patch_render_bounds(patch, coarse.coord.level);
+        assert_eq!(
+            minimum.y,
+            (patch.bounds.min[1] + SURFACE_SHAPE_MIN_DELTA_VOXELS) as f32 * VOXEL_SIZE_METRES
+        );
+        assert_eq!(
+            maximum.y,
+            (patch.bounds.max[1] + SURFACE_SHAPE_MAX_DELTA_VOXELS) as f32 * VOXEL_SIZE_METRES
+        );
+        assert_eq!(minimum.x, patch.bounds.min[0] as f32 * VOXEL_SIZE_METRES);
+        assert_eq!(maximum.z, patch.bounds.max[2] as f32 * VOXEL_SIZE_METRES);
+
+        let nearest = voxels_world::generate_surface_tile_mesh_with(
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
+            |x, _| (x.div_euclid(2), Material::Grass),
+        );
+        let nearest_patch = &nearest.patches[0];
+        let (nearest_minimum, nearest_maximum) =
+            surface_patch_render_bounds(nearest_patch, nearest.coord.level);
+        assert_eq!(
+            nearest_minimum,
+            glam::Vec3::from_array(
+                nearest_patch
+                    .bounds
+                    .min
+                    .map(|value| value as f32 * VOXEL_SIZE_METRES)
+            )
+        );
+        assert_eq!(
+            nearest_maximum,
+            glam::Vec3::from_array(
+                nearest_patch
+                    .bounds
+                    .max
+                    .map(|value| value as f32 * VOXEL_SIZE_METRES)
+            )
+        );
     }
 
     #[test]
@@ -8204,6 +8598,41 @@ mod tests {
             assert_eq!((material_face >> SURFACE_LOD_SHIFT) & 7, 3);
             assert_ne!(ao & SURFACE_MACRO_NORMAL_FLAG, 0);
         }
+        assert_eq!(size_of::<GpuQuad>(), 24);
+    }
+
+    #[test]
+    fn surface_shape_bits_round_trip_without_changing_material_or_horizon() {
+        let deltas = [-4, -1, 2, 3];
+        let shape = pack_surface_shape_deltas(deltas);
+        let profile = 0xa55a;
+        let base_material = u32::from(Material::Stone.id())
+            | FAR_MATERIAL_FLAG
+            | (u32::from(SurfaceLodLevel::Stride16.index()) << SURFACE_LOD_SHIFT);
+        let material_face =
+            pack_surface_horizon_material(pack_gpu_material_face(base_material, 5), profile)
+                | (u32::from(shape & 0xff) << SURFACE_SHAPE_MATERIAL_SHIFT);
+        let ao = pack_surface_horizon_ao(
+            pack_surface_macro_normals(glam::Vec3::Y, glam::Vec3::Y)
+                | (u32::from(shape >> 8) << SURFACE_SHAPE_AO_SHIFT),
+            profile,
+        );
+        let unpacked_shape = ((material_face >> SURFACE_SHAPE_MATERIAL_SHIFT) & 0xff)
+            | (((ao >> SURFACE_SHAPE_AO_SHIFT) & 0x0f) << 8);
+        assert_eq!(unpacked_shape, u32::from(shape));
+        for (corner, expected) in deltas.into_iter().enumerate() {
+            let bits = ((unpacked_shape >> (corner * 3)) & 0b111) as i32;
+            let decoded = if bits >= 4 { bits - 8 } else { bits };
+            assert_eq!(decoded, expected);
+        }
+        let unpacked_profile = ((material_face >> SURFACE_HORIZON_MATERIAL_LOW_SHIFT) & 0xff)
+            | (((material_face >> SURFACE_HORIZON_MATERIAL_HIGH_SHIFT) & 1) << 8)
+            | (((ao >> SURFACE_HORIZON_AO_SHIFT) & 0x7f) << 9);
+        assert_eq!(unpacked_profile, u32::from(profile));
+        assert_eq!(material_face & 0xff, u32::from(Material::Stone.id()));
+        assert_eq!((material_face & GPU_FACE_MASK) >> GPU_FACE_SHIFT, 5);
+        assert_eq!((material_face >> SURFACE_LOD_SHIFT) & 7, 3);
+        assert_ne!(ao & SURFACE_MACRO_NORMAL_FLAG, 0);
         assert_eq!(size_of::<GpuQuad>(), 24);
     }
 
@@ -8732,8 +9161,8 @@ mod tests {
                                 && quad.extent == [parent_stride as u16; 2]
                         })
                         .unwrap();
-                    let child_parent = (child_normals[child_quad] >> 12) & 0x0fff;
-                    let parent_own = parent_normals[parent_quad] & 0x0fff;
+                    let child_parent = (child_normals[child_quad] >> 10) & 0x03ff;
+                    let parent_own = parent_normals[parent_quad] & 0x03ff;
                     assert_eq!(
                         child_parent, parent_own,
                         "{child_level:?} child ({x}, {z}) disagrees with {parent_level:?}"
@@ -9438,11 +9867,12 @@ mod tests {
             morph_page: Some(1),
             morph_offset,
         };
-        let contiguous = coalesce_draw_items(vec![item(0, 0), item(24, 4)]);
+        let quad_bytes = size_of::<GpuQuad>() as u32;
+        let contiguous = coalesce_draw_items(vec![item(0, 0), item(quad_bytes, 4)]);
         assert_eq!(contiguous.len(), 1);
         assert_eq!(contiguous[0].quad_count, 2);
 
-        let split_sidecar = coalesce_draw_items(vec![item(0, 0), item(24, 8)]);
+        let split_sidecar = coalesce_draw_items(vec![item(0, 0), item(quad_bytes, 8)]);
         assert_eq!(split_sidecar.len(), 2);
     }
 

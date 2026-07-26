@@ -15,11 +15,21 @@ const CORNERS = array<vec2<i32>, 4>(
   vec2<i32>(0, 1),
 );
 const STANDARD_STRIP = array<u32, 4>(1u, 2u, 0u, 3u);
+const FLIPPED_STRIP = array<u32, 4>(0u, 1u, 3u, 2u);
 const MORPH_CLOSURE_EXTENT_FLAG: u32 = 0x8000u;
+
+fn corner_ao(packed: u32, corner: u32) -> f32 {
+  return f32((packed >> (corner * 2u)) & 3u) / 3.0;
+}
 
 fn unpack_signed_i16(value: u32) -> f32 {
   let bits = value & 65535u;
   return f32(select(i32(bits), i32(bits) - 65536, bits >= 32768u));
+}
+
+fn unpack_signed_i3(value: u32) -> f32 {
+  let bits = value & 7u;
+  return f32(select(i32(bits), i32(bits) - 8, bits >= 4u));
 }
 
 fn surface_morph_delta(morph_heights: u32, vertical_corner: i32) -> f32 {
@@ -53,22 +63,48 @@ fn surface_parent_blend(world: vec3<f32>, material: u32) -> f32 {
   return 1.0 - smoothstep(0.0, width, inside);
 }
 
+fn surface_shape_blend(world: vec3<f32>, material: u32) -> f32 {
+  if shadow_frame.lod_options.w < 0.5 || (material & 0x80000000u) == 0u {
+    return 0.0;
+  }
+  let level = (material >> 27u) & 7u;
+  let inner_half_extent = lod_boundary_half_extent(level);
+  let inner_delta = abs(world.xz - lod_boundary_center(level));
+  let inner_inside = inner_half_extent - max(inner_delta.x, inner_delta.y);
+  let inner_width = max(1.6, inner_half_extent * 0.02);
+  let inner_blend = smoothstep(0.0, inner_width, -inner_inside);
+  if level >= 7u {
+    return inner_blend;
+  }
+  let outer_boundary = level + 1u;
+  let outer_half_extent = lod_boundary_half_extent(outer_boundary);
+  let outer_delta = abs(world.xz - lod_boundary_center(outer_boundary));
+  let outer_inside = outer_half_extent - max(outer_delta.x, outer_delta.y);
+  let outer_width = max(1.6, outer_half_extent * 0.02);
+  return min(inner_blend, smoothstep(0.0, outer_width, outer_inside));
+}
+
 fn shadow_vertex(
   vertex_index: u32,
   origin: vec3<i32>,
   extent_voxels: vec2<u32>,
   material_face: u32,
+  ao: u32,
   morph_heights: u32,
   morph_geometry: bool,
 ) -> vec4<f32> {
   let face = (material_face >> 16u) & 7u;
-  let material = material_face & 0xfff8ffffu;
+  let packed_material = material_face & 0xfff8ffffu;
+  let surface_shape = ((packed_material >> 8u) & 255u) | (((ao >> 20u) & 15u) << 8u);
+  let material = packed_material & 0xffff00ffu;
   let morph_closure = (extent_voxels.x & MORPH_CLOSURE_EXTENT_FLAG) != 0u;
   let extent = vec2<i32>(vec2<u32>(
     extent_voxels.x & ~MORPH_CLOSURE_EXTENT_FLAG,
     extent_voxels.y,
   ));
-  let uv = CORNERS[STANDARD_STRIP[vertex_index]];
+  let flip = corner_ao(ao, 0u) + corner_ao(ao, 2u) > corner_ao(ao, 1u) + corner_ao(ao, 3u);
+  let corner = select(STANDARD_STRIP[vertex_index], FLIPPED_STRIP[vertex_index], flip);
+  let uv = CORNERS[corner];
   var local = vec3<i32>(0);
   switch face {
     case 0u: { local = vec3<i32>(1, uv.y * extent.y, uv.x * extent.x); }
@@ -79,6 +115,11 @@ fn shadow_vertex(
     default: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 0); }
   }
   var world = vec3<f32>(origin + local) * shadow_frame.camera_voxel.w;
+  if surface_shape != 0u {
+    world.y += unpack_signed_i3(surface_shape >> (corner * 3u))
+      * shadow_frame.camera_voxel.w
+      * surface_shape_blend(world, material);
+  }
   if morph_geometry {
     let parent_blend = surface_parent_blend(world, material);
     let morph_blend = select(parent_blend, 1.0 - parent_blend, morph_closure);
@@ -95,8 +136,17 @@ fn vs_main_fixed(
   @location(0) origin: vec3<i32>,
   @location(1) extent_voxels: vec2<u32>,
   @location(2) material_face: u32,
+  @location(3) ao: u32,
 ) -> @builtin(position) vec4<f32> {
-  return shadow_vertex(vertex_index, origin, extent_voxels, material_face, 0u, false);
+  return shadow_vertex(
+    vertex_index,
+    origin,
+    extent_voxels,
+    material_face,
+    ao,
+    0u,
+    false,
+  );
 }
 
 @vertex
@@ -105,6 +155,7 @@ fn vs_main_morph(
   @location(0) origin: vec3<i32>,
   @location(1) extent_voxels: vec2<u32>,
   @location(2) material_face: u32,
+  @location(3) ao: u32,
   @location(4) morph_heights: u32,
 ) -> @builtin(position) vec4<f32> {
   return shadow_vertex(
@@ -112,6 +163,7 @@ fn vs_main_morph(
     origin,
     extent_voxels,
     material_face,
+    ao,
     morph_heights,
     true,
   );
