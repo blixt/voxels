@@ -859,7 +859,7 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
     normal = -normal;
   }
   let facing = clamp(dot(normal, view_direction), 0.0, 1.0);
-  let fresnel = fresnel_schlick(facing, vec3<f32>(0.02037));
+  var fresnel = fresnel_schlick(facing, vec3<f32>(0.02037));
   let reflection = reflected_environment(reflect(-view_direction, normal));
   let camera_to_surface = input.world - frame.camera_time.xyz;
   let distance_to_camera = length(camera_to_surface);
@@ -868,6 +868,7 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   var transmitted_ray = refract(-view_direction, normal, refraction_ratio);
   if dot(transmitted_ray, transmitted_ray) < 0.000001 {
     transmitted_ray = reflect(-view_direction, normal);
+    fresnel = vec3<f32>(1.0);
   }
   let sample_world = input.world + transmitted_ray * mix(0.28, 1.25, smoothstep(0.2, 6.0, top_water_depth));
   let sample_clip = frame.view_projection * vec4<f32>(sample_world, 1.0);

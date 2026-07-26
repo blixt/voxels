@@ -159,6 +159,8 @@ mod tests {
             .expect("water fragment terminator")
             .0;
         assert!(water_fragment.contains("if !cut_transition_visible(input.position.xy)"));
+        assert!(water_fragment.contains("var fresnel = fresnel_schlick("));
+        assert!(water_fragment.contains("fresnel = vec3<f32>(1.0);"));
         assert!(voxels.contains("if refracted_background.w > input.position.z + 0.000001"));
         assert!(!voxels.contains("1.0 - abs(frame.medium.x * 2.0 - 1.0)"));
         assert!(!voxels.contains("sin(input.world.x * 2.7"));
