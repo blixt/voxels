@@ -70,6 +70,12 @@ const FAR_MATERIAL_FLAG: u32 = 1 << 31;
 const SURFACE_LOD_SHIFT: u32 = 27;
 const GPU_FACE_SHIFT: u32 = 16;
 const GPU_FACE_MASK: u32 = 0b111 << GPU_FACE_SHIFT;
+const GPU_SOURCE_SHIFT: u32 = 5;
+const GPU_SOURCE_MASK: u32 = 0b111 << GPU_SOURCE_SHIFT;
+const GPU_SOURCE_FRONTIER: u32 = 1;
+const GPU_SOURCE_LOD_CONNECTOR: u32 = 2;
+const GPU_SOURCE_SURFACE_FALLBACK: u32 = 3;
+const GPU_SOURCE_WATER: u32 = 4;
 const EXACT_VOLUME_FRONTIER_MESH_KEY: MeshKey = (u8::MAX, 2, 0, 0);
 pub const EXACT_VOLUME_FRONTIER_FACE_WORDS: usize = CHUNK_EDGE * CHUNK_EDGE / 64;
 const INTERNAL_SEAM_LOW_U_FLAG: u32 = 1 << 8;
@@ -419,8 +425,15 @@ const _: () = assert!(std::mem::offset_of!(GpuQuad, ao) == 20);
 
 fn pack_gpu_material_face(material: u32, face: u8) -> u32 {
     debug_assert_eq!(material & GPU_FACE_MASK, 0);
+    debug_assert_eq!(material & GPU_SOURCE_MASK, 0);
     debug_assert!(face <= 5);
     material | (u32::from(face) << GPU_FACE_SHIFT)
+}
+
+fn pack_gpu_source_material(material_face: u32, source: u32) -> u32 {
+    debug_assert_eq!(material_face & GPU_SOURCE_MASK, 0);
+    debug_assert!(source < 1 << 3);
+    material_face | (source << GPU_SOURCE_SHIFT)
 }
 
 fn pack_surface_horizon_material(material_face: u32, horizon_profile: u16) -> u32 {
@@ -1490,6 +1503,7 @@ pub struct Renderer {
     target_volume: Option<EditVolume>,
     edit_shape: EditShape,
     options: RenderOptions,
+    geometry_source_debug: bool,
     environment: OutdoorEnvironment,
     server_world_environment: WorldEnvironmentState,
     debug_environment_override: DebugEnvironmentOverride,
@@ -1551,6 +1565,7 @@ struct RenderOptions {
 #[derive(Clone, Copy, Debug)]
 struct FrameState {
     options: RenderOptions,
+    geometry_source_debug: bool,
     environment: OutdoorEnvironment,
     world_environment: WorldEnvironmentState,
     celestial_observation: CelestialObservation,
@@ -1865,6 +1880,7 @@ impl Renderer {
             None,
             FrameState {
                 options,
+                geometry_source_debug: false,
                 environment,
                 world_environment,
                 celestial_observation,
@@ -2425,6 +2441,7 @@ impl Renderer {
             target_volume: None,
             edit_shape: EditShape::Sphere,
             options,
+            geometry_source_debug: false,
             environment,
             server_world_environment: world_environment,
             debug_environment_override: DebugEnvironmentOverride::default(),
@@ -2832,6 +2849,16 @@ impl Renderer {
             .set_diagnostic_sky_active(self.runtime_config.diagnostic_sky_color.is_some());
     }
 
+    /// Colors visible geometry by its actual resident draw source and surface LOD level.
+    ///
+    /// This is deliberately a renderer diagnostic rather than a distance visualization: canonical
+    /// voxel meshes, temporary frontier caps, streamed fallback walls, cross-LOD connectors, and
+    /// every streamed level remain distinguishable even where their geometric ranges meet.
+    pub fn set_geometry_source_debug(&mut self, active: bool) {
+        self.geometry_source_debug = active;
+        self.ui.set_geometry_sources_active(active);
+    }
+
     /// Selects the material-detail pipeline for deterministic profiling without adding a
     /// developer-only control to the player-facing World Lab.
     pub fn set_material_detail_enabled(&mut self, enabled: bool) {
@@ -3002,6 +3029,9 @@ impl Renderer {
             UiAction::DiagnosticSkyChanged(active) => {
                 self.set_diagnostic_sky_color(active.then_some([1.0, 0.0, 1.0]));
             }
+            UiAction::GeometrySourcesChanged(active) => {
+                self.set_geometry_source_debug(active);
+            }
             UiAction::TakeScreenshot => {
                 self.request_screenshot();
             }
@@ -3078,7 +3108,7 @@ impl Renderer {
                 r#""camera":{{"eyeMetres":{:?},"velocityMetresPerSecond":{:?},"yawRadians":{},"pitchRadians":{},"headingDegrees":{},"verticalFovRadians":{},"nearPlaneMetres":0.05,"farPlaneMetres":{},"grounded":{},"locomotion":"{}","fluid":{{"immersion":{},"eyeDepthMetres":{},"eyesSubmerged":{},"swimming":{}}}}},"#,
                 r#""world":{},"environment":{{"serverTimeSeconds":{},"worldDays":{},"dayFraction":{},"yearFraction":{},"moonOrbitFraction":{},"twinklePhase":{},"weatherFraction":{},"weatherCycleSeconds":{},"cloudOffsetMetres":{:?},"cloudVelocityMetresPerSecond":{:?},"cloudCoverage":{},"celestialRevision":"{}","weatherRevision":"{}","sunDirection":{:?},"moonDirection":{:?},"debugDayFraction":{},"debugWeatherFraction":{},"surfaceRegion":{}}},"#,
                 r#""presentation":{{"viewportFingerprint":"{:016x}","worldQuads":{},"waterQuads":{},"drawCalls":{},"waterDrawCalls":{},"lodTransitionQuads":{},"incompleteTransitionEdges":{},"lodCutTransitionActive":{},"lodCutTransitionPhase":{},"surfaceWidth":{},"surfaceHeight":{}}},"#,
-                r#""render":{{"worldLabOpen":{},"features":{{"shadows":{},"voxelAmbientOcclusion":{},"screenSpaceAmbientOcclusion":{},"fog":{},"farTerrain":{},"water":{},"targetOutline":{},"materialDetail":{},"caveHeadlamp":{},"localLighting":{}}},"diagnosticSkyColor":{},"viewDistanceMetres":{},"lodFocus":{},"cutTransition":{}}}}}"#
+                r#""render":{{"worldLabOpen":{},"features":{{"shadows":{},"voxelAmbientOcclusion":{},"screenSpaceAmbientOcclusion":{},"fog":{},"farTerrain":{},"water":{},"targetOutline":{},"materialDetail":{},"caveHeadlamp":{},"localLighting":{}}},"diagnosticSkyColor":{},"geometrySourceDebug":{},"viewDistanceMetres":{},"lodFocus":{},"cutTransition":{}}}}}"#
             ),
             frame_id,
             self.config.width,
@@ -3141,6 +3171,7 @@ impl Renderer {
             options.cave_headlamp,
             options.local_lighting,
             diagnostic_sky,
+            self.geometry_source_debug,
             self.runtime_config.view_distance_metres,
             lod_focus,
             cut_transition,
@@ -3366,16 +3397,22 @@ impl Renderer {
                 |(((quad, macro_normal), horizon_profile), surface_shape)| GpuQuad {
                     origin: quad.origin,
                     extent_voxels: quad.extent,
-                    material_face: pack_surface_horizon_material(
-                        pack_gpu_material_face(
-                            u32::from(quad.material.id())
-                                | FAR_MATERIAL_FLAG
-                                | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
-                            quad.face,
-                        ),
-                        horizon_profile,
-                    ) | (u32::from(surface_shape & 0xff)
-                        << SURFACE_SHAPE_MATERIAL_SHIFT),
+                    material_face: pack_gpu_source_material(
+                        pack_surface_horizon_material(
+                            pack_gpu_material_face(
+                                u32::from(quad.material.id())
+                                    | FAR_MATERIAL_FLAG
+                                    | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
+                                quad.face,
+                            ),
+                            horizon_profile,
+                        ) | (u32::from(surface_shape & 0xff) << SURFACE_SHAPE_MATERIAL_SHIFT),
+                        if quad.synthetic_fallback {
+                            GPU_SOURCE_SURFACE_FALLBACK
+                        } else {
+                            0
+                        },
+                    ),
                     ao: pack_surface_horizon_ao(
                         macro_normal | (u32::from(surface_shape >> 8) << SURFACE_SHAPE_AO_SHIFT),
                         horizon_profile,
@@ -3407,10 +3444,13 @@ impl Renderer {
             .map(|quad| GpuQuad {
                 origin: quad.origin,
                 extent_voxels: quad.extent,
-                material_face: pack_gpu_material_face(
-                    u32::from(quad.material.id())
-                        | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
-                    quad.face,
+                material_face: pack_gpu_source_material(
+                    pack_gpu_material_face(
+                        u32::from(quad.material.id())
+                            | (u32::from(coord.level.index()) << SURFACE_LOD_SHIFT),
+                        quad.face,
+                    ),
+                    GPU_SOURCE_WATER,
                 ),
                 ao: 0xff,
             })
@@ -3992,16 +4032,25 @@ impl Renderer {
         if gpu_quads.is_empty() {
             return Ok(None);
         }
+        let gpu_quads = gpu_quads
+            .iter()
+            .copied()
+            .map(|mut quad| {
+                quad.material_face =
+                    pack_gpu_source_material(quad.material_face, GPU_SOURCE_LOD_CONNECTOR);
+                quad
+            })
+            .collect::<Vec<_>>();
         let active = self.lod_draw_plan.transition_mesh_key;
         let key = if active == Some(LOD_TRANSITION_MESH_KEYS[0]) {
             LOD_TRANSITION_MESH_KEYS[1]
         } else {
             LOD_TRANSITION_MESH_KEYS[0]
         };
-        if gpu_quads_match_resident(self.chunks.get(&key), gpu_quads, Some(morph_heights)) {
+        if gpu_quads_match_resident(self.chunks.get(&key), &gpu_quads, Some(morph_heights)) {
             return Ok(Some(key));
         }
-        let Some((bounds_min, bounds_max)) = gpu_quad_bounds(gpu_quads) else {
+        let Some((bounds_min, bounds_max)) = gpu_quad_bounds(&gpu_quads) else {
             return Err(());
         };
         let quad_count = gpu_quads.len() as u32;
@@ -4019,7 +4068,7 @@ impl Renderer {
             render_layer: RenderLayer::Opaque,
         };
         let Some(prepared) =
-            self.prepare_mesh_sliced(key, gpu_quads, Some(morph_heights), vec![slice])
+            self.prepare_mesh_sliced(key, &gpu_quads, Some(morph_heights), vec![slice])
         else {
             return Err(());
         };
@@ -4301,6 +4350,7 @@ impl Renderer {
             self.target_volume,
             FrameState {
                 options: frame_options,
+                geometry_source_debug: self.geometry_source_debug,
                 environment: self.environment,
                 world_environment: self.world_environment,
                 celestial_observation: self.celestial_observation,
@@ -4411,8 +4461,11 @@ impl Renderer {
         let refract_water =
             !water_draw_list.spans.is_empty() || !outgoing_water_draw_list.spans.is_empty();
         let diagnostic_sky = self.runtime_config.diagnostic_sky_color.is_some();
-        let clouds_active = self.volumetric_cloud_gpu.enabled() && !diagnostic_sky;
-        let weather_active = self.environment.precipitation > 0.002 && !diagnostic_sky;
+        let diagnostic_geometry = self.geometry_source_debug;
+        let clouds_active =
+            self.volumetric_cloud_gpu.enabled() && !diagnostic_sky && !diagnostic_geometry;
+        let weather_active =
+            self.environment.precipitation > 0.002 && !diagnostic_sky && !diagnostic_geometry;
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
         self.volumetric_cloud_gpu
@@ -6863,7 +6916,7 @@ fn gpu_quad_bounds(quads: &[GpuQuad]) -> Option<(glam::Vec3, glam::Vec3)> {
     for quad in quads {
         let face = (quad.material_face & GPU_FACE_MASK) >> GPU_FACE_SHIFT;
         let extent = glam::Vec2::new(
-            f32::from(quad.extent_voxels[0]) * VOXEL_SIZE_METRES,
+            f32::from(quad.extent_voxels[0] & !MORPH_CLOSURE_EXTENT_FLAG) * VOXEL_SIZE_METRES,
             f32::from(quad.extent_voxels[1]) * VOXEL_SIZE_METRES,
         );
         let size = match face {
@@ -7126,7 +7179,7 @@ fn frontier_face_gpu_quads(frontier: &ExactVolumeFrontierFace) -> Vec<GpuQuad> {
             quads.push(GpuQuad {
                 origin,
                 extent_voxels: [width as u16, height as u16],
-                material_face,
+                material_face: pack_gpu_source_material(material_face, GPU_SOURCE_FRONTIER),
                 ao: 0xff,
             });
         }
@@ -7516,6 +7569,7 @@ fn frame_uniform(
 ) -> FrameUniform {
     let FrameState {
         options,
+        geometry_source_debug,
         environment,
         world_environment,
         celestial_observation,
@@ -7562,7 +7616,12 @@ fn frame_uniform(
             if options.far_terrain { 1.0 } else { 0.0 },
             if options.target_outline { 1.0 } else { 0.0 },
         ],
-        lod_options: [0.0, 0.0, 0.0, if lod_focus.is_some() { 1.0 } else { 0.0 }],
+        lod_options: [
+            if geometry_source_debug { 1.0 } else { 0.0 },
+            0.0,
+            0.0,
+            if lod_focus.is_some() { 1.0 } else { 0.0 },
+        ],
         lod_boundary_centres: lod_boundary_centres_uniform(lod_focus),
         lod_boundary_half_extents: lod_boundary_half_extents_uniform(lod_focus),
         camera_forward: [
@@ -8282,6 +8341,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn geometry_source_tag_preserves_material_face_and_extents_need_no_tag_bits() {
+        assert!(
+            Material::ALL
+                .iter()
+                .all(|material| u32::from(material.id()) & GPU_SOURCE_MASK == 0)
+        );
+        let material_face =
+            pack_gpu_material_face(u32::from(Material::Stone.id()) | FAR_MATERIAL_FLAG, 5);
+        let quad = GpuQuad {
+            origin: [0; 3],
+            extent_voxels: [u16::MAX, u16::MAX],
+            material_face,
+            ao: 0,
+        };
+        let tagged = GpuQuad {
+            material_face: pack_gpu_source_material(quad.material_face, GPU_SOURCE_LOD_CONNECTOR),
+            ..quad
+        };
+        assert_eq!(
+            (tagged.material_face >> GPU_SOURCE_SHIFT) & 7,
+            GPU_SOURCE_LOD_CONNECTOR
+        );
+        assert_eq!(tagged.material_face & !GPU_SOURCE_MASK, material_face);
+        assert_eq!(tagged.extent_voxels, quad.extent_voxels);
+    }
+
     fn flat_patch_profile(patch: SurfacePatchId, height: i32) -> SurfacePatchProfile {
         flat_patch_profile_with_parent(patch, height, None)
     }
@@ -8668,6 +8754,10 @@ mod tests {
             ]
         );
         assert_eq!(x_quads[0].extent_voxels, [2, 3]);
+        assert_eq!(
+            (x_quads[0].material_face & GPU_SOURCE_MASK) >> GPU_SOURCE_SHIFT,
+            GPU_SOURCE_FRONTIER
+        );
         assert_eq!(x_quads[0].material_face >> GPU_FACE_SHIFT & 7, 0);
 
         let mut z_cells = [0_u64; EXACT_VOLUME_FRONTIER_FACE_WORDS];
@@ -8692,6 +8782,10 @@ mod tests {
             ]
         );
         assert_eq!(z_quads[0].extent_voxels, [3, 2]);
+        assert_eq!(
+            (z_quads[0].material_face & GPU_SOURCE_MASK) >> GPU_SOURCE_SHIFT,
+            GPU_SOURCE_FRONTIER
+        );
         assert_eq!(z_quads[0].material_face >> GPU_FACE_SHIFT & 7, 5);
 
         assert!(

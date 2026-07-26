@@ -245,6 +245,7 @@ export interface EngineAutomationApi {
   profile(profileId: number): void;
   spectator(active: boolean): Promise<boolean>;
   diagnosticSky(rgb: readonly [number, number, number] | null): Promise<boolean>;
+  geometrySourceDebug(enabled: boolean): Promise<boolean>;
   materialDetail(enabled: boolean): Promise<boolean>;
   lodBoundaries(halfExtentsVoxels: readonly number[]): Promise<boolean>;
   exactVolumePresented(x: number, y: number, z: number): Promise<boolean>;

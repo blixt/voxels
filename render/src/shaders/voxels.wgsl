@@ -39,6 +39,7 @@ struct VertexOut {
   @location(2) @interpolate(flat) material: u32,
   @location(3) ao: f32,
   @location(4) @interpolate(flat) terrain_lighting: vec2<f32>,
+  @location(5) @interpolate(flat) source: u32,
 };
 
 const CORNERS = array<vec2<i32>, 4>(
@@ -50,6 +51,7 @@ const CORNERS = array<vec2<i32>, 4>(
 const STANDARD_STRIP = array<u32, 4>(1u, 2u, 0u, 3u);
 const FLIPPED_STRIP = array<u32, 4>(0u, 1u, 3u, 2u);
 const MORPH_CLOSURE_EXTENT_FLAG: u32 = 0x8000u;
+const GPU_SOURCE_SHIFT: u32 = 5u;
 const INTERNAL_SEAM_LOW_U_FLAG: u32 = 0x00000100u;
 const INTERNAL_SEAM_HIGH_U_FLAG: u32 = 0x00000200u;
 const INTERNAL_SEAM_LOW_V_FLAG: u32 = 0x00000400u;
@@ -378,7 +380,8 @@ fn voxel_vertex(
   boundary_half_extents: array<vec4<f32>, 2>,
 ) -> VertexOut {
   let face = (material_face >> 16u) & 7u;
-  let packed_material = material_face & 0xfff8ffffu;
+  let encoded_source = (material_face >> GPU_SOURCE_SHIFT) & 7u;
+  let packed_material = material_face & 0xfff8ff1fu;
   let surface_shape = ((packed_material >> 8u) & 255u) | (((ao >> 20u) & 15u) << 8u);
   let material = packed_material & 0xffff00ffu;
   let morph_closure = (extent_voxels.x & MORPH_CLOSURE_EXTENT_FLAG) != 0u;
@@ -454,6 +457,9 @@ fn voxel_vertex(
   out.material = material;
   out.ao = select(corner_ao(ao, corner), 1.0, surface_macro_normal);
   out.terrain_lighting = terrain_lighting;
+  // Morph closures are ordinary streamed products in storage but a distinct draw source on the
+  // active cut. Keep them visually separable without consuming another packed extent category.
+  out.source = select(encoded_source, 5u, morph_closure);
   return out;
 }
 
@@ -719,6 +725,59 @@ fn material_macro_tint(material: u32, world: vec3<f32>) -> vec3<f32> {
   }
 }
 
+fn streamed_lod_debug_color(level: u32) -> vec3<f32> {
+  let colors = array<vec3<f32>, 8>(
+    vec3<f32>(0.12, 1.00, 0.18),
+    vec3<f32>(0.62, 1.00, 0.06),
+    vec3<f32>(1.00, 0.86, 0.04),
+    vec3<f32>(1.00, 0.43, 0.03),
+    vec3<f32>(1.00, 0.07, 0.04),
+    vec3<f32>(1.00, 0.04, 0.62),
+    vec3<f32>(0.62, 0.08, 1.00),
+    vec3<f32>(0.10, 0.32, 1.00),
+  );
+  return colors[min(level, 7u)];
+}
+
+fn geometry_source_debug_color(input: VertexOut) -> vec3<f32> {
+  let streamed = (input.material & 0x80000000u) != 0u;
+  let level = (input.material >> 27u) & 7u;
+  var color = select(
+    vec3<f32>(0.02, 0.82, 1.00),
+    streamed_lod_debug_color(level),
+    streamed,
+  );
+  switch input.source {
+    // Temporary opaque exact-volume frontier cap.
+    case 1u: { color = vec3<f32>(1.00, 0.02, 0.02); }
+    // Height-matched connector generated between two ownership sources.
+    case 2u: { color = vec3<f32>(1.00); }
+    // Streamed synthetic fallback wall standing in for unavailable exact vertical data.
+    case 3u: { color = vec3<f32>(1.00, 0.72, 0.02); }
+    // Streamed water keeps the surface level's hue but shifts toward blue.
+    case 4u: { color = mix(streamed_lod_debug_color(level), vec3<f32>(0.02, 0.35, 1.00), 0.48); }
+    // Surface morph closure drawn only inside a geometric handoff band.
+    case 5u: { color = vec3<f32>(0.95, 0.20, 1.00); }
+    default: {}
+  }
+  if CUT_TRANSITION != 0u {
+    let checker = (u32(input.position.x) + u32(input.position.y)) & 4u;
+    color = select(vec3<f32>(1.00, 0.02, 0.02), vec3<f32>(1.00), checker != 0u);
+  }
+
+  // Draw the source's actual sampling lattice in world space. Canonical cyan therefore carries a
+  // 10 cm grid, while every streamed hue exposes its own 20 cm, 40 cm, ... cell alignment.
+  let stride_voxels = select(1u, 1u << (level + 1u), streamed || input.source >= 2u);
+  let grid = surface_uv(input.world, input.normal)
+    / (frame.viewport_voxel.z * f32(stride_voxels));
+  let fraction = fract(grid);
+  let edge = min(min(fraction.x, 1.0 - fraction.x), min(fraction.y, 1.0 - fraction.y));
+  let footprint = max(max(fwidth(grid).x, fwidth(grid).y), 0.0005);
+  let resolved = 1.0 - smoothstep(0.28, 0.55, footprint);
+  let line = (1.0 - smoothstep(0.0, footprint * 0.75, edge)) * resolved;
+  return mix(color, color * 0.12, line * 0.72);
+}
+
 fn hash31(position: vec3<f32>) -> f32 {
   let value = dot(position, vec3<f32>(127.1, 311.7, 74.7));
   return fract(sin(value) * 43758.5453);
@@ -905,6 +964,9 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   }
   if !cut_transition_visible(input.position.xy) {
     discard;
+  }
+  if frame.lod_options.x > 0.5 {
+    return vec4<f32>(geometry_source_debug_color(input), 1.0);
   }
   let base_uv = input.position.xy / frame.viewport_voxel.xy;
   let base_background = scene_sample(base_uv);
@@ -1136,6 +1198,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   // Keep derivatives in uniform flow, then apply the coverage-preserving cut transition mask.
   if !cut_transition_visible(input.position.xy) {
     discard;
+  }
+  if frame.lod_options.x > 0.5 {
+    return vec4<f32>(geometry_source_debug_color(input), 1.0);
   }
   if distance_to_camera >= 144.0 {
     let distant_radiance = distant_surface_radiance(input, material, sun);

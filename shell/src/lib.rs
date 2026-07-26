@@ -4257,6 +4257,17 @@ mod web {
             true
         }
 
+        pub fn set_geometry_source_debug(&self, enabled: bool) -> bool {
+            let Some(engine) = self.engine.as_ref() else {
+                return false;
+            };
+            engine
+                .renderer
+                .borrow_mut()
+                .set_geometry_source_debug(enabled);
+            true
+        }
+
         pub fn set_material_detail(&self, enabled: bool) -> bool {
             let Some(engine) = self.engine.as_ref() else {
                 return false;

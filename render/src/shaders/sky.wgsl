@@ -120,6 +120,11 @@ fn celestial_star_radiance(ray: vec3<f32>, moon_disc: f32) -> vec3<f32> {
 
 @fragment
 fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+  // Geometry-source mode owns the entire diagnostic palette. Keep missing coverage black even
+  // when the separate magenta-sky detector is armed, so L5 and morph-source colors stay unambiguous.
+  if frame.lod_options.x > 0.5 {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+  }
   if frame.diagnostic_sky.w > 0.5 {
     return vec4<f32>(frame.diagnostic_sky.rgb, 1.0);
   }

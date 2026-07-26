@@ -512,6 +512,22 @@ mod tests {
     }
 
     #[test]
+    fn geometry_source_debug_uses_real_mesh_tags_and_lod_sampling_lattices() {
+        let voxels = include_str!("shaders/voxels.wgsl");
+        let shadow = include_str!("shaders/shadow.wgsl");
+        assert!(voxels.contains("fn geometry_source_debug_color(input: VertexOut)"));
+        assert!(voxels.contains("streamed_lod_debug_color(level)"));
+        assert!(voxels.contains("switch input.source"));
+        assert!(voxels.contains("let encoded_source = (material_face >> GPU_SOURCE_SHIFT) & 7u"));
+        assert!(voxels.contains("let stride_voxels = select("));
+        assert!(voxels.contains("if frame.lod_options.x > 0.5"));
+        for shader in [voxels, shadow] {
+            assert!(shader.contains("extent_voxels.x & ~MORPH_CLOSURE_EXTENT_FLAG"));
+            assert!(shader.contains("extent_voxels.y,"));
+        }
+    }
+
+    #[test]
     fn outgoing_cut_uses_its_frozen_lod_coordinate_system() {
         let voxels = include_str!("shaders/voxels.wgsl");
         assert!(voxels.contains("cut_transition.lod_boundary_centres"));

@@ -269,6 +269,7 @@ pub enum UiTarget {
     Header,
     CopyDiagnostics,
     DiagnosticSky,
+    GeometrySources,
     TakeScreenshot,
     Close,
     Time(TimeControl),
@@ -288,6 +289,7 @@ pub enum UiAction {
     EditShapeChanged(EditShape),
     CopyDiagnostics,
     DiagnosticSkyChanged(bool),
+    GeometrySourcesChanged(bool),
     TakeScreenshot,
     PanelOpenChanged(bool),
     TimeChanged(TimeControl),
@@ -520,6 +522,7 @@ pub struct MissionControlUi {
     spectator_available: bool,
     spectator_active: bool,
     diagnostic_sky_active: bool,
+    geometry_sources_active: bool,
     time_control: TimeControl,
     weather_control: WeatherControl,
     reduced_motion: bool,
@@ -559,6 +562,7 @@ impl MissionControlUi {
             spectator_available: config.spectator_available,
             spectator_active: false,
             diagnostic_sky_active: false,
+            geometry_sources_active: false,
             time_control: TimeControl::FollowServer,
             weather_control: WeatherControl::FollowServer,
             reduced_motion: false,
@@ -620,6 +624,14 @@ impl MissionControlUi {
 
     pub fn set_diagnostic_sky_active(&mut self, active: bool) {
         self.diagnostic_sky_active = active;
+    }
+
+    pub const fn geometry_sources_active(&self) -> bool {
+        self.geometry_sources_active
+    }
+
+    pub fn set_geometry_sources_active(&mut self, active: bool) {
+        self.geometry_sources_active = active;
     }
 
     pub const fn time_control(&self) -> TimeControl {
@@ -910,7 +922,7 @@ impl MissionControlUi {
             world_card.x,
             movement_card.y + movement_card.height + 10.0,
             world_card.width,
-            70.0,
+            118.0,
         );
         let screenshot_width = if compact { 104.0 } else { 128.0 };
         let screenshot = Rect::new(
@@ -925,10 +937,20 @@ impl MissionControlUi {
             (screenshot.x - diagnostics_card.x - 20.0).max(40.0),
             46.0,
         );
+        let geometry_sources = Rect::new(
+            diagnostics_card.x + 10.0,
+            diagnostics_card.y + 72.0,
+            diagnostics_card.width - 20.0,
+            40.0,
+        );
         regions.extend([
             InteractiveRegion {
                 target: UiTarget::DiagnosticSky,
                 rect: diagnostic_sky,
+            },
+            InteractiveRegion {
+                target: UiTarget::GeometrySources,
+                rect: geometry_sources,
             },
             InteractiveRegion {
                 target: UiTarget::TakeScreenshot,
@@ -1056,6 +1078,10 @@ impl MissionControlUi {
                 self.diagnostic_sky_active = !self.diagnostic_sky_active;
                 UiAction::DiagnosticSkyChanged(self.diagnostic_sky_active)
             }
+            Some(UiTarget::GeometrySources) if self.developer_controls => {
+                self.geometry_sources_active = !self.geometry_sources_active;
+                UiAction::GeometrySourcesChanged(self.geometry_sources_active)
+            }
             Some(UiTarget::TakeScreenshot) => UiAction::TakeScreenshot,
             Some(UiTarget::Close) => self.set_open(false),
             Some(UiTarget::Time(control)) if self.developer_controls => {
@@ -1072,7 +1098,8 @@ impl MissionControlUi {
             Some(UiTarget::Time(_))
             | Some(UiTarget::Weather(_))
             | Some(UiTarget::Spectator)
-            | Some(UiTarget::DiagnosticSky) => UiAction::None,
+            | Some(UiTarget::DiagnosticSky)
+            | Some(UiTarget::GeometrySources) => UiAction::None,
             Some(UiTarget::Header) | None => UiAction::None,
         }
     }
@@ -1436,6 +1463,50 @@ impl MissionControlUi {
             );
             let track = Rect::new(rect.x + rect.width - 42.0, rect.y + 11.0, 40.0, 22.0);
             let value = f32::from(self.diagnostic_sky_active);
+            push_surface(
+                draw,
+                track,
+                11.0,
+                TOGGLE_OFF
+                    .mix(ACCENT, value)
+                    .with_alpha(opacity * enabled_alpha),
+                PANEL_BORDER.with_alpha(opacity * 0.55 * enabled_alpha),
+                SurfaceRole::ToggleTrack,
+            );
+            push_surface(
+                draw,
+                Rect::new(track.x + 3.0 + value * 18.0, track.y + 3.0, 16.0, 16.0),
+                8.0,
+                TEXT_PRIMARY.with_alpha(opacity * enabled_alpha),
+                Color::new(1.0, 1.0, 1.0, 0.2 * opacity * enabled_alpha),
+                SurfaceRole::ToggleThumb,
+            );
+        }
+
+        if let Some(rect) = layout.region(UiTarget::GeometrySources) {
+            let enabled_alpha = if self.developer_controls { 1.0 } else { 0.45 };
+            push_text(
+                draw,
+                if layout.compact {
+                    "SOURCE / LOD COLORS"
+                } else {
+                    "GEOMETRY SOURCE / LOD COLORS"
+                },
+                [rect.x + 2.0, rect.y + 11.0],
+                if layout.compact { 7.5 } else { 8.5 },
+                TEXT_PRIMARY.with_alpha(opacity * enabled_alpha),
+                TextAlign::Left,
+            );
+            push_text(
+                draw,
+                "Exact cyan · L0→7 green→blue · connector white · holes black",
+                [rect.x + 2.0, rect.y + 29.0],
+                if layout.compact { 6.0 } else { 7.0 },
+                TEXT_MUTED.with_alpha(opacity * enabled_alpha),
+                TextAlign::Left,
+            );
+            let track = Rect::new(rect.x + rect.width - 42.0, rect.y + 8.0, 40.0, 22.0);
+            let value = f32::from(self.geometry_sources_active);
             push_surface(
                 draw,
                 track,
@@ -1947,6 +2018,23 @@ impl MissionControlUi {
                 "off"
             }
         );
+        let _ = writeln!(
+            report,
+            "Geometry source / LOD colors: {}",
+            if self.geometry_sources_active {
+                "on"
+            } else {
+                "off"
+            }
+        );
+        let _ = writeln!(
+            report,
+            "Geometry legend: exact cyan; L0 green; L1 lime; L2 yellow; L3 orange; \
+             L4 red; L5 magenta; L6 violet; L7 blue; frontier red; connector white; \
+             fallback amber; streamed water blue; morph closure pink; outgoing cut red/white; \
+             missing coverage / sky black"
+        );
+        let _ = writeln!(report, "Collision geometry: simulation only, not rendered");
 
         let _ = writeln!(report, "\nWORLD");
         let _ = writeln!(
@@ -2400,6 +2488,15 @@ mod tests {
             UiAction::DiagnosticSkyChanged(false)
         );
         assert_eq!(
+            activate(&mut ui, UiTarget::GeometrySources, viewport),
+            UiAction::GeometrySourcesChanged(true)
+        );
+        assert!(ui.geometry_sources_active());
+        assert_eq!(
+            activate(&mut ui, UiTarget::GeometrySources, viewport),
+            UiAction::GeometrySourcesChanged(false)
+        );
+        assert_eq!(
             activate(&mut ui, UiTarget::TakeScreenshot, viewport),
             UiAction::TakeScreenshot
         );
@@ -2424,6 +2521,10 @@ mod tests {
         assert_eq!(ui.layout(viewport).region(UiTarget::Spectator), None);
         assert_eq!(
             activate(&mut ui, UiTarget::DiagnosticSky, viewport),
+            UiAction::None
+        );
+        assert_eq!(
+            activate(&mut ui, UiTarget::GeometrySources, viewport),
             UiAction::None
         );
         assert_eq!(
@@ -2491,6 +2592,8 @@ mod tests {
         let report = ui.diagnostics_report();
         assert!(report.contains("Time authority: local debug override"));
         assert!(report.contains("Weather authority: local debug override"));
+        assert!(report.contains("L0 green; L1 lime; L2 yellow"));
+        assert!(report.contains("Collision geometry: simulation only, not rendered"));
         assert!(!report.contains("RENDER FEATURES"));
     }
 

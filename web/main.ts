@@ -135,6 +135,10 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     number,
     { resolve: (active: boolean) => void; reject: (reason: Error) => void }
   >();
+  const geometrySourceDebugResolvers = new Map<
+    number,
+    { resolve: (active: boolean) => void; reject: (reason: Error) => void }
+  >();
   const materialDetailResolvers = new Map<
     number,
     { resolve: (active: boolean) => void; reject: (reason: Error) => void }
@@ -170,6 +174,8 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     spectatorResolvers.clear();
     for (const { reject } of diagnosticSkyResolvers.values()) reject(error);
     diagnosticSkyResolvers.clear();
+    for (const { reject } of geometrySourceDebugResolvers.values()) reject(error);
+    geometrySourceDebugResolvers.clear();
     for (const { reject } of materialDetailResolvers.values()) reject(error);
     materialDetailResolvers.clear();
     for (const { reject } of lodBoundaryResolvers.values()) reject(error);
@@ -234,6 +240,13 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
           green: rgb?.[1] ?? 0,
           blue: rgb?.[2] ?? 0,
         });
+      }),
+    geometrySourceDebug: (enabled) =>
+      new Promise<boolean>((resolve, reject) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        geometrySourceDebugResolvers.set(requestId, { resolve, reject });
+        worker.postMessage({ kind: "geometrySourceDebug", requestId, enabled });
       }),
     materialDetail: (enabled) =>
       new Promise<boolean>((resolve, reject) => {
@@ -380,6 +393,9 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     } else if (event.data.kind === "diagnosticSky") {
       diagnosticSkyResolvers.get(event.data.requestId)?.resolve(event.data.active);
       diagnosticSkyResolvers.delete(event.data.requestId);
+    } else if (event.data.kind === "geometrySourceDebug") {
+      geometrySourceDebugResolvers.get(event.data.requestId)?.resolve(event.data.accepted);
+      geometrySourceDebugResolvers.delete(event.data.requestId);
     } else if (event.data.kind === "materialDetail") {
       materialDetailResolvers.get(event.data.requestId)?.resolve(event.data.accepted);
       materialDetailResolvers.delete(event.data.requestId);

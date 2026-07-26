@@ -926,11 +926,32 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
         screenshot,
         "image/png",
       );
+      const image = await analyzeWatertightTerrain(page, screenshot);
       headingSamples.push({
         yaw: options.look[0] + offset,
-        image: await analyzeWatertightTerrain(page, screenshot),
+        image,
       });
+      if (image.diagnosticSkyPixels > 0) {
+        await engine.setGeometrySourceDebug(true);
+        const geometrySources = await page.screenshot();
+        await context.artifacts.write(
+          `LOD heading ${index + 1} geometry sources`,
+          `heading-${index + 1}-geometry-sources.png`,
+          geometrySources,
+          "image/png",
+        );
+        await engine.setGeometrySourceDebug(false);
+      }
     }
+    await engine.setGeometrySourceDebug(true);
+    const geometrySources = await page.screenshot();
+    await context.artifacts.write(
+      "LOD geometry sources",
+      "geometry-sources.png",
+      geometrySources,
+      "image/png",
+    );
+    await engine.setGeometrySourceDebug(false);
     await engine.setDiagnosticSky(null);
     await sampleStablePerformance(page, engine, timings, 2_000);
     const image = headingSamples.reduce(

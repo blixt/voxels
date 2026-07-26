@@ -69,6 +69,7 @@ export type ToWorker =
       green: number;
       blue: number;
     }
+  | { kind: "geometrySourceDebug"; requestId: number; enabled: boolean }
   | { kind: "materialDetail"; requestId: number; enabled: boolean }
   | { kind: "lodBoundaries"; requestId: number; halfExtentsVoxels: number[] }
   | { kind: "exactVolumePresented"; requestId: number; x: number; y: number; z: number }
@@ -104,6 +105,7 @@ export type FromWorker =
   | { kind: "snapshot"; requestId: number; values: number[] }
   | { kind: "spectator"; requestId: number; active: boolean }
   | { kind: "diagnosticSky"; requestId: number; active: boolean }
+  | { kind: "geometrySourceDebug"; requestId: number; accepted: boolean }
   | { kind: "materialDetail"; requestId: number; accepted: boolean }
   | { kind: "lodBoundaries"; requestId: number; accepted: boolean }
   | { kind: "exactVolumePresented"; requestId: number; presented: boolean }

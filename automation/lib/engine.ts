@@ -207,6 +207,17 @@ export class EngineClient {
     await this.#page.waitForTimeout(50);
   }
 
+  async setGeometrySourceDebug(enabled: boolean): Promise<void> {
+    const accepted = await this.#page.evaluate(
+      (active) => globalThis.__VOXELS__!.geometrySourceDebug(active),
+      enabled,
+    );
+    if (!accepted) {
+      throw new Error("engine rejected the geometry-source diagnostic");
+    }
+    await this.#page.waitForTimeout(50);
+  }
+
   async setMaterialDetail(enabled: boolean): Promise<readonly number[]> {
     const accepted = await this.#page.evaluate(
       (active) => globalThis.__VOXELS__!.materialDetail(active),

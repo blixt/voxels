@@ -207,6 +207,13 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
           false,
       });
       break;
+    case "geometrySourceDebug":
+      scope.postMessage({
+        kind: "geometrySourceDebug",
+        requestId: message.requestId,
+        accepted: handle?.set_geometry_source_debug(message.enabled) ?? false,
+      });
+      break;
     case "materialDetail":
       scope.postMessage({
         kind: "materialDetail",

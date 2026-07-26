@@ -140,6 +140,14 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     throw new Error("World Lab diagnostic-sky toggle did not restore the ordinary atmosphere");
   }
 
+  await viewport.engine.setGeometrySourceDebug(true);
+  await context.artifacts.write(
+    "Geometry source and LOD diagnostic",
+    "world-lab-geometry-sources.png",
+    await page.screenshot(),
+    "image/png",
+  );
+
   // F2 must work as a gameplay key with World Lab closed. The downloaded PNG itself carries the
   // exact frame state, so a bug report remains reproducible even when no debug overlay was visible.
   await page.keyboard.press("F3");
@@ -172,7 +180,12 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     world?: { worldId?: string; sourceIdentityHash?: string; seed?: string };
     environment?: { dayFraction?: number; weatherFraction?: number };
     presentation?: { viewportFingerprint?: string; incompleteTransitionEdges?: number };
-    render?: { worldLabOpen?: boolean; viewDistanceMetres?: number; lodFocus?: unknown };
+    render?: {
+      worldLabOpen?: boolean;
+      geometrySourceDebug?: boolean;
+      viewDistanceMetres?: number;
+      lodFocus?: unknown;
+    };
   };
   const eye = reproduction.camera?.eyeMetres;
   if (
@@ -197,6 +210,7 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     !/^[0-9a-f]{16}$/u.test(reproduction.presentation?.viewportFingerprint ?? "") ||
     reproduction.presentation?.incompleteTransitionEdges !== 0 ||
     reproduction.render?.worldLabOpen !== false ||
+    reproduction.render.geometrySourceDebug !== true ||
     !Number.isFinite(reproduction.render.viewDistanceMetres) ||
     reproduction.render.lodFocus === null
   ) {
@@ -208,6 +222,7 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     keyCapture,
     "image/png",
   );
+  await viewport.engine.setGeometrySourceDebug(false);
   await page.keyboard.press("F3");
   await page.waitForTimeout(100);
 

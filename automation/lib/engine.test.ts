@@ -100,6 +100,13 @@ describe("typed engine client", () => {
     await expect(engine.setDiagnosticSky([256, 0, 255])).rejects.toThrow("diagnostic sky channels");
   });
 
+  it("applies geometry-source diagnostics through the Rust boundary", async () => {
+    const engine = new EngineClient(pageReturning([true, true]));
+
+    await engine.setGeometrySourceDebug(true);
+    await engine.setGeometrySourceDebug(false);
+  });
+
   it("validates aligned nonlinear LOD boundaries through the Rust boundary", async () => {
     const engine = new EngineClient(pageReturning([true]));
     const extents = [128, 320, 640, 1_280, 2_560, 4_096, 8_192, 16_384] as const;

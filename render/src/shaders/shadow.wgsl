@@ -108,7 +108,7 @@ fn shadow_vertex(
   morph_geometry: bool,
 ) -> vec4<f32> {
   let face = (material_face >> 16u) & 7u;
-  let packed_material = material_face & 0xfff8ffffu;
+  let packed_material = material_face & 0xfff8ff1fu;
   let surface_shape = ((packed_material >> 8u) & 255u) | (((ao >> 20u) & 15u) << 8u);
   let material = packed_material & 0xffff00ffu;
   let morph_closure = (extent_voxels.x & MORPH_CLOSURE_EXTENT_FLAG) != 0u;
