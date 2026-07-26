@@ -536,6 +536,11 @@ impl EditMap {
             read_edit_i32(bytes, 20)?,
             read_edit_i32(bytes, 24)?,
         );
+        if !encoded_coord.is_world_representable() {
+            return Err(EditChunkCodecError::InvalidHeader(
+                "chunk coordinate outside voxel grid",
+            ));
+        }
         if encoded_coord != coord {
             return Err(EditChunkCodecError::CoordinateMismatch);
         }
@@ -1016,6 +1021,22 @@ mod tests {
                 .decode_chunk_overrides(ChunkCoord::new(-3, 2, 8), &encoded)
                 .expect_err("coordinate substitution must fail"),
             EditChunkCodecError::CoordinateMismatch
+        );
+
+        let unrepresentable_coord =
+            ChunkCoord::new(i32::MAX.div_euclid(CHUNK_EDGE as i32) + 1, coord.y, coord.z);
+        let mut unrepresentable = encoded.clone();
+        unrepresentable[16..20].copy_from_slice(&unrepresentable_coord.x.to_le_bytes());
+        let hash = edit_chunk_hash(
+            unrepresentable_coord,
+            &unrepresentable[EDIT_CHUNK_HEADER_BYTES..],
+        );
+        unrepresentable[28..60].copy_from_slice(hash.as_bytes());
+        assert_eq!(
+            EditMap::default()
+                .decode_chunk_overrides(unrepresentable_coord, &unrepresentable)
+                .expect_err("unrepresentable durable coordinates must fail"),
+            EditChunkCodecError::InvalidHeader("chunk coordinate outside voxel grid")
         );
 
         let mut corrupt = encoded;
