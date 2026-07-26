@@ -616,14 +616,6 @@ impl BotRuntime {
 
     async fn send_pose(&mut self) -> Result<()> {
         self.pose_sequence = self.pose_sequence.saturating_add(1);
-        let fluid = self.camera.fluid_state();
-        let flags = if self.camera.grounded {
-            PLAYER_POSE_GROUNDED
-        } else if fluid.eyes_submerged {
-            PLAYER_POSE_SWIMMING
-        } else {
-            0
-        };
         let bytes = encode_player_pose(PlayerPoseUpdate {
             sequence: self.pose_sequence,
             sample_server_time_ms: 0,
@@ -631,7 +623,7 @@ impl BotRuntime {
             linear_velocity_metres_per_second: self.camera.velocity.to_array(),
             look_yaw_radians: self.camera.yaw,
             look_pitch_radians: self.camera.pitch,
-            flags,
+            flags: player_pose_flags(&self.camera),
         })?;
         self.traffic.sent(&bytes)?;
         self.presence.send(Message::Binary(bytes.into())).await?;
@@ -1077,6 +1069,17 @@ impl BotRuntime {
     }
 }
 
+fn player_pose_flags(camera: &CameraState) -> u16 {
+    let mut flags = 0;
+    if camera.grounded {
+        flags |= PLAYER_POSE_GROUNDED;
+    }
+    if camera.fluid_state().swimming {
+        flags |= PLAYER_POSE_SWIMMING;
+    }
+    flags
+}
+
 fn identity_for(index: usize, seed: u64) -> PlayerIdentity {
     let kind = BehaviorKind::for_index(index);
     let name = format!("bot-{}-{index:03}", behavior_name(kind));
@@ -1362,7 +1365,28 @@ const fn splitmix64(mut value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use voxels_core::{PLAYER_EYE_HEIGHT_METRES, VoxelPhysics};
     use voxels_world::{CHUNK_EDGE, Chunk};
+
+    #[test]
+    fn bot_pose_flags_preserve_swim_hysteresis_and_ground_contact() {
+        let mut camera = CameraState::spawn(Vec3::new(0.05, PLAYER_EYE_HEIGHT_METRES, 0.05));
+        camera.grounded = true;
+        camera.refresh_fluid_state(0.1, |_, y, _| {
+            if (0..=9).contains(&y) {
+                VoxelPhysics::FLUID
+            } else {
+                VoxelPhysics::EMPTY
+            }
+        });
+
+        assert!(camera.fluid_state().swimming);
+        assert!(!camera.fluid_state().eyes_submerged);
+        assert_eq!(
+            player_pose_flags(&camera),
+            PLAYER_POSE_GROUNDED | PLAYER_POSE_SWIMMING
+        );
+    }
 
     #[test]
     fn stable_roster_has_valid_unique_ids_and_expected_leaders() {
