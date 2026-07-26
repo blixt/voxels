@@ -109,9 +109,12 @@ per-player CPU consumption under load.
    one useful tile from letting three obsolete tiles retain an equal-priority socket slot.
 4. A higher-priority request may preempt stale lower-priority work in the bounded client window.
    Collision remains the strongest class, followed by visible exact chunks, the current and
-   predicted tiles at every surface level, visible surface work, replacements, and prefetch. Native
-   generation admission has the same collision/current-surface/ordinary ordering per session and
-   process-wide, so canceled or historical breadth cannot sit ahead of terrain beneath the camera.
+   predicted tiles at every surface level, visible exact chunks, visible surface work, replacements,
+   and prefetch. This browser admission rank is explicit rather than inherited from VXWP wire
+   discriminants: `ImmediateSurface` was added after `VisibleChunk`, but the server intentionally
+   gives the current/lead surface chain its own lane ahead of ordinary exact work. Native generation
+   admission has the same collision/current-surface/ordinary ordering per session and process-wide,
+   so canceled or historical breadth cannot sit ahead of terrain beneath the camera.
 5. Canceling a fragmented response emits an explicit VXWP fragment-abort frame. Without it, the
    client retained a partial reassembly slot forever; repeated fast-travel cancellation exhausted
    all 32 slots and disconnected the world socket. VXWP v33 deliberately has no legacy path.

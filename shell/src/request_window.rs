@@ -1,5 +1,22 @@
 use voxels_world::WorldProductPriority;
 
+/// Client request-window value order.
+///
+/// The wire discriminants preserve protocol compatibility and are not a scheduling contract:
+/// `ImmediateSurface` was added after `VisibleChunk`, while the server deliberately admits the
+/// current/lead surface chain before ordinary visible chunks. Keep this rank explicit so enum
+/// declaration order cannot silently invert browser-side admission again.
+const fn request_window_rank(priority: WorldProductPriority) -> u8 {
+    match priority {
+        WorldProductPriority::CollisionCritical => 0,
+        WorldProductPriority::ImmediateSurface => 1,
+        WorldProductPriority::VisibleChunk => 2,
+        WorldProductPriority::VisibleSurface => 3,
+        WorldProductPriority::ReplacementSurface => 4,
+        WorldProductPriority::Prefetch => 5,
+    }
+}
+
 /// Whether an in-flight batch should yield its request slot after the streaming focus changes.
 ///
 /// The completion path requeues tickets that still belong to the new focus and drops obsolete
@@ -19,10 +36,11 @@ pub(crate) fn priority_preemption_candidate(
     incoming: WorldProductPriority,
     pending: impl IntoIterator<Item = (u64, WorldProductPriority)>,
 ) -> Option<u64> {
+    let incoming_rank = request_window_rank(incoming);
     pending
         .into_iter()
-        .filter(|(_, priority)| *priority > incoming)
-        .max_by_key(|(request_id, priority)| (*priority, *request_id))
+        .filter(|(_, priority)| request_window_rank(*priority) > incoming_rank)
+        .max_by_key(|(request_id, priority)| (request_window_rank(*priority), *request_id))
         .map(|(request_id, _)| request_id)
 }
 
@@ -69,6 +87,33 @@ mod tests {
         assert_eq!(
             priority_preemption_candidate(WorldProductPriority::ImmediateSurface, pending),
             Some(10)
+        );
+    }
+
+    #[test]
+    fn immediate_surface_preempts_ordinary_visible_chunks() {
+        let pending = [
+            (10, WorldProductPriority::VisibleChunk),
+            (11, WorldProductPriority::ImmediateSurface),
+            (12, WorldProductPriority::VisibleChunk),
+        ];
+
+        assert_eq!(
+            priority_preemption_candidate(WorldProductPriority::ImmediateSurface, pending),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn visible_chunks_do_not_displace_current_surface_work() {
+        let pending = [
+            (10, WorldProductPriority::ImmediateSurface),
+            (11, WorldProductPriority::VisibleChunk),
+        ];
+
+        assert_eq!(
+            priority_preemption_candidate(WorldProductPriority::VisibleChunk, pending),
+            None
         );
     }
 
