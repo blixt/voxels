@@ -33,9 +33,9 @@ struct KeyPlane {
 /// It never owns world truth and is safe to reuse after any edit or source revision.
 pub struct BinaryMeshScratch {
     halo: Vec<u8>,
-    opaque_columns: Box<[[u64; HALO_PLANE]; 3]>,
-    translucent_columns: Box<[[u64; HALO_PLANE]; 3]>,
-    face_columns: Box<[[u32; FACE_PLANE]; 6]>,
+    opaque_columns: Box<[u64]>,
+    translucent_columns: Box<[u64]>,
+    face_columns: Box<[u32]>,
     keyed_planes: Vec<Vec<KeyPlane>>,
 }
 
@@ -43,9 +43,9 @@ impl Default for BinaryMeshScratch {
     fn default() -> Self {
         Self {
             halo: vec![0; HALO_VOLUME],
-            opaque_columns: Box::new([[0; HALO_PLANE]; 3]),
-            translucent_columns: Box::new([[0; HALO_PLANE]; 3]),
-            face_columns: Box::new([[0; FACE_PLANE]; 6]),
+            opaque_columns: vec![0; 3 * HALO_PLANE].into_boxed_slice(),
+            translucent_columns: vec![0; 3 * HALO_PLANE].into_boxed_slice(),
+            face_columns: vec![0; 6 * FACE_PLANE].into_boxed_slice(),
             keyed_planes: (0..CHUNK_EDGE).map(|_| Vec::new()).collect(),
         }
     }
@@ -82,15 +82,9 @@ pub fn mesh_chunk_binary_with_scratch(
     scratch: &mut BinaryMeshScratch,
 ) -> MeshedChunk {
     scratch.halo.fill(0);
-    for columns in scratch.opaque_columns.iter_mut() {
-        columns.fill(0);
-    }
-    for columns in scratch.translucent_columns.iter_mut() {
-        columns.fill(0);
-    }
-    for columns in scratch.face_columns.iter_mut() {
-        columns.fill(0);
-    }
+    scratch.opaque_columns.fill(0);
+    scratch.translucent_columns.fill(0);
+    scratch.face_columns.fill(0);
     for planes in &mut scratch.keyed_planes {
         planes.clear();
     }
@@ -129,9 +123,9 @@ pub fn mesh_chunk_binary_with_scratch(
                 } else {
                     &mut scratch.translucent_columns
                 };
-                columns[0][hz + hy * HALO_EDGE] |= 1_u64 << hx;
-                columns[1][hx + hz * HALO_EDGE] |= 1_u64 << hy;
-                columns[2][hx + hy * HALO_EDGE] |= 1_u64 << hz;
+                columns[hz + hy * HALO_EDGE] |= 1_u64 << hx;
+                columns[HALO_PLANE + hx + hz * HALO_EDGE] |= 1_u64 << hy;
+                columns[2 * HALO_PLANE + hx + hy * HALO_EDGE] |= 1_u64 << hz;
             }
         }
     }
@@ -143,7 +137,7 @@ pub fn mesh_chunk_binary_with_scratch(
     for face in 0..6 {
         for v in 0..CHUNK_EDGE {
             for u in 0..CHUNK_EDGE {
-                let mut slices = scratch.face_columns[face][u + v * CHUNK_EDGE];
+                let mut slices = scratch.face_columns[face * FACE_PLANE + u + v * CHUNK_EDGE];
                 while slices != 0 {
                     let slice = slices.trailing_zeros() as usize;
                     slices &= slices - 1;
@@ -193,8 +187,9 @@ fn build_visible_face_columns(scratch: &mut BinaryMeshScratch) {
         for v in 0..CHUNK_EDGE {
             for u in 0..CHUNK_EDGE {
                 let column_index = (u + 1) + (v + 1) * HALO_EDGE;
-                let opaque = scratch.opaque_columns[axis][column_index];
-                let translucent = scratch.translucent_columns[axis][column_index];
+                let column_index = axis * HALO_PLANE + column_index;
+                let opaque = scratch.opaque_columns[column_index];
+                let translucent = scratch.translucent_columns[column_index];
                 let renderable = opaque | translucent;
                 let (neighbor_opaque, neighbor_renderable) = if face & 1 == 0 {
                     (opaque >> 1, renderable >> 1)
@@ -204,7 +199,7 @@ fn build_visible_face_columns(scratch: &mut BinaryMeshScratch) {
                 // Opaque faces remain visible through translucent neighbors. Translucent faces are
                 // only emitted against air, avoiding duplicate internal alpha interfaces.
                 let visible = (opaque & !neighbor_opaque) | (translucent & !neighbor_renderable);
-                scratch.face_columns[face][u + v * CHUNK_EDGE] =
+                scratch.face_columns[face * FACE_PLANE + u + v * CHUNK_EDGE] =
                     ((visible & INTERIOR_BITS) >> 1) as u32;
             }
         }
