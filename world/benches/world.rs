@@ -13,13 +13,13 @@ use voxels_world::protocol::{
     encode_chunk_batch_result, encode_surface_tile_batch_result,
 };
 use voxels_world::{
-    CHUNK_EDGE, CINDER_VAULT, CINDER_VAULT_MOUTH_ANCHOR_XZ, ChunkCoord, EditMap, Generator,
-    Material, MeshingHalo, ProceduralWorldSource, SkylineFeatureKind, SurfaceLodLevel,
+    BinaryMeshScratch, CHUNK_EDGE, CINDER_VAULT, CINDER_VAULT_MOUTH_ANCHOR_XZ, ChunkCoord, EditMap,
+    Generator, Material, MeshingHalo, ProceduralWorldSource, SkylineFeatureKind, SurfaceLodLevel,
     SurfaceTileCoord, VoxelCoord, WorldProduct, WorldProductBatch, WorldProductPriority,
     WorldProductRequest, WorldSourceEngine, first_pilgrim_road_length_voxels,
     first_pilgrim_road_point_at_distance, first_pilgrim_route_anchor,
     first_pilgrim_route_anchor_for_feature_cell, generate_edited_surface_tile_mesh,
-    generate_edited_water_tile_mesh, generate_surface_tile_mesh, mesh_chunk,
+    generate_edited_water_tile_mesh, generate_surface_tile_mesh, mesh_chunk_binary_with_scratch,
     sample_first_pilgrim_road,
 };
 
@@ -355,26 +355,47 @@ fn streaming_codec(criterion: &mut Criterion) {
 
 fn meshing(criterion: &mut Criterion) {
     let generator = Generator::new(SEED);
-    criterion.bench_function("greedy mesh generated chunk", |bencher| {
+    let mut scratch = BinaryMeshScratch::default();
+    criterion.bench_function("binary mesh generated chunk", |bencher| {
         bencher.iter_batched(
-            || generator.generate_chunk(COORD),
-            |chunk| {
-                let origin = chunk.coord().world_origin();
-                let region = generator.region(origin[0] - 1, origin[2] - 1, 34, 34);
-                mesh_chunk(&chunk, |x, y, z| region.sample(x, y, z))
+            || {
+                (
+                    generator.generate_chunk(COORD),
+                    MeshingHalo::from_sampler(COORD, |x, y, z| generator.sample(x, y, z)),
+                )
+            },
+            |(chunk, halo)| {
+                mesh_chunk_binary_with_scratch(
+                    &chunk,
+                    |x, y, z| {
+                        halo.sample_world(x, y, z)
+                            .expect("benchmark halo must cover the binary mesher shell")
+                    },
+                    &mut scratch,
+                )
             },
             BatchSize::SmallInput,
         );
     });
     let chamber = CINDER_VAULT.chamber;
     let cave_coord = VoxelCoord::new(chamber[0], chamber[1], chamber[2]).chunk();
-    criterion.bench_function("greedy mesh Cinder Vault chunk", |bencher| {
+    criterion.bench_function("binary mesh Cinder Vault chunk", |bencher| {
         bencher.iter_batched(
-            || generator.generate_chunk(cave_coord),
-            |chunk| {
-                let origin = chunk.coord().world_origin();
-                let region = generator.region(origin[0] - 1, origin[2] - 1, 34, 34);
-                mesh_chunk(&chunk, |x, y, z| region.sample(x, y, z))
+            || {
+                (
+                    generator.generate_chunk(cave_coord),
+                    MeshingHalo::from_sampler(cave_coord, |x, y, z| generator.sample(x, y, z)),
+                )
+            },
+            |(chunk, halo)| {
+                mesh_chunk_binary_with_scratch(
+                    &chunk,
+                    |x, y, z| {
+                        halo.sample_world(x, y, z)
+                            .expect("benchmark halo must cover the binary mesher shell")
+                    },
+                    &mut scratch,
+                )
             },
             BatchSize::SmallInput,
         );
@@ -384,13 +405,24 @@ fn meshing(criterion: &mut Criterion) {
 fn water_meshing(criterion: &mut Criterion) {
     let generator = Generator::new(SEED);
     let coord = OCEAN_VOXEL.chunk();
-    criterion.bench_function("greedy mesh generated ocean chunk", |bencher| {
+    let mut scratch = BinaryMeshScratch::default();
+    criterion.bench_function("binary mesh generated ocean chunk", |bencher| {
         bencher.iter_batched(
-            || generator.generate_chunk(coord),
-            |chunk| {
-                let origin = chunk.coord().world_origin();
-                let region = generator.region(origin[0] - 1, origin[2] - 1, 34, 34);
-                mesh_chunk(&chunk, |x, y, z| region.sample(x, y, z))
+            || {
+                (
+                    generator.generate_chunk(coord),
+                    MeshingHalo::from_sampler(coord, |x, y, z| generator.sample(x, y, z)),
+                )
+            },
+            |(chunk, halo)| {
+                mesh_chunk_binary_with_scratch(
+                    &chunk,
+                    |x, y, z| {
+                        halo.sample_world(x, y, z)
+                            .expect("benchmark halo must cover the binary mesher shell")
+                    },
+                    &mut scratch,
+                )
             },
             BatchSize::SmallInput,
         );
