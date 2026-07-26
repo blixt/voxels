@@ -940,6 +940,10 @@ pub struct RenderDiagnostics {
     /// Candidate LOD edges still covered by their resident source edge because an exact connector
     /// was not complete when the current draw plan was installed.
     pub lod_incomplete_transition_edges: u32,
+    /// Whether the latest presented viewport contains both sides of an active geometric LOD cut.
+    pub lod_cut_transition_active: bool,
+    /// Normalized lifetime of the active geometric LOD cut, or zero while no cut is active.
+    pub lod_cut_transition_phase: f32,
     /// Grid-snapped centres, in canonical voxels, for the eight geometric LOD boundaries.
     pub lod_boundary_centres: [[i32; 2]; 8],
     pub surface_width: u32,
@@ -4157,7 +4161,7 @@ impl Renderer {
         } else {
             0
         };
-        let _ = self.maintain_cut_transition(resident_hierarchy);
+        let cut_transition_phase = self.maintain_cut_transition(resident_hierarchy);
         let cpu_lod_plan_ms = (now_ms() - lod_plan_started).max(0.0) as f32;
         // Queue readiness is not a proof that every fixed geometric owner is resident. Canonical
         // columns can still replace atomically and retained surface tiles can be incomplete. Keep
@@ -4715,6 +4719,8 @@ impl Renderer {
                 .and_then(|key| self.chunks.get(&key))
                 .map_or(0, |mesh| mesh.quad_count),
             lod_incomplete_transition_edges: self.lod_draw_plan.incomplete_transition_edges,
+            lod_cut_transition_active: cut_transition_phase.is_some(),
+            lod_cut_transition_phase: cut_transition_phase.unwrap_or(0.0),
             lod_boundary_centres: geometric_lod_focus
                 .map_or([[0; 2]; 8], GeometricLodFocus::boundary_centres),
             surface_width: self.config.width,

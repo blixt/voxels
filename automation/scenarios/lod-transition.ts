@@ -26,10 +26,82 @@ interface LodTimings {
   readonly incompleteTransitionEdges: number[];
 }
 
+interface PresentedFrameCapture {
+  readonly frames: readonly Buffer[];
+  readonly observedFrames: number;
+  readonly overflowFrames: number;
+  readonly firstTimestamp: number | null;
+  readonly lastTimestamp: number | null;
+}
+
+const MAX_PRESENTED_FRAME_CAPTURES = 300;
+
 function required(values: ArrayLike<number>, index: number, label: string): number {
   const value = values[index];
   if (value === undefined) throw new Error(`${label} omitted value ${index}`);
   return value;
+}
+
+async function capturePresentedFrames(
+  page: Page,
+  action: () => Promise<void>,
+): Promise<PresentedFrameCapture> {
+  const session = await page.context().newCDPSession(page);
+  const frames: Buffer[] = [];
+  const acknowledgements: Promise<void>[] = [];
+  let observedFrames = 0;
+  let overflowFrames = 0;
+  let firstTimestamp: number | null = null;
+  let lastTimestamp: number | null = null;
+  let acknowledgementError: unknown;
+  const onFrame = (event: {
+    readonly data: string;
+    readonly sessionId: number;
+    readonly metadata?: { readonly timestamp?: number };
+  }): void => {
+    observedFrames += 1;
+    const timestamp = event.metadata?.timestamp;
+    if (timestamp !== undefined && Number.isFinite(timestamp)) {
+      firstTimestamp ??= timestamp;
+      lastTimestamp = timestamp;
+    }
+    if (frames.length < MAX_PRESENTED_FRAME_CAPTURES) {
+      frames.push(Buffer.from(event.data, "base64"));
+    } else {
+      overflowFrames += 1;
+    }
+    acknowledgements.push(
+      session
+        .send("Page.screencastFrameAck", { sessionId: event.sessionId })
+        .then(() => undefined)
+        .catch((error: unknown) => {
+          acknowledgementError ??= error;
+        }),
+    );
+  };
+  session.on("Page.screencastFrame", onFrame);
+  try {
+    await session.send("Page.startScreencast", {
+      format: "png",
+      everyNthFrame: 1,
+    });
+    await action();
+    // Let Chromium deliver and acknowledge the final compositor frame before stopping capture.
+    await page.waitForTimeout(32);
+    await session.send("Page.stopScreencast");
+    await Promise.all(acknowledgements);
+    if (acknowledgementError !== undefined) throw acknowledgementError;
+  } finally {
+    session.off("Page.screencastFrame", onFrame);
+    await session.detach().catch(() => undefined);
+  }
+  return {
+    frames,
+    observedFrames,
+    overflowFrames,
+    firstTimestamp,
+    lastTimestamp,
+  };
 }
 
 function boundaryCentres(snapshot: readonly number[]): BoundaryCentres {
@@ -178,12 +250,18 @@ async function waitForCentreChange(
   timings: LodTimings,
 ): Promise<readonly number[]> {
   const deadline = Date.now() + 4_000;
+  let previousFrame = snapshotValue(await readSnapshot(engine, timings), "frameSequence");
   await page.keyboard.down(outboundKey);
   try {
     while (Date.now() < deadline) {
-      const snapshot = await readSnapshot(engine, timings);
+      const snapshot = await engine.waitForFrameAfter(previousFrame, {
+        timeoutMs: 2_000,
+        intervalMs: 1,
+        description: "renderer stopped while walking toward an LOD snap boundary",
+        onSnapshot: (sample) => collectTiming(sample, timings),
+      });
+      previousFrame = snapshotValue(snapshot, "frameSequence");
       if (!sameCentres(boundaryCentres(snapshot), initialCentres)) return snapshot;
-      await page.waitForTimeout(8);
     }
   } finally {
     await page.keyboard.up(outboundKey);
@@ -588,7 +666,9 @@ function parseOptions(arguments_: readonly string[]): LodOptions {
       }) ?? 1,
     pillarRadius:
       argumentsReader.number("pillar-radius", {
-        fallback: boundaryCoverage ? 1 : watertight ? 3 : 6,
+        // The transition fixture needs to cross an eight-voxel snap threshold and physically
+        // return to the comparison pose without stepping off its isolated spawn pedestal.
+        fallback: boundaryCoverage ? 1 : watertight ? 3 : 12,
         integer: true,
         minimum: 1,
         maximum: 32,
@@ -940,17 +1020,10 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
   } else {
     const movingCoverage = {
       samples: 0,
+      framesWithHoles: 0,
+      totalHolePixels: 0,
       worst: await analyzeWatertightTerrain(page, before),
       worstScreenshot: before,
-    };
-    const captureMovingCoverage = async (): Promise<void> => {
-      const screenshot = await page.screenshot();
-      const analysis = await analyzeWatertightTerrain(page, screenshot);
-      movingCoverage.samples += 1;
-      if (analysis.diagnosticSkyPixels > movingCoverage.worst.diagnosticSkyPixels) {
-        movingCoverage.worst = analysis;
-        movingCoverage.worstScreenshot = screenshot;
-      }
     };
     const cameraVoxelX = beforePose[0] / 0.1;
     const firstCentre = initialCentres[0];
@@ -958,20 +1031,88 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     const desiredXDirection = Math.sign(cameraVoxelX - firstCentre[0]) || 1;
     const forwardXDirection = Math.sign(Math.sin(snapshotValue(beforeSnapshot, "yaw"))) || 1;
     const outboundKey = desiredXDirection === forwardXDirection ? "KeyW" : "KeyS";
-    const crossedSnapshot = await waitForCentreChange(
-      page,
-      engine,
-      initialCentres,
-      outboundKey,
-      timings,
-    );
+    let crossedSnapshot: readonly number[] | undefined;
+    let capturedEngineFrames = 0;
+    let skippedEngineFrames = 0;
+    let transitionActiveFrames = 0;
+    let transitionActiveObserved = false;
+    let transitionCompletionObserved = false;
+    let minimumTransitionPhase = Number.POSITIVE_INFINITY;
+    let maximumTransitionPhase = Number.NEGATIVE_INFINITY;
+    const presentedFrames = await capturePresentedFrames(page, async () => {
+      crossedSnapshot = await waitForCentreChange(
+        page,
+        engine,
+        initialCentres,
+        outboundKey,
+        timings,
+      );
+      let previousFrame = snapshotValue(crossedSnapshot, "frameSequence");
+      const observeTransition = (snapshot: readonly number[]): boolean => {
+        const active = snapshotValue(snapshot, "lodCutTransitionActive") === 1;
+        if (active) {
+          transitionActiveObserved = true;
+          transitionActiveFrames += 1;
+          const phase = snapshotValue(snapshot, "lodCutTransitionPhase");
+          minimumTransitionPhase = Math.min(minimumTransitionPhase, phase);
+          maximumTransitionPhase = Math.max(maximumTransitionPhase, phase);
+        } else if (transitionActiveObserved) {
+          transitionCompletionObserved = true;
+        }
+        return active;
+      };
+      observeTransition(crossedSnapshot);
+      const transitionDeadline = Date.now() + 2_000;
+      while (!transitionCompletionObserved && Date.now() < transitionDeadline) {
+        const snapshot = await engine.waitForFrameAfter(previousFrame, {
+          timeoutMs: 2_000,
+          intervalMs: 1,
+          description: "LOD transition renderer stopped advancing",
+          onSnapshot: (sample) => collectTiming(sample, timings),
+        });
+        const frame = snapshotValue(snapshot, "frameSequence");
+        skippedEngineFrames += Math.max(0, frame - previousFrame - 1);
+        previousFrame = frame;
+        capturedEngineFrames += 1;
+        observeTransition(snapshot);
+      }
+    });
+    if (crossedSnapshot === undefined) {
+      throw new Error("presented-frame capture completed without crossing an LOD boundary");
+    }
+    for (const screenshot of presentedFrames.frames) {
+      const analysis = await analyzeWatertightTerrain(page, screenshot);
+      movingCoverage.samples += 1;
+      movingCoverage.totalHolePixels += analysis.diagnosticSkyPixels;
+      if (analysis.diagnosticSkyPixels > 0) movingCoverage.framesWithHoles += 1;
+      if (analysis.diagnosticSkyPixels > movingCoverage.worst.diagnosticSkyPixels) {
+        movingCoverage.worst = analysis;
+        movingCoverage.worstScreenshot = screenshot;
+      }
+    }
+    const capturedPresentationDurationMs =
+      presentedFrames.firstTimestamp === null || presentedFrames.lastTimestamp === null
+        ? null
+        : (presentedFrames.lastTimestamp - presentedFrames.firstTimestamp) * 1_000;
     const crossedPose = cameraPosition(crossedSnapshot);
     if (planarDistance(crossedPose, beforePose) <= 0) {
       throw new Error("LOD focus changed without measurable player movement");
     }
-    for (let transitionFrame = 0; transitionFrame < 10; transitionFrame += 1) {
-      await page.waitForTimeout(24);
-      await captureMovingCoverage();
+    if (presentedFrames.overflowFrames > 0) {
+      throw new Error(
+        `presented-frame capture exceeded ${MAX_PRESENTED_FRAME_CAPTURES} frames by ${presentedFrames.overflowFrames}`,
+      );
+    }
+    if (movingCoverage.samples < 8) {
+      throw new Error(
+        `presented-frame capture observed only ${movingCoverage.samples} compositor frames`,
+      );
+    }
+    if (!transitionActiveObserved) {
+      throw new Error("LOD cut transition did not become active after crossing the boundary");
+    }
+    if (!transitionCompletionObserved) {
+      throw new Error("LOD cut transition did not complete within the capture window");
     }
     await returnToPose(page, engine, beforePose, initialCentres, timings);
     const afterSnapshot = await waitForStableChangedFrame(page, engine, initialCentres, timings);
@@ -998,6 +1139,20 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       ...comparison,
       movingCoverage: {
         samples: movingCoverage.samples,
+        framesWithHoles: movingCoverage.framesWithHoles,
+        totalHolePixels: movingCoverage.totalHolePixels,
+        observedFrames: presentedFrames.observedFrames,
+        overflowFrames: presentedFrames.overflowFrames,
+        capturedEngineFrames,
+        skippedEngineFrames,
+        captureDurationMs: capturedPresentationDurationMs,
+        cutTransition: {
+          activeObserved: transitionActiveObserved,
+          completionObserved: transitionCompletionObserved,
+          activeEngineFrames: transitionActiveFrames,
+          minimumPhase: minimumTransitionPhase,
+          maximumPhase: maximumTransitionPhase,
+        },
         worst: movingCoverage.worst,
       },
       diagnosticSkyExposure: {
@@ -1028,8 +1183,10 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     ) {
       violations.push("valley terrain exposes the diagnostic magenta sky");
     }
-    if (image.movingCoverage.worst.diagnosticSkyPixels > 0)
-      violations.push("moving LOD transition exposes the diagnostic magenta sky");
+    if (image.movingCoverage.framesWithHoles !== 0)
+      violations.push(
+        `moving LOD transition exposed diagnostic sky in ${image.movingCoverage.framesWithHoles} presented frames`,
+      );
     if (image.ssim < 0.97) violations.push("valley SSIM fell below 0.97");
     if (performance.frameP95Ms > 12) violations.push("frame p95 exceeded 12ms");
     if (performance.fractionAbove16_67Ms > 0.01)
