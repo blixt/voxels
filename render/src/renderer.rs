@@ -452,6 +452,10 @@ struct CutTransition {
     started_at: f32,
 }
 
+fn cut_transition_is_active(started_at: Option<f32>, time: f32) -> bool {
+    started_at.is_some_and(|started_at| time - started_at < CUT_TRANSITION_SECONDS)
+}
+
 struct PendingSurfaceSelection {
     focus: GeometricLodFocus,
     canonical_columns: HashSet<(i32, i32)>,
@@ -3951,6 +3955,12 @@ impl Renderer {
             && previous_plan_resident
             && self.lod_draw_plan_focus.is_some()
             && focus.is_some()
+            && !cut_transition_is_active(
+                self.cut_transition
+                    .as_ref()
+                    .map(|transition| transition.started_at),
+                self.time,
+            )
         {
             self.cut_transition = Some(CutTransition {
                 from: self.lod_draw_plan.clone(),
@@ -8245,6 +8255,16 @@ fn json_optional_vec3(value: Option<[f32; 3]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progressive_plan_changes_do_not_restart_an_active_cut_handoff() {
+        assert!(cut_transition_is_active(Some(10.0), 10.1));
+        assert!(
+            !cut_transition_is_active(Some(10.0), 10.25),
+            "a new handoff can begin after the original transition window"
+        );
+        assert!(!cut_transition_is_active(None, 10.1));
+    }
 
     #[test]
     fn screenshot_readback_removes_row_padding_and_normalizes_bgra() {
