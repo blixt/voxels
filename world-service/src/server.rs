@@ -26,6 +26,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -52,8 +53,8 @@ use voxels_world::protocol::{
 };
 use voxels_world::{
     CHUNK_EDGE, ChunkCoord, Material, MeshingHalo, SurfaceSampleBlockRequest, WORLD_SCHEMA_VERSION,
-    WorldManifest, WorldManifestError, WorldProduct, WorldProductBatch, WorldProductPriority,
-    WorldProductRequest, WorldSourceEngine, WorldSourceError,
+    WorldManifest, WorldManifestError, WorldProduct, WorldProductBatch, WorldProductBatchItem,
+    WorldProductPriority, WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
 pub const WORLD_WEBSOCKET_PATH: &str = "/v33/world";
@@ -61,6 +62,7 @@ pub const PRESENCE_WEBSOCKET_PATH: &str = "/v33/presence";
 pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v33";
 pub const HEALTH_PATH: &str = "/healthz";
 const PREFETCH_WORKER_DIVISOR: usize = 4;
+const RESPONSE_ASSEMBLY_WORKER_DIVISOR: usize = 2;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 const INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -117,6 +119,10 @@ impl WorldServer {
         let generation_cancellations = Arc::new(Notify::new());
         let generation_limiter =
             PriorityGenerationLimiter::new(usize::from(config.transport.generation_workers));
+        let response_assembly_workers = (usize::from(config.transport.generation_workers)
+            / RESPONSE_ASSEMBLY_WORKER_DIVISOR)
+            .max(1);
+        let response_assembly_limiter = PriorityGenerationLimiter::new(response_assembly_workers);
         let prefetch_workers =
             (usize::from(config.transport.generation_workers) / PREFETCH_WORKER_DIVISOR).max(1);
         let prefetch_semaphore = Arc::new(Semaphore::new(prefetch_workers));
@@ -125,11 +131,13 @@ impl WorldServer {
             Arc::clone(&generation_cancellations),
             Arc::clone(&source),
             generation_limiter,
+            response_assembly_limiter,
             prefetch_semaphore,
             GenerationDispatcherLimits {
                 max_frame_bytes: config.transport.max_frame_bytes,
                 product_cache_bytes: config.transport.product_cache_bytes,
                 response_cache_bytes: config.transport.response_cache_bytes,
+                completion_queue_capacity: capacity,
             },
         ));
 
@@ -896,6 +904,7 @@ struct SessionRequests {
     generation_cancellations: Arc<Notify>,
     generation_permits: Arc<PriorityGenerationLimiter>,
     collision_generation_permits: Arc<Semaphore>,
+    response_assembly_permits: Arc<PriorityGenerationLimiter>,
     outbound_bytes: Arc<Semaphore>,
 }
 
@@ -916,6 +925,8 @@ impl SessionRequests {
         max_outbound_bytes: usize,
         generation_cancellations: Arc<Notify>,
     ) -> Self {
+        let response_assembly_workers =
+            (usize::from(generation_workers) / RESPONSE_ASSEMBLY_WORKER_DIVISOR).max(1);
         Self {
             max_in_flight: usize::from(max_in_flight),
             closed: AtomicBool::new(false),
@@ -925,6 +936,7 @@ impl SessionRequests {
             collision_generation_permits: Arc::new(Semaphore::new(usize::from(
                 collision_generation_workers,
             ))),
+            response_assembly_permits: PriorityGenerationLimiter::new(response_assembly_workers),
             outbound_bytes: Arc::new(Semaphore::new(max_outbound_bytes)),
         }
     }
@@ -944,6 +956,13 @@ impl SessionRequests {
                 _permit: self.generation_permits.acquire(priority).await,
             })
         }
+    }
+
+    async fn acquire_response_assembly(
+        self: &Arc<Self>,
+        priority: WorldProductPriority,
+    ) -> crate::generation_limiter::PriorityGenerationPermit {
+        self.response_assembly_permits.acquire(priority).await
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<u64, Arc<CancellationSignal>>> {
@@ -1302,8 +1321,8 @@ impl EncodedProduct {
 
 struct ProductGenerationCompletion {
     generation_id: u64,
-    keys: Vec<ProductFlightKey>,
-    result: Result<Vec<EncodedProduct>, String>,
+    key: ProductFlightKey,
+    result: Result<EncodedProduct, String>,
 }
 
 struct CachedProduct {
@@ -1545,7 +1564,7 @@ struct ProductFlight {
 
 struct ProductGenerationFlight {
     id: u64,
-    live_products: AtomicUsize,
+    unsettled_products: AtomicUsize,
     cancellation: CancellationSignal,
 }
 
@@ -1554,31 +1573,77 @@ impl ProductGenerationFlight {
         debug_assert!(product_count > 0);
         Arc::new(Self {
             id,
-            live_products: AtomicUsize::new(product_count),
+            unsettled_products: AtomicUsize::new(product_count),
             cancellation: CancellationSignal::default(),
         })
     }
 
-    fn abandon_product(&self) {
-        if self.live_products.fetch_sub(1, Ordering::AcqRel) == 1 {
+    fn settle_product(&self) {
+        if self.unsettled_products.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.cancellation.cancel();
         }
     }
 }
 
+enum PendingGenerationDelivery {
+    Batch(GenerationJob),
+    Surface {
+        sender: mpsc::Sender<Result<Arc<EncodedProduct>, String>>,
+        request_id: u64,
+        cancelled: Arc<CancellationSignal>,
+        session: Arc<SessionRequests>,
+    },
+}
+
 struct PendingGenerationBatch {
-    job: GenerationJob,
+    request: GenerationRequest,
+    delivery: PendingGenerationDelivery,
     items: Vec<Option<Result<Arc<EncodedProduct>, String>>>,
     remaining: usize,
+    next_ready: usize,
+}
+
+struct SurfaceGenerationDelivery {
+    job: GenerationJob,
+    products: mpsc::Receiver<Result<Arc<EncodedProduct>, String>>,
 }
 
 impl PendingGenerationBatch {
     fn new(job: GenerationJob, item_count: usize) -> Self {
+        let request = job.request.clone();
         Self {
-            job,
+            request,
+            delivery: PendingGenerationDelivery::Batch(job),
             items: vec![None; item_count],
             remaining: item_count,
+            next_ready: 0,
         }
+    }
+
+    fn new_surface(job: GenerationJob, item_count: usize) -> (Self, SurfaceGenerationDelivery) {
+        let request = job.request.clone();
+        let request_id = job.tracked.request_id;
+        let cancelled = Arc::clone(&job.tracked.cancelled);
+        let session = Arc::clone(&job.tracked.session);
+        // A batch can publish each index only once, so this channel is strictly bounded by the
+        // request's own product count even when compression or the outbound queue applies
+        // backpressure.
+        let (sender, products) = mpsc::channel(item_count.max(1));
+        (
+            Self {
+                request,
+                delivery: PendingGenerationDelivery::Surface {
+                    sender,
+                    request_id,
+                    cancelled,
+                    session,
+                },
+                items: vec![None; item_count],
+                remaining: item_count,
+                next_ready: 0,
+            },
+            SurfaceGenerationDelivery { job, products },
+        )
     }
 
     fn fill(&mut self, item_index: usize, result: Result<Arc<EncodedProduct>, String>) -> bool {
@@ -1589,7 +1654,43 @@ impl PendingGenerationBatch {
             *slot = Some(result);
             self.remaining -= 1;
         }
+        if let PendingGenerationDelivery::Surface { sender, .. } = &self.delivery {
+            while let Some(Some(result)) = self.items.get_mut(self.next_ready).map(Option::take) {
+                // Capacity equals the number of unique batch items, so Full is unreachable.
+                // Closed means cancellation or outbound shutdown already made the result stale.
+                match sender.try_send(result) {
+                    Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        unreachable!("surface delivery channel capacity matches its item count")
+                    }
+                }
+                self.next_ready += 1;
+            }
+        }
         self.remaining == 0
+    }
+
+    fn is_cancelled(&self) -> bool {
+        match &self.delivery {
+            PendingGenerationDelivery::Batch(job) => job.tracked.is_cancelled(),
+            PendingGenerationDelivery::Surface { cancelled, .. } => cancelled.is_cancelled(),
+        }
+    }
+
+    fn finish(self) {
+        match self.delivery {
+            PendingGenerationDelivery::Batch(job) => job.tracked.finish(),
+            PendingGenerationDelivery::Surface {
+                request_id,
+                cancelled,
+                session,
+                ..
+            } => session.finish(request_id, &cancelled),
+        }
+    }
+
+    fn is_surface(&self) -> bool {
+        matches!(&self.delivery, PendingGenerationDelivery::Surface { .. })
     }
 }
 
@@ -2737,10 +2838,12 @@ async fn run_generation_dispatcher(
     cancellations: Arc<Notify>,
     source: Arc<dyn WorldSourceEngine>,
     generation_limiter: Arc<PriorityGenerationLimiter>,
+    response_assembly_limiter: Arc<PriorityGenerationLimiter>,
     prefetch_semaphore: Arc<Semaphore>,
     limits: GenerationDispatcherLimits,
 ) {
-    let (completion_tx, mut completions) = mpsc::unbounded_channel();
+    let (completion_tx, mut completions) =
+        mpsc::channel::<ProductGenerationCompletion>(limits.completion_queue_capacity.max(1));
     let source_identity_hash = source.identity().identity_hash();
     let mut in_flight = HashMap::<ProductFlightKey, ProductFlight>::new();
     let mut pending = HashMap::<u64, PendingGenerationBatch>::new();
@@ -2760,6 +2863,55 @@ async fn run_generation_dispatcher(
             _ = cancellations.notified() => {
                 prune_cancelled_generation_batches(&mut pending, &mut in_flight);
             }
+            completion = completions.recv() => {
+                let Some(completion) = completion else {
+                    break;
+                };
+                let flight = completion.key;
+                let matching_generation = in_flight
+                    .get(&flight)
+                    .is_some_and(|current| current.generation.id == completion.generation_id);
+                if !matching_generation {
+                    continue;
+                }
+                let Some(product_flight) = in_flight.remove(&flight) else {
+                    continue;
+                };
+                product_flight.generation.settle_product();
+                let result = completion.result.and_then(|product| {
+                    if product.key() == flight.product {
+                        Ok(Arc::new(product))
+                    } else {
+                        Err("world source returned a mismatched product key".to_owned())
+                    }
+                });
+                if let Ok(product) = &result {
+                    cache.insert(flight.product, Arc::clone(product));
+                }
+                let mut ready = BTreeSet::new();
+                for waiter in product_flight.waiters {
+                    let Some(batch) = pending.get_mut(&waiter.batch_id) else {
+                        continue;
+                    };
+                    if batch.fill(waiter.item_index, result.clone()) {
+                        ready.insert(waiter.batch_id);
+                    }
+                }
+                for batch_id in ready {
+                    let Some(batch) = pending.remove(&batch_id) else {
+                        continue;
+                    };
+                    if !batch.is_surface() {
+                        spawn_generation_assembly(
+                            batch,
+                            source_identity_hash,
+                            Arc::clone(&generation_limiter),
+                            Arc::clone(&response_cache),
+                            limits.max_frame_bytes,
+                        );
+                    }
+                }
+            }
             job = jobs.recv(), if jobs_open => {
                 let Some(job) = job else {
                     jobs_open = false;
@@ -2778,7 +2930,23 @@ async fn run_generation_dispatcher(
                 let session = Arc::clone(&job.tracked.session);
                 let batch_id = next_batch_id;
                 next_batch_id = next_batch_id.wrapping_add(1).max(1);
-                let mut batch = PendingGenerationBatch::new(job, product_keys.len());
+                let (mut batch, surface_delivery) =
+                    if matches!(job.request, GenerationRequest::SurfaceTiles { .. }) {
+                        let (batch, delivery) =
+                            PendingGenerationBatch::new_surface(job, product_keys.len());
+                        (batch, Some(delivery))
+                    } else {
+                        (PendingGenerationBatch::new(job, product_keys.len()), None)
+                    };
+                if let Some(delivery) = surface_delivery {
+                    spawn_surface_generation_delivery(
+                        delivery,
+                        source_identity_hash,
+                        Arc::clone(&response_assembly_limiter),
+                        Arc::clone(&response_cache),
+                        limits.max_frame_bytes,
+                    );
+                }
                 let mut miss_indices = Vec::new();
                 let mut miss_keys = Vec::new();
                 for (item_index, product) in product_keys.into_iter().enumerate() {
@@ -2796,16 +2964,18 @@ async fn run_generation_dispatcher(
                     }
                 }
                 if batch.remaining == 0 {
-                    spawn_generation_assembly(
-                        batch,
-                        source_identity_hash,
-                        Arc::clone(&generation_limiter),
-                        Arc::clone(&response_cache),
-                        limits.max_frame_bytes,
-                    );
+                    if !batch.is_surface() {
+                        spawn_generation_assembly(
+                            batch,
+                            source_identity_hash,
+                            Arc::clone(&generation_limiter),
+                            Arc::clone(&response_cache),
+                            limits.max_frame_bytes,
+                        );
+                    }
                     continue;
                 }
-                let miss_request = batch.job.request.select(&miss_indices);
+                let miss_request = batch.request.select(&miss_indices);
                 pending.insert(batch_id, batch);
                 if !miss_indices.is_empty() {
                     let generation = ProductGenerationFlight::new(
@@ -2831,80 +3001,19 @@ async fn run_generation_dispatcher(
                     let completion_tx = completion_tx.clone();
                     let generation_id = generation.id;
                     tokio::spawn(async move {
-                        let result = generate_single_flight_products(
+                        generate_single_flight_products(
                             miss_request,
+                            miss_keys,
+                            generation_id,
                             source,
                             session,
                             generation_limiter,
                             prefetch_semaphore,
-                            &generation.cancellation,
+                            completion_tx,
+                            generation,
                         )
                         .await;
-                        let _ = completion_tx.send(ProductGenerationCompletion {
-                            generation_id,
-                            keys: miss_keys,
-                            result,
-                        });
                     });
-                }
-            }
-            completion = completions.recv(), if !in_flight.is_empty() => {
-                let Some(completion) = completion else {
-                    break;
-                };
-                let results = match completion.result {
-                    Ok(products) if products.len() == completion.keys.len() => products
-                        .into_iter()
-                        .zip(completion.keys.iter())
-                        .map(|(product, expected)| {
-                            if product.key() == expected.product {
-                                Ok(product)
-                            } else {
-                                Err("world source returned a mismatched product key".to_owned())
-                            }
-                        })
-                        .collect::<Vec<_>>(),
-                    Ok(_) => vec![
-                        Err("world source returned a mismatched product count".to_owned());
-                        completion.keys.len()
-                    ],
-                    Err(message) => vec![Err(message); completion.keys.len()],
-                };
-                let mut ready = BTreeSet::new();
-                for (flight, result) in completion.keys.into_iter().zip(results) {
-                    let matching_generation = in_flight
-                        .get(&flight)
-                        .is_some_and(|current| current.generation.id == completion.generation_id);
-                    if !matching_generation {
-                        continue;
-                    }
-                    let Some(product_flight) = in_flight.remove(&flight) else {
-                        continue;
-                    };
-                    let result = result.map(Arc::new);
-                    if let Ok(product) = &result {
-                        cache.insert(flight.product, Arc::clone(product));
-                    }
-                    for waiter in product_flight.waiters {
-                        let Some(batch) = pending.get_mut(&waiter.batch_id) else {
-                            continue;
-                        };
-                        if batch.fill(waiter.item_index, result.clone()) {
-                            ready.insert(waiter.batch_id);
-                        }
-                    }
-                }
-                for batch_id in ready {
-                    let Some(batch) = pending.remove(&batch_id) else {
-                        continue;
-                    };
-                    spawn_generation_assembly(
-                        batch,
-                        source_identity_hash,
-                        Arc::clone(&generation_limiter),
-                        Arc::clone(&response_cache),
-                        limits.max_frame_bytes,
-                    );
                 }
             }
         }
@@ -2916,6 +3025,7 @@ struct GenerationDispatcherLimits {
     max_frame_bytes: usize,
     product_cache_bytes: usize,
     response_cache_bytes: usize,
+    completion_queue_capacity: usize,
 }
 
 fn prune_cancelled_generation_batches(
@@ -2924,11 +3034,11 @@ fn prune_cancelled_generation_batches(
 ) -> usize {
     let cancelled = pending
         .iter()
-        .filter_map(|(&batch_id, batch)| batch.job.tracked.is_cancelled().then_some(batch_id))
+        .filter_map(|(&batch_id, batch)| batch.is_cancelled().then_some(batch_id))
         .collect::<HashSet<_>>();
     for batch_id in &cancelled {
         if let Some(batch) = pending.remove(batch_id) {
-            batch.job.tracked.finish();
+            batch.finish();
         }
     }
     if cancelled.is_empty() {
@@ -2946,55 +3056,170 @@ fn prune_cancelled_generation_batches(
         .collect::<Vec<_>>();
     for key in orphaned {
         if let Some(flight) = in_flight.remove(&key) {
-            flight.generation.abandon_product();
+            flight.generation.settle_product();
         }
     }
     cancelled.len()
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "single-flight generation keeps each bounded permit, completion route, and cancellation owner explicit"
+)]
 async fn generate_single_flight_products(
     request: GenerationRequest,
+    keys: Vec<ProductFlightKey>,
+    generation_id: u64,
     source: Arc<dyn WorldSourceEngine>,
     session: Arc<SessionRequests>,
     generation_limiter: Arc<PriorityGenerationLimiter>,
     prefetch_semaphore: Arc<Semaphore>,
-    cancellation: &CancellationSignal,
-) -> Result<Vec<EncodedProduct>, String> {
+    completion_tx: mpsc::Sender<ProductGenerationCompletion>,
+    generation: Arc<ProductGenerationFlight>,
+) {
     let priority = request.priority();
     let _prefetch_permit = if priority == WorldProductPriority::Prefetch {
-        Some(tokio::select! {
+        let permit = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => return Err("world generation cancelled".to_owned()),
-            permit = prefetch_semaphore.acquire_owned() => permit
-                .map_err(|_| "world prefetch generation limiter stopped".to_owned())?,
-        })
+            _ = generation.cancellation.cancelled() => {
+                send_generation_errors(
+                    &completion_tx,
+                    generation_id,
+                    &keys,
+                    0,
+                    "world generation cancelled".to_owned(),
+                ).await;
+                return;
+            }
+            permit = prefetch_semaphore.acquire_owned() => permit,
+        };
+        match permit {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                send_generation_errors(
+                    &completion_tx,
+                    generation_id,
+                    &keys,
+                    0,
+                    "world prefetch generation limiter stopped".to_owned(),
+                )
+                .await;
+                return;
+            }
+        }
     } else {
         None
     };
     let _session_permit = tokio::select! {
         biased;
-        _ = cancellation.cancelled() => return Err("world generation cancelled".to_owned()),
-        permit = session.acquire_generation(priority) => permit
-            .ok_or_else(|| "world session generation limiter stopped".to_owned())?,
+        _ = generation.cancellation.cancelled() => None,
+        permit = session.acquire_generation(priority) => permit,
+    };
+    let Some(_session_permit) = _session_permit else {
+        let message = if generation.cancellation.is_cancelled() {
+            "world generation cancelled"
+        } else {
+            "world session generation limiter stopped"
+        };
+        send_generation_errors(&completion_tx, generation_id, &keys, 0, message.to_owned()).await;
+        return;
     };
     let _global_permit = tokio::select! {
         biased;
-        _ = cancellation.cancelled() => return Err("world generation cancelled".to_owned()),
-        permit = generation_limiter.acquire(priority) => permit,
+        _ = generation.cancellation.cancelled() => None,
+        permit = generation_limiter.acquire(priority) => Some(permit),
     };
-    if cancellation.is_cancelled() {
-        return Err("world generation cancelled".to_owned());
-    }
-    tokio::task::spawn_blocking(move || match request {
-        GenerationRequest::Chunks { request, snapshot } => {
-            generate_chunk_products(source.as_ref(), request, snapshot)
-        }
-        GenerationRequest::SurfaceTiles { request, snapshot } => {
-            generate_surface_tile_products(source.as_ref(), request, snapshot)
+    let Some(_global_permit) = _global_permit else {
+        send_generation_errors(
+            &completion_tx,
+            generation_id,
+            &keys,
+            0,
+            "world generation cancelled".to_owned(),
+        )
+        .await;
+        return;
+    };
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let blocking_emitted = Arc::clone(&emitted);
+    let blocking_keys = keys.clone();
+    let blocking_tx = completion_tx.clone();
+    let blocking_generation = Arc::clone(&generation);
+    let result = tokio::task::spawn_blocking(move || {
+        let mut emit = |result: Result<EncodedProduct, String>| {
+            if blocking_generation.cancellation.is_cancelled() {
+                return ControlFlow::Break(());
+            }
+            let item_index = blocking_emitted.load(Ordering::Acquire);
+            let Some(&key) = blocking_keys.get(item_index) else {
+                return ControlFlow::Break(());
+            };
+            if blocking_tx
+                .blocking_send(ProductGenerationCompletion {
+                    generation_id,
+                    key,
+                    result,
+                })
+                .is_err()
+            {
+                return ControlFlow::Break(());
+            }
+            blocking_emitted.store(item_index + 1, Ordering::Release);
+            ControlFlow::Continue(())
+        };
+        match request {
+            GenerationRequest::Chunks { request, snapshot } => {
+                let products = generate_chunk_products(source.as_ref(), request, snapshot)?;
+                if products.len() != blocking_keys.len() {
+                    return Err("world source returned a mismatched product count".to_owned());
+                }
+                for product in products {
+                    if emit(Ok(product)).is_break() {
+                        return Err("world generation cancelled".to_owned());
+                    }
+                }
+                Ok(())
+            }
+            GenerationRequest::SurfaceTiles { request, snapshot } => {
+                emit_surface_tile_products(source.as_ref(), request, snapshot, &mut emit)
+            }
         }
     })
     .await
-    .map_err(|_| "world generation task failed".to_owned())?
+    .map_err(|_| "world generation task failed".to_owned())
+    .and_then(|result| result);
+    if let Err(message) = result {
+        send_generation_errors(
+            &completion_tx,
+            generation_id,
+            &keys,
+            emitted.load(Ordering::Acquire),
+            message,
+        )
+        .await;
+    }
+}
+
+async fn send_generation_errors(
+    completion_tx: &mpsc::Sender<ProductGenerationCompletion>,
+    generation_id: u64,
+    keys: &[ProductFlightKey],
+    emitted: usize,
+    message: String,
+) {
+    for &key in keys.iter().skip(emitted) {
+        if completion_tx
+            .send(ProductGenerationCompletion {
+                generation_id,
+                key,
+                result: Err(message.clone()),
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
 }
 
 fn spawn_generation_assembly(
@@ -3023,14 +3248,17 @@ async fn assemble_and_deliver_generation_batch(
     response_cache: Arc<Mutex<BatchResponseCache>>,
     max_frame_bytes: usize,
 ) {
-    if batch.job.tracked.is_cancelled() {
-        batch.job.tracked.finish();
+    let PendingGenerationDelivery::Batch(job) = batch.delivery else {
+        return;
+    };
+    if job.tracked.is_cancelled() {
+        job.tracked.finish();
         return;
     }
-    let request_id = batch.job.request.request_id();
+    let request_id = job.request.request_id();
     let Some(items) = batch.items.into_iter().collect::<Option<Vec<_>>>() else {
         deliver_generation_job(
-            batch.job,
+            job,
             Err("completed generation batch is missing a product".to_owned()),
             max_frame_bytes,
         )
@@ -3040,17 +3268,14 @@ async fn assemble_and_deliver_generation_batch(
     let products = match items.into_iter().collect::<Result<Vec<_>, _>>() {
         Ok(products) => products,
         Err(message) => {
-            deliver_generation_job(batch.job, Err(message), max_frame_bytes).await;
+            deliver_generation_job(job, Err(message), max_frame_bytes).await;
             return;
         }
     };
-    if matches!(batch.job.request, GenerationRequest::SurfaceTiles { .. }) {
-        assemble_and_deliver_surface_generation_batch(
-            batch.job,
-            source_identity_hash,
-            products,
-            generation_limiter,
-            response_cache,
+    if matches!(job.request, GenerationRequest::SurfaceTiles { .. }) {
+        deliver_generation_job(
+            job,
+            Err("surface generation batch reached non-progressive assembly".to_owned()),
             max_frame_bytes,
         )
         .await;
@@ -3059,32 +3284,32 @@ async fn assemble_and_deliver_generation_batch(
     let response_key = BatchResponseKey::from_products(&products);
     match get_cached_batch_response(&response_cache, &response_key, request_id) {
         Ok(Some(response)) => {
-            deliver_generation_job(batch.job, Ok(response), max_frame_bytes).await;
+            deliver_generation_job(job, Ok(response), max_frame_bytes).await;
             return;
         }
         Ok(None) => {}
         Err(message) => {
-            deliver_generation_job(batch.job, Err(message), max_frame_bytes).await;
+            deliver_generation_job(job, Err(message), max_frame_bytes).await;
             return;
         }
     }
-    let priority = batch.job.request.priority();
-    let session = Arc::clone(&batch.job.tracked.session);
+    let priority = job.request.priority();
+    let session = Arc::clone(&job.tracked.session);
     let session_permit = match tokio::select! {
         biased;
-        _ = batch.job.tracked.cancelled() => None,
+        _ = job.tracked.cancelled() => None,
         permit = session.acquire_generation(priority) => permit,
     } {
         Some(permit) => permit,
         None => {
-            batch.job.tracked.finish();
+            job.tracked.finish();
             return;
         }
     };
     let global_permit = tokio::select! {
         biased;
-        _ = batch.job.tracked.cancelled() => {
-            batch.job.tracked.finish();
+        _ = job.tracked.cancelled() => {
+            job.tracked.finish();
             return;
         }
         permit = generation_limiter.acquire(priority) => permit,
@@ -3093,24 +3318,24 @@ async fn assemble_and_deliver_generation_batch(
         Ok(Some(response)) => {
             drop(global_permit);
             drop(session_permit);
-            deliver_generation_job(batch.job, Ok(response), max_frame_bytes).await;
+            deliver_generation_job(job, Ok(response), max_frame_bytes).await;
             return;
         }
         Ok(None) => {}
         Err(message) => {
             drop(global_permit);
             drop(session_permit);
-            deliver_generation_job(batch.job, Err(message), max_frame_bytes).await;
+            deliver_generation_job(job, Err(message), max_frame_bytes).await;
             return;
         }
     }
     let response_flight = { lock_batch_response_cache(&response_cache).flight_lock(&response_key) };
     let response_flight_guard = tokio::select! {
         biased;
-        _ = batch.job.tracked.cancelled() => {
+        _ = job.tracked.cancelled() => {
             lock_batch_response_cache(&response_cache)
                 .abandon_flight(&response_key, &response_flight);
-            batch.job.tracked.finish();
+            job.tracked.finish();
             return;
         }
         guard = response_flight.lock() => guard,
@@ -3122,7 +3347,7 @@ async fn assemble_and_deliver_generation_batch(
             drop(response_flight_guard);
             drop(global_permit);
             drop(session_permit);
-            deliver_generation_job(batch.job, Ok(response), max_frame_bytes).await;
+            deliver_generation_job(job, Ok(response), max_frame_bytes).await;
             return;
         }
         Ok(None) => {}
@@ -3132,11 +3357,11 @@ async fn assemble_and_deliver_generation_batch(
             drop(response_flight_guard);
             drop(global_permit);
             drop(session_permit);
-            deliver_generation_job(batch.job, Err(message), max_frame_bytes).await;
+            deliver_generation_job(job, Err(message), max_frame_bytes).await;
             return;
         }
     }
-    let request = batch.job.request.clone();
+    let request = job.request.clone();
     let response = tokio::task::spawn_blocking(move || {
         assemble_generation_response(&request, source_identity_hash, &products)
     })
@@ -3155,133 +3380,202 @@ async fn assemble_and_deliver_generation_batch(
         lock_batch_response_cache(&response_cache).abandon_flight(&response_key, &response_flight);
     }
     drop(response_flight_guard);
-    deliver_generation_job(batch.job, response, max_frame_bytes).await;
+    deliver_generation_job(job, response, max_frame_bytes).await;
 }
 
-async fn assemble_and_deliver_surface_generation_batch(
-    job: GenerationJob,
+fn spawn_surface_generation_delivery(
+    delivery: SurfaceGenerationDelivery,
     source_identity_hash: voxels_world::WorldSourceIdentityHash,
-    products: Vec<Arc<EncodedProduct>>,
-    generation_limiter: Arc<PriorityGenerationLimiter>,
+    response_assembly_limiter: Arc<PriorityGenerationLimiter>,
     response_cache: Arc<Mutex<BatchResponseCache>>,
     max_frame_bytes: usize,
 ) {
-    let request_id = job.request.request_id();
-    let response_keys = products
-        .iter()
-        .enumerate()
-        .map(|(index, product)| {
-            BatchResponseKey::from_surface_product(product, index + 1 == products.len())
-        })
-        .collect::<Vec<_>>();
-    let mut responses = Vec::with_capacity(products.len());
-    let mut missing = false;
-    for key in &response_keys {
-        match get_cached_batch_response(&response_cache, key, request_id) {
-            Ok(response) => {
-                missing |= response.is_none();
-                responses.push(response);
-            }
-            Err(message) => {
-                deliver_generation_job(job, Err(message), max_frame_bytes).await;
-                return;
-            }
-        }
-    }
-    if missing {
-        let priority = job.request.priority();
-        let session = Arc::clone(&job.tracked.session);
-        let session_permit = match tokio::select! {
-            biased;
-            _ = job.tracked.cancelled() => None,
-            permit = session.acquire_generation(priority) => permit,
-        } {
-            Some(permit) => permit,
-            None => {
-                job.tracked.finish();
-                return;
-            }
-        };
-        let global_permit = tokio::select! {
-            biased;
-            _ = job.tracked.cancelled() => {
-                job.tracked.finish();
-                return;
-            }
-            permit = generation_limiter.acquire(priority) => permit,
-        };
-        for (index, product) in products.iter().enumerate() {
-            if responses[index].is_some() {
-                continue;
-            }
-            let response_key = &response_keys[index];
-            let response_flight =
-                { lock_batch_response_cache(&response_cache).flight_lock(response_key) };
-            let response_flight_guard = tokio::select! {
-                biased;
-                _ = job.tracked.cancelled() => {
-                    lock_batch_response_cache(&response_cache)
-                        .abandon_flight(response_key, &response_flight);
-                    job.tracked.finish();
-                    return;
-                }
-                guard = response_flight.lock() => guard,
-            };
-            let response =
-                match get_cached_batch_response(&response_cache, response_key, request_id) {
-                    Ok(Some(response)) => Ok(response),
-                    Ok(None) => {
-                        let product = Arc::clone(product);
-                        let final_item = index + 1 == products.len();
-                        tokio::task::spawn_blocking(move || {
-                            assemble_surface_item_response(
-                                request_id,
-                                source_identity_hash,
-                                product.as_ref(),
-                                final_item,
-                            )
-                        })
-                        .await
-                        .map_err(|_| "world response assembly task failed".to_owned())
-                        .and_then(|result| result)
-                    }
-                    Err(message) => Err(message),
-                };
-            match response {
-                Ok(response) => {
-                    if response.len() <= max_frame_bytes {
-                        lock_batch_response_cache(&response_cache)
-                            .insert(response_key.clone(), Arc::from(response.clone()));
-                    }
-                    lock_batch_response_cache(&response_cache)
-                        .finish_flight(response_key, &response_flight);
-                    responses[index] = Some(response);
-                }
-                Err(message) => {
-                    lock_batch_response_cache(&response_cache)
-                        .abandon_flight(response_key, &response_flight);
-                    drop(response_flight_guard);
-                    drop(global_permit);
-                    drop(session_permit);
-                    deliver_generation_job(job, Err(message), max_frame_bytes).await;
-                    return;
-                }
-            }
-            drop(response_flight_guard);
-        }
-        drop(global_permit);
-        drop(session_permit);
-    }
-    let Some(responses) = responses.into_iter().collect::<Option<Vec<_>>>() else {
-        deliver_generation_job(
-            job,
-            Err("surface response cache omitted a completed item".to_owned()),
+    tokio::spawn(async move {
+        deliver_surface_generation_stream(
+            delivery,
+            source_identity_hash,
+            response_assembly_limiter,
+            response_cache,
             max_frame_bytes,
         )
         .await;
-        return;
+    });
+}
+
+async fn deliver_surface_generation_stream(
+    mut delivery: SurfaceGenerationDelivery,
+    source_identity_hash: voxels_world::WorldSourceIdentityHash,
+    response_assembly_limiter: Arc<PriorityGenerationLimiter>,
+    response_cache: Arc<Mutex<BatchResponseCache>>,
+    max_frame_bytes: usize,
+) {
+    let item_count = match &delivery.job.request {
+        GenerationRequest::SurfaceTiles { request, .. } => request.coords.len(),
+        GenerationRequest::Chunks { .. } => {
+            deliver_generation_job(
+                delivery.job,
+                Err("chunk batch reached progressive surface delivery".to_owned()),
+                max_frame_bytes,
+            )
+            .await;
+            return;
+        }
     };
-    deliver_generation_frames(job, Ok(responses), max_frame_bytes).await;
+    let request_id = delivery.job.request.request_id();
+    let priority = delivery.job.request.priority();
+    let session = Arc::clone(&delivery.job.tracked.session);
+    let cancelled = Arc::clone(&delivery.job.tracked.cancelled);
+    let mut frames = GenerationFrameDelivery::new(delivery.job);
+    for index in 0..item_count {
+        let product = tokio::select! {
+            biased;
+            _ = cancelled.cancelled() => {
+                frames.finish();
+                return;
+            }
+            product = delivery.products.recv() => product,
+        };
+        let product = match product {
+            Some(Ok(product)) => product,
+            Some(Err(message)) => {
+                frames
+                    .send(encode_error(request_id, &message), true, max_frame_bytes)
+                    .await;
+                return;
+            }
+            None => {
+                frames
+                    .send(
+                        encode_error(
+                            request_id,
+                            "surface generation ended before its terminal item",
+                        ),
+                        true,
+                        max_frame_bytes,
+                    )
+                    .await;
+                return;
+            }
+        };
+        let final_item = index + 1 == item_count;
+        let response = assemble_cached_surface_item_response(
+            request_id,
+            source_identity_hash,
+            product,
+            final_item,
+            priority,
+            Arc::clone(&session),
+            Arc::clone(&response_assembly_limiter),
+            &cancelled,
+            Arc::clone(&response_cache),
+            max_frame_bytes,
+        )
+        .await;
+        match response {
+            Ok(response) => {
+                if !frames.send(response, final_item, max_frame_bytes).await {
+                    return;
+                }
+            }
+            Err(_message) if cancelled.is_cancelled() => {
+                frames.finish();
+                return;
+            }
+            Err(message) => {
+                frames
+                    .send(encode_error(request_id, &message), true, max_frame_bytes)
+                    .await;
+                return;
+            }
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one surface item carries explicit cache, priority, cancellation, and frame-limit authorities"
+)]
+async fn assemble_cached_surface_item_response(
+    request_id: u64,
+    source_identity_hash: voxels_world::WorldSourceIdentityHash,
+    product: Arc<EncodedProduct>,
+    final_item: bool,
+    priority: WorldProductPriority,
+    session: Arc<SessionRequests>,
+    response_assembly_limiter: Arc<PriorityGenerationLimiter>,
+    cancelled: &Arc<CancellationSignal>,
+    response_cache: Arc<Mutex<BatchResponseCache>>,
+    max_frame_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let response_key = BatchResponseKey::from_surface_product(&product, final_item);
+    if let Some(response) = get_cached_batch_response(&response_cache, &response_key, request_id)? {
+        return Ok(response);
+    }
+    let _session_permit = tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => return Err("world response assembly cancelled".to_owned()),
+        permit = session.acquire_response_assembly(priority) => permit,
+    };
+    let _global_permit = tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => return Err("world response assembly cancelled".to_owned()),
+        permit = response_assembly_limiter.acquire(priority) => permit,
+    };
+    if let Some(response) = get_cached_batch_response(&response_cache, &response_key, request_id)? {
+        return Ok(response);
+    }
+    let response_flight = { lock_batch_response_cache(&response_cache).flight_lock(&response_key) };
+    let response_flight_guard = tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => {
+            lock_batch_response_cache(&response_cache)
+                .abandon_flight(&response_key, &response_flight);
+            return Err("world response assembly cancelled".to_owned());
+        }
+        guard = response_flight.lock() => guard,
+    };
+    match get_cached_batch_response(&response_cache, &response_key, request_id) {
+        Ok(Some(response)) => {
+            lock_batch_response_cache(&response_cache)
+                .finish_flight(&response_key, &response_flight);
+            drop(response_flight_guard);
+            return Ok(response);
+        }
+        Ok(None) => {}
+        Err(message) => {
+            lock_batch_response_cache(&response_cache)
+                .finish_flight(&response_key, &response_flight);
+            drop(response_flight_guard);
+            return Err(message);
+        }
+    }
+    let response = tokio::task::spawn_blocking(move || {
+        assemble_surface_item_response(
+            request_id,
+            source_identity_hash,
+            product.as_ref(),
+            final_item,
+        )
+    })
+    .await
+    .map_err(|_| "world response assembly task failed".to_owned())
+    .and_then(|result| result);
+    match &response {
+        Ok(bytes) => {
+            if bytes.len() <= max_frame_bytes {
+                lock_batch_response_cache(&response_cache)
+                    .insert(response_key.clone(), Arc::from(bytes.clone()));
+            }
+            lock_batch_response_cache(&response_cache)
+                .finish_flight(&response_key, &response_flight);
+        }
+        Err(_) => {
+            lock_batch_response_cache(&response_cache)
+                .abandon_flight(&response_key, &response_flight);
+        }
+    }
+    drop(response_flight_guard);
+    response
 }
 
 fn assemble_surface_item_response(
@@ -3340,6 +3634,97 @@ async fn deliver_generation_job(
     .await;
 }
 
+struct GenerationFrameDelivery {
+    request_id: u64,
+    outbound: mpsc::Sender<OutboundFrame>,
+    cancellation: Arc<CancellationSignal>,
+    outbound_bytes: Arc<Semaphore>,
+    tracked: Option<TrackedRequest>,
+    priority: TrafficPriority,
+}
+
+impl GenerationFrameDelivery {
+    fn new(job: GenerationJob) -> Self {
+        Self {
+            request_id: job.request.request_id(),
+            priority: traffic_priority(job.request.priority()),
+            outbound: job.outbound,
+            cancellation: Arc::clone(&job.tracked.cancelled),
+            outbound_bytes: Arc::clone(&job.tracked.session.outbound_bytes),
+            tracked: Some(job.tracked),
+        }
+    }
+
+    fn finish(&mut self) {
+        if let Some(tracked) = self.tracked.take() {
+            tracked.finish();
+        }
+    }
+
+    /// Queues one response frame. Returns true only when a later item may still be sent.
+    async fn send(
+        &mut self,
+        mut bytes: Vec<u8>,
+        mut terminal: bool,
+        max_frame_bytes: usize,
+    ) -> bool {
+        if self.cancellation.is_cancelled() {
+            self.finish();
+            return false;
+        }
+        if bytes.len() > max_frame_bytes {
+            bytes = encode_error(
+                self.request_id,
+                "world result exceeds configured frame limit",
+            );
+            terminal = true;
+        }
+        let Ok(byte_count) = u32::try_from(bytes.len()) else {
+            self.finish();
+            return false;
+        };
+        let byte_permit = match tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => None,
+            permit = Arc::clone(&self.outbound_bytes).acquire_many_owned(byte_count) => permit.ok(),
+        } {
+            Some(permit) => permit,
+            None => {
+                self.finish();
+                return false;
+            }
+        };
+        let outbound = self.outbound.clone();
+        let outbound_permit = match tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => None,
+            permit = outbound.reserve() => permit.ok(),
+        } {
+            Some(permit) => permit,
+            None => {
+                self.finish();
+                return false;
+            }
+        };
+        outbound_permit.send(OutboundFrame {
+            bytes,
+            offset: 0,
+            fragment_transfer_id: None,
+            priority: self.priority,
+            cancellation: Some(Arc::clone(&self.cancellation)),
+            tracked: terminal.then(|| self.tracked.take()).flatten(),
+            _byte_permit: Some(byte_permit),
+        });
+        !terminal
+    }
+}
+
+impl Drop for GenerationFrameDelivery {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 async fn deliver_generation_frames(
     job: GenerationJob,
     responses: Result<Vec<Vec<u8>>, String>,
@@ -3362,60 +3747,14 @@ async fn deliver_generation_frames(
         )],
         Err(message) => vec![encode_error(request_id, &message)],
     };
-    let cancellation = Arc::clone(&job.tracked.cancelled);
-    let outbound_bytes = Arc::clone(&job.tracked.session.outbound_bytes);
-    let mut tracked = Some(job.tracked);
-    let priority = traffic_priority(job.request.priority());
+    let mut delivery = GenerationFrameDelivery::new(job);
     let frame_count = frames.len();
     for (index, bytes) in frames.into_iter().enumerate() {
-        let byte_count = match u32::try_from(bytes.len()) {
-            Ok(count) => count,
-            Err(_) => {
-                if let Some(tracked) = tracked.take() {
-                    tracked.finish();
-                }
-                return;
-            }
-        };
-        let byte_permit = match tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => None,
-            permit = Arc::clone(&outbound_bytes).acquire_many_owned(byte_count) => permit.ok(),
-        } {
-            Some(permit) => permit,
-            None => {
-                if let Some(tracked) = tracked.take() {
-                    tracked.finish();
-                }
-                return;
-            }
-        };
-        let outbound_permit = match tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => None,
-            permit = job.outbound.reserve() => permit.ok(),
-        } {
-            Some(permit) => permit,
-            None => {
-                if let Some(tracked) = tracked.take() {
-                    tracked.finish();
-                }
-                return;
-            }
-        };
         let terminal = index + 1 == frame_count;
-        let frame_tracker = if terminal { tracked.take() } else { None };
-        outbound_permit.send(OutboundFrame {
-            bytes,
-            offset: 0,
-            fragment_transfer_id: None,
-            priority,
-            cancellation: Some(Arc::clone(&cancellation)),
-            tracked: frame_tracker,
-            _byte_permit: Some(byte_permit),
-        });
+        if !delivery.send(bytes, terminal, max_frame_bytes).await {
+            return;
+        }
     }
-    debug_assert!(tracked.is_none());
 }
 
 fn traffic_priority(priority: WorldProductPriority) -> TrafficPriority {
@@ -3429,71 +3768,107 @@ fn traffic_priority(priority: WorldProductPriority) -> TrafficPriority {
     }
 }
 
-fn generate_surface_tile_products(
+fn emit_surface_tile_products(
     source: &dyn WorldSourceEngine,
     request: SurfaceTileBatchRequest,
     snapshot: SurfaceEditSnapshot,
-) -> Result<Vec<EncodedProduct>, String> {
+    emit: &mut dyn FnMut(Result<EncodedProduct, String>) -> ControlFlow<()>,
+) -> Result<(), String> {
     let coords = request.coords.clone();
-    let mut items = Vec::with_capacity(coords.len());
+    if snapshot.revisions.len() != coords.len() {
+        return Err("surface edit snapshot has a mismatched revision count".to_owned());
+    }
+    let source_identity_hash = source.identity().identity_hash();
     if snapshot.edits.is_empty() {
-        let result = source
-            .generate_batch(WorldProductBatch {
-                priority: request.priority,
-                requests: coords
-                    .iter()
-                    .copied()
-                    .map(WorldProductRequest::SurfaceTile)
-                    .collect(),
-            })
+        let mut next_index = 0;
+        let mut callback_error = None;
+        let mut emitter_stopped = false;
+        let returned_identity = source
+            .generate_surface_tiles(
+                request.priority,
+                &coords,
+                &mut |item: WorldProductBatchItem| {
+                    let Some((&coord, &edit_revision)) = coords
+                        .get(next_index)
+                        .zip(snapshot.revisions.get(next_index))
+                    else {
+                        callback_error =
+                            Some("world source returned too many surface tiles".to_owned());
+                        return ControlFlow::Break(());
+                    };
+                    if item.request != WorldProductRequest::SurfaceTile(coord) {
+                        callback_error =
+                            Some("world source returned a mismatched surface tile key".to_owned());
+                        return ControlFlow::Break(());
+                    }
+                    let item_result = match item.result {
+                        Ok(WorldProduct::SurfaceTile(snapshot)) => Ok(snapshot),
+                        Ok(_) => {
+                            callback_error =
+                                Some("world source returned a non-surface product".to_owned());
+                            return ControlFlow::Break(());
+                        }
+                        Err(error) => Err(error),
+                    };
+                    let product = encode_surface_tile_batch_item(
+                        source_identity_hash,
+                        &SurfaceTileBatchItem {
+                            coord,
+                            edit_revision,
+                            result: item_result,
+                        },
+                    )
+                    .map(EncodedProduct::SurfaceTile)
+                    .map_err(|error| error.to_string());
+                    next_index += 1;
+                    if let Err(message) = &product {
+                        callback_error = Some(message.clone());
+                    }
+                    let flow = emit(product);
+                    emitter_stopped = flow.is_break();
+                    if callback_error.is_some() {
+                        ControlFlow::Break(())
+                    } else {
+                        flow
+                    }
+                },
+            )
             .map_err(|error| error.to_string())?;
-        if result.source_identity_hash != source.identity().identity_hash()
-            || result.items.len() != coords.len()
-        {
+        if let Some(message) = callback_error {
+            return Err(message);
+        }
+        if emitter_stopped {
+            return Err("world generation cancelled".to_owned());
+        }
+        if returned_identity != source_identity_hash || next_index != coords.len() {
             return Err("world source returned a mismatched surface tile batch".to_owned());
         }
-        for ((coord, edit_revision), item) in coords
-            .iter()
-            .copied()
-            .zip(snapshot.revisions.iter().copied())
-            .zip(result.items)
-        {
-            if item.request != WorldProductRequest::SurfaceTile(coord) {
-                return Err("world source returned a mismatched surface tile key".to_owned());
-            }
-            let item_result = match item.result {
-                Ok(WorldProduct::SurfaceTile(snapshot)) => Ok(snapshot),
-                Ok(_) => return Err("world source returned a non-surface product".to_owned()),
-                Err(error) => Err(error),
-            };
-            items.push(SurfaceTileBatchItem {
-                coord,
-                edit_revision,
-                result: item_result,
-            });
-        }
-    } else {
-        for (coord, edit_revision) in coords
-            .iter()
-            .copied()
-            .zip(snapshot.revisions.iter().copied())
-        {
-            items.push(SurfaceTileBatchItem {
+        return Ok(());
+    }
+    for (coord, edit_revision) in coords
+        .iter()
+        .copied()
+        .zip(snapshot.revisions.iter().copied())
+    {
+        let product = encode_surface_tile_batch_item(
+            source_identity_hash,
+            &SurfaceTileBatchItem {
                 coord,
                 edit_revision,
                 result: source.generate_edited_surface_tile(&snapshot.edits, coord),
-            });
+            },
+        )
+        .map(EncodedProduct::SurfaceTile)
+        .map_err(|error| error.to_string());
+        let failed = product.is_err();
+        if emit(product).is_break() {
+            return Err("world generation cancelled".to_owned());
+        }
+        if failed {
+            return Err("world source returned an unencodable edited surface tile".to_owned());
         }
     }
-    let source_identity_hash = source.identity().identity_hash();
-    items
-        .iter()
-        .map(|item| {
-            encode_surface_tile_batch_item(source_identity_hash, item)
-                .map(EncodedProduct::SurfaceTile)
-                .map_err(|error| error.to_string())
-        })
-        .collect()
+    Ok(())
 }
 
 fn generate_chunk_products(
@@ -3562,6 +3937,7 @@ mod tests {
         TerrainDiffusionProviderConfig, WORLD_SERVICE_CONFIG_SCHEMA_VERSION, WorldSourceMode,
     };
     use futures_util::{SinkExt, StreamExt};
+    use std::sync::Condvar;
     use std::sync::atomic::AtomicUsize;
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::Error as ClientError;
@@ -3866,6 +4242,11 @@ mod tests {
         product_calls: Arc<Mutex<HashMap<WorldProductRequest, usize>>>,
     }
 
+    struct GatedSurfaceSource {
+        inner: ProceduralWorldSource,
+        release_second: Arc<(Mutex<bool>, Condvar)>,
+    }
+
     struct TestClient<S> {
         socket: tokio_tungstenite::WebSocketStream<S>,
         reassembler: FrameReassembler,
@@ -3977,6 +4358,218 @@ mod tests {
             self.inner
                 .nearest_prominent_skyline_feature(x, z, kind, max_radius_cells)
         }
+    }
+
+    impl WorldSourceEngine for GatedSurfaceSource {
+        fn identity(&self) -> &voxels_world::WorldSourceIdentity {
+            self.inner.identity()
+        }
+
+        fn generate_batch(
+            &self,
+            request: WorldProductBatch,
+        ) -> Result<voxels_world::WorldProductBatchResult, WorldSourceError> {
+            self.inner.generate_batch(request)
+        }
+
+        fn generate_surface_tiles(
+            &self,
+            priority: WorldProductPriority,
+            coords: &[SurfaceTileCoord],
+            emit: &mut dyn FnMut(WorldProductBatchItem) -> ControlFlow<()>,
+        ) -> Result<voxels_world::WorldSourceIdentityHash, WorldSourceError> {
+            for (index, &coord) in coords.iter().enumerate() {
+                if index == 1 {
+                    let (released, changed) = self.release_second.as_ref();
+                    let mut released = released
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    while !*released {
+                        released = changed
+                            .wait(released)
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    }
+                }
+                let mut stopped = false;
+                self.inner.generate_surface_tiles(
+                    priority,
+                    std::slice::from_ref(&coord),
+                    &mut |item| {
+                        let flow = emit(item);
+                        stopped = flow.is_break();
+                        flow
+                    },
+                )?;
+                if stopped {
+                    break;
+                }
+            }
+            Ok(self.inner.identity().identity_hash())
+        }
+
+        fn generate_edited_surface_tile(
+            &self,
+            edits: &voxels_world::EditMap,
+            coord: SurfaceTileCoord,
+        ) -> Result<voxels_world::SurfaceTileSnapshot, WorldSourceError> {
+            self.inner.generate_edited_surface_tile(edits, coord)
+        }
+
+        fn surface_tiles_affected_by_voxel(
+            &self,
+            edits: &voxels_world::EditMap,
+            level: SurfaceLodLevel,
+            coord: voxels_world::VoxelCoord,
+        ) -> Vec<SurfaceTileCoord> {
+            self.inner
+                .surface_tiles_affected_by_voxel(edits, level, coord)
+        }
+
+        fn atmosphere_sample(
+            &self,
+            x: i32,
+            z: i32,
+        ) -> (voxels_world::AtmosphereSample, voxels_world::SurfaceRegion) {
+            self.inner.atmosphere_sample(x, z)
+        }
+
+        fn skyline_features_anchored_in(
+            &self,
+            bounds: [[i32; 2]; 2],
+        ) -> Vec<voxels_world::SkylineFeature> {
+            self.inner.skyline_features_anchored_in(bounds)
+        }
+
+        fn skyline_features_at(
+            &self,
+            coord: voxels_world::VoxelCoord,
+        ) -> Vec<voxels_world::SkylineFeature> {
+            self.inner.skyline_features_at(coord)
+        }
+
+        fn nearest_skyline_feature(
+            &self,
+            x: i32,
+            z: i32,
+            kind: voxels_world::SkylineFeatureKind,
+            max_radius_cells: i32,
+        ) -> Option<voxels_world::SkylineFeature> {
+            self.inner
+                .nearest_skyline_feature(x, z, kind, max_radius_cells)
+        }
+
+        fn nearest_prominent_skyline_feature(
+            &self,
+            x: i32,
+            z: i32,
+            kind: voxels_world::SkylineFeatureKind,
+            max_radius_cells: i32,
+        ) -> Option<voxels_world::SkylineFeature> {
+            self.inner
+                .nearest_prominent_skyline_feature(x, z, kind, max_radius_cells)
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_publishes_the_first_surface_item_before_a_later_source_item_finishes() {
+        let release_second = Arc::new((Mutex::new(false), Condvar::new()));
+        let source: Arc<dyn WorldSourceEngine> = Arc::new(GatedSurfaceSource {
+            inner: ProceduralWorldSource::new(42),
+            release_second: Arc::clone(&release_second),
+        });
+        let cancellations = Arc::new(Notify::new());
+        let (jobs, job_rx) = mpsc::channel(4);
+        let dispatcher = tokio::spawn(run_generation_dispatcher(
+            job_rx,
+            Arc::clone(&cancellations),
+            source,
+            PriorityGenerationLimiter::new(1),
+            PriorityGenerationLimiter::new(1),
+            Arc::new(Semaphore::new(1)),
+            GenerationDispatcherLimits {
+                max_frame_bytes: 4 * 1024 * 1024,
+                product_cache_bytes: 4 * 1024 * 1024,
+                response_cache_bytes: 4 * 1024 * 1024,
+                completion_queue_capacity: 1,
+            },
+        ));
+        let session = Arc::new(SessionRequests::new(
+            1,
+            1,
+            1,
+            8 * 1024 * 1024,
+            cancellations,
+        ));
+        let request_id = 71;
+        let cancelled = session
+            .insert(request_id)
+            .ok()
+            .expect("surface request admission");
+        let coords = vec![
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 0, 0),
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 1, 0),
+        ];
+        let (outbound, mut received) = mpsc::channel(4);
+        jobs.send(GenerationJob {
+            request: GenerationRequest::SurfaceTiles {
+                request: SurfaceTileBatchRequest {
+                    request_id,
+                    priority: WorldProductPriority::ImmediateSurface,
+                    coords: coords.clone(),
+                },
+                snapshot: SurfaceEditSnapshot {
+                    edits: EditMap::default(),
+                    revisions: vec![0; coords.len()],
+                },
+            },
+            outbound,
+            tracked: TrackedRequest {
+                request_id,
+                cancelled,
+                session,
+            },
+        })
+        .await
+        .expect("generation dispatcher");
+
+        let first = tokio::time::timeout(Duration::from_secs(2), received.recv()).await;
+        {
+            let (released, changed) = release_second.as_ref();
+            *released
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            changed.notify_all();
+        }
+        let first = first
+            .expect("first item waited for the gated sibling")
+            .expect("first surface frame");
+        let first_result =
+            decode_surface_tile_batch_result(&first.bytes).expect("first surface result");
+        assert_eq!(first_result.items.len(), 1);
+        assert_eq!(first_result.items[0].coord, coords[0]);
+        assert!(!first_result.final_item);
+        assert!(first.tracked.is_none());
+
+        let mut final_frame = tokio::time::timeout(Duration::from_secs(2), received.recv())
+            .await
+            .expect("terminal item did not follow gate release")
+            .expect("terminal surface frame");
+        let final_result =
+            decode_surface_tile_batch_result(&final_frame.bytes).expect("terminal surface result");
+        assert_eq!(final_result.items.len(), 1);
+        assert_eq!(final_result.items[0].coord, coords[1]);
+        assert!(final_result.final_item);
+        final_frame
+            .tracked
+            .take()
+            .expect("terminal request tracker")
+            .finish();
+
+        drop(jobs);
+        tokio::time::timeout(Duration::from_secs(2), dispatcher)
+            .await
+            .expect("generation dispatcher shutdown")
+            .expect("generation dispatcher task");
     }
 
     fn test_generation_job(
@@ -4126,16 +4719,27 @@ mod tests {
         let source: Arc<dyn WorldSourceEngine> = Arc::new(ProceduralWorldSource::new(42));
         let prefetch = Arc::new(Semaphore::new(1));
         let generation = ProductGenerationFlight::new(1, 1);
+        let keys = vec![ProductFlightKey {
+            product: ProductKey::Chunk {
+                coord: ChunkCoord::new(2, 0, 3),
+                edit_revision: 0,
+            },
+            priority: WorldProductPriority::VisibleSurface,
+        }];
+        let (completion_tx, mut completions) = mpsc::channel(1);
         let task_generation = Arc::clone(&generation);
         let task_global = Arc::clone(&global);
         let task = tokio::spawn(async move {
             generate_single_flight_products(
                 request,
+                keys,
+                1,
                 source,
                 session,
                 task_global,
                 prefetch,
-                &task_generation.cancellation,
+                completion_tx,
+                task_generation,
             )
             .await
         });
@@ -4147,12 +4751,13 @@ mod tests {
         .await
         .expect("generation must wait for the occupied global worker");
 
-        generation.abandon_product();
-        let result = tokio::time::timeout(Duration::from_secs(1), task)
+        generation.settle_product();
+        tokio::time::timeout(Duration::from_secs(1), task)
             .await
             .expect("orphan generation must stop promptly")
             .expect("generation task");
-        assert!(result.is_err());
+        let completion = completions.recv().await.expect("cancellation completion");
+        assert!(completion.result.is_err());
         assert_eq!(global.waiting(), (0, 0, 0));
         drop(held);
     }

@@ -23,6 +23,7 @@ use crate::{
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::ControlFlow;
 
 const SURFACE_TILE_SAMPLE_EDGE: u32 = 34;
 const ECOLOGY_CELL_VOXELS: i32 = 64;
@@ -881,6 +882,30 @@ impl WorldSourceEngine for HeightfieldWorldSource {
             source_identity_hash: self.identity_hash,
             items,
         })
+    }
+
+    fn generate_surface_tiles(
+        &self,
+        priority: WorldProductPriority,
+        coords: &[SurfaceTileCoord],
+        emit: &mut dyn FnMut(WorldProductBatchItem) -> ControlFlow<()>,
+    ) -> Result<WorldSourceIdentityHash, WorldSourceError> {
+        if coords.len() > MAX_WORLD_PRODUCT_BATCH {
+            return Err(WorldSourceError::BatchTooLarge);
+        }
+        let edits = EditMap::default();
+        for &coord in coords {
+            let item = WorldProductBatchItem {
+                request: WorldProductRequest::SurfaceTile(coord),
+                result: self
+                    .surface_tile(&edits, coord, priority)
+                    .map(WorldProduct::SurfaceTile),
+            };
+            if emit(item).is_break() {
+                break;
+            }
+        }
+        Ok(self.identity_hash)
     }
 
     fn generate_edited_surface_tile(
@@ -2727,6 +2752,45 @@ mod tests {
             .next()
             .expect("one keyed result")
             .result
+    }
+
+    #[test]
+    fn heightfield_surface_emission_matches_batch_order_and_stops_early() {
+        let source = heightfield(FakeBehavior::Valid);
+        let coords = [
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride256, -1, 2),
+            SurfaceTileCoord::new(SurfaceLodLevel::Stride256, 0, 2),
+        ];
+        let expected = source
+            .generate_batch(WorldProductBatch {
+                priority: WorldProductPriority::VisibleSurface,
+                requests: coords
+                    .iter()
+                    .copied()
+                    .map(WorldProductRequest::SurfaceTile)
+                    .collect(),
+            })
+            .expect("heightfield surface batch");
+        let engine: &dyn WorldSourceEngine = &source;
+        let mut emitted = Vec::new();
+        let identity = engine
+            .generate_surface_tiles(WorldProductPriority::VisibleSurface, &coords, &mut |item| {
+                emitted.push(item);
+                ControlFlow::Continue(())
+            })
+            .expect("progressive heightfield surfaces");
+
+        assert_eq!(identity, expected.source_identity_hash);
+        assert_eq!(emitted, expected.items);
+
+        let mut stopped = Vec::new();
+        engine
+            .generate_surface_tiles(WorldProductPriority::VisibleSurface, &coords, &mut |item| {
+                stopped.push(item.request);
+                ControlFlow::Break(())
+            })
+            .expect("stopped heightfield surfaces");
+        assert_eq!(stopped, [WorldProductRequest::SurfaceTile(coords[0])]);
     }
 
     #[test]
