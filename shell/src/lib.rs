@@ -1291,8 +1291,7 @@ mod web {
     use voxels_world::protocol::{
         BrowserUserId, EDIT_CUBE_EDGE_VOXELS, EDIT_CUBE_VOLUME_VOXELS, EDIT_SPHERE_RADIUS_VOXELS,
         EDIT_SPHERE_VOLUME_VOXELS, EditAction, EditShape, EditVolume, MaterialInventory, PlayerId,
-        PlayerIdentity, SurfaceTileBatchItem, VoxelMutation, WorldCapabilities,
-        WorldEnvironmentSnapshot,
+        PlayerIdentity, VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
     };
     use voxels_world::{
         AtmosphereSample, BinaryMeshScratch, CHUNK_EDGE, CHUNK_VOXEL_BYTES,
@@ -1307,7 +1306,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 7;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 41;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 40;
     const FRAME_SAMPLE_WIDTH: u32 = 26;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -1325,15 +1324,11 @@ mod web {
         "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
         "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
         "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,canonicalSurfaceCellsResident,canonicalSurfaceCellsRequired,",
-        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,lodIncompleteTransitionEdges,lodCutTransitionActive,lodCutTransitionPhase,surfacePublicationQueued,surfacePublicationsAccepted,frameSequence,schemaVersion,sampleCount,",
+        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,lodIncompleteTransitionEdges,lodCutTransitionActive,lodCutTransitionPhase,frameSequence,schemaVersion,sampleCount,",
         "droppedSamples",
     );
     const SURFACE_HINT_VERTICAL_MARGIN_CHUNKS: i32 = 1;
     const INTERACTIVE_SURFACE_BATCH: usize = 4;
-    /// Bound expensive surface profile reconciliation and GPU publication to a small fraction of
-    /// a 120 Hz frame while retaining the measured four-item request throughput when uploads are
-    /// cheap.
-    const SURFACE_PUBLICATION_BUDGET_MS: f64 = 3.0;
     const BACKGROUND_SURFACE_BATCH: usize = 2;
     const BACKGROUND_SURFACE_BATCHES_IN_FLIGHT: usize = 4;
     #[derive(Clone, Copy, Debug)]
@@ -1536,11 +1531,6 @@ mod web {
         revision: u64,
     }
 
-    struct SurfacePublication {
-        ticket: RemoteSurfaceTicket,
-        item: Option<SurfaceTileBatchItem>,
-    }
-
     #[derive(Default)]
     struct EditRequirements {
         canonical: Vec<CanonicalRequirement>,
@@ -1624,8 +1614,6 @@ mod web {
         surface_accepted_edit_revisions: RefCell<BTreeMap<SurfaceTileCoord, u64>>,
         surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
         surface_in_flight: RefCell<BTreeSet<SurfaceTileCoord>>,
-        surface_publications: RefCell<VecDeque<SurfacePublication>>,
-        surface_publications_accepted: Cell<u32>,
         surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
         all_lods_ready: Cell<bool>,
         interactive_lods_ready: Cell<bool>,
@@ -2163,7 +2151,7 @@ mod web {
             performance: Option<&web_sys::Performance>,
         ) -> StreamFrameSample {
             let remote_start = performance_now(performance);
-            self.drain_remote_generation(performance);
+            self.drain_remote_generation();
             let remote_ms = (performance_now(performance) - remote_start) as f32;
             let plan_start = performance_now(performance);
             // Lead the desired cylinder rather than only sorting it toward a prediction outside
@@ -2769,65 +2757,13 @@ mod web {
             }
         }
 
-        fn drain_remote_generation(&self, performance: Option<&web_sys::Performance>) {
+        fn drain_remote_generation(&self) {
             if let Some(completion) = self.remote.next_completion() {
                 self.accept_remote_completion(completion);
             }
             if let Some(completion) = self.remote.next_surface_completion() {
-                self.queue_remote_surface_completion(completion);
+                self.accept_remote_surface_completion(completion);
             }
-            let started = performance_now(performance);
-            let mut published = 0_u32;
-            let mut processed = 0_u32;
-            for _ in 0..INTERACTIVE_SURFACE_BATCH {
-                let focus = self.surface_focus.get();
-                let initialized_level_count = self.initialized_surface_level_count.get();
-                let index = self
-                    .surface_publications
-                    .borrow()
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(index, publication)| {
-                        let priority = focus.map_or(WorldProductPriority::Prefetch, |focus| {
-                            surface_product_priority(
-                                publication.ticket.coord,
-                                focus,
-                                INTERACTIVE_SURFACE_LOD_LEVELS,
-                            )
-                        });
-                        (
-                            priority as u8,
-                            surface_stream_level_order(
-                                publication.ticket.coord,
-                                priority,
-                                initialized_level_count,
-                            ),
-                            *index,
-                        )
-                    })
-                    .map(|(index, _)| index);
-                let Some(index) = index else {
-                    break;
-                };
-                if processed > 0
-                    && initialized_level_count >= INTERACTIVE_SURFACE_LOD_LEVELS
-                    && performance_now(performance) - started >= SURFACE_PUBLICATION_BUDGET_MS
-                {
-                    break;
-                }
-                let Some(publication) = self.surface_publications.borrow_mut().remove(index) else {
-                    break;
-                };
-                processed = processed.saturating_add(1);
-                if self.accept_surface_publication(publication) {
-                    published = published.saturating_add(1);
-                }
-            }
-            self.surface_publications_accepted.set(
-                self.surface_publications_accepted
-                    .get()
-                    .saturating_add(published),
-            );
         }
 
         fn accept_remote_completion(&self, completion: RemoteChunkCompletion) {
@@ -2875,111 +2811,88 @@ mod web {
             }
         }
 
-        fn queue_remote_surface_completion(&self, completion: RemoteSurfaceCompletion) {
+        fn accept_remote_surface_completion(&self, completion: RemoteSurfaceCompletion) {
+            for ticket in &completion.tickets {
+                self.surface_in_flight.borrow_mut().remove(&ticket.coord);
+            }
             let Ok(result) = completion.result else {
                 for ticket in completion.tickets {
-                    self.surface_in_flight.borrow_mut().remove(&ticket.coord);
                     self.enqueue_surface_front(ticket.coord);
                 }
                 return;
             };
             if result.source_identity_hash != self.source_identity_hash() {
-                for ticket in completion.tickets {
-                    self.surface_in_flight.borrow_mut().remove(&ticket.coord);
-                }
                 log_gpu_error("world surface response identity changed");
                 return;
             }
             let mut items = result.items;
             for ticket in completion.tickets {
-                let item = items
-                    .iter()
-                    .position(|item| item.coord == ticket.coord)
-                    .map(|index| items.remove(index));
-                self.surface_publications
-                    .borrow_mut()
-                    .push_back(SurfacePublication { ticket, item });
-            }
-        }
-
-        fn accept_surface_publication(&self, publication: SurfacePublication) -> bool {
-            let ticket = publication.ticket;
-            self.surface_in_flight.borrow_mut().remove(&ticket.coord);
-            if !surface_tile_in_coverage(
-                ticket.coord,
-                self.surface_focus.get(),
-                self.config.surface_load_radius_tiles,
-                self.surface_cross_radii.get(),
-                self.surface_motion_axis.get(),
-            ) {
-                return false;
-            }
-            let Some(item) = publication.item else {
-                self.enqueue_surface_front(ticket.coord);
-                return false;
-            };
-            let edit_revision = item.edit_revision;
-            let snapshot = match item.result {
-                Ok(snapshot) => snapshot,
-                Err(voxels_world::WorldSourceError::SourceCoverageUnavailable) => return false,
-                Err(error) => {
-                    log_gpu_error(&format!(
-                        "world service could not generate surface tile {:?}: {error}",
-                        ticket.coord
-                    ));
+                let Some(index) = items.iter().position(|item| item.coord == ticket.coord) else {
                     self.enqueue_surface_front(ticket.coord);
-                    return false;
+                    continue;
+                };
+                let item = items.remove(index);
+                let edit_revision = item.edit_revision;
+                let snapshot = match item.result {
+                    Ok(snapshot) => snapshot,
+                    Err(voxels_world::WorldSourceError::SourceCoverageUnavailable) => continue,
+                    Err(error) => {
+                        log_gpu_error(&format!(
+                            "world service could not generate surface tile {:?}: {error}",
+                            ticket.coord
+                        ));
+                        self.enqueue_surface_front(ticket.coord);
+                        continue;
+                    }
+                };
+                let server_floor = self.edit_revisions.borrow().surface_floor(ticket.coord);
+                if !revision_satisfies(edit_revision, server_floor)
+                    || !self
+                        .surface_revisions
+                        .borrow()
+                        .accepts(ticket.coord, ticket.revision)
+                {
+                    self.enqueue_surface_front(ticket.coord);
+                    continue;
                 }
-            };
-            let server_floor = self.edit_revisions.borrow().surface_floor(ticket.coord);
-            if !revision_satisfies(edit_revision, server_floor)
-                || !self
-                    .surface_revisions
-                    .borrow()
-                    .accepts(ticket.coord, ticket.revision)
-            {
-                self.enqueue_surface_front(ticket.coord);
-                return false;
-            }
-            let canonical_hints = (ticket.coord.level == SurfaceLodLevel::Stride2).then(|| {
-                snapshot
-                    .terrain
-                    .canonical_surface_chunk_hints(SURFACE_HINT_VERTICAL_MARGIN_CHUNKS)
-            });
-            let exact_detail_chunks = snapshot.exact_detail_chunks.clone();
-            if self
-                .renderer
-                .borrow_mut()
-                .upload_surface_tile_meshes(&snapshot.terrain, &snapshot.water)
-            {
-                self.surface_resident.borrow_mut().insert(ticket.coord);
-                if let Some(hints) = canonical_hints {
-                    self.surface_chunk_hints
+                let canonical_hints = (ticket.coord.level == SurfaceLodLevel::Stride2).then(|| {
+                    snapshot
+                        .terrain
+                        .canonical_surface_chunk_hints(SURFACE_HINT_VERTICAL_MARGIN_CHUNKS)
+                });
+                let exact_detail_chunks = snapshot.exact_detail_chunks.clone();
+                if self
+                    .renderer
+                    .borrow_mut()
+                    .upload_surface_tile_meshes(&snapshot.terrain, &snapshot.water)
+                {
+                    self.surface_resident.borrow_mut().insert(ticket.coord);
+                    if let Some(hints) = canonical_hints {
+                        self.surface_chunk_hints
+                            .borrow_mut()
+                            .insert(ticket.coord, hints);
+                    }
+                    if exact_detail_chunks.is_empty() {
+                        self.surface_exact_detail_chunks
+                            .borrow_mut()
+                            .remove(&ticket.coord);
+                    } else {
+                        self.surface_exact_detail_chunks
+                            .borrow_mut()
+                            .insert(ticket.coord, exact_detail_chunks);
+                    }
+                    let committed = self
+                        .surface_revisions
                         .borrow_mut()
-                        .insert(ticket.coord, hints);
-                }
-                if exact_detail_chunks.is_empty() {
-                    self.surface_exact_detail_chunks
+                        .commit(ticket.coord, ticket.revision);
+                    debug_assert!(committed, "uploaded remote surface revision became stale");
+                    self.surface_accepted_edit_revisions
                         .borrow_mut()
-                        .remove(&ticket.coord);
+                        .insert(ticket.coord, edit_revision);
+                    self.surface_dirty.borrow_mut().remove(&ticket.coord);
                 } else {
-                    self.surface_exact_detail_chunks
-                        .borrow_mut()
-                        .insert(ticket.coord, exact_detail_chunks);
+                    self.enqueue_surface_front(ticket.coord);
                 }
-                let committed = self
-                    .surface_revisions
-                    .borrow_mut()
-                    .commit(ticket.coord, ticket.revision);
-                debug_assert!(committed, "uploaded remote surface revision became stale");
-                self.surface_accepted_edit_revisions
-                    .borrow_mut()
-                    .insert(ticket.coord, edit_revision);
-                self.surface_dirty.borrow_mut().remove(&ticket.coord);
-                true
-            } else {
-                self.enqueue_surface_front(ticket.coord);
-                false
             }
         }
 
@@ -4851,8 +4764,6 @@ mod web {
                         0.0
                     },
                     render.lod_cut_transition_phase,
-                    engine.surface_publications.borrow().len() as f32,
-                    engine.surface_publications_accepted.get() as f32,
                     engine.frame_sequence.get() as f32,
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);
@@ -5128,8 +5039,6 @@ mod web {
             surface_accepted_edit_revisions: RefCell::new(BTreeMap::new()),
             surface_queue: RefCell::new(VecDeque::new()),
             surface_in_flight: RefCell::new(BTreeSet::new()),
-            surface_publications: RefCell::new(VecDeque::new()),
-            surface_publications_accepted: Cell::new(0),
             surface_dirty: RefCell::new(BTreeSet::new()),
             all_lods_ready: Cell::new(false),
             interactive_lods_ready: Cell::new(false),

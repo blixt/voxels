@@ -85,8 +85,6 @@ interface ViewportSample {
   readonly canonicalSurfaceCellsResident: number;
   readonly canonicalSurfaceCellsRequired: number;
   readonly surfaceQueued: number;
-  readonly surfacePublicationQueued: number;
-  readonly surfacePublicationsAccepted: number;
   readonly generationQueued: number;
   readonly generationInFlight: number;
   readonly acceptedCompletions: number;
@@ -191,15 +189,10 @@ function cruiseWindow(samples: readonly ViewportSample[]) {
       samples.map((sample) => sample.lodIncompleteTransitionEdges),
     ),
     surfaceQueue: numericSummary(samples.map((sample) => sample.surfaceQueued)),
-    surfacePublicationQueue: numericSummary(
-      samples.map((sample) => sample.surfacePublicationQueued),
-    ),
     surfaceInFlight: numericSummary(samples.map((sample) => sample.surfaceInFlight)),
     generationQueue: numericSummary(samples.map((sample) => sample.generationQueued)),
     generationInFlight: numericSummary(samples.map((sample) => sample.generationInFlight)),
     acceptedCompletions: last.acceptedCompletions - first.acceptedCompletions,
-    acceptedSurfacePublications:
-      last.surfacePublicationsAccepted - first.surfacePublicationsAccepted,
     staleCompletions: last.staleCompletions - first.staleCompletions,
     evictions: last.totalEvictions - first.totalEvictions,
     canceledChunkRequests: last.canceledChunkRequests - first.canceledChunkRequests,
@@ -315,9 +308,6 @@ function cruiseQuality(
     ),
     longestDegradedPresentationMs: rounded(longestDegradedPresentationMs),
     surfaceQueue: numericSummary(measured.map((sample) => sample.surfaceQueued)),
-    surfacePublicationQueue: numericSummary(
-      measured.map((sample) => sample.surfacePublicationQueued),
-    ),
     surfaceInFlight: numericSummary(measured.map((sample) => sample.surfaceInFlight)),
     generationQueue: numericSummary(measured.map((sample) => sample.generationQueued)),
     generationInFlight: numericSummary(measured.map((sample) => sample.generationInFlight)),
@@ -327,8 +317,6 @@ function cruiseQuality(
     },
     staleCompletions: last.staleCompletions - first.staleCompletions,
     acceptedCompletions: last.acceptedCompletions - first.acceptedCompletions,
-    acceptedSurfacePublications:
-      last.surfacePublicationsAccepted - first.surfacePublicationsAccepted,
     evictions: last.totalEvictions - first.totalEvictions,
     windows,
     firstToLastWindow:
@@ -612,8 +600,6 @@ async function runScenario({
       canonicalSurfaceCellsResident: snapshotValue(current, "canonicalSurfaceCellsResident"),
       canonicalSurfaceCellsRequired: snapshotValue(current, "canonicalSurfaceCellsRequired"),
       surfaceQueued: snapshotValue(current, "surfaceQueued"),
-      surfacePublicationQueued: snapshotValue(current, "surfacePublicationQueued"),
-      surfacePublicationsAccepted: snapshotValue(current, "surfacePublicationsAccepted"),
       generationQueued: snapshotValue(current, "generationQueued"),
       generationInFlight: snapshotValue(current, "generationInFlight"),
       acceptedCompletions: snapshotValue(current, "acceptedCompletions"),
