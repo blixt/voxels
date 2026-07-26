@@ -23,6 +23,7 @@ use crate::ui_gpu::{SCENE_FORMAT, UiGpu};
 use bytemuck::{Pod, Zeroable};
 use hashbrown::{HashMap, HashSet};
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use voxels_core::{CameraState, EnclosureSample, FluidState, RemoteAvatarPose};
@@ -31,7 +32,8 @@ use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, Material, MeshedChunk,
     Quad, RenderLayer, SURFACE_PATCHES_PER_TILE_EDGE, SurfaceLodLevel, SurfacePatch,
     SurfacePatchEdge, SurfacePatchId, SurfaceQuad, SurfaceRegion, SurfaceTileCoord,
-    SurfaceTileMesh, VOXEL_SIZE_METRES, WaterTileMesh, fallback_surface_wall_material,
+    SurfaceTileMesh, VOXEL_SIZE_METRES, WaterTileMesh, WorldManifest,
+    fallback_surface_wall_material,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -1008,9 +1010,19 @@ pub struct RenderDiagnostics {
 #[derive(Debug, Eq, PartialEq)]
 pub struct ScreenshotCapture {
     pub filename: String,
+    pub metadata: String,
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ScreenshotWorldIdentity {
+    world_id: String,
+    source_identity_hash: String,
+    seed: u64,
+    world_schema_version: u32,
+    material_schema_version: u16,
 }
 
 #[derive(Default)]
@@ -1491,6 +1503,7 @@ pub struct Renderer {
     ui_text_error_reported: bool,
     diagnostics_copy_requested: bool,
     screenshot_requested: bool,
+    screenshot_world_identity: Option<ScreenshotWorldIdentity>,
     screenshot_readback: Arc<Mutex<ScreenshotReadbackState>>,
     host_ui_action: Option<HostUiAction>,
     interior: InteriorEnvironment,
@@ -2425,6 +2438,7 @@ impl Renderer {
             ui_text_error_reported: false,
             diagnostics_copy_requested: false,
             screenshot_requested: false,
+            screenshot_world_identity: None,
             screenshot_readback: Arc::new(Mutex::new(ScreenshotReadbackState::default())),
             host_ui_action: None,
             interior: InteriorEnvironment::default(),
@@ -2896,6 +2910,24 @@ impl Renderer {
                 .is_ok_and(|state| state.in_flight || state.completed.is_some())
     }
 
+    pub fn request_screenshot(&mut self) -> bool {
+        if self.screenshot_pending() {
+            return false;
+        }
+        self.screenshot_requested = true;
+        true
+    }
+
+    pub fn set_screenshot_world_manifest(&mut self, manifest: &WorldManifest) {
+        self.screenshot_world_identity = Some(ScreenshotWorldIdentity {
+            world_id: hex_bytes(manifest.world_id.as_bytes()),
+            source_identity_hash: manifest.source_identity_hash().to_string(),
+            seed: manifest.seed,
+            world_schema_version: manifest.world_schema_version,
+            material_schema_version: manifest.material_schema_version,
+        });
+    }
+
     pub fn take_screenshot_capture(&mut self) -> Option<ScreenshotCapture> {
         self.screenshot_readback
             .lock()
@@ -2967,9 +2999,7 @@ impl Renderer {
                 self.set_diagnostic_sky_color(active.then_some([1.0, 0.0, 1.0]));
             }
             UiAction::TakeScreenshot => {
-                if !self.screenshot_pending() {
-                    self.screenshot_requested = true;
-                }
+                self.request_screenshot();
             }
             UiAction::TimeChanged(control) => {
                 self.debug_environment_override.day_fraction = control.day_fraction();
@@ -2986,6 +3016,131 @@ impl Renderer {
             }
             UiAction::None | UiAction::PanelOpenChanged(_) => {}
         }
+    }
+
+    fn screenshot_reproduction_metadata(&self, frame_id: u32, camera: &CameraState) -> String {
+        let world = self.screenshot_world_identity.as_ref().map_or_else(
+            || "null".to_owned(),
+            |world| {
+                format!(
+                    concat!(
+                        r#"{{"worldId":"{}","sourceIdentityHash":"{}","seed":"{}","#,
+                        r#""worldSchemaVersion":{},"materialSchemaVersion":{}}}"#
+                    ),
+                    world.world_id,
+                    world.source_identity_hash,
+                    world.seed,
+                    world.world_schema_version,
+                    world.material_schema_version,
+                )
+            },
+        );
+        let lod_focus = self.geometric_lod_focus.map_or_else(
+            || "null".to_owned(),
+            |focus| {
+                format!(
+                    r#"{{"boundaryCentresVoxels":{:?},"boundaryHalfExtentsVoxels":{:?}}}"#,
+                    focus.boundary_centres(),
+                    focus.boundary_half_extents(),
+                )
+            },
+        );
+        let cut_transition = self.cut_transition.as_ref().map_or_else(
+            || "null".to_owned(),
+            |transition| {
+                let phase =
+                    ((self.time - transition.started_at) / CUT_TRANSITION_SECONDS).clamp(0.0, 1.0);
+                format!(r#"{{"active":true,"phase":{phase}}}"#)
+            },
+        );
+        let diagnostic_sky = json_optional_vec3(self.runtime_config.diagnostic_sky_color);
+        let debug_day_fraction = json_optional_f32(self.debug_environment_override.day_fraction);
+        let debug_weather_fraction =
+            json_optional_f32(self.debug_environment_override.weather_fraction);
+        let locomotion = match camera.locomotion() {
+            voxels_core::LocomotionMode::Walking => "walking",
+            voxels_core::LocomotionMode::Gliding => "gliding",
+            voxels_core::LocomotionMode::Spectator => "spectator",
+        };
+        let fluid = camera.fluid_state();
+        let environment = self.world_environment;
+        let celestial = self.celestial_observation;
+        let options = self.options;
+        let vertical_fov_radians = 68.0_f32.to_radians();
+        format!(
+            concat!(
+                r#"{{"schema":"voxels.reproduction.v1","frameSequence":{},"image":{{"#,
+                r#""pixelWidth":{},"pixelHeight":{},"cssWidth":{},"cssHeight":{},"devicePixelRatio":{}}},"#,
+                r#""camera":{{"eyeMetres":{:?},"velocityMetresPerSecond":{:?},"yawRadians":{},"pitchRadians":{},"headingDegrees":{},"verticalFovRadians":{},"nearPlaneMetres":0.05,"farPlaneMetres":{},"grounded":{},"locomotion":"{}","fluid":{{"immersion":{},"eyeDepthMetres":{},"eyesSubmerged":{},"swimming":{}}}}},"#,
+                r#""world":{},"environment":{{"serverTimeSeconds":{},"worldDays":{},"dayFraction":{},"yearFraction":{},"moonOrbitFraction":{},"twinklePhase":{},"weatherFraction":{},"weatherCycleSeconds":{},"cloudOffsetMetres":{:?},"cloudVelocityMetresPerSecond":{:?},"cloudCoverage":{},"celestialRevision":"{}","weatherRevision":"{}","sunDirection":{:?},"moonDirection":{:?},"debugDayFraction":{},"debugWeatherFraction":{},"surfaceRegion":{}}},"#,
+                r#""presentation":{{"viewportFingerprint":"{:016x}","worldQuads":{},"waterQuads":{},"drawCalls":{},"waterDrawCalls":{},"lodTransitionQuads":{},"incompleteTransitionEdges":{},"lodCutTransitionActive":{},"lodCutTransitionPhase":{},"surfaceWidth":{},"surfaceHeight":{}}},"#,
+                r#""render":{{"worldLabOpen":{},"features":{{"shadows":{},"voxelAmbientOcclusion":{},"screenSpaceAmbientOcclusion":{},"fog":{},"farTerrain":{},"water":{},"targetOutline":{},"materialDetail":{},"caveHeadlamp":{},"localLighting":{}}},"diagnosticSkyColor":{},"viewDistanceMetres":{},"lodFocus":{},"cutTransition":{}}}}}"#
+            ),
+            frame_id,
+            self.config.width,
+            self.config.height,
+            self.config.width as f32 / self.dpr,
+            self.config.height as f32 / self.dpr,
+            self.dpr,
+            camera.position.to_array(),
+            camera.velocity.to_array(),
+            camera.yaw,
+            camera.pitch,
+            camera.yaw.to_degrees().rem_euclid(360.0),
+            vertical_fov_radians,
+            self.runtime_config.view_distance_metres,
+            camera.grounded,
+            locomotion,
+            fluid.immersion,
+            fluid.eye_depth_metres,
+            fluid.eyes_submerged,
+            fluid.swimming,
+            world,
+            environment.server_time_seconds,
+            environment.world_days,
+            environment.day_fraction,
+            environment.year_fraction,
+            environment.moon_orbit_fraction,
+            environment.twinkle_phase,
+            environment.weather_fraction,
+            environment.weather_cycle_seconds,
+            environment.cloud_offset_metres,
+            environment.cloud_velocity_metres_per_second,
+            environment.cloud_coverage,
+            environment.celestial_revision,
+            environment.weather_revision,
+            celestial.sun_direction,
+            celestial.moon_direction,
+            debug_day_fraction,
+            debug_weather_fraction,
+            self.surface_region as u8,
+            self.diagnostics.viewport_fingerprint,
+            self.diagnostics.quads,
+            self.diagnostics.water_quads,
+            self.diagnostics.draw_calls,
+            self.diagnostics.water_draw_calls,
+            self.diagnostics.lod_transition_quads,
+            self.diagnostics.lod_incomplete_transition_edges,
+            self.diagnostics.lod_cut_transition_active,
+            self.diagnostics.lod_cut_transition_phase,
+            self.diagnostics.surface_width,
+            self.diagnostics.surface_height,
+            self.ui.open(),
+            options.shadows,
+            options.ambient_occlusion,
+            options.screen_space_ambient_occlusion,
+            options.fog,
+            options.far_terrain,
+            options.water,
+            options.target_outline,
+            options.material_detail,
+            options.cave_headlamp,
+            options.local_lighting,
+            diagnostic_sky,
+            self.runtime_config.view_distance_metres,
+            lod_focus,
+            cut_transition,
+        )
     }
 
     pub fn take_host_ui_action(&mut self) -> Option<HostUiAction> {
@@ -4834,7 +4989,12 @@ impl Renderer {
             });
             self.ui_gpu.draw(&mut pass);
         }
-        self.schedule_screenshot_readback(&mut encoder, screenshot_target.as_ref());
+        self.schedule_screenshot_readback(
+            &mut encoder,
+            screenshot_target.as_ref(),
+            frame_id,
+            camera,
+        );
         if let (Some(timer), Some(gpu_frame)) = (self.gpu_timer.as_ref(), gpu_frame.as_ref()) {
             timer.resolve(&mut encoder, gpu_frame);
         }
@@ -4854,6 +5014,8 @@ impl Renderer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         texture: Option<&wgpu::Texture>,
+        frame_id: u32,
+        camera: &CameraState,
     ) {
         if !self.screenshot_requested {
             return;
@@ -4908,6 +5070,7 @@ impl Renderer {
             },
         );
         let filename = self.ui.screenshot_filename();
+        let metadata = self.screenshot_reproduction_metadata(frame_id, camera);
         let state = Arc::clone(&self.screenshot_readback);
         if let Ok(mut readback) = state.lock() {
             readback.in_flight = true;
@@ -4928,6 +5091,7 @@ impl Renderer {
                         unpack_screenshot_rgba(&mapped, width, height, padded_bytes_per_row, bgra)
                             .map(|rgba| ScreenshotCapture {
                                 filename,
+                                metadata,
                                 width,
                                 height,
                                 rgba,
@@ -8060,6 +8224,22 @@ fn unpack_screenshot_rgba(
         }
     }
     Some(rgba)
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn json_optional_f32(value: Option<f32>) -> String {
+    value.map_or_else(|| "null".to_owned(), |value| value.to_string())
+}
+
+fn json_optional_vec3(value: Option<[f32; 3]>) -> String {
+    value.map_or_else(|| "null".to_owned(), |value| format!("{value:?}"))
 }
 
 #[cfg(test)]

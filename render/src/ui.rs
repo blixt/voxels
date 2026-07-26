@@ -1588,13 +1588,13 @@ impl MissionControlUi {
                 SurfaceRole::Toast,
             );
             let default_toast = if self.stats.swimming {
-                "WASD SWIM  ·  SPACE RISE  ·  SHIFT DIVE  ·  F3 WORLD LAB"
+                "WASD SWIM  ·  SPACE RISE  ·  SHIFT DIVE  ·  F2 CAPTURE  ·  F3 WORLD LAB"
             } else if self.stats.navigation.spectator {
-                "SPECTATING  ·  WASD FLY  ·  SPACE RISE  ·  SHIFT DESCEND  ·  F3 WORLD LAB"
+                "SPECTATING  ·  WASD FLY  ·  SPACE RISE  ·  SHIFT DESCEND  ·  F2 CAPTURE  ·  F3 WORLD LAB"
             } else if layout.toast.width < 500.0 {
-                "WASD MOVE  ·  SPACE JUMP / GLIDE  ·  F3 WORLD LAB"
+                "WASD MOVE  ·  SPACE JUMP / GLIDE  ·  F2 CAPTURE  ·  F3 WORLD LAB"
             } else {
-                "CLICK TO LOOK  ·  WASD MOVE  ·  SPACE JUMP / GLIDE  ·  LMB DIG  ·  RMB PLACE  ·  F3 WORLD LAB"
+                "CLICK TO LOOK  ·  WASD MOVE  ·  SPACE JUMP / GLIDE  ·  LMB DIG  ·  RMB PLACE  ·  F2 CAPTURE  ·  F3 WORLD LAB"
             };
             let toast = self.gameplay_toast.as_deref().unwrap_or(default_toast);
             push_text(

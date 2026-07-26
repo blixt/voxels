@@ -8,6 +8,7 @@ const KEY_CODES: Readonly<Record<string, number>> = {
   ShiftRight: 6,
   KeyQ: 7,
   F3: 8,
+  F2: 19,
   Digit1: 9,
   Digit2: 10,
   Digit3: 11,

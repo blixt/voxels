@@ -4,6 +4,7 @@ import { type EngineClient, snapshotValue } from "../lib/engine.ts";
 import { analyzeDiagnosticSky } from "../lib/image.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { startWorldStack } from "../lib/world.ts";
+import { readPngText } from "../../web/png-metadata.ts";
 
 const VIEWPORT = { width: 1280, height: 720 };
 
@@ -138,6 +139,77 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
   if (restoredSky.diagnosticSkyPixels !== 0) {
     throw new Error("World Lab diagnostic-sky toggle did not restore the ordinary atmosphere");
   }
+
+  // F2 must work as a gameplay key with World Lab closed. The downloaded PNG itself carries the
+  // exact frame state, so a bug report remains reproducible even when no debug overlay was visible.
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(100);
+  const captureState = await viewport.engine.snapshot();
+  const pendingKeyDownload = page.waitForEvent("download", { timeout: 10_000 });
+  await page.keyboard.press("F2");
+  const keyDownload = await pendingKeyDownload;
+  const keyDownloadPath = await keyDownload.path();
+  const keyDownloadFailure = await keyDownload.failure();
+  if (keyDownloadFailure !== null || keyDownloadPath === null) {
+    throw new Error(
+      `F2 screenshot download failed: ${keyDownloadFailure ?? "missing temporary file"}`,
+    );
+  }
+  const keyCapture = await readFile(keyDownloadPath);
+  const reproductionText = readPngText(keyCapture, "voxels.reproduction");
+  if (reproductionText === undefined) {
+    throw new Error("F2 screenshot omitted its embedded voxels.reproduction PNG metadata");
+  }
+  const reproduction = JSON.parse(reproductionText) as {
+    schema?: string;
+    image?: { pixelWidth?: number; pixelHeight?: number; devicePixelRatio?: number };
+    camera?: {
+      eyeMetres?: number[];
+      yawRadians?: number;
+      pitchRadians?: number;
+      verticalFovRadians?: number;
+    };
+    world?: { worldId?: string; sourceIdentityHash?: string; seed?: string };
+    environment?: { dayFraction?: number; weatherFraction?: number };
+    presentation?: { viewportFingerprint?: string; incompleteTransitionEdges?: number };
+    render?: { worldLabOpen?: boolean; viewDistanceMetres?: number; lodFocus?: unknown };
+  };
+  const eye = reproduction.camera?.eyeMetres;
+  if (
+    reproduction.schema !== "voxels.reproduction.v1" ||
+    reproduction.image?.pixelWidth !== VIEWPORT.width ||
+    reproduction.image.pixelHeight !== VIEWPORT.height ||
+    reproduction.image.devicePixelRatio !== 1 ||
+    eye?.length !== 3 ||
+    Math.hypot(
+      eye[0]! - snapshotValue(captureState, "cameraX"),
+      eye[1]! - snapshotValue(captureState, "cameraY"),
+      eye[2]! - snapshotValue(captureState, "cameraZ"),
+    ) > 0.001 ||
+    !Number.isFinite(reproduction.camera?.yawRadians) ||
+    !Number.isFinite(reproduction.camera?.pitchRadians) ||
+    !Number.isFinite(reproduction.camera?.verticalFovRadians) ||
+    !/^[0-9a-f]{32}$/u.test(reproduction.world?.worldId ?? "") ||
+    !/^[0-9a-f]{64}$/u.test(reproduction.world?.sourceIdentityHash ?? "") ||
+    !/^\d+$/u.test(reproduction.world?.seed ?? "") ||
+    !near(reproduction.environment?.dayFraction ?? Number.NaN, 0.5) ||
+    !near(reproduction.environment?.weatherFraction ?? Number.NaN, 0.08) ||
+    !/^[0-9a-f]{16}$/u.test(reproduction.presentation?.viewportFingerprint ?? "") ||
+    reproduction.presentation?.incompleteTransitionEdges !== 0 ||
+    reproduction.render?.worldLabOpen !== false ||
+    !Number.isFinite(reproduction.render.viewDistanceMetres) ||
+    reproduction.render.lodFocus === null
+  ) {
+    throw new Error(`F2 screenshot reproduction metadata is incomplete: ${reproductionText}`);
+  }
+  await context.artifacts.write(
+    "F2 screenshot with embedded reproduction metadata",
+    "world-lab-f2.png",
+    keyCapture,
+    "image/png",
+  );
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(100);
 
   // Rust owns these hit regions; renderer unit tests cover their responsive layout separately.
   await page.mouse.click(1_044.5, 205); // GOLDEN

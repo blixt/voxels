@@ -3607,6 +3607,8 @@ mod web {
                             if !was_open && is_open {
                                 self.input.borrow_mut().clear();
                             }
+                        } else if record.code == 19 && record.flags & 1 == 0 {
+                            self.renderer.borrow_mut().request_screenshot();
                         } else if !self.renderer.borrow().ui_open()
                             && record.flags & 1 == 0
                             && record.code == 7
@@ -3628,7 +3630,10 @@ mod web {
                             self.renderer
                                 .borrow_mut()
                                 .handle_ui_key(record.code, false, false);
-                        } else if record.code != 7 && !(9..=18).contains(&record.code) {
+                        } else if record.code != 7
+                            && record.code != 19
+                            && !(9..=18).contains(&record.code)
+                        {
                             self.input.borrow_mut().set_key(record.code, false);
                         }
                     }
@@ -4093,6 +4098,7 @@ mod web {
     #[wasm_bindgen]
     pub struct MissionControlScreenshot {
         filename: String,
+        metadata: String,
         width: u32,
         height: u32,
         rgba: Vec<u8>,
@@ -4102,6 +4108,7 @@ mod web {
         fn from(capture: ScreenshotCapture) -> Self {
             Self {
                 filename: capture.filename,
+                metadata: capture.metadata,
                 width: capture.width,
                 height: capture.height,
                 rgba: capture.rgba,
@@ -4114,6 +4121,11 @@ mod web {
         #[wasm_bindgen(getter)]
         pub fn filename(&self) -> String {
             self.filename.clone()
+        }
+
+        #[wasm_bindgen(getter)]
+        pub fn metadata(&self) -> String {
+            self.metadata.clone()
         }
 
         #[wasm_bindgen(getter)]
@@ -4986,6 +4998,7 @@ mod web {
         let mut renderer = renderer;
         renderer.set_reduced_motion(reduced_motion);
         renderer.set_inventory_counts(opened.inventory.counts);
+        renderer.set_screenshot_world_manifest(&opened.manifest);
         let scheduler = StreamScheduler::new(StreamConfig {
             load_radius_chunks: streaming.load_radius_chunks as i32,
             vertical_radius_chunks: streaming.vertical_radius_chunks as i32,

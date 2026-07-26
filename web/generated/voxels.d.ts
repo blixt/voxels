@@ -63,6 +63,7 @@ export class MissionControlScreenshot {
     rgba(): Uint8Array;
     readonly filename: string;
     readonly height: number;
+    readonly metadata: string;
     readonly width: number;
 }
 
@@ -109,6 +110,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly missioncontrolscreenshot_filename: (a: number) => [number, number];
     readonly missioncontrolscreenshot_height: (a: number) => number;
+    readonly missioncontrolscreenshot_metadata: (a: number) => [number, number];
     readonly missioncontrolscreenshot_rgba: (a: number) => [number, number];
     readonly missioncontrolscreenshot_width: (a: number) => number;
 }

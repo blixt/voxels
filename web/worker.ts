@@ -3,6 +3,7 @@ import init, {
   type EngineHandle,
   type MissionControlScreenshot,
 } from "./generated/voxels.js";
+import { embedPngText } from "./png-metadata.ts";
 import type { FromWorker, InitMessage, ToWorker } from "./protocol.ts";
 import { disposeWorkerEngine } from "./worker-lifecycle.ts";
 
@@ -91,10 +92,16 @@ async function encodeScreenshot(capture: MissionControlScreenshot): Promise<void
     if (!context) throw new Error("browser could not create a PNG encoding canvas");
     const pixels = new Uint8ClampedArray(rgba);
     context.putImageData(new ImageData(pixels, width, height), 0, 0);
-    const blob = await canvas.convertToBlob({ type: "image/png" });
-    if (blob.type !== "image/png" || blob.size < 8) {
+    const browserPng = await canvas.convertToBlob({ type: "image/png" });
+    if (browserPng.type !== "image/png" || browserPng.size < 8) {
       throw new Error("browser returned an invalid PNG screenshot");
     }
+    const png = embedPngText(
+      new Uint8Array(await browserPng.arrayBuffer()),
+      "voxels.reproduction",
+      capture.metadata,
+    );
+    const blob = new Blob([png.slice().buffer as ArrayBuffer], { type: "image/png" });
     scope.postMessage({
       kind: "downloadMissionControlScreenshot",
       blob,
