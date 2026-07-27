@@ -4245,12 +4245,37 @@ impl Renderer {
         let gpu_identity = screenshot_gpu_identity_json(&self.screenshot_gpu_identity);
         let streaming_manifest =
             screenshot_streaming_manifest_json(&self.screenshot_streaming_manifest);
-        let cut_manifest = screenshot_cut_manifest_json(
+        let legacy_cut_manifest = screenshot_cut_manifest_json(
             &self.lod_draw_plan,
             self.lod_draw_plan_focus,
             self.cut_transition.as_ref(),
         );
-        let cut_fingerprint = fingerprint_bytes(cut_manifest.as_bytes());
+        let gpu_virtual_feedback = self.virtual_terrain_gpu.latest_feedback();
+        let virtual_terrain_manifest = screenshot_virtual_terrain_manifest_json(
+            self.virtual_terrain_mode,
+            &self.virtual_terrain_pages,
+            (self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible)
+                .then_some(self.virtual_terrain_cut.as_ref())
+                .flatten(),
+            self.virtual_terrain_oracle_cut.as_ref(),
+            gpu_virtual_feedback.as_ref(),
+        );
+        let (cut_manifest, cut_fingerprint) =
+            if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible {
+                let cut = self.virtual_terrain_cut.as_ref();
+                (
+                    format!(
+                        r#"{{"kind":"virtualMicrovoxel","cut":{}}}"#,
+                        screenshot_virtual_cut_json(cut)
+                    ),
+                    cut.map_or(0, |cut| cut.fingerprint),
+                )
+            } else {
+                (
+                    format!(r#"{{"kind":"legacy","cut":{legacy_cut_manifest}}}"#),
+                    fingerprint_bytes(legacy_cut_manifest.as_bytes()),
+                )
+            };
         let inverse_view_projection = view_projection(
             &self.config,
             camera,
@@ -4258,6 +4283,12 @@ impl Renderer {
         )
         .inverse()
         .to_cols_array();
+        let representation_kinds = if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible
+        {
+            r#"{"steppedSurfaceResidual":1,"sparseVoxelBrick":2,"surfaceCluster":3,"triangleCluster":4}"#
+        } else {
+            r#"{"canonical":1,"steppedSurface":2,"rendererProduct":3}"#
+        };
         let attachment_manifest = format!(
             concat!(
                 r#"{{"terrainPixelOwnership":{{"chunkType":"vpDI","#,
@@ -4266,12 +4297,12 @@ impl Renderer {
                 r#""channels":["ownerIdHashLow","ownerIdHashHigh","primitiveFaceHash","packedRepresentationDepthFaceMaterial","reverseZDepthF32Bits"],"#,
                 r#""backgroundOwnerId":["0","0"],"ownerHash":{{"algorithm":"fnv1a32+jenkins-oaat32","#,
                 r#""words":["representationKind","hierarchyDepth","pageX","pageY","pageZ"],"#,
-                r#""representationKind":{{"canonical":1,"steppedSurface":2,"rendererProduct":3}}}},"#,
+                r#""representationKind":{}}},"#,
                 r#""descriptorBits":{{"representationSource":[0,4],"hierarchyDepth":[4,4],"face":[8,3],"material":[11,16]}},"#,
                 r#""worldPositionReconstruction":{{"pixelCenter":true,"depthConvention":"reverse-z-webgpu","#,
                 r#""inverseViewProjectionColumns":{:?}}}}}}}"#
             ),
-            inverse_view_projection,
+            representation_kinds, inverse_view_projection,
         );
         format!(
             concat!(
@@ -4279,7 +4310,7 @@ impl Renderer {
                 r#""pixelWidth":{},"pixelHeight":{},"cssWidth":{},"cssHeight":{},"devicePixelRatio":{}}},"#,
                 r#""camera":{{"eyeMetres":{:?},"velocityMetresPerSecond":{:?},"yawRadians":{},"pitchRadians":{},"headingDegrees":{},"verticalFovRadians":{},"nearPlaneMetres":0.05,"farPlaneMetres":{},"grounded":{},"locomotion":"{}","fluid":{{"immersion":{},"eyeDepthMetres":{},"signedEyeDepthMetres":{},"surfaceYMetres":{},"surfaceKnown":{},"eyesSubmerged":{},"swimming":{}}}}},"#,
                 r#""world":{},"environment":{{"serverTimeSeconds":{},"worldDays":{},"dayFraction":{},"yearFraction":{},"moonOrbitFraction":{},"twinklePhase":{},"planetCircumferenceMetres":{},"axialTiltRadians":{},"moonOrbitInclinationRadians":{},"celestialSeed":"{}","celestialRevision":"{}","weatherFraction":{},"weatherCycleSeconds":{},"cloudOffsetMetres":{:?},"cloudVelocityMetresPerSecond":{:?},"cloudCoverage":{},"cloudBaseMetres":{},"cloudTopMetres":{},"weatherSeed":"{}","weatherRevision":"{}","sunDirection":{:?},"moonDirection":{:?},"debugDayFraction":{},"debugWeatherFraction":{},"reproductionOverride":{},"surfaceRegion":{}}},"#,
-                r#""presentation":{{"viewportFingerprint":"{:016x}","selectedCutFingerprint":"{:016x}","selectedCut":{},"worldQuads":{},"waterQuads":{},"drawCalls":{},"waterDrawCalls":{},"lodTransitionQuads":{},"incompleteTransitionEdges":{},"lodCutTransitionActive":{},"lodCutTransitionPhase":{},"surfaceWidth":{},"surfaceHeight":{}}},"#,
+                r#""presentation":{{"viewportFingerprint":"{:016x}","selectedCutFingerprint":"{:016x}","selectedCut":{},"virtualTerrain":{},"worldQuads":{},"waterQuads":{},"drawCalls":{},"waterDrawCalls":{},"lodTransitionQuads":{},"incompleteTransitionEdges":{},"lodCutTransitionActive":{},"lodCutTransitionPhase":{},"surfaceWidth":{},"surfaceHeight":{}}},"#,
                 r#""streaming":{},"#,
                 r#""attachments":{},"#,
                 r#""render":{{"worldLabOpen":{},"features":{{"shadows":{},"voxelAmbientOcclusion":{},"screenSpaceAmbientOcclusion":{},"fog":{},"farTerrain":{},"water":{},"targetOutline":{},"materialDetail":{},"caveHeadlamp":{},"localLighting":{}}},"diagnosticSkyColor":{},"geometrySourceDebug":{},"viewDistanceMetres":{},"lodFocus":{},"cutTransition":{}}}}}"#
@@ -4338,6 +4369,7 @@ impl Renderer {
             self.diagnostics.viewport_fingerprint,
             cut_fingerprint,
             cut_manifest,
+            virtual_terrain_manifest,
             self.diagnostics.quads,
             self.diagnostics.water_quads,
             self.diagnostics.draw_calls,
@@ -12360,6 +12392,141 @@ fn screenshot_cut_manifest_json(
     format!(r#"{{"current":{current},"outgoing":{outgoing}}}"#)
 }
 
+fn screenshot_virtual_terrain_manifest_json(
+    mode: VirtualTerrainRenderMode,
+    resident: &BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
+    published_cut: Option<&VirtualTerrainCut>,
+    oracle_cut: Option<&VirtualTerrainCut>,
+    feedback: Option<&GpuVirtualTerrainFeedback>,
+) -> String {
+    let mode = match mode {
+        VirtualTerrainRenderMode::Disabled => "disabled",
+        VirtualTerrainRenderMode::Shadow => "shadow",
+        VirtualTerrainRenderMode::Visible => "visible",
+    };
+    let published = screenshot_virtual_cut_json(published_cut);
+    let oracle = screenshot_virtual_cut_json(oracle_cut);
+    let mut encoded = format!(
+        r#"{{"mode":"{mode}","publishedCut":{published},"oracleCut":{oracle},"residentPages":["#
+    );
+    for (index, (key, page)) in resident.iter().enumerate() {
+        if index != 0 {
+            encoded.push(',');
+        }
+        let _ = write!(
+            encoded,
+            concat!(
+                r#"{{"level":{},"coord":{:?},"revision":"{}","contentFingerprint":"{}","#,
+                r#""representation":"{}","representationKind":{}}}"#
+            ),
+            key.level,
+            key.coord,
+            page.revision,
+            hex_bytes(&page.content_fingerprint),
+            virtual_representation_label(page.representation),
+            page.representation as u8,
+        );
+    }
+    encoded.push_str("],\"gpuFeedback\":");
+    if let Some(feedback) = feedback {
+        let _ = write!(
+            encoded,
+            concat!(
+                r#"{{"submissionId":"{}","oracleFingerprint":"{:016x}","#,
+                r#""ownerlessRoots":{},"visitedNodes":{},"overflowFlags":{},"stackPeak":{},"#,
+                r#""compactionOverflowFlags":{},"compactedPages":{},"#,
+                r#""compactedOpaqueSurfaceElements":{},"compactedOpaqueTriangleElements":{},"#,
+                r#""compactedWaterSurfaceElements":{},"compactedWaterTriangleElements":{},"#,
+                r#""selectedPages":["#
+            ),
+            feedback.submission_id,
+            feedback.oracle_fingerprint,
+            feedback.ownerless_roots,
+            feedback.visited_nodes,
+            feedback.overflow_flags,
+            feedback.stack_peak,
+            feedback.compaction_overflow_flags,
+            feedback.compacted_pages,
+            feedback.compacted_surface_elements,
+            feedback.compacted_triangle_elements,
+            feedback.compacted_water_surface_elements,
+            feedback.compacted_water_triangle_elements,
+        );
+        write_virtual_page_keys(&mut encoded, &feedback.selected_pages);
+        encoded.push_str("],\"requestedPages\":[");
+        write_virtual_page_keys(&mut encoded, &feedback.requested_pages);
+        encoded.push_str("]}");
+    } else {
+        encoded.push_str("null");
+    }
+    encoded.push('}');
+    encoded
+}
+
+fn screenshot_virtual_cut_json(cut: Option<&VirtualTerrainCut>) -> String {
+    let Some(cut) = cut else {
+        return "null".to_owned();
+    };
+    let mut encoded = format!(
+        concat!(
+            r#"{{"fingerprint":"{:016x}","renderable":{},"visitedNodes":{},"#,
+            r#""selectedPrimitives":{},"selectedEncodedBytes":{},"feedbackOverflow":{},"#,
+            r#""selectionOverflow":{},"traversalOverflow":{},"incoherentReplacementGroups":{},"#,
+            r#""selectedPages":["#
+        ),
+        cut.fingerprint,
+        cut.is_renderable(),
+        cut.visited_nodes,
+        cut.selected_primitives,
+        cut.selected_encoded_bytes,
+        cut.feedback_overflow,
+        cut.selection_overflow,
+        cut.traversal_overflow,
+        cut.incoherent_replacement_groups,
+    );
+    write_virtual_page_keys(&mut encoded, &cut.selected_pages);
+    encoded.push_str("],\"requestedPages\":[");
+    for (index, request) in cut.requested_pages.iter().enumerate() {
+        if index != 0 {
+            encoded.push(',');
+        }
+        let _ = write!(
+            encoded,
+            r#"{{"level":{},"coord":{:?},"revision":"{}","contentFingerprint":"{}"}}"#,
+            request.key.level,
+            request.key.coord,
+            request.revision,
+            hex_bytes(&request.content_fingerprint),
+        );
+    }
+    encoded.push_str("],\"ownerlessRoots\":[");
+    write_virtual_page_keys(&mut encoded, &cut.ownerless_roots);
+    encoded.push_str("]}");
+    encoded
+}
+
+fn write_virtual_page_keys(encoded: &mut String, pages: &[TerrainPageKey]) {
+    for (index, key) in pages.iter().enumerate() {
+        if index != 0 {
+            encoded.push(',');
+        }
+        let _ = write!(
+            encoded,
+            r#"{{"level":{},"coord":{:?}}}"#,
+            key.level, key.coord
+        );
+    }
+}
+
+const fn virtual_representation_label(kind: TerrainPageRepresentationKind) -> &'static str {
+    match kind {
+        TerrainPageRepresentationKind::SteppedSurfaceResidual => "steppedSurfaceResidual",
+        TerrainPageRepresentationKind::SparseVoxelBrick => "sparseVoxelBrick",
+        TerrainPageRepresentationKind::SurfaceCluster => "surfaceCluster",
+        TerrainPageRepresentationKind::TriangleCluster => "triangleCluster",
+    }
+}
+
 fn screenshot_cut_plan_json(plan: &LodDrawPlan, focus: Option<GeometricLodFocus>) -> String {
     let mut patches = plan.patches.owned_patches().collect::<Vec<_>>();
     patches.sort_unstable();
@@ -12508,6 +12675,58 @@ mod tests {
             screenshot_cut_plan_json(&left, Some(focus)),
             screenshot_cut_plan_json(&right, Some(focus))
         );
+    }
+
+    #[test]
+    fn virtual_screenshot_manifest_records_cut_residency_and_gpu_certificate() {
+        let key = TerrainPageKey {
+            level: 1,
+            coord: [-2, 3, 4],
+        };
+        let mut resident = BTreeMap::new();
+        resident.insert(
+            key,
+            VirtualTerrainGpuPage {
+                revision: 17,
+                content_fingerprint: [0xab; 32],
+                representation: TerrainPageRepresentationKind::SparseVoxelBrick,
+                mesh: VirtualTerrainGpuMesh::Empty,
+            },
+        );
+        let cut = VirtualTerrainCut {
+            selected_pages: vec![key],
+            requested_pages: Vec::new(),
+            ownerless_roots: Vec::new(),
+            fingerprint: 0x1234,
+            visited_nodes: 1,
+            selected_primitives: 2,
+            selected_encoded_bytes: 3,
+            feedback_overflow: false,
+            selection_overflow: false,
+            traversal_overflow: false,
+            incoherent_replacement_groups: 0,
+        };
+        let feedback = GpuVirtualTerrainFeedback {
+            submission_id: 8,
+            oracle_fingerprint: cut.fingerprint,
+            selected_pages: vec![key],
+            compacted_pages: 1,
+            ..GpuVirtualTerrainFeedback::default()
+        };
+        let manifest = screenshot_virtual_terrain_manifest_json(
+            VirtualTerrainRenderMode::Visible,
+            &resident,
+            Some(&cut),
+            Some(&cut),
+            Some(&feedback),
+        );
+        assert!(manifest.contains(r#""mode":"visible""#));
+        assert!(manifest.contains(r#""coord":[-2, 3, 4]"#));
+        assert!(manifest.contains(r#""revision":"17""#));
+        assert!(manifest.contains(r#""representation":"sparseVoxelBrick""#));
+        assert!(manifest.contains(r#""submissionId":"8""#));
+        assert!(manifest.contains(r#""oracleFingerprint":"0000000000001234""#));
+        assert!(manifest.contains(&"ab".repeat(32)));
     }
 
     #[test]
