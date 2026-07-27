@@ -3,6 +3,7 @@ import { BrowserCapability } from "../lib/browser.ts";
 import { type EngineClient, snapshotValue } from "../lib/engine.ts";
 import { analyzeDiagnosticSky } from "../lib/image.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
+import { auditTerrainDiagnosticAttachment } from "../lib/terrain-diagnostic.ts";
 import { startWorldStack } from "../lib/world.ts";
 import { readPngText } from "../../web/png-metadata.ts";
 
@@ -84,7 +85,7 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
   });
   if (diagnosticSky.diagnosticSkyFraction < 0.5) {
     throw new Error(
-      `World Lab diagnostic-sky toggle did not reach the canvas: ${JSON.stringify(diagnosticSky)}`,
+      `World Lab diagnostic-sky toggle did not reach the canvas: ${JSON.stringify(diagnosticSky)}; browser failures: ${JSON.stringify(browser.failures)}`,
     );
   }
 
@@ -113,6 +114,23 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
   if (!downloadedCapture.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
     throw new Error("World Lab screenshot download is not a PNG");
   }
+  await context.artifacts.write(
+    "Downloaded World Lab screenshot",
+    "world-lab-downloaded.png",
+    downloadedCapture,
+    "image/png",
+  );
+  const downloadedDiagnostic = auditTerrainDiagnosticAttachment(downloadedCapture);
+  if (
+    downloadedDiagnostic.ownedPixels === 0 ||
+    downloadedDiagnostic.ownerIds === 0 ||
+    downloadedDiagnostic.unmappedOwnerIds.length !== 0 ||
+    downloadedDiagnostic.impossiblePrimitiveGapPixels !== 0
+  ) {
+    throw new Error(
+      `downloaded screenshot terrain ownership is not attributable: ${JSON.stringify(downloadedDiagnostic)}`,
+    );
+  }
   const downloadedSky = await analyzeDiagnosticSky(page, downloadedCapture, {
     x0: 0.02,
     x1: 0.7,
@@ -120,14 +138,16 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     y1: 0.28,
   });
   if (downloadedSky.diagnosticSkyFraction < 0.5) {
-    throw new Error("downloaded screenshot does not contain the presented diagnostic canvas");
+    throw new Error(
+      `downloaded screenshot does not contain the presented diagnostic canvas; browser failures: ${JSON.stringify(browser.failures.slice(0, 16))}`,
+    );
   }
-  await context.artifacts.write(
-    "Downloaded World Lab screenshot",
-    "world-lab-downloaded.png",
-    downloadedCapture,
-    "image/png",
-  );
+  const downloadedCoverage = await analyzeDiagnosticSky(page, downloadedCapture);
+  if (downloadedCoverage.largestEnclosedComponentPixels >= 16) {
+    throw new Error(
+      `downloaded screenshot contains an enclosed ownerless component of ${downloadedCoverage.largestEnclosedComponentPixels} pixels: ${JSON.stringify(downloadedCoverage.enclosedSampleCoordinates)}`,
+    );
+  }
   await page.mouse.click(945, 444); // restore ordinary sky
   await page.waitForTimeout(100);
   const restoredSky = await analyzeDiagnosticSky(page, await page.screenshot(), {
@@ -164,6 +184,17 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     );
   }
   const keyCapture = await readFile(keyDownloadPath);
+  const keyDiagnostic = auditTerrainDiagnosticAttachment(keyCapture);
+  if (
+    keyDiagnostic.ownedPixels === 0 ||
+    keyDiagnostic.ownerIds === 0 ||
+    keyDiagnostic.unmappedOwnerIds.length !== 0 ||
+    keyDiagnostic.impossiblePrimitiveGapPixels !== 0
+  ) {
+    throw new Error(
+      `F2 screenshot terrain ownership is not attributable: ${JSON.stringify(keyDiagnostic)}`,
+    );
+  }
   const reproductionText = readPngText(keyCapture, "voxels.reproduction");
   if (reproductionText === undefined) {
     throw new Error("F2 screenshot omitted its embedded voxels.reproduction PNG metadata");
@@ -326,6 +357,9 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
       residentChunks: snapshotValue(settled, "residentChunks"),
       ascentMetres: snapshotValue(ascended, "cameraY") - bodyPosition[1],
       downloadedScreenshotBytes: downloadedCapture.byteLength,
+      diagnosticOwnedPixels: keyDiagnostic.ownedPixels,
+      diagnosticOwnerIds: keyDiagnostic.ownerIds,
+      enclosedOwnerlessPixels: downloadedCoverage.enclosedPixels,
     },
     details: {
       browser: browser.version,

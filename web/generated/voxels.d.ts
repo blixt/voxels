@@ -68,6 +68,7 @@ export class MissionControlScreenshot {
     private constructor();
     free(): void;
     rgba(): Uint8Array;
+    terrain_diagnostic_u32x5(): Uint8Array;
     readonly filename: string;
     readonly height: number;
     readonly metadata: string;
@@ -122,6 +123,7 @@ export interface InitOutput {
     readonly missioncontrolscreenshot_height: (a: number) => number;
     readonly missioncontrolscreenshot_metadata: (a: number) => [number, number];
     readonly missioncontrolscreenshot_rgba: (a: number) => [number, number];
+    readonly missioncontrolscreenshot_terrain_diagnostic_u32x5: (a: number) => [number, number];
     readonly missioncontrolscreenshot_width: (a: number) => number;
 }
 

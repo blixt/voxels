@@ -1482,6 +1482,9 @@ pub struct ScreenshotCapture {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    /// Top-down little-endian `u32x5` pixels from the terrain draw cut used by the visible frame:
+    /// 64-bit owner ID, primitive/face hash, packed representation descriptor, reverse-Z f32 bits.
+    pub terrain_diagnostic_u32x5: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1924,6 +1927,10 @@ pub struct Renderer {
     voxel_morph_transition_flat_pipeline: RenderPipeline,
     voxel_morph_transition_ambient_occlusion_pipeline: RenderPipeline,
     voxel_morph_transition_ambient_occlusion_flat_pipeline: RenderPipeline,
+    screenshot_diagnostic_pipeline: RenderPipeline,
+    screenshot_diagnostic_morph_pipeline: RenderPipeline,
+    screenshot_diagnostic_transition_pipeline: RenderPipeline,
+    screenshot_diagnostic_morph_transition_pipeline: RenderPipeline,
     water_pipeline: RenderPipeline,
     water_transition_pipeline: RenderPipeline,
     weather_pipeline: RenderPipeline,
@@ -2796,6 +2803,34 @@ impl Renderer {
             &voxel_shader,
             VoxelPipelineVariant::new(false, true).morphing_transition(),
         );
+        let screenshot_diagnostic_pipeline = create_voxel_diagnostic_pipeline(
+            &device,
+            "screenshot integer diagnostic pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            VoxelPipelineVariant::new(false, false),
+        );
+        let screenshot_diagnostic_morph_pipeline = create_voxel_diagnostic_pipeline(
+            &device,
+            "screenshot integer diagnostic morph pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            VoxelPipelineVariant::new(false, false).morphing(),
+        );
+        let screenshot_diagnostic_transition_pipeline = create_voxel_diagnostic_pipeline(
+            &device,
+            "screenshot integer diagnostic transition pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            VoxelPipelineVariant::new(false, false).transition(),
+        );
+        let screenshot_diagnostic_morph_transition_pipeline = create_voxel_diagnostic_pipeline(
+            &device,
+            "screenshot integer diagnostic morph transition pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            VoxelPipelineVariant::new(false, false).morphing_transition(),
+        );
         let water_pipeline = pipeline(
             &device,
             "water pipeline",
@@ -2887,6 +2922,10 @@ impl Renderer {
             voxel_morph_transition_flat_pipeline,
             voxel_morph_transition_ambient_occlusion_pipeline,
             voxel_morph_transition_ambient_occlusion_flat_pipeline,
+            screenshot_diagnostic_pipeline,
+            screenshot_diagnostic_morph_pipeline,
+            screenshot_diagnostic_transition_pipeline,
+            screenshot_diagnostic_morph_transition_pipeline,
             water_pipeline,
             water_transition_pipeline,
             weather_pipeline,
@@ -3723,6 +3762,28 @@ impl Renderer {
             self.cut_transition.as_ref(),
         );
         let cut_fingerprint = fingerprint_bytes(cut_manifest.as_bytes());
+        let inverse_view_projection = view_projection(
+            &self.config,
+            camera,
+            self.runtime_config.view_distance_metres,
+        )
+        .inverse()
+        .to_cols_array();
+        let attachment_manifest = format!(
+            concat!(
+                r#"{{"terrainPixelOwnership":{{"chunkType":"vpDI","#,
+                r#""schema":"voxels.terrain-pixel-ownership.v1","compression":"deflate","#,
+                r#""format":"u32x5","byteOrder":"little-endian","rowOrder":"top-down","#,
+                r#""channels":["ownerIdHashLow","ownerIdHashHigh","primitiveFaceHash","packedRepresentationDepthFaceMaterial","reverseZDepthF32Bits"],"#,
+                r#""backgroundOwnerId":["0","0"],"ownerHash":{{"algorithm":"fnv1a32+jenkins-oaat32","#,
+                r#""words":["representationKind","hierarchyDepth","pageX","pageY","pageZ"],"#,
+                r#""representationKind":{{"canonical":1,"steppedSurface":2,"rendererProduct":3}}}},"#,
+                r#""descriptorBits":{{"representationSource":[0,4],"hierarchyDepth":[4,4],"face":[8,3],"material":[11,16]}},"#,
+                r#""worldPositionReconstruction":{{"pixelCenter":true,"depthConvention":"reverse-z-webgpu","#,
+                r#""inverseViewProjectionColumns":{:?}}}}}}}"#
+            ),
+            inverse_view_projection,
+        );
         format!(
             concat!(
                 r#"{{"schema":"voxels.reproduction.v2","frameSequence":{},"runtime":{},"gpu":{},"image":{{"#,
@@ -3731,6 +3792,7 @@ impl Renderer {
                 r#""world":{},"environment":{{"serverTimeSeconds":{},"worldDays":{},"dayFraction":{},"yearFraction":{},"moonOrbitFraction":{},"twinklePhase":{},"planetCircumferenceMetres":{},"axialTiltRadians":{},"moonOrbitInclinationRadians":{},"celestialSeed":"{}","celestialRevision":"{}","weatherFraction":{},"weatherCycleSeconds":{},"cloudOffsetMetres":{:?},"cloudVelocityMetresPerSecond":{:?},"cloudCoverage":{},"cloudBaseMetres":{},"cloudTopMetres":{},"weatherSeed":"{}","weatherRevision":"{}","sunDirection":{:?},"moonDirection":{:?},"debugDayFraction":{},"debugWeatherFraction":{},"reproductionOverride":{},"surfaceRegion":{}}},"#,
                 r#""presentation":{{"viewportFingerprint":"{:016x}","selectedCutFingerprint":"{:016x}","selectedCut":{},"worldQuads":{},"waterQuads":{},"drawCalls":{},"waterDrawCalls":{},"lodTransitionQuads":{},"incompleteTransitionEdges":{},"lodCutTransitionActive":{},"lodCutTransitionPhase":{},"surfaceWidth":{},"surfaceHeight":{}}},"#,
                 r#""streaming":{},"#,
+                r#""attachments":{},"#,
                 r#""render":{{"worldLabOpen":{},"features":{{"shadows":{},"voxelAmbientOcclusion":{},"screenSpaceAmbientOcclusion":{},"fog":{},"farTerrain":{},"water":{},"targetOutline":{},"materialDetail":{},"caveHeadlamp":{},"localLighting":{}}},"diagnosticSkyColor":{},"geometrySourceDebug":{},"viewDistanceMetres":{},"lodFocus":{},"cutTransition":{}}}}}"#
             ),
             frame_id,
@@ -3798,6 +3860,7 @@ impl Renderer {
             self.diagnostics.surface_width,
             self.diagnostics.surface_height,
             streaming_manifest,
+            attachment_manifest,
             self.ui.open(),
             options.shadows,
             options.ambient_occlusion,
@@ -5406,6 +5469,29 @@ impl Renderer {
         } else {
             self.ui_gpu.scene_view()
         };
+        let (screenshot_opaque_owners, screenshot_water_owners) = if self.screenshot_requested {
+            let Some(opaque) = screenshot_diagnostic_owner_buffers(
+                &self.device,
+                &self.queue,
+                &self.arena_buffers,
+                &self.chunks,
+                "screenshot opaque terrain owner sidecar",
+            ) else {
+                return false;
+            };
+            let Some(water) = screenshot_diagnostic_owner_buffers(
+                &self.device,
+                &self.queue,
+                &self.water_arena_buffers,
+                &self.water_chunks,
+                "screenshot water terrain owner sidecar",
+            ) else {
+                return false;
+            };
+            (Some(opaque), Some(water))
+        } else {
+            (None, None)
+        };
         let screenshot_target = self.screenshot_requested.then(|| {
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("screenshot composite target"),
@@ -5418,6 +5504,38 @@ impl Renderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: self.config.format,
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        });
+        let screenshot_diagnostic_identity_target = self.screenshot_requested.then(|| {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("screenshot integer ownership target"),
+                size: wgpu::Extent3d {
+                    width: self.config.width,
+                    height: self.config.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: TextureFormat::Rgba32Uint,
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        });
+        let screenshot_diagnostic_depth_target = self.screenshot_requested.then(|| {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("screenshot exact reverse-z target"),
+                size: wgpu::Extent3d {
+                    width: self.config.width,
+                    height: self.config.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: TextureFormat::R32Uint,
                 usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
                 view_formats: &[],
             })
@@ -5906,9 +6024,126 @@ impl Renderer {
             });
             self.ui_gpu.draw(&mut pass);
         }
+        if let (
+            Some(identity_target),
+            Some(reverse_z_target),
+            Some(opaque_owners),
+            Some(water_owners),
+        ) = (
+            screenshot_diagnostic_identity_target.as_ref(),
+            screenshot_diagnostic_depth_target.as_ref(),
+            screenshot_opaque_owners.as_ref(),
+            screenshot_water_owners.as_ref(),
+        ) {
+            let identity_view =
+                identity_target.create_view(&wgpu::TextureViewDescriptor::default());
+            let reverse_z_view =
+                reverse_z_target.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("screenshot integer terrain ownership pass"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &identity_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &reverse_z_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: self.depth.view(),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &self.frame_bind_group, &[]);
+            pass.set_bind_group(2, self.ambient_occlusion_gpu.sample_bind_group(), &[]);
+            pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
+            pass.set_pipeline(&self.screenshot_diagnostic_pipeline);
+            draw_diagnostic_spans(
+                &mut pass,
+                &self.arena_buffers,
+                opaque_owners,
+                &world_draw_list.fixed,
+            );
+            pass.set_pipeline(&self.screenshot_diagnostic_morph_pipeline);
+            draw_diagnostic_morph_spans(
+                &mut pass,
+                &self.arena_buffers,
+                opaque_owners,
+                &self.morph_arena_buffers,
+                &world_draw_list.morphing,
+            );
+            if let Some(cut_draw_lists) = &cut_draw_lists {
+                pass.set_pipeline(&self.screenshot_diagnostic_morph_transition_pipeline);
+                pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
+                draw_diagnostic_morph_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    opaque_owners,
+                    &self.morph_arena_buffers,
+                    &cut_draw_lists.incoming.morphing,
+                );
+                pass.set_pipeline(&self.screenshot_diagnostic_transition_pipeline);
+                pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                draw_diagnostic_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    opaque_owners,
+                    &cut_draw_lists.outgoing.fixed,
+                );
+                pass.set_pipeline(&self.screenshot_diagnostic_morph_transition_pipeline);
+                draw_diagnostic_morph_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    opaque_owners,
+                    &self.morph_arena_buffers,
+                    &cut_draw_lists.outgoing.morphing,
+                );
+            }
+            if refract_water {
+                pass.set_pipeline(&self.screenshot_diagnostic_pipeline);
+                pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
+                draw_diagnostic_spans(
+                    &mut pass,
+                    &self.water_arena_buffers,
+                    water_owners,
+                    &water_draw_list,
+                );
+                if !outgoing_water_draw_list.spans.is_empty() {
+                    pass.set_pipeline(&self.screenshot_diagnostic_transition_pipeline);
+                    pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                    draw_diagnostic_spans(
+                        &mut pass,
+                        &self.water_arena_buffers,
+                        water_owners,
+                        &outgoing_water_draw_list,
+                    );
+                }
+            }
+        }
         self.schedule_screenshot_readback(
             &mut encoder,
             screenshot_target.as_ref(),
+            screenshot_diagnostic_identity_target.as_ref(),
+            screenshot_diagnostic_depth_target.as_ref(),
             frame_id,
             camera,
         );
@@ -5931,6 +6166,8 @@ impl Renderer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         texture: Option<&wgpu::Texture>,
+        diagnostic_identity_texture: Option<&wgpu::Texture>,
+        diagnostic_depth_texture: Option<&wgpu::Texture>,
         frame_id: u32,
         camera: &CameraState,
     ) {
@@ -5940,6 +6177,13 @@ impl Renderer {
         self.screenshot_requested = false;
         let Some(texture) = texture else {
             (self.log_error)("screenshot capture failed: composite target was not created");
+            self.report_screenshot_result(false);
+            return;
+        };
+        let (Some(diagnostic_identity_texture), Some(diagnostic_depth_texture)) =
+            (diagnostic_identity_texture, diagnostic_depth_texture)
+        else {
+            (self.log_error)("screenshot capture failed: diagnostic targets were not created");
             self.report_screenshot_result(false);
             return;
         };
@@ -5963,7 +6207,29 @@ impl Renderer {
         let padded_bytes_per_row = unpadded_bytes_per_row
             .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer_size = u64::from(padded_bytes_per_row) * u64::from(height);
+        let color_buffer_size = u64::from(padded_bytes_per_row) * u64::from(height);
+        let diagnostic_identity_unpadded_bytes_per_row = match width.checked_mul(16) {
+            Some(bytes) => bytes,
+            None => {
+                self.report_screenshot_result(false);
+                return;
+            }
+        };
+        let diagnostic_identity_padded_bytes_per_row = diagnostic_identity_unpadded_bytes_per_row
+            .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let diagnostic_identity_buffer_size =
+            u64::from(diagnostic_identity_padded_bytes_per_row) * u64::from(height);
+        let diagnostic_depth_padded_bytes_per_row = padded_bytes_per_row;
+        let diagnostic_depth_buffer_size =
+            u64::from(diagnostic_depth_padded_bytes_per_row) * u64::from(height);
+        let Some(buffer_size) = color_buffer_size
+            .checked_add(diagnostic_identity_buffer_size)
+            .and_then(|size| size.checked_add(diagnostic_depth_buffer_size))
+        else {
+            self.report_screenshot_result(false);
+            return;
+        };
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("screenshot readback"),
             size: buffer_size,
@@ -5977,6 +6243,38 @@ impl Renderer {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        encoder.copy_texture_to_buffer(
+            diagnostic_identity_texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: color_buffer_size,
+                    bytes_per_row: Some(diagnostic_identity_padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        encoder.copy_texture_to_buffer(
+            diagnostic_depth_texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: color_buffer_size + diagnostic_identity_buffer_size,
+                    bytes_per_row: Some(diagnostic_depth_padded_bytes_per_row),
                     rows_per_image: Some(height),
                 },
             },
@@ -6005,14 +6303,47 @@ impl Renderer {
                     .get_mapped_range(..)
                     .ok()
                     .and_then(|mapped| {
-                        unpack_screenshot_rgba(&mapped, width, height, padded_bytes_per_row, bgra)
-                            .map(|rgba| ScreenshotCapture {
-                                filename,
-                                metadata,
-                                width,
-                                height,
-                                rgba,
-                            })
+                        let color_end = usize::try_from(color_buffer_size).ok()?;
+                        let identity_end =
+                            usize::try_from(color_buffer_size + diagnostic_identity_buffer_size)
+                                .ok()?;
+                        let diagnostic_identity = mapped.get(color_end..identity_end)?;
+                        let diagnostic_depth = mapped.get(identity_end..)?;
+                        let rgba = unpack_screenshot_rgba(
+                            mapped.get(..color_end)?,
+                            width,
+                            height,
+                            padded_bytes_per_row,
+                            bgra,
+                        )?;
+                        let diagnostic_identity = unpack_screenshot_diagnostic_rows(
+                            diagnostic_identity,
+                            width,
+                            height,
+                            16,
+                            diagnostic_identity_padded_bytes_per_row,
+                        )?;
+                        let diagnostic_depth = unpack_screenshot_diagnostic_rows(
+                            diagnostic_depth,
+                            width,
+                            height,
+                            4,
+                            diagnostic_depth_padded_bytes_per_row,
+                        )?;
+                        let terrain_diagnostic_u32x5 = interleave_screenshot_diagnostic(
+                            &diagnostic_identity,
+                            &diagnostic_depth,
+                            width,
+                            height,
+                        )?;
+                        Some(ScreenshotCapture {
+                            filename,
+                            metadata,
+                            width,
+                            height,
+                            rgba,
+                            terrain_diagnostic_u32x5,
+                        })
                     });
                 callback_buffer.unmap();
                 capture
@@ -6104,6 +6435,90 @@ fn draw_spans<'pass>(
     draws
 }
 
+/// Builds a screenshot-only owner sidecar mirroring the resident arena slots.
+///
+/// Ordinary frames retain the compact 24-byte terrain instance. On an explicit capture request,
+/// the directory's authoritative slice identities are expanded into an 8-byte transient vertex
+/// stream. This avoids permanently increasing terrain GPU memory merely to support diagnostics.
+fn screenshot_diagnostic_owner_buffers(
+    device: &Device,
+    queue: &Queue,
+    arena_buffers: &[Buffer],
+    chunks: &BTreeMap<MeshKey, ChunkMesh>,
+    label: &'static str,
+) -> Option<Vec<Buffer>> {
+    let quad_bytes = size_of::<GpuQuad>() as u64;
+    let owner_bytes = size_of::<[u32; 2]>() as u64;
+    let buffers = arena_buffers
+        .iter()
+        .map(|base| {
+            let slots = base.size().div_ceil(quad_bytes);
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: slots.saturating_mul(owner_bytes).max(owner_bytes),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        })
+        .collect::<Vec<_>>();
+    for (key, chunk) in chunks {
+        let owner_buffer = buffers.get(chunk.allocation.page as usize)?;
+        for slice in &chunk.slices {
+            let base_offset =
+                u64::from(chunk.allocation.offset).checked_add(u64::from(slice.relative_offset))?;
+            if !base_offset.is_multiple_of(quad_bytes) {
+                return None;
+            }
+            let owner_offset = (base_offset / quad_bytes).checked_mul(owner_bytes)?;
+            let owner = diagnostic_owner_for_slice(*key, slice);
+            let owners = vec![owner; slice.quad_count as usize];
+            let bytes = bytemuck::cast_slice(&owners);
+            if owner_offset.checked_add(bytes.len() as u64)? > owner_buffer.size() {
+                return None;
+            }
+            queue.write_buffer(owner_buffer, owner_offset, bytes);
+        }
+    }
+    Some(buffers)
+}
+
+fn diagnostic_owner_range(span: &DrawSpan) -> Option<std::ops::Range<u64>> {
+    let quad_bytes = size_of::<GpuQuad>() as u64;
+    let owner_bytes = size_of::<[u32; 2]>() as u64;
+    let base_offset = u64::from(span.offset);
+    if !base_offset.is_multiple_of(quad_bytes) {
+        return None;
+    }
+    let start = (base_offset / quad_bytes).checked_mul(owner_bytes)?;
+    let end = start.checked_add(u64::from(span.quad_count).checked_mul(owner_bytes)?)?;
+    Some(start..end)
+}
+
+fn draw_diagnostic_spans<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    arena_buffers: &'pass [Buffer],
+    owner_buffers: &'pass [Buffer],
+    draw_list: &DrawList,
+) -> u32 {
+    let mut draws = 0u32;
+    for span in &draw_list.spans {
+        let (Some(base_buffer), Some(owner_buffer), Some(owner_range)) = (
+            arena_buffers.get(span.page as usize),
+            owner_buffers.get(span.page as usize),
+            diagnostic_owner_range(span),
+        ) else {
+            continue;
+        };
+        let base_start = u64::from(span.offset);
+        let base_end = base_start + u64::from(span.size);
+        pass.set_vertex_buffer(0, base_buffer.slice(base_start..base_end));
+        pass.set_vertex_buffer(1, owner_buffer.slice(owner_range));
+        pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
+        draws = draws.saturating_add(1);
+    }
+    draws
+}
+
 fn draw_morph_spans<'pass>(
     pass: &mut wgpu::RenderPass<'pass>,
     arena_buffers: &'pass [Buffer],
@@ -6126,6 +6541,39 @@ fn draw_morph_spans<'pass>(
         let morph_end = morph_start + u64::from(span.quad_count) * size_of::<GpuMorph>() as u64;
         pass.set_vertex_buffer(0, base_buffer.slice(base_start..base_end));
         pass.set_vertex_buffer(1, morph_buffer.slice(morph_start..morph_end));
+        pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
+        draws = draws.saturating_add(1);
+    }
+    draws
+}
+
+fn draw_diagnostic_morph_spans<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    arena_buffers: &'pass [Buffer],
+    owner_buffers: &'pass [Buffer],
+    morph_arena_buffers: &'pass [Buffer],
+    draw_list: &DrawList,
+) -> u32 {
+    let mut draws = 0u32;
+    for span in &draw_list.spans {
+        let (Some(base_buffer), Some(owner_buffer), Some(morph_page), Some(owner_range)) = (
+            arena_buffers.get(span.page as usize),
+            owner_buffers.get(span.page as usize),
+            span.morph_page,
+            diagnostic_owner_range(span),
+        ) else {
+            continue;
+        };
+        let Some(morph_buffer) = morph_arena_buffers.get(morph_page as usize) else {
+            continue;
+        };
+        let base_start = u64::from(span.offset);
+        let base_end = base_start + u64::from(span.size);
+        let morph_start = u64::from(span.morph_offset);
+        let morph_end = morph_start + u64::from(span.quad_count) * size_of::<GpuMorph>() as u64;
+        pass.set_vertex_buffer(0, base_buffer.slice(base_start..base_end));
+        pass.set_vertex_buffer(1, owner_buffer.slice(owner_range));
+        pass.set_vertex_buffer(2, morph_buffer.slice(morph_start..morph_end));
         pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
         draws = draws.saturating_add(1);
     }
@@ -6356,6 +6804,61 @@ fn fingerprint_value(fingerprint: u64, value: u64) -> u64 {
         })
 }
 
+const DIAGNOSTIC_FNV32_OFFSET: u32 = 2_166_136_261;
+const DIAGNOSTIC_FNV32_PRIME: u32 = 16_777_619;
+
+fn diagnostic_owner_id(
+    representation_kind: u32,
+    hierarchy_depth: u32,
+    page_x: i32,
+    page_y: i32,
+    page_z: i32,
+) -> [u32; 2] {
+    let mut low = DIAGNOSTIC_FNV32_OFFSET;
+    let mut high = 0u32;
+    for word in [
+        representation_kind,
+        hierarchy_depth,
+        page_x as u32,
+        page_y as u32,
+        page_z as u32,
+    ] {
+        low = (low ^ word).wrapping_mul(DIAGNOSTIC_FNV32_PRIME);
+        high = high.wrapping_add(word);
+        high = high.wrapping_add(high << 10);
+        high ^= high >> 6;
+    }
+    high = high.wrapping_add(high << 3);
+    high ^= high >> 11;
+    high = high.wrapping_add(high << 15);
+    if low == 0 && high == 0 {
+        low = 1;
+    }
+    [low, high]
+}
+
+fn diagnostic_owner_for_slice(key: MeshKey, slice: &MeshSlice) -> [u32; 2] {
+    if let Some(patch) = slice.surface_patch_id {
+        diagnostic_owner_id(2, u32::from(patch.level.index()) + 1, patch.x, 0, patch.z)
+    } else if key.0 == 0 {
+        diagnostic_owner_id(1, 0, key.1, key.2, key.3)
+    } else {
+        // Renderer-generated frontier and transition products are explicit owners too. Their mesh
+        // key is stable in the selected-cut manifest and distinct from the page whose edge closes.
+        diagnostic_owner_id(3, u32::from(key.0), key.1, key.2, key.3)
+    }
+}
+
+fn gpu_quad_content_fingerprint(quads: &[GpuQuad], morph_heights: Option<&[GpuMorph]>) -> u64 {
+    let quad_fingerprint = fingerprint_bytes(bytemuck::cast_slice(quads));
+    morph_heights.map_or(quad_fingerprint, |heights| {
+        fingerprint_value(
+            quad_fingerprint,
+            fingerprint_bytes(bytemuck::cast_slice(heights)),
+        )
+    })
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the helper borrows independent renderer-owned arena resources transactionally"
@@ -6481,16 +6984,7 @@ fn prepare_mesh_sliced_into(
             morph_bytes,
         );
     }
-    let original_bytes = bytemuck::cast_slice(gpu_quads);
-    let content_fingerprint = morph_heights.map_or_else(
-        || fingerprint_bytes(original_bytes),
-        |heights| {
-            fingerprint_value(
-                fingerprint_bytes(original_bytes),
-                fingerprint_bytes(bytemuck::cast_slice(heights)),
-            )
-        },
-    );
+    let content_fingerprint = gpu_quad_content_fingerprint(gpu_quads, morph_heights);
     Some(ChunkMesh {
         allocation,
         morph_allocation,
@@ -6511,16 +7005,7 @@ fn gpu_quads_match_resident(
     quads: &[GpuQuad],
     morph_heights: Option<&[GpuMorph]>,
 ) -> bool {
-    let quad_bytes = bytemuck::cast_slice(quads);
-    let content_fingerprint = morph_heights.map_or_else(
-        || fingerprint_bytes(quad_bytes),
-        |heights| {
-            fingerprint_value(
-                fingerprint_bytes(quad_bytes),
-                fingerprint_bytes(bytemuck::cast_slice(heights)),
-            )
-        },
-    );
+    let content_fingerprint = gpu_quad_content_fingerprint(quads, morph_heights);
     gpu_quad_content_matches(
         mesh.map(|mesh| (mesh.quad_count, mesh.content_fingerprint)),
         quads.len() as u32,
@@ -9467,6 +9952,86 @@ fn create_voxel_pipeline(
     )
 }
 
+fn create_voxel_diagnostic_pipeline(
+    device: &Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    variant: VoxelPipelineVariant,
+) -> RenderPipeline {
+    let constants = [
+        ("MATERIAL_DETAIL", 0.0),
+        (
+            "CUT_TRANSITION",
+            if variant.cut_transition { 1.0 } else { 0.0 },
+        ),
+    ];
+    let fixed_buffers = [Some(quad_layout()), Some(diagnostic_owner_layout())];
+    let morph_buffers = [
+        Some(quad_layout()),
+        Some(diagnostic_owner_layout()),
+        Some(diagnostic_morph_height_layout()),
+    ];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some(if variant.morph_geometry {
+                if variant.cut_transition {
+                    "vs_transition_morph_diagnostic"
+                } else {
+                    "vs_main_morph_diagnostic"
+                }
+            } else if variant.cut_transition {
+                "vs_transition_fixed_diagnostic"
+            } else {
+                "vs_main_fixed_diagnostic"
+            }),
+            buffers: if variant.morph_geometry {
+                &morph_buffers
+            } else {
+                &fixed_buffers
+            },
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &constants,
+                ..Default::default()
+            },
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_diagnostic"),
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: TextureFormat::Rgba32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(wgpu::ColorTargetState {
+                    format: TextureFormat::R32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::RED,
+                }),
+            ],
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &constants,
+                ..Default::default()
+            },
+        }),
+        primitive: quad_primitive_state(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Greater),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 fn pipeline(
     device: &Device,
     label: &str,
@@ -9658,8 +10223,26 @@ fn quad_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
+fn diagnostic_owner_layout() -> wgpu::VertexBufferLayout<'static> {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![4 => Uint32x2];
+    wgpu::VertexBufferLayout {
+        array_stride: size_of::<[u32; 2]>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &ATTRIBUTES,
+    }
+}
+
 fn morph_height_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![4 => Sint16x4];
+    wgpu::VertexBufferLayout {
+        array_stride: size_of::<GpuMorph>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &ATTRIBUTES,
+    }
+}
+
+fn diagnostic_morph_height_layout() -> wgpu::VertexBufferLayout<'static> {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![5 => Sint16x4];
     wgpu::VertexBufferLayout {
         array_stride: size_of::<GpuMorph>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
@@ -9719,6 +10302,53 @@ fn unpack_screenshot_rgba(
         }
     }
     Some(rgba)
+}
+
+fn unpack_screenshot_diagnostic_rows(
+    padded: &[u8],
+    width: u32,
+    height: u32,
+    bytes_per_pixel: u32,
+    padded_bytes_per_row: u32,
+) -> Option<Vec<u8>> {
+    let row_bytes = usize::try_from(width.checked_mul(bytes_per_pixel)?).ok()?;
+    let padded_row_bytes = usize::try_from(padded_bytes_per_row).ok()?;
+    let height = usize::try_from(height).ok()?;
+    if padded_row_bytes < row_bytes || padded.len() < padded_row_bytes.checked_mul(height)? {
+        return None;
+    }
+    let mut attachment = vec![0; row_bytes.checked_mul(height)?];
+    for (source, destination) in padded
+        .chunks_exact(padded_row_bytes)
+        .take(height)
+        .zip(attachment.chunks_exact_mut(row_bytes))
+    {
+        destination.copy_from_slice(&source[..row_bytes]);
+    }
+    Some(attachment)
+}
+
+fn interleave_screenshot_diagnostic(
+    identity: &[u8],
+    reverse_z: &[u8],
+    width: u32,
+    height: u32,
+) -> Option<Vec<u8>> {
+    let pixels = usize::try_from(width.checked_mul(height)?).ok()?;
+    if identity.len() != pixels.checked_mul(16)? || reverse_z.len() != pixels.checked_mul(4)? {
+        return None;
+    }
+    let mut interleaved = vec![0; pixels.checked_mul(20)?];
+    for pixel in 0..pixels {
+        let identity_start = pixel * 16;
+        let depth_start = pixel * 4;
+        let destination = pixel * 20;
+        interleaved[destination..destination + 16]
+            .copy_from_slice(&identity[identity_start..identity_start + 16]);
+        interleaved[destination + 16..destination + 20]
+            .copy_from_slice(&reverse_z[depth_start..depth_start + 4]);
+    }
+    Some(interleaved)
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
@@ -11499,7 +12129,7 @@ mod tests {
             ao: 0xff,
         };
         let quads = [quad];
-        let fingerprint = fingerprint_bytes(bytemuck::cast_slice(&quads));
+        let fingerprint = gpu_quad_content_fingerprint(&quads, None);
         assert!(gpu_quad_content_matches(
             Some((1, fingerprint)),
             1,
@@ -11513,7 +12143,7 @@ mod tests {
 
         let mut changed = quad;
         changed.origin[1] += 1;
-        let changed_fingerprint = fingerprint_bytes(bytemuck::bytes_of(&changed));
+        let changed_fingerprint = gpu_quad_content_fingerprint(&[changed], None);
         assert!(!gpu_quad_content_matches(
             Some((1, fingerprint)),
             1,
@@ -11990,6 +12620,45 @@ mod tests {
             canonical_water_surface: false,
             render_layer: RenderLayer::Opaque,
         }
+    }
+
+    #[test]
+    fn diagnostic_owner_hashes_match_the_attachment_decoder_for_signed_pages() {
+        assert_eq!(
+            diagnostic_owner_id(1, 0, -9, 4, -7),
+            [1_853_617_194, 3_627_557_418]
+        );
+        assert_eq!(
+            diagnostic_owner_id(2, 3, -7, 0, 13),
+            [1_589_663_946, 251_670_784]
+        );
+        assert_eq!(
+            diagnostic_owner_id(3, 255, 2, 0, 0),
+            [964_022_151, 1_104_392_134]
+        );
+    }
+
+    #[test]
+    fn directory_slices_assign_the_actual_canonical_surface_and_renderer_owners() {
+        assert_eq!(
+            diagnostic_owner_for_slice((0, -9, 4, -7), &test_slice()),
+            diagnostic_owner_id(1, 0, -9, 4, -7)
+        );
+
+        let mut surface_slice = test_slice();
+        surface_slice.surface_patch_id =
+            Some(SurfacePatchId::new(SurfaceLodLevel::Stride8, -7, 13));
+        assert_eq!(
+            diagnostic_owner_for_slice(
+                (SurfaceLodLevel::Stride8.index() + 1, 0, 0, 0),
+                &surface_slice,
+            ),
+            diagnostic_owner_id(2, 3, -7, 0, 13)
+        );
+        assert_eq!(
+            diagnostic_owner_for_slice((255, 2, 0, 0), &test_slice()),
+            diagnostic_owner_id(3, 255, 2, 0, 0)
+        );
     }
 
     #[test]

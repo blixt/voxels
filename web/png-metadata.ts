@@ -1,6 +1,15 @@
 const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 const TEXT_CHUNK = new Uint8Array([116, 69, 88, 116]);
 const IHDR_CHUNK = "IHDR";
+const CRC_TABLE = new Uint32Array(
+  Array.from({ length: 256 }, (_, byte) => {
+    let value = byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value >>> 1) ^ (0xedb88320 & -(value & 1));
+    }
+    return value >>> 0;
+  }),
+);
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
@@ -34,10 +43,7 @@ function chunkType(bytes: Uint8Array, offset: number): string {
 function crc32(bytes: Uint8Array): number {
   let crc = 0xffffffff;
   for (const byte of bytes) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
-    }
+    crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ byte) & 0xff]!;
   }
   return (crc ^ 0xffffffff) >>> 0;
 }
@@ -80,15 +86,41 @@ export function embedPngText(png: Uint8Array, keyword: string, text: string): Ui
   if (!everyCodeUnit(text, (code) => code <= 127)) {
     throw new Error("PNG reproduction metadata must be ASCII");
   }
+  const payload = new TextEncoder().encode(`${keyword}\0${text}`);
+  return embedPngChunkBytes(png, TEXT_CHUNK, payload);
+}
+
+/**
+ * Inserts one private ancillary PNG chunk immediately after IHDR.
+ *
+ * The chunk type must follow PNG's four-letter convention. The first lower-case letter marks the
+ * attachment ancillary, the second lower-case letter marks it private, and the reserved third
+ * letter must remain upper-case. This is used for binary diagnostic data that would be wasteful
+ * and ambiguous in a textual sidecar.
+ */
+export function embedPngBinary(png: Uint8Array, type: string, payload: Uint8Array): Uint8Array {
+  if (
+    type.length !== 4 ||
+    !everyCodeUnit(type, (code) => (code >= 65 && code <= 90) || (code >= 97 && code <= 122)) ||
+    type.charCodeAt(0) < 97 ||
+    type.charCodeAt(1) < 97 ||
+    type.charCodeAt(2) > 90
+  ) {
+    throw new Error("private ancillary PNG chunk type must match aaAa");
+  }
+  return embedPngChunkBytes(png, new TextEncoder().encode(type), payload);
+}
+
+function embedPngChunkBytes(png: Uint8Array, type: Uint8Array, payload: Uint8Array): Uint8Array {
+  assertPng(png);
   const ihdrOffset = PNG_SIGNATURE.length;
   if (chunkType(png, ihdrOffset + 4) !== IHDR_CHUNK) {
     throw new Error("PNG does not begin with IHDR");
   }
   const insertionOffset = chunkEnd(png, ihdrOffset);
-  const payload = new TextEncoder().encode(`${keyword}\0${text}`);
   const chunk = new Uint8Array(payload.length + 12);
   writeU32(chunk, 0, payload.length);
-  chunk.set(TEXT_CHUNK, 4);
+  chunk.set(type, 4);
   chunk.set(payload, 8);
   writeU32(chunk, chunk.length - 4, crc32(chunk.subarray(4, chunk.length - 4)));
 
@@ -113,6 +145,22 @@ export function readPngText(png: Uint8Array, keyword: string): string | undefine
       if (separator > 0 && decoder.decode(payload.subarray(0, separator)) === keyword) {
         return decoder.decode(payload.subarray(separator + 1));
       }
+    }
+    if (type === "IEND") break;
+    offset = end;
+  }
+  return undefined;
+}
+
+/** Returns a copy of the first matching private binary attachment, if present. */
+export function readPngBinary(png: Uint8Array, requestedType: string): Uint8Array | undefined {
+  assertPng(png);
+  let offset = PNG_SIGNATURE.length;
+  while (offset < png.length) {
+    const end = chunkEnd(png, offset);
+    const type = chunkType(png, offset + 4);
+    if (type === requestedType) {
+      return png.slice(offset + 8, end - 4);
     }
     if (type === "IEND") break;
     offset = end;

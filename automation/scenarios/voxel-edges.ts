@@ -1,10 +1,16 @@
 import { execFileSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import type { Page } from "playwright";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import { BrowserCapability, chromeWebGpuLaunchOptions } from "../lib/browser.ts";
 import { type EngineClient, snapshotValue } from "../lib/engine.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
+import {
+  readTerrainDiagnosticAttachment,
+  type TerrainDiagnosticAttachment,
+} from "../lib/terrain-diagnostic.ts";
 import { startWorldStack, type WorldSource } from "../lib/world.ts";
+import { readPngText } from "../../web/png-metadata.ts";
 
 const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed|server rejected edit/iu;
@@ -21,6 +27,8 @@ interface Options {
   readonly buildProfile: "debug" | "wasm-dev" | "release";
   readonly viewport: { readonly width: number; readonly height: number };
   readonly deviceScaleFactor: number;
+  readonly coordinateSpace: "positive" | "negative";
+  readonly randomizedPoses: number;
 }
 
 function parseOptions(arguments_: readonly string[]): Options {
@@ -41,6 +49,9 @@ function parseOptions(arguments_: readonly string[]): Options {
     buildProfile: reader.choice("build", ["debug", "wasm-dev", "release"] as const, "release"),
     viewport: { width: viewport[0], height: viewport[1] },
     deviceScaleFactor: reader.number("dpr", { fallback: 1, minimum: 0.5, maximum: 4 }) ?? 1,
+    coordinateSpace: reader.choice("coordinates", ["positive", "negative"] as const, "positive"),
+    randomizedPoses:
+      reader.number("poses", { fallback: 16, minimum: 1, maximum: 128, integer: true }) ?? 16,
   };
   reader.assertEmpty();
   return options;
@@ -256,18 +267,36 @@ function projectBox(
 
 async function analyzeProjectedBox(
   page: Page,
-  screenshot: Buffer,
+  screenshot: Buffer | undefined,
   projectedCorners: readonly (readonly [number, number])[],
+  occupancyMask?: { readonly width: number; readonly height: number; readonly bytes: Uint8Array },
 ) {
   return page.evaluate(
-    async ({ base64, corners, tolerance }) => {
-      const response = await fetch(`data:image/png;base64,${base64}`);
-      const bitmap = await createImageBitmap(await response.blob());
-      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-      const context = canvas.getContext("2d", { willReadFrequently: true });
-      if (context === null) throw new Error("edge oracle canvas is unavailable");
-      context.drawImage(bitmap, 0, 0);
-      const pixels = context.getImageData(0, 0, bitmap.width, bitmap.height).data;
+    async ({ base64, maskBase64, maskWidth, maskHeight, corners, tolerance }) => {
+      let imageWidth: number;
+      let imageHeight: number;
+      let pixels: Uint8ClampedArray | undefined;
+      let fullMask: Uint8Array | undefined;
+      if (maskBase64 !== undefined) {
+        const binary = atob(maskBase64);
+        fullMask = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+        imageWidth = maskWidth;
+        imageHeight = maskHeight;
+        if (fullMask.length !== imageWidth * imageHeight) {
+          throw new Error("edge oracle occupancy mask has the wrong dimensions");
+        }
+      } else {
+        if (base64 === undefined) throw new Error("edge oracle has no rendered source");
+        const response = await fetch(`data:image/png;base64,${base64}`);
+        const bitmap = await createImageBitmap(await response.blob());
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        if (context === null) throw new Error("edge oracle canvas is unavailable");
+        context.drawImage(bitmap, 0, 0);
+        imageWidth = bitmap.width;
+        imageHeight = bitmap.height;
+        pixels = context.getImageData(0, 0, bitmap.width, bitmap.height).data;
+      }
       const cross = (
         origin: readonly number[],
         left: readonly number[],
@@ -292,12 +321,9 @@ async function analyzeProjectedBox(
       const upper = half([...sorted].reverse());
       const hull = [...lower.slice(0, -1), ...upper.slice(0, -1)];
       const x0 = Math.max(0, Math.floor(Math.min(...hull.map((point) => point[0]!))) - 8);
-      const x1 = Math.min(bitmap.width, Math.ceil(Math.max(...hull.map((point) => point[0]!))) + 8);
+      const x1 = Math.min(imageWidth, Math.ceil(Math.max(...hull.map((point) => point[0]!))) + 8);
       const y0 = Math.max(0, Math.floor(Math.min(...hull.map((point) => point[1]!))) - 8);
-      const y1 = Math.min(
-        bitmap.height,
-        Math.ceil(Math.max(...hull.map((point) => point[1]!))) + 8,
-      );
+      const y1 = Math.min(imageHeight, Math.ceil(Math.max(...hull.map((point) => point[1]!))) + 8);
       const inside = (x: number, y: number) => {
         for (let index = 0; index < hull.length; index += 1) {
           if (cross(hull[index]!, hull[(index + 1) % hull.length]!, [x, y]) < 0) return false;
@@ -311,11 +337,15 @@ async function analyzeProjectedBox(
         for (let x = x0; x < x1; x += 1) {
           const local = x - x0 + (y - y0) * width;
           expected[local] = Number(inside(x + 0.5, y + 0.5));
-          const source = (x + y * bitmap.width) * 4;
-          const red = pixels[source] ?? 0;
-          const green = pixels[source + 1] ?? 0;
-          const blue = pixels[source + 2] ?? 0;
-          actual[local] = Number(!(red >= 232 && green <= 48 && blue >= 232));
+          if (fullMask !== undefined) {
+            actual[local] = fullMask[x + y * imageWidth] ?? 0;
+          } else {
+            const source = (x + y * imageWidth) * 4;
+            const red = pixels?.[source] ?? 0;
+            const green = pixels?.[source + 1] ?? 0;
+            const blue = pixels?.[source + 2] ?? 0;
+            actual[local] = Number(!(red >= 232 && green <= 48 && blue >= 232));
+          }
         }
       }
       const near = (mask: Uint8Array, x: number, y: number) => {
@@ -358,7 +388,7 @@ async function analyzeProjectedBox(
         }
       }
       return {
-        image: { width: bitmap.width, height: bitmap.height },
+        image: { width: imageWidth, height: imageHeight },
         hull,
         roi: { x0, x1, y0, y1 },
         expectedPixels,
@@ -370,11 +400,60 @@ async function analyzeProjectedBox(
       };
     },
     {
-      base64: screenshot.toString("base64"),
+      base64: screenshot?.toString("base64"),
+      maskBase64: occupancyMask ? Buffer.from(occupancyMask.bytes).toString("base64") : undefined,
+      maskWidth: occupancyMask?.width ?? 0,
+      maskHeight: occupancyMask?.height ?? 0,
       corners: projectedCorners,
       tolerance: EDGE_TOLERANCE_PIXELS,
     },
   );
+}
+
+async function missionScreenshot(page: Page): Promise<Buffer> {
+  const pending = page.waitForEvent("download", { timeout: 15_000 });
+  await page.keyboard.press("F2");
+  const download = await pending;
+  const path = await download.path();
+  const failure = await download.failure();
+  if (failure !== null || path === null) {
+    throw new Error(`edge oracle screenshot failed: ${failure ?? "missing file"}`);
+  }
+  return readFile(path);
+}
+
+function fixtureOccupancyMask(
+  attachment: TerrainDiagnosticAttachment,
+  projectedCorners: readonly (readonly [number, number])[],
+  bounds: ReturnType<typeof cubeBounds>,
+) {
+  const mask = new Uint8Array(attachment.width * attachment.height);
+  const x0 = Math.max(0, Math.floor(Math.min(...projectedCorners.map((point) => point[0]))) - 8);
+  const x1 = Math.min(
+    attachment.width,
+    Math.ceil(Math.max(...projectedCorners.map((point) => point[0]))) + 8,
+  );
+  const y0 = Math.max(0, Math.floor(Math.min(...projectedCorners.map((point) => point[1]))) - 8);
+  const y1 = Math.min(
+    attachment.height,
+    Math.ceil(Math.max(...projectedCorners.map((point) => point[1]))) + 8,
+  );
+  const epsilon = 0.025;
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) {
+      const world = attachment.pixel(x, y).worldMetres;
+      if (
+        world !== undefined &&
+        world.every(
+          (value, axis) =>
+            value >= bounds.minimum[axis]! - epsilon && value <= bounds.maximum[axis]! + epsilon,
+        )
+      ) {
+        mask[x + y * attachment.width] = 1;
+      }
+    }
+  }
+  return { width: attachment.width, height: attachment.height, bytes: mask };
 }
 
 async function runVoxelEdges(context: ScenarioContext, arguments_: readonly string[]) {
@@ -383,7 +462,7 @@ async function runVoxelEdges(context: ScenarioContext, arguments_: readonly stri
     fixture: {
       prefix: "voxels-voxel-edges-",
       source: options.source,
-      spawnVoxels: [4_208, 6_082],
+      spawnVoxels: options.coordinateSpace === "negative" ? [-4_208, -6_082] : [4_208, 6_082],
       spawnPillarHeightVoxels: 1,
       spawnPillarRadiusVoxels: 1,
       spawnProtectionRadiusVoxels: 1,
@@ -457,16 +536,85 @@ async function runVoxelEdges(context: ScenarioContext, arguments_: readonly stri
   const physicalHeight = options.viewport.height * options.deviceScaleFactor;
   const projected = projectBox(aligned, bounds, physicalWidth, physicalHeight);
   const analysis = await analyzeProjectedBox(page, screenshot, projected);
-  const violations: string[] = [];
-  if (analysis.missingBeyondTolerancePixels !== 0) {
-    violations.push(
-      `${analysis.missingBeyondTolerancePixels} analytic cube pixels were missing beyond ${EDGE_TOLERANCE_PIXELS}px tolerance`,
-    );
+  const reproductionPng = await missionScreenshot(page);
+  const reproductionText = readPngText(reproductionPng, "voxels.reproduction");
+  if (reproductionText === undefined) {
+    throw new Error("edge oracle reproduction capture omitted metadata");
   }
-  if (analysis.excessBeyondTolerancePixels !== 0) {
-    violations.push(
-      `${analysis.excessBeyondTolerancePixels} rendered pixels exceeded the analytic cube beyond ${EDGE_TOLERANCE_PIXELS}px tolerance`,
+  const reproduction = JSON.parse(reproductionText) as {
+    camera: {
+      eyeMetres: [number, number, number];
+      velocityMetresPerSecond: [number, number, number];
+      yawRadians: number;
+      pitchRadians: number;
+      headingDegrees: number;
+      grounded: boolean;
+      locomotion: string;
+    };
+  };
+  let randomState = 0x8f70_1a2b;
+  const random = () => {
+    randomState ^= randomState << 13;
+    randomState ^= randomState >>> 17;
+    randomState ^= randomState << 5;
+    return (randomState >>> 0) / 0x1_0000_0000;
+  };
+  const randomizedAnalyses = [];
+  for (let pose = 0; pose < options.randomizedPoses; pose += 1) {
+    const azimuth = random() * Math.PI * 2;
+    const radius = 6 + random() * 6;
+    const eye: [number, number, number] = [
+      Math.fround(target[0] + Math.sin(azimuth) * radius),
+      Math.fround(target[1] + (random() - 0.5) * 0.8),
+      Math.fround(target[2] + Math.cos(azimuth) * radius),
+    ];
+    // Keep the fixture above the horizon and the crosshair below it. This prevents either ground
+    // pixels or the hovered-voxel overlay from entering the analytic silhouette ROI.
+    const lookTarget: Vector3 = [target[0], target[1] - 1.5, target[2]];
+    const dx = lookTarget[0] - eye[0];
+    const dy = lookTarget[1] - eye[1];
+    const dz = lookTarget[2] - eye[2];
+    reproduction.camera.eyeMetres = eye;
+    reproduction.camera.velocityMetresPerSecond = [0, 0, 0];
+    reproduction.camera.yawRadians = Math.fround(Math.atan2(dx, -dz));
+    reproduction.camera.pitchRadians = Math.fround(Math.atan2(dy, Math.hypot(dx, dz)));
+    reproduction.camera.headingDegrees = (reproduction.camera.yawRadians * 180) / Math.PI;
+    reproduction.camera.grounded = false;
+    reproduction.camera.locomotion = "spectator";
+    const poseSnapshot = await engine.applyReproduction(JSON.stringify(reproduction));
+    await engine.waitForFrameAfter(snapshotValue(poseSnapshot, "frameSequence"));
+    const poseProjected = projectBox(poseSnapshot, bounds, physicalWidth, physicalHeight);
+    const poseCapture = await missionScreenshot(page);
+    const poseAttachment = readTerrainDiagnosticAttachment(poseCapture);
+    const poseAnalysis = await analyzeProjectedBox(
+      page,
+      undefined,
+      poseProjected,
+      fixtureOccupancyMask(poseAttachment, poseProjected, bounds),
     );
+    randomizedAnalyses.push({
+      pose,
+      eye,
+      yaw: reproduction.camera.yawRadians,
+      pitch: reproduction.camera.pitchRadians,
+      ...poseAnalysis,
+    });
+  }
+  const violations: string[] = [];
+  for (const [label, result] of [
+    ["baseline", analysis],
+    ...randomizedAnalyses.map((result) => [`pose ${result.pose}`, result] as const),
+  ] as const) {
+    if (result.missingBeyondTolerancePixels !== 0) {
+      violations.push(
+        `${label}: ${result.missingBeyondTolerancePixels} analytic cube pixels were missing beyond ${EDGE_TOLERANCE_PIXELS}px tolerance`,
+      );
+    }
+    if (result.excessBeyondTolerancePixels !== 0) {
+      violations.push(
+        `${label}: ${result.excessBeyondTolerancePixels} rendered pixels exceeded the analytic cube beyond ${EDGE_TOLERANCE_PIXELS}px tolerance`,
+      );
+    }
   }
   const report = {
     ok: violations.length === 0,
@@ -483,6 +631,7 @@ async function runVoxelEdges(context: ScenarioContext, arguments_: readonly stri
     fixture: { first, second, bounds, materialId },
     tolerancePixels: EDGE_TOLERANCE_PIXELS,
     analysis,
+    randomizedAnalyses,
     violations,
   };
   await context.artifacts.writeJson("Voxel edge oracle report", "report.json", report);

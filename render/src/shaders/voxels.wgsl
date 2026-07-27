@@ -41,6 +41,10 @@ struct VertexOut {
   @location(4) @interpolate(flat) terrain_lighting: vec2<f32>,
   @location(5) @interpolate(flat) source: u32,
   @location(6) surface_weather: vec2<f32>,
+  // Screenshot-only integer attachment identity. Keeping this as an ordinary flat varying lets
+  // the diagnostic pass execute the exact production vertex path, including morphs and cut
+  // transitions, without changing the visible color pass or maintaining a second geometry model.
+  @location(7) @interpolate(flat) terrain_identity: vec4<u32>,
 };
 
 const CORNERS = array<vec2<i32>, 4>(
@@ -58,6 +62,37 @@ const TRANSITION_TRIANGLE_OFFSET_MASK: u32 = 0x01ffu;
 const CANONICAL_TRIANGLE_FLAG: u32 = 0x2000u;
 const CANONICAL_TRIANGLE_OFFSET_MASK: u32 = 0x003fu;
 const GPU_SOURCE_SHIFT: u32 = 5u;
+fn diagnostic_primitive_id(
+  origin: vec3<i32>,
+  extent_voxels: vec2<u32>,
+  material_face: u32,
+  ao: u32,
+) -> u32 {
+  var hash = 2166136261u;
+  hash = diagnostic_hash_step(hash, bitcast<u32>(origin.x));
+  hash = diagnostic_hash_step(hash, bitcast<u32>(origin.y));
+  hash = diagnostic_hash_step(hash, bitcast<u32>(origin.z));
+  hash = diagnostic_hash_step(hash, extent_voxels.x | (extent_voxels.y << 16u));
+  hash = diagnostic_hash_step(hash, material_face);
+  hash = diagnostic_hash_step(hash, ao);
+  return select(hash, 1u, hash == 0u);
+}
+
+fn diagnostic_hash_step(hash: u32, value: u32) -> u32 {
+  return (hash ^ value) * 16777619u;
+}
+
+fn diagnostic_descriptor(material: u32, source: u32, face: u32) -> u32 {
+  let streamed = (material & 0x80000000u) != 0u;
+  let hierarchy_depth = select(0u, ((material >> 27u) & 7u) + 1u, streamed);
+  let material_id = material & 0xffffu;
+  // bits 0..3 representation/source, 4..7 hierarchy depth, 8..10 face, 11..26 material.
+  // bits 27..31 remain available for attachment-level flags without revising the pixel format.
+  return (source & 15u)
+    | ((hierarchy_depth & 15u) << 4u)
+    | ((face & 7u) << 8u)
+    | ((material_id & 0xffffu) << 11u);
+}
 
 fn corner_ao(packed: u32, corner: u32) -> f32 {
   return f32((packed >> (corner * 2u)) & 3u) / 3.0;
@@ -439,6 +474,7 @@ fn voxel_vertex(
   extent_voxels: vec2<u32>,
   material_face: u32,
   ao: u32,
+  encoded_owner_id: vec2<u32>,
   morph_heights: vec4<i32>,
   morph_geometry: bool,
   boundary_centres: array<vec4<f32>, 4>,
@@ -532,6 +568,19 @@ fn voxel_vertex(
   // Morph closures are ordinary streamed products in storage but a distinct draw source on the
   // active cut. Keep them visually separable without consuming another packed extent category.
   out.source = select(encoded_source, 5u, morph_closure);
+  // Production entry points pass a literal zero owner. Keeping every diagnostic operation inside
+  // this branch lets shader specialization eliminate it from ordinary frames; screenshot entry
+  // points supply the transient sidecar's non-zero owner.
+  if any(encoded_owner_id != vec2<u32>(0u)) {
+    out.terrain_identity = vec4<u32>(
+      encoded_owner_id.x,
+      encoded_owner_id.y,
+      diagnostic_primitive_id(origin, extent_voxels, material_face, ao),
+      diagnostic_descriptor(material, out.source, face),
+    );
+  } else {
+    out.terrain_identity = vec4<u32>(0u);
+  }
   // The finest cloud octave changes over hundreds of metres, so evaluating it at every covered
   // 10 cm terrain fragment only repeats the same signal. Interpolating the exact shared field
   // from surface vertices retains substantially more spatial resolution than the field contains.
@@ -553,6 +602,31 @@ fn vs_main_fixed(
     extent_voxels,
     material_face,
     ao,
+    vec2<u32>(0u),
+    vec4<i32>(0),
+    false,
+    frame.lod_boundary_centres,
+    frame.lod_boundary_half_extents,
+    vec2<f32>(0.0),
+  );
+}
+
+@vertex
+fn vs_main_fixed_diagnostic(
+  @builtin(vertex_index) vertex_index: u32,
+  @location(0) origin: vec3<i32>,
+  @location(1) extent_voxels: vec2<u32>,
+  @location(2) material_face: u32,
+  @location(3) ao: u32,
+  @location(4) diagnostic_owner: vec2<u32>,
+) -> VertexOut {
+  return voxel_vertex(
+    vertex_index,
+    origin,
+    extent_voxels,
+    material_face,
+    ao,
+    diagnostic_owner,
     vec4<i32>(0),
     false,
     frame.lod_boundary_centres,
@@ -576,6 +650,32 @@ fn vs_main_morph(
     extent_voxels,
     material_face,
     ao,
+    vec2<u32>(0u),
+    morph_heights,
+    true,
+    frame.lod_boundary_centres,
+    frame.lod_boundary_half_extents,
+    vec2<f32>(0.0),
+  );
+}
+
+@vertex
+fn vs_main_morph_diagnostic(
+  @builtin(vertex_index) vertex_index: u32,
+  @location(0) origin: vec3<i32>,
+  @location(1) extent_voxels: vec2<u32>,
+  @location(2) material_face: u32,
+  @location(3) ao: u32,
+  @location(4) diagnostic_owner: vec2<u32>,
+  @location(5) morph_heights: vec4<i32>,
+) -> VertexOut {
+  return voxel_vertex(
+    vertex_index,
+    origin,
+    extent_voxels,
+    material_face,
+    ao,
+    diagnostic_owner,
     morph_heights,
     true,
     frame.lod_boundary_centres,
@@ -612,6 +712,31 @@ fn vs_transition_fixed(
     extent_voxels,
     material_face,
     ao,
+    vec2<u32>(0u),
+    vec4<i32>(0),
+    false,
+    transition_boundary_centres(),
+    transition_boundary_half_extents(),
+    cut_transition.phase_role.xy,
+  );
+}
+
+@vertex
+fn vs_transition_fixed_diagnostic(
+  @builtin(vertex_index) vertex_index: u32,
+  @location(0) origin: vec3<i32>,
+  @location(1) extent_voxels: vec2<u32>,
+  @location(2) material_face: u32,
+  @location(3) ao: u32,
+  @location(4) diagnostic_owner: vec2<u32>,
+) -> VertexOut {
+  return voxel_vertex(
+    vertex_index,
+    origin,
+    extent_voxels,
+    material_face,
+    ao,
+    diagnostic_owner,
     vec4<i32>(0),
     false,
     transition_boundary_centres(),
@@ -635,6 +760,32 @@ fn vs_transition_morph(
     extent_voxels,
     material_face,
     ao,
+    vec2<u32>(0u),
+    morph_heights,
+    true,
+    transition_boundary_centres(),
+    transition_boundary_half_extents(),
+    cut_transition.phase_role.xy,
+  );
+}
+
+@vertex
+fn vs_transition_morph_diagnostic(
+  @builtin(vertex_index) vertex_index: u32,
+  @location(0) origin: vec3<i32>,
+  @location(1) extent_voxels: vec2<u32>,
+  @location(2) material_face: u32,
+  @location(3) ao: u32,
+  @location(4) diagnostic_owner: vec2<u32>,
+  @location(5) morph_heights: vec4<i32>,
+) -> VertexOut {
+  return voxel_vertex(
+    vertex_index,
+    origin,
+    extent_voxels,
+    material_face,
+    ao,
+    diagnostic_owner,
     morph_heights,
     true,
     transition_boundary_centres(),
@@ -1458,4 +1609,21 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     );
   }
   return vec4<f32>(transport_surface_radiance(color, input.world, sun), 1.0);
+}
+
+/// One machine-readable identity record for the winning terrain fragment at each screenshot
+/// pixel. A second single-channel integer target stores the exact reverse-Z f32 bit pattern.
+/// Together with the reproduction package's inverse view-projection matrix and integer pixel
+/// coordinate this reconstructs world position without spending three more 32-bit render targets.
+struct DiagnosticFragmentOut {
+  @location(0) identity: vec4<u32>,
+  @location(1) reverse_z_depth: u32,
+};
+
+@fragment
+fn fs_diagnostic(input: VertexOut) -> DiagnosticFragmentOut {
+  var out: DiagnosticFragmentOut;
+  out.identity = input.terrain_identity;
+  out.reverse_z_depth = bitcast<u32>(input.position.z);
+  return out;
 }

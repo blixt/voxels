@@ -147,12 +147,20 @@ export async function analyzeDiagnosticSky(
           const y = Math.floor(current / width);
           touchesBoundary ||= x === 0 || x + 1 === width || y === 0 || y + 1 === height;
           if (componentCoordinates.length < 32) componentCoordinates.push(current);
-          const neighbors = [
-            x > 0 ? current - 1 : -1,
-            x + 1 < width ? current + 1 : -1,
-            y > 0 ? current - width : -1,
-            y + 1 < height ? current + width : -1,
-          ];
+          // Rasterized diagonal silhouettes connect sky through corner-adjacent pixels. Treating
+          // those as separate components creates one-pixel false holes exactly along sloped
+          // terrain, so the coverage oracle deliberately uses 8-connectivity.
+          const neighbors: number[] = [];
+          for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+              if (dx === 0 && dy === 0) continue;
+              const neighborX = x + dx;
+              const neighborY = y + dy;
+              if (neighborX >= 0 && neighborX < width && neighborY >= 0 && neighborY < height) {
+                neighbors.push(neighborX + neighborY * width);
+              }
+            }
+          }
           for (const neighbor of neighbors) {
             if (neighbor < 0 || mask[neighbor] === 0 || visited[neighbor] !== 0) continue;
             visited[neighbor] = 1;

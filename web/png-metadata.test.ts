@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { embedPngText, readPngText } from "./png-metadata.ts";
+import { embedPngBinary, embedPngText, readPngBinary, readPngText } from "./png-metadata.ts";
 
 function crc32(bytes: Uint8Array): number {
   let crc = 0xffffffff;
@@ -66,5 +66,16 @@ describe("PNG screenshot metadata", () => {
     expect(() => embedPngText(minimalPng(), "voxels.reproduction", '{"place":"Málaga"}')).toThrow(
       /must be ASCII/u,
     );
+  });
+
+  it("embeds a CRC-valid private binary attachment without a textual sidecar", () => {
+    const source = minimalPng();
+    const diagnostic = new Uint8Array([0, 255, 17, 0, 88, 42]);
+    const encoded = embedPngBinary(source, "vpDI", diagnostic);
+
+    expect(readPngBinary(encoded, "vpDI")).toEqual(diagnostic);
+    expect(readPngBinary(encoded, "vpXX")).toBeUndefined();
+    expect(() => embedPngBinary(source, "VPDI", diagnostic)).toThrow(/must match aaAa/u);
+    expect(() => embedPngBinary(source, "vpdI", diagnostic)).toThrow(/must match aaAa/u);
   });
 });

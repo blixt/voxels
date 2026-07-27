@@ -17,6 +17,7 @@ pub mod mesh;
 pub mod protocol;
 pub mod route;
 pub mod source;
+pub mod virtual_surface;
 pub mod visibility;
 
 pub use cave::{
@@ -83,6 +84,10 @@ pub use source::{
     WorldProductBatchResult, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
     WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind,
     procedural_world_source,
+};
+pub use virtual_surface::{
+    BoundaryCertificate, BoundarySide, BoundarySideCertificate, CanonicalBoundarySample,
+    CanonicalFaceKey, FaceAxis, VoxelBounds, canonical_exposed_faces,
 };
 pub use visibility::{
     MAX_VISIBILITY_CELLS, MAX_VISIBILITY_PORTALS, PortalState, VisibilityCellId, VisibilityGraph,

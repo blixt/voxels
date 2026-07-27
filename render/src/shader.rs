@@ -447,6 +447,8 @@ mod tests {
             );
             assert!(!shader.contains("let world = origin + local"));
         }
+        assert!(voxels.contains("@location(4) diagnostic_owner: vec2<u32>"));
+        assert!(voxels.contains("@location(5) morph_heights: vec4<i32>"));
         assert!(voxels.contains("vec3<f32>(origin + local)"));
         assert!(shadows.contains("vec3<f32>(origin + vec3<i32>(local))"));
         assert!(shadows.contains("surface_parent_blend(world, material)"));

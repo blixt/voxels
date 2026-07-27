@@ -4490,6 +4490,7 @@ mod web {
         width: u32,
         height: u32,
         rgba: Vec<u8>,
+        terrain_diagnostic_u32x5: Vec<u8>,
     }
 
     impl From<ScreenshotCapture> for MissionControlScreenshot {
@@ -4500,6 +4501,7 @@ mod web {
                 width: capture.width,
                 height: capture.height,
                 rgba: capture.rgba,
+                terrain_diagnostic_u32x5: capture.terrain_diagnostic_u32x5,
             }
         }
     }
@@ -4528,6 +4530,10 @@ mod web {
 
         pub fn rgba(&mut self) -> Vec<u8> {
             std::mem::take(&mut self.rgba)
+        }
+
+        pub fn terrain_diagnostic_u32x5(&mut self) -> Vec<u8> {
+            std::mem::take(&mut self.terrain_diagnostic_u32x5)
         }
     }
 

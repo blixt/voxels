@@ -3,7 +3,7 @@ import init, {
   type EngineHandle,
   type MissionControlScreenshot,
 } from "./generated/voxels.js";
-import { embedPngText } from "./png-metadata.ts";
+import { embedPngBinary, embedPngText } from "./png-metadata.ts";
 import type { FromWorker, InitMessage, ToWorker } from "./protocol.ts";
 import { disposeWorkerEngine } from "./worker-lifecycle.ts";
 
@@ -87,6 +87,10 @@ async function encodeScreenshot(capture: MissionControlScreenshot): Promise<void
     if (rgba.byteLength !== width * height * 4) {
       throw new Error("renderer returned an invalid RGBA screenshot");
     }
+    const terrainDiagnostic = capture.terrain_diagnostic_u32x5();
+    if (terrainDiagnostic.byteLength !== width * height * 20) {
+      throw new Error("renderer returned an invalid u32x5 terrain diagnostic attachment");
+    }
     const canvas = new OffscreenCanvas(width, height);
     const context = canvas.getContext("2d");
     if (!context) throw new Error("browser could not create a PNG encoding canvas");
@@ -96,11 +100,33 @@ async function encodeScreenshot(capture: MissionControlScreenshot): Promise<void
     if (browserPng.type !== "image/png" || browserPng.size < 8) {
       throw new Error("browser returned an invalid PNG screenshot");
     }
-    const png = embedPngText(
+    const metadataPng = embedPngText(
       new Uint8Array(await browserPng.arrayBuffer()),
       "voxels.reproduction",
       capture.metadata,
     );
+    const compressor = new CompressionStream("deflate");
+    const compressedDiagnostic = new Uint8Array(
+      await new Response(
+        new Blob([terrainDiagnostic.slice().buffer as ArrayBuffer])
+          .stream()
+          .pipeThrough(compressor),
+      ).arrayBuffer(),
+    );
+    // Big-endian framing makes the attachment self-describing without relying on JS typed-array
+    // host endianness. The compressed payload itself expands to the little-endian RGBA32Uint rows
+    // described by voxels.reproduction.v2.
+    const headerBytes = 20;
+    const diagnosticPayload = new Uint8Array(headerBytes + compressedDiagnostic.byteLength);
+    diagnosticPayload.set([0x56, 0x54, 0x50, 0x31], 0); // "VTP1"
+    const header = new DataView(diagnosticPayload.buffer);
+    header.setUint16(4, 1);
+    header.setUint16(6, 5);
+    header.setUint32(8, width);
+    header.setUint32(12, height);
+    header.setUint32(16, terrainDiagnostic.byteLength);
+    diagnosticPayload.set(compressedDiagnostic, headerBytes);
+    const png = embedPngBinary(metadataPng, "vpDI", diagnosticPayload);
     const blob = new Blob([png.slice().buffer as ArrayBuffer], { type: "image/png" });
     scope.postMessage({
       kind: "downloadMissionControlScreenshot",
