@@ -19,6 +19,7 @@ const NORMAL_ERROR_PIXELS_PER_RADIAN: f64 = 0.25;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VirtualTerrainCapacity {
     pub max_directories: usize,
+    pub max_roots: usize,
     pub max_directory_nodes: usize,
     pub max_resident_pages: usize,
     pub max_resident_encoded_bytes: usize,
@@ -31,6 +32,7 @@ pub struct VirtualTerrainCapacity {
 impl VirtualTerrainCapacity {
     pub const DEVELOPMENT_128_MIB: Self = Self {
         max_directories: 512,
+        max_roots: 512,
         max_directory_nodes: 299_520,
         max_resident_pages: 8_192,
         max_resident_encoded_bytes: 128 * 1_024 * 1_024,
@@ -42,6 +44,8 @@ impl VirtualTerrainCapacity {
 
     fn validates(self) -> bool {
         self.max_directories > 0
+            && self.max_roots > 0
+            && self.max_roots <= self.max_directory_nodes
             && self.max_directory_nodes > 0
             && self.max_resident_pages > 0
             && self.max_resident_encoded_bytes > 0
@@ -207,6 +211,37 @@ impl VirtualTerrainHierarchy {
         self.source_identity_hash
     }
 
+    pub const fn capacity(&self) -> VirtualTerrainCapacity {
+        self.capacity
+    }
+
+    pub fn directory_node(&self, key: TerrainPageKey) -> Option<TerrainHierarchyNode> {
+        self.nodes.get(&key).copied()
+    }
+
+    pub fn refined_last_cut(&self) -> impl Iterator<Item = TerrainPageKey> + '_ {
+        self.refined_last_cut.iter().copied()
+    }
+
+    pub fn replacement_is_resident_and_coherent(&self, key: TerrainPageKey) -> bool {
+        let Some(parent) = self.resident.get(&key).map(|resident| &resident.page) else {
+            return false;
+        };
+        let Some(children) = key.children() else {
+            return false;
+        };
+        let child_pages = children
+            .iter()
+            .filter_map(|child| {
+                self.resident
+                    .get(child)
+                    .map(|resident| resident.page.clone())
+            })
+            .collect::<Vec<_>>();
+        child_pages.len() == TERRAIN_PAGE_MAX_CHILDREN
+            && validate_terrain_replacement(parent, &child_pages).is_ok()
+    }
+
     pub fn register_region_directory(
         &mut self,
         directory: &TerrainHierarchyDirectoryV1,
@@ -239,6 +274,12 @@ impl VirtualTerrainHierarchy {
         if self.directory_fingerprints.len() >= self.capacity.max_directories
             || self.nodes.len().saturating_add(directory.nodes.len())
                 > self.capacity.max_directory_nodes
+            || self.roots.len().saturating_add(
+                directory
+                    .roots()
+                    .filter(|node| !self.roots.contains(&node.key))
+                    .count(),
+            ) > self.capacity.max_roots
         {
             return Err(VirtualTerrainError::DirectoryCapacity);
         }

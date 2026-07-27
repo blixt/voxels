@@ -213,6 +213,14 @@ fn vs_main_fixed(
 }
 
 @vertex
+fn vs_virtual_cluster(
+  @location(0) position_voxels: vec3<i32>,
+) -> @builtin(position) vec4<f32> {
+  let world = vec3<f32>(position_voxels) * shadow_frame.camera_voxel.w;
+  return shadow_frame.clip_from_world * vec4<f32>(world, 1.0);
+}
+
+@vertex
 fn vs_main_morph(
   @builtin(vertex_index) vertex_index: u32,
   @location(0) origin: vec3<i32>,

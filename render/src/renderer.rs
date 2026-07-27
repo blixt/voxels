@@ -25,6 +25,7 @@ use crate::virtual_terrain::{
     VirtualTerrainCapacity, VirtualTerrainCut, VirtualTerrainError, VirtualTerrainHierarchy,
     VirtualTerrainView,
 };
+use crate::virtual_terrain_gpu::{GpuVirtualTerrainFeedback, VirtualTerrainGpuControl};
 use bytemuck::{Pod, Zeroable};
 use hashbrown::{HashMap, HashSet};
 use std::collections::{BTreeMap, VecDeque};
@@ -261,13 +262,24 @@ pub struct RendererConfig {
     pub diagnostic_sky_color: Option<[f32; 3]>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum VirtualTerrainRenderMode {
+    #[default]
+    Disabled,
+    Shadow,
+    Visible,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VirtualTerrainRendererError {
     Hierarchy(VirtualTerrainError),
     UnsupportedRepresentation(TerrainPageRepresentationKind),
     InvalidSurfaceCluster(TerrainPageKey),
+    InvalidTriangleCluster(TerrainPageKey),
     GpuPageTooLarge(TerrainPageKey),
     GpuPoolCapacity,
+    GpuTraversal,
+    NoRenderableCut,
     SelectedPageMissingGpu(TerrainPageKey),
 }
 
@@ -287,6 +299,12 @@ impl std::fmt::Display for VirtualTerrainRendererError {
                     "virtual terrain surface cluster {key:?} is invalid"
                 )
             }
+            Self::InvalidTriangleCluster(key) => {
+                write!(
+                    formatter,
+                    "virtual terrain triangle cluster {key:?} is invalid"
+                )
+            }
             Self::GpuPageTooLarge(key) => {
                 write!(
                     formatter,
@@ -295,6 +313,12 @@ impl std::fmt::Display for VirtualTerrainRendererError {
             }
             Self::GpuPoolCapacity => {
                 formatter.write_str("virtual terrain GPU page pool capacity exceeded")
+            }
+            Self::GpuTraversal => {
+                formatter.write_str("virtual terrain GPU traversal state is inconsistent")
+            }
+            Self::NoRenderableCut => {
+                formatter.write_str("virtual terrain has no complete renderable cut")
             }
             Self::SelectedPageMissingGpu(key) => {
                 write!(
@@ -483,6 +507,16 @@ struct GpuQuad {
     material_face: u32,
     ao: u32,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+struct GpuTerrainVertex {
+    position: [i32; 3],
+    material: u32,
+    normal: [i16; 4],
+}
+
+const _: () = assert!(size_of::<GpuTerrainVertex>() == 24);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
@@ -710,10 +744,83 @@ fn virtual_surface_gpu_quads(
             origin,
             extent_voxels,
             material_face: pack_gpu_material_face(u32::from(material.id()), face),
-            ao: 0,
+            // Page clusters do not currently carry per-corner occluders. Encode fully open
+            // corners instead of zero, which in the canonical AO convention means maximally
+            // occluded.
+            ao: u32::from(u8::MAX),
         });
     }
     Ok(gpu_quads)
+}
+
+fn virtual_triangle_gpu_vertices(
+    page: &TerrainPageV1,
+) -> Result<Vec<GpuTerrainVertex>, VirtualTerrainRendererError> {
+    let TerrainPageRepresentation::TriangleCluster(cluster) = &page.representation else {
+        return Err(VirtualTerrainRendererError::UnsupportedRepresentation(
+            page.representation.kind(),
+        ));
+    };
+    let vertex_count = cluster
+        .triangles
+        .len()
+        .checked_mul(3)
+        .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
+    let mut vertices = Vec::with_capacity(vertex_count);
+    for triangle in &cluster.triangles {
+        let material = page
+            .materials
+            .get(usize::from(triangle.material_index))
+            .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(
+                page.key,
+            ))?
+            .material;
+        let source_vertices = triangle
+            .vertices
+            .map(|index| cluster.vertices.get(index as usize));
+        let [Some(left), Some(middle), Some(right)] = source_vertices else {
+            return Err(VirtualTerrainRendererError::InvalidTriangleCluster(
+                page.key,
+            ));
+        };
+        if [left, middle, right]
+            .iter()
+            .any(|vertex| vertex.material_index != triangle.material_index)
+        {
+            return Err(VirtualTerrainRendererError::InvalidTriangleCluster(
+                page.key,
+            ));
+        }
+        let edge_a = std::array::from_fn::<_, 3, _>(|axis| {
+            f64::from(middle.position[axis]) - f64::from(left.position[axis])
+        });
+        let edge_b = std::array::from_fn::<_, 3, _>(|axis| {
+            f64::from(right.position[axis]) - f64::from(left.position[axis])
+        });
+        let cross = [
+            edge_a[1] * edge_b[2] - edge_a[2] * edge_b[1],
+            edge_a[2] * edge_b[0] - edge_a[0] * edge_b[2],
+            edge_a[0] * edge_b[1] - edge_a[1] * edge_b[0],
+        ];
+        let length = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+        if !length.is_finite() || length <= f64::EPSILON {
+            return Err(VirtualTerrainRendererError::InvalidTriangleCluster(
+                page.key,
+            ));
+        }
+        let normal = std::array::from_fn::<_, 3, _>(|axis| {
+            let value = (cross[axis] / length * f64::from(i16::MAX)).round();
+            value.clamp(f64::from(i16::MIN + 1), f64::from(i16::MAX)) as i16
+        });
+        for vertex in [left, middle, right] {
+            vertices.push(GpuTerrainVertex {
+                position: vertex.position,
+                material: u32::from(material.id()),
+                normal: [normal[0], normal[1], normal[2], 0],
+            });
+        }
+    }
+    Ok(vertices)
 }
 
 const fn pack_canonical_triangle_extent(extent: u16) -> u16 {
@@ -1110,7 +1217,21 @@ struct VirtualTerrainGpuPage {
     revision: u64,
     content_fingerprint: [u8; 32],
     representation: TerrainPageRepresentationKind,
-    mesh: Option<ChunkMesh>,
+    mesh: VirtualTerrainGpuMesh,
+}
+
+enum VirtualTerrainGpuMesh {
+    Empty,
+    Surface(ChunkMesh),
+    Triangle(TerrainTriangleMesh),
+}
+
+struct TerrainTriangleMesh {
+    allocation: Allocation,
+    vertex_count: u32,
+    content_fingerprint: u64,
+    bounds_min: glam::Vec3,
+    bounds_max: glam::Vec3,
 }
 
 struct PreparedCanonicalChunkUpload {
@@ -1263,6 +1384,31 @@ struct DrawList {
     fingerprint: u64,
     tested_slices: u32,
     selected_slices: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TerrainTriangleDrawSpan {
+    page: u16,
+    offset: u32,
+    size: u32,
+    vertex_count: u32,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct TerrainTriangleDrawList {
+    spans: Vec<TerrainTriangleDrawSpan>,
+    mesh_count: u32,
+    vertex_count: u32,
+    fingerprint: u64,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct VirtualTerrainDrawLists {
+    surfaces: DrawList,
+    triangles: TerrainTriangleDrawList,
+    fingerprint: u64,
+    mesh_count: u32,
+    primitive_count: u32,
 }
 
 /// Camera-visible opaque geometry split by whether its vertices can move in the current LOD band.
@@ -1505,6 +1651,13 @@ pub struct RenderDiagnostics {
     pub shadow_cascades: u32,
     pub quads: u32,
     pub water_quads: u32,
+    pub virtual_terrain_gpu_selected_pages: u32,
+    pub virtual_terrain_gpu_requested_pages: u32,
+    pub virtual_terrain_gpu_ownerless_roots: u32,
+    pub virtual_terrain_gpu_visited_nodes: u32,
+    pub virtual_terrain_gpu_overflow_flags: u32,
+    pub virtual_terrain_gpu_stack_peak: u32,
+    pub virtual_terrain_gpu_matches_cpu_cut: bool,
     /// Stable identity of the world geometry selected for the latest presented viewport.
     pub viewport_fingerprint: u64,
     pub refraction_copy_bytes: u64,
@@ -2048,6 +2201,12 @@ pub struct Renderer {
     voxel_morph_transition_flat_pipeline: RenderPipeline,
     voxel_morph_transition_ambient_occlusion_pipeline: RenderPipeline,
     voxel_morph_transition_ambient_occlusion_flat_pipeline: RenderPipeline,
+    virtual_triangle_depth_pipeline: RenderPipeline,
+    virtual_triangle_pipeline: RenderPipeline,
+    virtual_triangle_flat_pipeline: RenderPipeline,
+    virtual_triangle_ambient_occlusion_pipeline: RenderPipeline,
+    virtual_triangle_ambient_occlusion_flat_pipeline: RenderPipeline,
+    virtual_triangle_diagnostic_pipeline: RenderPipeline,
     screenshot_diagnostic_pipeline: RenderPipeline,
     screenshot_diagnostic_morph_pipeline: RenderPipeline,
     screenshot_diagnostic_transition_pipeline: RenderPipeline,
@@ -2070,7 +2229,11 @@ pub struct Renderer {
     chunks: BTreeMap<MeshKey, ChunkMesh>,
     water_chunks: BTreeMap<MeshKey, ChunkMesh>,
     virtual_terrain: VirtualTerrainHierarchy,
+    virtual_terrain_gpu: VirtualTerrainGpuControl,
+    virtual_terrain_mode: VirtualTerrainRenderMode,
     virtual_terrain_cut: Option<VirtualTerrainCut>,
+    virtual_terrain_oracle_cut: Option<VirtualTerrainCut>,
+    virtual_terrain_oracle_view: Option<VirtualTerrainView>,
     virtual_terrain_pages: BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
     virtual_terrain_arena: ArenaAllocator,
     virtual_terrain_arena_buffers: Vec<Buffer>,
@@ -2154,6 +2317,7 @@ struct ShadowGpu {
     bind_groups: [BindGroup; CASCADE_COUNT],
     fixed_pipeline: RenderPipeline,
     morph_pipeline: RenderPipeline,
+    virtual_triangle_pipeline: RenderPipeline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2325,6 +2489,12 @@ impl ShadowGpu {
             &shader,
             true,
         );
+        let virtual_triangle_pipeline = virtual_triangle_shadow_caster_pipeline(
+            device,
+            "virtual terrain triangle shadow caster pipeline",
+            &pipeline_layout,
+            &shader,
+        );
         Ok(Self {
             layout,
             _texture: texture,
@@ -2335,6 +2505,7 @@ impl ShadowGpu {
             bind_groups,
             fixed_pipeline,
             morph_pipeline,
+            virtual_triangle_pipeline,
         })
     }
 
@@ -2803,6 +2974,12 @@ impl Renderer {
             &voxel_shader,
             true,
         );
+        let virtual_triangle_depth_pipeline = virtual_triangle_depth_pipeline(
+            &device,
+            "virtual terrain triangle depth pipeline",
+            &sky_pipeline_layout,
+            &voxel_shader,
+        );
         let depth_prepass_transition_fixed_pipeline = transition_depth_pipeline(
             &device,
             "complete cut transition fixed depth pipeline",
@@ -2929,6 +3106,44 @@ impl Renderer {
             &voxel_shader,
             VoxelPipelineVariant::new(false, true).morphing_transition(),
         );
+        let virtual_triangle_pipeline = create_virtual_triangle_pipeline(
+            &device,
+            "virtual terrain triangle pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            true,
+            false,
+        );
+        let virtual_triangle_flat_pipeline = create_virtual_triangle_pipeline(
+            &device,
+            "flat virtual terrain triangle pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            false,
+            false,
+        );
+        let virtual_triangle_ambient_occlusion_pipeline = create_virtual_triangle_pipeline(
+            &device,
+            "spatial AO virtual terrain triangle pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            true,
+            true,
+        );
+        let virtual_triangle_ambient_occlusion_flat_pipeline = create_virtual_triangle_pipeline(
+            &device,
+            "flat spatial AO virtual terrain triangle pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+            false,
+            true,
+        );
+        let virtual_triangle_diagnostic_pipeline = virtual_triangle_diagnostic_pipeline(
+            &device,
+            "virtual terrain triangle diagnostic pipeline",
+            &world_pipeline_layout,
+            &voxel_shader,
+        );
         let screenshot_diagnostic_pipeline = create_voxel_diagnostic_pipeline(
             &device,
             "screenshot integer diagnostic pipeline",
@@ -3007,9 +3222,11 @@ impl Renderer {
             ui_gpu.water_scene_bind_group(&device, &water_scene_layout, opaque_depth.view());
 
         let placement_inventory = PlacementInventory::new();
-        let virtual_terrain =
-            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB)
-                .map_err(|error| format!("virtual terrain hierarchy: {error}"))?;
+        let virtual_terrain_capacity = VirtualTerrainCapacity::DEVELOPMENT_128_MIB;
+        let virtual_terrain = VirtualTerrainHierarchy::new(virtual_terrain_capacity)
+            .map_err(|error| format!("virtual terrain hierarchy: {error}"))?;
+        let virtual_terrain_gpu = VirtualTerrainGpuControl::new(&device, virtual_terrain_capacity)
+            .map_err(|error| format!("virtual terrain GPU control: {error:?}"))?;
         let virtual_terrain_arena = ArenaAllocator::new_bounded(
             ARENA_PAGE_BYTES,
             size_of::<GpuQuad>() as u32,
@@ -3058,6 +3275,12 @@ impl Renderer {
             voxel_morph_transition_flat_pipeline,
             voxel_morph_transition_ambient_occlusion_pipeline,
             voxel_morph_transition_ambient_occlusion_flat_pipeline,
+            virtual_triangle_depth_pipeline,
+            virtual_triangle_pipeline,
+            virtual_triangle_flat_pipeline,
+            virtual_triangle_ambient_occlusion_pipeline,
+            virtual_triangle_ambient_occlusion_flat_pipeline,
+            virtual_triangle_diagnostic_pipeline,
             screenshot_diagnostic_pipeline,
             screenshot_diagnostic_morph_pipeline,
             screenshot_diagnostic_transition_pipeline,
@@ -3080,7 +3303,11 @@ impl Renderer {
             chunks: BTreeMap::new(),
             water_chunks: BTreeMap::new(),
             virtual_terrain,
+            virtual_terrain_gpu,
+            virtual_terrain_mode: VirtualTerrainRenderMode::Disabled,
             virtual_terrain_cut: None,
+            virtual_terrain_oracle_cut: None,
+            virtual_terrain_oracle_view: None,
             virtual_terrain_pages: BTreeMap::new(),
             virtual_terrain_arena,
             virtual_terrain_arena_buffers: Vec::new(),
@@ -4038,7 +4265,9 @@ impl Renderer {
         directory: &TerrainHierarchyDirectoryV1,
     ) -> Result<(), VirtualTerrainRendererError> {
         self.virtual_terrain.register_region_directory(directory)?;
-        self.virtual_terrain_cut = None;
+        self.virtual_terrain_gpu
+            .register_directory(&self.queue, directory)
+            .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
         Ok(())
     }
 
@@ -4051,75 +4280,123 @@ impl Renderer {
         &mut self,
         page: TerrainPageV1,
     ) -> Result<(), VirtualTerrainRendererError> {
+        let page_key = page.key;
         if let Some(existing) = self.virtual_terrain_pages.get(&page.key)
             && existing.revision == page.revision
             && existing.content_fingerprint == page.content_fingerprint
             && existing.representation == page.representation.kind()
         {
             self.virtual_terrain.install_page(page)?;
+            self.virtual_terrain_gpu
+                .update_page_residency(&self.queue, &self.virtual_terrain, page_key)
+                .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
             return Ok(());
         }
-        let gpu_quads = virtual_surface_gpu_quads(&page)?;
-        let gpu_bytes = gpu_quads
-            .len()
-            .checked_mul(size_of::<GpuQuad>())
-            .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
-        if gpu_bytes > ARENA_PAGE_BYTES as usize {
-            return Err(VirtualTerrainRendererError::GpuPageTooLarge(page.key));
-        }
-        let mesh = if gpu_quads.is_empty() {
-            None
-        } else {
-            let minimum = glam::Vec3::from_array(
-                page.bounds
-                    .min
-                    .as_array()
-                    .map(|value| value as f32 * VOXEL_SIZE_METRES),
-            );
-            let maximum = glam::Vec3::from_array(
-                page.bounds
-                    .max
-                    .as_array()
-                    .map(|value| value as f32 * VOXEL_SIZE_METRES),
-            );
-            let quad_count = u32::try_from(gpu_quads.len())
-                .map_err(|_| VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
-            let size = quad_count
-                .checked_mul(size_of::<GpuQuad>() as u32)
-                .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
-            let slice = MeshSlice {
-                relative_offset: 0,
-                size,
-                quad_count,
-                bounds_min: minimum,
-                bounds_max: maximum,
-                surface_patch_id: None,
-                boundary_edge: None,
-                stitch_edges: 0,
-                morph_closure: false,
-                exact_replacement_chunk: None,
-                canonical_water_surface: false,
-                render_layer: RenderLayer::Opaque,
-            };
-            Some(
-                prepare_mesh_sliced_into(
-                    &self.device,
-                    &self.queue,
-                    &mut self.virtual_terrain_arena,
-                    &mut self.virtual_terrain_arena_buffers,
-                    None,
-                    &gpu_quads,
-                    None,
-                    vec![slice],
-                    u8::MAX,
-                    "bounded virtual terrain quad pool",
-                )
-                .ok_or(VirtualTerrainRendererError::GpuPoolCapacity)?,
-            )
+        let minimum = glam::Vec3::from_array(
+            page.bounds
+                .min
+                .as_array()
+                .map(|value| value as f32 * VOXEL_SIZE_METRES),
+        );
+        let maximum = glam::Vec3::from_array(
+            page.bounds
+                .max
+                .as_array()
+                .map(|value| value as f32 * VOXEL_SIZE_METRES),
+        );
+        let mesh = match &page.representation {
+            TerrainPageRepresentation::SurfaceCluster(_) => {
+                let gpu_quads = virtual_surface_gpu_quads(&page)?;
+                let gpu_bytes = gpu_quads
+                    .len()
+                    .checked_mul(size_of::<GpuQuad>())
+                    .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
+                if gpu_bytes > ARENA_PAGE_BYTES as usize {
+                    return Err(VirtualTerrainRendererError::GpuPageTooLarge(page.key));
+                }
+                if gpu_quads.is_empty() {
+                    VirtualTerrainGpuMesh::Empty
+                } else {
+                    let quad_count = u32::try_from(gpu_quads.len())
+                        .map_err(|_| VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
+                    let size = quad_count
+                        .checked_mul(size_of::<GpuQuad>() as u32)
+                        .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
+                    let slice = MeshSlice {
+                        relative_offset: 0,
+                        size,
+                        quad_count,
+                        bounds_min: minimum,
+                        bounds_max: maximum,
+                        surface_patch_id: None,
+                        boundary_edge: None,
+                        stitch_edges: 0,
+                        morph_closure: false,
+                        exact_replacement_chunk: None,
+                        canonical_water_surface: false,
+                        render_layer: RenderLayer::Opaque,
+                    };
+                    VirtualTerrainGpuMesh::Surface(
+                        prepare_mesh_sliced_into(
+                            &self.device,
+                            &self.queue,
+                            &mut self.virtual_terrain_arena,
+                            &mut self.virtual_terrain_arena_buffers,
+                            None,
+                            &gpu_quads,
+                            None,
+                            vec![slice],
+                            u8::MAX,
+                            "bounded virtual terrain page pool",
+                        )
+                        .ok_or(VirtualTerrainRendererError::GpuPoolCapacity)?,
+                    )
+                }
+            }
+            TerrainPageRepresentation::TriangleCluster(_) => {
+                let vertices = virtual_triangle_gpu_vertices(&page)?;
+                let gpu_bytes = vertices
+                    .len()
+                    .checked_mul(size_of::<GpuTerrainVertex>())
+                    .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
+                if gpu_bytes > ARENA_PAGE_BYTES as usize {
+                    return Err(VirtualTerrainRendererError::GpuPageTooLarge(page.key));
+                }
+                if vertices.is_empty() {
+                    VirtualTerrainGpuMesh::Empty
+                } else {
+                    VirtualTerrainGpuMesh::Triangle(
+                        prepare_terrain_triangle_mesh_into(
+                            &self.device,
+                            &self.queue,
+                            &mut self.virtual_terrain_arena,
+                            &mut self.virtual_terrain_arena_buffers,
+                            &vertices,
+                            minimum,
+                            maximum,
+                            "bounded virtual terrain page pool",
+                        )
+                        .ok_or(VirtualTerrainRendererError::GpuPoolCapacity)?,
+                    )
+                }
+            }
+            representation => {
+                return Err(VirtualTerrainRendererError::UnsupportedRepresentation(
+                    representation.kind(),
+                ));
+            }
         };
         if let Err(error) = self.virtual_terrain.install_page(page.clone()) {
-            discard_prepared_mesh(&mut self.virtual_terrain_arena, None, mesh);
+            discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, mesh);
             return Err(error.into());
+        }
+        if self
+            .virtual_terrain_gpu
+            .update_page_residency(&self.queue, &self.virtual_terrain, page.key)
+            .is_err()
+        {
+            discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, mesh);
+            return Err(VirtualTerrainRendererError::GpuTraversal);
         }
         let resident = VirtualTerrainGpuPage {
             revision: page.revision,
@@ -4127,12 +4404,9 @@ impl Renderer {
             representation: page.representation.kind(),
             mesh,
         };
-        if let Some(old) = self.virtual_terrain_pages.insert(page.key, resident)
-            && let Some(old_mesh) = old.mesh
-        {
-            let _ = self.virtual_terrain_arena.free(old_mesh.allocation);
+        if let Some(old) = self.virtual_terrain_pages.insert(page.key, resident) {
+            discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, old.mesh);
         }
-        self.virtual_terrain_cut = None;
         Ok(())
     }
 
@@ -4140,13 +4414,50 @@ impl Renderer {
         &mut self,
         view: VirtualTerrainView,
     ) -> Result<VirtualTerrainCut, VirtualTerrainRendererError> {
+        self.virtual_terrain_gpu
+            .synchronize_prior_refinement(&self.queue, &self.virtual_terrain)
+            .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
         let cut = self.virtual_terrain.select_cut(view)?;
-        self.virtual_terrain_cut = Some(cut.clone());
+        self.virtual_terrain_oracle_view = Some(view);
+        self.virtual_terrain_oracle_cut = Some(cut.clone());
+        if self.virtual_terrain_mode != VirtualTerrainRenderMode::Visible || cut.is_renderable() {
+            self.virtual_terrain_cut = Some(cut.clone());
+        }
         Ok(cut)
     }
 
     pub fn virtual_terrain_cut(&self) -> Option<&VirtualTerrainCut> {
         self.virtual_terrain_cut.as_ref()
+    }
+
+    pub fn set_virtual_terrain_render_mode(
+        &mut self,
+        mode: VirtualTerrainRenderMode,
+    ) -> Result<(), VirtualTerrainRendererError> {
+        if mode == VirtualTerrainRenderMode::Visible {
+            let Some(cut) = self
+                .virtual_terrain_cut
+                .as_ref()
+                .filter(|cut| cut.is_renderable())
+            else {
+                return Err(VirtualTerrainRendererError::NoRenderableCut);
+            };
+            if let Some(missing) = cut
+                .selected_pages
+                .iter()
+                .find(|key| !self.virtual_terrain_pages.contains_key(key))
+            {
+                return Err(VirtualTerrainRendererError::SelectedPageMissingGpu(
+                    *missing,
+                ));
+            }
+        }
+        self.virtual_terrain_mode = mode;
+        Ok(())
+    }
+
+    pub const fn virtual_terrain_render_mode(&self) -> VirtualTerrainRenderMode {
+        self.virtual_terrain_mode
     }
 
     /// Resident page count, encoded CPU bytes, primitive count, GPU capacity, and GPU allocation.
@@ -5539,12 +5850,37 @@ impl Renderer {
         else {
             return false;
         };
-        // The virtual path builds its independent, one-owner GPU draw directory every frame while
-        // shadow deployment is active. It is deliberately not mixed with the visible legacy cut:
-        // a later runtime cutover chooses one directory or the other atomically.
-        let Ok(_virtual_terrain_shadow_draw_list) = self.collect_virtual_terrain_draw_list() else {
+        let virtual_visible = self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible;
+        if virtual_visible
+            && !self
+                .virtual_terrain_cut
+                .as_ref()
+                .is_some_and(VirtualTerrainCut::is_renderable)
+        {
             return false;
+        }
+        // Shadow mode builds the same bounded directories without mixing their geometry into the
+        // visible legacy owner. Visible mode atomically chooses the virtual directory for every
+        // opaque terrain pass below.
+        let virtual_active = self.virtual_terrain_mode != VirtualTerrainRenderMode::Disabled;
+        let virtual_world_draw_lists = if virtual_active {
+            let Ok(draw_lists) = self.collect_virtual_terrain_draw_list(view_clip) else {
+                return false;
+            };
+            draw_lists
+        } else {
+            VirtualTerrainDrawLists::default()
         };
+        let mut virtual_shadow_draw_lists: [VirtualTerrainDrawLists; CASCADE_COUNT] =
+            std::array::from_fn(|_| VirtualTerrainDrawLists::default());
+        if virtual_active && shadows_active {
+            for (destination, clip) in virtual_shadow_draw_lists.iter_mut().zip(shadow_clips) {
+                let Ok(draw_lists) = self.collect_virtual_terrain_draw_list(clip) else {
+                    return false;
+                };
+                *destination = draw_lists;
+            }
+        }
         let water_draw_list = self.collect_draw_list(
             &self.water_chunks,
             |key, chunk| {
@@ -5606,6 +5942,18 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
+        if virtual_active {
+            let Some(oracle_view) = self.virtual_terrain_oracle_view else {
+                return false;
+            };
+            if self
+                .virtual_terrain_gpu
+                .encode_traversal(&self.queue, &mut encoder, oracle_view)
+                .is_err()
+            {
+                return false;
+            }
+        }
         let gpu_frame = self.gpu_timer.as_mut().and_then(|timer| {
             timer.begin_frame(
                 frame_id,
@@ -5639,19 +5987,36 @@ impl Renderer {
                     multiview_mask: None,
                 });
                 pass.set_bind_group(0, &self.shadow_gpu.bind_groups[cascade_index], &[]);
-                pass.set_pipeline(&self.shadow_gpu.fixed_pipeline);
-                shadow_draw_calls = shadow_draw_calls.saturating_add(draw_spans(
-                    &mut pass,
-                    &self.arena_buffers,
-                    &draw_list.fixed,
-                ));
-                pass.set_pipeline(&self.shadow_gpu.morph_pipeline);
-                shadow_draw_calls = shadow_draw_calls.saturating_add(draw_morph_spans(
-                    &mut pass,
-                    &self.arena_buffers,
-                    &self.morph_arena_buffers,
-                    &draw_list.morphing,
-                ));
+                if virtual_visible {
+                    let virtual_draw_list = &virtual_shadow_draw_lists[cascade_index];
+                    pass.set_pipeline(&self.shadow_gpu.fixed_pipeline);
+                    shadow_draw_calls = shadow_draw_calls.saturating_add(draw_spans(
+                        &mut pass,
+                        &self.virtual_terrain_arena_buffers,
+                        &virtual_draw_list.surfaces,
+                    ));
+                    pass.set_pipeline(&self.shadow_gpu.virtual_triangle_pipeline);
+                    shadow_draw_calls =
+                        shadow_draw_calls.saturating_add(draw_terrain_triangle_spans(
+                            &mut pass,
+                            &self.virtual_terrain_arena_buffers,
+                            &virtual_draw_list.triangles,
+                        ));
+                } else {
+                    pass.set_pipeline(&self.shadow_gpu.fixed_pipeline);
+                    shadow_draw_calls = shadow_draw_calls.saturating_add(draw_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        &draw_list.fixed,
+                    ));
+                    pass.set_pipeline(&self.shadow_gpu.morph_pipeline);
+                    shadow_draw_calls = shadow_draw_calls.saturating_add(draw_morph_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        &self.morph_arena_buffers,
+                        &draw_list.morphing,
+                    ));
+                }
                 if has_avatars {
                     self.avatar_gpu.draw_shadow(&mut pass);
                     shadow_draw_calls += 1;
@@ -5676,46 +6041,63 @@ impl Renderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(&self.depth_prepass_fast_pipeline);
                 pass.set_bind_group(0, &self.frame_bind_group, &[]);
-                depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
-                    &mut pass,
-                    &self.arena_buffers,
-                    &world_draw_list.fixed,
-                ));
-                pass.set_pipeline(&self.depth_prepass_morph_pipeline);
-                depth_prepass_draw_calls =
-                    depth_prepass_draw_calls.saturating_add(draw_morph_spans(
+                if virtual_visible {
+                    pass.set_pipeline(&self.depth_prepass_fast_pipeline);
+                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
                         &mut pass,
-                        &self.arena_buffers,
-                        &self.morph_arena_buffers,
-                        &world_draw_list.morphing,
+                        &self.virtual_terrain_arena_buffers,
+                        &virtual_world_draw_lists.surfaces,
                     ));
-                if let Some(cut_draw_lists) = &cut_draw_lists {
-                    pass.set_pipeline(&self.depth_prepass_transition_pipeline);
-                    pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
+                    pass.set_pipeline(&self.virtual_triangle_depth_pipeline);
                     depth_prepass_draw_calls =
-                        depth_prepass_draw_calls.saturating_add(draw_morph_spans(
+                        depth_prepass_draw_calls.saturating_add(draw_terrain_triangle_spans(
                             &mut pass,
-                            &self.arena_buffers,
-                            &self.morph_arena_buffers,
-                            &cut_draw_lists.incoming.morphing,
+                            &self.virtual_terrain_arena_buffers,
+                            &virtual_world_draw_lists.triangles,
                         ));
-                    pass.set_pipeline(&self.depth_prepass_transition_fixed_pipeline);
-                    pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                } else {
+                    pass.set_pipeline(&self.depth_prepass_fast_pipeline);
                     depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
                         &mut pass,
                         &self.arena_buffers,
-                        &cut_draw_lists.outgoing.fixed,
+                        &world_draw_list.fixed,
                     ));
-                    pass.set_pipeline(&self.depth_prepass_transition_pipeline);
+                    pass.set_pipeline(&self.depth_prepass_morph_pipeline);
                     depth_prepass_draw_calls =
                         depth_prepass_draw_calls.saturating_add(draw_morph_spans(
                             &mut pass,
                             &self.arena_buffers,
                             &self.morph_arena_buffers,
-                            &cut_draw_lists.outgoing.morphing,
+                            &world_draw_list.morphing,
                         ));
+                    if let Some(cut_draw_lists) = &cut_draw_lists {
+                        pass.set_pipeline(&self.depth_prepass_transition_pipeline);
+                        pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
+                        depth_prepass_draw_calls =
+                            depth_prepass_draw_calls.saturating_add(draw_morph_spans(
+                                &mut pass,
+                                &self.arena_buffers,
+                                &self.morph_arena_buffers,
+                                &cut_draw_lists.incoming.morphing,
+                            ));
+                        pass.set_pipeline(&self.depth_prepass_transition_fixed_pipeline);
+                        pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                        depth_prepass_draw_calls =
+                            depth_prepass_draw_calls.saturating_add(draw_spans(
+                                &mut pass,
+                                &self.arena_buffers,
+                                &cut_draw_lists.outgoing.fixed,
+                            ));
+                        pass.set_pipeline(&self.depth_prepass_transition_pipeline);
+                        depth_prepass_draw_calls =
+                            depth_prepass_draw_calls.saturating_add(draw_morph_spans(
+                                &mut pass,
+                                &self.arena_buffers,
+                                &self.morph_arena_buffers,
+                                &cut_draw_lists.outgoing.morphing,
+                            ));
+                    }
                 }
                 if has_avatars {
                     self.avatar_gpu.draw_depth(&mut pass);
@@ -5746,13 +6128,24 @@ impl Renderer {
             self.ui_gpu.scene_view()
         };
         let (screenshot_opaque_owners, screenshot_water_owners) = if self.screenshot_requested {
-            let Some(opaque) = screenshot_diagnostic_owner_buffers(
-                &self.device,
-                &self.queue,
-                &self.arena_buffers,
-                &self.chunks,
-                "screenshot opaque terrain owner sidecar",
-            ) else {
+            let opaque = if virtual_visible {
+                screenshot_virtual_terrain_owner_buffers(
+                    &self.device,
+                    &self.queue,
+                    &self.virtual_terrain_arena_buffers,
+                    &self.virtual_terrain_pages,
+                    "screenshot virtual terrain owner sidecar",
+                )
+            } else {
+                screenshot_diagnostic_owner_buffers(
+                    &self.device,
+                    &self.queue,
+                    &self.arena_buffers,
+                    &self.chunks,
+                    "screenshot opaque terrain owner sidecar",
+                )
+            };
+            let Some(opaque) = opaque else {
                 return false;
             };
             let Some(water) = screenshot_diagnostic_owner_buffers(
@@ -5879,38 +6272,64 @@ impl Renderer {
                         &self.voxel_morph_transition_flat_pipeline,
                     )
                 };
-            pass.set_pipeline(fixed_pipeline);
-            draw_spans(&mut pass, &self.arena_buffers, &world_draw_list.fixed);
-            pass.set_pipeline(morph_pipeline);
-            draw_morph_spans(
-                &mut pass,
-                &self.arena_buffers,
-                &self.morph_arena_buffers,
-                &world_draw_list.morphing,
-            );
-            if let Some(cut_draw_lists) = &cut_draw_lists {
-                pass.set_pipeline(morph_transition_pipeline);
-                pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
-                draw_morph_spans(
-                    &mut pass,
-                    &self.arena_buffers,
-                    &self.morph_arena_buffers,
-                    &cut_draw_lists.incoming.morphing,
-                );
-                pass.set_pipeline(transition_pipeline);
-                pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+            if virtual_visible {
+                let virtual_triangle_pipeline = if self.options.screen_space_ambient_occlusion {
+                    if self.options.material_detail {
+                        &self.virtual_triangle_ambient_occlusion_pipeline
+                    } else {
+                        &self.virtual_triangle_ambient_occlusion_flat_pipeline
+                    }
+                } else if self.options.material_detail {
+                    &self.virtual_triangle_pipeline
+                } else {
+                    &self.virtual_triangle_flat_pipeline
+                };
+                pass.set_pipeline(fixed_pipeline);
                 draw_spans(
                     &mut pass,
-                    &self.arena_buffers,
-                    &cut_draw_lists.outgoing.fixed,
+                    &self.virtual_terrain_arena_buffers,
+                    &virtual_world_draw_lists.surfaces,
                 );
-                pass.set_pipeline(morph_transition_pipeline);
+                pass.set_pipeline(virtual_triangle_pipeline);
+                draw_terrain_triangle_spans(
+                    &mut pass,
+                    &self.virtual_terrain_arena_buffers,
+                    &virtual_world_draw_lists.triangles,
+                );
+            } else {
+                pass.set_pipeline(fixed_pipeline);
+                draw_spans(&mut pass, &self.arena_buffers, &world_draw_list.fixed);
+                pass.set_pipeline(morph_pipeline);
                 draw_morph_spans(
                     &mut pass,
                     &self.arena_buffers,
                     &self.morph_arena_buffers,
-                    &cut_draw_lists.outgoing.morphing,
+                    &world_draw_list.morphing,
                 );
+                if let Some(cut_draw_lists) = &cut_draw_lists {
+                    pass.set_pipeline(morph_transition_pipeline);
+                    pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
+                    draw_morph_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        &self.morph_arena_buffers,
+                        &cut_draw_lists.incoming.morphing,
+                    );
+                    pass.set_pipeline(transition_pipeline);
+                    pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                    draw_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        &cut_draw_lists.outgoing.fixed,
+                    );
+                    pass.set_pipeline(morph_transition_pipeline);
+                    draw_morph_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        &self.morph_arena_buffers,
+                        &cut_draw_lists.outgoing.morphing,
+                    );
+                }
             }
             self.avatar_gpu
                 .draw_scene(&mut pass, self.options.screen_space_ambient_occlusion);
@@ -6024,6 +6443,7 @@ impl Renderer {
         let arena = self.arena.stats();
         let morph_arena = self.morph_arena.stats();
         let water_arena = self.water_arena.stats();
+        let virtual_terrain_arena = self.virtual_terrain_arena.stats();
         let scene_pixels = u64::from(self.config.width) * u64::from(self.config.height);
         let shadow_resolution = u64::from(
             self.runtime_config
@@ -6066,9 +6486,14 @@ impl Renderer {
                 .selected_slices
                 .saturating_add(lists.outgoing.selected_slices)
         });
+        let terrain_fingerprint = if virtual_visible {
+            virtual_world_draw_lists.fingerprint
+        } else {
+            world_draw_list.fingerprint
+        };
         let viewport_fingerprint = fingerprint_value(
             fingerprint_value(
-                fingerprint_value(FINGERPRINT_OFFSET, world_draw_list.fingerprint),
+                fingerprint_value(FINGERPRINT_OFFSET, terrain_fingerprint),
                 water_draw_list.fingerprint,
             ),
             outgoing_water_draw_list.fingerprint,
@@ -6081,15 +6506,42 @@ impl Renderer {
                     lists.outgoing.fingerprint,
                 )
             });
-        self.diagnostics = RenderDiagnostics {
-            resident_chunks: self.chunks.len() as u32,
-            visible_chunks: world_draw_list.mesh_count.saturating_add(cut_meshes),
-            draw_calls: world_draw_list
+        let visible_terrain_meshes = if virtual_visible {
+            virtual_world_draw_lists.mesh_count
+        } else {
+            world_draw_list.mesh_count.saturating_add(cut_meshes)
+        };
+        let visible_terrain_draw_calls = if virtual_visible {
+            virtual_world_draw_lists
+                .surfaces
+                .spans
+                .len()
+                .saturating_add(virtual_world_draw_lists.triangles.spans.len())
+        } else {
+            world_draw_list
                 .fixed
                 .spans
                 .len()
                 .saturating_add(world_draw_list.morphing.spans.len())
                 .saturating_add(cut_draw_calls)
+        };
+        let visible_terrain_primitives = if virtual_visible {
+            virtual_world_draw_lists.primitive_count
+        } else {
+            world_draw_list.quad_count.saturating_add(cut_quads)
+        };
+        let gpu_virtual_feedback = self.virtual_terrain_gpu.latest_feedback();
+        let gpu_virtual_matches_cpu = gpu_virtual_feedback.as_ref().is_some_and(|feedback| {
+            gpu_feedback_matches_cut(feedback, self.virtual_terrain_oracle_cut.as_ref())
+        });
+        self.diagnostics = RenderDiagnostics {
+            resident_chunks: if virtual_visible {
+                self.virtual_terrain_pages.len() as u32
+            } else {
+                self.chunks.len() as u32
+            },
+            visible_chunks: visible_terrain_meshes,
+            draw_calls: visible_terrain_draw_calls
                 .saturating_add(water_draw_list.spans.len())
                 .saturating_add(outgoing_water_draw_list.spans.len())
                 .saturating_add(usize::from(has_avatars)) as u32,
@@ -6104,14 +6556,31 @@ impl Renderer {
             } else {
                 0
             },
-            quads: world_draw_list
-                .quad_count
-                .saturating_add(cut_quads)
+            quads: visible_terrain_primitives
                 .saturating_add(water_draw_list.quad_count)
                 .saturating_add(outgoing_water_draw_list.quad_count),
             water_quads: water_draw_list
                 .quad_count
                 .saturating_add(outgoing_water_draw_list.quad_count),
+            virtual_terrain_gpu_selected_pages: gpu_virtual_feedback
+                .as_ref()
+                .map_or(0, |feedback| feedback.selected_pages.len() as u32),
+            virtual_terrain_gpu_requested_pages: gpu_virtual_feedback
+                .as_ref()
+                .map_or(0, |feedback| feedback.requested_pages.len() as u32),
+            virtual_terrain_gpu_ownerless_roots: gpu_virtual_feedback
+                .as_ref()
+                .map_or(0, |feedback| feedback.ownerless_roots),
+            virtual_terrain_gpu_visited_nodes: gpu_virtual_feedback
+                .as_ref()
+                .map_or(0, |feedback| feedback.visited_nodes),
+            virtual_terrain_gpu_overflow_flags: gpu_virtual_feedback
+                .as_ref()
+                .map_or(0, |feedback| feedback.overflow_flags),
+            virtual_terrain_gpu_stack_peak: gpu_virtual_feedback
+                .as_ref()
+                .map_or(0, |feedback| feedback.stack_peak),
+            virtual_terrain_gpu_matches_cpu_cut: gpu_virtual_matches_cpu,
             viewport_fingerprint,
             refraction_copy_bytes: refraction_copy_bytes(
                 self.config.width,
@@ -6121,19 +6590,23 @@ impl Renderer {
             arena_pages: arena
                 .pages
                 .saturating_add(morph_arena.pages)
-                .saturating_add(water_arena.pages) as u32,
+                .saturating_add(water_arena.pages)
+                .saturating_add(virtual_terrain_arena.pages) as u32,
             arena_capacity_bytes: arena
                 .capacity_bytes
                 .saturating_add(morph_arena.capacity_bytes)
-                .saturating_add(water_arena.capacity_bytes),
+                .saturating_add(water_arena.capacity_bytes)
+                .saturating_add(virtual_terrain_arena.capacity_bytes),
             arena_allocated_bytes: arena
                 .allocated_bytes
                 .saturating_add(morph_arena.allocated_bytes)
-                .saturating_add(water_arena.allocated_bytes),
+                .saturating_add(water_arena.allocated_bytes)
+                .saturating_add(virtual_terrain_arena.allocated_bytes),
             core_gpu_bytes: arena
                 .capacity_bytes
                 .saturating_add(morph_arena.capacity_bytes)
                 .saturating_add(water_arena.capacity_bytes)
+                .saturating_add(virtual_terrain_arena.capacity_bytes)
                 // Two RGBA16F scene targets plus writable and sampled Depth32Float targets.
                 .saturating_add(scene_pixels.saturating_mul(24))
                 .saturating_add(shadow_bytes)
@@ -6163,22 +6636,38 @@ impl Renderer {
             cpu_encode_ms: 0.0,
             cpu_submit_ms: 0.0,
             lod_ownership_refreshes,
-            draw_list_tested_slices: shadow_draw_lists
-                .iter()
-                .map(|draw_list| draw_list.tested_slices)
-                .sum::<u32>()
-                .saturating_add(world_draw_list.tested_slices)
-                .saturating_add(cut_tested_slices)
-                .saturating_add(water_draw_list.tested_slices)
-                .saturating_add(outgoing_water_draw_list.tested_slices),
-            draw_list_selected_slices: shadow_draw_lists
-                .iter()
-                .map(|draw_list| draw_list.selected_slices)
-                .sum::<u32>()
-                .saturating_add(world_draw_list.selected_slices)
-                .saturating_add(cut_selected_slices)
-                .saturating_add(water_draw_list.selected_slices)
-                .saturating_add(outgoing_water_draw_list.selected_slices),
+            draw_list_tested_slices: if virtual_visible {
+                virtual_shadow_draw_lists
+                    .iter()
+                    .map(|draw_list| draw_list.surfaces.tested_slices)
+                    .sum::<u32>()
+                    .saturating_add(virtual_world_draw_lists.surfaces.tested_slices)
+            } else {
+                shadow_draw_lists
+                    .iter()
+                    .map(|draw_list| draw_list.tested_slices)
+                    .sum::<u32>()
+                    .saturating_add(world_draw_list.tested_slices)
+                    .saturating_add(cut_tested_slices)
+            }
+            .saturating_add(water_draw_list.tested_slices)
+            .saturating_add(outgoing_water_draw_list.tested_slices),
+            draw_list_selected_slices: if virtual_visible {
+                virtual_shadow_draw_lists
+                    .iter()
+                    .map(|draw_list| draw_list.surfaces.selected_slices)
+                    .sum::<u32>()
+                    .saturating_add(virtual_world_draw_lists.surfaces.selected_slices)
+            } else {
+                shadow_draw_lists
+                    .iter()
+                    .map(|draw_list| draw_list.selected_slices)
+                    .sum::<u32>()
+                    .saturating_add(world_draw_list.selected_slices)
+                    .saturating_add(cut_selected_slices)
+            }
+            .saturating_add(water_draw_list.selected_slices)
+            .saturating_add(outgoing_water_draw_list.selected_slices),
             lod_transition_quads: self
                 .lod_draw_plan
                 .transition_mesh_key
@@ -6352,47 +6841,64 @@ impl Renderer {
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
             pass.set_bind_group(2, self.ambient_occlusion_gpu.sample_bind_group(), &[]);
             pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
-            pass.set_pipeline(&self.screenshot_diagnostic_pipeline);
-            draw_diagnostic_spans(
-                &mut pass,
-                &self.arena_buffers,
-                opaque_owners,
-                &world_draw_list.fixed,
-            );
-            pass.set_pipeline(&self.screenshot_diagnostic_morph_pipeline);
-            draw_diagnostic_morph_spans(
-                &mut pass,
-                &self.arena_buffers,
-                opaque_owners,
-                &self.morph_arena_buffers,
-                &world_draw_list.morphing,
-            );
-            if let Some(cut_draw_lists) = &cut_draw_lists {
-                pass.set_pipeline(&self.screenshot_diagnostic_morph_transition_pipeline);
-                pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
-                draw_diagnostic_morph_spans(
+            if virtual_visible {
+                pass.set_pipeline(&self.screenshot_diagnostic_pipeline);
+                draw_diagnostic_spans(
                     &mut pass,
-                    &self.arena_buffers,
+                    &self.virtual_terrain_arena_buffers,
                     opaque_owners,
-                    &self.morph_arena_buffers,
-                    &cut_draw_lists.incoming.morphing,
+                    &virtual_world_draw_lists.surfaces,
                 );
-                pass.set_pipeline(&self.screenshot_diagnostic_transition_pipeline);
-                pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                pass.set_pipeline(&self.virtual_triangle_diagnostic_pipeline);
+                draw_diagnostic_triangle_spans(
+                    &mut pass,
+                    &self.virtual_terrain_arena_buffers,
+                    opaque_owners,
+                    &virtual_world_draw_lists.triangles,
+                );
+            } else {
+                pass.set_pipeline(&self.screenshot_diagnostic_pipeline);
                 draw_diagnostic_spans(
                     &mut pass,
                     &self.arena_buffers,
                     opaque_owners,
-                    &cut_draw_lists.outgoing.fixed,
+                    &world_draw_list.fixed,
                 );
-                pass.set_pipeline(&self.screenshot_diagnostic_morph_transition_pipeline);
+                pass.set_pipeline(&self.screenshot_diagnostic_morph_pipeline);
                 draw_diagnostic_morph_spans(
                     &mut pass,
                     &self.arena_buffers,
                     opaque_owners,
                     &self.morph_arena_buffers,
-                    &cut_draw_lists.outgoing.morphing,
+                    &world_draw_list.morphing,
                 );
+                if let Some(cut_draw_lists) = &cut_draw_lists {
+                    pass.set_pipeline(&self.screenshot_diagnostic_morph_transition_pipeline);
+                    pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
+                    draw_diagnostic_morph_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        opaque_owners,
+                        &self.morph_arena_buffers,
+                        &cut_draw_lists.incoming.morphing,
+                    );
+                    pass.set_pipeline(&self.screenshot_diagnostic_transition_pipeline);
+                    pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                    draw_diagnostic_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        opaque_owners,
+                        &cut_draw_lists.outgoing.fixed,
+                    );
+                    pass.set_pipeline(&self.screenshot_diagnostic_morph_transition_pipeline);
+                    draw_diagnostic_morph_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        opaque_owners,
+                        &self.morph_arena_buffers,
+                        &cut_draw_lists.outgoing.morphing,
+                    );
+                }
             }
             if refract_water {
                 pass.set_pipeline(&self.screenshot_diagnostic_pipeline);
@@ -6691,14 +7197,24 @@ impl Renderer {
         }
     }
 
-    fn collect_virtual_terrain_draw_list(&self) -> Result<DrawList, VirtualTerrainRendererError> {
+    fn collect_virtual_terrain_draw_list(
+        &self,
+        view_clip: AabbClipVolume,
+    ) -> Result<VirtualTerrainDrawLists, VirtualTerrainRendererError> {
         let Some(cut) = self.virtual_terrain_cut.as_ref() else {
-            return Ok(DrawList::default());
+            return Ok(VirtualTerrainDrawLists::default());
         };
-        let mut items = Vec::new();
+        let mut surface_items = Vec::new();
+        let mut triangle_items = Vec::new();
         let mut mesh_count = 0u32;
-        let mut quad_count = 0u32;
+        let mut primitive_count = 0u32;
+        let mut surface_mesh_count = 0u32;
+        let mut surface_quad_count = 0u32;
+        let mut triangle_mesh_count = 0u32;
+        let mut triangle_vertex_count = 0u32;
         let mut fingerprint = cut.fingerprint;
+        let mut surface_fingerprint = cut.fingerprint;
+        let mut triangle_fingerprint = cut.fingerprint;
         let mut tested_slices = 0u32;
         let mut selected_slices = 0u32;
         for key in &cut.selected_pages {
@@ -6713,35 +7229,74 @@ impl Renderer {
             fingerprint = fingerprint_value(fingerprint, page.revision);
             fingerprint =
                 fingerprint_value(fingerprint, fingerprint_bytes(&page.content_fingerprint));
-            let Some(mesh) = page.mesh.as_ref() else {
-                continue;
-            };
-            mesh_count = mesh_count.saturating_add(1);
-            fingerprint = fingerprint_value(fingerprint, mesh.content_fingerprint);
-            for slice in &mesh.slices {
-                tested_slices = tested_slices.saturating_add(1);
-                if slice.render_layer != RenderLayer::Opaque {
-                    continue;
+            match &page.mesh {
+                VirtualTerrainGpuMesh::Empty => {}
+                VirtualTerrainGpuMesh::Surface(mesh) => {
+                    if !view_clip.contains_aabb(mesh.bounds_min, mesh.bounds_max) {
+                        continue;
+                    }
+                    mesh_count = mesh_count.saturating_add(1);
+                    surface_mesh_count = surface_mesh_count.saturating_add(1);
+                    fingerprint = fingerprint_value(fingerprint, mesh.content_fingerprint);
+                    surface_fingerprint =
+                        fingerprint_value(surface_fingerprint, mesh.content_fingerprint);
+                    for slice in &mesh.slices {
+                        tested_slices = tested_slices.saturating_add(1);
+                        if slice.render_layer != RenderLayer::Opaque {
+                            continue;
+                        }
+                        selected_slices = selected_slices.saturating_add(1);
+                        surface_items.push(DrawItem {
+                            page: mesh.allocation.page,
+                            offset: mesh.allocation.offset + slice.relative_offset,
+                            size: slice.size,
+                            quad_count: slice.quad_count,
+                            morph_page: None,
+                            morph_offset: 0,
+                        });
+                        surface_quad_count = surface_quad_count.saturating_add(slice.quad_count);
+                        primitive_count =
+                            primitive_count.saturating_add(slice.quad_count.saturating_mul(2));
+                    }
                 }
-                selected_slices = selected_slices.saturating_add(1);
-                items.push(DrawItem {
-                    page: mesh.allocation.page,
-                    offset: mesh.allocation.offset + slice.relative_offset,
-                    size: slice.size,
-                    quad_count: slice.quad_count,
-                    morph_page: None,
-                    morph_offset: 0,
-                });
-                quad_count = quad_count.saturating_add(slice.quad_count);
+                VirtualTerrainGpuMesh::Triangle(mesh) => {
+                    if !view_clip.contains_aabb(mesh.bounds_min, mesh.bounds_max) {
+                        continue;
+                    }
+                    mesh_count = mesh_count.saturating_add(1);
+                    triangle_mesh_count = triangle_mesh_count.saturating_add(1);
+                    fingerprint = fingerprint_value(fingerprint, mesh.content_fingerprint);
+                    triangle_fingerprint =
+                        fingerprint_value(triangle_fingerprint, mesh.content_fingerprint);
+                    triangle_items.push(TerrainTriangleDrawSpan {
+                        page: mesh.allocation.page,
+                        offset: mesh.allocation.offset,
+                        size: mesh.allocation.size,
+                        vertex_count: mesh.vertex_count,
+                    });
+                    triangle_vertex_count = triangle_vertex_count.saturating_add(mesh.vertex_count);
+                    primitive_count = primitive_count.saturating_add(mesh.vertex_count / 3);
+                }
             }
         }
-        Ok(DrawList {
-            spans: coalesce_draw_items(items),
-            mesh_count,
-            quad_count,
+        Ok(VirtualTerrainDrawLists {
+            surfaces: DrawList {
+                spans: coalesce_draw_items(surface_items),
+                mesh_count: surface_mesh_count,
+                quad_count: surface_quad_count,
+                fingerprint: surface_fingerprint,
+                tested_slices,
+                selected_slices,
+            },
+            triangles: TerrainTriangleDrawList {
+                spans: coalesce_triangle_draw_spans(triangle_items),
+                mesh_count: triangle_mesh_count,
+                vertex_count: triangle_vertex_count,
+                fingerprint: triangle_fingerprint,
+            },
             fingerprint,
-            tested_slices,
-            selected_slices,
+            mesh_count,
+            primitive_count,
         })
     }
 }
@@ -6760,6 +7315,25 @@ fn draw_spans<'pass>(
         let end = start + u64::from(span.size);
         pass.set_vertex_buffer(0, buffer.slice(start..end));
         pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
+        draws = draws.saturating_add(1);
+    }
+    draws
+}
+
+fn draw_terrain_triangle_spans<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    arena_buffers: &'pass [Buffer],
+    draw_list: &TerrainTriangleDrawList,
+) -> u32 {
+    let mut draws = 0u32;
+    for span in &draw_list.spans {
+        let Some(buffer) = arena_buffers.get(span.page as usize) else {
+            continue;
+        };
+        let start = u64::from(span.offset);
+        let end = start + u64::from(span.size);
+        pass.set_vertex_buffer(0, buffer.slice(start..end));
+        pass.draw(0..span.vertex_count, 0..1);
         draws = draws.saturating_add(1);
     }
     draws
@@ -6812,6 +7386,57 @@ fn screenshot_diagnostic_owner_buffers(
     Some(buffers)
 }
 
+fn screenshot_virtual_terrain_owner_buffers(
+    device: &Device,
+    queue: &Queue,
+    arena_buffers: &[Buffer],
+    pages: &BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
+    label: &'static str,
+) -> Option<Vec<Buffer>> {
+    let primitive_bytes = size_of::<GpuQuad>() as u64;
+    debug_assert_eq!(primitive_bytes, size_of::<GpuTerrainVertex>() as u64);
+    let owner_bytes = size_of::<[u32; 2]>() as u64;
+    let buffers = arena_buffers
+        .iter()
+        .map(|base| {
+            let slots = base.size().div_ceil(primitive_bytes);
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: slots.saturating_mul(owner_bytes).max(owner_bytes),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        })
+        .collect::<Vec<_>>();
+    for (key, page) in pages {
+        let owner = diagnostic_owner_id(
+            u32::from(page.representation as u8),
+            u32::from(key.level),
+            key.coord[0],
+            key.coord[1],
+            key.coord[2],
+        );
+        let (allocation, count) = match &page.mesh {
+            VirtualTerrainGpuMesh::Empty => continue,
+            VirtualTerrainGpuMesh::Surface(mesh) => (mesh.allocation, mesh.quad_count),
+            VirtualTerrainGpuMesh::Triangle(mesh) => (mesh.allocation, mesh.vertex_count),
+        };
+        let owner_buffer = buffers.get(allocation.page as usize)?;
+        let base_offset = u64::from(allocation.offset);
+        if !base_offset.is_multiple_of(primitive_bytes) {
+            return None;
+        }
+        let owner_offset = (base_offset / primitive_bytes).checked_mul(owner_bytes)?;
+        let owners = vec![owner; count as usize];
+        let bytes = bytemuck::cast_slice(&owners);
+        if owner_offset.checked_add(bytes.len() as u64)? > owner_buffer.size() {
+            return None;
+        }
+        queue.write_buffer(owner_buffer, owner_offset, bytes);
+    }
+    Some(buffers)
+}
+
 fn diagnostic_owner_range(span: &DrawSpan) -> Option<std::ops::Range<u64>> {
     let quad_bytes = size_of::<GpuQuad>() as u64;
     let owner_bytes = size_of::<[u32; 2]>() as u64;
@@ -6821,6 +7446,18 @@ fn diagnostic_owner_range(span: &DrawSpan) -> Option<std::ops::Range<u64>> {
     }
     let start = (base_offset / quad_bytes).checked_mul(owner_bytes)?;
     let end = start.checked_add(u64::from(span.quad_count).checked_mul(owner_bytes)?)?;
+    Some(start..end)
+}
+
+fn diagnostic_triangle_owner_range(span: &TerrainTriangleDrawSpan) -> Option<std::ops::Range<u64>> {
+    let vertex_bytes = size_of::<GpuTerrainVertex>() as u64;
+    let owner_bytes = size_of::<[u32; 2]>() as u64;
+    let base_offset = u64::from(span.offset);
+    if !base_offset.is_multiple_of(vertex_bytes) {
+        return None;
+    }
+    let start = (base_offset / vertex_bytes).checked_mul(owner_bytes)?;
+    let end = start.checked_add(u64::from(span.vertex_count).checked_mul(owner_bytes)?)?;
     Some(start..end)
 }
 
@@ -6844,6 +7481,31 @@ fn draw_diagnostic_spans<'pass>(
         pass.set_vertex_buffer(0, base_buffer.slice(base_start..base_end));
         pass.set_vertex_buffer(1, owner_buffer.slice(owner_range));
         pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
+        draws = draws.saturating_add(1);
+    }
+    draws
+}
+
+fn draw_diagnostic_triangle_spans<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    arena_buffers: &'pass [Buffer],
+    owner_buffers: &'pass [Buffer],
+    draw_list: &TerrainTriangleDrawList,
+) -> u32 {
+    let mut draws = 0u32;
+    for span in &draw_list.spans {
+        let (Some(base_buffer), Some(owner_buffer), Some(owner_range)) = (
+            arena_buffers.get(span.page as usize),
+            owner_buffers.get(span.page as usize),
+            diagnostic_triangle_owner_range(span),
+        ) else {
+            continue;
+        };
+        let base_start = u64::from(span.offset);
+        let base_end = base_start + u64::from(span.size);
+        pass.set_vertex_buffer(0, base_buffer.slice(base_start..base_end));
+        pass.set_vertex_buffer(1, owner_buffer.slice(owner_range));
+        pass.draw(0..span.vertex_count, 0..1);
         draws = draws.saturating_add(1);
     }
     draws
@@ -7328,6 +7990,65 @@ fn prepare_mesh_sliced_into(
         bounds_max,
         activation_mask,
     })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the helper borrows the independent virtual terrain pool transactionally"
+)]
+fn prepare_terrain_triangle_mesh_into(
+    device: &Device,
+    queue: &Queue,
+    arena: &mut ArenaAllocator,
+    arena_buffers: &mut Vec<Buffer>,
+    vertices: &[GpuTerrainVertex],
+    bounds_min: glam::Vec3,
+    bounds_max: glam::Vec3,
+    buffer_label: &'static str,
+) -> Option<TerrainTriangleMesh> {
+    if vertices.is_empty() || !vertices.len().is_multiple_of(3) {
+        return None;
+    }
+    let bytes = bytemuck::cast_slice(vertices);
+    let byte_len = u32::try_from(bytes.len()).ok()?;
+    let allocation = arena.allocate(byte_len)?;
+    while arena_buffers.len() <= allocation.page as usize {
+        let page = arena_buffers.len() as u16;
+        let Some(capacity) = arena.page_capacity(page) else {
+            let _ = arena.free(allocation);
+            return None;
+        };
+        arena_buffers.push(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(buffer_label),
+            size: u64::from(capacity),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+    }
+    let Some(buffer) = arena_buffers.get(allocation.page as usize) else {
+        let _ = arena.free(allocation);
+        return None;
+    };
+    queue.write_buffer(buffer, u64::from(allocation.offset), bytes);
+    Some(TerrainTriangleMesh {
+        allocation,
+        vertex_count: vertices.len() as u32,
+        content_fingerprint: fingerprint_bytes(bytes),
+        bounds_min,
+        bounds_max,
+    })
+}
+
+fn discard_virtual_terrain_mesh(arena: &mut ArenaAllocator, mesh: VirtualTerrainGpuMesh) {
+    match mesh {
+        VirtualTerrainGpuMesh::Empty => {}
+        VirtualTerrainGpuMesh::Surface(mesh) => {
+            discard_prepared_mesh(arena, None, Some(mesh));
+        }
+        VirtualTerrainGpuMesh::Triangle(mesh) => {
+            let _ = arena.free(mesh.allocation);
+        }
+    }
 }
 
 fn gpu_quads_match_resident(
@@ -9621,6 +10342,29 @@ fn coalesce_draw_items(mut items: Vec<DrawItem>) -> Vec<DrawSpan> {
     spans
 }
 
+fn coalesce_triangle_draw_spans(
+    mut items: Vec<TerrainTriangleDrawSpan>,
+) -> Vec<TerrainTriangleDrawSpan> {
+    items.sort_unstable_by_key(|item| (item.page, item.offset));
+    let mut spans: Vec<TerrainTriangleDrawSpan> = Vec::with_capacity(items.len());
+    for item in items {
+        if let Some(last) = spans.last_mut()
+            && last.page == item.page
+            && last.offset.checked_add(last.size) == Some(item.offset)
+            && let (Some(size), Some(vertex_count)) = (
+                last.size.checked_add(item.size),
+                last.vertex_count.checked_add(item.vertex_count),
+            )
+        {
+            last.size = size;
+            last.vertex_count = vertex_count;
+            continue;
+        }
+        spans.push(item);
+    }
+    spans
+}
+
 const fn placement_material_label(material: Material) -> &'static str {
     match material {
         Material::Grass => "GRASS",
@@ -10118,6 +10862,40 @@ fn view_projection(
     projection * view
 }
 
+fn gpu_feedback_matches_cut(
+    feedback: &GpuVirtualTerrainFeedback,
+    cut: Option<&VirtualTerrainCut>,
+) -> bool {
+    let Some(cut) = cut else {
+        return feedback.selected_pages.is_empty()
+            && feedback.requested_pages.is_empty()
+            && feedback.ownerless_roots == 0
+            && !feedback.overflowed();
+    };
+    if feedback.overflowed()
+        || feedback.ownerless_roots != cut.ownerless_roots.len() as u32
+        || cut.feedback_overflow
+        || cut.selection_overflow
+        || cut.traversal_overflow
+    {
+        return false;
+    }
+    let mut selected = feedback.selected_pages.clone();
+    selected.sort_unstable();
+    selected.dedup();
+    let mut requested = feedback.requested_pages.clone();
+    requested.sort_unstable();
+    requested.dedup();
+    let mut expected_requests = cut
+        .requested_pages
+        .iter()
+        .map(|identity| identity.key)
+        .collect::<Vec<_>>();
+    expected_requests.sort_unstable();
+    expected_requests.dedup();
+    selected == cut.selected_pages && requested == expected_requests
+}
+
 /// Finite right-handed DirectX/WebGPU projection with near -> 1 and far -> 0.
 ///
 /// Floating-point precision is concentrated near zero, so reversing depth retains useful
@@ -10280,6 +11058,156 @@ fn create_voxel_pipeline(
             fragment_constants: &constants,
         },
     )
+}
+
+fn create_virtual_triangle_pipeline(
+    device: &Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    material_detail: bool,
+    spatial_ao: bool,
+) -> RenderPipeline {
+    let constants = [
+        ("MATERIAL_DETAIL", if material_detail { 1.0 } else { 0.0 }),
+        ("CUT_TRANSITION", 0.0),
+    ];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_virtual_cluster"),
+            buffers: &[Some(terrain_triangle_layout())],
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &constants,
+                ..Default::default()
+            },
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: SCENE_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &constants,
+                ..Default::default()
+            },
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(!spatial_ao),
+            depth_compare: Some(if spatial_ao {
+                wgpu::CompareFunction::GreaterEqual
+            } else {
+                wgpu::CompareFunction::Greater
+            }),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn virtual_triangle_depth_pipeline(
+    device: &Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+) -> RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_virtual_cluster"),
+            buffers: &[Some(terrain_triangle_layout())],
+            compilation_options: Default::default(),
+        },
+        fragment: None,
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Greater),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn virtual_triangle_diagnostic_pipeline(
+    device: &Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+) -> RenderPipeline {
+    let constants = [("MATERIAL_DETAIL", 0.0), ("CUT_TRANSITION", 0.0)];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_virtual_cluster_diagnostic"),
+            buffers: &[
+                Some(terrain_triangle_layout()),
+                Some(terrain_triangle_diagnostic_owner_layout()),
+            ],
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &constants,
+                ..Default::default()
+            },
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_diagnostic"),
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: TextureFormat::Rgba32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(wgpu::ColorTargetState {
+                    format: TextureFormat::R32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::RED,
+                }),
+            ],
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &constants,
+                ..Default::default()
+            },
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Greater),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 fn create_voxel_diagnostic_pipeline(
@@ -10539,6 +11467,43 @@ fn shadow_caster_pipeline(
     })
 }
 
+fn virtual_triangle_shadow_caster_pipeline(
+    device: &Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+) -> RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_virtual_cluster"),
+            buffers: &[Some(terrain_triangle_layout())],
+            compilation_options: Default::default(),
+        },
+        fragment: None,
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 2.0,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 fn quad_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
         0 => Sint32x3,
@@ -10549,6 +11514,28 @@ fn quad_layout() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
         array_stride: size_of::<GpuQuad>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &ATTRIBUTES,
+    }
+}
+
+fn terrain_triangle_layout() -> wgpu::VertexBufferLayout<'static> {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
+        0 => Sint32x3,
+        1 => Uint32,
+        2 => Snorm16x4
+    ];
+    wgpu::VertexBufferLayout {
+        array_stride: size_of::<GpuTerrainVertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &ATTRIBUTES,
+    }
+}
+
+fn terrain_triangle_diagnostic_owner_layout() -> wgpu::VertexBufferLayout<'static> {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![3 => Uint32x2];
+    wgpu::VertexBufferLayout {
+        array_stride: size_of::<[u32; 2]>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &ATTRIBUTES,
     }
 }
@@ -13885,6 +14872,73 @@ mod tests {
             expected.sort_unstable();
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn virtual_triangle_vertices_preserve_positions_materials_and_flat_winding() {
+        let key = TerrainPageKey {
+            level: 0,
+            coord: [0, 0, 0],
+        };
+        let page = TerrainPageV1 {
+            source_identity_hash: voxels_world::WorldSourceIdentityHash::from_bytes([9; 32]),
+            key,
+            revision: 1,
+            bounds: key.bounds().expect("valid test bounds"),
+            children: Vec::new(),
+            errors: voxels_world::TerrainErrorBounds {
+                geometric_millivoxels: 1,
+                ..voxels_world::TerrainErrorBounds::EXACT
+            },
+            topology: voxels_world::TerrainTopologyClass::Volumetric,
+            boundary_fingerprints: [[0; 32]; 6],
+            materials: vec![voxels_world::TerrainMaterialCoverage {
+                material: Material::Basalt,
+                occupied_voxels: 1,
+                exposed_unit_faces: 1,
+            }],
+            representation: TerrainPageRepresentation::TriangleCluster(
+                voxels_world::TerrainTriangleCluster {
+                    vertices: vec![
+                        voxels_world::TerrainClusterVertex {
+                            position: [0, 0, 0],
+                            material_index: 0,
+                        },
+                        voxels_world::TerrainClusterVertex {
+                            position: [2, 0, 0],
+                            material_index: 0,
+                        },
+                        voxels_world::TerrainClusterVertex {
+                            position: [0, 3, 0],
+                            material_index: 0,
+                        },
+                    ],
+                    triangles: vec![voxels_world::TerrainClusterTriangle {
+                        vertices: [0, 1, 2],
+                        material_index: 0,
+                    }],
+                },
+            ),
+            content_fingerprint: [0; 32],
+        };
+        let vertices = virtual_triangle_gpu_vertices(&page).expect("triangle conversion");
+        assert_eq!(
+            vertices
+                .iter()
+                .map(|vertex| vertex.position)
+                .collect::<Vec<_>>(),
+            [[0, 0, 0], [2, 0, 0], [0, 3, 0]]
+        );
+        assert!(
+            vertices
+                .iter()
+                .all(|vertex| vertex.material == u32::from(Material::Basalt.id()))
+        );
+        assert!(
+            vertices
+                .iter()
+                .all(|vertex| vertex.normal == [0, 0, i16::MAX, 0])
+        );
     }
 
     #[test]

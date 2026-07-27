@@ -611,6 +611,72 @@ fn vs_main_fixed(
   );
 }
 
+fn virtual_cluster_surface_weather(world: vec3<f32>) -> vec2<f32> {
+  return cloud_surface_weather(world);
+}
+
+fn virtual_cluster_vertex(
+  position_voxels: vec3<i32>,
+  material: u32,
+  packed_normal: vec4<f32>,
+  encoded_owner_id: vec2<u32>,
+) -> VertexOut {
+  let world = vec3<f32>(position_voxels) * frame.viewport_voxel.z;
+  var out: VertexOut;
+  out.position = frame.view_projection * vec4<f32>(world, 1.0);
+  out.world = world;
+  out.normal = normalize(packed_normal.xyz);
+  out.material = material;
+  out.ao = 1.0;
+  out.terrain_lighting = vec2<f32>(1.0);
+  out.source = 8u;
+  out.terrain_identity = vec4<u32>(0u);
+  if any(encoded_owner_id != vec2<u32>(0u)) {
+    var primitive = 2166136261u;
+    primitive = diagnostic_hash_step(primitive, bitcast<u32>(position_voxels.x));
+    primitive = diagnostic_hash_step(primitive, bitcast<u32>(position_voxels.y));
+    primitive = diagnostic_hash_step(primitive, bitcast<u32>(position_voxels.z));
+    primitive = diagnostic_hash_step(primitive, material);
+    out.terrain_identity = vec4<u32>(
+      encoded_owner_id.x,
+      encoded_owner_id.y,
+      select(primitive, 1u, primitive == 0u),
+      diagnostic_descriptor(material, 8u, 7u),
+    );
+  }
+  out.surface_weather = virtual_cluster_surface_weather(world);
+  return out;
+}
+
+@vertex
+fn vs_virtual_cluster(
+  @location(0) position_voxels: vec3<i32>,
+  @location(1) material: u32,
+  @location(2) packed_normal: vec4<f32>,
+) -> VertexOut {
+  return virtual_cluster_vertex(
+    position_voxels,
+    material,
+    packed_normal,
+    vec2<u32>(0u),
+  );
+}
+
+@vertex
+fn vs_virtual_cluster_diagnostic(
+  @location(0) position_voxels: vec3<i32>,
+  @location(1) material: u32,
+  @location(2) packed_normal: vec4<f32>,
+  @location(3) diagnostic_owner: vec2<u32>,
+) -> VertexOut {
+  return virtual_cluster_vertex(
+    position_voxels,
+    material,
+    packed_normal,
+    diagnostic_owner,
+  );
+}
+
 @vertex
 fn vs_main_fixed_diagnostic(
   @builtin(vertex_index) vertex_index: u32,
