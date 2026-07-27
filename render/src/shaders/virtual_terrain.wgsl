@@ -63,7 +63,7 @@ fn page_bounds_metres(node: VirtualTerrainNode) -> mat2x3<f32> {
   );
 }
 
-fn root_visible(node: VirtualTerrainNode) -> bool {
+fn page_visible(node: VirtualTerrainNode) -> bool {
   let bounds = page_bounds_metres(node);
   let center = (bounds[0] + bounds[1]) * 0.5;
   let radius = length(bounds[1] - center);
@@ -132,7 +132,7 @@ fn traverse(@builtin(global_invocation_id) invocation: vec3<u32>) {
     atomicAdd(&counters.ownerless_roots, 1u);
     return;
   }
-  if !root_visible(nodes[root_index]) {
+  if !page_visible(nodes[root_index]) {
     return;
   }
 
@@ -146,10 +146,17 @@ fn traverse(@builtin(global_invocation_id) invocation: vec3<u32>) {
     }
     stack_count -= 1u;
     let node_index = stack[stack_count];
-    let visited = atomicAdd(&counters.visited_nodes, 1u);
-    if visited >= view.counts_flags.w || node_index >= view.options.z {
+    if node_index >= view.options.z {
       atomicOr(&counters.overflow_flags, OVERFLOW_TRAVERSAL);
-      if node_index < view.options.z && (node_flags(nodes[node_index]) & NODE_RESIDENT) != 0u {
+      continue;
+    }
+    if !page_visible(nodes[node_index]) {
+      continue;
+    }
+    let visited = atomicAdd(&counters.visited_nodes, 1u);
+    if visited >= view.counts_flags.w {
+      atomicOr(&counters.overflow_flags, OVERFLOW_TRAVERSAL);
+      if (node_flags(nodes[node_index]) & NODE_RESIDENT) != 0u {
         append_selected(node_index);
       } else if node_index == root_index {
         atomicAdd(&counters.ownerless_roots, 1u);

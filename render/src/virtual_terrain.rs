@@ -464,6 +464,9 @@ struct CutBuilder<'a> {
 
 impl CutBuilder<'_> {
     fn visit(&mut self, key: TerrainPageKey, root: bool) {
+        if !page_is_visible(key, self.view) {
+            return;
+        }
         if self.visited_nodes >= self.hierarchy.capacity.max_traversal_nodes {
             self.traversal_overflow = true;
             if root {
@@ -823,6 +826,21 @@ mod tests {
                 assert_ne!(right.ancestor_at(1), Some(*left));
             }
         }
+    }
+
+    #[test]
+    fn complete_group_selects_only_conservatively_visible_children() {
+        let (mut hierarchy, pages) = hierarchy();
+        for page in pages {
+            hierarchy.install_page(page).unwrap();
+        }
+        let mut edge_view = view(true);
+        edge_view.camera_position_metres = [-3.2, 3.2, -6.3];
+        edge_view.camera_forward = [0.0, 0.0, -1.0];
+        let cut = hierarchy.select_cut(edge_view).unwrap();
+        assert!(cut.is_renderable());
+        assert_eq!(cut.selected_pages.len(), 4);
+        assert!(cut.selected_pages.iter().all(|key| key.coord[2] == -2));
     }
 
     #[test]
