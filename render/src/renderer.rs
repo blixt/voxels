@@ -44,7 +44,7 @@ use voxels_world::{
     SurfacePatchEdge, SurfacePatchId, SurfaceQuad, SurfaceRegion, SurfaceTileCoord,
     SurfaceTileMesh, TerrainHierarchyDirectoryV1, TerrainPageKey, TerrainPageRepresentation,
     TerrainPageRepresentationKind, TerrainPageV1, VOXEL_SIZE_METRES, WaterTileMesh, WorldManifest,
-    fallback_surface_wall_material,
+    fallback_surface_wall_material, reconstruct_exact_terrain_surface,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -708,10 +708,20 @@ fn canonical_gpu_quad(world_origin: [i32; 3], quad: &Quad) -> GpuQuad {
 fn virtual_surface_gpu_quads(
     page: &TerrainPageV1,
 ) -> Result<Vec<GpuQuad>, VirtualTerrainRendererError> {
-    let TerrainPageRepresentation::SurfaceCluster(quads) = &page.representation else {
-        return Err(VirtualTerrainRendererError::UnsupportedRepresentation(
-            page.representation.kind(),
-        ));
+    let reconstructed;
+    let quads = match &page.representation {
+        TerrainPageRepresentation::SurfaceCluster(quads) => quads,
+        TerrainPageRepresentation::SteppedSurfaceResidual(_)
+        | TerrainPageRepresentation::SparseVoxelBrick(_) => {
+            reconstructed = reconstruct_exact_terrain_surface(page)
+                .map_err(|_| VirtualTerrainRendererError::InvalidSurfaceCluster(page.key))?;
+            &reconstructed
+        }
+        TerrainPageRepresentation::TriangleCluster(_) => {
+            return Err(VirtualTerrainRendererError::UnsupportedRepresentation(
+                page.representation.kind(),
+            ));
+        }
     };
     let mut gpu_quads = Vec::with_capacity(quads.len());
     for quad in quads {
@@ -4317,7 +4327,9 @@ impl Renderer {
                 .map(|value| value as f32 * VOXEL_SIZE_METRES),
         );
         let mesh = match &page.representation {
-            TerrainPageRepresentation::SurfaceCluster(_) => {
+            TerrainPageRepresentation::SteppedSurfaceResidual(_)
+            | TerrainPageRepresentation::SparseVoxelBrick(_)
+            | TerrainPageRepresentation::SurfaceCluster(_) => {
                 let gpu_quads = virtual_surface_gpu_quads(&page)?;
                 let gpu_bytes = gpu_quads
                     .len()
@@ -4391,11 +4403,6 @@ impl Renderer {
                         .ok_or(VirtualTerrainRendererError::GpuPoolCapacity)?,
                     )
                 }
-            }
-            representation => {
-                return Err(VirtualTerrainRendererError::UnsupportedRepresentation(
-                    representation.kind(),
-                ));
             }
         };
         let geometry = match &mesh {
@@ -14984,6 +14991,68 @@ mod tests {
             expected.sort_unstable();
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn virtual_surface_quads_accept_every_exact_compact_encoding() {
+        let source = voxels_world::WorldSourceIdentityHash::from_bytes([19; 32]);
+        let stepped = voxels_world::build_compact_exact_terrain_page(
+            source,
+            TerrainPageKey {
+                level: 0,
+                coord: [-2, -1, 1],
+            },
+            1,
+            |coord| {
+                let height = -8 + (coord.x + coord.z).rem_euclid(2);
+                if coord.y <= height {
+                    Material::Stone
+                } else {
+                    Material::Air
+                }
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            stepped.representation,
+            TerrainPageRepresentation::SteppedSurfaceResidual(_)
+        ));
+        let stepped_gpu = virtual_surface_gpu_quads(&stepped).unwrap();
+        assert!(!stepped_gpu.is_empty());
+        assert!(stepped_gpu.iter().all(|quad| {
+            quad.extent_voxels.into_iter().all(|extent| extent > 0)
+                && quad.material_face & !GPU_FACE_MASK == u32::from(Material::Stone.id())
+        }));
+
+        let sparse = voxels_world::build_compact_exact_terrain_page(
+            source,
+            TerrainPageKey {
+                level: 0,
+                coord: [-1, 0, -2],
+            },
+            2,
+            |coord| {
+                let hash = coord.x.wrapping_mul(73_856_093)
+                    ^ coord.y.wrapping_mul(19_349_663)
+                    ^ coord.z.wrapping_mul(83_492_791);
+                if hash.rem_euclid(97) == 0 {
+                    Material::Basalt
+                } else {
+                    Material::Air
+                }
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            sparse.representation,
+            TerrainPageRepresentation::SparseVoxelBrick(_)
+        ));
+        let sparse_gpu = virtual_surface_gpu_quads(&sparse).unwrap();
+        assert!(!sparse_gpu.is_empty());
+        assert!(sparse_gpu.iter().all(|quad| {
+            quad.extent_voxels.into_iter().all(|extent| extent > 0)
+                && quad.material_face & !GPU_FACE_MASK == u32::from(Material::Basalt.id())
+        }));
     }
 
     #[test]

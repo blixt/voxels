@@ -9,7 +9,7 @@ use std::fmt;
 use voxels_world::{
     TERRAIN_PAGE_MAX_CHILDREN, TerrainHierarchyDirectoryV1, TerrainHierarchyNode, TerrainPageKey,
     TerrainPageRepresentation, TerrainPageTransferIdentity, TerrainPageV1, WorldSourceIdentityHash,
-    encode_terrain_page, validate_terrain_replacement,
+    encode_terrain_page, reconstruct_exact_terrain_surface, validate_terrain_replacement,
 };
 
 const FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -586,12 +586,10 @@ impl CutBuilder<'_> {
 
 fn page_primitive_count(page: &TerrainPageV1) -> usize {
     match &page.representation {
-        TerrainPageRepresentation::SteppedSurfaceResidual(surface) => surface.runs.len(),
-        TerrainPageRepresentation::SparseVoxelBrick(bricks) => bricks
-            .bricks
-            .iter()
-            .map(|brick| brick.material_indices.len())
-            .sum(),
+        TerrainPageRepresentation::SteppedSurfaceResidual(_)
+        | TerrainPageRepresentation::SparseVoxelBrick(_) => {
+            reconstruct_exact_terrain_surface(page).map_or(usize::MAX, |quads| quads.len())
+        }
         TerrainPageRepresentation::SurfaceCluster(quads) => quads.len(),
         TerrainPageRepresentation::TriangleCluster(cluster) => cluster.triangles.len(),
     }

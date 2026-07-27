@@ -15,7 +15,7 @@ use std::io::Read;
 #[cfg(feature = "terrain-page-builder")]
 use crate::terrain_error::certify_bidirectional_surface_error;
 
-pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 1;
+pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 2;
 pub const TERRAIN_PAGE_EDGE_SAMPLES: u32 = 32;
 pub const TERRAIN_PAGE_MAX_LEVEL: u8 = 20;
 pub const TERRAIN_PAGE_MAX_CHILDREN: usize = 8;
@@ -28,7 +28,7 @@ pub const TERRAIN_PAGE_TARGET_COMPRESSED_BYTES: usize = 65_536;
 pub const TERRAIN_PAGE_MAX_COMPRESSED_BYTES: usize = 262_144;
 pub const TERRAIN_PAGE_MAX_PAYLOAD_BYTES: usize = 2_097_152;
 const SPARSE_BRICK_EDGE: u8 = 8;
-const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v1\0";
+const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v2\0";
 const PARENT_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-parent-boundary-v1\0";
 const PAGE_MAGIC: &[u8; 4] = b"VXTP";
 const PAGE_HEADER_LEN: u16 = 344;
@@ -198,6 +198,12 @@ pub struct SteppedSurfaceResidual {
     pub shape_xz: [u16; 2],
     pub columns: Vec<TerrainColumn>,
     pub runs: Vec<TerrainMaterialRun>,
+    /// Exact exposed faces on the six half-open page planes.
+    ///
+    /// Interior faces are reconstructed from the compact column occupancy. Boundary hashes prove
+    /// replacement coherence but cannot recover this geometry, so the independently renderable
+    /// page must carry the sparse boundary surface explicitly.
+    pub boundary_quads: Vec<TerrainSurfaceQuad>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -211,6 +217,12 @@ pub struct TerrainSparseBrick {
 pub struct SparseVoxelBrickPayload {
     pub brick_edge: u8,
     pub bricks: Vec<TerrainSparseBrick>,
+    /// Exact exposed faces on the six half-open page planes.
+    ///
+    /// Faces wholly inside the page are reconstructed from brick occupancy. Keeping only these
+    /// boundary faces avoids both invented page walls and dependence on a neighboring page being
+    /// resident.
+    pub boundary_quads: Vec<TerrainSurfaceQuad>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -341,6 +353,29 @@ impl From<TerrainReplacementError> for TerrainPageBuildError {
         Self::InvalidChildGroup(error)
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerrainPageReconstructionError {
+    InvalidPage,
+    UnsupportedRepresentation,
+    NonUnitStride,
+}
+
+impl fmt::Display for TerrainPageReconstructionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidPage => formatter.write_str("terrain page cannot be reconstructed"),
+            Self::UnsupportedRepresentation => {
+                formatter.write_str("terrain page representation is not an exact occupancy payload")
+            }
+            Self::NonUnitStride => {
+                formatter.write_str("terrain occupancy reconstruction requires unit voxel stride")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TerrainPageReconstructionError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TerrainReplacementError {
@@ -550,9 +585,15 @@ fn build_exact_terrain_page_with_policy(
     let boundary_fingerprints =
         std::array::from_fn(|index| certificate.side(BoundarySide::ALL[index]).fingerprint);
     let (materials, palette_indices) = material_coverage(bounds, &samples, &faces)?;
-    let (stepped, topology) = build_stepped(bounds, &samples, &palette_indices)?;
-    let sparse = build_sparse(bounds, &samples, &palette_indices);
     let clusters = merge_surface_faces(&faces, &palette_indices);
+    let boundary_quads = clusters
+        .iter()
+        .copied()
+        .filter(|quad| surface_quad_is_on_boundary(*quad, bounds))
+        .collect::<Vec<_>>();
+    let (mut stepped, topology) = build_stepped(bounds, &samples, &palette_indices)?;
+    stepped.boundary_quads.clone_from(&boundary_quads);
+    let sparse = build_sparse(bounds, &samples, &palette_indices);
     let cluster_payload = TerrainPageRepresentation::SurfaceCluster(clusters);
     let representation = if matches!(policy, TerrainLeafPolicy::Clustered) {
         cluster_payload
@@ -569,6 +610,7 @@ fn build_exact_terrain_page_with_policy(
         let sparse_payload = TerrainPageRepresentation::SparseVoxelBrick(SparseVoxelBrickPayload {
             brick_edge: SPARSE_BRICK_EDGE,
             bricks: sparse,
+            boundary_quads,
         });
         if representation_bytes(&cluster_payload).len()
             <= representation_bytes(&sparse_payload).len()
@@ -1606,9 +1648,18 @@ fn build_stepped(
             ],
             columns,
             runs,
+            boundary_quads: Vec::new(),
         },
         topology,
     ))
+}
+
+fn surface_quad_is_on_boundary(quad: TerrainSurfaceQuad, bounds: VoxelBounds) -> bool {
+    match quad.axis {
+        FaceAxis::X => quad.plane == bounds.min.x || quad.plane == bounds.max.x,
+        FaceAxis::Y => quad.plane == bounds.min.y || quad.plane == bounds.max.y,
+        FaceAxis::Z => quad.plane == bounds.min.z || quad.plane == bounds.max.z,
+    }
 }
 
 fn build_sparse(
@@ -1657,6 +1708,161 @@ fn build_sparse(
         }
     }
     bricks
+}
+
+/// Reconstructs an exact clustered surface from a compact level-0 occupancy representation.
+///
+/// The compact payload owns all occupancy inside its half-open page. Interior exposed faces are
+/// derived from that occupancy, while the explicit boundary quads preserve the one-voxel halo
+/// decision made by the producer. This makes a page independently renderable without inventing
+/// walls at page edges or requiring a neighboring page to be resident.
+pub fn reconstruct_exact_terrain_surface(
+    page: &TerrainPageV1,
+) -> Result<Vec<TerrainSurfaceQuad>, TerrainPageReconstructionError> {
+    if !page.validates_identity() {
+        return Err(TerrainPageReconstructionError::InvalidPage);
+    }
+    let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+    let volume = edge
+        .checked_mul(edge)
+        .and_then(|area| area.checked_mul(edge))
+        .ok_or(TerrainPageReconstructionError::InvalidPage)?;
+    let mut occupancy = vec![u8::MAX; volume];
+    let boundary_quads = match &page.representation {
+        TerrainPageRepresentation::SteppedSurfaceResidual(surface) => {
+            if surface.sample_stride_voxels != 1 || page.key.level != 0 {
+                return Err(TerrainPageReconstructionError::NonUnitStride);
+            }
+            for z in 0..edge {
+                for x in 0..edge {
+                    let column = surface.columns[x + z * edge];
+                    let start = column.first_run as usize;
+                    let end = start + usize::from(column.run_count);
+                    for run in &surface.runs[start..end] {
+                        for world_y in run.minimum_y..run.minimum_y + i32::from(run.length) {
+                            let local_y = usize::try_from(world_y - page.bounds.min.y)
+                                .map_err(|_| TerrainPageReconstructionError::InvalidPage)?;
+                            occupancy[voxel_linear_index(x, local_y, z, edge)] = run.material_index;
+                        }
+                    }
+                }
+            }
+            &surface.boundary_quads
+        }
+        TerrainPageRepresentation::SparseVoxelBrick(payload) => {
+            if page.key.level != 0 {
+                return Err(TerrainPageReconstructionError::NonUnitStride);
+            }
+            let brick_edge = usize::from(payload.brick_edge);
+            for brick in &payload.bricks {
+                let mut material_cursor = 0usize;
+                for bit in 0..brick_edge.pow(3) {
+                    if brick.occupancy[bit / 64] & (1u64 << (bit % 64)) == 0 {
+                        continue;
+                    }
+                    let local_x = bit % brick_edge;
+                    let local_y = bit / brick_edge % brick_edge;
+                    let local_z = bit / (brick_edge * brick_edge);
+                    let x = usize::from(brick.local_brick[0]) * brick_edge + local_x;
+                    let y = usize::from(brick.local_brick[1]) * brick_edge + local_y;
+                    let z = usize::from(brick.local_brick[2]) * brick_edge + local_z;
+                    occupancy[voxel_linear_index(x, y, z, edge)] =
+                        brick.material_indices[material_cursor];
+                    material_cursor += 1;
+                }
+            }
+            &payload.boundary_quads
+        }
+        _ => return Err(TerrainPageReconstructionError::UnsupportedRepresentation),
+    };
+
+    let mut faces = BTreeSet::new();
+    for z in 0..edge {
+        for y in 0..edge {
+            for x in 0..edge {
+                let material_index = occupancy[voxel_linear_index(x, y, z, edge)];
+                if material_index == u8::MAX {
+                    continue;
+                }
+                let material_id = page.materials[usize::from(material_index)].material.id();
+                let world = VoxelCoord::new(
+                    page.bounds.min.x + x as i32,
+                    page.bounds.min.y + y as i32,
+                    page.bounds.min.z + z as i32,
+                );
+                for axis in FaceAxis::ALL {
+                    for positive in [false, true] {
+                        let (nx, ny, nz) = match (axis, positive) {
+                            (FaceAxis::X, false) => (x.checked_sub(1), Some(y), Some(z)),
+                            (FaceAxis::X, true) => {
+                                (x.checked_add(1).filter(|v| *v < edge), Some(y), Some(z))
+                            }
+                            (FaceAxis::Y, false) => (Some(x), y.checked_sub(1), Some(z)),
+                            (FaceAxis::Y, true) => {
+                                (Some(x), y.checked_add(1).filter(|v| *v < edge), Some(z))
+                            }
+                            (FaceAxis::Z, false) => (Some(x), Some(y), z.checked_sub(1)),
+                            (FaceAxis::Z, true) => {
+                                (Some(x), Some(y), z.checked_add(1).filter(|v| *v < edge))
+                            }
+                        };
+                        let (Some(nx), Some(ny), Some(nz)) = (nx, ny, nz) else {
+                            continue;
+                        };
+                        if occupancy[voxel_linear_index(nx, ny, nz, edge)] == u8::MAX {
+                            faces.insert(canonical_face(world, material_id, axis, positive));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for quad in boundary_quads {
+        let material_id = page.materials[usize::from(quad.material_index)]
+            .material
+            .id();
+        expand_surface_quad(*quad, material_id, &mut faces);
+    }
+    let palette_indices = page
+        .materials
+        .iter()
+        .enumerate()
+        .map(|(index, coverage)| (coverage.material.id(), index as u8))
+        .collect::<BTreeMap<_, _>>();
+    Ok(merge_surface_faces(
+        &faces.into_iter().collect::<Vec<_>>(),
+        &palette_indices,
+    ))
+}
+
+fn voxel_linear_index(x: usize, y: usize, z: usize, edge: usize) -> usize {
+    x + y * edge + z * edge * edge
+}
+
+fn canonical_face(
+    solid: VoxelCoord,
+    material_id: u16,
+    axis: FaceAxis,
+    positive: bool,
+) -> CanonicalFaceKey {
+    let component = match axis {
+        FaceAxis::X => solid.x,
+        FaceAxis::Y => solid.y,
+        FaceAxis::Z => solid.z,
+    };
+    let (u, v) = match axis {
+        FaceAxis::X => (solid.y, solid.z),
+        FaceAxis::Y => (solid.x, solid.z),
+        FaceAxis::Z => (solid.x, solid.y),
+    };
+    CanonicalFaceKey {
+        axis,
+        plane: component + i32::from(positive),
+        u,
+        v,
+        solid_side: solid,
+        material_id,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1796,6 +2002,7 @@ fn representation_bytes(representation: &TerrainPageRepresentation) -> Vec<u8> {
             push_u16(&mut bytes, surface.shape_xz[1]);
             push_u32(&mut bytes, surface.columns.len() as u32);
             push_u32(&mut bytes, surface.runs.len() as u32);
+            push_u32(&mut bytes, surface.boundary_quads.len() as u32);
             for column in &surface.columns {
                 push_u32(&mut bytes, column.first_run);
                 push_u16(&mut bytes, column.run_count);
@@ -1805,10 +2012,12 @@ fn representation_bytes(representation: &TerrainPageRepresentation) -> Vec<u8> {
                 push_u16(&mut bytes, run.length);
                 bytes.push(run.material_index);
             }
+            encode_surface_quads(&mut bytes, &surface.boundary_quads);
         }
         TerrainPageRepresentation::SparseVoxelBrick(payload) => {
             bytes.push(payload.brick_edge);
             push_u32(&mut bytes, payload.bricks.len() as u32);
+            push_u32(&mut bytes, payload.boundary_quads.len() as u32);
             for brick in &payload.bricks {
                 bytes.extend_from_slice(&brick.local_brick);
                 for occupancy in brick.occupancy {
@@ -1817,19 +2026,11 @@ fn representation_bytes(representation: &TerrainPageRepresentation) -> Vec<u8> {
                 push_u16(&mut bytes, brick.material_indices.len() as u16);
                 bytes.extend_from_slice(&brick.material_indices);
             }
+            encode_surface_quads(&mut bytes, &payload.boundary_quads);
         }
         TerrainPageRepresentation::SurfaceCluster(quads) => {
             push_u32(&mut bytes, quads.len() as u32);
-            for quad in quads {
-                bytes.push(quad.axis as u8);
-                bytes.push(u8::from(quad.positive));
-                bytes.push(quad.material_index);
-                push_i32(&mut bytes, quad.plane);
-                push_i32(&mut bytes, quad.u);
-                push_i32(&mut bytes, quad.v);
-                push_u16(&mut bytes, quad.width);
-                push_u16(&mut bytes, quad.height);
-            }
+            encode_surface_quads(&mut bytes, quads);
         }
         TerrainPageRepresentation::TriangleCluster(cluster) => {
             push_u32(&mut bytes, cluster.vertices.len() as u32);
@@ -1849,6 +2050,19 @@ fn representation_bytes(representation: &TerrainPageRepresentation) -> Vec<u8> {
         }
     }
     bytes
+}
+
+fn encode_surface_quads(bytes: &mut Vec<u8>, quads: &[TerrainSurfaceQuad]) {
+    for quad in quads {
+        bytes.push(quad.axis as u8);
+        bytes.push(u8::from(quad.positive));
+        bytes.push(quad.material_index);
+        push_i32(bytes, quad.plane);
+        push_i32(bytes, quad.u);
+        push_i32(bytes, quad.v);
+        push_u16(bytes, quad.width);
+        push_u16(bytes, quad.height);
+    }
 }
 
 fn children_are_complete(page: &TerrainPageV1) -> bool {
@@ -1894,6 +2108,7 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
                         && run.minimum_y >= page.bounds.min.y
                         && run.minimum_y + i32::from(run.length) <= page.bounds.max.y
                 })
+                && boundary_quads_are_valid(&surface.boundary_quads, page, palette_len)
         }
         TerrainPageRepresentation::SparseVoxelBrick(payload) => {
             let bricks_per_axis = TERRAIN_PAGE_EDGE_SAMPLES as u8 / SPARSE_BRICK_EDGE;
@@ -1921,6 +2136,7 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
                             .iter()
                             .all(|index| usize::from(*index) < palette_len)
                 })
+                && boundary_quads_are_valid(&payload.boundary_quads, page, palette_len)
         }
         TerrainPageRepresentation::SurfaceCluster(quads) => quads.iter().all(|quad| {
             quad.width > 0
@@ -1932,6 +2148,20 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
             triangle_cluster_validation_error(cluster, page.bounds, palette_len).is_ok()
         }
     }
+}
+
+fn boundary_quads_are_valid(
+    quads: &[TerrainSurfaceQuad],
+    page: &TerrainPageV1,
+    palette_len: usize,
+) -> bool {
+    quads.iter().all(|quad| {
+        quad.width > 0
+            && quad.height > 0
+            && usize::from(quad.material_index) < palette_len
+            && quad_inside_bounds(*quad, page.bounds)
+            && surface_quad_is_on_boundary(*quad, page.bounds)
+    })
 }
 
 fn quad_inside_bounds(quad: TerrainSurfaceQuad, bounds: VoxelBounds) -> bool {
@@ -2390,9 +2620,13 @@ fn decode_representation(
             let shape_xz = [cursor.u16()?, cursor.u16()?];
             let column_count = cursor.u32()? as usize;
             let run_count = cursor.u32()? as usize;
+            let boundary_quad_count = cursor.u32()? as usize;
             let expected_columns =
                 TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize;
-            if column_count != expected_columns || run_count > expected_columns * 32 {
+            if column_count != expected_columns
+                || run_count > expected_columns * 32
+                || boundary_quad_count > TERRAIN_PAGE_MAX_PAYLOAD_BYTES / 19
+            {
                 return Err(TerrainPageCodecError::InvalidRepresentation(
                     "invalid stepped counts",
                 ));
@@ -2412,17 +2646,23 @@ fn decode_representation(
                     material_index: cursor.u8()?,
                 });
             }
+            let boundary_quads = decode_surface_quads(&mut cursor, boundary_quad_count)?;
             TerrainPageRepresentation::SteppedSurfaceResidual(SteppedSurfaceResidual {
                 sample_stride_voxels,
                 shape_xz,
                 columns,
                 runs,
+                boundary_quads,
             })
         }
         TerrainPageRepresentationKind::SparseVoxelBrick => {
             let brick_edge = cursor.u8()?;
             let brick_count = cursor.u32()? as usize;
-            if brick_edge != SPARSE_BRICK_EDGE || brick_count > 64 {
+            let boundary_quad_count = cursor.u32()? as usize;
+            if brick_edge != SPARSE_BRICK_EDGE
+                || brick_count > 64
+                || boundary_quad_count > TERRAIN_PAGE_MAX_PAYLOAD_BYTES / 19
+            {
                 return Err(TerrainPageCodecError::InvalidRepresentation(
                     "invalid sparse brick header",
                 ));
@@ -2446,9 +2686,11 @@ fn decode_representation(
                     material_indices: cursor.bytes(material_count)?.to_vec(),
                 });
             }
+            let boundary_quads = decode_surface_quads(&mut cursor, boundary_quad_count)?;
             TerrainPageRepresentation::SparseVoxelBrick(SparseVoxelBrickPayload {
                 brick_edge,
                 bricks,
+                boundary_quads,
             })
         }
         TerrainPageRepresentationKind::SurfaceCluster => {
@@ -2458,35 +2700,7 @@ fn decode_representation(
                     "surface cluster count",
                 ));
             }
-            let mut quads = Vec::with_capacity(quad_count);
-            for _ in 0..quad_count {
-                let axis = match cursor.u8()? {
-                    0 => FaceAxis::X,
-                    1 => FaceAxis::Y,
-                    2 => FaceAxis::Z,
-                    _ => {
-                        return Err(TerrainPageCodecError::InvalidRepresentation(
-                            "surface cluster axis",
-                        ));
-                    }
-                };
-                let positive = cursor.u8()?;
-                if positive > 1 {
-                    return Err(TerrainPageCodecError::InvalidRepresentation(
-                        "surface cluster side",
-                    ));
-                }
-                quads.push(TerrainSurfaceQuad {
-                    axis,
-                    positive: positive != 0,
-                    material_index: cursor.u8()?,
-                    plane: cursor.i32()?,
-                    u: cursor.i32()?,
-                    v: cursor.i32()?,
-                    width: cursor.u16()?,
-                    height: cursor.u16()?,
-                });
-            }
+            let quads = decode_surface_quads(&mut cursor, quad_count)?;
             TerrainPageRepresentation::SurfaceCluster(quads)
         }
         TerrainPageRepresentationKind::TriangleCluster => {
@@ -2527,6 +2741,42 @@ fn decode_representation(
         ));
     }
     Ok(representation)
+}
+
+fn decode_surface_quads(
+    cursor: &mut PageCursor<'_>,
+    quad_count: usize,
+) -> Result<Vec<TerrainSurfaceQuad>, TerrainPageCodecError> {
+    let mut quads = Vec::with_capacity(quad_count);
+    for _ in 0..quad_count {
+        let axis = match cursor.u8()? {
+            0 => FaceAxis::X,
+            1 => FaceAxis::Y,
+            2 => FaceAxis::Z,
+            _ => {
+                return Err(TerrainPageCodecError::InvalidRepresentation(
+                    "surface cluster axis",
+                ));
+            }
+        };
+        let positive = cursor.u8()?;
+        if positive > 1 {
+            return Err(TerrainPageCodecError::InvalidRepresentation(
+                "surface cluster side",
+            ));
+        }
+        quads.push(TerrainSurfaceQuad {
+            axis,
+            positive: positive != 0,
+            material_index: cursor.u8()?,
+            plane: cursor.i32()?,
+            u: cursor.i32()?,
+            v: cursor.i32()?,
+            width: cursor.u16()?,
+            height: cursor.u16()?,
+        });
+    }
+    Ok(quads)
 }
 
 struct PageCursor<'a> {
@@ -2698,6 +2948,7 @@ mod tests {
                 ],
                 columns,
                 runs,
+                boundary_quads: Vec::new(),
             });
         page.content_fingerprint = terrain_page_fingerprint(&page);
         assert!(page.validates_identity());
@@ -2874,6 +3125,13 @@ mod tests {
         let TerrainPageRepresentation::SurfaceCluster(quads) = &page.representation else {
             panic!("expected clustered terrain page");
         };
+        surface_face_set(page, quads)
+    }
+
+    fn surface_face_set(
+        page: &TerrainPageV1,
+        quads: &[TerrainSurfaceQuad],
+    ) -> BTreeSet<CanonicalFaceKey> {
         let mut faces = BTreeSet::new();
         for quad in quads {
             let material_id = page.materials[usize::from(quad.material_index)]
@@ -2882,6 +3140,72 @@ mod tests {
             expand_surface_quad(*quad, material_id, &mut faces);
         }
         faces
+    }
+
+    #[test]
+    fn compact_stepped_surface_reconstructs_the_exact_halo_owned_faces() {
+        let key = TerrainPageKey {
+            level: 0,
+            coord: [-2, -1, 1],
+        };
+        let sampler = |coord: VoxelCoord| {
+            let height = -8 + (coord.x + coord.z).rem_euclid(2);
+            if coord.y <= height {
+                Material::Stone
+            } else {
+                Material::Air
+            }
+        };
+        let page = build_compact_exact_terrain_page(identity(), key, 91, sampler).unwrap();
+        assert!(matches!(
+            page.representation,
+            TerrainPageRepresentation::SteppedSurfaceResidual(_)
+        ));
+        let reconstructed = reconstruct_exact_terrain_surface(&page).unwrap();
+        assert_eq!(
+            surface_face_set(&page, &reconstructed),
+            canonical_exposed_faces(page.bounds, sampler)
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(
+            decode_terrain_page(&encode_terrain_page(&page).unwrap(), identity()).unwrap(),
+            page
+        );
+    }
+
+    #[test]
+    fn compact_sparse_bricks_reconstruct_the_exact_halo_owned_faces() {
+        let key = TerrainPageKey {
+            level: 0,
+            coord: [-1, 0, -2],
+        };
+        let sampler = |coord: VoxelCoord| {
+            let hash = coord.x.wrapping_mul(73_856_093)
+                ^ coord.y.wrapping_mul(19_349_663)
+                ^ coord.z.wrapping_mul(83_492_791);
+            if hash.rem_euclid(97) == 0 {
+                Material::Basalt
+            } else {
+                Material::Air
+            }
+        };
+        let page = build_compact_exact_terrain_page(identity(), key, 92, sampler).unwrap();
+        assert!(matches!(
+            page.representation,
+            TerrainPageRepresentation::SparseVoxelBrick(_)
+        ));
+        let reconstructed = reconstruct_exact_terrain_surface(&page).unwrap();
+        assert_eq!(
+            surface_face_set(&page, &reconstructed),
+            canonical_exposed_faces(page.bounds, sampler)
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(
+            decode_terrain_page(&encode_terrain_page(&page).unwrap(), identity()).unwrap(),
+            page
+        );
     }
 
     fn exact_cluster_children(key: TerrainPageKey, revision: u64) -> Vec<TerrainPageV1> {
@@ -3224,6 +3548,7 @@ mod tests {
                 shape_xz: [32, 32],
                 columns,
                 runs,
+                boundary_quads: Vec::new(),
             }),
             &children,
         )
