@@ -21,6 +21,7 @@ pub mod terrain_directory;
 pub mod terrain_page;
 #[cfg(feature = "terrain-page-builder")]
 pub mod terrain_region;
+pub mod terrain_transport;
 pub mod virtual_surface;
 #[cfg(any(test, feature = "virtual-surface-bakeoff"))]
 #[doc(hidden)]
@@ -115,6 +116,14 @@ pub use terrain_page::{
 pub use terrain_page::{build_budgeted_terrain_parent, build_simplified_triangle_terrain_parent};
 #[cfg(feature = "terrain-page-builder")]
 pub use terrain_region::{TerrainRegionBuildError, TerrainRegionBuildV1, build_terrain_region};
+pub use terrain_transport::{
+    TERRAIN_PAGE_TRANSFER_MAX_BYTES, TERRAIN_PAGE_TRANSFER_MAX_ITEMS,
+    TERRAIN_PAGE_TRANSFER_SCHEMA_VERSION, TerrainPageBatchItemV1, TerrainPageBatchRequestV1,
+    TerrainPageBatchResultV1, TerrainPageTransferCodecError, TerrainPageTransferFailure,
+    TerrainPageTransferIdentity, decode_terrain_page_batch_request,
+    decode_terrain_page_batch_result, encode_terrain_page_batch_request,
+    encode_terrain_page_batch_result,
+};
 pub use virtual_surface::{
     BoundaryCertificate, BoundarySide, BoundarySideCertificate, CanonicalBoundarySample,
     CanonicalFaceKey, FaceAxis, VoxelBounds, canonical_exposed_faces,
