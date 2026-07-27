@@ -1178,11 +1178,12 @@ impl RemoteInner {
     fn send_terrain_directory_request(
         self: &Rc<Self>,
         priority: WorldProductPriority,
-        roots: Vec<voxels_world::TerrainPageKey>,
+        mut roots: Vec<voxels_world::TerrainPageKey>,
     ) -> Result<RemoteRequestId, RemoteWorldError> {
         if self.state.get() != RemoteConnectionState::Open {
             return Err(self.terminal_error().unwrap_or(RemoteWorldError::NotOpen));
         }
+        roots.sort_unstable();
         protocol::encode_terrain_directory_batch(&TerrainDirectoryBatchRequest {
             request_id: 1,
             priority,
@@ -1220,7 +1221,7 @@ impl RemoteInner {
     fn send_terrain_page_request(
         self: &Rc<Self>,
         priority: WorldProductPriority,
-        pages: Vec<TerrainPageTransferIdentity>,
+        mut pages: Vec<TerrainPageTransferIdentity>,
     ) -> Result<RemoteRequestId, RemoteWorldError> {
         if self.state.get() != RemoteConnectionState::Open {
             return Err(self.terminal_error().unwrap_or(RemoteWorldError::NotOpen));
@@ -1233,6 +1234,7 @@ impl RemoteInner {
         else {
             return Err(RemoteWorldError::NotOpen);
         };
+        pages.sort_unstable();
         protocol::encode_virtual_terrain_page_batch(&VirtualTerrainPageBatchRequest {
             request_id: 1,
             priority,

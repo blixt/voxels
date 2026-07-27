@@ -1343,7 +1343,7 @@ mod web {
     const BACKGROUND_SURFACE_BATCH: usize = 2;
     const BACKGROUND_SURFACE_BATCHES_IN_FLIGHT: usize = 4;
     const VIRTUAL_TERRAIN_MAX_REGIONS: usize = 48;
-    const VIRTUAL_TERRAIN_MAX_DIRECTORY_IN_FLIGHT: usize = 2;
+    const VIRTUAL_TERRAIN_MAX_DIRECTORY_IN_FLIGHT: usize = 1;
     const VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS: u64 = 1_000;
     const VIRTUAL_TERRAIN_PAGE_CACHE_BYTES: usize = 128 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_REFINE_ABOVE_PIXELS: f64 = 0.75;
@@ -3369,7 +3369,9 @@ mod web {
         }
 
         fn stream_virtual_terrain(&self, camera: &CameraState, streaming_velocity: Vec3) {
-            if !self.virtual_terrain_supported() {
+            if !self.virtual_terrain_supported()
+                || self.initialized_surface_level_count.get() < INTERACTIVE_SURFACE_LOD_LEVELS
+            {
                 return;
             }
             let now_ms = self.last_time.get().max(0.0) as u64;
@@ -3503,10 +3505,10 @@ mod web {
             if roots.is_empty() {
                 return;
             }
-            match self.remote.submit_terrain_directory_batch(
-                WorldProductPriority::ImmediateSurface,
-                roots.clone(),
-            ) {
+            match self
+                .remote
+                .submit_terrain_directory_batch(WorldProductPriority::Prefetch, roots.clone())
+            {
                 Ok(request_id) => {
                     self.virtual_terrain
                         .borrow_mut()
