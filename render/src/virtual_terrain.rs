@@ -1,0 +1,866 @@
+//! Bounded resident hierarchy and one-owner cut selection for virtual microvoxel terrain.
+//!
+//! This module is deliberately independent of WGPU resources. It is the CPU oracle for the GPU
+//! traversal: roots remain valid fallbacks, refinement replaces a parent only as a complete
+//! certified child group, and request feedback is bounded without ever manufacturing geometry.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use voxels_world::{
+    TERRAIN_PAGE_MAX_CHILDREN, TerrainHierarchyDirectoryV1, TerrainHierarchyNode, TerrainPageKey,
+    TerrainPageRepresentation, TerrainPageTransferIdentity, TerrainPageV1, WorldSourceIdentityHash,
+    encode_terrain_page, validate_terrain_replacement,
+};
+
+const FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
+const NORMAL_ERROR_PIXELS_PER_RADIAN: f64 = 0.25;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VirtualTerrainCapacity {
+    pub max_directories: usize,
+    pub max_directory_nodes: usize,
+    pub max_resident_pages: usize,
+    pub max_resident_encoded_bytes: usize,
+    pub max_resident_primitives: usize,
+    pub max_selected_pages: usize,
+    pub max_traversal_nodes: usize,
+    pub max_feedback_pages: usize,
+}
+
+impl VirtualTerrainCapacity {
+    pub const DEVELOPMENT_128_MIB: Self = Self {
+        max_directories: 512,
+        max_directory_nodes: 299_520,
+        max_resident_pages: 8_192,
+        max_resident_encoded_bytes: 128 * 1_024 * 1_024,
+        max_resident_primitives: 16_777_216,
+        max_selected_pages: 16_384,
+        max_traversal_nodes: 131_072,
+        max_feedback_pages: 256,
+    };
+
+    fn validates(self) -> bool {
+        self.max_directories > 0
+            && self.max_directory_nodes > 0
+            && self.max_resident_pages > 0
+            && self.max_resident_encoded_bytes > 0
+            && self.max_resident_primitives > 0
+            && self.max_selected_pages > 0
+            && self.max_traversal_nodes >= self.max_selected_pages
+            && self.max_feedback_pages > 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VirtualTerrainView {
+    pub camera_position_metres: [f64; 3],
+    pub camera_forward: [f64; 3],
+    pub vertical_fov_radians: f64,
+    pub aspect_ratio: f64,
+    pub viewport_height_pixels: u32,
+    pub near_metres: f64,
+    pub far_metres: f64,
+    pub refine_above_pixels: f64,
+    pub coarsen_below_pixels: f64,
+    pub wet_specular_sensitivity: f64,
+    /// Reference/debug override. Production selection normally follows certified error.
+    pub force_exact_leaves: bool,
+}
+
+impl VirtualTerrainView {
+    pub fn validates(self) -> bool {
+        self.camera_position_metres
+            .into_iter()
+            .chain(self.camera_forward)
+            .all(f64::is_finite)
+            && length_squared(self.camera_forward) > f64::EPSILON
+            && self.vertical_fov_radians.is_finite()
+            && self.vertical_fov_radians > 0.0
+            && self.vertical_fov_radians < std::f64::consts::PI
+            && self.aspect_ratio.is_finite()
+            && self.aspect_ratio > 0.0
+            && self.viewport_height_pixels > 0
+            && self.near_metres.is_finite()
+            && self.near_metres > 0.0
+            && self.far_metres.is_finite()
+            && self.far_metres > self.near_metres
+            && self.refine_above_pixels.is_finite()
+            && self.coarsen_below_pixels.is_finite()
+            && self.refine_above_pixels > self.coarsen_below_pixels
+            && self.coarsen_below_pixels >= 0.0
+            && self.wet_specular_sensitivity.is_finite()
+            && (0.0..=1.0).contains(&self.wet_specular_sensitivity)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VirtualTerrainCut {
+    pub selected_pages: Vec<TerrainPageKey>,
+    pub requested_pages: Vec<TerrainPageTransferIdentity>,
+    pub ownerless_roots: Vec<TerrainPageKey>,
+    pub fingerprint: u64,
+    pub visited_nodes: usize,
+    pub selected_primitives: usize,
+    pub selected_encoded_bytes: usize,
+    pub feedback_overflow: bool,
+    pub selection_overflow: bool,
+    pub traversal_overflow: bool,
+    pub incoherent_replacement_groups: usize,
+}
+
+impl VirtualTerrainCut {
+    pub fn is_renderable(&self) -> bool {
+        self.ownerless_roots.is_empty() && !self.selection_overflow && !self.traversal_overflow
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VirtualTerrainError {
+    InvalidCapacity,
+    InvalidView,
+    InvalidDirectory,
+    DirectoryCapacity,
+    DirectoryCollision(TerrainPageKey),
+    SourceMismatch,
+    UnknownPage(TerrainPageKey),
+    InvalidPage(TerrainPageKey),
+    StalePage(TerrainPageKey),
+    ResidentPageCapacity,
+    ResidentByteCapacity,
+    ResidentPrimitiveCapacity,
+}
+
+impl fmt::Display for VirtualTerrainError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidCapacity => formatter.write_str("invalid virtual terrain capacity"),
+            Self::InvalidView => formatter.write_str("invalid virtual terrain view"),
+            Self::InvalidDirectory => formatter.write_str("invalid virtual terrain directory"),
+            Self::DirectoryCapacity => {
+                formatter.write_str("virtual terrain directory capacity exceeded")
+            }
+            Self::DirectoryCollision(key) => {
+                write!(formatter, "virtual terrain directory collides at {key:?}")
+            }
+            Self::SourceMismatch => formatter.write_str("virtual terrain source mismatch"),
+            Self::UnknownPage(key) => write!(formatter, "unknown virtual terrain page {key:?}"),
+            Self::InvalidPage(key) => write!(formatter, "invalid virtual terrain page {key:?}"),
+            Self::StalePage(key) => write!(formatter, "stale virtual terrain page {key:?}"),
+            Self::ResidentPageCapacity => {
+                formatter.write_str("virtual terrain resident page capacity exceeded")
+            }
+            Self::ResidentByteCapacity => {
+                formatter.write_str("virtual terrain resident byte capacity exceeded")
+            }
+            Self::ResidentPrimitiveCapacity => {
+                formatter.write_str("virtual terrain resident primitive capacity exceeded")
+            }
+        }
+    }
+}
+
+impl std::error::Error for VirtualTerrainError {}
+
+#[derive(Clone, Debug)]
+struct ResidentPage {
+    page: TerrainPageV1,
+    encoded_bytes: usize,
+    primitive_count: usize,
+    last_selected_frame: u64,
+}
+
+#[derive(Debug)]
+pub struct VirtualTerrainHierarchy {
+    capacity: VirtualTerrainCapacity,
+    source_identity_hash: Option<WorldSourceIdentityHash>,
+    directory_fingerprints: BTreeSet<[u8; 32]>,
+    nodes: BTreeMap<TerrainPageKey, TerrainHierarchyNode>,
+    roots: BTreeSet<TerrainPageKey>,
+    resident: BTreeMap<TerrainPageKey, ResidentPage>,
+    resident_encoded_bytes: usize,
+    resident_primitives: usize,
+    refined_last_cut: BTreeSet<TerrainPageKey>,
+    frame: u64,
+}
+
+impl VirtualTerrainHierarchy {
+    pub fn new(capacity: VirtualTerrainCapacity) -> Result<Self, VirtualTerrainError> {
+        if !capacity.validates() {
+            return Err(VirtualTerrainError::InvalidCapacity);
+        }
+        Ok(Self {
+            capacity,
+            source_identity_hash: None,
+            directory_fingerprints: BTreeSet::new(),
+            nodes: BTreeMap::new(),
+            roots: BTreeSet::new(),
+            resident: BTreeMap::new(),
+            resident_encoded_bytes: 0,
+            resident_primitives: 0,
+            refined_last_cut: BTreeSet::new(),
+            frame: 0,
+        })
+    }
+
+    pub fn source_identity_hash(&self) -> Option<WorldSourceIdentityHash> {
+        self.source_identity_hash
+    }
+
+    pub fn register_region_directory(
+        &mut self,
+        directory: &TerrainHierarchyDirectoryV1,
+    ) -> Result<(), VirtualTerrainError> {
+        self.register_directory(directory, true)
+    }
+
+    fn register_directory(
+        &mut self,
+        directory: &TerrainHierarchyDirectoryV1,
+        require_fixed_regions: bool,
+    ) -> Result<(), VirtualTerrainError> {
+        if !directory.validates_identity()
+            || (require_fixed_regions && !directory.validates_region_partition())
+        {
+            return Err(VirtualTerrainError::InvalidDirectory);
+        }
+        if self
+            .source_identity_hash
+            .is_some_and(|source| source != directory.source_identity_hash)
+        {
+            return Err(VirtualTerrainError::SourceMismatch);
+        }
+        if self
+            .directory_fingerprints
+            .contains(&directory.content_fingerprint)
+        {
+            return Ok(());
+        }
+        if self.directory_fingerprints.len() >= self.capacity.max_directories
+            || self.nodes.len().saturating_add(directory.nodes.len())
+                > self.capacity.max_directory_nodes
+        {
+            return Err(VirtualTerrainError::DirectoryCapacity);
+        }
+        for node in &directory.nodes {
+            if self
+                .nodes
+                .get(&node.key)
+                .is_some_and(|existing| existing != node)
+            {
+                return Err(VirtualTerrainError::DirectoryCollision(node.key));
+            }
+        }
+        self.source_identity_hash = Some(directory.source_identity_hash);
+        self.directory_fingerprints
+            .insert(directory.content_fingerprint);
+        for node in &directory.nodes {
+            self.nodes.entry(node.key).or_insert(*node);
+            if node.is_root {
+                self.roots.insert(node.key);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn install_page(&mut self, page: TerrainPageV1) -> Result<(), VirtualTerrainError> {
+        let Some(node) = self.nodes.get(&page.key) else {
+            return Err(VirtualTerrainError::UnknownPage(page.key));
+        };
+        if page.source_identity_hash
+            != self
+                .source_identity_hash
+                .unwrap_or(page.source_identity_hash)
+        {
+            return Err(VirtualTerrainError::SourceMismatch);
+        }
+        if !page.validates_identity()
+            || page.revision != node.revision
+            || page.content_fingerprint != node.content_fingerprint
+            || page.errors != node.errors
+            || page.topology != node.topology
+            || page.representation.kind() != node.representation
+        {
+            return Err(VirtualTerrainError::InvalidPage(page.key));
+        }
+        if let Some(existing) = self.resident.get(&page.key) {
+            return if existing.page.content_fingerprint == page.content_fingerprint
+                && existing.page.revision == page.revision
+            {
+                Ok(())
+            } else {
+                Err(VirtualTerrainError::StalePage(page.key))
+            };
+        }
+        let encoded_bytes = encode_terrain_page(&page)
+            .map_err(|_| VirtualTerrainError::InvalidPage(page.key))?
+            .len();
+        if encoded_bytes != node.encoded_bytes as usize {
+            return Err(VirtualTerrainError::InvalidPage(page.key));
+        }
+        let primitive_count = page_primitive_count(&page);
+        if self.resident.len() >= self.capacity.max_resident_pages {
+            return Err(VirtualTerrainError::ResidentPageCapacity);
+        }
+        if self.resident_encoded_bytes.saturating_add(encoded_bytes)
+            > self.capacity.max_resident_encoded_bytes
+        {
+            return Err(VirtualTerrainError::ResidentByteCapacity);
+        }
+        if self.resident_primitives.saturating_add(primitive_count)
+            > self.capacity.max_resident_primitives
+        {
+            return Err(VirtualTerrainError::ResidentPrimitiveCapacity);
+        }
+        self.resident_encoded_bytes += encoded_bytes;
+        self.resident_primitives += primitive_count;
+        self.resident.insert(
+            page.key,
+            ResidentPage {
+                page,
+                encoded_bytes,
+                primitive_count,
+                last_selected_frame: 0,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn resident_page(&self, key: TerrainPageKey) -> Option<&TerrainPageV1> {
+        self.resident.get(&key).map(|resident| &resident.page)
+    }
+
+    pub fn resident_usage(&self) -> (usize, usize, usize) {
+        (
+            self.resident.len(),
+            self.resident_encoded_bytes,
+            self.resident_primitives,
+        )
+    }
+
+    pub fn select_cut(
+        &mut self,
+        view: VirtualTerrainView,
+    ) -> Result<VirtualTerrainCut, VirtualTerrainError> {
+        if !view.validates() {
+            return Err(VirtualTerrainError::InvalidView);
+        }
+        self.frame = self.frame.wrapping_add(1).max(1);
+        let frame = self.frame;
+        let prior_refined = self.refined_last_cut.clone();
+        let mut builder = CutBuilder {
+            hierarchy: self,
+            view,
+            frame,
+            prior_refined: &prior_refined,
+            next_refined: BTreeSet::new(),
+            selected: Vec::new(),
+            requests: BTreeSet::new(),
+            ownerless_roots: Vec::new(),
+            visited_nodes: 0,
+            selected_primitives: 0,
+            selected_encoded_bytes: 0,
+            feedback_overflow: false,
+            selection_overflow: false,
+            traversal_overflow: false,
+            incoherent_replacement_groups: 0,
+        };
+        let roots = builder
+            .hierarchy
+            .roots
+            .iter()
+            .copied()
+            .filter(|key| page_is_visible(*key, view))
+            .collect::<Vec<_>>();
+        for root in roots {
+            if builder.selected.len() >= builder.hierarchy.capacity.max_selected_pages {
+                builder.selection_overflow = true;
+                builder.ownerless_roots.push(root);
+                builder.request(root);
+                continue;
+            }
+            builder.visit(root, true);
+        }
+        builder.selected.sort_unstable();
+        builder.ownerless_roots.sort_unstable();
+        let mut requested_pages = builder.requests.into_iter().collect::<Vec<_>>();
+        requested_pages.sort_unstable_by_key(|identity| identity.key);
+        let fingerprint = cut_fingerprint(&builder.selected, builder.hierarchy);
+        builder.hierarchy.refined_last_cut = builder.next_refined;
+        Ok(VirtualTerrainCut {
+            selected_pages: builder.selected,
+            requested_pages,
+            ownerless_roots: builder.ownerless_roots,
+            fingerprint,
+            visited_nodes: builder.visited_nodes,
+            selected_primitives: builder.selected_primitives,
+            selected_encoded_bytes: builder.selected_encoded_bytes,
+            feedback_overflow: builder.feedback_overflow,
+            selection_overflow: builder.selection_overflow,
+            traversal_overflow: builder.traversal_overflow,
+            incoherent_replacement_groups: builder.incoherent_replacement_groups,
+        })
+    }
+}
+
+struct CutBuilder<'a> {
+    hierarchy: &'a mut VirtualTerrainHierarchy,
+    view: VirtualTerrainView,
+    frame: u64,
+    prior_refined: &'a BTreeSet<TerrainPageKey>,
+    next_refined: BTreeSet<TerrainPageKey>,
+    selected: Vec<TerrainPageKey>,
+    requests: BTreeSet<TerrainPageTransferIdentity>,
+    ownerless_roots: Vec<TerrainPageKey>,
+    visited_nodes: usize,
+    selected_primitives: usize,
+    selected_encoded_bytes: usize,
+    feedback_overflow: bool,
+    selection_overflow: bool,
+    traversal_overflow: bool,
+    incoherent_replacement_groups: usize,
+}
+
+impl CutBuilder<'_> {
+    fn visit(&mut self, key: TerrainPageKey, root: bool) {
+        if self.visited_nodes >= self.hierarchy.capacity.max_traversal_nodes {
+            self.traversal_overflow = true;
+            if root {
+                self.ownerless_roots.push(key);
+            } else {
+                self.select(key);
+            }
+            return;
+        }
+        self.visited_nodes += 1;
+        let Some(node) = self.hierarchy.nodes.get(&key).cloned() else {
+            if root {
+                self.ownerless_roots.push(key);
+            }
+            return;
+        };
+        if !self.hierarchy.resident.contains_key(&key) {
+            self.request(key);
+            if root {
+                self.ownerless_roots.push(key);
+            }
+            return;
+        }
+        let threshold = if self.prior_refined.contains(&key) {
+            self.view.coarsen_below_pixels
+        } else {
+            self.view.refine_above_pixels
+        };
+        let projected_error = projected_page_error_pixels(&node, self.view);
+        let wants_refinement =
+            node.has_children && (self.view.force_exact_leaves || projected_error > threshold);
+        if wants_refinement
+            && self
+                .selected
+                .len()
+                .saturating_add(TERRAIN_PAGE_MAX_CHILDREN)
+                <= self.hierarchy.capacity.max_selected_pages
+        {
+            let Some(children) = key.children() else {
+                self.select(key);
+                return;
+            };
+            let child_pages = children
+                .iter()
+                .filter_map(|child| {
+                    self.hierarchy
+                        .resident
+                        .get(child)
+                        .map(|resident| resident.page.clone())
+                })
+                .collect::<Vec<_>>();
+            if child_pages.len() == TERRAIN_PAGE_MAX_CHILDREN {
+                let Some(parent) = self
+                    .hierarchy
+                    .resident
+                    .get(&key)
+                    .map(|resident| resident.page.clone())
+                else {
+                    self.request(key);
+                    if root {
+                        self.ownerless_roots.push(key);
+                    }
+                    return;
+                };
+                if validate_terrain_replacement(&parent, &child_pages).is_ok() {
+                    self.next_refined.insert(key);
+                    for child in children {
+                        self.visit(child, false);
+                    }
+                    return;
+                }
+                self.incoherent_replacement_groups =
+                    self.incoherent_replacement_groups.saturating_add(1);
+            } else {
+                for child in children {
+                    if !self.hierarchy.resident.contains_key(&child) {
+                        self.request(child);
+                    }
+                }
+            }
+        } else if wants_refinement {
+            self.selection_overflow = true;
+        }
+        self.select(key);
+    }
+
+    fn select(&mut self, key: TerrainPageKey) {
+        let Some(resident) = self.hierarchy.resident.get_mut(&key) else {
+            return;
+        };
+        if self.selected.len() >= self.hierarchy.capacity.max_selected_pages {
+            self.selection_overflow = true;
+            return;
+        }
+        resident.last_selected_frame = self.frame;
+        self.selected.push(key);
+        self.selected_primitives = self
+            .selected_primitives
+            .saturating_add(resident.primitive_count);
+        self.selected_encoded_bytes = self
+            .selected_encoded_bytes
+            .saturating_add(resident.encoded_bytes);
+    }
+
+    fn request(&mut self, key: TerrainPageKey) {
+        let Some(node) = self.hierarchy.nodes.get(&key) else {
+            return;
+        };
+        if self.requests.len() >= self.hierarchy.capacity.max_feedback_pages {
+            self.feedback_overflow = true;
+            return;
+        }
+        self.requests.insert(TerrainPageTransferIdentity {
+            key,
+            revision: node.revision,
+            content_fingerprint: node.content_fingerprint,
+        });
+    }
+}
+
+fn page_primitive_count(page: &TerrainPageV1) -> usize {
+    match &page.representation {
+        TerrainPageRepresentation::SteppedSurfaceResidual(surface) => surface.runs.len(),
+        TerrainPageRepresentation::SparseVoxelBrick(bricks) => bricks
+            .bricks
+            .iter()
+            .map(|brick| brick.material_indices.len())
+            .sum(),
+        TerrainPageRepresentation::SurfaceCluster(quads) => quads.len(),
+        TerrainPageRepresentation::TriangleCluster(cluster) => cluster.triangles.len(),
+    }
+}
+
+fn projected_page_error_pixels(node: &TerrainHierarchyNode, view: VirtualTerrainView) -> f64 {
+    if node.errors.unresolved_topology {
+        return f64::INFINITY;
+    }
+    let positional_error_millivoxels = node
+        .errors
+        .geometric_millivoxels
+        .max(node.errors.silhouette_millivoxels)
+        .max(node.errors.material_boundary_millivoxels);
+    let positional_error_metres = f64::from(positional_error_millivoxels) * 0.000_1;
+    let distance =
+        distance_to_page_metres(node.key, view.camera_position_metres).max(view.near_metres);
+    let projection_scale =
+        f64::from(view.viewport_height_pixels) / (2.0 * (view.vertical_fov_radians * 0.5).tan());
+    let positional_pixels = positional_error_metres * projection_scale / distance;
+    let normal_pixels = f64::from(node.errors.normal_milliradians)
+        * 0.001
+        * NORMAL_ERROR_PIXELS_PER_RADIAN
+        * view.wet_specular_sensitivity;
+    positional_pixels.max(normal_pixels)
+}
+
+fn distance_to_page_metres(key: TerrainPageKey, point: [f64; 3]) -> f64 {
+    let Some(bounds) = key.bounds() else {
+        return f64::INFINITY;
+    };
+    let minimum = bounds.min.as_array().map(|value| f64::from(value) * 0.1);
+    let maximum = bounds.max.as_array().map(|value| f64::from(value) * 0.1);
+    (0..3)
+        .map(|axis| {
+            let distance = if point[axis] < minimum[axis] {
+                minimum[axis] - point[axis]
+            } else if point[axis] > maximum[axis] {
+                point[axis] - maximum[axis]
+            } else {
+                0.0
+            };
+            distance * distance
+        })
+        .sum::<f64>()
+        .sqrt()
+}
+
+fn page_is_visible(key: TerrainPageKey, view: VirtualTerrainView) -> bool {
+    let Some(bounds) = key.bounds() else {
+        return false;
+    };
+    let minimum = bounds.min.as_array().map(|value| f64::from(value) * 0.1);
+    let maximum = bounds.max.as_array().map(|value| f64::from(value) * 0.1);
+    let center = [
+        (minimum[0] + maximum[0]) * 0.5,
+        (minimum[1] + maximum[1]) * 0.5,
+        (minimum[2] + maximum[2]) * 0.5,
+    ];
+    let radius = length([
+        maximum[0] - center[0],
+        maximum[1] - center[1],
+        maximum[2] - center[2],
+    ]);
+    let forward = normalize(view.camera_forward);
+    let mut right = cross(forward, [0.0, 1.0, 0.0]);
+    if length_squared(right) <= f64::EPSILON {
+        right = [1.0, 0.0, 0.0];
+    } else {
+        right = normalize(right);
+    }
+    let up = normalize(cross(right, forward));
+    let relative = subtract(center, view.camera_position_metres);
+    let depth = dot(relative, forward);
+    if depth + radius < view.near_metres || depth - radius > view.far_metres {
+        return false;
+    }
+    let tangent_vertical = (view.vertical_fov_radians * 0.5).tan();
+    let tangent_horizontal = tangent_vertical * view.aspect_ratio;
+    let horizontal_plane_scale = (1.0 + tangent_horizontal * tangent_horizontal).sqrt();
+    let vertical_plane_scale = (1.0 + tangent_vertical * tangent_vertical).sqrt();
+    dot(relative, right).abs() <= depth * tangent_horizontal + radius * horizontal_plane_scale
+        && dot(relative, up).abs() <= depth * tangent_vertical + radius * vertical_plane_scale
+}
+
+fn cut_fingerprint(selected: &[TerrainPageKey], hierarchy: &VirtualTerrainHierarchy) -> u64 {
+    let mut fingerprint = FINGERPRINT_OFFSET;
+    for key in selected {
+        fingerprint = fingerprint_byte(fingerprint, key.level);
+        for component in key.coord {
+            for byte in component.to_le_bytes() {
+                fingerprint = fingerprint_byte(fingerprint, byte);
+            }
+        }
+        if let Some(page) = hierarchy.resident.get(key) {
+            for byte in page.page.revision.to_le_bytes() {
+                fingerprint = fingerprint_byte(fingerprint, byte);
+            }
+            for byte in page.page.content_fingerprint {
+                fingerprint = fingerprint_byte(fingerprint, byte);
+            }
+        }
+    }
+    fingerprint
+}
+
+fn fingerprint_byte(fingerprint: u64, byte: u8) -> u64 {
+    (fingerprint ^ u64::from(byte)).wrapping_mul(FINGERPRINT_PRIME)
+}
+
+fn subtract(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+}
+
+fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+
+fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
+}
+
+fn length_squared(vector: [f64; 3]) -> f64 {
+    dot(vector, vector)
+}
+
+fn length(vector: [f64; 3]) -> f64 {
+    length_squared(vector).sqrt()
+}
+
+fn normalize(vector: [f64; 3]) -> [f64; 3] {
+    let inverse = length(vector).recip();
+    [
+        vector[0] * inverse,
+        vector[1] * inverse,
+        vector[2] * inverse,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use voxels_world::{
+        Material, TerrainErrorBounds, TerrainHierarchyDirectoryV1, VoxelCoord,
+        build_exact_cluster_terrain_parent, build_exact_terrain_page,
+    };
+
+    fn identity() -> WorldSourceIdentityHash {
+        WorldSourceIdentityHash::from_bytes([0x95; 32])
+    }
+
+    fn hierarchy_pages() -> Vec<TerrainPageV1> {
+        let root_key = TerrainPageKey {
+            level: 1,
+            coord: [-1, 0, -1],
+        };
+        let children = root_key
+            .children()
+            .unwrap()
+            .into_iter()
+            .map(|key| {
+                build_exact_terrain_page(identity(), key, 7, |coord| {
+                    if coord.y <= 10 {
+                        Material::Stone
+                    } else {
+                        Material::Air
+                    }
+                })
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let root = build_exact_cluster_terrain_parent(root_key, 7, &children).unwrap();
+        std::iter::once(root).chain(children).collect()
+    }
+
+    fn view(force_exact_leaves: bool) -> VirtualTerrainView {
+        VirtualTerrainView {
+            camera_position_metres: [-3.2, 3.2, 8.0],
+            camera_forward: [0.0, 0.0, -1.0],
+            vertical_fov_radians: 1.0,
+            aspect_ratio: 16.0 / 9.0,
+            viewport_height_pixels: 1080,
+            near_metres: 0.1,
+            far_metres: 1_000.0,
+            refine_above_pixels: 0.65,
+            coarsen_below_pixels: 0.35,
+            wet_specular_sensitivity: 1.0,
+            force_exact_leaves,
+        }
+    }
+
+    fn hierarchy() -> (VirtualTerrainHierarchy, Vec<TerrainPageV1>) {
+        let pages = hierarchy_pages();
+        let directory = TerrainHierarchyDirectoryV1::from_pages(&pages).unwrap();
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        hierarchy.register_directory(&directory, false).unwrap();
+        (hierarchy, pages)
+    }
+
+    #[test]
+    fn incomplete_refinement_keeps_parent_and_requests_the_whole_missing_group() {
+        let (mut hierarchy, pages) = hierarchy();
+        let root = pages.iter().find(|page| page.key.level == 1).unwrap();
+        hierarchy.install_page(root.clone()).unwrap();
+        let cut = hierarchy.select_cut(view(true)).unwrap();
+        assert!(cut.is_renderable());
+        assert_eq!(cut.selected_pages, vec![root.key]);
+        assert_eq!(cut.requested_pages.len(), TERRAIN_PAGE_MAX_CHILDREN);
+        assert!(cut.ownerless_roots.is_empty());
+    }
+
+    #[test]
+    fn complete_group_atomically_replaces_parent_without_overlap() {
+        let (mut hierarchy, pages) = hierarchy();
+        for page in pages {
+            hierarchy.install_page(page).unwrap();
+        }
+        let cut = hierarchy.select_cut(view(true)).unwrap();
+        assert!(cut.is_renderable());
+        assert_eq!(cut.selected_pages.len(), TERRAIN_PAGE_MAX_CHILDREN);
+        assert!(cut.selected_pages.iter().all(|key| key.level == 0));
+        assert!(cut.requested_pages.is_empty());
+        for (index, left) in cut.selected_pages.iter().enumerate() {
+            for right in &cut.selected_pages[index + 1..] {
+                assert_ne!(left.ancestor_at(1), Some(*right));
+                assert_ne!(right.ancestor_at(1), Some(*left));
+            }
+        }
+    }
+
+    #[test]
+    fn exact_parent_stays_selected_without_forced_leaf_refinement() {
+        let (mut hierarchy, pages) = hierarchy();
+        for page in pages {
+            hierarchy.install_page(page).unwrap();
+        }
+        let cut = hierarchy.select_cut(view(false)).unwrap();
+        assert_eq!(cut.selected_pages.len(), 1);
+        assert_eq!(cut.selected_pages[0].level, 1);
+        assert_eq!(cut.selected_primitives, 1);
+    }
+
+    #[test]
+    fn missing_root_is_explicitly_ownerless_and_requested() {
+        let (mut hierarchy, _) = hierarchy();
+        let cut = hierarchy.select_cut(view(false)).unwrap();
+        assert!(!cut.is_renderable());
+        assert_eq!(cut.ownerless_roots.len(), 1);
+        assert_eq!(cut.requested_pages.len(), 1);
+    }
+
+    #[test]
+    fn invalid_capacity_and_view_fail_closed() {
+        let mut capacity = VirtualTerrainCapacity::DEVELOPMENT_128_MIB;
+        capacity.max_feedback_pages = 0;
+        assert!(matches!(
+            VirtualTerrainHierarchy::new(capacity),
+            Err(VirtualTerrainError::InvalidCapacity)
+        ));
+        let (mut hierarchy, _) = hierarchy();
+        let mut invalid = view(false);
+        invalid.aspect_ratio = f64::NAN;
+        assert_eq!(
+            hierarchy.select_cut(invalid),
+            Err(VirtualTerrainError::InvalidView)
+        );
+    }
+
+    #[test]
+    fn page_distance_and_projection_use_canonical_ten_centimetre_scale() {
+        let key = TerrainPageKey {
+            level: 0,
+            coord: [0, 0, 0],
+        };
+        assert_eq!(distance_to_page_metres(key, [0.0, 0.0, 6.4]), 3.2);
+        let node = TerrainHierarchyNode {
+            key,
+            revision: 1,
+            content_fingerprint: [1; 32],
+            errors: TerrainErrorBounds {
+                geometric_millivoxels: 1_000,
+                ..TerrainErrorBounds::EXACT
+            },
+            topology: voxels_world::TerrainTopologyClass::SingleRunColumns,
+            representation: voxels_world::TerrainPageRepresentationKind::SurfaceCluster,
+            encoded_bytes: 1,
+            has_children: false,
+            is_root: true,
+        };
+        let mut projection_view = view(false);
+        projection_view.camera_position_metres = [1.6, 1.6, 6.4];
+        let pixels = projected_page_error_pixels(&node, projection_view);
+        assert!(pixels > 30.0 && pixels < 32.0);
+    }
+
+    #[test]
+    fn negative_region_root_is_conservatively_visible() {
+        let visible = page_is_visible(
+            TerrainPageKey {
+                level: 1,
+                coord: [-1, 0, -1],
+            },
+            view(false),
+        );
+        assert!(visible);
+        let _ = VoxelCoord::new(0, 0, 0);
+    }
+}

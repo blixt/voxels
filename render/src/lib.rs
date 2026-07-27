@@ -13,3 +13,4 @@ mod shader;
 pub mod shadow;
 pub mod ui;
 mod ui_gpu;
+pub mod virtual_terrain;
