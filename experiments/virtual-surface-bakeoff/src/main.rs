@@ -7,7 +7,8 @@ use std::time::Instant;
 use voxels_world::{
     BakeoffCamera, BakeoffCandidateKind, BakeoffVolume, Material, SurfaceSampleBlockRequest,
     VoxelBlockRequest, VoxelBounds, VoxelCoord, WorldProduct, WorldProductBatch,
-    WorldProductPriority, WorldProductRequest, WorldSourceEngine, run_virtual_surface_bakeoff,
+    WorldProductPriority, WorldProductRequest, WorldSourceEngine,
+    benchmark_clustered_page_rebuild, run_virtual_surface_bakeoff,
 };
 use voxels_world_service::LoadedWorldServiceConfig;
 
@@ -18,6 +19,9 @@ const SUPPLIED_SOURCE_HASH: &str =
     "82bdc2f68c8aa5a845927e52c2e3c5c781e96a7fe83b1bc723384df91daae09f";
 const DEFAULT_EDGE: u32 = 128;
 const BLOCK_EDGE: u32 = 32;
+const BLOCK_HEIGHT: u32 = 256;
+const SURFACE_BLOCK_EDGE: u32 = 256;
+const MAX_BATCH_ITEMS: usize = 256;
 const BELOW_SURFACE_VOXELS: i32 = 64;
 const ABOVE_SURFACE_VOXELS: i32 = 32;
 
@@ -54,7 +58,8 @@ struct Arguments {
     config: PathBuf,
     output: Option<PathBuf>,
     fixture: Fixture,
-    gpu: bool,
+    gpu: GpuMode,
+    cluster_only: bool,
     pose: usize,
     edge: u32,
     ray_grid: [u32; 2],
@@ -66,11 +71,19 @@ enum Fixture {
     TopologyStress,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum GpuMode {
+    Disabled,
+    Competition,
+    RasterOnly,
+}
+
 fn parse_arguments() -> Result<Arguments, Box<dyn std::error::Error>> {
     let mut config = PathBuf::from("config/world-service.toml");
     let mut output = None;
     let mut fixture = Fixture::Supplied;
-    let mut gpu = false;
+    let mut gpu = GpuMode::Disabled;
+    let mut cluster_only = false;
     let mut pose = 0usize;
     let mut edge = DEFAULT_EDGE;
     let mut ray_grid = [320, 180];
@@ -86,7 +99,11 @@ fn parse_arguments() -> Result<Arguments, Box<dyn std::error::Error>> {
                 _ => return Err("--fixture must be supplied or topology-stress".into()),
             };
         } else if argument == "--gpu" {
-            gpu = true;
+            gpu = GpuMode::Competition;
+        } else if argument == "--gpu-raster-only" {
+            gpu = GpuMode::RasterOnly;
+        } else if argument == "--cluster-only" {
+            cluster_only = true;
         } else if let Some(value) = argument.strip_prefix("--pose=") {
             pose = value.parse::<usize>()?.saturating_sub(1);
         } else if let Some(value) = argument.strip_prefix("--edge=") {
@@ -111,6 +128,7 @@ fn parse_arguments() -> Result<Arguments, Box<dyn std::error::Error>> {
         output,
         fixture,
         gpu,
+        cluster_only,
         pose,
         edge,
         ray_grid,
@@ -178,24 +196,6 @@ fn topology_stress_volume() -> Result<(BakeoffVolume, Value), Box<dyn std::error
     ))
 }
 
-fn single_product(
-    source: &dyn WorldSourceEngine,
-    request: WorldProductRequest,
-) -> Result<WorldProduct, Box<dyn std::error::Error>> {
-    let mut result = source.generate_batch(WorldProductBatch {
-        priority: WorldProductPriority::VisibleSurface,
-        requests: vec![request],
-    })?;
-    if result.items.len() != 1 {
-        return Err("world source returned the wrong item count".into());
-    }
-    result
-        .items
-        .pop()
-        .ok_or_else(|| "world source omitted the requested product".into())
-        .and_then(|item| item.result.map_err(Into::into))
-}
-
 fn sample_volume(
     source: &dyn WorldSourceEngine,
     pose: SuppliedPose,
@@ -211,29 +211,47 @@ fn sample_volume(
     let half = i32::try_from(edge / 2)?;
     let min_x = focus[0].saturating_sub(half);
     let min_z = focus[1].saturating_sub(half);
-    let surface_request = SurfaceSampleBlockRequest {
-        origin: [min_x, min_z],
-        sample_shape: [edge, edge],
-    };
-    let WorldProduct::SurfaceSampleBlock(surface) = single_product(
-        source,
-        WorldProductRequest::SurfaceSampleBlock(surface_request),
-    )?
-    else {
-        return Err("world source returned the wrong surface product".into());
-    };
-    let minimum_height = surface
-        .samples()
-        .iter()
-        .map(|sample| sample.height)
-        .min()
-        .ok_or("surface product is empty")?;
-    let maximum_height = surface
-        .samples()
-        .iter()
-        .map(|sample| sample.height.max(sample.water_level.unwrap_or(i32::MIN)))
-        .max()
-        .ok_or("surface product is empty")?;
+    let mut surface_requests = Vec::new();
+    let mut surface_z = 0u32;
+    while surface_z < edge {
+        let depth = SURFACE_BLOCK_EDGE.min(edge - surface_z);
+        let mut surface_x = 0u32;
+        while surface_x < edge {
+            let width = SURFACE_BLOCK_EDGE.min(edge - surface_x);
+            surface_requests.push(WorldProductRequest::SurfaceSampleBlock(
+                SurfaceSampleBlockRequest {
+                    origin: [
+                        min_x.saturating_add(i32::try_from(surface_x)?),
+                        min_z.saturating_add(i32::try_from(surface_z)?),
+                    ],
+                    sample_shape: [width, depth],
+                },
+            ));
+            surface_x += width;
+        }
+        surface_z += depth;
+    }
+    let mut minimum_height = i32::MAX;
+    let mut maximum_height = i32::MIN;
+    for requests in surface_requests.chunks(MAX_BATCH_ITEMS) {
+        let result = source.generate_batch(WorldProductBatch {
+            priority: WorldProductPriority::VisibleSurface,
+            requests: requests.to_vec(),
+        })?;
+        for item in result.items {
+            let WorldProduct::SurfaceSampleBlock(surface) = item.result? else {
+                return Err("world source returned the wrong surface product".into());
+            };
+            for sample in surface.samples() {
+                minimum_height = minimum_height.min(sample.height);
+                maximum_height =
+                    maximum_height.max(sample.height.max(sample.water_level.unwrap_or(i32::MIN)));
+            }
+        }
+    }
+    if minimum_height == i32::MAX || maximum_height == i32::MIN {
+        return Err("surface product is empty".into());
+    }
     let min_y = minimum_height.saturating_sub(BELOW_SURFACE_VOXELS);
     let max_y = maximum_height
         .saturating_add(ABOVE_SURFACE_VOXELS)
@@ -260,48 +278,55 @@ fn sample_volume(
         let mut x = 0u32;
         while x < edge {
             let width = BLOCK_EDGE.min(edge - x);
-            requests.push(WorldProductRequest::VoxelBlock(VoxelBlockRequest {
-                min: VoxelCoord::new(
-                    min_x.saturating_add(i32::try_from(x)?),
-                    min_y,
-                    min_z.saturating_add(i32::try_from(z)?),
-                ),
-                sample_shape: [width, height, depth],
-            }));
+            let mut y = 0u32;
+            while y < height {
+                let block_height = BLOCK_HEIGHT.min(height - y);
+                requests.push(WorldProductRequest::VoxelBlock(VoxelBlockRequest {
+                    min: VoxelCoord::new(
+                        min_x.saturating_add(i32::try_from(x)?),
+                        min_y.saturating_add(i32::try_from(y)?),
+                        min_z.saturating_add(i32::try_from(z)?),
+                    ),
+                    sample_shape: [width, block_height, depth],
+                }));
+                y += block_height;
+            }
             x += width;
         }
         z += depth;
     }
-    if requests.len() > 256 {
-        return Err("volume requires more than one bounded world-product batch".into());
-    }
-    let result = source.generate_batch(WorldProductBatch {
-        priority: WorldProductPriority::VisibleChunk,
-        requests,
-    })?;
-    for item in result.items {
-        let WorldProduct::VoxelBlock(block) = item.result? else {
-            return Err("world source returned the wrong voxel product".into());
-        };
-        let [width, block_height, depth] = block.request.sample_shape;
-        for local_z in 0..depth {
-            for local_y in 0..block_height {
-                for local_x in 0..width {
-                    let world = VoxelCoord::new(
-                        block.request.min.x.saturating_add(i32::try_from(local_x)?),
-                        block.request.min.y.saturating_add(i32::try_from(local_y)?),
-                        block.request.min.z.saturating_add(i32::try_from(local_z)?),
-                    );
-                    let material = block
-                        .sample(world)
-                        .ok_or("voxel product omitted an in-bounds sample")?;
-                    let global_x = usize::try_from(i64::from(world.x) - i64::from(bounds.min.x))?;
-                    let global_y = usize::try_from(i64::from(world.y) - i64::from(bounds.min.y))?;
-                    let global_z = usize::try_from(i64::from(world.z) - i64::from(bounds.min.z))?;
-                    let index = global_x
-                        + global_y * usize::try_from(edge)?
-                        + global_z * usize::try_from(edge)? * usize::try_from(height)?;
-                    materials[index] = material;
+    for requests in requests.chunks(MAX_BATCH_ITEMS) {
+        let result = source.generate_batch(WorldProductBatch {
+            priority: WorldProductPriority::VisibleChunk,
+            requests: requests.to_vec(),
+        })?;
+        for item in result.items {
+            let WorldProduct::VoxelBlock(block) = item.result? else {
+                return Err("world source returned the wrong voxel product".into());
+            };
+            let [width, block_height, depth] = block.request.sample_shape;
+            for local_z in 0..depth {
+                for local_y in 0..block_height {
+                    for local_x in 0..width {
+                        let world = VoxelCoord::new(
+                            block.request.min.x.saturating_add(i32::try_from(local_x)?),
+                            block.request.min.y.saturating_add(i32::try_from(local_y)?),
+                            block.request.min.z.saturating_add(i32::try_from(local_z)?),
+                        );
+                        let material = block
+                            .sample(world)
+                            .ok_or("voxel product omitted an in-bounds sample")?;
+                        let global_x =
+                            usize::try_from(i64::from(world.x) - i64::from(bounds.min.x))?;
+                        let global_y =
+                            usize::try_from(i64::from(world.y) - i64::from(bounds.min.y))?;
+                        let global_z =
+                            usize::try_from(i64::from(world.z) - i64::from(bounds.min.z))?;
+                        let index = global_x
+                            + global_y * usize::try_from(edge)?
+                            + global_z * usize::try_from(edge)? * usize::try_from(height)?;
+                        materials[index] = material;
+                    }
                 }
             }
         }
@@ -363,6 +388,36 @@ fn find_surface_focus(
         }
     }
     Err("camera centre ray did not reach authoritative terrain within 204.8 metres".into())
+}
+
+fn duration_distribution(values: &[std::time::Duration]) -> Value {
+    let mut milliseconds = values
+        .iter()
+        .map(|duration| duration.as_secs_f64() * 1000.0)
+        .collect::<Vec<_>>();
+    milliseconds.sort_by(f64::total_cmp);
+    if milliseconds.is_empty() {
+        return json!({
+            "minimum": 0,
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "maximum": 0,
+        });
+    }
+    let percentile = |quantile: f64| {
+        let index = (quantile * milliseconds.len() as f64).ceil() as usize;
+        milliseconds[index
+            .saturating_sub(1)
+            .min(milliseconds.len().saturating_sub(1))]
+    };
+    json!({
+        "minimum": milliseconds.first().copied().unwrap_or(0.0),
+        "p50": percentile(0.50),
+        "p95": percentile(0.95),
+        "p99": percentile(0.99),
+        "maximum": milliseconds.last().copied().unwrap_or(0.0),
+    })
 }
 
 #[allow(
@@ -447,13 +502,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let volume_sample_ms = volume_started.elapsed().as_secs_f64() * 1000.0;
+    let candidate_kinds: &[BakeoffCandidateKind] = if arguments.cluster_only {
+        &[BakeoffCandidateKind::ClusteredVirtualGeometry]
+    } else {
+        &BakeoffCandidateKind::ALL
+    };
     let (candidates, comparisons) = run_virtual_surface_bakeoff(
         &volume,
         camera,
         arguments.ray_grid,
-        &BakeoffCandidateKind::ALL,
+        candidate_kinds,
     )?;
-    let gpu_report = if arguments.gpu {
+    let cluster_edit = (!arguments.cluster_only).then(|| benchmark_clustered_page_rebuild(&volume));
+    let gpu_report = if arguments.gpu != GpuMode::Disabled {
         let clustered = candidates
             .iter()
             .find(|candidate| candidate.kind == BakeoffCandidateKind::ClusteredVirtualGeometry)
@@ -462,12 +523,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .gpu_quads()
             .ok_or("clustered candidate omitted exact GPU leaves")?;
         let exact_cluster_raster = pollster::block_on(gpu::run(camera, &quads))?;
-        let dense_voxel_ray_caster = pollster::block_on(gpu_voxel::run(camera, &volume))?;
-        json!({
-            "schema": "voxels.virtual-surface-gpu-competition.v1",
-            "exactClusterRaster": exact_cluster_raster,
-            "denseVoxelRayCasterLowerBound": dense_voxel_ray_caster,
-        })
+        if arguments.gpu == GpuMode::Competition {
+            let dense_voxel_ray_caster = pollster::block_on(gpu_voxel::run(camera, &volume))?;
+            json!({
+                "schema": "voxels.virtual-surface-gpu-competition.v1",
+                "exactClusterRaster": exact_cluster_raster,
+                "denseVoxelRayCasterLowerBound": dense_voxel_ray_caster,
+            })
+        } else {
+            json!({
+                "schema": "voxels.virtual-surface-gpu-raster-scaling.v1",
+                "exactClusterRaster": exact_cluster_raster,
+            })
+        }
     } else {
         Value::Null
     };
@@ -503,6 +571,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "sampleMs": volume_sample_ms,
         },
         "candidates": candidate_json,
+        "clusteredIncrementalBuild": cluster_edit.map(|metrics| json!({
+            "pageEdgeVoxels": metrics.page_edge_voxels,
+            "pageCount": metrics.page_count,
+            "initialBuildMs": metrics.initial_build_time.as_secs_f64() * 1000.0,
+            "initialFaceCount": metrics.initial_face_count,
+            "initialPrimitiveCount": metrics.initial_primitive_count,
+            "initialLogicalBytes": metrics.initial_logical_bytes,
+            "editSamples": metrics.edit_samples,
+            "boundaryEditSamples": metrics.boundary_edit_samples,
+            "maximumRebuiltPages": metrics.maximum_rebuilt_pages,
+            "rebuildMs": duration_distribution(&metrics.rebuild_times),
+            "exactRebuildViolations": metrics.exact_rebuild_violations,
+        })),
         "gpu": gpu_report,
     });
     let encoded = serde_json::to_string_pretty(&report)?;

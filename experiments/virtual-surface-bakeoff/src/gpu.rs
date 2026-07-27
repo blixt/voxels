@@ -18,6 +18,7 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADER: &str = r#"
 struct Camera {
   view_projection: mat4x4<f32>,
+  shadow_view_projection: mat4x4<f32>,
   eye_voxels: vec4<f32>,
 };
 
@@ -31,10 +32,13 @@ struct VertexOut {
   @location(0) @interpolate(flat) material_id: u32,
   @location(1) @interpolate(flat) normal: vec3<f32>,
   @location(2) world: vec3<f32>,
+  @location(3) shadow_position: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<storage, read> quads: array<Quad>;
+@group(1) @binding(0) var shadow_depth: texture_depth_2d;
+@group(1) @binding(1) var shadow_sampler: sampler_comparison;
 
 const CORNERS = array<vec2<f32>, 6>(
   vec2<f32>(0.0, 0.0),
@@ -73,6 +77,8 @@ fn vs_main(
   out.material_id = quad.extent.w;
   out.normal = normal;
   out.world = world;
+  out.shadow_position =
+    camera.shadow_view_projection * vec4<f32>(world - camera.eye_voxels.xyz, 1.0);
   return out;
 }
 
@@ -91,9 +97,21 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let view = normalize(camera.eye_voxels.xyz - input.world);
   let half_vector = normalize(sun + view);
   let diffuse = max(dot(input.normal, sun), 0.0);
+  let shadow_ndc = input.shadow_position.xyz / input.shadow_position.w;
+  let shadow_uv = vec2<f32>(shadow_ndc.x * 0.5 + 0.5, 0.5 - shadow_ndc.y * 0.5);
+  let in_shadow_map = all(shadow_uv >= vec2<f32>(0.0))
+    && all(shadow_uv <= vec2<f32>(1.0))
+    && shadow_ndc.z >= 0.0
+    && shadow_ndc.z <= 1.0;
+  let shadow_visibility = select(
+    1.0,
+    textureSampleCompare(shadow_depth, shadow_sampler, shadow_uv, shadow_ndc.z - 0.00015),
+    in_shadow_map,
+  );
   let wet_base = material_color(input.material_id) * 0.72;
   let specular = pow(max(dot(input.normal, half_vector), 0.0), 48.0) * 0.65;
-  let color = wet_base * (0.055 + diffuse * 0.28) + vec3<f32>(0.24, 0.31, 0.45) * specular;
+  let color = wet_base * (0.055 + diffuse * 0.28 * shadow_visibility)
+    + vec3<f32>(0.24, 0.31, 0.45) * specular * shadow_visibility;
   return vec4<f32>(color, 1.0);
 }
 "#;
@@ -102,7 +120,17 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuCamera {
     view_projection: [f32; 16],
+    shadow_view_projection: [f32; 16],
     eye_voxels: [f32; 4],
+}
+
+fn shadow_matrix() -> glam::Mat4 {
+    let light_direction = Vec3::new(-0.42, -0.78, -0.46).normalize();
+    let light_eye = -light_direction * 640.0;
+    let view = glam::camera::rh::view::look_at_mat4(light_eye, Vec3::ZERO, Vec3::Y);
+    let projection =
+        glam::camera::rh::proj::directx::orthographic(-420.0, 420.0, -420.0, 420.0, 1.0, 1_280.0);
+    projection * view
 }
 
 fn camera_uniform(camera: BakeoffCamera) -> GpuCamera {
@@ -122,19 +150,17 @@ fn camera_uniform(camera: BakeoffCamera) -> GpuCamera {
     let view = glam::camera::rh::view::look_to_mat4(Vec3::ZERO, forward, Vec3::Y);
     GpuCamera {
         view_projection: (projection * view).to_cols_array(),
+        shadow_view_projection: shadow_matrix().to_cols_array(),
         eye_voxels: [eye.x, eye.y, eye.z, 0.0],
     }
 }
 
 fn shadow_uniform(camera: BakeoffCamera) -> GpuCamera {
     let eye = Vec3::from_array(camera.eye_voxels.map(|value| value as f32));
-    let light_direction = Vec3::new(-0.42, -0.78, -0.46).normalize();
-    let light_eye = -light_direction * 640.0;
-    let view = glam::camera::rh::view::look_at_mat4(light_eye, Vec3::ZERO, Vec3::Y);
-    let projection =
-        glam::camera::rh::proj::directx::orthographic(-420.0, 420.0, -420.0, 420.0, 1.0, 1_280.0);
+    let matrix = shadow_matrix();
     GpuCamera {
-        view_projection: (projection * view).to_cols_array(),
+        view_projection: matrix.to_cols_array(),
+        shadow_view_projection: matrix.to_cols_array(),
         eye_voxels: [eye.x, eye.y, eye.z, 0.0],
     }
 }
@@ -226,11 +252,40 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
             },
         ],
     });
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("virtual surface raster pipeline layout"),
-        bind_group_layouts: &[Some(&bind_group_layout)],
-        immediate_size: 0,
-    });
+    let shadow_sample_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("virtual surface shadow sample bindings"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+            ],
+        });
+    let color_pipeline_layout =
+        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("virtual surface color pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout), Some(&shadow_sample_layout)],
+            immediate_size: 0,
+        });
+    let shadow_pipeline_layout =
+        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("virtual surface shadow pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
     let depth_state = wgpu::DepthStencilState {
         format: DEPTH_FORMAT,
         depth_write_enabled: Some(true),
@@ -240,7 +295,7 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
     };
     let color_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("virtual surface 4K wet night raster"),
-        layout: Some(&pipeline_layout),
+        layout: Some(&color_pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: Some("vs_main"),
@@ -269,7 +324,7 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
     });
     let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("virtual surface shadow raster"),
-        layout: Some(&pipeline_layout),
+        layout: Some(&shadow_pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: Some("vs_main"),
@@ -326,7 +381,7 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
         "virtual surface 4K color",
         [WIDTH, HEIGHT],
         COLOR_FORMAT,
-        wgpu::TextureUsages::RENDER_ATTACHMENT,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
     );
     let color_depth = target(
         &device,
@@ -340,11 +395,37 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
         "virtual surface shadow depth",
         [SHADOW_EDGE, SHADOW_EDGE],
         DEPTH_FORMAT,
-        wgpu::TextureUsages::RENDER_ATTACHMENT,
+        wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
     );
     let color_view = color_target.create_view(&Default::default());
     let color_depth_view = color_depth.create_view(&Default::default());
     let shadow_depth_view = shadow_depth.create_view(&Default::default());
+    let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("virtual surface shadow comparison sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        compare: Some(wgpu::CompareFunction::LessEqual),
+        ..Default::default()
+    });
+    let shadow_sample_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("virtual surface shadow sample bind group"),
+        layout: &shadow_sample_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&shadow_depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+            },
+        ],
+    });
 
     let encode_frame = |encoder: &mut wgpu::CommandEncoder,
                         query_set: Option<&wgpu::QuerySet>,
@@ -362,7 +443,7 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
                     view: &shadow_depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
+                        store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
                 }),
@@ -388,7 +469,7 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Discard,
+                        store: wgpu::StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -405,6 +486,7 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
             });
             pass.set_pipeline(&color_pipeline);
             pass.set_bind_group(0, &color_bind_group, &[]);
+            pass.set_bind_group(1, &shadow_sample_bind_group, &[]);
             pass.draw(0..6, 0..u32::try_from(quads.len()).unwrap_or(u32::MAX));
         }
     };
@@ -436,6 +518,14 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let color_bytes = u64::from(WIDTH) * u64::from(HEIGHT) * 4;
+    let shadow_bytes = u64::from(SHADOW_EDGE) * u64::from(SHADOW_EDGE) * 4;
+    let output_readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("virtual surface raster output verification"),
+        size: color_bytes + shadow_bytes,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("virtual surface timed raster frames"),
     });
@@ -445,6 +535,38 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
     // Keep the final measured pass from also being the command encoder's final pass.
     // On Metal the final end-of-pass counter sample can otherwise remain zero.
     encode_frame(&mut encoder, None, 0);
+    encoder.copy_texture_to_buffer(
+        color_target.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &output_readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(WIDTH * 4),
+                rows_per_image: Some(HEIGHT),
+            },
+        },
+        wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+    );
+    encoder.copy_texture_to_buffer(
+        shadow_depth.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &output_readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: color_bytes,
+                bytes_per_row: Some(SHADOW_EDGE * 4),
+                rows_per_image: Some(SHADOW_EDGE),
+            },
+        },
+        wgpu::Extent3d {
+            width: SHADOW_EDGE,
+            height: SHADOW_EDGE,
+            depth_or_array_layers: 1,
+        },
+    );
     encoder.resolve_query_set(&query_set, 0..query_count, &resolve, 0);
     encoder.copy_buffer_to_buffer(&resolve, 0, &readback, 0, query_bytes);
     queue.submit([encoder.finish()]);
@@ -466,6 +588,43 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
         .collect::<Vec<_>>();
     drop(mapped);
     readback.unmap();
+    let output_slice = output_readback.slice(..);
+    let (output_sender, output_receiver) = mpsc::channel();
+    output_slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = output_sender.send(result);
+    });
+    device.poll(wgpu::PollType::wait_indefinitely())?;
+    output_receiver.recv()??;
+    let output = output_slice.get_mapped_range()?;
+    let color_end = usize::try_from(color_bytes)?;
+    let primary_hit_pixels = output[..color_end]
+        .chunks_exact(4)
+        .filter(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
+        .count();
+    let mut shadow_hit_pixels = 0usize;
+    let mut invalid_shadow_pixels = 0usize;
+    for bytes in output[color_end..].chunks_exact(4) {
+        let mut raw = [0u8; 4];
+        raw.copy_from_slice(bytes);
+        let depth = f32::from_le_bytes(raw);
+        if !depth.is_finite() {
+            invalid_shadow_pixels += 1;
+        } else if depth < 0.999_999 {
+            shadow_hit_pixels += 1;
+        }
+    }
+    let output_hash = output.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    drop(output);
+    output_readback.unmap();
+    if primary_hit_pixels == 0 || shadow_hit_pixels == 0 || invalid_shadow_pixels != 0 {
+        return Err(format!(
+            "cluster raster GPU output is invalid: {primary_hit_pixels} primary hits, \
+             {shadow_hit_pixels} shadow hits, {invalid_shadow_pixels} invalid shadow samples"
+        )
+        .into());
+    }
     let mut shadow_ms = Vec::with_capacity(SAMPLE_FRAMES as usize);
     let mut color_ms = Vec::with_capacity(SAMPLE_FRAMES as usize);
     let mut discarded_timestamp_frames = 0u32;
@@ -527,12 +686,18 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
             "quadCount": quads.len(),
             "triangleCountPerPass": quads.len() * 2,
             "passesPerFrame": 2,
-            "state": "night-rain-wet-material",
+            "state": "night-rain-wet-material-shadow-sampled",
         },
         "gpuMs": {
             "shadow": distribution(&shadow_ms),
             "color": distribution(&color_ms),
             "total": distribution(&total_ms),
+        },
+        "readbackVerification": {
+            "primaryHitPixels": primary_hit_pixels,
+            "shadowHitPixels": shadow_hit_pixels,
+            "invalidShadowPixels": invalid_shadow_pixels,
+            "fnv1a64": format!("{output_hash:016x}"),
         },
         "allocatedBytes": {
             "quadPayload": std::mem::size_of_val(quads),

@@ -26,6 +26,15 @@ interface PoseReport {
   readonly capture: { readonly pose: number };
   readonly source: { readonly identityHash: string };
   readonly candidates: readonly CandidateReport[];
+  readonly clusteredIncrementalBuild: null | {
+    readonly pageEdgeVoxels: number;
+    readonly pageCount: number;
+    readonly editSamples: number;
+    readonly boundaryEditSamples: number;
+    readonly maximumRebuiltPages: number;
+    readonly rebuildMs: { readonly p95: number; readonly p99: number };
+    readonly exactRebuildViolations: number;
+  };
   readonly gpu: null | {
     readonly schema: string;
     readonly exactClusterRaster: {
@@ -229,6 +238,7 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
   ];
   const candidates = kinds.map((kind) => candidateSummary(reports, kind));
   const gpu = reports.find((report) => report.gpu !== null)?.gpu;
+  const incrementalBuilds = reports.map((report) => report.clusteredIncrementalBuild);
   if (
     gpu === null ||
     gpu === undefined ||
@@ -243,6 +253,19 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
     gpu.denseVoxelRayCasterLowerBound.readbackVerification.invalidShadowPixels !== 0
   ) {
     throw new Error("supplied-world bake-off omitted valid, nontrivial Metal/WGPU results");
+  }
+  if (
+    incrementalBuilds.some(
+      (build) =>
+        build === null ||
+        build.editSamples < 16 ||
+        build.boundaryEditSamples === 0 ||
+        build.maximumRebuiltPages > 7 ||
+        build.exactRebuildViolations !== 0 ||
+        !Number.isFinite(build.rebuildMs.p95),
+    )
+  ) {
+    throw new Error("clustered page-local edit rebuild gate failed");
   }
   const rayCasterPrimaryDecision =
     gpu.denseVoxelRayCasterLowerBound.gpuMs.total.p95 > 4
@@ -282,6 +305,7 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
       sparseBrickPrimaryRenderer: rayCasterPrimaryDecision,
       exactClusterRaster: "continue to hierarchy scaling and edit-build tests",
     },
+    clusteredIncrementalBuild: incrementalBuilds,
     topologyStress: {
       steppedSurface: topologyStepped,
       exactCapableViolations: topologyExactViolations,
@@ -300,6 +324,9 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
       steppedSurfaceOwnerlessHits: topologyStepped.ownerlessReferenceHits,
       clusteredRasterGpuP95Ms: gpu.exactClusterRaster.gpuMs.total.p95,
       denseVoxelRayCasterGpuP95Ms: gpu.denseVoxelRayCasterLowerBound.gpuMs.total.p95,
+      clusteredEditRebuildP95Ms: Math.max(
+        ...incrementalBuilds.map((build) => build?.rebuildMs.p95 ?? Number.POSITIVE_INFINITY),
+      ),
     },
     details: summary,
   };

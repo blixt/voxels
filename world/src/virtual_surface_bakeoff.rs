@@ -8,12 +8,14 @@ use crate::{
     CanonicalFaceKey, FaceAxis, Material, VoxelBounds, VoxelCoord, canonical_exposed_faces,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
 use std::fmt;
 use std::mem::size_of;
 use std::time::{Duration, Instant};
 
 const BRICK_EDGE: i32 = 8;
 const CLUSTER_QUADS: usize = 128;
+const CLUSTER_PAGE_EDGE: i32 = 32;
 const RAY_EPSILON: f64 = 1.0e-7;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -119,6 +121,17 @@ impl BakeoffVolume {
         let z = usize::try_from(i64::from(coord.z) - i64::from(self.bounds.min.z)).ok()?;
         x.checked_add(y.checked_mul(self.shape[0])?)?
             .checked_add(z.checked_mul(self.shape[0].checked_mul(self.shape[1])?)?)
+    }
+
+    fn set_material(&mut self, coord: VoxelCoord, material: Material) -> bool {
+        let Some(index) = self.index(coord) else {
+            return false;
+        };
+        let Some(value) = self.materials.get_mut(index) else {
+            return false;
+        };
+        *value = material;
+        true
     }
 }
 
@@ -558,7 +571,10 @@ struct ClusteredGeometry {
 
 impl ClusteredGeometry {
     fn build(volume: &BakeoffVolume) -> Self {
-        let quads = ExactGreedy::build(volume).quads;
+        Self::from_quads(ExactGreedy::build(volume).quads)
+    }
+
+    fn from_quads(quads: Vec<GreedyQuad>) -> Self {
         let mut ordered_quad_indices = (0..quads.len())
             .filter_map(|index| u32::try_from(index).ok())
             .collect::<Vec<_>>();
@@ -925,6 +941,212 @@ pub struct BakeoffComparison {
     pub depth_mismatches: u64,
     pub maximum_depth_error_voxels: f64,
     pub trace_time: Duration,
+}
+
+#[derive(Clone, Debug)]
+pub struct BakeoffClusterEditMetrics {
+    pub page_edge_voxels: u32,
+    pub page_count: usize,
+    pub initial_build_time: Duration,
+    pub initial_face_count: usize,
+    pub initial_primitive_count: usize,
+    pub initial_logical_bytes: usize,
+    pub edit_samples: usize,
+    pub boundary_edit_samples: usize,
+    pub maximum_rebuilt_pages: usize,
+    pub rebuild_times: Vec<Duration>,
+    pub exact_rebuild_violations: usize,
+}
+
+type ClusterPageKey = [i32; 3];
+
+#[derive(Clone, Debug)]
+struct ClusterPageBuild {
+    faces: Vec<CanonicalFaceKey>,
+    geometry: ClusteredGeometry,
+}
+
+fn cluster_page_key(coord: VoxelCoord) -> ClusterPageKey {
+    [
+        coord.x.div_euclid(CLUSTER_PAGE_EDGE),
+        coord.y.div_euclid(CLUSTER_PAGE_EDGE),
+        coord.z.div_euclid(CLUSTER_PAGE_EDGE),
+    ]
+}
+
+fn cluster_page_bounds(key: ClusterPageKey, volume: VoxelBounds) -> Option<VoxelBounds> {
+    let minimum = VoxelCoord::new(
+        key[0].saturating_mul(CLUSTER_PAGE_EDGE).max(volume.min.x),
+        key[1].saturating_mul(CLUSTER_PAGE_EDGE).max(volume.min.y),
+        key[2].saturating_mul(CLUSTER_PAGE_EDGE).max(volume.min.z),
+    );
+    let maximum = VoxelCoord::new(
+        key[0]
+            .saturating_add(1)
+            .saturating_mul(CLUSTER_PAGE_EDGE)
+            .min(volume.max.x),
+        key[1]
+            .saturating_add(1)
+            .saturating_mul(CLUSTER_PAGE_EDGE)
+            .min(volume.max.y),
+        key[2]
+            .saturating_add(1)
+            .saturating_mul(CLUSTER_PAGE_EDGE)
+            .min(volume.max.z),
+    );
+    VoxelBounds::new(minimum, maximum)
+}
+
+fn cluster_page_keys(bounds: VoxelBounds) -> Vec<ClusterPageKey> {
+    let minimum = cluster_page_key(bounds.min);
+    let maximum = cluster_page_key(VoxelCoord::new(
+        bounds.max.x.saturating_sub(1),
+        bounds.max.y.saturating_sub(1),
+        bounds.max.z.saturating_sub(1),
+    ));
+    let mut keys = Vec::new();
+    for z in minimum[2]..=maximum[2] {
+        for y in minimum[1]..=maximum[1] {
+            for x in minimum[0]..=maximum[0] {
+                keys.push([x, y, z]);
+            }
+        }
+    }
+    keys
+}
+
+fn build_cluster_page(
+    volume: &BakeoffVolume,
+    key: ClusterPageKey,
+) -> ClusterPageBuild {
+    let faces = cluster_page_bounds(key, volume.bounds).map_or_else(Vec::new, |bounds| {
+        canonical_exposed_faces(bounds, |coord| volume.material_at(coord))
+    });
+    let geometry = ClusteredGeometry::from_quads(merge_faces(&faces));
+    ClusterPageBuild { faces, geometry }
+}
+
+fn affected_cluster_pages(coord: VoxelCoord, bounds: VoxelBounds) -> BTreeSet<ClusterPageKey> {
+    let mut pages = BTreeSet::new();
+    for offset in [
+        [0, 0, 0],
+        [-1, 0, 0],
+        [1, 0, 0],
+        [0, -1, 0],
+        [0, 1, 0],
+        [0, 0, -1],
+        [0, 0, 1],
+    ] {
+        let neighbor = VoxelCoord::new(
+            coord.x.saturating_add(offset[0]),
+            coord.y.saturating_add(offset[1]),
+            coord.z.saturating_add(offset[2]),
+        );
+        if bounds.contains(neighbor) {
+            pages.insert(cluster_page_key(neighbor));
+        }
+    }
+    pages
+}
+
+/// Measures page-local exact-cluster repair for deterministic surface edits. Volume cloning and
+/// oracle comparison are intentionally outside the timed section: the result isolates the work a
+/// content-addressed page builder must perform after an edit.
+pub fn benchmark_clustered_page_rebuild(volume: &BakeoffVolume) -> BakeoffClusterEditMetrics {
+    let initial_started = Instant::now();
+    let mut pages = cluster_page_keys(volume.bounds)
+        .into_iter()
+        .map(|key| (key, build_cluster_page(volume, key)))
+        .collect::<BTreeMap<_, _>>();
+    let initial_build_time = initial_started.elapsed();
+    let initial_face_count = pages.values().map(|page| page.faces.len()).sum();
+    let initial_primitive_count = pages
+        .values()
+        .map(|page| page.geometry.quads.len())
+        .sum();
+    let initial_logical_bytes = pages
+        .values()
+        .map(|page| {
+            page.faces.capacity() * size_of::<CanonicalFaceKey>() + page.geometry.logical_bytes()
+        })
+        .sum();
+    let exposed = pages
+        .values()
+        .flat_map(|page| page.faces.iter().map(|face| face.solid_side))
+        .collect::<BTreeSet<_>>();
+    let boundary_score = |coord: VoxelCoord| {
+        [coord.x, coord.y, coord.z]
+            .into_iter()
+            .filter(|component| matches!(component.rem_euclid(CLUSTER_PAGE_EDGE), 0 | 31))
+            .count()
+    };
+    let mut preferred = exposed.iter().copied().collect::<Vec<_>>();
+    preferred.sort_unstable_by_key(|coord| (Reverse(boundary_score(*coord)), *coord));
+    let boundary_count = preferred
+        .iter()
+        .take_while(|coord| boundary_score(**coord) > 0)
+        .count();
+    let boundary_stride = boundary_count.div_ceil(24).max(1);
+    let mut edit_sites = preferred
+        .iter()
+        .take(boundary_count)
+        .step_by(boundary_stride)
+        .take(24)
+        .copied()
+        .collect::<Vec<_>>();
+    let interior = &preferred[boundary_count..];
+    let interior_stride = interior.len().div_ceil(8).max(1);
+    edit_sites.extend(interior.iter().step_by(interior_stride).take(8).copied());
+    let mut rebuild_times = Vec::with_capacity(edit_sites.len());
+    let mut boundary_edit_samples = 0;
+    let mut maximum_rebuilt_pages = 0;
+    let mut exact_rebuild_violations = 0;
+    for coord in &edit_sites {
+        let affected = affected_cluster_pages(*coord, volume.bounds);
+        maximum_rebuilt_pages = maximum_rebuilt_pages.max(affected.len());
+        boundary_edit_samples += usize::from(
+            boundary_score(*coord) > 0,
+        );
+        let mut edited = volume.clone();
+        if !edited.set_material(*coord, Material::Air) {
+            exact_rebuild_violations += 1;
+            continue;
+        }
+        let rebuild_started = Instant::now();
+        let replacements = affected
+            .iter()
+            .copied()
+            .map(|key| (key, build_cluster_page(&edited, key)))
+            .collect::<Vec<_>>();
+        rebuild_times.push(rebuild_started.elapsed());
+        for (key, faces) in replacements {
+            pages.insert(key, faces);
+        }
+        let mut actual = pages
+            .values()
+            .flat_map(|page| page.faces.iter().copied())
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        let expected =
+            canonical_exposed_faces(edited.bounds, |sample| edited.material_at(sample));
+        exact_rebuild_violations += usize::from(actual != expected);
+        for key in &affected {
+            pages.insert(*key, build_cluster_page(volume, *key));
+        }
+    }
+    BakeoffClusterEditMetrics {
+        page_edge_voxels: CLUSTER_PAGE_EDGE as u32,
+        page_count: pages.len(),
+        initial_build_time,
+        initial_face_count,
+        initial_primitive_count,
+        initial_logical_bytes,
+        edit_samples: edit_sites.len(),
+        boundary_edit_samples,
+        maximum_rebuilt_pages,
+        rebuild_times,
+        exact_rebuild_violations,
+    }
 }
 
 /// Runs the frozen-volume oracle at a deliberately lower sampling grid than presentation. The
@@ -1336,5 +1558,26 @@ mod tests {
         assert_eq!(comparisons[0].invented_hits, 0);
         assert_eq!(comparisons[0].material_mismatches, 0);
         assert_eq!(comparisons[0].depth_mismatches, 0);
+    }
+
+    #[test]
+    fn clustered_page_rebuilds_are_exact_for_negative_boundary_edits() {
+        let bounds =
+            VoxelBounds::new(VoxelCoord::new(-65, -33, -65), VoxelCoord::new(65, 34, 65))
+                .unwrap();
+        let volume = BakeoffVolume::from_sampler(bounds, |coord| {
+            if coord.y <= (coord.x.div_euclid(9) + coord.z.div_euclid(11)).rem_euclid(7) - 3 {
+                Material::Stone
+            } else {
+                Material::Air
+            }
+        })
+        .unwrap();
+        let metrics = benchmark_clustered_page_rebuild(&volume);
+        assert!(metrics.page_count > 1);
+        assert!(metrics.edit_samples >= 16);
+        assert!(metrics.boundary_edit_samples > 0);
+        assert!(metrics.maximum_rebuilt_pages <= 7);
+        assert_eq!(metrics.exact_rebuild_violations, 0);
     }
 }
