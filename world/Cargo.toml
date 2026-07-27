@@ -11,6 +11,10 @@ workspace = true
 [lib]
 name = "voxels_world"
 
+[features]
+default = []
+virtual-surface-bakeoff = []
+
 [dependencies]
 blake3 = "1"
 brotli = "8.0.4"

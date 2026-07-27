@@ -18,6 +18,9 @@ pub mod protocol;
 pub mod route;
 pub mod source;
 pub mod virtual_surface;
+#[cfg(any(test, feature = "virtual-surface-bakeoff"))]
+#[doc(hidden)]
+pub mod virtual_surface_bakeoff;
 pub mod visibility;
 
 pub use cave::{
@@ -88,6 +91,12 @@ pub use source::{
 pub use virtual_surface::{
     BoundaryCertificate, BoundarySide, BoundarySideCertificate, CanonicalBoundarySample,
     CanonicalFaceKey, FaceAxis, VoxelBounds, canonical_exposed_faces,
+};
+#[cfg(any(test, feature = "virtual-surface-bakeoff"))]
+#[doc(hidden)]
+pub use virtual_surface_bakeoff::{
+    BakeoffCamera, BakeoffCandidate, BakeoffCandidateKind, BakeoffComparison, BakeoffError,
+    BakeoffHit, BakeoffVolume, run_virtual_surface_bakeoff,
 };
 pub use visibility::{
     MAX_VISIBILITY_CELLS, MAX_VISIBILITY_PORTALS, PortalState, VisibilityCellId, VisibilityGraph,
