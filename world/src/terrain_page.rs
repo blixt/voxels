@@ -20,6 +20,7 @@ pub const TERRAIN_PAGE_MAX_COMPRESSED_BYTES: usize = 262_144;
 pub const TERRAIN_PAGE_MAX_PAYLOAD_BYTES: usize = 2_097_152;
 const SPARSE_BRICK_EDGE: u8 = 8;
 const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v1\0";
+const PARENT_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-parent-boundary-v1\0";
 const PAGE_MAGIC: &[u8; 4] = b"VXTP";
 const PAGE_HEADER_LEN: u16 = 344;
 const PAGE_COMPRESSION_BROTLI: u8 = 1;
@@ -144,6 +145,7 @@ pub struct TerrainMaterialRun {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SteppedSurfaceResidual {
+    pub sample_stride_voxels: u32,
     pub shape_xz: [u16; 2],
     pub columns: Vec<TerrainColumn>,
     pub runs: Vec<TerrainMaterialRun>,
@@ -227,6 +229,8 @@ impl TerrainPageV1 {
 pub enum TerrainPageBuildError {
     NotExactLeaf,
     InvalidPageKey,
+    InvalidChildGroup(TerrainReplacementError),
+    UnsupportedChildRepresentation,
     SamplingBoundsOverflow,
     MaterialPaletteOverflow,
     PayloadOverflow,
@@ -237,6 +241,12 @@ impl fmt::Display for TerrainPageBuildError {
         match self {
             Self::NotExactLeaf => formatter.write_str("exact page builder requires a level-0 key"),
             Self::InvalidPageKey => formatter.write_str("terrain page key has no valid bounds"),
+            Self::InvalidChildGroup(error) => {
+                write!(formatter, "terrain parent child group is invalid: {error}")
+            }
+            Self::UnsupportedChildRepresentation => {
+                formatter.write_str("exact terrain parent requires clustered child surfaces")
+            }
             Self::SamplingBoundsOverflow => {
                 formatter.write_str("terrain page halo exceeds canonical coordinates")
             }
@@ -249,6 +259,53 @@ impl fmt::Display for TerrainPageBuildError {
 }
 
 impl std::error::Error for TerrainPageBuildError {}
+
+impl From<TerrainReplacementError> for TerrainPageBuildError {
+    fn from(error: TerrainReplacementError) -> Self {
+        Self::InvalidChildGroup(error)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TerrainReplacementError {
+    InvalidParent,
+    WrongChildCount,
+    InvalidChild,
+    SourceMismatch,
+    IncompleteChildKeys,
+    ChildReferenceMismatch,
+    InternalBoundaryMismatch,
+    OuterBoundaryMismatch,
+    InvalidRepresentation,
+}
+
+impl fmt::Display for TerrainReplacementError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidParent => formatter.write_str("replacement parent is invalid"),
+            Self::WrongChildCount => formatter.write_str("replacement requires exactly 8 children"),
+            Self::InvalidChild => formatter.write_str("replacement child is invalid"),
+            Self::SourceMismatch => formatter.write_str("replacement source identities differ"),
+            Self::IncompleteChildKeys => {
+                formatter.write_str("replacement child keys do not complete the parent")
+            }
+            Self::ChildReferenceMismatch => {
+                formatter.write_str("replacement child revision or fingerprint differs")
+            }
+            Self::InternalBoundaryMismatch => {
+                formatter.write_str("replacement child boundaries do not cancel")
+            }
+            Self::OuterBoundaryMismatch => {
+                formatter.write_str("replacement outer boundary differs from the parent")
+            }
+            Self::InvalidRepresentation => {
+                formatter.write_str("replacement parent representation is invalid")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TerrainReplacementError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TerrainPageCodecError {
@@ -318,7 +375,47 @@ pub fn build_exact_terrain_page(
     source_identity_hash: WorldSourceIdentityHash,
     key: TerrainPageKey,
     revision: u64,
+    material_at: impl FnMut(VoxelCoord) -> Material,
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    build_exact_terrain_page_with_policy(
+        source_identity_hash,
+        key,
+        revision,
+        material_at,
+        TerrainLeafPolicy::Clustered,
+    )
+}
+
+/// Builds the same exact owner while choosing the smallest raw payload among legal encodings.
+/// This is useful for producer experiments; the production hierarchy begins with clustered leaves
+/// so exact parents can be formed without recovering occupancy from a surface-only payload.
+pub fn build_compact_exact_terrain_page(
+    source_identity_hash: WorldSourceIdentityHash,
+    key: TerrainPageKey,
+    revision: u64,
+    material_at: impl FnMut(VoxelCoord) -> Material,
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    build_exact_terrain_page_with_policy(
+        source_identity_hash,
+        key,
+        revision,
+        material_at,
+        TerrainLeafPolicy::Compact,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum TerrainLeafPolicy {
+    Clustered,
+    Compact,
+}
+
+fn build_exact_terrain_page_with_policy(
+    source_identity_hash: WorldSourceIdentityHash,
+    key: TerrainPageKey,
+    revision: u64,
     mut material_at: impl FnMut(VoxelCoord) -> Material,
+    policy: TerrainLeafPolicy,
 ) -> Result<TerrainPageV1, TerrainPageBuildError> {
     if key.level != 0 {
         return Err(TerrainPageBuildError::NotExactLeaf);
@@ -380,15 +477,24 @@ pub fn build_exact_terrain_page(
     let (stepped, topology) = build_stepped(bounds, &samples, &palette_indices)?;
     let sparse = build_sparse(bounds, &samples, &palette_indices);
     let clusters = merge_surface_faces(&faces, &palette_indices);
-    let representation = if topology == TerrainTopologyClass::SingleRunColumns {
-        TerrainPageRepresentation::SteppedSurfaceResidual(stepped)
+    let cluster_payload = TerrainPageRepresentation::SurfaceCluster(clusters);
+    let representation = if matches!(policy, TerrainLeafPolicy::Clustered) {
+        cluster_payload
+    } else if topology == TerrainTopologyClass::SingleRunColumns {
+        let stepped_payload = TerrainPageRepresentation::SteppedSurfaceResidual(stepped);
+        if representation_bytes(&cluster_payload).len()
+            <= representation_bytes(&stepped_payload).len()
+        {
+            cluster_payload
+        } else {
+            stepped_payload
+        }
     } else {
         let sparse_payload =
             TerrainPageRepresentation::SparseVoxelBrick(SparseVoxelBrickPayload {
                 brick_edge: SPARSE_BRICK_EDGE,
                 bricks: sparse,
             });
-        let cluster_payload = TerrainPageRepresentation::SurfaceCluster(clusters);
         if representation_bytes(&cluster_payload).len() <= representation_bytes(&sparse_payload).len()
         {
             cluster_payload
@@ -414,6 +520,384 @@ pub fn build_exact_terrain_page(
     };
     page.content_fingerprint = terrain_page_fingerprint(&page);
     Ok(page)
+}
+
+/// Assembles a parent from an already-built representation and an exact complete child group.
+///
+/// Builders may choose any payload encoding, but cannot choose their own ownership boundary or
+/// child identity. This function derives those fields from the children and refuses incoherent
+/// groups before assigning the parent's semantic fingerprint.
+pub fn assemble_terrain_parent(
+    key: TerrainPageKey,
+    revision: u64,
+    errors: TerrainErrorBounds,
+    topology: TerrainTopologyClass,
+    materials: Vec<TerrainMaterialCoverage>,
+    representation: TerrainPageRepresentation,
+    children: &[TerrainPageV1],
+) -> Result<TerrainPageV1, TerrainReplacementError> {
+    if key.level == 0 {
+        return Err(TerrainReplacementError::InvalidParent);
+    }
+    let bounds = key
+        .bounds()
+        .ok_or(TerrainReplacementError::InvalidParent)?;
+    validate_children_for_key(key, children)?;
+    let source_identity_hash = children[0].source_identity_hash;
+    let boundary_fingerprints = aggregate_child_boundaries(key, children)?;
+    let mut child_references = children
+        .iter()
+        .map(|child| TerrainPageChild {
+            key: child.key,
+            revision: child.revision,
+            content_fingerprint: child.content_fingerprint,
+        })
+        .collect::<Vec<_>>();
+    child_references.sort_unstable_by_key(|child| child.key);
+    let mut page = TerrainPageV1 {
+        source_identity_hash,
+        key,
+        revision,
+        bounds,
+        children: child_references,
+        errors,
+        topology,
+        boundary_fingerprints,
+        materials,
+        representation,
+        content_fingerprint: [0; 32],
+    };
+    if !representation_is_valid(&page) {
+        return Err(TerrainReplacementError::InvalidRepresentation);
+    }
+    page.content_fingerprint = terrain_page_fingerprint(&page);
+    Ok(page)
+}
+
+/// Builds an exact parent by taking the set union of eight exact clustered child surfaces.
+///
+/// Child quads are expanded only to canonical unit-face keys, deduplicated, and greedily merged
+/// again. That deliberately trades build time for a simple proof: the parent renders exactly the
+/// same owned 10 cm faces as the complete child group, including across negative coordinates and
+/// former child boundaries. No geometric simplification is performed by this builder.
+pub fn build_exact_cluster_terrain_parent(
+    key: TerrainPageKey,
+    revision: u64,
+    children: &[TerrainPageV1],
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    if key.level == 0 || key.bounds().is_none() {
+        return Err(TerrainPageBuildError::InvalidPageKey);
+    }
+    validate_children_for_key(key, children)?;
+    if children
+        .iter()
+        .any(|child| !matches!(child.representation, TerrainPageRepresentation::SurfaceCluster(_)))
+    {
+        return Err(TerrainPageBuildError::UnsupportedChildRepresentation);
+    }
+
+    let mut occupied_by_material = BTreeMap::<u16, u32>::new();
+    let mut exposed_by_material = BTreeMap::<u16, u32>::new();
+    let mut material_by_id = BTreeMap::<u16, Material>::new();
+    for child in children {
+        for coverage in &child.materials {
+            let material_id = coverage.material.id();
+            material_by_id.insert(material_id, coverage.material);
+            let occupied = occupied_by_material.entry(material_id).or_default();
+            *occupied = occupied.saturating_add(coverage.occupied_voxels);
+            let exposed = exposed_by_material.entry(material_id).or_default();
+            *exposed = exposed.saturating_add(coverage.exposed_unit_faces);
+        }
+    }
+    let mut palette_indices = BTreeMap::new();
+    let mut materials = Vec::with_capacity(material_by_id.len());
+    for (index, (material_id, material)) in material_by_id.into_iter().enumerate() {
+        let material_index =
+            u8::try_from(index).map_err(|_| TerrainPageBuildError::MaterialPaletteOverflow)?;
+        palette_indices.insert(material_id, material_index);
+        materials.push(TerrainMaterialCoverage {
+            material,
+            occupied_voxels: occupied_by_material
+                .get(&material_id)
+                .copied()
+                .unwrap_or_default(),
+            exposed_unit_faces: exposed_by_material
+                .get(&material_id)
+                .copied()
+                .unwrap_or_default(),
+        });
+    }
+
+    let mut faces = BTreeSet::new();
+    for child in children {
+        let TerrainPageRepresentation::SurfaceCluster(quads) = &child.representation else {
+            unreachable!("child representation was checked above");
+        };
+        for quad in quads {
+            let material_id = child.materials[usize::from(quad.material_index)]
+                .material
+                .id();
+            expand_surface_quad(*quad, material_id, &mut faces);
+        }
+    }
+    let faces = faces.into_iter().collect::<Vec<_>>();
+    let representation =
+        TerrainPageRepresentation::SurfaceCluster(merge_surface_faces(&faces, &palette_indices));
+    if representation_bytes(&representation).len() > TERRAIN_PAGE_MAX_PAYLOAD_BYTES {
+        return Err(TerrainPageBuildError::PayloadOverflow);
+    }
+    let errors = children
+        .iter()
+        .fold(TerrainErrorBounds::EXACT, |aggregate, child| {
+            max_error_bounds(aggregate, child.errors)
+        });
+    let topology = if children
+        .iter()
+        .any(|child| child.topology == TerrainTopologyClass::Volumetric)
+    {
+        TerrainTopologyClass::Volumetric
+    } else {
+        TerrainTopologyClass::SingleRunColumns
+    };
+    let page = assemble_terrain_parent(
+        key,
+        revision,
+        errors,
+        topology,
+        materials,
+        representation,
+        children,
+    )?;
+    encode_terrain_page(&page).map_err(|_| TerrainPageBuildError::PayloadOverflow)?;
+    Ok(page)
+}
+
+fn max_error_bounds(left: TerrainErrorBounds, right: TerrainErrorBounds) -> TerrainErrorBounds {
+    TerrainErrorBounds {
+        geometric_millivoxels: left
+            .geometric_millivoxels
+            .max(right.geometric_millivoxels),
+        silhouette_millivoxels: left
+            .silhouette_millivoxels
+            .max(right.silhouette_millivoxels),
+        material_boundary_millivoxels: left
+            .material_boundary_millivoxels
+            .max(right.material_boundary_millivoxels),
+        normal_milliradians: left
+            .normal_milliradians
+            .max(right.normal_milliradians),
+        unresolved_topology: left.unresolved_topology || right.unresolved_topology,
+    }
+}
+
+fn expand_surface_quad(
+    quad: TerrainSurfaceQuad,
+    material_id: u16,
+    faces: &mut BTreeSet<CanonicalFaceKey>,
+) {
+    for delta_v in 0..i32::from(quad.height) {
+        for delta_u in 0..i32::from(quad.width) {
+            let u = quad.u + delta_u;
+            let v = quad.v + delta_v;
+            let normal = if quad.positive {
+                quad.plane - 1
+            } else {
+                quad.plane
+            };
+            let solid_side = match quad.axis {
+                FaceAxis::X => VoxelCoord::new(normal, u, v),
+                FaceAxis::Y => VoxelCoord::new(u, normal, v),
+                FaceAxis::Z => VoxelCoord::new(u, v, normal),
+            };
+            faces.insert(CanonicalFaceKey {
+                axis: quad.axis,
+                plane: quad.plane,
+                u,
+                v,
+                solid_side,
+                material_id,
+            });
+        }
+    }
+}
+
+pub fn validate_terrain_replacement(
+    parent: &TerrainPageV1,
+    children: &[TerrainPageV1],
+) -> Result<(), TerrainReplacementError> {
+    if !parent.validates_identity() || parent.key.level == 0 {
+        return Err(TerrainReplacementError::InvalidParent);
+    }
+    validate_children_for_key(parent.key, children)?;
+    let references = children
+        .iter()
+        .map(|child| {
+            (
+                child.key,
+                (child.revision, child.content_fingerprint),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if parent.children.iter().any(|reference| {
+        references.get(&reference.key)
+            != Some(&(reference.revision, reference.content_fingerprint))
+    }) {
+        return Err(TerrainReplacementError::ChildReferenceMismatch);
+    }
+    if aggregate_child_boundaries(parent.key, children)? != parent.boundary_fingerprints {
+        return Err(TerrainReplacementError::OuterBoundaryMismatch);
+    }
+    Ok(())
+}
+
+fn validate_children_for_key(
+    parent_key: TerrainPageKey,
+    children: &[TerrainPageV1],
+) -> Result<(), TerrainReplacementError> {
+    if children.len() != TERRAIN_PAGE_MAX_CHILDREN {
+        return Err(TerrainReplacementError::WrongChildCount);
+    }
+    if children.iter().any(|child| !child.validates_identity()) {
+        return Err(TerrainReplacementError::InvalidChild);
+    }
+    let source = children[0].source_identity_hash;
+    if children
+        .iter()
+        .any(|child| child.source_identity_hash != source)
+    {
+        return Err(TerrainReplacementError::SourceMismatch);
+    }
+    let expected = parent_key
+        .children()
+        .ok_or(TerrainReplacementError::InvalidParent)?;
+    let actual = children
+        .iter()
+        .map(|child| child.key)
+        .collect::<BTreeSet<_>>();
+    if actual != BTreeSet::from(expected) {
+        return Err(TerrainReplacementError::IncompleteChildKeys);
+    }
+    for (index, left) in children.iter().enumerate() {
+        for right in &children[index + 1..] {
+            let Some((left_side, right_side)) = adjacent_page_sides(left.bounds, right.bounds) else {
+                continue;
+            };
+            if left.boundary_fingerprints[left_side as usize]
+                != right.boundary_fingerprints[right_side as usize]
+            {
+                return Err(TerrainReplacementError::InternalBoundaryMismatch);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn aggregate_child_boundaries(
+    parent_key: TerrainPageKey,
+    children: &[TerrainPageV1],
+) -> Result<[[u8; 32]; 6], TerrainReplacementError> {
+    validate_children_for_key(parent_key, children)?;
+    let parent_bounds = parent_key
+        .bounds()
+        .ok_or(TerrainReplacementError::InvalidParent)?;
+    let mut fingerprints = [[0u8; 32]; 6];
+    for side in BoundarySide::ALL {
+        let mut side_children = children
+            .iter()
+            .filter(|child| boundary_plane(child.bounds, side) == boundary_plane(parent_bounds, side))
+            .collect::<Vec<_>>();
+        side_children.sort_unstable_by_key(|child| tangential_page_coord(child.key, side.axis()));
+        if side_children.len() != 4 {
+            return Err(TerrainReplacementError::IncompleteChildKeys);
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(PARENT_BOUNDARY_DOMAIN);
+        hasher.update(&[side.axis() as u8]);
+        hasher.update(&boundary_plane(parent_bounds, side).to_le_bytes());
+        hasher.update(&[parent_key.level]);
+        for child in side_children {
+            let tangent = tangential_page_coord(child.key, side.axis());
+            hasher.update(&tangent[0].to_le_bytes());
+            hasher.update(&tangent[1].to_le_bytes());
+            hasher.update(&child.boundary_fingerprints[side as usize]);
+        }
+        fingerprints[side as usize] = *hasher.finalize().as_bytes();
+    }
+    Ok(fingerprints)
+}
+
+fn boundary_plane(bounds: VoxelBounds, side: BoundarySide) -> i32 {
+    match side {
+        BoundarySide::NegativeX => bounds.min.x,
+        BoundarySide::PositiveX => bounds.max.x,
+        BoundarySide::NegativeY => bounds.min.y,
+        BoundarySide::PositiveY => bounds.max.y,
+        BoundarySide::NegativeZ => bounds.min.z,
+        BoundarySide::PositiveZ => bounds.max.z,
+    }
+}
+
+fn tangential_page_coord(key: TerrainPageKey, axis: FaceAxis) -> [i32; 2] {
+    match axis {
+        FaceAxis::X => [key.coord[1], key.coord[2]],
+        FaceAxis::Y => [key.coord[0], key.coord[2]],
+        FaceAxis::Z => [key.coord[0], key.coord[1]],
+    }
+}
+
+fn adjacent_page_sides(
+    left: VoxelBounds,
+    right: VoxelBounds,
+) -> Option<(BoundarySide, BoundarySide)> {
+    if left.max.x == right.min.x
+        && left.min.y == right.min.y
+        && left.max.y == right.max.y
+        && left.min.z == right.min.z
+        && left.max.z == right.max.z
+    {
+        return Some((BoundarySide::PositiveX, BoundarySide::NegativeX));
+    }
+    if right.max.x == left.min.x
+        && left.min.y == right.min.y
+        && left.max.y == right.max.y
+        && left.min.z == right.min.z
+        && left.max.z == right.max.z
+    {
+        return Some((BoundarySide::NegativeX, BoundarySide::PositiveX));
+    }
+    if left.max.y == right.min.y
+        && left.min.x == right.min.x
+        && left.max.x == right.max.x
+        && left.min.z == right.min.z
+        && left.max.z == right.max.z
+    {
+        return Some((BoundarySide::PositiveY, BoundarySide::NegativeY));
+    }
+    if right.max.y == left.min.y
+        && left.min.x == right.min.x
+        && left.max.x == right.max.x
+        && left.min.z == right.min.z
+        && left.max.z == right.max.z
+    {
+        return Some((BoundarySide::NegativeY, BoundarySide::PositiveY));
+    }
+    if left.max.z == right.min.z
+        && left.min.x == right.min.x
+        && left.max.x == right.max.x
+        && left.min.y == right.min.y
+        && left.max.y == right.max.y
+    {
+        return Some((BoundarySide::PositiveZ, BoundarySide::NegativeZ));
+    }
+    if right.max.z == left.min.z
+        && left.min.x == right.min.x
+        && left.max.x == right.max.x
+        && left.min.y == right.min.y
+        && left.max.y == right.max.y
+    {
+        return Some((BoundarySide::NegativeZ, BoundarySide::PositiveZ));
+    }
+    None
 }
 
 fn material_coverage(
@@ -521,6 +1005,7 @@ fn build_stepped(
     }
     Ok((
         SteppedSurfaceResidual {
+            sample_stride_voxels: 1,
             shape_xz: [
                 TERRAIN_PAGE_EDGE_SAMPLES as u16,
                 TERRAIN_PAGE_EDGE_SAMPLES as u16,
@@ -716,6 +1201,7 @@ fn representation_bytes(representation: &TerrainPageRepresentation) -> Vec<u8> {
     let mut bytes = Vec::new();
     match representation {
         TerrainPageRepresentation::SteppedSurfaceResidual(surface) => {
+            push_u32(&mut bytes, surface.sample_stride_voxels);
             push_u16(&mut bytes, surface.shape_xz[0]);
             push_u16(&mut bytes, surface.shape_xz[1]);
             push_u32(&mut bytes, surface.columns.len() as u32);
@@ -779,6 +1265,8 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
     match &page.representation {
         TerrainPageRepresentation::SteppedSurfaceResidual(surface) => {
             page.topology == TerrainTopologyClass::SingleRunColumns
+                && surface.sample_stride_voxels
+                    == 1u32.checked_shl(u32::from(page.key.level)).unwrap_or(0)
                 && surface.shape_xz
                     == [
                         TERRAIN_PAGE_EDGE_SAMPLES as u16,
@@ -793,7 +1281,7 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
                     end <= surface.runs.len()
                         && surface.runs[start..end].windows(2).all(|runs| {
                             runs[0].minimum_y + i32::from(runs[0].length)
-                                <= runs[1].minimum_y
+                                == runs[1].minimum_y
                         })
                 })
                 && surface.runs.iter().all(|run| {
@@ -844,21 +1332,24 @@ fn quad_inside_bounds(quad: TerrainSurfaceQuad, bounds: VoxelBounds) -> bool {
     let height = i32::from(quad.height);
     match quad.axis {
         FaceAxis::X => {
-            (bounds.min.x..=bounds.max.x).contains(&quad.plane)
+            ((quad.positive && (bounds.min.x + 1..=bounds.max.x).contains(&quad.plane))
+                || (!quad.positive && (bounds.min.x..bounds.max.x).contains(&quad.plane)))
                 && quad.u >= bounds.min.y
                 && quad.v >= bounds.min.z
                 && quad.u.saturating_add(width) <= bounds.max.y
                 && quad.v.saturating_add(height) <= bounds.max.z
         }
         FaceAxis::Y => {
-            (bounds.min.y..=bounds.max.y).contains(&quad.plane)
+            ((quad.positive && (bounds.min.y + 1..=bounds.max.y).contains(&quad.plane))
+                || (!quad.positive && (bounds.min.y..bounds.max.y).contains(&quad.plane)))
                 && quad.u >= bounds.min.x
                 && quad.v >= bounds.min.z
                 && quad.u.saturating_add(width) <= bounds.max.x
                 && quad.v.saturating_add(height) <= bounds.max.z
         }
         FaceAxis::Z => {
-            (bounds.min.z..=bounds.max.z).contains(&quad.plane)
+            ((quad.positive && (bounds.min.z + 1..=bounds.max.z).contains(&quad.plane))
+                || (!quad.positive && (bounds.min.z..bounds.max.z).contains(&quad.plane)))
                 && quad.u >= bounds.min.x
                 && quad.v >= bounds.min.y
                 && quad.u.saturating_add(width) <= bounds.max.x
@@ -1159,6 +1650,7 @@ fn decode_representation(
     let mut cursor = PageCursor::new(payload);
     let representation = match kind {
         TerrainPageRepresentationKind::SteppedSurfaceResidual => {
+            let sample_stride_voxels = cursor.u32()?;
             let shape_xz = [cursor.u16()?, cursor.u16()?];
             let column_count = cursor.u32()? as usize;
             let run_count = cursor.u32()? as usize;
@@ -1185,6 +1677,7 @@ fn decode_representation(
                 });
             }
             TerrainPageRepresentation::SteppedSurfaceResidual(SteppedSurfaceResidual {
+                sample_stride_voxels,
                 shape_xz,
                 columns,
                 runs,
@@ -1408,6 +1901,37 @@ mod tests {
         }
     }
 
+    fn solid_stepped_leaf(key: TerrainPageKey, revision: u64) -> TerrainPageV1 {
+        let mut page =
+            build_exact_terrain_page(identity(), key, revision, |_| Material::Stone).unwrap();
+        let runs = (0..TERRAIN_PAGE_EDGE_SAMPLES * TERRAIN_PAGE_EDGE_SAMPLES)
+            .map(|_| TerrainMaterialRun {
+                minimum_y: page.bounds.min.y,
+                length: TERRAIN_PAGE_EDGE_SAMPLES as u16,
+                material_index: 0,
+            })
+            .collect::<Vec<_>>();
+        let columns = (0..runs.len())
+            .map(|index| TerrainColumn {
+                first_run: index as u32,
+                run_count: 1,
+            })
+            .collect();
+        page.representation =
+            TerrainPageRepresentation::SteppedSurfaceResidual(SteppedSurfaceResidual {
+                sample_stride_voxels: 1,
+                shape_xz: [
+                    TERRAIN_PAGE_EDGE_SAMPLES as u16,
+                    TERRAIN_PAGE_EDGE_SAMPLES as u16,
+                ],
+                columns,
+                runs,
+            });
+        page.content_fingerprint = terrain_page_fingerprint(&page);
+        assert!(page.validates_identity());
+        page
+    }
+
     #[test]
     fn signed_page_keys_have_exact_nested_half_open_bounds() {
         let key = TerrainPageKey {
@@ -1425,28 +1949,22 @@ mod tests {
     }
 
     #[test]
-    fn exact_heightfield_leaf_round_trips_every_voxel_and_is_deterministic() {
+    fn exact_heightfield_leaf_round_trips_every_face_and_is_deterministic() {
         let key = TerrainPageKey {
             level: 0,
             coord: [-1, -1, -1],
         };
-        let first = build_exact_terrain_page(identity(), key, 7, terrain).unwrap();
-        let second = build_exact_terrain_page(identity(), key, 7, terrain).unwrap();
+        let first = build_compact_exact_terrain_page(identity(), key, 7, terrain).unwrap();
+        let second = build_compact_exact_terrain_page(identity(), key, 7, terrain).unwrap();
         assert_eq!(first, second);
         assert!(first.validates_identity());
         assert_eq!(first.topology, TerrainTopologyClass::SingleRunColumns);
-        assert!(matches!(
-            first.representation,
-            TerrainPageRepresentation::SteppedSurfaceResidual(_)
-        ));
-        for z in first.bounds.min.z..first.bounds.max.z {
-            for y in first.bounds.min.y..first.bounds.max.y {
-                for x in first.bounds.min.x..first.bounds.max.x {
-                    let coord = VoxelCoord::new(x, y, z);
-                    assert_eq!(material_from_payload(&first, coord), terrain(coord));
-                }
-            }
-        }
+        assert_eq!(
+            clustered_face_set(&first),
+            canonical_exposed_faces(first.bounds, terrain)
+                .into_iter()
+                .collect()
+        );
     }
 
     #[test]
@@ -1546,16 +2064,13 @@ mod tests {
 
     #[test]
     fn vxtp_codec_round_trips_stepped_and_volumetric_pages() {
-        let stepped = build_exact_terrain_page(
-            identity(),
+        let stepped = solid_stepped_leaf(
             TerrainPageKey {
                 level: 0,
                 coord: [-1, -1, -1],
             },
             19,
-            terrain,
-        )
-        .unwrap();
+        );
         let volumetric_sampler = |coord: VoxelCoord| {
             if coord.y <= 2 || ((12..=14).contains(&coord.y) && coord.x < 24) {
                 Material::Stone
@@ -1579,6 +2094,95 @@ mod tests {
             assert_eq!(decode_terrain_page(&encoded, identity()).unwrap(), page);
             assert_eq!(encode_terrain_page(&page).unwrap(), encoded);
         }
+    }
+
+    fn clustered_face_set(page: &TerrainPageV1) -> BTreeSet<CanonicalFaceKey> {
+        let TerrainPageRepresentation::SurfaceCluster(quads) = &page.representation else {
+            panic!("expected clustered terrain page");
+        };
+        let mut faces = BTreeSet::new();
+        for quad in quads {
+            let material_id = page.materials[usize::from(quad.material_index)]
+                .material
+                .id();
+            expand_surface_quad(*quad, material_id, &mut faces);
+        }
+        faces
+    }
+
+    fn exact_cluster_children(key: TerrainPageKey, revision: u64) -> Vec<TerrainPageV1> {
+        key.children()
+            .unwrap()
+            .into_iter()
+            .map(|child| build_exact_terrain_page(identity(), child, revision, terrain).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn exact_cluster_parent_is_the_canonical_union_at_negative_coordinates() {
+        let key = TerrainPageKey {
+            level: 1,
+            coord: [-1, -1, -1],
+        };
+        let children = exact_cluster_children(key, 41);
+        let expected = children
+            .iter()
+            .flat_map(clustered_face_set)
+            .collect::<BTreeSet<_>>();
+        let parent = build_exact_cluster_terrain_parent(key, 42, &children).unwrap();
+        assert_eq!(clustered_face_set(&parent), expected);
+        assert_eq!(parent.errors, TerrainErrorBounds::EXACT);
+        validate_terrain_replacement(&parent, &children).unwrap();
+        let encoded = encode_terrain_page(&parent).unwrap();
+        assert_eq!(decode_terrain_page(&encoded, identity()).unwrap(), parent);
+    }
+
+    #[test]
+    fn exact_cluster_hierarchy_remains_closed_through_two_levels() {
+        let root_key = TerrainPageKey {
+            level: 2,
+            coord: [-1, -1, 0],
+        };
+        let level_one = root_key
+            .children()
+            .unwrap()
+            .into_iter()
+            .map(|key| {
+                let leaves = exact_cluster_children(key, 51);
+                build_exact_cluster_terrain_parent(key, 52, &leaves).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let expected = level_one
+            .iter()
+            .flat_map(clustered_face_set)
+            .collect::<BTreeSet<_>>();
+        let root = build_exact_cluster_terrain_parent(root_key, 53, &level_one).unwrap();
+        assert_eq!(clustered_face_set(&root), expected);
+        validate_terrain_replacement(&root, &level_one).unwrap();
+    }
+
+    #[test]
+    fn exact_cluster_parent_rejects_compact_noncluster_children() {
+        let key = TerrainPageKey {
+            level: 1,
+            coord: [0, -1, 0],
+        };
+        let children = key
+            .children()
+            .unwrap()
+            .into_iter()
+            .map(|child| solid_stepped_leaf(child, 61))
+            .collect::<Vec<_>>();
+        assert!(children.iter().any(|child| {
+            !matches!(
+                child.representation,
+                TerrainPageRepresentation::SurfaceCluster(_)
+            )
+        }));
+        assert_eq!(
+            build_exact_cluster_terrain_parent(key, 62, &children),
+            Err(TerrainPageBuildError::UnsupportedChildRepresentation)
+        );
     }
 
     #[test]
@@ -1628,6 +2232,100 @@ mod tests {
         assert_eq!(
             decode_terrain_page(&trailing, identity()),
             Err(TerrainPageCodecError::InvalidHeader("trailing bytes"))
+        );
+    }
+
+    fn solid_parent_fixture() -> (TerrainPageV1, Vec<TerrainPageV1>) {
+        let key = TerrainPageKey {
+            level: 1,
+            coord: [0, -1, 0],
+        };
+        let children = key
+            .children()
+            .unwrap()
+            .into_iter()
+            .map(|child| {
+                build_exact_terrain_page(identity(), child, 31, |_| Material::Stone).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let runs = (0..TERRAIN_PAGE_EDGE_SAMPLES * TERRAIN_PAGE_EDGE_SAMPLES)
+            .map(|_| TerrainMaterialRun {
+                minimum_y: -64,
+                length: 64,
+                material_index: 0,
+            })
+            .collect::<Vec<_>>();
+        let columns = (0..runs.len())
+            .map(|index| TerrainColumn {
+                first_run: index as u32,
+                run_count: 1,
+            })
+            .collect();
+        let parent = assemble_terrain_parent(
+            key,
+            32,
+            TerrainErrorBounds::EXACT,
+            TerrainTopologyClass::SingleRunColumns,
+            vec![TerrainMaterialCoverage {
+                material: Material::Stone,
+                occupied_voxels: 64 * 64 * 64,
+                exposed_unit_faces: 0,
+            }],
+            TerrainPageRepresentation::SteppedSurfaceResidual(SteppedSurfaceResidual {
+                sample_stride_voxels: 2,
+                shape_xz: [32, 32],
+                columns,
+                runs,
+            }),
+            &children,
+        )
+        .unwrap();
+        (parent, children)
+    }
+
+    #[test]
+    fn atomic_replacement_binds_complete_children_and_composable_boundaries() {
+        let (parent, children) = solid_parent_fixture();
+        assert!(parent.validates_identity());
+        validate_terrain_replacement(&parent, &children).unwrap();
+        let encoded = encode_terrain_page(&parent).unwrap();
+        assert_eq!(decode_terrain_page(&encoded, identity()).unwrap(), parent);
+
+        let mut reordered = children.clone();
+        reordered.reverse();
+        validate_terrain_replacement(&parent, &reordered).unwrap();
+
+        assert_eq!(
+            validate_terrain_replacement(&parent, &children[..7]),
+            Err(TerrainReplacementError::WrongChildCount)
+        );
+    }
+
+    #[test]
+    fn atomic_replacement_rejects_stale_and_boundary_incoherent_children() {
+        let (parent, children) = solid_parent_fixture();
+        let mut stale = children.clone();
+        stale[0] = build_exact_terrain_page(identity(), stale[0].key, 99, |_| Material::Stone)
+            .unwrap();
+        assert_eq!(
+            validate_terrain_replacement(&parent, &stale),
+            Err(TerrainReplacementError::ChildReferenceMismatch)
+        );
+
+        let mut incoherent = children;
+        let boundary_x = incoherent[0].bounds.max.x - 1;
+        incoherent[0] =
+            build_exact_terrain_page(identity(), incoherent[0].key, 31, |coord| {
+                if coord.x == boundary_x {
+                    Material::Air
+                } else {
+                    Material::Stone
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            validate_terrain_replacement(&parent, &incoherent),
+            Err(TerrainReplacementError::InternalBoundaryMismatch)
         );
     }
 }
