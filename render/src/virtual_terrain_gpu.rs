@@ -554,6 +554,83 @@ impl VirtualTerrainGpuControl {
         Ok(())
     }
 
+    /// Rebuilds the bounded GPU directory mirror after immutable region directories are retired.
+    ///
+    /// Node indices are an internal cache detail, so compaction is preferable to leaving tombstones
+    /// that would eventually exhaust a long-travel session. Callers republish geometry records
+    /// after this method because every index may have changed.
+    pub(crate) fn synchronize_directory_set(
+        &mut self,
+        queue: &Queue,
+        hierarchy: &VirtualTerrainHierarchy,
+    ) -> Result<(), VirtualTerrainGpuError> {
+        let directory_nodes = hierarchy.nodes().collect::<Vec<_>>();
+        let roots = hierarchy.roots().collect::<BTreeSet<_>>();
+        if directory_nodes.len() > self.capacity.max_directory_nodes {
+            return Err(VirtualTerrainGpuError::DirectoryCapacity);
+        }
+        if roots.len() > self.capacity.max_roots {
+            return Err(VirtualTerrainGpuError::RootCapacity);
+        }
+        let mut node_indices = BTreeMap::new();
+        let mut node_keys = Vec::with_capacity(directory_nodes.len());
+        for (index, node) in directory_nodes.iter().enumerate() {
+            let index =
+                u32::try_from(index).map_err(|_| VirtualTerrainGpuError::DirectoryCapacity)?;
+            node_indices.insert(node.key, index);
+            node_keys.push(node.key);
+        }
+        let prior_refined = hierarchy.refined_last_cut().collect::<BTreeSet<_>>();
+        let mut nodes = Vec::with_capacity(directory_nodes.len());
+        let mut root_indices = Vec::with_capacity(roots.len());
+        for node in &directory_nodes {
+            let mut packed = pack_node(node, &node_indices)?;
+            let mut flags = static_flags(node);
+            if hierarchy.resident_page(node.key).is_some() {
+                flags |= NODE_RESIDENT;
+            }
+            if hierarchy.replacement_is_resident_and_coherent(node.key) {
+                flags |= NODE_REPLACEMENT_COHERENT;
+            }
+            if prior_refined.contains(&node.key) {
+                flags |= NODE_PRIOR_REFINED;
+            }
+            packed.maximum_flags[3] = flags as i32;
+            if node.is_root {
+                root_indices.push(
+                    *node_indices
+                        .get(&node.key)
+                        .ok_or(VirtualTerrainGpuError::DirectoryCapacity)?,
+                );
+            }
+            nodes.push(packed);
+        }
+        if !nodes.is_empty() {
+            queue.write_buffer(&self.node_buffer, 0, bytemuck::cast_slice(&nodes));
+        }
+        if !root_indices.is_empty() {
+            queue.write_buffer(&self.root_buffer, 0, bytemuck::cast_slice(&root_indices));
+        }
+        let geometry_pages = vec![GpuVirtualTerrainGeometryPage::default(); nodes.len()];
+        if !geometry_pages.is_empty() {
+            queue.write_buffer(
+                &self.geometry_page_buffer,
+                0,
+                bytemuck::cast_slice(&geometry_pages),
+            );
+        }
+        self.nodes = nodes;
+        self.node_indices = node_indices;
+        self.node_keys = node_keys;
+        self.root_indices = root_indices;
+        self.prior_refined = prior_refined;
+        self.geometry_pages = geometry_pages;
+        if let Ok(mut feedback) = self.feedback.lock() {
+            *feedback = None;
+        }
+        Ok(())
+    }
+
     pub(crate) fn bind_geometry_source(
         &mut self,
         device: &Device,

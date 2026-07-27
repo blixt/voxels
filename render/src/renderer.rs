@@ -4727,39 +4727,7 @@ impl Renderer {
                 }
             }
         };
-        let geometry = match &mesh {
-            VirtualTerrainGpuMesh::Empty => VirtualTerrainGpuGeometry::default(),
-            VirtualTerrainGpuMesh::Surface(mesh) => {
-                let mut geometry = VirtualTerrainGpuGeometry::default();
-                for slice in &mesh.slices {
-                    let range = VirtualTerrainGpuGeometryRange {
-                        source_offset_bytes: u64::from(
-                            mesh.allocation.offset + slice.relative_offset,
-                        ),
-                        element_count: slice.quad_count,
-                    };
-                    match slice.render_layer {
-                        RenderLayer::Opaque => geometry.opaque_surface = range,
-                        RenderLayer::Translucent => geometry.water_surface = range,
-                        RenderLayer::Empty => {}
-                    }
-                }
-                geometry
-            }
-            VirtualTerrainGpuMesh::Triangle(mesh) => VirtualTerrainGpuGeometry {
-                opaque_triangle: VirtualTerrainGpuGeometryRange {
-                    source_offset_bytes: u64::from(mesh.allocation.offset),
-                    element_count: mesh.opaque_vertex_count,
-                },
-                water_triangle: VirtualTerrainGpuGeometryRange {
-                    source_offset_bytes: u64::from(mesh.allocation.offset)
-                        + u64::from(mesh.opaque_vertex_count)
-                            * size_of::<GpuTerrainVertex>() as u64,
-                    element_count: mesh.water_vertex_count,
-                },
-                ..VirtualTerrainGpuGeometry::default()
-            },
-        };
+        let geometry = virtual_terrain_gpu_geometry(&mesh);
         let allocation_page = match &mesh {
             VirtualTerrainGpuMesh::Empty => None,
             VirtualTerrainGpuMesh::Surface(mesh) => Some(mesh.allocation.page),
@@ -4916,6 +4884,79 @@ impl Renderer {
 
     pub const fn virtual_terrain_render_mode(&self) -> VirtualTerrainRenderMode {
         self.virtual_terrain_mode
+    }
+
+    pub fn virtual_terrain_region_roots(&self) -> Vec<TerrainPageKey> {
+        self.virtual_terrain.roots().collect()
+    }
+
+    /// Retires immutable region directories outside the current streaming working set.
+    ///
+    /// Any directory compaction invalidates GPU node indices, so publication drops to shadow mode,
+    /// resident geometry records are rebound under their new indices, and a later certified cut
+    /// performs the next visible handoff.
+    pub fn retain_virtual_terrain_regions(
+        &mut self,
+        keep: impl IntoIterator<Item = TerrainPageKey>,
+    ) -> Result<usize, VirtualTerrainRendererError> {
+        let keep = keep.into_iter().collect::<BTreeSet<_>>();
+        let remove = self
+            .virtual_terrain
+            .roots()
+            .filter(|root| !keep.contains(root))
+            .collect::<Vec<_>>();
+        if remove.is_empty() {
+            return Ok(0);
+        }
+        self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
+        self.virtual_terrain_cut = None;
+        self.virtual_terrain_oracle_cut = None;
+        self.virtual_terrain_oracle_view = None;
+        let mut removed_pages = BTreeSet::new();
+        for root in remove {
+            removed_pages.extend(self.virtual_terrain.remove_region_directory(root));
+        }
+        for key in &removed_pages {
+            if let Some(page) = self.virtual_terrain_pages.remove(key) {
+                discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
+            }
+        }
+        self.virtual_terrain_gpu
+            .synchronize_directory_set(&self.queue, &self.virtual_terrain)
+            .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
+        for (key, page) in &self.virtual_terrain_pages {
+            self.virtual_terrain_gpu
+                .update_page_geometry(&self.queue, *key, virtual_terrain_gpu_geometry(&page.mesh))
+                .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
+        }
+        Ok(removed_pages.len())
+    }
+
+    pub fn remove_virtual_terrain_page(
+        &mut self,
+        key: TerrainPageKey,
+    ) -> Result<bool, VirtualTerrainRendererError> {
+        if !self.virtual_terrain.remove_page(key) {
+            return Ok(false);
+        }
+        self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
+        self.virtual_terrain_cut = None;
+        self.virtual_terrain_oracle_cut = None;
+        self.virtual_terrain_oracle_view = None;
+        if let Some(page) = self.virtual_terrain_pages.remove(&key) {
+            discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
+        }
+        self.virtual_terrain_gpu
+            .update_page_geometry(&self.queue, key, VirtualTerrainGpuGeometry::default())
+            .and_then(|()| {
+                self.virtual_terrain_gpu.update_page_residency(
+                    &self.queue,
+                    &self.virtual_terrain,
+                    key,
+                )
+            })
+            .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
+        Ok(true)
     }
 
     /// Resident page count, encoded CPU bytes, primitive count, GPU capacity, and GPU allocation.
@@ -8782,6 +8823,39 @@ fn discard_virtual_terrain_mesh(arena: &mut ArenaAllocator, mesh: VirtualTerrain
         VirtualTerrainGpuMesh::Triangle(mesh) => {
             let _ = arena.free(mesh.allocation);
         }
+    }
+}
+
+fn virtual_terrain_gpu_geometry(mesh: &VirtualTerrainGpuMesh) -> VirtualTerrainGpuGeometry {
+    match mesh {
+        VirtualTerrainGpuMesh::Empty => VirtualTerrainGpuGeometry::default(),
+        VirtualTerrainGpuMesh::Surface(mesh) => {
+            let mut geometry = VirtualTerrainGpuGeometry::default();
+            for slice in &mesh.slices {
+                let range = VirtualTerrainGpuGeometryRange {
+                    source_offset_bytes: u64::from(mesh.allocation.offset + slice.relative_offset),
+                    element_count: slice.quad_count,
+                };
+                match slice.render_layer {
+                    RenderLayer::Opaque => geometry.opaque_surface = range,
+                    RenderLayer::Translucent => geometry.water_surface = range,
+                    RenderLayer::Empty => {}
+                }
+            }
+            geometry
+        }
+        VirtualTerrainGpuMesh::Triangle(mesh) => VirtualTerrainGpuGeometry {
+            opaque_triangle: VirtualTerrainGpuGeometryRange {
+                source_offset_bytes: u64::from(mesh.allocation.offset),
+                element_count: mesh.opaque_vertex_count,
+            },
+            water_triangle: VirtualTerrainGpuGeometryRange {
+                source_offset_bytes: u64::from(mesh.allocation.offset)
+                    + u64::from(mesh.opaque_vertex_count) * size_of::<GpuTerrainVertex>() as u64,
+                element_count: mesh.water_vertex_count,
+            },
+            ..VirtualTerrainGpuGeometry::default()
+        },
     }
 }
 

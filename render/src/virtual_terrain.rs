@@ -179,6 +179,8 @@ pub struct VirtualTerrainHierarchy {
     capacity: VirtualTerrainCapacity,
     source_identity_hash: Option<WorldSourceIdentityHash>,
     directory_fingerprints: BTreeSet<[u8; 32]>,
+    directory_nodes: BTreeMap<[u8; 32], Vec<TerrainPageKey>>,
+    directory_roots: BTreeMap<TerrainPageKey, [u8; 32]>,
     nodes: BTreeMap<TerrainPageKey, TerrainHierarchyNode>,
     roots: BTreeSet<TerrainPageKey>,
     resident: BTreeMap<TerrainPageKey, ResidentPage>,
@@ -197,6 +199,8 @@ impl VirtualTerrainHierarchy {
             capacity,
             source_identity_hash: None,
             directory_fingerprints: BTreeSet::new(),
+            directory_nodes: BTreeMap::new(),
+            directory_roots: BTreeMap::new(),
             nodes: BTreeMap::new(),
             roots: BTreeSet::new(),
             resident: BTreeMap::new(),
@@ -221,6 +225,14 @@ impl VirtualTerrainHierarchy {
 
     pub fn refined_last_cut(&self) -> impl Iterator<Item = TerrainPageKey> + '_ {
         self.refined_last_cut.iter().copied()
+    }
+
+    pub fn nodes(&self) -> impl Iterator<Item = TerrainHierarchyNode> + '_ {
+        self.nodes.values().copied()
+    }
+
+    pub fn roots(&self) -> impl Iterator<Item = TerrainPageKey> + '_ {
+        self.roots.iter().copied()
     }
 
     pub fn replacement_is_resident_and_coherent(&self, key: TerrainPageKey) -> bool {
@@ -295,10 +307,16 @@ impl VirtualTerrainHierarchy {
         self.source_identity_hash = Some(directory.source_identity_hash);
         self.directory_fingerprints
             .insert(directory.content_fingerprint);
+        self.directory_nodes.insert(
+            directory.content_fingerprint,
+            directory.nodes.iter().map(|node| node.key).collect(),
+        );
         for node in &directory.nodes {
             self.nodes.entry(node.key).or_insert(*node);
             if node.is_root {
                 self.roots.insert(node.key);
+                self.directory_roots
+                    .insert(node.key, directory.content_fingerprint);
             }
         }
         Ok(())
@@ -377,6 +395,50 @@ impl VirtualTerrainHierarchy {
             self.resident_encoded_bytes,
             self.resident_primitives,
         )
+    }
+
+    pub fn remove_page(&mut self, key: TerrainPageKey) -> bool {
+        let Some(resident) = self.resident.remove(&key) else {
+            return false;
+        };
+        self.resident_encoded_bytes = self
+            .resident_encoded_bytes
+            .saturating_sub(resident.encoded_bytes);
+        self.resident_primitives = self
+            .resident_primitives
+            .saturating_sub(resident.primitive_count);
+        self.refined_last_cut.remove(&key);
+        if let Some(parent) = key.parent() {
+            self.refined_last_cut.remove(&parent);
+        }
+        true
+    }
+
+    /// Removes the complete directory containing `root` and every resident page it described.
+    ///
+    /// Fixed production regions are disjoint, but the directory format permits multiple roots.
+    /// They are therefore retired as one immutable directory unit.
+    pub fn remove_region_directory(&mut self, root: TerrainPageKey) -> Vec<TerrainPageKey> {
+        let Some(fingerprint) = self.directory_roots.get(&root).copied() else {
+            return Vec::new();
+        };
+        let Some(keys) = self.directory_nodes.remove(&fingerprint) else {
+            return Vec::new();
+        };
+        self.directory_fingerprints.remove(&fingerprint);
+        let key_set = keys.iter().copied().collect::<BTreeSet<_>>();
+        self.directory_roots
+            .retain(|_, owner| *owner != fingerprint);
+        self.roots.retain(|key| !key_set.contains(key));
+        for key in &keys {
+            self.remove_page(*key);
+            self.nodes.remove(key);
+            self.refined_last_cut.remove(key);
+        }
+        if self.directory_fingerprints.is_empty() {
+            self.source_identity_hash = None;
+        }
+        keys
     }
 
     pub fn select_cut(
@@ -866,6 +928,23 @@ mod tests {
         assert!(!cut.is_renderable());
         assert_eq!(cut.ownerless_roots.len(), 1);
         assert_eq!(cut.requested_pages.len(), 1);
+    }
+
+    #[test]
+    fn removing_a_region_reclaims_every_page_node_and_accounted_byte() {
+        let (mut hierarchy, pages) = hierarchy();
+        let root = pages.iter().find(|page| page.key.level == 1).unwrap().key;
+        for page in pages {
+            hierarchy.install_page(page).unwrap();
+        }
+        assert_eq!(hierarchy.resident_usage().0, 9);
+        let removed = hierarchy.remove_region_directory(root);
+        assert_eq!(removed.len(), 9);
+        assert_eq!(hierarchy.resident_usage(), (0, 0, 0));
+        assert_eq!(hierarchy.nodes().count(), 0);
+        assert_eq!(hierarchy.roots().count(), 0);
+        assert_eq!(hierarchy.source_identity_hash(), None);
+        assert!(hierarchy.remove_region_directory(root).is_empty());
     }
 
     #[test]
