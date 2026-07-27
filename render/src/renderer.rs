@@ -21,6 +21,10 @@ use crate::shadow::{
 use crate::ui::{Color, InventoryItem, LiveStats, MissionControlUi, UiAction, UiKey, Viewport};
 pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
 use crate::ui_gpu::{SCENE_FORMAT, UiGpu};
+use crate::virtual_terrain::{
+    VirtualTerrainCapacity, VirtualTerrainCut, VirtualTerrainError, VirtualTerrainHierarchy,
+    VirtualTerrainView,
+};
 use bytemuck::{Pod, Zeroable};
 use hashbrown::{HashMap, HashSet};
 use std::collections::{BTreeMap, VecDeque};
@@ -30,10 +34,11 @@ use std::sync::{Arc, Mutex};
 use voxels_core::{CameraState, EnclosureSample, FluidState, RemoteAvatarPose};
 use voxels_world::protocol::{EditShape, EditVolume};
 use voxels_world::{
-    AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, Material, MeshedChunk,
-    Quad, RenderLayer, SURFACE_PATCHES_PER_TILE_EDGE, SurfaceLodLevel, SurfacePatch,
+    AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, FaceAxis, Material,
+    MeshedChunk, Quad, RenderLayer, SURFACE_PATCHES_PER_TILE_EDGE, SurfaceLodLevel, SurfacePatch,
     SurfacePatchEdge, SurfacePatchId, SurfaceQuad, SurfaceRegion, SurfaceTileCoord,
-    SurfaceTileMesh, VOXEL_SIZE_METRES, WaterTileMesh, WorldManifest,
+    SurfaceTileMesh, TerrainHierarchyDirectoryV1, TerrainPageKey, TerrainPageRepresentation,
+    TerrainPageRepresentationKind, TerrainPageV1, VOXEL_SIZE_METRES, WaterTileMesh, WorldManifest,
     fallback_surface_wall_material,
 };
 use wgpu::util::DeviceExt;
@@ -67,6 +72,9 @@ const PLACEMENT_MATERIALS: [Material; Material::ALL.len() - 1] = [
 ];
 const MATERIAL_WHEEL_SLOTS: usize = 10;
 const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
+const VIRTUAL_TERRAIN_GPU_POOL_BYTES: u64 = 128 * 1024 * 1024;
+const VIRTUAL_TERRAIN_GPU_POOL_PAGES: usize =
+    VIRTUAL_TERRAIN_GPU_POOL_BYTES as usize / ARENA_PAGE_BYTES as usize;
 const FAR_MATERIAL_FLAG: u32 = 1 << 31;
 const SURFACE_LOD_SHIFT: u32 = 27;
 const GPU_FACE_SHIFT: u32 = 16;
@@ -251,6 +259,59 @@ pub struct RendererConfig {
     pub directional_shadows: DirectionalShadowConfig,
     pub volumetric_clouds: VolumetricCloudConfig,
     pub diagnostic_sky_color: Option<[f32; 3]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VirtualTerrainRendererError {
+    Hierarchy(VirtualTerrainError),
+    UnsupportedRepresentation(TerrainPageRepresentationKind),
+    InvalidSurfaceCluster(TerrainPageKey),
+    GpuPageTooLarge(TerrainPageKey),
+    GpuPoolCapacity,
+    SelectedPageMissingGpu(TerrainPageKey),
+}
+
+impl std::fmt::Display for VirtualTerrainRendererError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hierarchy(error) => write!(formatter, "{error}"),
+            Self::UnsupportedRepresentation(kind) => {
+                write!(
+                    formatter,
+                    "virtual terrain representation {kind:?} has no GPU path"
+                )
+            }
+            Self::InvalidSurfaceCluster(key) => {
+                write!(
+                    formatter,
+                    "virtual terrain surface cluster {key:?} is invalid"
+                )
+            }
+            Self::GpuPageTooLarge(key) => {
+                write!(
+                    formatter,
+                    "virtual terrain GPU page {key:?} exceeds its hard bound"
+                )
+            }
+            Self::GpuPoolCapacity => {
+                formatter.write_str("virtual terrain GPU page pool capacity exceeded")
+            }
+            Self::SelectedPageMissingGpu(key) => {
+                write!(
+                    formatter,
+                    "selected virtual terrain page {key:?} has no resident GPU record"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for VirtualTerrainRendererError {}
+
+impl From<VirtualTerrainError> for VirtualTerrainRendererError {
+    fn from(error: VirtualTerrainError) -> Self {
+        Self::Hierarchy(error)
+    }
 }
 
 /// Source/build identity embedded in every screenshot reproduction package.
@@ -600,6 +661,59 @@ fn canonical_gpu_quad(world_origin: [i32; 3], quad: &Quad) -> GpuQuad {
         material_face: pack_gpu_material_face(u32::from(quad.material), quad.face),
         ao: u32::from(quad.ao),
     }
+}
+
+fn virtual_surface_gpu_quads(
+    page: &TerrainPageV1,
+) -> Result<Vec<GpuQuad>, VirtualTerrainRendererError> {
+    let TerrainPageRepresentation::SurfaceCluster(quads) = &page.representation else {
+        return Err(VirtualTerrainRendererError::UnsupportedRepresentation(
+            page.representation.kind(),
+        ));
+    };
+    let mut gpu_quads = Vec::with_capacity(quads.len());
+    for quad in quads {
+        let material = page
+            .materials
+            .get(usize::from(quad.material_index))
+            .ok_or(VirtualTerrainRendererError::InvalidSurfaceCluster(page.key))?
+            .material;
+        if quad.width == 0 || quad.height == 0 {
+            return Err(VirtualTerrainRendererError::InvalidSurfaceCluster(page.key));
+        }
+        let normal_origin = if quad.positive {
+            quad.plane
+                .checked_sub(1)
+                .ok_or(VirtualTerrainRendererError::InvalidSurfaceCluster(page.key))?
+        } else {
+            quad.plane
+        };
+        let (origin, extent_voxels, face) = match quad.axis {
+            // The existing quad shader's X faces use GPU-u for world Z and GPU-v for world Y.
+            FaceAxis::X => (
+                [normal_origin, quad.u, quad.v],
+                [quad.height, quad.width],
+                if quad.positive { 0 } else { 1 },
+            ),
+            FaceAxis::Y => (
+                [quad.u, normal_origin, quad.v],
+                [quad.width, quad.height],
+                if quad.positive { 2 } else { 3 },
+            ),
+            FaceAxis::Z => (
+                [quad.u, quad.v, normal_origin],
+                [quad.width, quad.height],
+                if quad.positive { 4 } else { 5 },
+            ),
+        };
+        gpu_quads.push(GpuQuad {
+            origin,
+            extent_voxels,
+            material_face: pack_gpu_material_face(u32::from(material.id()), face),
+            ao: 0,
+        });
+    }
+    Ok(gpu_quads)
 }
 
 const fn pack_canonical_triangle_extent(extent: u16) -> u16 {
@@ -990,6 +1104,13 @@ struct ChunkMesh {
     bounds_min: glam::Vec3,
     bounds_max: glam::Vec3,
     activation_mask: u8,
+}
+
+struct VirtualTerrainGpuPage {
+    revision: u64,
+    content_fingerprint: [u8; 32],
+    representation: TerrainPageRepresentationKind,
+    mesh: Option<ChunkMesh>,
 }
 
 struct PreparedCanonicalChunkUpload {
@@ -1948,6 +2069,11 @@ pub struct Renderer {
     material_detail: MaterialDetailGpu,
     chunks: BTreeMap<MeshKey, ChunkMesh>,
     water_chunks: BTreeMap<MeshKey, ChunkMesh>,
+    virtual_terrain: VirtualTerrainHierarchy,
+    virtual_terrain_cut: Option<VirtualTerrainCut>,
+    virtual_terrain_pages: BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
+    virtual_terrain_arena: ArenaAllocator,
+    virtual_terrain_arena_buffers: Vec<Buffer>,
     surface_patch_profiles: HashMap<SurfacePatchId, SurfacePatchProfile>,
     canonical_surface_profiles: CanonicalColumnProfiles,
     surface_patch_residency: HashSet<SurfacePatchId>,
@@ -2881,6 +3007,16 @@ impl Renderer {
             ui_gpu.water_scene_bind_group(&device, &water_scene_layout, opaque_depth.view());
 
         let placement_inventory = PlacementInventory::new();
+        let virtual_terrain =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB)
+                .map_err(|error| format!("virtual terrain hierarchy: {error}"))?;
+        let virtual_terrain_arena = ArenaAllocator::new_bounded(
+            ARENA_PAGE_BYTES,
+            size_of::<GpuQuad>() as u32,
+            VIRTUAL_TERRAIN_GPU_POOL_BYTES,
+            VIRTUAL_TERRAIN_GPU_POOL_PAGES,
+        )
+        .ok_or_else(|| "virtual terrain GPU pool has invalid capacity".to_owned())?;
         let mut ui = MissionControlUi::new(runtime_config.mission_control);
         ui.set_diagnostic_sky_active(runtime_config.diagnostic_sky_color.is_some());
         ui.set_environment_status(daylight_phase.label(), surface_region_label(surface_region));
@@ -2943,6 +3079,11 @@ impl Renderer {
             material_detail,
             chunks: BTreeMap::new(),
             water_chunks: BTreeMap::new(),
+            virtual_terrain,
+            virtual_terrain_cut: None,
+            virtual_terrain_pages: BTreeMap::new(),
+            virtual_terrain_arena,
+            virtual_terrain_arena_buffers: Vec::new(),
             surface_patch_profiles: HashMap::new(),
             canonical_surface_profiles: HashMap::new(),
             surface_patch_residency: HashSet::new(),
@@ -3890,6 +4031,135 @@ impl Renderer {
 
     pub fn set_spectator_available(&mut self, available: bool) {
         self.ui.set_spectator_available(available);
+    }
+
+    pub fn register_virtual_terrain_directory(
+        &mut self,
+        directory: &TerrainHierarchyDirectoryV1,
+    ) -> Result<(), VirtualTerrainRendererError> {
+        self.virtual_terrain.register_region_directory(directory)?;
+        self.virtual_terrain_cut = None;
+        Ok(())
+    }
+
+    /// Uploads a certified virtual-terrain page without publishing a partial render owner.
+    ///
+    /// GPU storage is prepared first, hierarchy identity is installed second, and only then is the
+    /// page made addressable by a selected cut. Any failure frees the provisional allocation and
+    /// leaves the prior resident page/cut untouched.
+    pub fn upload_virtual_terrain_page(
+        &mut self,
+        page: TerrainPageV1,
+    ) -> Result<(), VirtualTerrainRendererError> {
+        if let Some(existing) = self.virtual_terrain_pages.get(&page.key)
+            && existing.revision == page.revision
+            && existing.content_fingerprint == page.content_fingerprint
+            && existing.representation == page.representation.kind()
+        {
+            self.virtual_terrain.install_page(page)?;
+            return Ok(());
+        }
+        let gpu_quads = virtual_surface_gpu_quads(&page)?;
+        let gpu_bytes = gpu_quads
+            .len()
+            .checked_mul(size_of::<GpuQuad>())
+            .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
+        if gpu_bytes > ARENA_PAGE_BYTES as usize {
+            return Err(VirtualTerrainRendererError::GpuPageTooLarge(page.key));
+        }
+        let mesh = if gpu_quads.is_empty() {
+            None
+        } else {
+            let minimum = glam::Vec3::from_array(
+                page.bounds
+                    .min
+                    .as_array()
+                    .map(|value| value as f32 * VOXEL_SIZE_METRES),
+            );
+            let maximum = glam::Vec3::from_array(
+                page.bounds
+                    .max
+                    .as_array()
+                    .map(|value| value as f32 * VOXEL_SIZE_METRES),
+            );
+            let quad_count = u32::try_from(gpu_quads.len())
+                .map_err(|_| VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
+            let size = quad_count
+                .checked_mul(size_of::<GpuQuad>() as u32)
+                .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
+            let slice = MeshSlice {
+                relative_offset: 0,
+                size,
+                quad_count,
+                bounds_min: minimum,
+                bounds_max: maximum,
+                surface_patch_id: None,
+                boundary_edge: None,
+                stitch_edges: 0,
+                morph_closure: false,
+                exact_replacement_chunk: None,
+                canonical_water_surface: false,
+                render_layer: RenderLayer::Opaque,
+            };
+            Some(
+                prepare_mesh_sliced_into(
+                    &self.device,
+                    &self.queue,
+                    &mut self.virtual_terrain_arena,
+                    &mut self.virtual_terrain_arena_buffers,
+                    None,
+                    &gpu_quads,
+                    None,
+                    vec![slice],
+                    u8::MAX,
+                    "bounded virtual terrain quad pool",
+                )
+                .ok_or(VirtualTerrainRendererError::GpuPoolCapacity)?,
+            )
+        };
+        if let Err(error) = self.virtual_terrain.install_page(page.clone()) {
+            discard_prepared_mesh(&mut self.virtual_terrain_arena, None, mesh);
+            return Err(error.into());
+        }
+        let resident = VirtualTerrainGpuPage {
+            revision: page.revision,
+            content_fingerprint: page.content_fingerprint,
+            representation: page.representation.kind(),
+            mesh,
+        };
+        if let Some(old) = self.virtual_terrain_pages.insert(page.key, resident)
+            && let Some(old_mesh) = old.mesh
+        {
+            let _ = self.virtual_terrain_arena.free(old_mesh.allocation);
+        }
+        self.virtual_terrain_cut = None;
+        Ok(())
+    }
+
+    pub fn select_virtual_terrain_cut(
+        &mut self,
+        view: VirtualTerrainView,
+    ) -> Result<VirtualTerrainCut, VirtualTerrainRendererError> {
+        let cut = self.virtual_terrain.select_cut(view)?;
+        self.virtual_terrain_cut = Some(cut.clone());
+        Ok(cut)
+    }
+
+    pub fn virtual_terrain_cut(&self) -> Option<&VirtualTerrainCut> {
+        self.virtual_terrain_cut.as_ref()
+    }
+
+    /// Resident page count, encoded CPU bytes, primitive count, GPU capacity, and GPU allocation.
+    pub fn virtual_terrain_usage(&self) -> (usize, usize, usize, u64, u64) {
+        let (pages, encoded_bytes, primitives) = self.virtual_terrain.resident_usage();
+        let gpu = self.virtual_terrain_arena.stats();
+        (
+            pages,
+            encoded_bytes,
+            primitives,
+            gpu.capacity_bytes,
+            gpu.allocated_bytes,
+        )
     }
 
     pub fn upload_chunk(&mut self, chunk: &Chunk, mesh: &MeshedChunk) -> bool {
@@ -5269,6 +5539,12 @@ impl Renderer {
         else {
             return false;
         };
+        // The virtual path builds its independent, one-owner GPU draw directory every frame while
+        // shadow deployment is active. It is deliberately not mixed with the visible legacy cut:
+        // a later runtime cutover chooses one directory or the other atomically.
+        let Ok(_virtual_terrain_shadow_draw_list) = self.collect_virtual_terrain_draw_list() else {
+            return false;
+        };
         let water_draw_list = self.collect_draw_list(
             &self.water_chunks,
             |key, chunk| {
@@ -6413,6 +6689,60 @@ impl Renderer {
             tested_slices,
             selected_slices,
         }
+    }
+
+    fn collect_virtual_terrain_draw_list(&self) -> Result<DrawList, VirtualTerrainRendererError> {
+        let Some(cut) = self.virtual_terrain_cut.as_ref() else {
+            return Ok(DrawList::default());
+        };
+        let mut items = Vec::new();
+        let mut mesh_count = 0u32;
+        let mut quad_count = 0u32;
+        let mut fingerprint = cut.fingerprint;
+        let mut tested_slices = 0u32;
+        let mut selected_slices = 0u32;
+        for key in &cut.selected_pages {
+            let page = self
+                .virtual_terrain_pages
+                .get(key)
+                .ok_or(VirtualTerrainRendererError::SelectedPageMissingGpu(*key))?;
+            fingerprint = fingerprint_value(fingerprint, u64::from(key.level));
+            for component in key.coord {
+                fingerprint = fingerprint_value(fingerprint, component as u32 as u64);
+            }
+            fingerprint = fingerprint_value(fingerprint, page.revision);
+            fingerprint =
+                fingerprint_value(fingerprint, fingerprint_bytes(&page.content_fingerprint));
+            let Some(mesh) = page.mesh.as_ref() else {
+                continue;
+            };
+            mesh_count = mesh_count.saturating_add(1);
+            fingerprint = fingerprint_value(fingerprint, mesh.content_fingerprint);
+            for slice in &mesh.slices {
+                tested_slices = tested_slices.saturating_add(1);
+                if slice.render_layer != RenderLayer::Opaque {
+                    continue;
+                }
+                selected_slices = selected_slices.saturating_add(1);
+                items.push(DrawItem {
+                    page: mesh.allocation.page,
+                    offset: mesh.allocation.offset + slice.relative_offset,
+                    size: slice.size,
+                    quad_count: slice.quad_count,
+                    morph_page: None,
+                    morph_offset: 0,
+                });
+                quad_count = quad_count.saturating_add(slice.quad_count);
+            }
+        }
+        Ok(DrawList {
+            spans: coalesce_draw_items(items),
+            mesh_count,
+            quad_count,
+            fingerprint,
+            tested_slices,
+            selected_slices,
+        })
     }
 }
 
@@ -13465,6 +13795,96 @@ mod tests {
             &outside_inner_cut,
             &canonical
         ));
+    }
+
+    #[test]
+    fn virtual_surface_quads_preserve_the_global_integer_lattice_on_every_face() {
+        let key = TerrainPageKey {
+            level: 0,
+            coord: [0, 0, 0],
+        };
+        let source_quads = [
+            (FaceAxis::X, true, 10, 20, 24, 2, 3),
+            (FaceAxis::X, false, 11, 20, 24, 2, 3),
+            (FaceAxis::Y, true, 12, 20, 24, 2, 3),
+            (FaceAxis::Y, false, 13, 20, 24, 2, 3),
+            (FaceAxis::Z, true, 14, 20, 24, 2, 3),
+            (FaceAxis::Z, false, 15, 20, 24, 2, 3),
+        ]
+        .map(|(axis, positive, plane, u, v, width, height)| {
+            voxels_world::TerrainSurfaceQuad {
+                axis,
+                plane,
+                u,
+                v,
+                width,
+                height,
+                positive,
+                material_index: 0,
+            }
+        });
+        let page = TerrainPageV1 {
+            source_identity_hash: voxels_world::WorldSourceIdentityHash::from_bytes([7; 32]),
+            key,
+            revision: 1,
+            bounds: key.bounds().expect("valid test bounds"),
+            children: Vec::new(),
+            errors: voxels_world::TerrainErrorBounds::EXACT,
+            topology: voxels_world::TerrainTopologyClass::Volumetric,
+            boundary_fingerprints: [[0; 32]; 6],
+            materials: vec![voxels_world::TerrainMaterialCoverage {
+                material: Material::Stone,
+                occupied_voxels: 1,
+                exposed_unit_faces: 1,
+            }],
+            representation: TerrainPageRepresentation::SurfaceCluster(source_quads.to_vec()),
+            content_fingerprint: [0; 32],
+        };
+        let gpu = virtual_surface_gpu_quads(&page).expect("surface conversion");
+        assert_eq!(gpu.len(), source_quads.len());
+        for (source, converted) in source_quads.iter().zip(&gpu) {
+            let expected_face = source.axis as u8 * 2 + u8::from(!source.positive);
+            assert_eq!(
+                (converted.material_face & GPU_FACE_MASK) >> GPU_FACE_SHIFT,
+                u32::from(expected_face)
+            );
+            let mut actual = canonical_quad_corners(*converted);
+            actual.sort_unstable();
+            let mut expected = match source.axis {
+                FaceAxis::X => [
+                    [source.plane, source.u, source.v],
+                    [source.plane, source.u + i32::from(source.width), source.v],
+                    [
+                        source.plane,
+                        source.u + i32::from(source.width),
+                        source.v + i32::from(source.height),
+                    ],
+                    [source.plane, source.u, source.v + i32::from(source.height)],
+                ],
+                FaceAxis::Y => [
+                    [source.u, source.plane, source.v],
+                    [source.u + i32::from(source.width), source.plane, source.v],
+                    [
+                        source.u + i32::from(source.width),
+                        source.plane,
+                        source.v + i32::from(source.height),
+                    ],
+                    [source.u, source.plane, source.v + i32::from(source.height)],
+                ],
+                FaceAxis::Z => [
+                    [source.u, source.v, source.plane],
+                    [source.u + i32::from(source.width), source.v, source.plane],
+                    [
+                        source.u + i32::from(source.width),
+                        source.v + i32::from(source.height),
+                        source.plane,
+                    ],
+                    [source.u, source.v + i32::from(source.height), source.plane],
+                ],
+            };
+            expected.sort_unstable();
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

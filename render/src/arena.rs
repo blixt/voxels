@@ -26,6 +26,8 @@ struct Page {
 pub(crate) struct ArenaAllocator {
     default_page_size: u32,
     alignment: u32,
+    maximum_capacity_bytes: Option<u64>,
+    maximum_pages: Option<usize>,
     pages: Vec<Page>,
     active: BTreeMap<(u16, u32), (u32, u32)>,
     next_generation: u32,
@@ -36,10 +38,32 @@ impl ArenaAllocator {
         Self {
             default_page_size: default_page_size.max(1),
             alignment: alignment.max(1),
+            maximum_capacity_bytes: None,
+            maximum_pages: None,
             pages: Vec::new(),
             active: BTreeMap::new(),
             next_generation: 1,
         }
+    }
+
+    pub fn new_bounded(
+        default_page_size: u32,
+        alignment: u32,
+        maximum_capacity_bytes: u64,
+        maximum_pages: usize,
+    ) -> Option<Self> {
+        if maximum_capacity_bytes == 0 || maximum_pages == 0 {
+            return None;
+        }
+        Some(Self {
+            default_page_size: default_page_size.max(1),
+            alignment: alignment.max(1),
+            maximum_capacity_bytes: Some(maximum_capacity_bytes),
+            maximum_pages: Some(maximum_pages.min(u16::MAX as usize)),
+            pages: Vec::new(),
+            active: BTreeMap::new(),
+            next_generation: 1,
+        })
     }
 
     pub fn allocate(&mut self, requested_size: u32) -> Option<Allocation> {
@@ -61,11 +85,21 @@ impl ArenaAllocator {
         let (page_index, range_index) = if let Some((_, page, range)) = best {
             (page, range)
         } else {
-            if self.pages.len() >= u16::MAX as usize {
+            if self.pages.len() >= self.maximum_pages.unwrap_or(u16::MAX as usize) {
                 return None;
             }
             let minimum = self.default_page_size.max(size);
             let capacity = minimum.checked_next_power_of_two().unwrap_or(minimum);
+            let current_capacity = self
+                .pages
+                .iter()
+                .map(|page| u64::from(page.capacity))
+                .sum::<u64>();
+            if self.maximum_capacity_bytes.is_some_and(|maximum| {
+                current_capacity.saturating_add(u64::from(capacity)) > maximum
+            }) {
+                return None;
+            }
             self.pages.push(Page {
                 capacity,
                 free: vec![(0, capacity)],
@@ -184,6 +218,27 @@ mod tests {
         assert!(!arena.free(old));
         assert!(arena.free(current));
         assert_eq!(arena.stats().allocated_bytes, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_allocator_never_grows_past_byte_or_page_ceiling() -> Result<(), &'static str> {
+        let mut byte_bounded =
+            ArenaAllocator::new_bounded(64, 8, 128, 8).ok_or("invalid byte bound")?;
+        let first = byte_bounded.allocate(64).ok_or("first byte allocation")?;
+        let second = byte_bounded.allocate(64).ok_or("second byte allocation")?;
+        assert!(byte_bounded.allocate(1).is_none());
+        assert_eq!(byte_bounded.stats().capacity_bytes, 128);
+        assert!(byte_bounded.free(first));
+        assert!(byte_bounded.allocate(1).is_some());
+        assert_eq!(byte_bounded.stats().capacity_bytes, 128);
+        assert!(byte_bounded.free(second));
+
+        let mut page_bounded =
+            ArenaAllocator::new_bounded(32, 4, 1_024, 1).ok_or("invalid page bound")?;
+        assert!(page_bounded.allocate(32).is_some());
+        assert!(page_bounded.allocate(4).is_none());
+        assert_eq!(page_bounded.stats().pages, 1);
         Ok(())
     }
 }
