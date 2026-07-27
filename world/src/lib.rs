@@ -18,6 +18,8 @@ pub mod protocol;
 pub mod route;
 pub mod source;
 pub mod terrain_directory;
+#[cfg(feature = "terrain-page-builder")]
+mod terrain_error;
 pub mod terrain_page;
 #[cfg(feature = "terrain-page-builder")]
 pub mod terrain_region;

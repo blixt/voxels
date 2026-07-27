@@ -7,13 +7,14 @@ use std::path::PathBuf;
 use std::time::Instant;
 use voxels_world::{
     BakeoffCamera, BakeoffCandidateKind, BakeoffVolume, Material, SurfaceSampleBlockRequest,
-    TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TerrainPageBuildError, TerrainPageKey,
-    TerrainPageRepresentation, TerrainPageV1, TerrainSimplificationBudget, VoxelBlockRequest,
-    VoxelBounds, VoxelCoord, WorldProduct, WorldProductBatch, WorldProductPriority,
-    WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash,
+    TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TERRAIN_REGION_ROOT_LEVEL, TerrainPageBuildError,
+    TerrainPageKey, TerrainPageRepresentation, TerrainPageV1, TerrainSimplificationBudget,
+    VoxelBlockRequest, VoxelBounds, VoxelCoord, WorldProduct, WorldProductBatch,
+    WorldProductPriority, WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash,
     benchmark_clustered_page_rebuild, build_compact_exact_terrain_page,
     build_exact_cluster_terrain_parent, build_exact_terrain_page,
-    build_simplified_triangle_terrain_parent, encode_terrain_page, run_virtual_surface_bakeoff,
+    build_simplified_triangle_terrain_parent, build_terrain_region, encode_terrain_page,
+    run_virtual_surface_bakeoff,
 };
 use voxels_world_service::LoadedWorldServiceConfig;
 
@@ -65,6 +66,7 @@ struct Arguments {
     fixture: Fixture,
     gpu: GpuMode,
     cluster_only: bool,
+    region_only: bool,
     pose: usize,
     edge: u32,
     ray_grid: [u32; 2],
@@ -89,6 +91,7 @@ fn parse_arguments() -> Result<Arguments, Box<dyn std::error::Error>> {
     let mut fixture = Fixture::Supplied;
     let mut gpu = GpuMode::Disabled;
     let mut cluster_only = false;
+    let mut region_only = false;
     let mut pose = 0usize;
     let mut edge = DEFAULT_EDGE;
     let mut ray_grid = [320, 180];
@@ -109,6 +112,8 @@ fn parse_arguments() -> Result<Arguments, Box<dyn std::error::Error>> {
             gpu = GpuMode::RasterOnly;
         } else if argument == "--cluster-only" {
             cluster_only = true;
+        } else if argument == "--region-only" {
+            region_only = true;
         } else if let Some(value) = argument.strip_prefix("--pose=") {
             pose = value.parse::<usize>()?.saturating_sub(1);
         } else if let Some(value) = argument.strip_prefix("--edge=") {
@@ -134,6 +139,7 @@ fn parse_arguments() -> Result<Arguments, Box<dyn std::error::Error>> {
         fixture,
         gpu,
         cluster_only,
+        region_only,
         pose,
         edge,
         ray_grid,
@@ -271,26 +277,49 @@ fn sample_volume(
         ),
     )
     .ok_or("computed volume bounds are invalid")?;
-    let sample_count = usize::try_from(edge)?
-        .checked_mul(usize::try_from(height)?)
-        .and_then(|plane| plane.checked_mul(usize::try_from(edge).ok()?))
+    let volume = sample_voxel_volume(source, bounds)?;
+    Ok((
+        volume,
+        json!({
+            "bounds": {
+                "min": bounds.min.as_array(),
+                "max": bounds.max.as_array(),
+                "shape": [edge, height, edge],
+            },
+            "surfaceHeightVoxels": {
+                "minimum": minimum_height,
+                "maximum": maximum_height,
+            },
+            "lookIntersectionVoxels": focus,
+        }),
+    ))
+}
+
+fn sample_voxel_volume(
+    source: &dyn WorldSourceEngine,
+    bounds: VoxelBounds,
+) -> Result<BakeoffVolume, Box<dyn std::error::Error>> {
+    let shape = voxel_bounds_shape(bounds)?;
+    let sample_count = usize::try_from(shape[0])?
+        .checked_mul(usize::try_from(shape[1])?)
+        .and_then(|plane| plane.checked_mul(usize::try_from(shape[2]).ok()?))
         .ok_or("volume sample count overflows")?;
     let mut materials = vec![Material::Air; sample_count];
     let mut requests = Vec::new();
     let mut z = 0u32;
-    while z < edge {
-        let depth = BLOCK_EDGE.min(edge - z);
+    while z < shape[2] {
+        let depth = BLOCK_EDGE.min(shape[2] - z);
         let mut x = 0u32;
-        while x < edge {
-            let width = BLOCK_EDGE.min(edge - x);
+        while x < shape[0] {
+            let width = BLOCK_EDGE.min(shape[0] - x);
             let mut y = 0u32;
-            while y < height {
-                let block_height = BLOCK_HEIGHT.min(height - y);
+            while y < shape[1] {
+                let block_height = BLOCK_HEIGHT.min(shape[1] - y);
                 requests.push(WorldProductRequest::VoxelBlock(VoxelBlockRequest {
                     min: VoxelCoord::new(
-                        min_x.saturating_add(i32::try_from(x)?),
-                        min_y.saturating_add(i32::try_from(y)?),
-                        min_z.saturating_add(i32::try_from(z)?),
+                        bounds.min.x.saturating_add(i32::try_from(x)?),
+                        bounds.min.y.saturating_add(i32::try_from(y)?),
+                        bounds.min.z.saturating_add(i32::try_from(z)?),
                     ),
                     sample_shape: [width, block_height, depth],
                 }));
@@ -328,30 +357,161 @@ fn sample_volume(
                         let global_z =
                             usize::try_from(i64::from(world.z) - i64::from(bounds.min.z))?;
                         let index = global_x
-                            + global_y * usize::try_from(edge)?
-                            + global_z * usize::try_from(edge)? * usize::try_from(height)?;
+                            + global_y * usize::try_from(shape[0])?
+                            + global_z * usize::try_from(shape[0])? * usize::try_from(shape[1])?;
                         materials[index] = material;
                     }
                 }
             }
         }
     }
-    let volume = BakeoffVolume::new(bounds, materials)?;
+    Ok(BakeoffVolume::new(bounds, materials)?)
+}
+
+fn sample_fixed_region(
+    source: &dyn WorldSourceEngine,
+    pose: SuppliedPose,
+) -> Result<(BakeoffVolume, TerrainPageKey, Value), Box<dyn std::error::Error>> {
+    let eye_voxels = pose.eye_metres.map(|metres| metres * 10.0);
+    let forward = [
+        pose.yaw.sin() * pose.pitch.cos(),
+        pose.pitch.sin(),
+        -pose.yaw.cos() * pose.pitch.cos(),
+    ];
+    let focus = find_surface_focus(source, eye_voxels, forward)?;
+    let result = source.generate_batch(WorldProductBatch {
+        priority: WorldProductPriority::VisibleSurface,
+        requests: vec![WorldProductRequest::SurfaceSampleBlock(
+            SurfaceSampleBlockRequest {
+                origin: focus,
+                sample_shape: [1, 1],
+            },
+        )],
+    })?;
+    let item = result
+        .items
+        .into_iter()
+        .next()
+        .ok_or("fixed region focus sample is missing")?;
+    let WorldProduct::SurfaceSampleBlock(block) = item.result? else {
+        return Err("fixed region focus returned the wrong product".into());
+    };
+    let surface_y = block
+        .samples()
+        .first()
+        .ok_or("fixed region focus sample is empty")?
+        .height;
+    let span = i32::try_from(32u32 << TERRAIN_REGION_ROOT_LEVEL)?;
+    let root = TerrainPageKey {
+        level: TERRAIN_REGION_ROOT_LEVEL,
+        coord: [
+            focus[0].div_euclid(span),
+            surface_y.div_euclid(span),
+            focus[1].div_euclid(span),
+        ],
+    };
+    let bounds = root.bounds().ok_or("fixed region root is invalid")?;
+    let volume = sample_voxel_volume(source, bounds)?;
     Ok((
         volume,
+        root,
         json!({
+            "root": {
+                "level": root.level,
+                "coord": root.coord,
+            },
             "bounds": {
                 "min": bounds.min.as_array(),
                 "max": bounds.max.as_array(),
-                "shape": [edge, height, edge],
-            },
-            "surfaceHeightVoxels": {
-                "minimum": minimum_height,
-                "maximum": maximum_height,
+                "shape": voxel_bounds_shape(bounds)?,
             },
             "lookIntersectionVoxels": focus,
+            "surfaceYVoxels": surface_y,
         }),
     ))
+}
+
+fn voxel_bounds_shape(bounds: VoxelBounds) -> Result<[u32; 3], Box<dyn std::error::Error>> {
+    Ok([
+        u32::try_from(i64::from(bounds.max.x) - i64::from(bounds.min.x))?,
+        u32::try_from(i64::from(bounds.max.y) - i64::from(bounds.min.y))?,
+        u32::try_from(i64::from(bounds.max.z) - i64::from(bounds.min.z))?,
+    ])
+}
+
+fn fixed_region_report(
+    source: &dyn WorldSourceEngine,
+    source_identity_hash: WorldSourceIdentityHash,
+    pose: SuppliedPose,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let sample_started = Instant::now();
+    let (volume, root, region) = sample_fixed_region(source, pose)?;
+    let sample_ms = sample_started.elapsed().as_secs_f64() * 1_000.0;
+    let build_started = Instant::now();
+    let build = build_terrain_region(
+        source_identity_hash,
+        root,
+        1,
+        TerrainSimplificationBudget {
+            target_triangles: 4_096,
+            max_error_millivoxels: 8_000,
+            target_encoded_bytes: TERRAIN_PAGE_TARGET_COMPRESSED_BYTES as u32,
+        },
+        |coord| volume.material_at(coord),
+    )?;
+    let build_ms = build_started.elapsed().as_secs_f64() * 1_000.0;
+    let mut level_reports = Vec::new();
+    for level in 0..=TERRAIN_REGION_ROOT_LEVEL {
+        let pages = build
+            .pages
+            .iter()
+            .filter(|page| page.key.level == level)
+            .collect::<Vec<_>>();
+        let encoded_bytes = pages
+            .iter()
+            .map(|page| encode_terrain_page(page).map(|encoded| encoded.len()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let geometric_errors = pages
+            .iter()
+            .map(|page| page.errors.geometric_millivoxels as usize)
+            .collect::<Vec<_>>();
+        let triangles = pages
+            .iter()
+            .map(|page| triangle_count(page))
+            .collect::<Vec<_>>();
+        let mut representations = BTreeMap::<&'static str, usize>::new();
+        for page in &pages {
+            *representations.entry(page_kind(page)).or_default() += 1;
+        }
+        level_reports.push(json!({
+            "level": level,
+            "pageCount": pages.len(),
+            "representations": representations,
+            "compressedBytes": usize_distribution(&encoded_bytes),
+            "triangles": usize_distribution(&triangles),
+            "geometricErrorMillivoxels": usize_distribution(&geometric_errors),
+        }));
+    }
+    let total_compressed_bytes = build
+        .pages
+        .iter()
+        .map(encode_terrain_page)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|encoded| encoded.len())
+        .sum::<usize>();
+    Ok(json!({
+        "schema": "voxels.virtual-terrain-fixed-region-bake.v1",
+        "region": region,
+        "sampleMs": sample_ms,
+        "buildMs": build_ms,
+        "logicalVoxelBytes": volume.logical_bytes(),
+        "pageCount": build.pages.len(),
+        "totalCompressedBytes": total_compressed_bytes,
+        "directoryNodes": build.directory.nodes.len(),
+        "validRegionPartition": build.directory.validates_region_partition(),
+        "levels": level_reports,
+    }))
 }
 
 fn find_surface_focus(
@@ -631,6 +791,46 @@ fn page_size_report(volume: &BakeoffVolume) -> Result<Value, Box<dyn std::error:
 )]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = parse_arguments()?;
+    if arguments.region_only {
+        if arguments.fixture != Fixture::Supplied {
+            return Err("--region-only requires --fixture=supplied".into());
+        }
+        let loaded = LoadedWorldServiceConfig::load(&arguments.config)?;
+        let source_started = Instant::now();
+        let source = loaded.build_world_source()?;
+        let source_build_ms = source_started.elapsed().as_secs_f64() * 1_000.0;
+        let source_identity_hash = source.identity().identity_hash();
+        if source_identity_hash.to_string() != SUPPLIED_SOURCE_HASH {
+            return Err(format!(
+                "configured source {source_identity_hash} does not match supplied captures {SUPPLIED_SOURCE_HASH}"
+            )
+            .into());
+        }
+        let report = json!({
+            "source": {
+                "config": arguments.config,
+                "identityHash": source_identity_hash.to_string(),
+                "seed": loaded.config().world_seed.to_string(),
+                "buildMs": source_build_ms,
+            },
+            "capture": {
+                "fixture": "supplied",
+                "pose": arguments.pose + 1,
+            },
+            "fixedRegion": fixed_region_report(
+                source.as_ref(),
+                source_identity_hash,
+                SUPPLIED_POSES[arguments.pose],
+            )?,
+        });
+        let encoded = serde_json::to_string_pretty(&report)?;
+        if let Some(path) = arguments.output {
+            std::fs::write(path, format!("{encoded}\n"))?;
+        } else {
+            println!("{encoded}");
+        }
+        return Ok(());
+    }
     let volume_started = Instant::now();
     let (volume, region, camera, source_json, capture_json) = match arguments.fixture {
         Fixture::Supplied => {

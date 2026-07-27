@@ -12,6 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Read;
 
+#[cfg(feature = "terrain-page-builder")]
+use crate::terrain_error::certify_bidirectional_surface_error;
+
 pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 1;
 pub const TERRAIN_PAGE_EDGE_SAMPLES: u32 = 32;
 pub const TERRAIN_PAGE_MAX_LEVEL: u8 = 20;
@@ -33,6 +36,8 @@ const PAGE_COMPRESSION_BROTLI: u8 = 1;
 const PAGE_BROTLI_QUALITY: i32 = 5;
 const PAGE_BROTLI_WINDOW_BITS: i32 = 20;
 const PAGE_BROTLI_BUFFER_BYTES: usize = 16_384;
+#[cfg(feature = "terrain-page-builder")]
+const SURFACE_ERROR_CERTIFICATE_MAX_SPACING_MILLIVOXELS: u32 = 250;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TerrainPageKey {
@@ -869,13 +874,18 @@ fn simplify_exact_terrain_parent(
         .unwrap_or(usize::MAX)
         .saturating_mul(3)
         .min(indices.len());
+    let certificate_spacing_millivoxels = SURFACE_ERROR_CERTIFICATE_MAX_SPACING_MILLIVOXELS
+        .min(budget.max_error_millivoxels.saturating_div(4).max(1));
+    let simplifier_error_limit_millivoxels = budget
+        .max_error_millivoxels
+        .saturating_sub(certificate_spacing_millivoxels);
     let mut measured_error_voxels = 0.0f32;
     let simplified_indices = meshopt::simplify_with_locks_decoder(
         &indices,
         &positions,
         &locks,
         target_index_count,
-        budget.max_error_millivoxels as f32 / 1000.0,
+        simplifier_error_limit_millivoxels as f32 / 1000.0,
         meshopt::SimplifyOptions::LockBorder
             | meshopt::SimplifyOptions::ErrorAbsolute
             | meshopt::SimplifyOptions::Regularize,
@@ -887,17 +897,32 @@ fn simplify_exact_terrain_parent(
     let cluster = compact_simplified_cluster(&input, &simplified_indices)?;
     triangle_cluster_validation_error(&cluster, exact.bounds, exact.materials.len())
         .map_err(simplification_validation_build_error)?;
+    if open_surface_edge_signature(&cluster) != open_surface_edge_signature(&input) {
+        return Err(TerrainPageBuildError::InvalidSimplification);
+    }
     let reduced = cluster.triangles.len() < input.triangles.len();
-    let introduced_millivoxels = if reduced {
-        (measured_error_voxels.max(0.0) * 1000.0)
+    let simplifier_reported_millivoxels = if reduced {
+        (measured_error_voxels.max(0.0) * 1_000.0)
             .ceil()
             .clamp(0.0, u32::MAX as f32) as u32
     } else {
         0
     };
-    if introduced_millivoxels > budget.max_error_millivoxels {
+    if simplifier_reported_millivoxels > simplifier_error_limit_millivoxels {
         return Err(TerrainPageBuildError::InvalidSimplification);
     }
+    let introduced_millivoxels = if reduced {
+        certify_bidirectional_surface_error(
+            &input,
+            &cluster,
+            exact.bounds.min.as_array(),
+            certificate_spacing_millivoxels,
+            budget.max_error_millivoxels,
+        )?
+        .upper_bound_millivoxels
+    } else {
+        0
+    };
     let child_errors = children
         .iter()
         .fold(TerrainErrorBounds::EXACT, |aggregate, child| {
@@ -1215,6 +1240,36 @@ fn locked_cluster_vertices(cluster: &TerrainTriangleCluster, bounds: VoxelBounds
         }
     }
     locks
+}
+
+#[cfg(feature = "terrain-page-builder")]
+fn open_surface_edge_signature(
+    cluster: &TerrainTriangleCluster,
+) -> BTreeSet<([i32; 3], [i32; 3], u8)> {
+    let mut counts = BTreeMap::<([i32; 3], [i32; 3], u8), u8>::new();
+    for triangle in &cluster.triangles {
+        let positions = triangle
+            .vertices
+            .map(|index| cluster.vertices[index as usize].position);
+        for [left, right] in [
+            [positions[0], positions[1]],
+            [positions[1], positions[2]],
+            [positions[2], positions[0]],
+        ] {
+            let (left, right) = if left < right {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            *counts
+                .entry((left, right, triangle.material_index))
+                .or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(edge, count)| (count != 2).then_some(edge))
+        .collect()
 }
 
 fn max_error_bounds(left: TerrainErrorBounds, right: TerrainErrorBounds) -> TerrainErrorBounds {
