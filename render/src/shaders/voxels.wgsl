@@ -40,6 +40,7 @@ struct VertexOut {
   @location(3) ao: f32,
   @location(4) @interpolate(flat) terrain_lighting: vec2<f32>,
   @location(5) @interpolate(flat) source: u32,
+  @location(6) surface_weather: vec2<f32>,
 };
 
 const CORNERS = array<vec2<i32>, 4>(
@@ -62,11 +63,6 @@ fn corner_ao(packed: u32, corner: u32) -> f32 {
   return f32((packed >> (corner * 2u)) & 3u) / 3.0;
 }
 
-fn unpack_signed_i16(value: u32) -> f32 {
-  let bits = value & 65535u;
-  return f32(select(i32(bits), i32(bits) - 65536, bits >= 32768u));
-}
-
 fn unpack_signed_i3(value: u32) -> f32 {
   let bits = value & 7u;
   return f32(select(i32(bits), i32(bits) - 8, bits >= 4u));
@@ -86,10 +82,34 @@ fn surface_quad_flip(_face: u32, surface_shape: u32, packed_ao: u32) -> bool {
     > corner_ao(packed_ao, 1u) + corner_ao(packed_ao, 3u);
 }
 
-fn surface_morph_delta(morph_heights: u32, vertical_corner: i32) -> f32 {
-  let bottom = unpack_signed_i16(morph_heights);
-  let top = unpack_signed_i16(morph_heights >> 16u);
-  return select(bottom, top, vertical_corner != 0);
+fn surface_morph_corner(morph_heights: vec4<i32>, corner: u32) -> f32 {
+  return f32(morph_heights[corner]) * 0.5;
+}
+
+fn interpolated_quad_value(
+  values: vec4<f32>,
+  uv: vec2<f32>,
+  flipped: bool,
+) -> f32 {
+  let point = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
+  if flipped {
+    if point.x + point.y <= 1.0 {
+      return values.x * (1.0 - point.x - point.y)
+        + values.y * point.x
+        + values.w * point.y;
+    }
+    return values.y * (1.0 - point.y)
+      + values.z * (point.x + point.y - 1.0)
+      + values.w * (1.0 - point.x);
+  }
+  if point.y <= point.x {
+    return values.x * (1.0 - point.x)
+      + values.y * (point.x - point.y)
+      + values.z * point.y;
+  }
+  return values.x * (1.0 - point.y)
+    + values.z * point.x
+    + values.w * (point.y - point.x);
 }
 
 fn unpack_surface_macro_normal(packed: u32, parent: bool) -> vec3<f32> {
@@ -214,10 +234,15 @@ fn surface_parent_normal_blend(
   }
   let boundary = level + 1u;
   let half_extent = lod_boundary_half_extent(boundary, boundary_half_extents);
-  let delta = abs(world.xz - lod_boundary_center(boundary, boundary_centres));
-  let inside = half_extent - max(delta.x, delta.y);
-  // At sprint speed this remains a roughly 200ms spatial morph at the nearest ring while avoiding
-  // vertex-sidecar work on a second full row of Stride2 patches.
+  // Ownership remains on the exact snapped lattice, but its geometry field follows the camera
+  // continuously. Hysteresis can hold a cut 5/8 of one snap step behind the camera; finishing the
+  // morph before that envelope guarantees every newly owned fine patch is already identical to
+  // its parent when the atomic cut moves.
+  let snap_step = 3.2 * exp2(f32(max(i32(boundary) - 1, 0)));
+  let maximum_snap_lag = snap_step * 0.625;
+  let delta = abs(world.xz - frame.camera_time.xz);
+  let inside = half_extent - maximum_snap_lag - max(delta.x, delta.y);
+  // At sprint speed the nearest 1.6m ramp lasts roughly 200ms.
   let width = max(1.6, half_extent * 0.02);
   return cut_transition_parent_blend(
     1.0 - smoothstep(0.0, width, inside),
@@ -280,13 +305,17 @@ fn transition_triangle_local(
   return vec3<i32>(xz.x, 1, xz.y);
 }
 
-fn canonical_triangle_local(
-  corner: u32,
-  encoded_extent: vec2<u32>,
-  face: u32,
-) -> vec3<f32> {
-  let width = f32((((encoded_extent.x >> 6u) & 31u) | ((encoded_extent.x >> 10u) & 32u)) + 1u);
-  let height = f32((((encoded_extent.y >> 6u) & 31u) | ((encoded_extent.y >> 10u) & 32u)) + 1u);
+fn canonical_triangle_extent(encoded_extent: vec2<u32>) -> vec2<f32> {
+  return vec2<f32>(
+    f32((((encoded_extent.x >> 6u) & 31u) | ((encoded_extent.x >> 10u) & 32u)) + 1u),
+    f32((((encoded_extent.y >> 6u) & 31u) | ((encoded_extent.y >> 10u) & 32u)) + 1u),
+  );
+}
+
+fn canonical_triangle_uv(corner: u32, encoded_extent: vec2<u32>) -> vec2<f32> {
+  let extent = canonical_triangle_extent(encoded_extent);
+  let width = extent.x;
+  let height = extent.y;
   let edge = (encoded_extent.x >> 11u) & 3u;
   let anchor_code = (encoded_extent.y >> 11u) & 7u;
   let raw_start = f32(encoded_extent.x & CANONICAL_TRIANGLE_OFFSET_MASK);
@@ -312,10 +341,18 @@ fn canonical_triangle_local(
   );
   let anchor_uv = select(
     corner_anchors[min(max(anchor_code, 1u), 4u) - 1u],
-    vec2<f32>(width, height) * 0.5,
+    extent * 0.5,
     anchor_code == 0u,
   );
-  let uv = select(boundary_uv, anchor_uv, corner == 0u);
+  return select(boundary_uv, anchor_uv, corner == 0u);
+}
+
+fn canonical_triangle_local(
+  corner: u32,
+  encoded_extent: vec2<u32>,
+  face: u32,
+) -> vec3<f32> {
+  let uv = canonical_triangle_uv(corner, encoded_extent);
   switch face {
     case 0u: { return vec3<f32>(1.0, uv.y, uv.x); }
     case 1u: { return vec3<f32>(0.0, uv.y, uv.x); }
@@ -340,7 +377,7 @@ fn quad_world(
   material: u32,
   ao: u32,
   surface_shape: u32,
-  morph_heights: u32,
+  morph_heights: vec4<i32>,
   morph_closure: bool,
   morph_geometry: bool,
   transition_triangle: bool,
@@ -374,7 +411,22 @@ fn quad_world(
       transition_phase_role,
     );
     let morph_blend = select(parent_blend, 1.0 - parent_blend, morph_closure);
-    world.y += surface_morph_delta(morph_heights, uv.y)
+    var morph_delta = surface_morph_corner(morph_heights, corner);
+    if canonical_triangle {
+      let values = vec4<f32>(
+        surface_morph_corner(morph_heights, 0u),
+        surface_morph_corner(morph_heights, 1u),
+        surface_morph_corner(morph_heights, 2u),
+        surface_morph_corner(morph_heights, 3u),
+      );
+      let source_extent = canonical_triangle_extent(encoded_extent);
+      morph_delta = interpolated_quad_value(
+        values,
+        canonical_triangle_uv(corner, encoded_extent) / source_extent,
+        surface_quad_flip(face, surface_shape, ao),
+      );
+    }
+    world.y += morph_delta
       * frame.viewport_voxel.z
       * morph_blend;
   }
@@ -387,7 +439,7 @@ fn voxel_vertex(
   extent_voxels: vec2<u32>,
   material_face: u32,
   ao: u32,
-  morph_heights: u32,
+  morph_heights: vec4<i32>,
   morph_geometry: bool,
   boundary_centres: array<vec4<f32>, 4>,
   boundary_half_extents: array<vec4<f32>, 2>,
@@ -480,6 +532,10 @@ fn voxel_vertex(
   // Morph closures are ordinary streamed products in storage but a distinct draw source on the
   // active cut. Keep them visually separable without consuming another packed extent category.
   out.source = select(encoded_source, 5u, morph_closure);
+  // The finest cloud octave changes over hundreds of metres, so evaluating it at every covered
+  // 10 cm terrain fragment only repeats the same signal. Interpolating the exact shared field
+  // from surface vertices retains substantially more spatial resolution than the field contains.
+  out.surface_weather = cloud_surface_weather(world);
   return out;
 }
 
@@ -497,7 +553,7 @@ fn vs_main_fixed(
     extent_voxels,
     material_face,
     ao,
-    0u,
+    vec4<i32>(0),
     false,
     frame.lod_boundary_centres,
     frame.lod_boundary_half_extents,
@@ -512,7 +568,7 @@ fn vs_main_morph(
   @location(1) extent_voxels: vec2<u32>,
   @location(2) material_face: u32,
   @location(3) ao: u32,
-  @location(4) morph_heights: u32,
+  @location(4) morph_heights: vec4<i32>,
 ) -> VertexOut {
   return voxel_vertex(
     vertex_index,
@@ -556,7 +612,7 @@ fn vs_transition_fixed(
     extent_voxels,
     material_face,
     ao,
-    0u,
+    vec4<i32>(0),
     false,
     transition_boundary_centres(),
     transition_boundary_half_extents(),
@@ -571,7 +627,7 @@ fn vs_transition_morph(
   @location(1) extent_voxels: vec2<u32>,
   @location(2) material_face: u32,
   @location(3) ao: u32,
-  @location(4) morph_heights: u32,
+  @location(4) morph_heights: vec4<i32>,
 ) -> VertexOut {
   return voxel_vertex(
     vertex_index,
@@ -1050,7 +1106,7 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
 
   var surface_radiance = reflection * fresnel;
   let sun = normalize(frame.key_light_direction.xyz);
-  let visibility = sun_visibility(input.world, normal) * cloud_surface_weather(input.world).x;
+  let visibility = sun_visibility(input.world, normal) * input.surface_weather.x;
   surface_radiance += frame.key_light_radiance.rgb
     * evaluate_direct_dielectric_f0(
       vec3<f32>(0.0),
@@ -1223,7 +1279,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     detail_uv_dy,
     distance_to_camera,
   );
-  let surface_weather = cloud_surface_weather(input.world);
+  let surface_weather = input.surface_weather;
   let shadow = sun_visibility(input.world, input.normal)
     * surface_weather.x
     * input.terrain_lighting.x;

@@ -27,11 +27,6 @@ fn corner_ao(packed: u32, corner: u32) -> f32 {
   return f32((packed >> (corner * 2u)) & 3u) / 3.0;
 }
 
-fn unpack_signed_i16(value: u32) -> f32 {
-  let bits = value & 65535u;
-  return f32(select(i32(bits), i32(bits) - 65536, bits >= 32768u));
-}
-
 fn unpack_signed_i3(value: u32) -> f32 {
   let bits = value & 7u;
   return f32(select(i32(bits), i32(bits) - 8, bits >= 4u));
@@ -51,10 +46,8 @@ fn surface_quad_flip(_face: u32, surface_shape: u32, packed_ao: u32) -> bool {
     > corner_ao(packed_ao, 1u) + corner_ao(packed_ao, 3u);
 }
 
-fn surface_morph_delta(morph_heights: u32, vertical_corner: i32) -> f32 {
-  let bottom = unpack_signed_i16(morph_heights);
-  let top = unpack_signed_i16(morph_heights >> 16u);
-  return select(bottom, top, vertical_corner != 0);
+fn surface_morph_delta(morph_heights: vec4<i32>, corner: u32) -> f32 {
+  return f32(morph_heights[corner]) * 0.5;
 }
 
 fn lod_boundary_center(boundary: u32) -> vec2<f32> {
@@ -76,8 +69,10 @@ fn surface_parent_blend(world: vec3<f32>, material: u32) -> f32 {
   }
   let boundary = level + 1u;
   let half_extent = lod_boundary_half_extent(boundary);
-  let delta = abs(world.xz - lod_boundary_center(boundary));
-  let inside = half_extent - max(delta.x, delta.y);
+  let snap_step = 3.2 * exp2(f32(max(i32(boundary) - 1, 0)));
+  let maximum_snap_lag = snap_step * 0.625;
+  let delta = abs(world.xz - shadow_frame.camera_voxel.xz);
+  let inside = half_extent - maximum_snap_lag - max(delta.x, delta.y);
   let width = max(1.6, half_extent * 0.02);
   return 1.0 - smoothstep(0.0, width, inside);
 }
@@ -122,7 +117,7 @@ fn shadow_vertex(
   extent_voxels: vec2<u32>,
   material_face: u32,
   ao: u32,
-  morph_heights: u32,
+  morph_heights: vec4<i32>,
   morph_geometry: bool,
 ) -> vec4<f32> {
   let face = (material_face >> 16u) & 7u;
@@ -191,7 +186,7 @@ fn shadow_vertex(
   if morph_geometry {
     let parent_blend = surface_parent_blend(world, material);
     let morph_blend = select(parent_blend, 1.0 - parent_blend, morph_closure);
-    world.y += surface_morph_delta(morph_heights, uv.y)
+    world.y += surface_morph_delta(morph_heights, corner)
       * shadow_frame.camera_voxel.w
       * morph_blend;
   }
@@ -212,7 +207,7 @@ fn vs_main_fixed(
     extent_voxels,
     material_face,
     ao,
-    0u,
+    vec4<i32>(0),
     false,
   );
 }
@@ -224,7 +219,7 @@ fn vs_main_morph(
   @location(1) extent_voxels: vec2<u32>,
   @location(2) material_face: u32,
   @location(3) ao: u32,
-  @location(4) morph_heights: u32,
+  @location(4) morph_heights: vec4<i32>,
 ) -> @builtin(position) vec4<f32> {
   return shadow_vertex(
     vertex_index,

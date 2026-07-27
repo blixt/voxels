@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 33;
+pub const PROTOCOL_VERSION: u16 = 34;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -38,7 +38,7 @@ const MAX_SURFACE_EXACT_DETAIL_CHUNKS: usize = 4_096;
 const MAX_MANIFEST_MODEL_STRING_BYTES: usize = 4_096;
 const MAX_MANIFEST_MODEL_WEIGHT_HASHES: usize = 64;
 const SURFACE_SNAPSHOT_MAGIC: &[u8; 4] = b"VXST";
-const SURFACE_SNAPSHOT_VERSION: u16 = 10;
+const SURFACE_SNAPSHOT_VERSION: u16 = 11;
 const SURFACE_QUAD_SYNTHETIC_FALLBACK_BIT: u64 = 1 << 19;
 
 const KIND_OPEN_WORLD: u16 = 1;

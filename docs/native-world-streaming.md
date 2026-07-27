@@ -7,7 +7,7 @@ provider therefore adds no provider branch, model dependency, or Metal API to th
 
 ## Why binary WebSocket first
 
-VXWP v33 uses the standard `WebSocket` API over loopback. This is the best first transport for
+VXWP v34 uses the standard `WebSocket` API over loopback. This is the best first transport for
 reliable chunk assets: it is mature, works in a dedicated worker, and requires neither an HTTP/3
 certificate setup nor WebRTC signaling. Axum's native Rust server disables Nagle delay, and the
 application bounds outstanding work so classic WebSocket's missing receive-side backpressure cannot
@@ -39,13 +39,13 @@ The [W3C WebTransport specification][webtransport-spec] supports carrying the sa
 envelopes on a future reliable stream. Transport choice is deliberately below world identity,
 request correlation, and chunk codecs.
 
-## VXWP v33 contract
+## VXWP v34 contract
 
 Each WebSocket message contains exactly one little-endian VXWP envelope with `VXWP` magic, protocol
 version, message kind, request ID, payload length, and reserved fields. The format is code-versioned;
 Rust enum layout and Serde output are not wire formats.
 
-1. The browser upgrades `/v33/world`, offering `voxels.world.v33` and the configured local auth token,
+1. The browser upgrades `/v34/world`, offering `voxels.world.v34` and the configured local auth token,
    then sends `OpenWorld` with its maximum in-flight batch count and browser-local player claim.
 2. The daemon replies with `WorldOpened`: immutable world manifest, source identity/hash,
    capabilities, negotiated request window, echoed player claim, spawn sample, authoritative resume
@@ -65,7 +65,7 @@ Rust enum layout and Serde output are not wire formats.
    residency bound, quality level, or bandwidth ceiling.
 5. Each successful near item carries the existing palette/bit-packed VXCH chunk plus an exact,
    palette/bit-packed meshing halo. Both are integrity checked before meshing.
-6. Surface meshes use a separate `VXST` v10 payload containing bounded terrain, water, patch
+6. Surface meshes use a separate `VXST` v11 payload containing bounded terrain, water, patch
    boundary-face ranges, exact-chunk-tagged vertical fallback spans, explicit parent-height morph
    closures, child/parent shading-height grids, compact cardinal landscape-horizon profiles, and
    bounded sparse exact-detail chunk hints for edited topology that a heightfield cannot preserve.
@@ -77,7 +77,7 @@ Rust enum layout and Serde output are not wire formats.
    resident until its one exact 3D chunk is renderable. The renderer derives exact height-matched
    connectors and lighting morphs from the two resident profiles.
 7. Every chunk or surface result body is independently Brotli-compressed at quality 2 with a 20-bit
-   window. Its mandatory v33 envelope declares the exact uncompressed length; the decoder rejects
+   window. Its mandatory v34 envelope declares the exact uncompressed length; the decoder rejects
    unknown codecs, nonzero reserved bytes, outputs above the 16 MiB frame bound, truncated streams,
    and streams producing even one byte beyond the declaration before semantic validation. Large
    logical frames are paced in fragments keyed by a connection-local transfer ID, independent of
@@ -88,7 +88,7 @@ Rust enum layout and Serde output are not wire formats.
 8. `Cancel` is best effort. Late, canceled, mismatched, or stale-revision responses are discarded;
    they cannot resurrect an evicted scheduler ticket or strand partial reassembly state.
 9. `WorldOpened` also returns a connection-scoped, random presence session token. The browser uses
-   it to open `/v33/presence` on a dedicated socket; a token cannot be reused by another world
+   it to open `/v34/presence` on a dedicated socket; a token cannot be reused by another world
    connection.
 10. Browsers send bounded `PlayerPose` latest-state frames. The server validates monotonic sequence,
     finite coordinates, update rate, reported velocity, and receipt-time horizontal/vertical movement
@@ -117,7 +117,7 @@ Rust enum layout and Serde output are not wire formats.
     The server expands it to the selected one-cubic-metre sphere or cube centred on the target,
     credits every removed material, and atomically commits at most 1,021 exact voxel values.
     Placement consumes only earned selected material and succeeds only when the complete stencil is
-    empty. VXWP v33 returns the semantic action plus an adaptive sparse-ordinal or dense-bitset
+    empty. VXWP v34 returns the semantic action plus an adaptive sparse-ordinal or dense-bitset
     mutation mask; final materials and affected chunk halos are reconstructed rather than repeated.
     Inventory, compact edit chunks, bounded idempotency receipts, and product revisions share one
     SQLite transaction.
@@ -179,9 +179,9 @@ Copy it to both `config/client.toml` as `[world].auth_subprotocol_token` and
 
 ```toml
 [world]
-endpoint = "ws://127.0.0.1:9777/v33/world"
-presence_endpoint = "ws://127.0.0.1:9777/v33/presence"
-subprotocol = "voxels.world.v33"
+endpoint = "ws://127.0.0.1:9777/v34/world"
+presence_endpoint = "ws://127.0.0.1:9777/v34/presence"
+subprotocol = "voxels.world.v34"
 auth_subprotocol_token = "the-same-random-local-token"
 ```
 

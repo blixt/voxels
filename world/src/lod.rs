@@ -18,7 +18,7 @@ pub const SURFACE_PATCH_EDGE_CELLS: i32 = 8;
 pub const SURFACE_PATCHES_PER_TILE_EDGE: i32 = SURFACE_TILE_EDGE_CELLS / SURFACE_PATCH_EDGE_CELLS;
 pub const SURFACE_LOD_LEVEL_COUNT: usize = 8;
 pub const SURFACE_SHADING_EDGE_SAMPLES: usize = 34;
-pub const SURFACE_PARENT_SHADING_EDGE_SAMPLES: usize = 18;
+pub const SURFACE_PARENT_SHADING_EDGE_SAMPLES: usize = 20;
 pub const SURFACE_HORIZON_CELL_COUNT: usize =
     (SURFACE_TILE_EDGE_CELLS * SURFACE_TILE_EDGE_CELLS) as usize;
 pub const SURFACE_PARENT_HORIZON_CELL_COUNT: usize =
@@ -388,8 +388,9 @@ pub struct SurfaceTileMesh {
     pub morph_closures: Vec<SurfaceMorphClosure>,
     pub patches: Vec<SurfacePatch>,
     /// View-independent height samples used to keep lighting continuous across streamed tile and
-    /// LOD boundaries. `heights` retains the tile's one-cell halo; `parent_heights` covers the
-    /// same footprint on the next-coarser lattice and is empty only for the outermost level.
+    /// LOD boundaries. `heights` retains the tile's one-cell halo; `parent_heights` retains two
+    /// coarser cells so the adjacent parent's complete boundary polygon can be reconstructed and
+    /// is empty only for the outermost level.
     pub shading: SurfaceShading,
 }
 
@@ -1229,9 +1230,9 @@ fn generate_surface_tile_mesh_with_options(
     };
     let parent_heights = coord.level.next_coarser().map_or_else(Vec::new, |_| {
         let parent_stride = stride * 2;
-        (-1..=(SURFACE_TILE_EDGE_CELLS / 2))
+        (-2..=(SURFACE_TILE_EDGE_CELLS / 2 + 1))
             .flat_map(|sample_z| {
-                (-1..=(SURFACE_TILE_EDGE_CELLS / 2)).map(move |sample_x| {
+                (-2..=(SURFACE_TILE_EDGE_CELLS / 2 + 1)).map(move |sample_x| {
                     parent_surface(
                         offset_clamped(origin_x, sample_x * parent_stride + parent_stride / 2),
                         offset_clamped(origin_z, sample_z * parent_stride + parent_stride / 2),

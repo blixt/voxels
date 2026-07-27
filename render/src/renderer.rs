@@ -8,8 +8,9 @@ use crate::environment::{
     WorldEnvironmentState, surface_region_label,
 };
 use crate::lod::{
-    GeometricLodFocus, LOD_BOUNDARY_HALF_EXTENTS, LodOwner, SurfacePatchSelection,
-    SurfacePatchSelectionBuild, incomplete_resident_parents, lod_boundary_half_extents_are_valid,
+    GeometricLodFocus, LOD_BOUNDARY_HALF_EXTENTS, LOD_BOUNDARY_SNAP, LodOwner,
+    SurfacePatchSelection, SurfacePatchSelectionBuild, incomplete_resident_parents,
+    lod_boundary_half_extents_are_valid,
 };
 use crate::material_detail::MaterialDetailGpu;
 use crate::shadow::{
@@ -362,6 +363,15 @@ struct GpuQuad {
     ao: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
+struct GpuMorph {
+    /// Four exact signed half-voxel deltas, one per source-quad corner.
+    deltas: [i16; 4],
+}
+
+const _: () = assert!(size_of::<GpuMorph>() == 8);
+
 /// A visible opening from a resident exact-volume chunk into a chunk whose mesh is not ready.
 ///
 /// Unknown data is not empty space. The renderer temporarily closes only these reachable portal
@@ -413,7 +423,7 @@ struct SurfacePatchProfile {
 #[derive(Default)]
 struct LodTransitionBuild {
     quads: Vec<GpuQuad>,
-    morph_heights: Vec<u32>,
+    morph_heights: Vec<GpuMorph>,
     exact_edges: HashSet<(SurfacePatchId, u8)>,
     incomplete_edges: u32,
 }
@@ -706,15 +716,25 @@ fn canonical_gpu_quads(world_origin: [i32; 3], quads: &[Quad]) -> Vec<GpuQuad> {
         .iter()
         .map(|quad| canonical_gpu_quad(world_origin, quad))
         .collect::<Vec<_>>();
+    let chunk_max = world_origin.map(|value| value.saturating_add(CHUNK_EDGE as i32));
     constrain_gpu_quad_t_junctions(
         &base_quads,
         |_, quad| {
-            ((quad.material_face & GPU_FACE_MASK) >> GPU_FACE_SHIFT) == 2
-                && quad.extent_voxels[0] <= 63
+            quad.extent_voxels[0] <= 63
                 && quad.extent_voxels[1] <= 63
                 && quad.extent_voxels.into_iter().all(|extent| extent > 0)
         },
-        |_, _, _, _| false,
+        |_, _, start, end| {
+            // Adjacent canonical chunks and the surface-LOD transition mesh are uploaded
+            // independently, so their boundary vertices are not present in `base_quads`.
+            // Subdivide every chunk-boundary edge onto the authoritative 10 cm lattice. Both
+            // owners then rasterize identical short edges instead of a greedy long edge meeting
+            // several independently rounded segments at a T-junction.
+            (0..3).any(|axis| {
+                start[axis] == end[axis]
+                    && (start[axis] == world_origin[axis] || start[axis] == chunk_max[axis])
+            })
+        },
         false,
     )
     .into_iter()
@@ -746,6 +766,35 @@ fn split_gpu_quad_vertical_extent(quad: GpuQuad, maximum_extent: u16) -> Vec<Gpu
         remaining -= height;
     }
     output
+}
+
+fn split_surface_morph(original: GpuQuad, piece: GpuQuad, morph: GpuMorph) -> GpuMorph {
+    let height = i64::from(original.extent_voxels[1]);
+    if height == 0 || piece == original {
+        return morph;
+    }
+    let start = i64::from(piece.origin[1]) - i64::from(original.origin[1]);
+    let end = start + i64::from(piece.extent_voxels[1]);
+    let interpolate = |bottom: i16, top: i16, offset: i64| {
+        let numerator =
+            i64::from(bottom) * (height - offset) + i64::from(top) * offset + height / 2;
+        i16::try_from(numerator.div_euclid(height)).unwrap_or_else(|_| {
+            debug_assert!(false, "split surface morph exceeds i16");
+            if numerator.is_negative() {
+                i16::MIN
+            } else {
+                i16::MAX
+            }
+        })
+    };
+    GpuMorph {
+        deltas: [
+            interpolate(morph.deltas[0], morph.deltas[3], start),
+            interpolate(morph.deltas[1], morph.deltas[2], start),
+            interpolate(morph.deltas[1], morph.deltas[2], end),
+            interpolate(morph.deltas[0], morph.deltas[3], end),
+        ],
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1217,7 +1266,7 @@ impl DrawListBuilder {
             size: slice.size,
             quad_count: slice.quad_count,
             morph_page: Some(morph_allocation.page),
-            morph_offset: morph_allocation.offset + first_quad * size_of::<u32>() as u32,
+            morph_offset: morph_allocation.offset + first_quad * size_of::<GpuMorph>() as u32,
         });
         self.quad_count = self.quad_count.saturating_add(slice.quad_count);
         Ok(())
@@ -1832,6 +1881,8 @@ pub struct Renderer {
     local_light_candidates: BTreeMap<MeshKey, Vec<GpuLocalLight>>,
     arena: ArenaAllocator,
     arena_buffers: Vec<Buffer>,
+    morph_arena: ArenaAllocator,
+    morph_arena_buffers: Vec<Buffer>,
     water_arena: ArenaAllocator,
     water_arena_buffers: Vec<Buffer>,
     depth: DepthTarget,
@@ -2771,6 +2822,8 @@ impl Renderer {
             local_light_candidates: BTreeMap::new(),
             arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuQuad>() as u32),
             arena_buffers: Vec::new(),
+            morph_arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuMorph>() as u32),
+            morph_arena_buffers: Vec::new(),
             water_arena: ArenaAllocator::new(ARENA_PAGE_BYTES, size_of::<GpuQuad>() as u32),
             water_arena_buffers: Vec::new(),
             depth,
@@ -3170,6 +3223,7 @@ impl Renderer {
         };
         commit_prepared_mesh(
             &mut self.arena,
+            Some(&mut self.morph_arena),
             &mut self.chunks,
             EXACT_VOLUME_FRONTIER_MESH_KEY,
             Some(prepared),
@@ -3666,7 +3720,7 @@ impl Renderer {
                 });
             }
             let Some(prepared) = self.prepare_water_mesh_sliced(key, &water_quads, slices) else {
-                discard_prepared_mesh(&mut self.arena, opaque_update);
+                discard_prepared_mesh(&mut self.arena, Some(&mut self.morph_arena), opaque_update);
                 return None;
             };
             Some(prepared)
@@ -3682,14 +3736,21 @@ impl Renderer {
     }
 
     fn discard_canonical_chunk_upload(&mut self, upload: PreparedCanonicalChunkUpload) {
-        discard_prepared_mesh(&mut self.arena, upload.opaque);
-        discard_prepared_mesh(&mut self.water_arena, upload.translucent);
+        discard_prepared_mesh(&mut self.arena, Some(&mut self.morph_arena), upload.opaque);
+        discard_prepared_mesh(&mut self.water_arena, None, upload.translucent);
     }
 
     fn commit_canonical_chunk_upload(&mut self, upload: PreparedCanonicalChunkUpload) {
-        commit_prepared_mesh(&mut self.arena, &mut self.chunks, upload.key, upload.opaque);
+        commit_prepared_mesh(
+            &mut self.arena,
+            Some(&mut self.morph_arena),
+            &mut self.chunks,
+            upload.key,
+            upload.opaque,
+        );
         commit_prepared_mesh(
             &mut self.water_arena,
+            None,
             &mut self.water_chunks,
             upload.key,
             upload.translucent,
@@ -3729,6 +3790,7 @@ impl Renderer {
             .collect::<HashSet<_>>();
         let (macro_normals, geometry_shapes) = surface_macro_normals_and_shapes(tile);
         let horizon_profiles = surface_horizon_profiles(tile);
+        let geometry_morphs = surface_geometry_morphs(tile, &macro_normals, &geometry_shapes);
         let encoded_gpu_quads: Vec<_> = tile
             .quads
             .iter()
@@ -3764,57 +3826,82 @@ impl Renderer {
                 },
             )
             .collect();
-        let constrained_gpu_quads = if coord.level == SurfaceLodLevel::Stride2 {
-            let mut owners = Vec::new();
-            let mut pieces = Vec::new();
-            for (owner, &quad) in encoded_gpu_quads.iter().enumerate() {
-                for piece in split_gpu_quad_vertical_extent(quad, 63) {
-                    owners.push(owner);
-                    pieces.push(piece);
+        let (constrained_gpu_quads, constrained_gpu_morphs) =
+            if coord.level == SurfaceLodLevel::Stride2 {
+                let mut owners = Vec::new();
+                let mut pieces = Vec::new();
+                let mut piece_morphs = Vec::new();
+                for (owner, &quad) in encoded_gpu_quads.iter().enumerate() {
+                    let split = split_gpu_quad_vertical_extent(quad, 63);
+                    for piece in split {
+                        owners.push(owner);
+                        pieces.push(piece);
+                        piece_morphs.push(split_surface_morph(quad, piece, geometry_morphs[owner]));
+                    }
                 }
-            }
-            let constrained_pieces = constrain_gpu_quad_t_junctions(
-                &pieces,
-                |_, quad| {
-                    let surface_shape = ((quad.material_face >> SURFACE_SHAPE_MATERIAL_SHIFT)
-                        & 0xff)
-                        | (((quad.ao >> SURFACE_SHAPE_AO_SHIFT) & 0x0f) << 8);
-                    surface_shape == 0
-                        && quad.extent_voxels[0] <= 63
-                        && quad.extent_voxels[1] <= 63
-                        && quad.extent_voxels.into_iter().all(|extent| extent > 0)
-                },
-                |_, _, start, end| {
-                    let [tile_min_x, tile_min_z] = coord.voxel_origin();
-                    let tile_max_x = tile_min_x.saturating_add(coord.voxel_span());
-                    let tile_max_z = tile_min_z.saturating_add(coord.voxel_span());
-                    start[0] == end[0]
-                        && start[2] == end[2]
-                        && (start[0] == tile_min_x
-                            || start[0] == tile_max_x
-                            || start[2] == tile_min_z
-                            || start[2] == tile_max_z)
-                },
-                true,
-            );
-            let mut constrained = vec![Vec::new(); encoded_gpu_quads.len()];
-            for (owner, triangles) in owners.into_iter().zip(constrained_pieces) {
-                constrained[owner].extend(triangles);
-            }
-            constrained
-        } else {
-            encoded_gpu_quads
-                .iter()
-                .copied()
-                .map(|quad| vec![quad])
-                .collect()
-        };
+                let constrained_pieces = constrain_gpu_quad_t_junctions(
+                    &pieces,
+                    |_, quad| {
+                        let surface_shape = ((quad.material_face >> SURFACE_SHAPE_MATERIAL_SHIFT)
+                            & 0xff)
+                            | (((quad.ao >> SURFACE_SHAPE_AO_SHIFT) & 0x0f) << 8);
+                        surface_shape == 0
+                            && quad.extent_voxels[0] <= 63
+                            && quad.extent_voxels[1] <= 63
+                            && quad.extent_voxels.into_iter().all(|extent| extent > 0)
+                    },
+                    |_, _, start, end| {
+                        let [tile_min_x, tile_min_z] = coord.voxel_origin();
+                        let tile_max_x = tile_min_x.saturating_add(coord.voxel_span());
+                        let tile_max_z = tile_min_z.saturating_add(coord.voxel_span());
+                        start[0] == end[0]
+                            && start[2] == end[2]
+                            && (start[0] == tile_min_x
+                                || start[0] == tile_max_x
+                                || start[2] == tile_min_z
+                                || start[2] == tile_max_z)
+                    },
+                    true,
+                );
+                let mut constrained = vec![Vec::new(); encoded_gpu_quads.len()];
+                let mut constrained_morphs = vec![Vec::new(); encoded_gpu_quads.len()];
+                for ((owner, morph), triangles) in
+                    owners.into_iter().zip(piece_morphs).zip(constrained_pieces)
+                {
+                    // Canonical transition triangles retain the source piece's four corner
+                    // deltas; the shader evaluates that piecewise-linear field at inserted
+                    // vertices. Adjacent tall-wall pieces share the same rounded half-voxel
+                    // endpoint, so their artificial partition cannot open a crack.
+                    constrained_morphs[owner].extend(std::iter::repeat_n(morph, triangles.len()));
+                    constrained[owner].extend(triangles);
+                }
+                (constrained, constrained_morphs)
+            } else {
+                (
+                    encoded_gpu_quads
+                        .iter()
+                        .copied()
+                        .map(|quad| vec![quad])
+                        .collect(),
+                    geometry_morphs
+                        .iter()
+                        .copied()
+                        .map(|morph| vec![morph])
+                        .collect(),
+                )
+            };
         let patch_profiles =
             surface_patch_profiles(tile, &macro_normals, &horizon_profiles, &geometry_shapes);
         let exact_replacement_chunks = tile
             .quads
             .iter()
             .map(surface_exact_replacement_chunk)
+            .collect::<Vec<_>>();
+        let closure_gpu = surface_morph_closure_gpu_quads(tile, &macro_normals, &horizon_profiles);
+        let closure_exact_replacement_chunks = tile
+            .morph_closures
+            .iter()
+            .map(|closure| surface_exact_replacement_chunk(&closure.quad))
             .collect::<Vec<_>>();
         let water_gpu_quads: Vec<_> = water
             .quads
@@ -3834,7 +3921,9 @@ impl Renderer {
             })
             .collect();
         let quad_bytes = size_of::<GpuQuad>() as u32;
-        let mut gpu_quads = Vec::with_capacity(encoded_gpu_quads.len());
+        let mut gpu_quads =
+            Vec::with_capacity(encoded_gpu_quads.len().saturating_add(closure_gpu.len()));
+        let mut gpu_morph_heights = Vec::with_capacity(gpu_quads.capacity());
         let mut slices = Vec::new();
         for patch in &tile.patches {
             let Some(patch_id) = SurfacePatchId::from_tile_cell_min(
@@ -3875,6 +3964,11 @@ impl Renderer {
                         .iter()
                         .flat_map(|&index| constrained_gpu_quads[index].iter().copied()),
                 );
+                gpu_morph_heights.extend(
+                    source_indices
+                        .iter()
+                        .flat_map(|&index| constrained_gpu_morphs[index].iter().copied()),
+                );
                 let end = gpu_quads.len() as u32;
                 slices.push(MeshSlice {
                     relative_offset: start * quad_bytes,
@@ -3892,6 +3986,62 @@ impl Renderer {
                     canonical_water_surface: false,
                     render_layer: RenderLayer::Opaque,
                 });
+            }
+        }
+        // Keep dormant topology closures after all ordinary patches. Interleaving them patch by
+        // patch leaves an unselected allocation gap after nearly every fixed slice and prevents
+        // the base terrain stream from coalescing. The active morph band still selects the exact
+        // closure slices from this compact tail.
+        for patch in &tile.patches {
+            let Some(patch_id) = SurfacePatchId::from_tile_cell_min(
+                coord,
+                [patch.cell_bounds[0][0], patch.cell_bounds[0][1]],
+            ) else {
+                continue;
+            };
+            let (bounds_min, bounds_max) = surface_patch_render_bounds(patch, coord.level);
+            let closure_groups = std::iter::once((0_u8, patch.morph_closure_range.clone())).chain(
+                SurfacePatchEdge::ALL.into_iter().map(|edge| {
+                    (
+                        edge.index() as u8 + 1,
+                        patch.edge_morph_closure_ranges[edge.index()].clone(),
+                    )
+                }),
+            );
+            for (encoded_edge, range) in closure_groups {
+                let mut groups = BTreeMap::<Option<(i32, i32, i32)>, Vec<usize>>::new();
+                for closure_index in range {
+                    let index = closure_index as usize;
+                    groups
+                        .entry(closure_exact_replacement_chunks[index])
+                        .or_default()
+                        .push(index);
+                }
+                for (exact_replacement_chunk, source_indices) in groups {
+                    let start = gpu_quads.len() as u32;
+                    for index in source_indices {
+                        let (quad, morph) = closure_gpu[index];
+                        gpu_quads.push(quad);
+                        gpu_morph_heights.push(morph);
+                    }
+                    let end = gpu_quads.len() as u32;
+                    slices.push(MeshSlice {
+                        relative_offset: start * quad_bytes,
+                        size: (end - start) * quad_bytes,
+                        quad_count: end - start,
+                        bounds_min,
+                        bounds_max,
+                        surface_patch_id: Some(patch_id),
+                        boundary_edge: encoded_edge
+                            .checked_sub(1)
+                            .and_then(|index| SurfacePatchEdge::ALL.get(index as usize).copied()),
+                        stitch_edges: 0,
+                        morph_closure: true,
+                        exact_replacement_chunk,
+                        canonical_water_surface: false,
+                        render_layer: RenderLayer::Opaque,
+                    });
+                }
             }
         }
         let water_slices: Vec<_> = water
@@ -3928,7 +4078,8 @@ impl Renderer {
                 }
             })
             .collect();
-        if gpu_quads_match_resident(self.chunks.get(&key), &gpu_quads, None)
+        debug_assert_eq!(gpu_quads.len(), gpu_morph_heights.len());
+        if gpu_quads_match_resident(self.chunks.get(&key), &gpu_quads, Some(&gpu_morph_heights))
             && mesh_slices_match_resident(self.chunks.get(&key), &slices, gpu_quads.len())
             && gpu_quads_match_resident(self.water_chunks.get(&key), &water_gpu_quads, None)
             && mesh_slices_match_resident(
@@ -3945,7 +4096,9 @@ impl Renderer {
         let opaque_update = if gpu_quads.is_empty() {
             None
         } else {
-            let Some(prepared) = self.prepare_mesh_sliced(key, &gpu_quads, None, slices) else {
+            let Some(prepared) =
+                self.prepare_mesh_sliced(key, &gpu_quads, Some(&gpu_morph_heights), slices)
+            else {
                 return false;
             };
             Some(prepared)
@@ -3956,14 +4109,21 @@ impl Renderer {
             let Some(prepared) =
                 self.prepare_water_mesh_sliced(key, &water_gpu_quads, water_slices)
             else {
-                discard_prepared_mesh(&mut self.arena, opaque_update);
+                discard_prepared_mesh(&mut self.arena, Some(&mut self.morph_arena), opaque_update);
                 return false;
             };
             Some(prepared)
         };
-        commit_prepared_mesh(&mut self.arena, &mut self.chunks, key, opaque_update);
+        commit_prepared_mesh(
+            &mut self.arena,
+            Some(&mut self.morph_arena),
+            &mut self.chunks,
+            key,
+            opaque_update,
+        );
         commit_prepared_mesh(
             &mut self.water_arena,
+            None,
             &mut self.water_chunks,
             key,
             water_update,
@@ -3986,7 +4146,7 @@ impl Renderer {
         &mut self,
         key: MeshKey,
         gpu_quads: &[GpuQuad],
-        morph_heights: Option<&[u32]>,
+        morph_heights: Option<&[GpuMorph]>,
         slices: Vec<MeshSlice>,
     ) -> Option<ChunkMesh> {
         let activation_mask = self.chunk_activations.upload_mask(key);
@@ -3995,6 +4155,7 @@ impl Renderer {
             &self.queue,
             &mut self.arena,
             &mut self.arena_buffers,
+            Some((&mut self.morph_arena, &mut self.morph_arena_buffers)),
             gpu_quads,
             morph_heights,
             slices,
@@ -4015,6 +4176,7 @@ impl Renderer {
             &self.queue,
             &mut self.water_arena,
             &mut self.water_arena_buffers,
+            None,
             gpu_quads,
             None,
             slices,
@@ -4406,7 +4568,7 @@ impl Renderer {
     fn publish_lod_transition_mesh(
         &mut self,
         gpu_quads: &[GpuQuad],
-        morph_heights: &[u32],
+        morph_heights: &[GpuMorph],
     ) -> Result<Option<MeshKey>, ()> {
         if gpu_quads.is_empty() {
             return Ok(None);
@@ -4454,7 +4616,13 @@ impl Renderer {
         else {
             return Err(());
         };
-        commit_prepared_mesh(&mut self.arena, &mut self.chunks, key, Some(prepared));
+        commit_prepared_mesh(
+            &mut self.arena,
+            Some(&mut self.morph_arena),
+            &mut self.chunks,
+            key,
+            Some(prepared),
+        );
         Ok(Some(key))
     }
 
@@ -4564,7 +4732,7 @@ impl Renderer {
         if let Some(chunk) = self.chunks.remove(&key) {
             let _ = self.arena.free(chunk.allocation);
             if let Some(morph_allocation) = chunk.morph_allocation {
-                let _ = self.arena.free(morph_allocation);
+                let _ = self.morph_arena.free(morph_allocation);
             }
         }
     }
@@ -4572,9 +4740,7 @@ impl Renderer {
     fn remove_water_mesh(&mut self, key: MeshKey) {
         if let Some(chunk) = self.water_chunks.remove(&key) {
             let _ = self.water_arena.free(chunk.allocation);
-            if let Some(morph_allocation) = chunk.morph_allocation {
-                let _ = self.water_arena.free(morph_allocation);
-            }
+            debug_assert!(chunk.morph_allocation.is_none());
         }
     }
 
@@ -4906,6 +5072,7 @@ impl Renderer {
                 shadow_draw_calls = shadow_draw_calls.saturating_add(draw_morph_spans(
                     &mut pass,
                     &self.arena_buffers,
+                    &self.morph_arena_buffers,
                     &draw_list.morphing,
                 ));
                 if has_avatars {
@@ -4940,9 +5107,13 @@ impl Renderer {
                     &world_draw_list.fixed,
                 ));
                 pass.set_pipeline(&self.depth_prepass_morph_pipeline);
-                depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(
-                    draw_morph_spans(&mut pass, &self.arena_buffers, &world_draw_list.morphing),
-                );
+                depth_prepass_draw_calls =
+                    depth_prepass_draw_calls.saturating_add(draw_morph_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        &self.morph_arena_buffers,
+                        &world_draw_list.morphing,
+                    ));
                 if let Some(cut_draw_lists) = &cut_draw_lists {
                     pass.set_pipeline(&self.depth_prepass_transition_pipeline);
                     pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
@@ -4950,6 +5121,7 @@ impl Renderer {
                         depth_prepass_draw_calls.saturating_add(draw_morph_spans(
                             &mut pass,
                             &self.arena_buffers,
+                            &self.morph_arena_buffers,
                             &cut_draw_lists.incoming.morphing,
                         ));
                     pass.set_pipeline(&self.depth_prepass_transition_fixed_pipeline);
@@ -4964,6 +5136,7 @@ impl Renderer {
                         depth_prepass_draw_calls.saturating_add(draw_morph_spans(
                             &mut pass,
                             &self.arena_buffers,
+                            &self.morph_arena_buffers,
                             &cut_draw_lists.outgoing.morphing,
                         ));
                 }
@@ -5077,13 +5250,19 @@ impl Renderer {
             pass.set_pipeline(fixed_pipeline);
             draw_spans(&mut pass, &self.arena_buffers, &world_draw_list.fixed);
             pass.set_pipeline(morph_pipeline);
-            draw_morph_spans(&mut pass, &self.arena_buffers, &world_draw_list.morphing);
+            draw_morph_spans(
+                &mut pass,
+                &self.arena_buffers,
+                &self.morph_arena_buffers,
+                &world_draw_list.morphing,
+            );
             if let Some(cut_draw_lists) = &cut_draw_lists {
                 pass.set_pipeline(morph_transition_pipeline);
                 pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
                 draw_morph_spans(
                     &mut pass,
                     &self.arena_buffers,
+                    &self.morph_arena_buffers,
                     &cut_draw_lists.incoming.morphing,
                 );
                 pass.set_pipeline(transition_pipeline);
@@ -5097,6 +5276,7 @@ impl Renderer {
                 draw_morph_spans(
                     &mut pass,
                     &self.arena_buffers,
+                    &self.morph_arena_buffers,
                     &cut_draw_lists.outgoing.morphing,
                 );
             }
@@ -5210,6 +5390,7 @@ impl Renderer {
             pass.draw(0..6, 0..PRECIPITATION_INSTANCE_COUNT);
         }
         let arena = self.arena.stats();
+        let morph_arena = self.morph_arena.stats();
         let water_arena = self.water_arena.stats();
         let scene_pixels = u64::from(self.config.width) * u64::from(self.config.height);
         let shadow_resolution = u64::from(
@@ -5305,15 +5486,21 @@ impl Renderer {
                 self.config.height,
                 refract_water,
             ),
-            arena_pages: arena.pages.saturating_add(water_arena.pages) as u32,
+            arena_pages: arena
+                .pages
+                .saturating_add(morph_arena.pages)
+                .saturating_add(water_arena.pages) as u32,
             arena_capacity_bytes: arena
                 .capacity_bytes
+                .saturating_add(morph_arena.capacity_bytes)
                 .saturating_add(water_arena.capacity_bytes),
             arena_allocated_bytes: arena
                 .allocated_bytes
+                .saturating_add(morph_arena.allocated_bytes)
                 .saturating_add(water_arena.allocated_bytes),
             core_gpu_bytes: arena
                 .capacity_bytes
+                .saturating_add(morph_arena.capacity_bytes)
                 .saturating_add(water_arena.capacity_bytes)
                 // Two RGBA16F scene targets plus writable and sampled Depth32Float targets.
                 .saturating_add(scene_pixels.saturating_mul(24))
@@ -5682,6 +5869,7 @@ fn draw_spans<'pass>(
 fn draw_morph_spans<'pass>(
     pass: &mut wgpu::RenderPass<'pass>,
     arena_buffers: &'pass [Buffer],
+    morph_arena_buffers: &'pass [Buffer],
     draw_list: &DrawList,
 ) -> u32 {
     let mut draws = 0u32;
@@ -5691,13 +5879,13 @@ fn draw_morph_spans<'pass>(
         else {
             continue;
         };
-        let Some(morph_buffer) = arena_buffers.get(morph_page as usize) else {
+        let Some(morph_buffer) = morph_arena_buffers.get(morph_page as usize) else {
             continue;
         };
         let base_start = u64::from(span.offset);
         let base_end = base_start + u64::from(span.size);
         let morph_start = u64::from(span.morph_offset);
-        let morph_end = morph_start + u64::from(span.quad_count) * size_of::<u32>() as u64;
+        let morph_end = morph_start + u64::from(span.quad_count) * size_of::<GpuMorph>() as u64;
         pass.set_vertex_buffer(0, base_buffer.slice(base_start..base_end));
         pass.set_vertex_buffer(1, morph_buffer.slice(morph_start..morph_end));
         pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
@@ -5939,8 +6127,9 @@ fn prepare_mesh_sliced_into(
     queue: &Queue,
     arena: &mut ArenaAllocator,
     arena_buffers: &mut Vec<Buffer>,
+    mut morph_storage: Option<(&mut ArenaAllocator, &mut Vec<Buffer>)>,
     gpu_quads: &[GpuQuad],
-    morph_heights: Option<&[u32]>,
+    morph_heights: Option<&[GpuMorph]>,
     mut slices: Vec<MeshSlice>,
     activation_mask: u8,
     buffer_label: &'static str,
@@ -5978,13 +6167,17 @@ fn prepare_mesh_sliced_into(
         return None;
     };
     let allocation = arena.allocate(byte_len)?;
-    let morph_bytes = morph_heights.map(bytemuck::cast_slice::<u32, u8>);
+    let morph_bytes = morph_heights.map(bytemuck::cast_slice::<GpuMorph, u8>);
     let morph_allocation = if let Some(morph_bytes) = morph_bytes {
+        let Some((morph_arena, _)) = morph_storage.as_mut() else {
+            let _ = arena.free(allocation);
+            return None;
+        };
         let Ok(morph_byte_len) = u32::try_from(morph_bytes.len()) else {
             let _ = arena.free(allocation);
             return None;
         };
-        let Some(morph_allocation) = arena.allocate(morph_byte_len) else {
+        let Some(morph_allocation) = morph_arena.allocate(morph_byte_len) else {
             let _ = arena.free(allocation);
             return None;
         };
@@ -5992,14 +6185,14 @@ fn prepare_mesh_sliced_into(
     } else {
         None
     };
-    let highest_page =
-        morph_allocation.map_or(allocation.page, |morph| allocation.page.max(morph.page));
-    while arena_buffers.len() <= highest_page as usize {
+    while arena_buffers.len() <= allocation.page as usize {
         let page = arena_buffers.len() as u16;
         let Some(capacity) = arena.page_capacity(page) else {
             let _ = arena.free(allocation);
-            if let Some(morph_allocation) = morph_allocation {
-                let _ = arena.free(morph_allocation);
+            if let (Some(morph_allocation), Some((morph_arena, _))) =
+                (morph_allocation, morph_storage.as_mut())
+            {
+                let _ = morph_arena.free(morph_allocation);
             }
             return None;
         };
@@ -6012,16 +6205,36 @@ fn prepare_mesh_sliced_into(
     }
     let Some(buffer) = arena_buffers.get(allocation.page as usize) else {
         let _ = arena.free(allocation);
-        if let Some(morph_allocation) = morph_allocation {
-            let _ = arena.free(morph_allocation);
+        if let (Some(morph_allocation), Some((morph_arena, _))) =
+            (morph_allocation, morph_storage.as_mut())
+        {
+            let _ = morph_arena.free(morph_allocation);
         }
         return None;
     };
     queue.write_buffer(buffer, u64::from(allocation.offset), bytes);
     if let (Some(morph_bytes), Some(morph_allocation)) = (morph_bytes, morph_allocation) {
-        let Some(morph_buffer) = arena_buffers.get(morph_allocation.page as usize) else {
+        let Some((morph_arena, morph_arena_buffers)) = morph_storage.as_mut() else {
             let _ = arena.free(allocation);
-            let _ = arena.free(morph_allocation);
+            return None;
+        };
+        while morph_arena_buffers.len() <= morph_allocation.page as usize {
+            let page = morph_arena_buffers.len() as u16;
+            let Some(capacity) = morph_arena.page_capacity(page) else {
+                let _ = arena.free(allocation);
+                let _ = morph_arena.free(morph_allocation);
+                return None;
+            };
+            morph_arena_buffers.push(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("voxel morph sidecar arena page"),
+                size: u64::from(capacity),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let Some(morph_buffer) = morph_arena_buffers.get(morph_allocation.page as usize) else {
+            let _ = arena.free(allocation);
+            let _ = morph_arena.free(morph_allocation);
             return None;
         };
         queue.write_buffer(
@@ -6058,7 +6271,7 @@ fn prepare_mesh_sliced_into(
 fn gpu_quads_match_resident(
     mesh: Option<&ChunkMesh>,
     quads: &[GpuQuad],
-    morph_heights: Option<&[u32]>,
+    morph_heights: Option<&[GpuMorph]>,
 ) -> bool {
     let quad_bytes = bytemuck::cast_slice(quads);
     let content_fingerprint = morph_heights.map_or_else(
@@ -6101,17 +6314,26 @@ fn gpu_quad_content_matches(
     })
 }
 
-fn discard_prepared_mesh(arena: &mut ArenaAllocator, prepared: Option<ChunkMesh>) {
+fn discard_prepared_mesh(
+    arena: &mut ArenaAllocator,
+    mut morph_arena: Option<&mut ArenaAllocator>,
+    prepared: Option<ChunkMesh>,
+) {
     if let Some(prepared) = prepared {
         let _ = arena.free(prepared.allocation);
         if let Some(morph_allocation) = prepared.morph_allocation {
-            let _ = arena.free(morph_allocation);
+            let Some(morph_arena) = morph_arena.as_mut() else {
+                debug_assert!(false, "morph allocation has no owning arena");
+                return;
+            };
+            let _ = morph_arena.free(morph_allocation);
         }
     }
 }
 
 fn commit_prepared_mesh(
     arena: &mut ArenaAllocator,
+    mut morph_arena: Option<&mut ArenaAllocator>,
     chunks: &mut BTreeMap<MeshKey, ChunkMesh>,
     key: MeshKey,
     prepared: Option<ChunkMesh>,
@@ -6124,7 +6346,11 @@ fn commit_prepared_mesh(
     if let Some(old) = old {
         let _ = arena.free(old.allocation);
         if let Some(morph_allocation) = old.morph_allocation {
-            let _ = arena.free(morph_allocation);
+            let Some(morph_arena) = morph_arena.as_mut() else {
+                debug_assert!(false, "morph allocation has no owning arena");
+                return;
+            };
+            let _ = morph_arena.free(morph_allocation);
         }
     }
 }
@@ -6242,8 +6468,8 @@ fn surface_macro_normals_and_shapes(tile: &SurfaceTileMesh) -> (Vec<u32>, Vec<u1
                 sampled_shading_normal(
                     &tile.shading.parent_heights,
                     voxels_world::SURFACE_PARENT_SHADING_EDGE_SAMPLES,
-                    x / 2 + 1,
-                    z / 2 + 1,
+                    x / 2 + 2,
+                    z / 2 + 2,
                     stride * 2,
                 )
             };
@@ -6323,13 +6549,27 @@ fn surface_macro_normals(tile: &SurfaceTileMesh) -> Vec<u32> {
     surface_macro_normals_and_shapes(tile).0
 }
 
-fn pack_surface_morph_heights(bottom_delta: i32, top_delta: i32) -> u32 {
-    let (Ok(bottom), Ok(top)) = (i16::try_from(bottom_delta), i16::try_from(top_delta)) else {
-        // A pathological height discontinuity must remain exact rather than wrap into unrelated
-        // geometry. Normal generated terrain is several orders of magnitude inside this range.
-        return 0;
+fn pack_surface_morph_deltas_half_voxels(deltas: [i32; 4]) -> GpuMorph {
+    GpuMorph {
+        deltas: deltas.map(|delta| {
+            i16::try_from(delta).unwrap_or_else(|_| {
+                debug_assert!(false, "adjacent surface LOD height delta exceeds i16");
+                delta.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+            })
+        }),
+    }
+}
+
+fn pack_surface_morph_heights(bottom_delta: i32, top_delta: i32) -> GpuMorph {
+    let (Some(bottom), Some(top)) = (bottom_delta.checked_mul(2), top_delta.checked_mul(2)) else {
+        return GpuMorph::default();
     };
-    u32::from(bottom as u16) | (u32::from(top as u16) << 16)
+    pack_surface_morph_deltas_half_voxels([bottom, bottom, top, top])
+}
+
+#[cfg(test)]
+fn unpack_surface_morph_delta_half_voxels(packed: GpuMorph, corner: usize) -> i32 {
+    i32::from(packed.deltas[corner])
 }
 
 fn pack_surface_shape_deltas(deltas: [i32; 4]) -> u16 {
@@ -6532,8 +6772,8 @@ fn surface_parent_height(tile: &SurfaceTileMesh, x: i32, z: i32) -> Option<i32> 
     }
     let [origin_x, origin_z] = tile.coord.voxel_origin();
     let parent_stride = tile.coord.stride_voxels().checked_mul(2)?;
-    let sample_x = (i64::from(x) - i64::from(origin_x)).div_euclid(i64::from(parent_stride)) + 1;
-    let sample_z = (i64::from(z) - i64::from(origin_z)).div_euclid(i64::from(parent_stride)) + 1;
+    let sample_x = (i64::from(x) - i64::from(origin_x)).div_euclid(i64::from(parent_stride)) + 2;
+    let sample_z = (i64::from(z) - i64::from(origin_z)).div_euclid(i64::from(parent_stride)) + 2;
     let edge = voxels_world::SURFACE_PARENT_SHADING_EDGE_SAMPLES as i64;
     if !(0..edge).contains(&sample_x) || !(0..edge).contains(&sample_z) {
         return None;
@@ -6544,31 +6784,175 @@ fn surface_parent_height(tile: &SurfaceTileMesh, x: i32, z: i32) -> Option<i32> 
         .copied()
 }
 
-/// Resolves the exact parent-height endpoints for generated terrain body faces. Top faces move as
-/// a unit; vertical faces move their lower and upper edges independently, so adjacent cells retain
-/// a closed shell throughout the transition. Skyline proxies and outermost tiles intentionally do
+fn parent_shading_height(tile: &SurfaceTileMesh, cell_x: i32, cell_z: i32) -> Option<i32> {
+    let edge = voxels_world::SURFACE_PARENT_SHADING_EDGE_SAMPLES as i32;
+    let sample_x = cell_x.checked_add(2)?;
+    let sample_z = cell_z.checked_add(2)?;
+    if !(0..edge).contains(&sample_x) || !(0..edge).contains(&sample_z) {
+        return None;
+    }
+    tile.shading
+        .parent_heights
+        .get((sample_x + sample_z * edge) as usize)
+        .copied()
+}
+
+fn parent_shape_vertex_height(tile: &SurfaceTileMesh, grid_x: i32, grid_z: i32) -> Option<i32> {
+    let parent_cells = voxels_world::SURFACE_TILE_EDGE_CELLS / 2;
+    if !(-1..=parent_cells + 1).contains(&grid_x) || !(-1..=parent_cells + 1).contains(&grid_z) {
+        return None;
+    }
+    let heights = [
+        parent_shading_height(tile, grid_x - 1, grid_z - 1)?,
+        parent_shading_height(tile, grid_x, grid_z - 1)?,
+        parent_shading_height(tile, grid_x, grid_z)?,
+        parent_shading_height(tile, grid_x - 1, grid_z)?,
+    ];
+    let minimum = *heights.iter().min()?;
+    let maximum = *heights.iter().max()?;
+    let parent_stride = tile.coord.stride_voxels().checked_mul(2)?;
+    let maximum_range = parent_stride.saturating_mul(2).min(6);
+    if maximum.saturating_sub(minimum) > maximum_range {
+        return None;
+    }
+    let target = heights
+        .into_iter()
+        .map(i64::from)
+        .sum::<i64>()
+        .saturating_add(2)
+        .div_euclid(4) as i32;
+    heights
+        .into_iter()
+        .all(|height| (-4..=3).contains(&target.saturating_sub(height)))
+        .then_some(target)
+}
+
+fn parent_cell_shape(tile: &SurfaceTileMesh, cell_x: i32, cell_z: i32) -> Option<(i32, u16)> {
+    let height = parent_shading_height(tile, cell_x, cell_z)?;
+    let delta = |grid_x, grid_z| {
+        parent_shape_vertex_height(tile, grid_x, grid_z)
+            .map_or(0, |vertex| vertex.saturating_sub(height))
+    };
+    Some((
+        height,
+        pack_surface_shape_deltas([
+            delta(cell_x, cell_z),
+            delta(cell_x + 1, cell_z),
+            delta(cell_x + 1, cell_z + 1),
+            delta(cell_x, cell_z + 1),
+        ]),
+    ))
+}
+
+/// Evaluates the exact next-coarser triangle mesh at a child-grid vertex. The result is expressed
+/// in half-voxel units: child vertices can land at a parent edge midpoint, while four signed
+/// 16-bit deltas retain that precision within the dedicated morph sidecar.
+fn parent_surface_height_half_voxels(
+    tile: &SurfaceTileMesh,
+    cell_world_x: i32,
+    cell_world_z: i32,
+    vertex_world_x: i32,
+    vertex_world_z: i32,
+) -> Option<i32> {
+    if tile.shading.parent_heights.is_empty() {
+        return None;
+    }
+    let [origin_x, origin_z] = tile.coord.voxel_origin();
+    let parent_stride = tile.coord.stride_voxels().checked_mul(2)?;
+    let cell_x =
+        (i64::from(cell_world_x) - i64::from(origin_x)).div_euclid(i64::from(parent_stride));
+    let cell_z =
+        (i64::from(cell_world_z) - i64::from(origin_z)).div_euclid(i64::from(parent_stride));
+    let parent_cells = i64::from(voxels_world::SURFACE_TILE_EDGE_CELLS / 2);
+    // Parent shading carries two cells of halo on every side. Boundary walls need the complete
+    // adjacent halo cell to resolve both its shared edge and its triangle/shape decision;
+    // rejecting that cell zeroed the wall's valid upper morph too and left a half-voxel crack.
+    if !(-1..=parent_cells).contains(&cell_x) || !(-1..=parent_cells).contains(&cell_z) {
+        return None;
+    }
+    let cell_x = cell_x as i32;
+    let cell_z = cell_z as i32;
+    let cell_origin_x =
+        i64::from(origin_x).checked_add(i64::from(cell_x) * i64::from(parent_stride))?;
+    let cell_origin_z =
+        i64::from(origin_z).checked_add(i64::from(cell_z) * i64::from(parent_stride))?;
+    let offset_x = i64::from(vertex_world_x).checked_sub(cell_origin_x)?;
+    let offset_z = i64::from(vertex_world_z).checked_sub(cell_origin_z)?;
+    let doubled_x = offset_x.checked_mul(2)?;
+    let doubled_z = offset_z.checked_mul(2)?;
+    if doubled_x % i64::from(parent_stride) != 0 || doubled_z % i64::from(parent_stride) != 0 {
+        return None;
+    }
+    let u = i32::try_from(doubled_x / i64::from(parent_stride)).ok()?;
+    let v = i32::try_from(doubled_z / i64::from(parent_stride)).ok()?;
+    if !(0..=2).contains(&u) || !(0..=2).contains(&v) {
+        return None;
+    }
+    let (height, shape) = parent_cell_shape(tile, cell_x, cell_z)?;
+    let corners =
+        std::array::from_fn::<_, 4, _>(|corner| unpack_surface_shape_delta(shape, corner));
+    let flip = (corners[0] - corners[2]).abs() > (corners[1] - corners[3]).abs();
+    let shaped_half_voxels = if flip {
+        if u + v <= 2 {
+            corners[0] * (2 - u - v) + corners[1] * u + corners[3] * v
+        } else {
+            corners[1] * (2 - v) + corners[2] * (u + v - 2) + corners[3] * (2 - u)
+        }
+    } else if v <= u {
+        corners[0] * (2 - u) + corners[1] * (u - v) + corners[2] * v
+    } else {
+        corners[0] * (2 - v) + corners[2] * u + corners[3] * (v - u)
+    };
+    height.checked_mul(2)?.checked_add(shaped_half_voxels)
+}
+
+/// Resolves the exact next-coarser target for every generated terrain vertex. Top and wall corners
+/// move independently, so the child shell converges to the same shaped parent triangles without
+/// cracks, giant-block overlap, or a second geometry layer. Skyline proxies and outermost tiles do
 /// not morph.
-#[cfg(test)]
-fn surface_geometry_morphs(tile: &SurfaceTileMesh, macro_normals: &[u32]) -> Vec<u32> {
+fn surface_geometry_morphs(
+    tile: &SurfaceTileMesh,
+    macro_normals: &[u32],
+    geometry_shapes: &[u16],
+) -> Vec<GpuMorph> {
     let stride = tile.coord.stride_voxels();
     tile.quads
         .iter()
         .zip(macro_normals)
-        .map(|(quad, &macro_normal)| {
+        .zip(geometry_shapes)
+        .map(|((quad, &macro_normal), &shape)| {
             if macro_normal & SURFACE_MACRO_NORMAL_FLAG == 0 {
-                return 0;
+                return GpuMorph::default();
             }
             if quad.face == 2 {
-                let Some(parent_height) =
-                    surface_parent_height(tile, quad.origin[0], quad.origin[2])
-                else {
-                    return 0;
-                };
-                let delta = parent_height.saturating_sub(quad.origin[1]);
-                return pack_surface_morph_heights(delta, delta);
+                let vertices = [
+                    [quad.origin[0], quad.origin[2]],
+                    [quad.origin[0].saturating_add(stride), quad.origin[2]],
+                    [
+                        quad.origin[0].saturating_add(stride),
+                        quad.origin[2].saturating_add(stride),
+                    ],
+                    [quad.origin[0], quad.origin[2].saturating_add(stride)],
+                ];
+                let mut deltas = [0; 4];
+                for (corner, [vertex_x, vertex_z]) in vertices.into_iter().enumerate() {
+                    let Some(parent_height) = parent_surface_height_half_voxels(
+                        tile,
+                        quad.origin[0],
+                        quad.origin[2],
+                        vertex_x,
+                        vertex_z,
+                    ) else {
+                        return GpuMorph::default();
+                    };
+                    let child_height =
+                        quad.origin[1].saturating_add(unpack_surface_shape_delta(shape, corner));
+                    deltas[corner] = parent_height.saturating_sub(child_height.saturating_mul(2));
+                }
+                return pack_surface_morph_deltas_half_voxels(deltas);
             }
             if !matches!(quad.face, 0 | 1 | 4 | 5) {
-                return 0;
+                return GpuMorph::default();
             }
             let own_x = quad.origin[0] - if quad.face == 0 { stride - 1 } else { 0 };
             let own_z = quad.origin[2] - if quad.face == 4 { stride - 1 } else { 0 };
@@ -6578,30 +6962,63 @@ fn surface_geometry_morphs(tile: &SurfaceTileMesh, macro_normals: &[u32]) -> Vec
                 4 => (own_x, own_z.saturating_add(stride)),
                 _ => (own_x, own_z.saturating_sub(stride)),
             };
-            let (Some(parent_own), Some(parent_neighbor)) = (
-                surface_parent_height(tile, own_x, own_z),
-                surface_parent_height(tile, neighbor_x, neighbor_z),
-            ) else {
-                return 0;
+            let endpoints = match quad.face {
+                0 => [
+                    [own_x.saturating_add(stride), own_z],
+                    [own_x.saturating_add(stride), own_z.saturating_add(stride)],
+                ],
+                1 => [[own_x, own_z], [own_x, own_z.saturating_add(stride)]],
+                4 => [
+                    [own_x, own_z.saturating_add(stride)],
+                    [own_x.saturating_add(stride), own_z.saturating_add(stride)],
+                ],
+                _ => [[own_x, own_z], [own_x.saturating_add(stride), own_z]],
             };
-            let child_neighbor = quad.origin[1].saturating_sub(1);
-            let child_own = quad.origin[1]
-                .saturating_add(i32::from(quad.extent[1]))
-                .saturating_sub(1);
-            pack_surface_morph_heights(
-                parent_neighbor.saturating_sub(child_neighbor),
-                parent_own.saturating_sub(child_own),
-            )
+            let parent_at = |cell_x, cell_z, endpoint: [i32; 2]| {
+                parent_surface_height_half_voxels(tile, cell_x, cell_z, endpoint[0], endpoint[1])
+                    .and_then(|height| height.checked_add(2))
+            };
+            let (Some(parent_bottom_first), Some(parent_bottom_second)) = (
+                parent_at(neighbor_x, neighbor_z, endpoints[0]),
+                parent_at(neighbor_x, neighbor_z, endpoints[1]),
+            ) else {
+                return GpuMorph::default();
+            };
+            let (Some(parent_top_first), Some(parent_top_second)) = (
+                parent_at(own_x, own_z, endpoints[0]),
+                parent_at(own_x, own_z, endpoints[1]),
+            ) else {
+                return GpuMorph::default();
+            };
+            let current = [
+                quad.origin[1].saturating_add(unpack_surface_shape_delta(shape, 0)),
+                quad.origin[1].saturating_add(unpack_surface_shape_delta(shape, 1)),
+                quad.origin[1]
+                    .saturating_add(i32::from(quad.extent[1]))
+                    .saturating_add(unpack_surface_shape_delta(shape, 2)),
+                quad.origin[1]
+                    .saturating_add(i32::from(quad.extent[1]))
+                    .saturating_add(unpack_surface_shape_delta(shape, 3)),
+            ];
+            let target = [
+                parent_bottom_first,
+                parent_bottom_second,
+                parent_top_second,
+                parent_top_first,
+            ];
+            let deltas = std::array::from_fn(|corner| {
+                target[corner].saturating_sub(current[corner].saturating_mul(2))
+            });
+            pack_surface_morph_deltas_half_voxels(deltas)
         })
         .collect()
 }
 
-#[cfg(test)]
 fn surface_morph_closure_gpu_quads(
     tile: &SurfaceTileMesh,
     macro_normals: &[u32],
     horizon_profiles: &[u16],
-) -> Vec<(GpuQuad, u32)> {
+) -> Vec<(GpuQuad, GpuMorph)> {
     let stride = tile.coord.stride_voxels();
     let attributes = tile
         .quads
@@ -6647,14 +7064,17 @@ fn surface_morph_closure_gpu_quads(
                 GpuQuad {
                     origin: quad.origin,
                     extent_voxels: [quad.extent[0] | MORPH_CLOSURE_EXTENT_FLAG, quad.extent[1]],
-                    material_face: pack_surface_horizon_material(
-                        pack_gpu_material_face(
-                            u32::from(quad.material.id())
-                                | FAR_MATERIAL_FLAG
-                                | (u32::from(tile.coord.level.index()) << SURFACE_LOD_SHIFT),
-                            quad.face,
+                    material_face: pack_gpu_source_material(
+                        pack_surface_horizon_material(
+                            pack_gpu_material_face(
+                                u32::from(quad.material.id())
+                                    | FAR_MATERIAL_FLAG
+                                    | (u32::from(tile.coord.level.index()) << SURFACE_LOD_SHIFT),
+                                quad.face,
+                            ),
+                            horizon_profile,
                         ),
-                        horizon_profile,
+                        GPU_SOURCE_SKYLINE_PROXY,
                     ),
                     ao: pack_surface_horizon_ao(macro_normal, horizon_profile),
                 },
@@ -7038,7 +7458,7 @@ fn build_lod_transitions(
         morph_heights: Vec::with_capacity(transitions.len() * 16),
         ..LodTransitionBuild::default()
     };
-    let mut connector_edges = BTreeMap::<(SurfacePatchId, u8), Vec<(GpuQuad, u32)>>::new();
+    let mut connector_edges = BTreeMap::<(SurfacePatchId, u8), Vec<(GpuQuad, GpuMorph)>>::new();
     for (patch, edge) in transitions {
         let Some(coarse) = surface_profiles.get(&patch) else {
             build.incomplete_edges = build.incomplete_edges.saturating_add(1);
@@ -7095,7 +7515,7 @@ fn build_lod_transitions(
         quad.material_face =
             pack_gpu_source_material(quad.material_face, GPU_SOURCE_LOD_STITCH_TOP);
         build.quads.push(quad);
-        build.morph_heights.push(0);
+        build.morph_heights.push(GpuMorph::default());
     }
     build
 }
@@ -7417,7 +7837,7 @@ fn for_each_fallback_surface_wall_run(
 }
 
 fn append_lod_transition(
-    quads: &mut Vec<(GpuQuad, u32)>,
+    quads: &mut Vec<(GpuQuad, GpuMorph)>,
     selection: &SurfacePatchSelection,
     surface_profiles: &HashMap<SurfacePatchId, SurfacePatchProfile>,
     canonical_profiles: &CanonicalColumnProfiles,
@@ -7605,7 +8025,7 @@ fn append_lod_transition(
                         GPU_SOURCE_CROSSING_LOD_CONNECTOR,
                     );
                 }
-                quads.push((quad, 0));
+                quads.push((quad, GpuMorph::default()));
             }
             tangent += fine_stride;
             continue;
@@ -7658,7 +8078,7 @@ fn append_lod_transition(
                 patch.level,
                 coarse_cell.macro_normal,
                 coarse_cell.horizon_profile,
-                0,
+                GpuMorph::default(),
             )
         };
         for_each_fallback_surface_wall_run(
@@ -7953,7 +8373,8 @@ fn slice_owned_by_lod(
         return false;
     }
     if slice.morph_closure {
-        return false;
+        return plan.owns_patch(patch_id)
+            && focus.is_some_and(|focus| surface_patch_intersects_morph_band(focus, patch_id));
     }
     if slice.stitch_edges != 0 {
         return plan.owns_patch(patch_id)
@@ -8044,7 +8465,6 @@ fn frontier_face_gpu_quads(frontier: &ExactVolumeFrontierFace) -> Vec<GpuQuad> {
     quads
 }
 
-#[cfg(test)]
 fn surface_patch_intersects_morph_band(focus: GeometricLodFocus, patch: SurfacePatchId) -> bool {
     let boundary = usize::from(patch.level.index()) + 1;
     let boundary_half_extents = focus.boundary_half_extents();
@@ -8076,18 +8496,30 @@ fn surface_patch_intersects_morph_band(focus: GeometricLodFocus, patch: SurfaceP
     };
     let minimum_axis_delta = nearest_axis_delta(min_x, max_x, centre[0])
         .max(nearest_axis_delta(min_z, max_z, centre[1]));
-    // Matches the shader's max(1.6m, half_extent * 0.02) band in canonical 10cm voxels.
+    // The shader moves its morph field continuously with the camera while the single-owner cut
+    // remains snapped. Hysteresis can hold a cut 5/8 of one snap step behind the camera. Cover the
+    // union of every possible continuous ramp relative to that snapped centre: the cut itself is
+    // the outer edge, and width + twice the lag is the conservative inner edge.
     let width = 16_i64.max((i64::from(half_extent) + 49) / 50);
-    maximum_axis_delta >= i64::from(half_extent) - width
-        && minimum_axis_delta <= i64::from(half_extent) + width
+    let maximum_lag = i64::from(LOD_BOUNDARY_SNAP[boundary])
+        .saturating_mul(5)
+        .div_euclid(8);
+    maximum_axis_delta >= i64::from(half_extent) - width - maximum_lag * 2
+        && minimum_axis_delta <= i64::from(half_extent)
 }
 
 fn slice_uses_geometry_morph(
-    _key: &MeshKey,
-    _focus: Option<GeometricLodFocus>,
-    _slice: &MeshSlice,
+    key: &MeshKey,
+    focus: Option<GeometricLodFocus>,
+    slice: &MeshSlice,
 ) -> bool {
-    false
+    if LOD_TRANSITION_MESH_KEYS.contains(key) {
+        return true;
+    }
+    let (Some(focus), Some(patch)) = (focus, slice.surface_patch_id) else {
+        return false;
+    };
+    surface_patch_intersects_morph_band(focus, patch)
 }
 
 fn mesh_casts_directional_shadow(key: &MeshKey) -> bool {
@@ -8111,7 +8543,7 @@ fn coalesce_draw_items(mut items: Vec<DrawItem>) -> Vec<DrawSpan> {
             && last.morph_page == item.morph_page
             && last.morph_page.is_none_or(|_| {
                 last.quad_count
-                    .checked_mul(size_of::<u32>() as u32)
+                    .checked_mul(size_of::<GpuMorph>() as u32)
                     .and_then(|size| last.morph_offset.checked_add(size))
                     == Some(item.morph_offset)
             })
@@ -8989,9 +9421,9 @@ fn quad_layout() -> wgpu::VertexBufferLayout<'static> {
 }
 
 fn morph_height_layout() -> wgpu::VertexBufferLayout<'static> {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![4 => Uint32];
+    const ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![4 => Sint16x4];
     wgpu::VertexBufferLayout {
-        array_stride: size_of::<u32>() as wgpu::BufferAddress,
+        array_stride: size_of::<GpuMorph>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &ATTRIBUTES,
     }
@@ -9364,24 +9796,129 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_surface_cells_morph_to_the_exact_same_parent_height() {
+    fn adjacent_surface_cells_morph_their_shared_vertex_to_the_exact_same_parent_height() {
         let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0);
         let tile =
             voxels_world::generate_surface_tile_mesh_with(coord, |x, _| (x, Material::Grass));
-        let macro_normals = surface_macro_normals(&tile);
-        let morphs = surface_geometry_morphs(&tile, &macro_normals);
-        let resolved_height = |origin: [i32; 3]| {
+        let (macro_normals, geometry_shapes) = surface_macro_normals_and_shapes(&tile);
+        let morphs = surface_geometry_morphs(&tile, &macro_normals, &geometry_shapes);
+        let resolved_height = |origin: [i32; 3], corner: usize| {
             let index = tile
                 .quads
                 .iter()
                 .position(|quad| quad.origin == origin && quad.face == 2)
                 .expect("terrain top exists");
             let packed = morphs[index];
-            let bits = (packed & 0xffff) as u16;
-            tile.quads[index].origin[1] + i32::from(bits as i16)
+            let child_height = tile.quads[index].origin[1]
+                .saturating_add(unpack_surface_shape_delta(geometry_shapes[index], corner));
+            child_height * 2 + unpack_surface_morph_delta_half_voxels(packed, corner)
         };
-        assert_eq!(resolved_height([0, 1, 0]), 2);
-        assert_eq!(resolved_height([2, 3, 0]), 2);
+        assert_eq!(resolved_height([0, 1, 0], 1), 4);
+        assert_eq!(resolved_height([2, 3, 0], 0), 4);
+    }
+
+    #[test]
+    fn every_morphed_surface_wall_endpoint_matches_the_shared_parent_top() {
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0);
+        let surface = |x: i32, z: i32| {
+            (
+                x.div_euclid(3)
+                    .saturating_add(z.div_euclid(5))
+                    .saturating_add(if x >= 0 { 7 } else { 0 }),
+                Material::Grass,
+            )
+        };
+        let tile = voxels_world::generate_surface_tile_mesh_with(coord, surface);
+        let (macro_normals, geometry_shapes) = surface_macro_normals_and_shapes(&tile);
+        let morphs = surface_geometry_morphs(&tile, &macro_normals, &geometry_shapes);
+        let mut parent_tops = BTreeMap::<(i32, i32), std::collections::BTreeSet<i32>>::new();
+        for tile_z in -1..=1 {
+            for tile_x in -1..=1 {
+                let neighbor = voxels_world::generate_surface_tile_mesh_with(
+                    SurfaceTileCoord::new(SurfaceLodLevel::Stride2, tile_x, tile_z),
+                    surface,
+                );
+                let (neighbor_normals, neighbor_shapes) =
+                    surface_macro_normals_and_shapes(&neighbor);
+                let neighbor_morphs =
+                    surface_geometry_morphs(&neighbor, &neighbor_normals, &neighbor_shapes);
+                for (index, quad) in neighbor
+                    .quads
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, quad)| quad.face == 2)
+                {
+                    let corners = [
+                        [quad.origin[0], quad.origin[2]],
+                        [quad.origin[0] + i32::from(quad.extent[0]), quad.origin[2]],
+                        [
+                            quad.origin[0] + i32::from(quad.extent[0]),
+                            quad.origin[2] + i32::from(quad.extent[1]),
+                        ],
+                        [quad.origin[0], quad.origin[2] + i32::from(quad.extent[1])],
+                    ];
+                    for (corner, [x, z]) in corners.into_iter().enumerate() {
+                        let current = quad.origin[1]
+                            + 1
+                            + unpack_surface_shape_delta(neighbor_shapes[index], corner);
+                        let target = current * 2
+                            + unpack_surface_morph_delta_half_voxels(
+                                neighbor_morphs[index],
+                                corner,
+                            );
+                        parent_tops.entry((x, z)).or_default().insert(target);
+                    }
+                }
+            }
+        }
+        for (index, quad) in tile.quads.iter().enumerate().filter(|(_, quad)| {
+            matches!(quad.face, 0 | 1 | 4 | 5) && quad.extent[0] == coord.stride_voxels() as u16
+        }) {
+            let width = i32::from(quad.extent[0]);
+            let endpoints = match quad.face {
+                0 => [
+                    [quad.origin[0] + 1, quad.origin[2]],
+                    [quad.origin[0] + 1, quad.origin[2] + width],
+                ],
+                1 => [
+                    [quad.origin[0], quad.origin[2]],
+                    [quad.origin[0], quad.origin[2] + width],
+                ],
+                4 => [
+                    [quad.origin[0], quad.origin[2] + 1],
+                    [quad.origin[0] + width, quad.origin[2] + 1],
+                ],
+                5 => [
+                    [quad.origin[0], quad.origin[2]],
+                    [quad.origin[0] + width, quad.origin[2]],
+                ],
+                _ => unreachable!(),
+            };
+            for corner in 0..4 {
+                let endpoint = endpoints[usize::from(corner == 1 || corner == 2)];
+                let current = quad.origin[1]
+                    + if corner >= 2 {
+                        i32::from(quad.extent[1])
+                    } else {
+                        0
+                    }
+                    + unpack_surface_shape_delta(geometry_shapes[index], corner);
+                let target =
+                    current * 2 + unpack_surface_morph_delta_half_voxels(morphs[index], corner);
+                let tops = parent_tops
+                    .get(&(endpoint[0], endpoint[1]))
+                    .expect("neighboring top target exists");
+                assert!(
+                    tops.contains(&target),
+                    "wall face {} corner {corner} target {target} misses tops {tops:?} at ({}, {}); quad {quad:?}, shape {}, morph {:?}",
+                    quad.face,
+                    endpoint[0],
+                    endpoint[1],
+                    geometry_shapes[index],
+                    morphs[index],
+                );
+            }
+        }
     }
 
     #[test]
@@ -9411,14 +9948,14 @@ mod tests {
             assert_ne!(quad.extent_voxels[0] & MORPH_CLOSURE_EXTENT_FLAG, 0);
             assert_eq!(quad.extent_voxels[0] & !MORPH_CLOSURE_EXTENT_FLAG, 2);
             assert_eq!(quad.extent_voxels[1], 2);
-            let bottom_delta = (morph_heights as u16) as i16;
-            let top_delta = ((morph_heights >> 16) as u16) as i16;
+            let bottom_delta = unpack_surface_morph_delta_half_voxels(morph_heights, 0);
+            let top_delta = unpack_surface_morph_delta_half_voxels(morph_heights, 2);
             assert_eq!(bottom_delta, 0);
-            assert_eq!(top_delta, -2);
-            assert_eq!(quad.origin[1] + i32::from(bottom_delta), 11);
+            assert_eq!(top_delta, -4);
+            assert_eq!(quad.origin[1] * 2 + bottom_delta, 22);
             assert_eq!(
-                quad.origin[1] + i32::from(quad.extent_voxels[1]) + i32::from(top_delta),
-                11
+                (quad.origin[1] + i32::from(quad.extent_voxels[1])) * 2 + top_delta,
+                22
             );
         }
     }
@@ -9779,13 +10316,15 @@ mod tests {
             assert_eq!(quad.material_face >> GPU_FACE_SHIFT & 7, 0);
             assert_ne!(quad.ao & SURFACE_MACRO_NORMAL_FLAG, 0);
             assert_eq!(quad.origin[1] + i32::from(quad.extent_voxels[1]), 21,);
-            assert_eq!((morph_heights as u16) as i16, 0);
-            assert_eq!(((morph_heights >> 16) as u16) as i16, -8);
+            assert_eq!(unpack_surface_morph_delta_half_voxels(morph_heights, 0), 0);
             assert_eq!(
-                quad.origin[1]
-                    + i32::from(quad.extent_voxels[1])
-                    + i32::from(((morph_heights >> 16) as u16) as i16),
-                13,
+                unpack_surface_morph_delta_half_voxels(morph_heights, 2),
+                -16
+            );
+            assert_eq!(
+                (quad.origin[1] + i32::from(quad.extent_voxels[1])) * 2
+                    + unpack_surface_morph_delta_half_voxels(morph_heights, 2),
+                26,
                 "the fine endpoint must meet its own hidden parent at height 12"
             );
         }
@@ -9907,7 +10446,10 @@ mod tests {
         assert_eq!(stitches.len(), 72);
         for (quad, &morph_heights) in connectors {
             assert_eq!(quad.extent_voxels, [2, 10]);
-            assert_eq!(((morph_heights >> 16) as u16) as i16, -8);
+            assert_eq!(
+                unpack_surface_morph_delta_half_voxels(morph_heights, 2),
+                -16
+            );
         }
         assert_eq!(
             stitches
@@ -9948,8 +10490,8 @@ mod tests {
             assert_eq!(quad.material_face >> GPU_FACE_SHIFT & 7, 2);
             assert_ne!(quad.extent_voxels[0] & TRANSITION_TRIANGLE_FLAG, 0);
             assert_eq!(quad.origin[1], 10);
-            assert_eq!((morph_heights as u16) as i16, 0);
-            assert_eq!(((morph_heights >> 16) as u16) as i16, 0);
+            assert_eq!(unpack_surface_morph_delta_half_voxels(morph_heights, 0), 0);
+            assert_eq!(unpack_surface_morph_delta_half_voxels(morph_heights, 2), 0);
         }
         assert_eq!(
             transitions
@@ -10522,19 +11064,19 @@ mod tests {
             ao: 0xff,
             _pad: 0,
         };
-        let large = top([0, 0, 0], [4, 4]);
+        let large = top([4, 0, 4], [4, 4]);
         assert_eq!(
             canonical_gpu_quads([0; 3], &[large]),
             vec![canonical_gpu_quad([0; 3], &large)],
             "an isolated greedy face keeps its single compact instance"
         );
 
-        let adjacent = top([4, 0, 2], [1, 1]);
+        let adjacent = top([8, 0, 6], [1, 1]);
         let constrained = canonical_gpu_quads([0; 3], &[large, adjacent]);
         let large_triangles = constrained
             .iter()
             .filter(|quad| {
-                quad.origin == [0, 0, 0] && quad.extent_voxels[0] & CANONICAL_TRIANGLE_FLAG != 0
+                quad.origin == [4, 0, 4] && quad.extent_voxels[0] & CANONICAL_TRIANGLE_FLAG != 0
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -10559,11 +11101,45 @@ mod tests {
         assert_eq!(
             constrained
                 .iter()
-                .filter(|quad| quad.origin == [4, 0, 2])
+                .filter(|quad| quad.origin == [8, 0, 6])
                 .count(),
             1,
             "the unit neighbor already has the exact shared endpoints"
         );
+    }
+
+    #[test]
+    fn every_canonical_chunk_boundary_face_uses_ten_centimetre_raster_edges() {
+        let boundary_faces = [
+            (0, [31, 4, 4]),
+            (1, [0, 4, 4]),
+            (2, [4, 31, 4]),
+            (3, [4, 0, 4]),
+            (4, [4, 4, 31]),
+            (5, [4, 4, 0]),
+        ];
+        for (face, origin) in boundary_faces {
+            let quad = Quad {
+                origin,
+                face,
+                extent: [4, 4],
+                material: Material::Stone.id(),
+                ao: 0xff,
+                _pad: 0,
+            };
+            let constrained = canonical_gpu_quads([0; 3], &[quad]);
+            assert_eq!(
+                constrained.len(),
+                16,
+                "face {face} must split all four boundary edges into four unit segments"
+            );
+            assert!(constrained.iter().all(|triangle| {
+                triangle.extent_voxels[0] & CANONICAL_TRIANGLE_FLAG != 0
+                    && (triangle.extent_voxels[1] & CANONICAL_TRIANGLE_OFFSET_MASK)
+                        - (triangle.extent_voxels[0] & CANONICAL_TRIANGLE_OFFSET_MASK)
+                        == 1
+            }));
+        }
     }
 
     #[test]
@@ -10813,10 +11389,11 @@ mod tests {
     fn failed_second_layer_keeps_resident_mesh_and_releases_prepared_storage() {
         let key = (0, 1, 2, 3);
         let mut arena = ArenaAllocator::new(128, 4);
+        let mut morph_arena = ArenaAllocator::new(128, 4);
         let resident = arena.allocate(32).expect("resident allocation");
-        let resident_morph = arena.allocate(8).expect("resident morph allocation");
+        let resident_morph = morph_arena.allocate(8).expect("resident morph allocation");
         let prepared = arena.allocate(64).expect("prepared allocation");
-        let prepared_morph = arena.allocate(8).expect("prepared morph allocation");
+        let prepared_morph = morph_arena.allocate(8).expect("prepared morph allocation");
         let mut chunks = BTreeMap::from([(
             key,
             ChunkMesh {
@@ -10836,6 +11413,7 @@ mod tests {
 
         discard_prepared_mesh(
             &mut arena,
+            Some(&mut morph_arena),
             Some(ChunkMesh {
                 allocation: prepared,
                 morph_allocation: Some(prepared_morph),
@@ -10852,15 +11430,16 @@ mod tests {
         );
 
         assert_eq!(chunks.get(&key).map(|mesh| mesh.allocation), Some(resident));
+        assert_eq!(arena.stats().allocated_bytes, u64::from(resident.size));
         assert_eq!(
-            arena.stats().allocated_bytes,
-            u64::from(resident.size + resident_morph.size)
+            morph_arena.stats().allocated_bytes,
+            u64::from(resident_morph.size)
         );
         assert!(!arena.free(prepared));
-        assert!(!arena.free(prepared_morph));
+        assert!(!morph_arena.free(prepared_morph));
         let resident_mesh = chunks.remove(&key).expect("resident mesh");
         assert!(arena.free(resident_mesh.allocation));
-        assert!(arena.free(resident_mesh.morph_allocation.expect("resident morph")));
+        assert!(morph_arena.free(resident_mesh.morph_allocation.expect("resident morph")));
     }
 
     fn test_slice() -> MeshSlice {
@@ -11201,11 +11780,13 @@ mod tests {
             morph_offset,
         };
         let quad_bytes = size_of::<GpuQuad>() as u32;
-        let contiguous = coalesce_draw_items(vec![item(0, 0), item(quad_bytes, 4)]);
+        let morph_bytes = size_of::<GpuMorph>() as u32;
+        let contiguous = coalesce_draw_items(vec![item(0, 0), item(quad_bytes, morph_bytes)]);
         assert_eq!(contiguous.len(), 1);
         assert_eq!(contiguous[0].quad_count, 2);
 
-        let split_sidecar = coalesce_draw_items(vec![item(0, 0), item(quad_bytes, 8)]);
+        let split_sidecar =
+            coalesce_draw_items(vec![item(0, 0), item(quad_bytes, morph_bytes * 2)]);
         assert_eq!(split_sidecar.len(), 2);
     }
 

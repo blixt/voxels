@@ -118,10 +118,13 @@ mod tests {
         assert!(FRAME_SOURCE.contains("max(frame.weather.x - frame.weather.w, 0.0)"));
         assert_eq!(
             voxels
-                .matches("let surface_weather = cloud_surface_weather(input.world);")
+                .matches("out.surface_weather = cloud_surface_weather(world);")
                 .count(),
             1
         );
+        assert!(voxels.contains("@location(6) surface_weather: vec2<f32>"));
+        assert!(voxels.contains("let surface_weather = input.surface_weather;"));
+        assert!(voxels.contains("* input.surface_weather.x"));
         assert!(voxels.contains("let local_precipitation = liquid_precipitation()"));
         assert!(voxels.contains("surface_weather.y"));
         assert!(voxels.contains("surface_detail.roughness * 0.24"));
@@ -429,9 +432,10 @@ mod tests {
         for shader in [voxels, shadows] {
             assert!(shader.contains("@location(0) origin: vec3<i32>"));
             assert!(shader.contains("@location(3) ao: u32"));
-            assert!(shader.contains("@location(4) morph_heights: u32"));
+            assert!(shader.contains("@location(4) morph_heights: vec4<i32>"));
             assert!(shader.contains("unpack_signed_i3(surface_shape >> (corner * 3u))"));
-            assert!(shader.contains("surface_morph_delta(morph_heights, uv.y)"));
+            assert!(shader.contains("f32(morph_heights[corner]) * 0.5"));
+            assert!(shader.contains("vec4<i32>(0)"));
             assert!(shader.contains("surface_quad_flip(face, surface_shape, ao)"));
             assert!(
                 shader.contains("select(STANDARD_STRIP[vertex_index], FLIPPED_STRIP[vertex_index]")

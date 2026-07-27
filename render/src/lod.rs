@@ -12,7 +12,7 @@ pub const LOD_BOUNDARY_HALF_EXTENTS: [i32; 8] =
 // Snap only as coarsely as both adjacent representations require. In particular, the near handoff
 // moves in one 3.2 m chunk rather than a 12.8 m feature cell, cutting its worst visible replacement
 // strip by two thirds while preserving whole-chunk and whole-patch ownership.
-const LOD_BOUNDARY_SNAP: [i32; 8] = [32, 32, 64, 128, 256, 512, 1_024, 2_048];
+pub(crate) const LOD_BOUNDARY_SNAP: [i32; 8] = [32, 32, 64, 128, 256, 512, 1_024, 2_048];
 const LOD_SNAP_HYSTERESIS_DIVISOR: i32 = 8;
 
 pub fn lod_boundary_half_extents_are_valid(extents: [i32; 8]) -> bool {

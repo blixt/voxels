@@ -28,10 +28,22 @@ interface LodTimings {
 
 interface PresentedFrameCapture {
   readonly frames: readonly Buffer[];
+  readonly timestamps: readonly (number | null)[];
   readonly observedFrames: number;
   readonly overflowFrames: number;
   readonly firstTimestamp: number | null;
   readonly lastTimestamp: number | null;
+}
+
+interface PresentedFrameCaptureControl {
+  readonly observedFrames: () => number;
+}
+
+interface CentreChangeCapture {
+  readonly crossed: readonly number[];
+  readonly snapshots: readonly (readonly number[])[];
+  readonly observedEngineFrames: number;
+  readonly skippedEngineFrames: number;
 }
 
 const MAX_PRESENTED_FRAME_CAPTURES = 300;
@@ -44,10 +56,11 @@ function required(values: ArrayLike<number>, index: number, label: string): numb
 
 async function capturePresentedFrames(
   page: Page,
-  action: () => Promise<void>,
+  action: (capture: PresentedFrameCaptureControl) => Promise<void>,
 ): Promise<PresentedFrameCapture> {
   const session = await page.context().newCDPSession(page);
   const frames: Buffer[] = [];
+  const timestamps: Array<number | null> = [];
   const acknowledgements: Promise<void>[] = [];
   let observedFrames = 0;
   let overflowFrames = 0;
@@ -67,6 +80,7 @@ async function capturePresentedFrames(
     }
     if (frames.length < MAX_PRESENTED_FRAME_CAPTURES) {
       frames.push(Buffer.from(event.data, "base64"));
+      timestamps.push(timestamp !== undefined && Number.isFinite(timestamp) ? timestamp : null);
     } else {
       overflowFrames += 1;
     }
@@ -85,7 +99,7 @@ async function capturePresentedFrames(
       format: "png",
       everyNthFrame: 1,
     });
-    await action();
+    await action({ observedFrames: () => observedFrames });
     // Let Chromium deliver and acknowledge the final compositor frame before stopping capture.
     await page.waitForTimeout(32);
     await session.send("Page.stopScreencast");
@@ -97,6 +111,7 @@ async function capturePresentedFrames(
   }
   return {
     frames,
+    timestamps,
     observedFrames,
     overflowFrames,
     firstTimestamp,
@@ -248,9 +263,16 @@ async function waitForCentreChange(
   initialCentres: BoundaryCentres,
   outboundKey: string,
   timings: LodTimings,
-): Promise<readonly number[]> {
+  afterCentreChangeFrames: number,
+  onCentreChange: () => void,
+): Promise<CentreChangeCapture> {
   const deadline = Date.now() + 4_000;
   let previousFrame = snapshotValue(await readSnapshot(engine, timings), "frameSequence");
+  let crossed: readonly number[] | undefined;
+  let framesAfterCrossing = 0;
+  let observedEngineFrames = 0;
+  let skippedEngineFrames = 0;
+  const snapshots: Array<readonly number[]> = [];
   await page.keyboard.down(outboundKey);
   try {
     while (Date.now() < deadline) {
@@ -260,13 +282,35 @@ async function waitForCentreChange(
         description: "renderer stopped while walking toward an LOD snap boundary",
         onSnapshot: (sample) => collectTiming(sample, timings),
       });
-      previousFrame = snapshotValue(snapshot, "frameSequence");
-      if (!sameCentres(boundaryCentres(snapshot), initialCentres)) return snapshot;
+      const frame = snapshotValue(snapshot, "frameSequence");
+      skippedEngineFrames += Math.max(0, frame - previousFrame - 1);
+      previousFrame = frame;
+      observedEngineFrames += 1;
+      snapshots.push(snapshot);
+      if (crossed === undefined && !sameCentres(boundaryCentres(snapshot), initialCentres)) {
+        crossed = snapshot;
+        onCentreChange();
+      } else if (crossed !== undefined) {
+        framesAfterCrossing += 1;
+      }
+      if (crossed !== undefined && framesAfterCrossing >= afterCentreChangeFrames) {
+        return {
+          crossed,
+          snapshots,
+          observedEngineFrames,
+          skippedEngineFrames,
+        };
+      }
     }
   } finally {
     await page.keyboard.up(outboundKey);
   }
-  throw new Error("walking forward did not cross an LOD snap boundary");
+  if (crossed === undefined) {
+    throw new Error("walking forward did not cross an LOD snap boundary");
+  }
+  throw new Error(
+    `renderer produced only ${framesAfterCrossing}/${afterCentreChangeFrames} requested frames after the LOD boundary`,
+  );
 }
 
 async function waitForStableFrame(
@@ -472,6 +516,147 @@ async function compareScreenshots(page: Page, before: Buffer, after: Buffer) {
   );
 }
 
+async function analyzePresentedFrameContinuity(
+  page: Page,
+  frames: readonly Buffer[],
+  timestamps: readonly (number | null)[],
+) {
+  if (frames.length < 2 || frames.length !== timestamps.length) {
+    throw new Error(
+      `LOD continuity requires at least two aligned frames; received ${frames.length} frames and ${timestamps.length} timestamps`,
+    );
+  }
+  const pairs = await page.evaluate(
+    async ({ base64Frames, frameTimestamps }) => {
+      const required = <T>(values: ArrayLike<T>, index: number): T => {
+        const value = values[index];
+        if (value === undefined) throw new Error(`LOD continuity omitted value ${index}`);
+        return value;
+      };
+      const decode = async (base64: string) => {
+        const response = await fetch(`data:image/png;base64,${base64}`);
+        const bitmap = await createImageBitmap(await response.blob());
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        if (context === null) throw new Error("LOD continuity canvas is unavailable");
+        context.drawImage(bitmap, 0, 0);
+        return {
+          width: bitmap.width,
+          height: bitmap.height,
+          pixels: context.getImageData(0, 0, bitmap.width, bitmap.height).data,
+        };
+      };
+      const linear = (value: number): number => {
+        const channel = value / 255;
+        return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+      };
+      const luma = (pixels: Uint8ClampedArray, index: number): number =>
+        0.2126 * linear(required(pixels, index)) +
+        0.7152 * linear(required(pixels, index + 1)) +
+        0.0722 * linear(required(pixels, index + 2));
+      const results: Array<{
+        readonly pair: number;
+        readonly intervalMs: number | null;
+        readonly meanAbsoluteLinearLumaDelta: number;
+        readonly normalizedMeanAbsoluteLinearLumaDelta: number;
+        readonly relativeMeanLinearLumaDelta: number;
+        readonly catastrophicDarkFraction: number;
+      }> = [];
+      let left = await decode(required(base64Frames, 0));
+      for (let pair = 0; pair + 1 < base64Frames.length; pair += 1) {
+        const right = await decode(required(base64Frames, pair + 1));
+        if (left.width !== right.width || left.height !== right.height) {
+          throw new Error("LOD continuity frames have different dimensions");
+        }
+        const roi = {
+          x0: Math.floor(left.width * 0.02),
+          x1: Math.ceil(left.width * 0.98),
+          y0: Math.floor(left.height * 0.55),
+          y1: Math.ceil(left.height * 0.98),
+        };
+        const footprint = 4;
+        let samples = 0;
+        let leftSum = 0;
+        let rightSum = 0;
+        let absoluteSum = 0;
+        let catastrophic = 0;
+        for (let y = roi.y0; y < roi.y1; y += footprint) {
+          for (let x = roi.x0; x < roi.x1; x += footprint) {
+            let leftLuma = 0;
+            let rightLuma = 0;
+            let footprintSamples = 0;
+            for (let dy = 0; dy < footprint && y + dy < roi.y1; dy += 1) {
+              for (let dx = 0; dx < footprint && x + dx < roi.x1; dx += 1) {
+                const pixel = (x + dx + (y + dy) * left.width) * 4;
+                leftLuma += luma(left.pixels, pixel);
+                rightLuma += luma(right.pixels, pixel);
+                footprintSamples += 1;
+              }
+            }
+            leftLuma /= footprintSamples;
+            rightLuma /= footprintSamples;
+            leftSum += leftLuma;
+            rightSum += rightLuma;
+            absoluteSum += Math.abs(leftLuma - rightLuma);
+            if (
+              Math.max(leftLuma, rightLuma) > 0.03 &&
+              Math.min(leftLuma, rightLuma) < Math.max(leftLuma, rightLuma) * 0.5
+            ) {
+              catastrophic += 1;
+            }
+            samples += 1;
+          }
+        }
+        const leftTimestamp = required(frameTimestamps, pair);
+        const rightTimestamp = required(frameTimestamps, pair + 1);
+        const intervalMs =
+          leftTimestamp === null || rightTimestamp === null
+            ? null
+            : Math.max(0, (rightTimestamp - leftTimestamp) * 1_000);
+        const meanAbsoluteLinearLumaDelta = absoluteSum / samples;
+        results.push({
+          pair,
+          intervalMs,
+          meanAbsoluteLinearLumaDelta,
+          normalizedMeanAbsoluteLinearLumaDelta:
+            intervalMs === null || intervalMs < 1
+              ? meanAbsoluteLinearLumaDelta
+              : (meanAbsoluteLinearLumaDelta * (1000 / 60)) / intervalMs,
+          relativeMeanLinearLumaDelta:
+            Math.abs(rightSum - leftSum) / Math.max(leftSum, samples * 0.001),
+          catastrophicDarkFraction: catastrophic / samples,
+        });
+        left = right;
+      }
+      return results;
+    },
+    {
+      base64Frames: frames.map((frame) => frame.toString("base64")),
+      frameTimestamps: timestamps,
+    },
+  );
+  const deltas = pairs.map((pair) => pair.normalizedMeanAbsoluteLinearLumaDelta);
+  const catastrophic = pairs.map((pair) => pair.catastrophicDarkFraction);
+  const maximum = Math.max(...deltas);
+  const maximumPair = pairs.find((pair) => pair.normalizedMeanAbsoluteLinearLumaDelta === maximum);
+  const median = percentile(deltas, 0.5);
+  return {
+    pairs,
+    samples: pairs.length,
+    normalizedMeanAbsoluteLinearLumaDelta: {
+      median,
+      p95: percentile(deltas, 0.95),
+      maximum,
+      maximumOverMedian: maximum / Math.max(median, 0.000_1),
+      maximumPair: maximumPair?.pair ?? 0,
+    },
+    catastrophicDarkFraction: {
+      p95: percentile(catastrophic, 0.95),
+      maximum: Math.max(...catastrophic),
+    },
+  };
+}
+
 async function analyzeWatertightTerrain(
   page: Page,
   screenshot: Buffer,
@@ -540,6 +725,7 @@ interface LodOptions {
   readonly geometrySourceTravel: boolean;
   readonly travelSeconds: number;
   readonly buildProfile: "debug" | "wasm-dev" | "release";
+  readonly environment: "day-clear" | "night-rain";
 }
 
 function parseOptions(arguments_: readonly string[]): LodOptions {
@@ -637,6 +823,11 @@ function parseOptions(arguments_: readonly string[]): LodOptions {
       ["debug", "wasm-dev", "release"] as const,
       "release",
     ),
+    environment: argumentsReader.choice(
+      "environment",
+      ["day-clear", "night-rain"] as const,
+      "day-clear",
+    ),
   };
   argumentsReader.assertEmpty();
   return options;
@@ -667,9 +858,9 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       cascadedShadows: options.cascadedShadows,
       screenSpaceAmbientOcclusion: options.screenSpaceAmbientOcclusion,
       dayLengthSeconds: 0,
-      dayFractionAtUnixEpoch: 0.5,
+      dayFractionAtUnixEpoch: options.environment === "night-rain" ? 0 : 0.5,
       weatherCycleSeconds: 0,
-      weatherFractionAtUnixEpoch: 0.08,
+      weatherFractionAtUnixEpoch: options.environment === "night-rain" ? 0.5 : 0.08,
       cloudVelocityMetresPerSecond: [0, 0],
     },
     service: { metal: options.source === "terrain-diffusion-30m" },
@@ -899,6 +1090,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
       dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "",
       source: options.source,
+      environment: options.environment,
       browser: browser.version,
       travel: {
         trajectory: descentCoverage ? "diagonal-descent" : "horizontal-flight",
@@ -1044,6 +1236,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
       dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "",
       source: options.source,
+      environment: options.environment,
       spawnVoxels: options.spawn,
       look: options.look,
       browser: browser.version,
@@ -1087,52 +1280,28 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     let crossedSnapshot: readonly number[] | undefined;
     let capturedEngineFrames = 0;
     let skippedEngineFrames = 0;
-    let transitionActiveFrames = 0;
-    let transitionActiveObserved = false;
-    let transitionCompletionObserved = false;
-    let minimumTransitionPhase = Number.POSITIVE_INFINITY;
-    let maximumTransitionPhase = Number.NEGATIVE_INFINITY;
+    let crossingPresentedFrame = 0;
+    let movementSnapshots: readonly (readonly number[])[] = [];
     // Spectator flight drives the same moving-camera LOD focus and cut renderer, then restores the
     // saved body pose exactly when disabled. The old keyboard braking loop varied by centimetres
     // and introduced enough parallax to hide the cut comparison behind a positioning error.
     await engine.setSpectator(true);
-    const presentedFrames = await capturePresentedFrames(page, async () => {
-      crossedSnapshot = await waitForCentreChange(
+    const presentedFrames = await capturePresentedFrames(page, async (capture) => {
+      const movement = await waitForCentreChange(
         page,
         engine,
         initialCentres,
         outboundKey,
         timings,
+        12,
+        () => {
+          crossingPresentedFrame = capture.observedFrames();
+        },
       );
-      let previousFrame = snapshotValue(crossedSnapshot, "frameSequence");
-      const observeTransition = (snapshot: readonly number[]): boolean => {
-        const active = snapshotValue(snapshot, "lodCutTransitionActive") === 1;
-        if (active) {
-          transitionActiveObserved = true;
-          transitionActiveFrames += 1;
-          const phase = snapshotValue(snapshot, "lodCutTransitionPhase");
-          minimumTransitionPhase = Math.min(minimumTransitionPhase, phase);
-          maximumTransitionPhase = Math.max(maximumTransitionPhase, phase);
-        } else if (transitionActiveObserved) {
-          transitionCompletionObserved = true;
-        }
-        return active;
-      };
-      observeTransition(crossedSnapshot);
-      const transitionDeadline = Date.now() + 2_000;
-      while (!transitionCompletionObserved && Date.now() < transitionDeadline) {
-        const snapshot = await engine.waitForFrameAfter(previousFrame, {
-          timeoutMs: 2_000,
-          intervalMs: 1,
-          description: "LOD transition renderer stopped advancing",
-          onSnapshot: (sample) => collectTiming(sample, timings),
-        });
-        const frame = snapshotValue(snapshot, "frameSequence");
-        skippedEngineFrames += Math.max(0, frame - previousFrame - 1);
-        previousFrame = frame;
-        capturedEngineFrames += 1;
-        observeTransition(snapshot);
-      }
+      crossedSnapshot = movement.crossed;
+      capturedEngineFrames = movement.observedEngineFrames;
+      skippedEngineFrames = movement.skippedEngineFrames;
+      movementSnapshots = movement.snapshots;
     });
     if (crossedSnapshot === undefined) {
       throw new Error("presented-frame capture completed without crossing an LOD boundary");
@@ -1165,12 +1334,47 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
         `presented-frame capture observed only ${movingCoverage.samples} compositor frames`,
       );
     }
-    if (!transitionActiveObserved) {
-      throw new Error("LOD cut transition did not become active after crossing the boundary");
+    const transitionActiveFrames = movementSnapshots.filter(
+      (snapshot) => snapshotValue(snapshot, "lodCutTransitionActive") === 1,
+    ).length;
+    const transitionActiveObserved = transitionActiveFrames > 0;
+    const continuityStart = Math.max(
+      0,
+      Math.min(crossingPresentedFrame - 1, presentedFrames.frames.length - 2),
+    );
+    const continuityFrames = presentedFrames.frames.slice(continuityStart);
+    const continuityTimestamps = presentedFrames.timestamps.slice(continuityStart);
+    const continuityAnalysis = await analyzePresentedFrameContinuity(
+      page,
+      continuityFrames,
+      continuityTimestamps,
+    );
+    const crossingPair = continuityAnalysis.pairs[0];
+    if (crossingPair === undefined) {
+      throw new Error("LOD continuity capture omitted the ownership crossing pair");
     }
-    if (!transitionCompletionObserved) {
-      throw new Error("LOD cut transition did not complete within the capture window");
-    }
+    const continuity = {
+      ...continuityAnalysis,
+      crossing: {
+        ...crossingPair,
+        normalizedDeltaOverMotionMedian:
+          crossingPair.normalizedMeanAbsoluteLinearLumaDelta /
+          Math.max(continuityAnalysis.normalizedMeanAbsoluteLinearLumaDelta.median, 0.000_1),
+      },
+    };
+    const worstContinuityPair = continuity.normalizedMeanAbsoluteLinearLumaDelta.maximumPair;
+    await context.artifacts.write(
+      "Worst LOD continuity pair before",
+      "moving-worst-continuity-before.png",
+      continuityFrames[worstContinuityPair] ?? continuityFrames[0] ?? before,
+      "image/png",
+    );
+    await context.artifacts.write(
+      "Worst LOD continuity pair after",
+      "moving-worst-continuity-after.png",
+      continuityFrames[worstContinuityPair + 1] ?? continuityFrames.at(-1) ?? before,
+      "image/png",
+    );
     await engine.setSpectator(false);
     const afterSnapshot = await waitForStableChangedFrame(page, engine, initialCentres, timings);
     const afterCentres = boundaryCentres(afterSnapshot);
@@ -1205,11 +1409,10 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
         captureDurationMs: capturedPresentationDurationMs,
         cutTransition: {
           activeObserved: transitionActiveObserved,
-          completionObserved: transitionCompletionObserved,
           activeEngineFrames: transitionActiveFrames,
-          minimumPhase: minimumTransitionPhase,
-          maximumPhase: maximumTransitionPhase,
+          expectedInactive: true,
         },
+        continuity,
         worst: movingCoverage.worst,
       },
       diagnosticSkyExposure: {
@@ -1244,6 +1447,19 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       violations.push(
         `moving LOD transition exposed diagnostic sky in ${image.movingCoverage.framesWithHoles} presented frames`,
       );
+    if (image.movingCoverage.cutTransition.activeObserved)
+      violations.push("legacy dual-cut transition overlay became active");
+    if (image.movingCoverage.continuity.normalizedMeanAbsoluteLinearLumaDelta.maximum > 0.05) {
+      violations.push("moving LOD continuity delta exceeded 0.05 linear luminance");
+    }
+    if (
+      image.movingCoverage.continuity.normalizedMeanAbsoluteLinearLumaDelta.maximumOverMedian > 3
+    ) {
+      violations.push("moving LOD continuity produced a delta over 3x the motion median");
+    }
+    if (image.movingCoverage.continuity.crossing.normalizedDeltaOverMotionMedian > 3) {
+      violations.push("LOD ownership crossing produced a delta over 3x the motion median");
+    }
     if (image.ssim < 0.97) violations.push("valley SSIM fell below 0.97");
     if (performance.frameP95Ms > 12) violations.push("frame p95 exceeded 12ms");
     if (performance.fractionAbove16_67Ms > 0.01)
@@ -1260,6 +1476,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
       dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim() !== "",
       source: options.source,
+      environment: options.environment,
       spawnVoxels: options.spawn,
       look: options.look,
       browser: browser.version,
