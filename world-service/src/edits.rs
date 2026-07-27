@@ -17,9 +17,10 @@ use voxels_world::protocol::{
     ProtocolError, VoxelMutation, encode_edit_commit,
 };
 use voxels_world::{
-    ChunkCoord, EditMap, Material, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES,
-    VoxelBlockRequest, VoxelCoord, WorldId, WorldProduct, WorldProductBatch, WorldProductPriority,
-    WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash,
+    ChunkCoord, EditMap, Material, SurfaceLodLevel, SurfaceTileCoord, TERRAIN_REGION_ROOT_LEVEL,
+    TerrainPageKey, VOXEL_SIZE_METRES, VoxelBlockRequest, VoxelCoord, WorldId, WorldProduct,
+    WorldProductBatch, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
+    WorldSourceIdentityHash,
 };
 
 use crate::EDIT_DATABASE_SCHEMA_VERSION;
@@ -209,6 +210,12 @@ pub(crate) struct ChunkEditSnapshot {
 pub(crate) struct SurfaceEditSnapshot {
     pub(crate) edits: EditMap,
     pub(crate) revisions: Vec<u64>,
+}
+
+#[derive(Clone)]
+pub(crate) struct TerrainEditSnapshot {
+    pub(crate) edits: EditMap,
+    pub(crate) revision: u64,
 }
 
 #[derive(Debug)]
@@ -615,6 +622,32 @@ impl EditAuthority {
                 })
                 .collect(),
         }
+    }
+
+    /// Captures the exact edit ownership needed to rebuild one fixed virtual-terrain region.
+    ///
+    /// The sampled interval includes the positive and negative one-voxel halo used by exact leaf
+    /// pages. The maximum intersecting chunk revision is a local monotonic region revision: an
+    /// edit inside this region necessarily advances it, while an unrelated edit cannot invalidate
+    /// every virtual-terrain directory in the world.
+    pub(crate) fn snapshot_terrain_region(
+        &self,
+        root: TerrainPageKey,
+    ) -> Option<TerrainEditSnapshot> {
+        let chunks = terrain_region_chunks(root)?;
+        let state = self.lock();
+        let revision = terrain_region_revision(&state, &chunks);
+        Some(TerrainEditSnapshot {
+            edits: state.edits.snapshot_for_chunks(&chunks),
+            revision,
+        })
+    }
+
+    /// Reads only the local revision authority on a cache hit; unlike a build snapshot this does
+    /// not clone the region's sparse edit payload.
+    pub(crate) fn terrain_region_revision(&self, root: TerrainPageKey) -> Option<u64> {
+        let chunks = terrain_region_chunks(root)?;
+        Some(terrain_region_revision(&self.lock(), &chunks))
     }
 
     pub(crate) fn apply(
@@ -1262,6 +1295,37 @@ fn plan_action(
             })
         }
     }
+}
+
+fn terrain_region_chunks(root: TerrainPageKey) -> Option<Vec<ChunkCoord>> {
+    if root.level != TERRAIN_REGION_ROOT_LEVEL {
+        return None;
+    }
+    let bounds = root.bounds()?;
+    let sampled_min = VoxelCoord::new(
+        bounds.min.x.checked_sub(1)?,
+        bounds.min.y.checked_sub(1)?,
+        bounds.min.z.checked_sub(1)?,
+    );
+    let minimum_chunk = sampled_min.chunk();
+    let maximum_chunk = bounds.max.chunk();
+    let mut chunks = Vec::new();
+    for z in minimum_chunk.z..=maximum_chunk.z {
+        for y in minimum_chunk.y..=maximum_chunk.y {
+            for x in minimum_chunk.x..=maximum_chunk.x {
+                chunks.push(ChunkCoord::new(x, y, z));
+            }
+        }
+    }
+    Some(chunks)
+}
+
+fn terrain_region_revision(state: &EditState, chunks: &[ChunkCoord]) -> u64 {
+    chunks
+        .iter()
+        .filter_map(|coord| state.chunk_revisions.get(coord).copied())
+        .max()
+        .unwrap_or(INITIAL_REVISION)
 }
 
 fn source_voxel_block(

@@ -26,7 +26,7 @@ feature is an error. It never silently creates a different procedural world.
 The complete schema is:
 
 ```toml
-schema_version = 25
+schema_version = 26
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 source = "terrain-diffusion-30m"
@@ -50,6 +50,7 @@ max_in_flight_batches = 16
 max_connections = 1024
 global_queue_capacity = 16384
 product_cache_bytes = 268435456
+virtual_terrain_cache_bytes = 268435456
 response_cache_bytes = 67108864
 generation_workers = 8
 generation_workers_per_client = 2
@@ -245,7 +246,9 @@ client never branches on provider selection; changing the daemon source and rest
 sufficient to switch between procedural and learned terrain. The transport bounds total accepted
 connections and queued work, and the per-client worker cap prevents one connection from occupying
 the complete local generation pool. `product_cache_bytes` bounds an LRU of validated encoded product
-items. `response_cache_bytes` separately bounds complete compressed batches shared by co-located
+items. `virtual_terrain_cache_bytes` separately bounds complete encoded fixed-region directories
+and page payloads; stale revisions and least-recently-used regions are evicted atomically.
+`response_cache_bytes` separately bounds complete compressed batches shared by co-located
 clients and exact retries, so retaining a dense multiplayer working set does not evict the products
 needed for responsive traversal. Concurrent overlapping batches single-flight each chunk or surface
 tile through one CPU/Metal generation, then assemble their requested order into independently

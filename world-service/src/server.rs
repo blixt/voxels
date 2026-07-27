@@ -7,6 +7,7 @@ use crate::{
     generation_limiter::PriorityGenerationLimiter,
     presence::{PoseAdmission, PresenceHub, PresenceStreamState},
     traffic::{ClientTrafficRegistry, ClientTrafficShaper, TrafficPriority},
+    virtual_terrain::{PreparedTerrainRegion, VirtualTerrainAuthority, VirtualTerrainError},
 };
 use axum::Router;
 use axum::extract::State;
@@ -22,7 +23,7 @@ use futures_util::stream::{FuturesUnordered, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -39,27 +40,33 @@ use voxels_world::protocol::{
     BrowserUserId, ChunkBatchItem, ChunkBatchRequest, EditSessionId, EditVolume,
     EncodedChunkBatchItem, EncodedSurfaceTileBatchItem, FRAME_FRAGMENT_OVERHEAD_BYTES, PlayerId,
     PlayerIdentity, PlayerResume, PresenceOpened, PresencePong, ResyncRequired, SpawnPoint,
-    SurfaceTileBatchItem, SurfaceTileBatchRequest, VoxelMutation, WorldCapabilities,
-    WorldEnvironmentSnapshot, WorldOpened, cancel_kind, chunk_batch_kind,
+    SurfaceTileBatchItem, SurfaceTileBatchRequest, TerrainDirectoryBatchItem,
+    TerrainDirectoryBatchRequest, TerrainDirectoryBatchResult, TerrainDirectoryFailure,
+    VirtualTerrainPageBatchRequest, VirtualTerrainPageBatchResult, VoxelMutation,
+    WorldCapabilities, WorldEnvironmentSnapshot, WorldOpened, cancel_kind, chunk_batch_kind,
     clone_message_with_request_id, decode_cancel, decode_chunk_batch, decode_edit_command,
     decode_open_presence, decode_open_world, decode_player_pose, decode_presence_ping,
-    decode_surface_tile_batch, edit_command_kind, encode_chunk_batch_item,
-    encode_chunk_batch_result_from_items, encode_edit_commit, encode_error, encode_frame_fragment,
-    encode_frame_fragment_abort, encode_presence_opened, encode_presence_pong,
-    encode_resync_required, encode_surface_tile_batch_item,
-    encode_surface_tile_batch_result_from_items, encode_world_opened, message_kind,
-    message_request_id, open_presence_kind, open_world_kind, player_pose_kind, presence_ping_kind,
-    surface_tile_batch_kind,
+    decode_surface_tile_batch, decode_terrain_directory_batch, decode_virtual_terrain_page_batch,
+    edit_command_kind, encode_chunk_batch_item, encode_chunk_batch_result_from_items,
+    encode_edit_commit, encode_error, encode_frame_fragment, encode_frame_fragment_abort,
+    encode_presence_opened, encode_presence_pong, encode_resync_required,
+    encode_surface_tile_batch_item, encode_surface_tile_batch_result_from_items,
+    encode_terrain_directory_batch_result, encode_virtual_terrain_page_batch_result,
+    encode_world_opened, message_kind, message_request_id, open_presence_kind, open_world_kind,
+    player_pose_kind, presence_ping_kind, surface_tile_batch_kind, terrain_directory_batch_kind,
+    virtual_terrain_page_batch_kind,
 };
 use voxels_world::{
-    CHUNK_EDGE, ChunkCoord, Material, MeshingHalo, SurfaceSampleBlockRequest, WORLD_SCHEMA_VERSION,
-    WorldManifest, WorldManifestError, WorldProduct, WorldProductBatch, WorldProductBatchItem,
-    WorldProductPriority, WorldProductRequest, WorldSourceEngine, WorldSourceError,
+    CHUNK_EDGE, ChunkCoord, Material, MeshingHalo, SurfaceSampleBlockRequest,
+    TERRAIN_REGION_ROOT_LEVEL, TerrainPageBatchItemV1, TerrainPageBatchResultV1, TerrainPageKey,
+    TerrainPageTransferFailure, WORLD_SCHEMA_VERSION, WorldManifest, WorldManifestError,
+    WorldProduct, WorldProductBatch, WorldProductBatchItem, WorldProductPriority,
+    WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v34/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v34/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v34";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v35/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v35/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v35";
 pub const HEALTH_PATH: &str = "/healthz";
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const RESPONSE_ASSEMBLY_WORKER_DIVISOR: usize = 2;
@@ -119,6 +126,13 @@ impl WorldServer {
         let generation_cancellations = Arc::new(Notify::new());
         let generation_limiter =
             PriorityGenerationLimiter::new(usize::from(config.transport.generation_workers));
+        let virtual_terrain = VirtualTerrainAuthority::new(
+            Arc::clone(&source),
+            Arc::clone(&edits),
+            Arc::clone(&generation_limiter),
+            (usize::from(config.transport.generation_workers) / 4).clamp(1, 2),
+            config.transport.virtual_terrain_cache_bytes,
+        );
         let response_assembly_workers = (usize::from(config.transport.generation_workers)
             / RESPONSE_ASSEMBLY_WORKER_DIVISOR)
             .max(1);
@@ -178,6 +192,7 @@ impl WorldServer {
             presence,
             source,
             edits: Arc::clone(&edits),
+            virtual_terrain,
             generation_tx,
             generation_cancellations,
             process_shutdown: shutdown_rx,
@@ -441,6 +456,7 @@ fn prepare_world(
     manifest.validate()?;
     let capabilities = WorldCapabilities::CANONICAL_CHUNKS
         .union(WorldCapabilities::SURFACE_LOD)
+        .union(WorldCapabilities::VIRTUAL_TERRAIN)
         .union(WorldCapabilities::SERVER_EDITS)
         .union(WorldCapabilities::ENVIRONMENT)
         .union(WorldCapabilities::PLAYER_PRESENCE);
@@ -691,6 +707,7 @@ struct ServerState {
     presence: Arc<PresenceHub>,
     source: Arc<dyn WorldSourceEngine>,
     edits: Arc<EditAuthority>,
+    virtual_terrain: Arc<VirtualTerrainAuthority>,
     generation_tx: mpsc::Sender<GenerationJob>,
     generation_cancellations: Arc<Notify>,
     process_shutdown: watch::Receiver<bool>,
@@ -1061,6 +1078,22 @@ enum RequestAdmissionError {
     Closed,
     Duplicate,
     WindowFull,
+}
+
+fn admit_tracked_request(
+    session: &Arc<SessionRequests>,
+    request_id: u64,
+) -> Result<TrackedRequest, &'static str> {
+    let cancelled = session.insert(request_id).map_err(|error| match error {
+        RequestAdmissionError::Closed => "world session is closing",
+        RequestAdmissionError::Duplicate => "request id is already in flight",
+        RequestAdmissionError::WindowFull => "negotiated request window is full",
+    })?;
+    Ok(TrackedRequest {
+        request_id,
+        cancelled,
+        session: Arc::clone(session),
+    })
 }
 
 struct TrackedRequest {
@@ -1957,6 +1990,53 @@ async fn run_session(
                     break;
                 }
             }
+        } else if kind == terrain_directory_batch_kind() {
+            let request = match decode_terrain_directory_batch(&bytes) {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = send_control_error(&outbound, 0, &error.to_string()).await;
+                    break;
+                }
+            };
+            let tracked = match admit_tracked_request(&session, request.request_id) {
+                Ok(tracked) => tracked,
+                Err(message) => {
+                    let _ = send_control_error(&outbound, request.request_id, message).await;
+                    continue;
+                }
+            };
+            tokio::spawn(serve_virtual_terrain_directories(
+                request,
+                Arc::clone(&state.virtual_terrain),
+                outbound.clone(),
+                tracked,
+                state.max_frame_bytes,
+            ));
+        } else if kind == virtual_terrain_page_batch_kind() {
+            let request = match decode_virtual_terrain_page_batch(
+                &bytes,
+                state.virtual_terrain.source_identity_hash(),
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = send_control_error(&outbound, 0, &error.to_string()).await;
+                    break;
+                }
+            };
+            let tracked = match admit_tracked_request(&session, request.request_id) {
+                Ok(tracked) => tracked,
+                Err(message) => {
+                    let _ = send_control_error(&outbound, request.request_id, message).await;
+                    continue;
+                }
+            };
+            tokio::spawn(serve_virtual_terrain_pages(
+                request,
+                Arc::clone(&state.virtual_terrain),
+                outbound.clone(),
+                tracked,
+                state.max_frame_bytes,
+            ));
         } else if kind == edit_command_kind() {
             let command = match decode_edit_command(&bytes) {
                 Ok(command) => command,
@@ -2530,6 +2610,146 @@ async fn send_frame(
             _byte_permit: None,
         })
         .await
+}
+
+async fn serve_virtual_terrain_directories(
+    request: TerrainDirectoryBatchRequest,
+    authority: Arc<VirtualTerrainAuthority>,
+    outbound: mpsc::Sender<OutboundFrame>,
+    tracked: TrackedRequest,
+    max_frame_bytes: usize,
+) {
+    let session = Arc::clone(&tracked.session);
+    let cancellation = Arc::clone(&tracked.cancelled);
+    let mut delivery = GenerationFrameDelivery::from_tracked(
+        request.request_id,
+        request.priority,
+        outbound,
+        tracked,
+    );
+    let session_permit = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => None,
+        permit = session.acquire_generation(request.priority) => permit,
+    };
+    let Some(_session_permit) = session_permit else {
+        delivery.finish();
+        return;
+    };
+    let mut items = Vec::with_capacity(request.roots.len());
+    for root in request.roots {
+        let generated = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                delivery.finish();
+                return;
+            }
+            generated = authority.ensure_region(root, request.priority) => generated,
+        };
+        let result = match generated {
+            Ok(region) => Ok(region.directory.clone()),
+            Err(VirtualTerrainError::InvalidRoot) => Err(TerrainDirectoryFailure::Unavailable),
+            Err(_) => Err(TerrainDirectoryFailure::GenerationFailed),
+        };
+        items.push(TerrainDirectoryBatchItem { root, result });
+    }
+    let response = TerrainDirectoryBatchResult {
+        request_id: request.request_id,
+        source_identity_hash: authority.source_identity_hash(),
+        items,
+    };
+    let bytes = encode_terrain_directory_batch_result(&response)
+        .unwrap_or_else(|error| encode_error(request.request_id, &error.to_string()));
+    delivery.send(bytes, true, max_frame_bytes).await;
+}
+
+async fn serve_virtual_terrain_pages(
+    request: VirtualTerrainPageBatchRequest,
+    authority: Arc<VirtualTerrainAuthority>,
+    outbound: mpsc::Sender<OutboundFrame>,
+    tracked: TrackedRequest,
+    max_frame_bytes: usize,
+) {
+    let session = Arc::clone(&tracked.session);
+    let cancellation = Arc::clone(&tracked.cancelled);
+    let mut delivery = GenerationFrameDelivery::from_tracked(
+        request.request_id,
+        request.priority,
+        outbound,
+        tracked,
+    );
+    let session_permit = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => None,
+        permit = session.acquire_generation(request.priority) => permit,
+    };
+    let Some(_session_permit) = session_permit else {
+        delivery.finish();
+        return;
+    };
+
+    let mut regions = BTreeMap::<TerrainPageKey, Arc<PreparedTerrainRegion>>::new();
+    let mut failed_regions = BTreeMap::<TerrainPageKey, TerrainPageTransferFailure>::new();
+    let mut items = Vec::with_capacity(request.batch.pages.len());
+    for identity in request.batch.pages {
+        let Some(root) = identity.key.ancestor_at(TERRAIN_REGION_ROOT_LEVEL) else {
+            items.push(TerrainPageBatchItemV1 {
+                requested: identity,
+                result: Err(TerrainPageTransferFailure::Unavailable),
+            });
+            continue;
+        };
+        if !regions.contains_key(&root) && !failed_regions.contains_key(&root) {
+            let generated = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    delivery.finish();
+                    return;
+                }
+                generated = authority.ensure_region(root, request.priority) => generated,
+            };
+            match generated {
+                Ok(region) => {
+                    regions.insert(root, region);
+                }
+                Err(VirtualTerrainError::InvalidRoot) => {
+                    failed_regions.insert(root, TerrainPageTransferFailure::Unavailable);
+                }
+                Err(_) => {
+                    failed_regions.insert(root, TerrainPageTransferFailure::GenerationFailed);
+                }
+            }
+        }
+        let result = if let Some(failure) = failed_regions.get(&root) {
+            Err(*failure)
+        } else {
+            match regions.get(&root) {
+                Some(region) if region.revision != identity.revision => {
+                    Err(TerrainPageTransferFailure::StaleRevision)
+                }
+                Some(region) => match region.page(identity) {
+                    Ok(Some(page)) => Ok(page),
+                    Ok(None) => Err(TerrainPageTransferFailure::Unavailable),
+                    Err(_) => Err(TerrainPageTransferFailure::GenerationFailed),
+                },
+                None => Err(TerrainPageTransferFailure::GenerationFailed),
+            }
+        };
+        items.push(TerrainPageBatchItemV1 {
+            requested: identity,
+            result,
+        });
+    }
+    let response = VirtualTerrainPageBatchResult {
+        request_id: request.request_id,
+        batch: TerrainPageBatchResultV1 {
+            source_identity_hash: authority.source_identity_hash(),
+            items,
+        },
+    };
+    let bytes = encode_virtual_terrain_page_batch_result(&response)
+        .unwrap_or_else(|error| encode_error(request.request_id, &error.to_string()));
+    delivery.send(bytes, true, max_frame_bytes).await;
 }
 
 async fn write_frames(
@@ -3645,13 +3865,27 @@ struct GenerationFrameDelivery {
 
 impl GenerationFrameDelivery {
     fn new(job: GenerationJob) -> Self {
+        Self::from_tracked(
+            job.request.request_id(),
+            job.request.priority(),
+            job.outbound,
+            job.tracked,
+        )
+    }
+
+    fn from_tracked(
+        request_id: u64,
+        priority: WorldProductPriority,
+        outbound: mpsc::Sender<OutboundFrame>,
+        tracked: TrackedRequest,
+    ) -> Self {
         Self {
-            request_id: job.request.request_id(),
-            priority: traffic_priority(job.request.priority()),
-            outbound: job.outbound,
-            cancellation: Arc::clone(&job.tracked.cancelled),
-            outbound_bytes: Arc::clone(&job.tracked.session.outbound_bytes),
-            tracked: Some(job.tracked),
+            request_id,
+            priority: traffic_priority(priority),
+            outbound,
+            cancellation: Arc::clone(&tracked.cancelled),
+            outbound_bytes: Arc::clone(&tracked.session.outbound_bytes),
+            tracked: Some(tracked),
         }
     }
 
@@ -4022,6 +4256,108 @@ mod tests {
         )
         .await
         .expect("writer shutdown exceeded its configured bound");
+    }
+
+    #[tokio::test]
+    async fn virtual_terrain_directory_and_page_handlers_share_exact_region_identity() {
+        let source: Arc<dyn WorldSourceEngine> = Arc::new(ProceduralWorldSource::new(18));
+        let edits = EditAuthority::in_memory(
+            voxels_world::WorldId::from_bytes([7; 16]),
+            source.as_ref(),
+            8,
+        )
+        .expect("edits");
+        let authority = VirtualTerrainAuthority::new(
+            Arc::clone(&source),
+            edits,
+            PriorityGenerationLimiter::new(1),
+            1,
+            128 * 1024 * 1024,
+        );
+        let root = TerrainPageKey {
+            level: TERRAIN_REGION_ROOT_LEVEL,
+            coord: [-1, 0, 1],
+        };
+        let built = authority
+            .ensure_region(root, WorldProductPriority::VisibleSurface)
+            .await
+            .expect("region");
+        let cached = authority
+            .ensure_region(root, WorldProductPriority::Prefetch)
+            .await
+            .expect("cached region");
+        assert!(Arc::ptr_eq(&built, &cached));
+
+        let session = Arc::new(SessionRequests::new(
+            4,
+            1,
+            1,
+            64 * 1024 * 1024,
+            Arc::new(Notify::new()),
+        ));
+        let (outbound, mut responses) = mpsc::channel(2);
+        let directory_request = TerrainDirectoryBatchRequest {
+            request_id: 801,
+            priority: WorldProductPriority::VisibleSurface,
+            roots: vec![root],
+        };
+        let tracked =
+            admit_tracked_request(&session, directory_request.request_id).expect("admitted");
+        serve_virtual_terrain_directories(
+            directory_request,
+            Arc::clone(&authority),
+            outbound.clone(),
+            tracked,
+            voxels_world::protocol::MAX_PROTOCOL_FRAME_BYTES,
+        )
+        .await;
+        let directory_frame = responses.recv().await.expect("directory response");
+        let directory_result =
+            voxels_world::protocol::decode_terrain_directory_batch_result(&directory_frame.bytes)
+                .expect("decode directory response");
+        assert_eq!(directory_result.items.len(), 1);
+        let directory = directory_result.items[0]
+            .result
+            .as_ref()
+            .expect("directory");
+        assert_eq!(directory, &built.directory);
+        directory_frame
+            .tracked
+            .expect("terminal directory request")
+            .finish();
+
+        let node = directory.node(root).expect("root node");
+        let identity = voxels_world::TerrainPageTransferIdentity {
+            key: node.key,
+            revision: node.revision,
+            content_fingerprint: node.content_fingerprint,
+        };
+        let page_request = VirtualTerrainPageBatchRequest {
+            request_id: 802,
+            priority: WorldProductPriority::VisibleSurface,
+            batch: voxels_world::TerrainPageBatchRequestV1 {
+                source_identity_hash: authority.source_identity_hash(),
+                pages: vec![identity],
+            },
+        };
+        let tracked = admit_tracked_request(&session, page_request.request_id).expect("admitted");
+        serve_virtual_terrain_pages(
+            page_request,
+            authority,
+            outbound,
+            tracked,
+            voxels_world::protocol::MAX_PROTOCOL_FRAME_BYTES,
+        )
+        .await;
+        let page_frame = responses.recv().await.expect("page response");
+        let page_result = voxels_world::protocol::decode_virtual_terrain_page_batch_result(
+            &page_frame.bytes,
+            source.identity().identity_hash(),
+        )
+        .expect("decode page response");
+        let page = page_result.batch.items[0].result.as_ref().expect("page");
+        assert!(identity.matches(page));
+        page_frame.tracked.expect("terminal page request").finish();
     }
 
     #[test]
@@ -4900,6 +5236,7 @@ mod tests {
                 max_connections: 4,
                 global_queue_capacity: 8,
                 product_cache_bytes: 4 * 1024 * 1024,
+                virtual_terrain_cache_bytes: 64 * 1024 * 1024,
                 response_cache_bytes: 1024 * 1024,
                 generation_workers: 4,
                 generation_workers_per_client: 2,
@@ -5205,7 +5542,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v34, test-local-token"),
+            HeaderValue::from_static("voxels.world.v35, test-local-token"),
         );
         let (socket, response) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -6243,7 +6580,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v34, test-local-token"),
+            HeaderValue::from_static("voxels.world.v35, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -6277,7 +6614,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v34, test-local-token"),
+            HeaderValue::from_static("voxels.world.v35, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);

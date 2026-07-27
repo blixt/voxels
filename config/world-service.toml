@@ -1,5 +1,5 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 25
+schema_version = 26
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
@@ -32,6 +32,8 @@ max_connections = 1024
 global_queue_capacity = 16384
 # Immutable encoded products are shared by overlapping requests.
 product_cache_bytes = 268435456
+# Complete virtual terrain regions retain encoded pages under a separate hard LRU budget.
+virtual_terrain_cache_bytes = 268435456
 # Complete compressed batches are shared across co-located clients and identical retries.
 response_cache_bytes = 67108864
 generation_workers = 8

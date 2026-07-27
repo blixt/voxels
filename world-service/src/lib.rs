@@ -30,13 +30,14 @@ pub mod server;
 #[cfg(feature = "automation-fixture")]
 pub mod storage_benchmark;
 mod traffic;
+mod virtual_terrain;
 
 pub use server::{
     PRESENCE_WEBSOCKET_PATH, WORLD_WEBSOCKET_PATH, WORLD_WEBSOCKET_PROTOCOL, WorldServer,
     WorldServerError, serve_loaded_config,
 };
 
-pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 25;
+pub const WORLD_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 26;
 pub const EDIT_DATABASE_SCHEMA_VERSION: i64 = 13;
 
 const DEFAULT_WORLD_ID: [u8; 16] = [
@@ -46,6 +47,10 @@ const MAX_CONFIGURED_IN_FLIGHT_BATCHES: u16 = 1_024;
 const EDIT_DATABASE_SCHEMA_TOKEN: &str = "{edit_schema}";
 const EDIT_DATABASE_WORLD_TOKEN: &str = "{world_id}";
 const EDIT_DATABASE_SOURCE_TOKEN: &str = "{source_hash}";
+
+const fn default_virtual_terrain_cache_bytes() -> usize {
+    256 * 1024 * 1024
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -84,6 +89,9 @@ pub struct LoopbackTransportConfig {
     pub global_queue_capacity: u16,
     /// LRU budget for immutable encoded world products shared by overlapping requests.
     pub product_cache_bytes: usize,
+    /// LRU budget for encoded virtual-terrain directories and page payloads.
+    #[serde(default = "default_virtual_terrain_cache_bytes")]
+    pub virtual_terrain_cache_bytes: usize,
     /// LRU budget for complete compressed batch responses shared by co-located clients.
     pub response_cache_bytes: usize,
     /// Maximum blocking generation batches executing across all clients.
@@ -117,6 +125,7 @@ impl Default for LoopbackTransportConfig {
             max_connections: 1_024,
             global_queue_capacity: 16_384,
             product_cache_bytes: 256 * 1024 * 1024,
+            virtual_terrain_cache_bytes: default_virtual_terrain_cache_bytes(),
             response_cache_bytes: 64 * 1024 * 1024,
             generation_workers: 8,
             generation_workers_per_client: 2,
@@ -563,6 +572,11 @@ impl WorldServiceConfig {
         if self.transport.product_cache_bytes > 1024 * 1024 * 1024 {
             return Err(WorldServiceConfigError::InvalidConcurrency(
                 "product_cache_bytes must stay at most 1 GiB",
+            ));
+        }
+        if self.transport.virtual_terrain_cache_bytes > 1024 * 1024 * 1024 {
+            return Err(WorldServiceConfigError::InvalidConcurrency(
+                "virtual_terrain_cache_bytes must stay at most 1 GiB",
             ));
         }
         if self.transport.response_cache_bytes > 256 * 1024 * 1024 {
@@ -1110,7 +1124,7 @@ mod tests {
     };
 
     const CONFIG_TOML: &str = r#"
-schema_version = 25
+schema_version = 26
 world_id = "07070707-0707-0707-0707-070707070707"
 world_seed = 42
 source = "procedural-v16"
@@ -1131,6 +1145,7 @@ max_in_flight_batches = 16
 max_connections = 512
 global_queue_capacity = 128
 product_cache_bytes = 268435456
+virtual_terrain_cache_bytes = 268435456
 response_cache_bytes = 67108864
 generation_workers = 8
 generation_workers_per_client = 2
@@ -1317,7 +1332,7 @@ sea_level_voxels = 52
 
     #[test]
     fn schema_and_unknown_fields_are_rejected() {
-        let wrong_schema = CONFIG_TOML.replace("schema_version = 25", "schema_version = 24");
+        let wrong_schema = CONFIG_TOML.replace("schema_version = 26", "schema_version = 25");
         assert_eq!(
             WorldServiceConfig::from_toml(&wrong_schema),
             Err(WorldServiceConfigError::UnsupportedSchema {
