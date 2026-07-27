@@ -26,6 +26,17 @@ interface PoseReport {
   readonly capture: { readonly pose: number };
   readonly source: { readonly identityHash: string };
   readonly candidates: readonly CandidateReport[];
+  readonly gpu: null | {
+    readonly schema: string;
+    readonly adapter: Readonly<Record<string, unknown>>;
+    readonly workload: Readonly<Record<string, unknown>>;
+    readonly gpuMs: {
+      readonly shadow: { readonly p95: number };
+      readonly color: { readonly p95: number };
+      readonly total: { readonly p95: number; readonly p99: number };
+    };
+    readonly allocatedBytes: Readonly<Record<string, number>>;
+  };
 }
 
 function percentile(values: readonly number[], quantile: number): number {
@@ -107,9 +118,9 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
       "--profile",
       "worldgen",
       "-p",
-      "voxels-world-service",
+      "voxels-virtual-surface-bakeoff",
       "--features",
-      "automation-fixture,terrain-metal,virtual-surface-bakeoff",
+      "terrain-metal",
       "--bin",
       "voxels-virtual-surface-bakeoff",
     ],
@@ -126,7 +137,13 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
     await runProcess(
       context,
       executable,
-      [`--pose=${pose}`, `--edge=${edge}`, `--rays=${rays[0]}x${rays[1]}`, `--output=${output}`],
+      [
+        `--pose=${pose}`,
+        `--edge=${edge}`,
+        `--rays=${rays[0]}x${rays[1]}`,
+        ...(pose === 2 ? ["--gpu"] : []),
+        `--output=${output}`,
+      ],
       {
         label: `virtual surface pose ${pose}`,
         stdio: "inherit",
@@ -142,6 +159,48 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
     }
     reports.push(report);
   }
+  context.log("sampling deterministic cave, overhang, water, and floating-voxel stress volume");
+  const topologyOutput = context.artifacts.resolve("topology-stress.json");
+  await runProcess(
+    context,
+    executable,
+    ["--fixture=topology-stress", `--rays=${rays[0]}x${rays[1]}`, `--output=${topologyOutput}`],
+    {
+      label: "virtual surface topology stress",
+      stdio: "inherit",
+    },
+  );
+  context.artifacts.record("Virtual surface topology stress", topologyOutput, "application/json");
+  const topology = JSON.parse(await readFile(topologyOutput, "utf8")) as PoseReport;
+  if (topology.schema !== "voxels.virtual-surface-bakeoff.v1" || topology.capture.pose !== 0) {
+    throw new Error("topology stress produced an incompatible bake-off report");
+  }
+  const topologyStepped = topology.candidates.find(
+    (candidate) => candidate.kind === "stepped-surface",
+  );
+  if (
+    topologyStepped === undefined ||
+    topologyStepped.volumetricExceptionColumns === 0 ||
+    topologyStepped.ownerlessReferenceHits === 0
+  ) {
+    throw new Error(
+      "topology stress did not prove the pure stepped-surface candidate is incomplete",
+    );
+  }
+  const topologyExactViolations = topology.candidates
+    .filter((candidate) => candidate.kind !== "stepped-surface")
+    .flatMap((candidate) => [
+      candidate.ownerlessReferenceHits,
+      candidate.inventedHits,
+      candidate.materialMismatches,
+      candidate.depthMismatches,
+    ])
+    .reduce((sum, value) => sum + value, 0);
+  if (topologyExactViolations !== 0) {
+    throw new Error(
+      `topology stress found ${topologyExactViolations} errors in exact-capable candidates`,
+    );
+  }
   const kinds = [
     "exact-greedy",
     "stepped-surface",
@@ -149,6 +208,15 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
     "sparse-brick-ray-caster",
   ];
   const candidates = kinds.map((kind) => candidateSummary(reports, kind));
+  const gpu = reports.find((report) => report.gpu !== null)?.gpu;
+  if (
+    gpu === null ||
+    gpu === undefined ||
+    gpu.schema !== "voxels.virtual-surface-gpu-bakeoff.v1" ||
+    !Number.isFinite(gpu.gpuMs.total.p95)
+  ) {
+    throw new Error("supplied-world bake-off omitted valid Metal/WGPU timestamps");
+  }
   const exactCandidates = candidates.filter(
     (candidate) =>
       candidate.kind !== "stepped-surface" || candidate.volumetricExceptionColumns === 0,
@@ -177,6 +245,11 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
     rayGrid: rays,
     sourceIdentityHashes: [...new Set(reports.map((report) => report.source.identityHash))],
     candidates,
+    gpu,
+    topologyStress: {
+      steppedSurface: topologyStepped,
+      exactCapableViolations: topologyExactViolations,
+    },
   };
   await context.artifacts.writeJson("Virtual surface bake-off summary", "summary.json", summary);
   return {
@@ -187,6 +260,9 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
       raysPerPose: rays[0] * rays[1],
       candidates: candidates.length,
       correctnessViolations: correctnessViolations.length,
+      steppedSurfaceExceptionColumns: topologyStepped.volumetricExceptionColumns,
+      steppedSurfaceOwnerlessHits: topologyStepped.ownerlessReferenceHits,
+      clusteredRasterGpuP95Ms: gpu.gpuMs.total.p95,
     },
     details: summary,
   };

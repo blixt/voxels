@@ -250,6 +250,35 @@ struct GreedyQuad {
     material: Material,
 }
 
+/// Fixed-layout quad payload used only by the isolated GPU prototype executable.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct BakeoffGpuQuad {
+    pub axis: i32,
+    pub plane: i32,
+    pub u: i32,
+    pub v: i32,
+    pub width: u32,
+    pub height: u32,
+    pub positive: u32,
+    pub material_id: u32,
+}
+
+impl From<GreedyQuad> for BakeoffGpuQuad {
+    fn from(quad: GreedyQuad) -> Self {
+        Self {
+            axis: quad.axis as i32,
+            plane: quad.plane,
+            u: quad.u,
+            v: quad.v,
+            width: quad.width,
+            height: quad.height,
+            positive: u32::from(quad.positive),
+            material_id: u32::from(quad.material.id()),
+        }
+    }
+}
+
 impl GreedyQuad {
     fn bounds(self) -> FloatBounds {
         let plane = f64::from(self.plane);
@@ -867,6 +896,20 @@ impl BakeoffCandidate {
             CandidateStorage::ClusteredVirtualGeometry(candidate) => candidate.trace(ray),
             CandidateStorage::SparseBrickRayCaster(candidate) => candidate.trace(ray),
         }
+    }
+
+    /// Returns the exact greedy surface used by the two hardware-raster candidates. The clustered
+    /// prototype changes traversal and residency, not leaf geometry, so both intentionally produce
+    /// byte-identical 10 cm-lattice quads.
+    pub fn gpu_quads(&self) -> Option<Vec<BakeoffGpuQuad>> {
+        let quads = match &self.storage {
+            CandidateStorage::ExactGreedy(candidate) => &candidate.quads,
+            CandidateStorage::ClusteredVirtualGeometry(candidate) => &candidate.quads,
+            CandidateStorage::SteppedSurface(_) | CandidateStorage::SparseBrickRayCaster(_) => {
+                return None;
+            }
+        };
+        Some(quads.iter().copied().map(Into::into).collect())
     }
 }
 

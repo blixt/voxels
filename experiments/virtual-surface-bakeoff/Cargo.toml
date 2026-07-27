@@ -1,0 +1,27 @@
+[package]
+name = "voxels-virtual-surface-bakeoff"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+terrain-metal = ["voxels-world-service/terrain-metal"]
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.33"
+pollster = "0.4"
+serde_json = "1"
+voxels-world = { path = "../../world", features = ["virtual-surface-bakeoff"] }
+voxels-world-service = { path = "../../world-service" }
+wgpu = { version = "=30.0.0", default-features = false, features = ["metal", "wgsl"] }
+
+[[bin]]
+name = "voxels-virtual-surface-bakeoff"
+path = "src/main.rs"
+required-features = ["terrain-metal"]

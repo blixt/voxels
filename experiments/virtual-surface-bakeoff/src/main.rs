@@ -11,6 +11,8 @@ use voxels_world::{
 };
 use voxels_world_service::LoadedWorldServiceConfig;
 
+mod gpu;
+
 const SUPPLIED_SOURCE_HASH: &str =
     "82bdc2f68c8aa5a845927e52c2e3c5c781e96a7fe83b1bc723384df91daae09f";
 const DEFAULT_EDGE: u32 = 128;
@@ -50,14 +52,24 @@ const SUPPLIED_POSES: [SuppliedPose; 3] = [
 struct Arguments {
     config: PathBuf,
     output: Option<PathBuf>,
+    fixture: Fixture,
+    gpu: bool,
     pose: usize,
     edge: u32,
     ray_grid: [u32; 2],
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Fixture {
+    Supplied,
+    TopologyStress,
+}
+
 fn parse_arguments() -> Result<Arguments, Box<dyn std::error::Error>> {
     let mut config = PathBuf::from("config/world-service.toml");
     let mut output = None;
+    let mut fixture = Fixture::Supplied;
+    let mut gpu = false;
     let mut pose = 0usize;
     let mut edge = DEFAULT_EDGE;
     let mut ray_grid = [320, 180];
@@ -66,6 +78,14 @@ fn parse_arguments() -> Result<Arguments, Box<dyn std::error::Error>> {
             config = PathBuf::from(value);
         } else if let Some(value) = argument.strip_prefix("--output=") {
             output = Some(PathBuf::from(value));
+        } else if let Some(value) = argument.strip_prefix("--fixture=") {
+            fixture = match value {
+                "supplied" => Fixture::Supplied,
+                "topology-stress" => Fixture::TopologyStress,
+                _ => return Err("--fixture must be supplied or topology-stress".into()),
+            };
+        } else if argument == "--gpu" {
+            gpu = true;
         } else if let Some(value) = argument.strip_prefix("--pose=") {
             pose = value.parse::<usize>()?.saturating_sub(1);
         } else if let Some(value) = argument.strip_prefix("--edge=") {
@@ -88,10 +108,73 @@ fn parse_arguments() -> Result<Arguments, Box<dyn std::error::Error>> {
     Ok(Arguments {
         config,
         output,
+        fixture,
+        gpu,
         pose,
         edge,
         ray_grid,
     })
+}
+
+fn topology_stress_volume() -> Result<(BakeoffVolume, Value), Box<dyn std::error::Error>> {
+    let bounds = VoxelBounds::new(VoxelCoord::new(-64, -32, -64), VoxelCoord::new(64, 48, 64))
+        .ok_or("topology-stress bounds are invalid")?;
+    let volume = BakeoffVolume::from_sampler(bounds, |coord| {
+        let tunnel = (-7..=7).contains(&coord.x)
+            && (-48..=16).contains(&coord.z)
+            && (-9..=0).contains(&coord.y);
+        let cave = {
+            let dx = i64::from(coord.x + 28);
+            let dy = i64::from(coord.y + 10);
+            let dz = i64::from(coord.z + 20);
+            dx * dx + dy * dy + dz * dz < 14 * 14
+        };
+        let floating_voxel = coord == VoxelCoord::new(24, 22, -12);
+        let overhang = (-48..=-12).contains(&coord.x)
+            && (8..=11).contains(&coord.y)
+            && (-30..=12).contains(&coord.z);
+        let overhang_support = (-48..=-43).contains(&coord.x)
+            && (0..=11).contains(&coord.y)
+            && (-30..=12).contains(&coord.z);
+        let water = (12..=42).contains(&coord.x)
+            && (-30..=8).contains(&coord.z)
+            && (1..=3).contains(&coord.y);
+        if floating_voxel {
+            Material::GlowCrystal
+        } else if overhang || overhang_support {
+            Material::Basalt
+        } else if water {
+            Material::Water
+        } else if coord.y <= 0 && !tunnel && !cave {
+            if coord.y == 0 {
+                Material::Grass
+            } else if coord.y >= -3 {
+                Material::Dirt
+            } else {
+                Material::Stone
+            }
+        } else {
+            Material::Air
+        }
+    })?;
+    Ok((
+        volume,
+        json!({
+            "bounds": {
+                "min": bounds.min.as_array(),
+                "max": bounds.max.as_array(),
+                "shape": [128, 80, 128],
+            },
+            "features": [
+                "tunnel-roof",
+                "enclosed-cave",
+                "supported-overhang",
+                "floating-single-voxel",
+                "opaque-material-runs",
+                "water-terrain-intersection",
+            ],
+        }),
+    ))
 }
 
 fn single_product(
@@ -287,34 +370,100 @@ fn find_surface_focus(
 )]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = parse_arguments()?;
-    let loaded = LoadedWorldServiceConfig::load(&arguments.config)?;
-    let source_started = Instant::now();
-    let source = loaded.build_world_source()?;
-    let source_build_ms = source_started.elapsed().as_secs_f64() * 1000.0;
-    let identity_hash = source.identity().identity_hash().to_string();
-    if identity_hash != SUPPLIED_SOURCE_HASH {
-        return Err(format!(
-            "configured source {identity_hash} does not match supplied captures {SUPPLIED_SOURCE_HASH}"
-        )
-        .into());
-    }
-    let pose = SUPPLIED_POSES[arguments.pose];
     let volume_started = Instant::now();
-    let (volume, region) = sample_volume(source.as_ref(), pose, arguments.edge)?;
-    let volume_sample_ms = volume_started.elapsed().as_secs_f64() * 1000.0;
-    let camera = BakeoffCamera {
-        eye_voxels: pose.eye_metres.map(|metres| metres * 10.0),
-        yaw_radians: pose.yaw,
-        pitch_radians: pose.pitch,
-        vertical_fov_radians: 1.186_823_8,
-        aspect_ratio: f64::from(pose.pixel_size[0]) / f64::from(pose.pixel_size[1]),
+    let (volume, region, camera, source_json, capture_json) = match arguments.fixture {
+        Fixture::Supplied => {
+            let loaded = LoadedWorldServiceConfig::load(&arguments.config)?;
+            let source_started = Instant::now();
+            let source = loaded.build_world_source()?;
+            let source_build_ms = source_started.elapsed().as_secs_f64() * 1000.0;
+            let identity_hash = source.identity().identity_hash().to_string();
+            if identity_hash != SUPPLIED_SOURCE_HASH {
+                return Err(format!(
+                    "configured source {identity_hash} does not match supplied captures {SUPPLIED_SOURCE_HASH}"
+                )
+                .into());
+            }
+            let pose = SUPPLIED_POSES[arguments.pose];
+            let (volume, region) = sample_volume(source.as_ref(), pose, arguments.edge)?;
+            let camera = BakeoffCamera {
+                eye_voxels: pose.eye_metres.map(|metres| metres * 10.0),
+                yaw_radians: pose.yaw,
+                pitch_radians: pose.pitch,
+                vertical_fov_radians: 1.186_823_8,
+                aspect_ratio: f64::from(pose.pixel_size[0]) / f64::from(pose.pixel_size[1]),
+            };
+            (
+                volume,
+                region,
+                camera,
+                json!({
+                    "config": arguments.config,
+                    "identityHash": identity_hash,
+                    "seed": loaded.config().world_seed.to_string(),
+                    "buildMs": source_build_ms,
+                }),
+                json!({
+                    "fixture": "supplied",
+                    "pose": arguments.pose + 1,
+                    "eyeMetres": pose.eye_metres,
+                    "yawRadians": pose.yaw,
+                    "pitchRadians": pose.pitch,
+                    "verticalFovRadians": 1.186_823_8,
+                    "pixelSize": pose.pixel_size,
+                    "rayGrid": arguments.ray_grid,
+                }),
+            )
+        }
+        Fixture::TopologyStress => {
+            let (volume, region) = topology_stress_volume()?;
+            (
+                volume,
+                region,
+                BakeoffCamera {
+                    eye_voxels: [0.5, 28.5, 76.0],
+                    yaw_radians: 0.0,
+                    pitch_radians: -0.28,
+                    vertical_fov_radians: 1.0,
+                    aspect_ratio: 16.0 / 9.0,
+                },
+                json!({
+                    "identityHash": "deterministic-topology-stress-v1",
+                    "seed": "0",
+                    "buildMs": 0,
+                }),
+                json!({
+                    "fixture": "topology-stress",
+                    "pose": 0,
+                    "eyeVoxels": [0.5, 28.5, 76.0],
+                    "yawRadians": 0,
+                    "pitchRadians": -0.28,
+                    "verticalFovRadians": 1,
+                    "pixelSize": [16, 9],
+                    "rayGrid": arguments.ray_grid,
+                }),
+            )
+        }
     };
+    let volume_sample_ms = volume_started.elapsed().as_secs_f64() * 1000.0;
     let (candidates, comparisons) = run_virtual_surface_bakeoff(
         &volume,
         camera,
         arguments.ray_grid,
         &BakeoffCandidateKind::ALL,
     )?;
+    let gpu_report = if arguments.gpu {
+        let clustered = candidates
+            .iter()
+            .find(|candidate| candidate.kind == BakeoffCandidateKind::ClusteredVirtualGeometry)
+            .ok_or("bake-off omitted clustered candidate")?;
+        let quads = clustered
+            .gpu_quads()
+            .ok_or("clustered candidate omitted exact GPU leaves")?;
+        pollster::block_on(gpu::run(camera, &quads))?
+    } else {
+        Value::Null
+    };
     let candidate_json = candidates
         .iter()
         .zip(comparisons.iter())
@@ -339,27 +488,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Vec<_>>();
     let report = json!({
         "schema": "voxels.virtual-surface-bakeoff.v1",
-        "source": {
-            "config": arguments.config,
-            "identityHash": identity_hash,
-            "seed": loaded.config().world_seed.to_string(),
-            "buildMs": source_build_ms,
-        },
-        "capture": {
-            "pose": arguments.pose + 1,
-            "eyeMetres": pose.eye_metres,
-            "yawRadians": pose.yaw,
-            "pitchRadians": pose.pitch,
-            "verticalFovRadians": 1.186_823_8,
-            "pixelSize": pose.pixel_size,
-            "rayGrid": arguments.ray_grid,
-        },
+        "source": source_json,
+        "capture": capture_json,
         "region": region,
         "volume": {
             "logicalBytes": volume.logical_bytes(),
             "sampleMs": volume_sample_ms,
         },
         "candidates": candidate_json,
+        "gpu": gpu_report,
     });
     let encoded = serde_json::to_string_pretty(&report)?;
     if let Some(path) = arguments.output {

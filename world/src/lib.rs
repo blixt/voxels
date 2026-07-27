@@ -96,7 +96,7 @@ pub use virtual_surface::{
 #[doc(hidden)]
 pub use virtual_surface_bakeoff::{
     BakeoffCamera, BakeoffCandidate, BakeoffCandidateKind, BakeoffComparison, BakeoffError,
-    BakeoffHit, BakeoffVolume, run_virtual_surface_bakeoff,
+    BakeoffGpuQuad, BakeoffHit, BakeoffVolume, run_virtual_surface_bakeoff,
 };
 pub use visibility::{
     MAX_VISIBILITY_CELLS, MAX_VISIBILITY_PORTALS, PortalState, VisibilityCellId, VisibilityGraph,

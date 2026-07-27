@@ -12,7 +12,6 @@ workspace = true
 default = []
 automation-fixture = ["dep:serde_json", "dep:voxels-client-config"]
 terrain-metal = ["voxels-world-terrain-diffusion/metal"]
-virtual-surface-bakeoff = ["voxels-world/virtual-surface-bakeoff"]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
@@ -52,8 +51,3 @@ required-features = ["automation-fixture"]
 name = "voxels-storage-benchmark"
 path = "src/bin/voxels-storage-benchmark.rs"
 required-features = ["automation-fixture"]
-
-[[bin]]
-name = "voxels-virtual-surface-bakeoff"
-path = "src/bin/voxels-virtual-surface-bakeoff.rs"
-required-features = ["automation-fixture", "terrain-metal", "virtual-surface-bakeoff"]
