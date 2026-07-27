@@ -1284,8 +1284,8 @@ mod web {
         ChunkActivationReason, HostUiAction, LocalLightVisibility, MissionControlConfig, Renderer,
         RendererConfig, RendererFeatureConfig, ScreenshotCanonicalPageState, ScreenshotCapture,
         ScreenshotFeatureState, ScreenshotMutableRenderState, ScreenshotReproductionIdentity,
-        ScreenshotStreamingManifest, ScreenshotSurfacePageState, VirtualTerrainRenderMode,
-        VirtualTerrainRendererError, VolumetricCloudConfig,
+        ScreenshotStreamingManifest, ScreenshotSurfacePageState, ScreenshotVirtualRegionState,
+        VirtualTerrainRenderMode, VirtualTerrainRendererError, VolumetricCloudConfig,
     };
     use voxels_render::shadow::DirectionalShadowConfig;
     use voxels_render::ui::{LiveStats, NavigationTelemetry};
@@ -1317,7 +1317,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 7;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 40;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 41;
     const FRAME_SAMPLE_WIDTH: u32 = 26;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -1335,7 +1335,7 @@ mod web {
         "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
         "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
         "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,canonicalSurfaceCellsResident,canonicalSurfaceCellsRequired,",
-        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,lodIncompleteTransitionEdges,lodCutTransitionActive,lodCutTransitionPhase,frameSequence,schemaVersion,sampleCount,",
+        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,lodIncompleteTransitionEdges,lodCutTransitionActive,lodCutTransitionPhase,virtualTerrainMode,virtualTerrainRegisteredRegions,virtualTerrainDirectoryInFlight,virtualTerrainDirectoryNodes,virtualTerrainResidentPages,virtualTerrainResidentMiB,virtualTerrainResidentPrimitives,virtualTerrainSelectedPages,virtualTerrainRequestedPages,virtualTerrainOwnerlessRoots,virtualTerrainGpuMatchesCpuCut,virtualTerrainStreamPending,virtualTerrainStreamInFlight,virtualTerrainCancellationWasteMiB,virtualTerrainCachePages,virtualTerrainCacheMiB,frameSequence,schemaVersion,sampleCount,",
         "droppedSamples",
     );
     const SURFACE_HINT_VERTICAL_MARGIN_CHUNKS: i32 = 1;
@@ -1979,10 +1979,48 @@ mod web {
                     desired: status.desired,
                 })
                 .collect();
+            let virtual_regions = {
+                let state = self.virtual_terrain.borrow();
+                let roots = state
+                    .registered_roots
+                    .iter()
+                    .chain(state.directory_in_flight.keys())
+                    .chain(state.minimum_region_revisions.keys())
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                roots
+                    .into_iter()
+                    .map(|root| ScreenshotVirtualRegionState {
+                        root,
+                        minimum_revision: state
+                            .minimum_region_revisions
+                            .get(&root)
+                            .copied()
+                            .unwrap_or(0),
+                        registered: state.registered_roots.contains(&root),
+                        in_flight: state.directory_in_flight.contains_key(&root),
+                    })
+                    .collect()
+            };
+            let virtual_stream = self.virtual_terrain_scheduler.borrow().stats();
+            let (virtual_cache_pages, virtual_cache_bytes) = {
+                let cache = self.virtual_terrain_cache.borrow();
+                (cache.len(), cache.resident_bytes())
+            };
             ScreenshotStreamingManifest {
                 surface_epoch: revisions.epoch(),
                 surface_pages,
                 canonical_pages,
+                virtual_regions,
+                virtual_pending_pages: virtual_stream.pending_pages,
+                virtual_in_flight_pages: virtual_stream.in_flight_pages,
+                virtual_obsolete_in_flight_pages: virtual_stream.obsolete_in_flight_pages,
+                virtual_cancelled_pending_pages: virtual_stream.cancelled_pending_pages,
+                virtual_useful_bytes: virtual_stream.useful_bytes,
+                virtual_cancellation_waste_bytes: virtual_stream.cancellation_waste_bytes,
+                virtual_failed_pages: virtual_stream.failed_pages,
+                virtual_cache_pages,
+                virtual_cache_bytes,
             }
         }
 
@@ -5669,6 +5707,38 @@ mod web {
                     .iter()
                     .filter(|key| !stream_interest_keys.contains(key))
                     .count();
+                let (
+                    virtual_terrain_mode,
+                    virtual_terrain_resident_pages,
+                    virtual_terrain_resident_bytes,
+                    virtual_terrain_resident_primitives,
+                ) = {
+                    let renderer = engine.renderer.borrow();
+                    let (pages, bytes, primitives, _, _) = renderer.virtual_terrain_usage();
+                    let mode = match renderer.virtual_terrain_render_mode() {
+                        VirtualTerrainRenderMode::Disabled => 0.0,
+                        VirtualTerrainRenderMode::Shadow => 1.0,
+                        VirtualTerrainRenderMode::Visible => 2.0,
+                    };
+                    (mode, pages, bytes, primitives)
+                };
+                let (
+                    virtual_terrain_registered_regions,
+                    virtual_terrain_directory_in_flight,
+                    virtual_terrain_directory_nodes,
+                ) = {
+                    let state = engine.virtual_terrain.borrow();
+                    (
+                        state.registered_roots.len(),
+                        state.directory_in_flight.len(),
+                        state.nodes.len(),
+                    )
+                };
+                let virtual_terrain_stream = engine.virtual_terrain_scheduler.borrow().stats();
+                let (virtual_terrain_cache_pages, virtual_terrain_cache_bytes) = {
+                    let cache = engine.virtual_terrain_cache.borrow();
+                    (cache.len(), cache.resident_bytes())
+                };
                 values.extend_from_slice(&[
                     camera.position.x,
                     camera.position.y,
@@ -5921,6 +5991,26 @@ mod web {
                         0.0
                     },
                     render.lod_cut_transition_phase,
+                    virtual_terrain_mode,
+                    virtual_terrain_registered_regions as f32,
+                    virtual_terrain_directory_in_flight as f32,
+                    virtual_terrain_directory_nodes as f32,
+                    virtual_terrain_resident_pages as f32,
+                    virtual_terrain_resident_bytes as f32 / (1024.0 * 1024.0),
+                    virtual_terrain_resident_primitives as f32,
+                    render.virtual_terrain_gpu_selected_pages as f32,
+                    render.virtual_terrain_gpu_requested_pages as f32,
+                    render.virtual_terrain_gpu_ownerless_roots as f32,
+                    if render.virtual_terrain_gpu_matches_cpu_cut {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    virtual_terrain_stream.pending_pages as f32,
+                    virtual_terrain_stream.in_flight_pages as f32,
+                    virtual_terrain_stream.cancellation_waste_bytes as f32 / (1024.0 * 1024.0),
+                    virtual_terrain_cache_pages as f32,
+                    virtual_terrain_cache_bytes as f32 / (1024.0 * 1024.0),
                     engine.frame_sequence.get() as f32,
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);

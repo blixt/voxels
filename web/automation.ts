@@ -1,7 +1,7 @@
 import type { BrowserPlayerSession } from "./local-player.ts";
 
 export const AUTOMATION_CONTRACT_VERSION = 7;
-export const SNAPSHOT_SCHEMA_VERSION = 40;
+export const SNAPSHOT_SCHEMA_VERSION = 41;
 export const FRAME_SAMPLE_WIDTH = 26;
 export const GPU_SAMPLE_WIDTH = 13;
 
@@ -212,10 +212,26 @@ export const SNAPSHOT = Object.freeze({
   lodIncompleteTransitionEdges: 201,
   lodCutTransitionActive: 202,
   lodCutTransitionPhase: 203,
-  frameSequence: 204,
-  schemaVersion: 205,
-  sampleCount: 206,
-  droppedSamples: 207,
+  virtualTerrainMode: 204,
+  virtualTerrainRegisteredRegions: 205,
+  virtualTerrainDirectoryInFlight: 206,
+  virtualTerrainDirectoryNodes: 207,
+  virtualTerrainResidentPages: 208,
+  virtualTerrainResidentMiB: 209,
+  virtualTerrainResidentPrimitives: 210,
+  virtualTerrainSelectedPages: 211,
+  virtualTerrainRequestedPages: 212,
+  virtualTerrainOwnerlessRoots: 213,
+  virtualTerrainGpuMatchesCpuCut: 214,
+  virtualTerrainStreamPending: 215,
+  virtualTerrainStreamInFlight: 216,
+  virtualTerrainCancellationWasteMiB: 217,
+  virtualTerrainCachePages: 218,
+  virtualTerrainCacheMiB: 219,
+  frameSequence: 220,
+  schemaVersion: 221,
+  sampleCount: 222,
+  droppedSamples: 223,
 } as const);
 
 export type SnapshotField = keyof typeof SNAPSHOT;

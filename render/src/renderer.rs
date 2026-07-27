@@ -394,12 +394,30 @@ pub struct ScreenshotCanonicalPageState {
     pub desired: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScreenshotVirtualRegionState {
+    pub root: TerrainPageKey,
+    pub minimum_revision: u64,
+    pub registered: bool,
+    pub in_flight: bool,
+}
+
 /// Exact host-side residency/request state captured on the frame that owns screenshot readback.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ScreenshotStreamingManifest {
     pub surface_epoch: u64,
     pub surface_pages: Vec<ScreenshotSurfacePageState>,
     pub canonical_pages: Vec<ScreenshotCanonicalPageState>,
+    pub virtual_regions: Vec<ScreenshotVirtualRegionState>,
+    pub virtual_pending_pages: usize,
+    pub virtual_in_flight_pages: usize,
+    pub virtual_obsolete_in_flight_pages: usize,
+    pub virtual_cancelled_pending_pages: u64,
+    pub virtual_useful_bytes: u64,
+    pub virtual_cancellation_waste_bytes: u64,
+    pub virtual_failed_pages: u64,
+    pub virtual_cache_pages: usize,
+    pub virtual_cache_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -12622,6 +12640,8 @@ fn screenshot_streaming_manifest_json(manifest: &ScreenshotStreamingManifest) ->
             page.revision,
         )
     });
+    let mut virtual_regions = manifest.virtual_regions.clone();
+    virtual_regions.sort_unstable_by_key(|region| region.root);
     let mut encoded = format!(
         r#"{{"surfaceEpoch":"{}","surfacePages":["#,
         manifest.surface_epoch
@@ -12672,7 +12692,47 @@ fn screenshot_streaming_manifest_json(manifest: &ScreenshotStreamingManifest) ->
             page.desired,
         );
     }
-    encoded.push_str("]}");
+    encoded.push_str("],\"virtualRegions\":[");
+    for (index, region) in virtual_regions.iter().enumerate() {
+        if index != 0 {
+            encoded.push(',');
+        }
+        let _ = write!(
+            encoded,
+            concat!(
+                r#"{{"key":"virtual:{}:{}:{}:{}","level":{},"x":{},"y":{},"z":{},"#,
+                r#""minimumRevision":"{}","registered":{},"inFlight":{}}}"#
+            ),
+            region.root.level,
+            region.root.coord[0],
+            region.root.coord[1],
+            region.root.coord[2],
+            region.root.level,
+            region.root.coord[0],
+            region.root.coord[1],
+            region.root.coord[2],
+            region.minimum_revision,
+            region.registered,
+            region.in_flight,
+        );
+    }
+    let _ = write!(
+        encoded,
+        concat!(
+            r#"],"virtualStream":{{"pendingPages":{},"inFlightPages":{},"obsoleteInFlightPages":{},"#,
+            r#""cancelledPendingPages":"{}","usefulBytes":"{}","cancellationWasteBytes":"{}","#,
+            r#""failedPages":"{}","cachePages":{},"cacheBytes":"{}"}}}}"#
+        ),
+        manifest.virtual_pending_pages,
+        manifest.virtual_in_flight_pages,
+        manifest.virtual_obsolete_in_flight_pages,
+        manifest.virtual_cancelled_pending_pages,
+        manifest.virtual_useful_bytes,
+        manifest.virtual_cancellation_waste_bytes,
+        manifest.virtual_failed_pages,
+        manifest.virtual_cache_pages,
+        manifest.virtual_cache_bytes,
+    );
     encoded
 }
 
@@ -12952,6 +13012,40 @@ mod tests {
         assert_eq!(
             json_string("gpu \"driver\"\\Málaga\n\u{0001}"),
             "\"gpu \\\"driver\\\"\\\\M\\u00e1laga\\n\\u0001\""
+        );
+    }
+
+    #[test]
+    fn screenshot_streaming_manifest_includes_virtual_transport_state() {
+        let manifest = ScreenshotStreamingManifest {
+            virtual_regions: vec![ScreenshotVirtualRegionState {
+                root: TerrainPageKey {
+                    level: TERRAIN_REGION_ROOT_LEVEL,
+                    coord: [-2, 3, 4],
+                },
+                minimum_revision: 17,
+                registered: true,
+                in_flight: false,
+            }],
+            virtual_pending_pages: 5,
+            virtual_in_flight_pages: 6,
+            virtual_obsolete_in_flight_pages: 2,
+            virtual_cancelled_pending_pages: 7,
+            virtual_useful_bytes: 8,
+            virtual_cancellation_waste_bytes: 9,
+            virtual_failed_pages: 10,
+            virtual_cache_pages: 11,
+            virtual_cache_bytes: 12,
+            ..ScreenshotStreamingManifest::default()
+        };
+        assert_eq!(
+            screenshot_streaming_manifest_json(&manifest),
+            concat!(
+                r#"{"surfaceEpoch":"0","surfacePages":[],"canonicalPages":[],"virtualRegions":["#,
+                r#"{"key":"virtual:3:-2:3:4","level":3,"x":-2,"y":3,"z":4,"minimumRevision":"17","registered":true,"inFlight":false}],"#,
+                r#""virtualStream":{"pendingPages":5,"inFlightPages":6,"obsoleteInFlightPages":2,"cancelledPendingPages":"7","usefulBytes":"8","#,
+                r#""cancellationWasteBytes":"9","failedPages":"10","cachePages":11,"cacheBytes":"12"}}"#
+            )
         );
     }
 
