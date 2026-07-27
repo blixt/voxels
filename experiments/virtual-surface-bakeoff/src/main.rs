@@ -2,13 +2,16 @@
 compile_error!("voxels-virtual-surface-bakeoff requires macOS and Apple Metal");
 
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
 use voxels_world::{
     BakeoffCamera, BakeoffCandidateKind, BakeoffVolume, Material, SurfaceSampleBlockRequest,
-    VoxelBlockRequest, VoxelBounds, VoxelCoord, WorldProduct, WorldProductBatch,
-    WorldProductPriority, WorldProductRequest, WorldSourceEngine,
-    benchmark_clustered_page_rebuild, run_virtual_surface_bakeoff,
+    TerrainPageKey, TerrainPageRepresentation, TerrainPageV1, VoxelBlockRequest, VoxelBounds,
+    VoxelCoord, WorldProduct, WorldProductBatch, WorldProductPriority, WorldProductRequest,
+    WorldSourceEngine, WorldSourceIdentityHash, benchmark_clustered_page_rebuild,
+    build_compact_exact_terrain_page, build_exact_cluster_terrain_parent,
+    build_exact_terrain_page, encode_terrain_page, run_virtual_surface_bakeoff,
 };
 use voxels_world_service::LoadedWorldServiceConfig;
 
@@ -420,6 +423,147 @@ fn duration_distribution(values: &[std::time::Duration]) -> Value {
     })
 }
 
+fn usize_distribution(values: &[usize]) -> Value {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    if sorted.is_empty() {
+        return json!({
+            "minimum": 0,
+            "p50": 0,
+            "p95": 0,
+            "p99": 0,
+            "maximum": 0,
+        });
+    }
+    let percentile = |numerator: usize, denominator: usize| {
+        let index = sorted.len().saturating_mul(numerator).div_ceil(denominator);
+        sorted[index.saturating_sub(1).min(sorted.len().saturating_sub(1))]
+    };
+    json!({
+        "minimum": sorted.first().copied().unwrap_or(0),
+        "p50": percentile(50, 100),
+        "p95": percentile(95, 100),
+        "p99": percentile(99, 100),
+        "maximum": sorted.last().copied().unwrap_or(0),
+    })
+}
+
+fn page_kind(page: &TerrainPageV1) -> &'static str {
+    match &page.representation {
+        TerrainPageRepresentation::SteppedSurfaceResidual(_) => "stepped-surface-residual",
+        TerrainPageRepresentation::SparseVoxelBrick(_) => "sparse-voxel-brick",
+        TerrainPageRepresentation::SurfaceCluster(_) => "surface-cluster",
+    }
+}
+
+fn clustered_quad_count(page: &TerrainPageV1) -> usize {
+    match &page.representation {
+        TerrainPageRepresentation::SurfaceCluster(quads) => quads.len(),
+        _ => 0,
+    }
+}
+
+fn page_size_report(volume: &BakeoffVolume) -> Result<Value, Box<dyn std::error::Error>> {
+    let bounds = volume.bounds();
+    let page_min = [
+        bounds.min.x.div_euclid(32),
+        bounds.min.y.div_euclid(32),
+        bounds.min.z.div_euclid(32),
+    ];
+    let page_max = [
+        (bounds.max.x - 1).div_euclid(32),
+        (bounds.max.y - 1).div_euclid(32),
+        (bounds.max.z - 1).div_euclid(32),
+    ];
+    let source = WorldSourceIdentityHash::from_bytes([0x71; 32]);
+    let mut leaves = BTreeMap::new();
+    let mut compact_bytes = Vec::new();
+    let mut compact_kinds = BTreeMap::<&'static str, usize>::new();
+    let mut leaf_build_times = Vec::new();
+    for z in page_min[2]..=page_max[2] {
+        for y in page_min[1]..=page_max[1] {
+            for x in page_min[0]..=page_max[0] {
+                let key = TerrainPageKey {
+                    level: 0,
+                    coord: [x, y, z],
+                };
+                let started = Instant::now();
+                let leaf =
+                    build_exact_terrain_page(source, key, 1, |coord| volume.material_at(coord))?;
+                leaf_build_times.push(started.elapsed());
+                let compact = build_compact_exact_terrain_page(source, key, 1, |coord| {
+                    volume.material_at(coord)
+                })?;
+                compact_bytes.push(encode_terrain_page(&compact)?.len());
+                *compact_kinds.entry(page_kind(&compact)).or_default() += 1;
+                leaves.insert(key, leaf);
+            }
+        }
+    }
+
+    let leaf_bytes = leaves
+        .values()
+        .map(encode_terrain_page)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|bytes| bytes.len())
+        .collect::<Vec<_>>();
+    let leaf_quads = leaves
+        .values()
+        .map(clustered_quad_count)
+        .collect::<Vec<_>>();
+    let mut hierarchy = Vec::new();
+    let mut current = leaves;
+    for level in 1u8..=4 {
+        let mut grouped = BTreeMap::<TerrainPageKey, Vec<TerrainPageV1>>::new();
+        for page in current.into_values() {
+            if let Some(parent) = page.key.parent() {
+                grouped.entry(parent).or_default().push(page);
+            }
+        }
+        let mut next = BTreeMap::new();
+        let mut encoded_bytes = Vec::new();
+        let mut quads = Vec::new();
+        let mut build_times = Vec::new();
+        for (key, children) in grouped {
+            if children.len() != 8 {
+                continue;
+            }
+            let started = Instant::now();
+            let parent = build_exact_cluster_terrain_parent(key, u64::from(level) + 1, &children)?;
+            build_times.push(started.elapsed());
+            encoded_bytes.push(encode_terrain_page(&parent)?.len());
+            quads.push(clustered_quad_count(&parent));
+            next.insert(key, parent);
+        }
+        if next.is_empty() {
+            break;
+        }
+        hierarchy.push(json!({
+            "level": level,
+            "pageCount": next.len(),
+            "compressedBytes": usize_distribution(&encoded_bytes),
+            "clusterQuads": usize_distribution(&quads),
+            "buildMs": duration_distribution(&build_times),
+        }));
+        current = next;
+    }
+    Ok(json!({
+        "schema": "voxels.virtual-terrain-page-sizing.v1",
+        "leaf": {
+            "pageCount": leaf_bytes.len(),
+            "compressedBytes": usize_distribution(&leaf_bytes),
+            "clusterQuads": usize_distribution(&leaf_quads),
+            "buildMs": duration_distribution(&leaf_build_times),
+        },
+        "compactLeafExperiment": {
+            "compressedBytes": usize_distribution(&compact_bytes),
+            "representationCounts": compact_kinds,
+        },
+        "exactHierarchy": hierarchy,
+    }))
+}
+
 #[allow(
     clippy::print_stdout,
     reason = "the explicit bake-off command emits its machine-readable report"
@@ -502,6 +646,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let volume_sample_ms = volume_started.elapsed().as_secs_f64() * 1000.0;
+    let terrain_pages = page_size_report(&volume)?;
     let candidate_kinds: &[BakeoffCandidateKind] = if arguments.cluster_only {
         &[BakeoffCandidateKind::ClusteredVirtualGeometry]
     } else {
@@ -584,6 +729,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "rebuildMs": duration_distribution(&metrics.rebuild_times),
             "exactRebuildViolations": metrics.exact_rebuild_violations,
         })),
+        "terrainPages": terrain_pages,
         "gpu": gpu_report,
     });
     let encoded = serde_json::to_string_pretty(&report)?;

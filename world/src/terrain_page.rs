@@ -16,6 +16,12 @@ pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 1;
 pub const TERRAIN_PAGE_EDGE_SAMPLES: u32 = 32;
 pub const TERRAIN_PAGE_MAX_LEVEL: u8 = 20;
 pub const TERRAIN_PAGE_MAX_CHILDREN: usize = 8;
+/// Builder target selected from the 12.8–51.2 m Terrain Diffusion sizing corpus.
+///
+/// Exact pages may temporarily exceed this while an ancestor is being simplified, but published
+/// production pages should stay at or below this target. The larger hard cap exists only so a
+/// valid parent is never discarded before a replacement is available.
+pub const TERRAIN_PAGE_TARGET_COMPRESSED_BYTES: usize = 65_536;
 pub const TERRAIN_PAGE_MAX_COMPRESSED_BYTES: usize = 262_144;
 pub const TERRAIN_PAGE_MAX_PAYLOAD_BYTES: usize = 2_097_152;
 const SPARSE_BRICK_EDGE: u8 = 8;

@@ -35,6 +35,28 @@ interface PoseReport {
     readonly rebuildMs: { readonly p95: number; readonly p99: number };
     readonly exactRebuildViolations: number;
   };
+  readonly terrainPages: {
+    readonly schema: string;
+    readonly leaf: {
+      readonly pageCount: number;
+      readonly compressedBytes: {
+        readonly p50: number;
+        readonly p95: number;
+        readonly p99: number;
+        readonly maximum: number;
+      };
+    };
+    readonly exactHierarchy: readonly {
+      readonly level: number;
+      readonly pageCount: number;
+      readonly compressedBytes: {
+        readonly p50: number;
+        readonly p95: number;
+        readonly p99: number;
+        readonly maximum: number;
+      };
+    }[];
+  };
   readonly gpu: null | {
     readonly schema: string;
     readonly exactClusterRaster: {
@@ -239,6 +261,7 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
   const candidates = kinds.map((kind) => candidateSummary(reports, kind));
   const gpu = reports.find((report) => report.gpu !== null)?.gpu;
   const incrementalBuilds = reports.map((report) => report.clusteredIncrementalBuild);
+  const terrainPages = reports.map((report) => report.terrainPages);
   if (
     gpu === null ||
     gpu === undefined ||
@@ -266,6 +289,19 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
     )
   ) {
     throw new Error("clustered page-local edit rebuild gate failed");
+  }
+  if (
+    terrainPages.some(
+      (pages) =>
+        pages.schema !== "voxels.virtual-terrain-page-sizing.v1" ||
+        pages.leaf.pageCount === 0 ||
+        pages.leaf.compressedBytes.maximum > 65_536 ||
+        pages.exactHierarchy.some(
+          (level) => level.pageCount === 0 || level.compressedBytes.maximum > 65_536,
+        ),
+    )
+  ) {
+    throw new Error("virtual terrain page sizing exceeded the measured 64 KiB target");
   }
   const rayCasterPrimaryDecision =
     gpu.denseVoxelRayCasterLowerBound.gpuMs.total.p95 > 4
@@ -306,6 +342,7 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
       exactClusterRaster: "continue to hierarchy scaling and edit-build tests",
     },
     clusteredIncrementalBuild: incrementalBuilds,
+    terrainPages,
     topologyStress: {
       steppedSurface: topologyStepped,
       exactCapableViolations: topologyExactViolations,
@@ -326,6 +363,9 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
       denseVoxelRayCasterGpuP95Ms: gpu.denseVoxelRayCasterLowerBound.gpuMs.total.p95,
       clusteredEditRebuildP95Ms: Math.max(
         ...incrementalBuilds.map((build) => build?.rebuildMs.p95 ?? Number.POSITIVE_INFINITY),
+      ),
+      terrainPageCompressedP99Bytes: Math.max(
+        ...terrainPages.map((pages) => pages.leaf.compressedBytes.p99),
       ),
     },
     details: summary,

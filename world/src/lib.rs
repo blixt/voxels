@@ -92,9 +92,10 @@ pub use source::{
 pub use terrain_page::{
     SparseVoxelBrickPayload, SteppedSurfaceResidual, TERRAIN_PAGE_EDGE_SAMPLES,
     TERRAIN_PAGE_MAX_CHILDREN, TERRAIN_PAGE_MAX_COMPRESSED_BYTES, TERRAIN_PAGE_MAX_LEVEL,
-    TERRAIN_PAGE_MAX_PAYLOAD_BYTES, TERRAIN_PAGE_SCHEMA_VERSION, TerrainColumn,
-    TerrainErrorBounds, TerrainMaterialCoverage, TerrainMaterialRun, TerrainPageBuildError,
-    TerrainPageChild, TerrainPageCodecError, TerrainPageKey, TerrainPageRepresentation,
+    TERRAIN_PAGE_MAX_PAYLOAD_BYTES, TERRAIN_PAGE_SCHEMA_VERSION,
+    TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TerrainColumn, TerrainErrorBounds,
+    TerrainMaterialCoverage, TerrainMaterialRun, TerrainPageBuildError, TerrainPageChild,
+    TerrainPageCodecError, TerrainPageKey, TerrainPageRepresentation,
     TerrainPageRepresentationKind, TerrainPageV1, TerrainSparseBrick, TerrainSurfaceQuad,
     TerrainTopologyClass, TerrainReplacementError, assemble_terrain_parent,
     build_compact_exact_terrain_page, build_exact_cluster_terrain_parent,
