@@ -17,6 +17,7 @@ pub mod mesh;
 pub mod protocol;
 pub mod route;
 pub mod source;
+pub mod terrain_directory;
 pub mod terrain_page;
 pub mod virtual_surface;
 #[cfg(any(test, feature = "virtual-surface-bakeoff"))]
@@ -88,6 +89,11 @@ pub use source::{
     WorldProductBatchResult, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
     WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind,
     procedural_world_source,
+};
+pub use terrain_directory::{
+    TERRAIN_DIRECTORY_MAX_NODES, TERRAIN_DIRECTORY_MAX_ROOTS, TERRAIN_DIRECTORY_SCHEMA_VERSION,
+    TerrainDirectoryError, TerrainHierarchyDirectoryV1, TerrainHierarchyNode,
+    decode_terrain_directory, encode_terrain_directory,
 };
 pub use terrain_page::{
     SparseVoxelBrickPayload, SteppedSurfaceResidual, TERRAIN_PAGE_EDGE_SAMPLES,
