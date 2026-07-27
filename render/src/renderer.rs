@@ -31,7 +31,7 @@ use crate::virtual_terrain_gpu::{
     VIRTUAL_TERRAIN_COMPACT_WATER_TRIANGLE_BYTES, VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET,
     VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET, VIRTUAL_TERRAIN_WATER_SURFACE_INDIRECT_OFFSET,
     VIRTUAL_TERRAIN_WATER_TRIANGLE_INDIRECT_OFFSET, VirtualTerrainGpuControl,
-    VirtualTerrainGpuGeometry, VirtualTerrainGpuGeometryRange,
+    VirtualTerrainGpuGeometry, VirtualTerrainGpuGeometryRange, VirtualTerrainGpuTimestampWrites,
 };
 use bytemuck::{Pod, Zeroable};
 use hashbrown::{HashMap, HashSet};
@@ -145,7 +145,7 @@ const LOD_PLAN_REBUILD_SURFACE_PROFILE: u32 = 1 << 4;
 const LOD_PLAN_REBUILD_ENCLOSED_VIEW: u32 = 1 << 5;
 const LOD_PLAN_REBUILD_CANONICAL_VOLUME: u32 = 1 << 6;
 const LOD_SELECTION_WORK_ITEMS_PER_FRAME: usize = 1_024;
-const GPU_QUERY_COUNT: u32 = 24;
+const GPU_QUERY_COUNT: u32 = 28;
 const PRECIPITATION_INSTANCE_COUNT: u32 = 48 * 48 * 2;
 const QUAD_VERTEX_COUNT: u32 = 4;
 const GPU_QUERY_BUFFER_BYTES: u64 = GPU_QUERY_COUNT as u64 * size_of::<u64>() as u64;
@@ -289,6 +289,7 @@ pub enum VirtualTerrainRendererError {
     SelectedCutCompactionCapacity,
     NoRenderableCut,
     SelectedPageMissingGpu(TerrainPageKey),
+    GpuCutNotCertified,
 }
 
 impl std::fmt::Display for VirtualTerrainRendererError {
@@ -337,6 +338,8 @@ impl std::fmt::Display for VirtualTerrainRendererError {
                     "selected virtual terrain page {key:?} has no resident GPU record"
                 )
             }
+            Self::GpuCutNotCertified => formatter
+                .write_str("virtual terrain GPU cut has not been certified for publication"),
         }
     }
 }
@@ -1758,6 +1761,8 @@ pub struct RenderDiagnostics {
     pub gpu_cloud_ms: Option<f32>,
     pub gpu_weather_ms: Option<f32>,
     pub gpu_ui_ms: Option<f32>,
+    pub gpu_virtual_terrain_traversal_ms: Option<f32>,
+    pub gpu_virtual_terrain_compaction_ms: Option<f32>,
     pub cpu_cull_ms: f32,
     pub cpu_lod_plan_ms: f32,
     pub lod_plan_rebuild_reason: u32,
@@ -1897,6 +1902,8 @@ pub struct GpuTimingSample {
     pub cloud_ms: f32,
     pub weather_ms: f32,
     pub ui_ms: f32,
+    pub virtual_terrain_traversal_ms: f32,
+    pub virtual_terrain_compaction_ms: f32,
 }
 
 #[derive(Debug, Default)]
@@ -1931,6 +1938,7 @@ struct GpuPassMask {
     ambient_occlusion: bool,
     clouds: bool,
     weather: bool,
+    virtual_terrain: bool,
 }
 
 impl GpuTimingFrame {
@@ -1999,6 +2007,16 @@ fn parse_gpu_timestamps(
         0.0
     };
     let ui_ms = elapsed_ms(22, 23)?;
+    let virtual_terrain_traversal_ms = if passes.virtual_terrain {
+        elapsed_ms(24, 25)?
+    } else {
+        0.0
+    };
+    let virtual_terrain_compaction_ms = if passes.virtual_terrain {
+        elapsed_ms(26, 27)?
+    } else {
+        0.0
+    };
     let mut first = timestamps[14].min(timestamps[22]);
     let mut last = timestamps[15].max(timestamps[23]);
     if passes.shadows {
@@ -2029,6 +2047,10 @@ fn parse_gpu_timestamps(
             .max(timestamps[9])
             .max(timestamps[11]);
     }
+    if passes.virtual_terrain {
+        first = first.min(timestamps[24]).min(timestamps[26]);
+        last = last.max(timestamps[25]).max(timestamps[27]);
+    }
     let total_ms = last.checked_sub(first)? as f32 * timestamp_period / 1_000_000.0;
     if total_ms > 1_000.0 {
         return None;
@@ -2045,6 +2067,8 @@ fn parse_gpu_timestamps(
         cloud_ms,
         weather_ms,
         ui_ms,
+        virtual_terrain_traversal_ms,
+        virtual_terrain_compaction_ms,
     })
 }
 
@@ -2172,6 +2196,12 @@ impl GpuTimer {
             samples: state.history.drain(..).collect(),
             dropped: std::mem::take(&mut state.dropped),
         }
+    }
+
+    fn cancel_frame(&self, frame: GpuTimingFrame) {
+        self.readback[frame.slot]
+            .available
+            .store(true, Ordering::Release);
     }
 }
 
@@ -4589,12 +4619,20 @@ impl Renderer {
         self.virtual_terrain_oracle_cut = Some(cut.clone());
         let renderable =
             cut.is_renderable() && self.virtual_terrain_cut_fits_compaction(&cut).is_ok();
-        if self.virtual_terrain_mode != VirtualTerrainRenderMode::Visible || renderable {
+        let preserves_visible_cut = self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible
+            && renderable
+            && self
+                .virtual_terrain_cut
+                .as_ref()
+                .is_some_and(|visible| visible.fingerprint == cut.fingerprint);
+        if self.virtual_terrain_mode != VirtualTerrainRenderMode::Visible || preserves_visible_cut {
             self.virtual_terrain_cut = Some(cut.clone());
         } else {
-            // Never let a rejected GPU cut replace the current visible owner. Shadow mode keeps
-            // the legacy path visible while the bounded overflow/request diagnostics remain live.
+            // A changed candidate must traverse, compact, and round-trip through the bounded GPU
+            // feedback oracle before it can replace the currently visible owner. Shadow mode
+            // keeps the legacy path visible while that candidate is being certified.
             self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
+            self.virtual_terrain_cut = Some(cut.clone());
         }
         Ok(cut)
     }
@@ -4625,6 +4663,13 @@ impl Renderer {
                 ));
             }
             self.virtual_terrain_cut_fits_compaction(cut)?;
+            let certified = self
+                .virtual_terrain_gpu
+                .latest_feedback()
+                .is_some_and(|feedback| gpu_feedback_matches_cut(&feedback, Some(cut)));
+            if !certified {
+                return Err(VirtualTerrainRendererError::GpuCutNotCertified);
+            }
         }
         self.virtual_terrain_mode = mode;
         Ok(())
@@ -6097,6 +6142,7 @@ impl Renderer {
             return false;
         };
         let virtual_visible = self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible;
+        let virtual_shadow = self.virtual_terrain_mode == VirtualTerrainRenderMode::Shadow;
         if virtual_visible
             && !self
                 .virtual_terrain_cut
@@ -6108,8 +6154,7 @@ impl Renderer {
         // Shadow mode builds the same bounded directories without mixing their geometry into the
         // visible legacy owner. Visible mode atomically chooses the virtual directory for every
         // opaque terrain pass below.
-        let virtual_active = self.virtual_terrain_mode != VirtualTerrainRenderMode::Disabled;
-        let virtual_world_draw_lists = if virtual_active {
+        let virtual_world_draw_lists = if virtual_visible {
             let Ok(draw_lists) = self.collect_virtual_terrain_draw_list(view_clip) else {
                 return false;
             };
@@ -6187,19 +6232,18 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
-        if virtual_active {
-            let Some(oracle_view) = self.virtual_terrain_oracle_view else {
+        let virtual_candidate = if virtual_shadow {
+            let (Some(oracle_view), Some(oracle_cut)) = (
+                self.virtual_terrain_oracle_view,
+                self.virtual_terrain_oracle_cut.as_ref(),
+            ) else {
                 return false;
             };
-            if self
-                .virtual_terrain_gpu
-                .encode_traversal(&self.queue, &mut encoder, oracle_view)
-                .is_err()
-            {
-                return false;
-            }
-        }
-        let gpu_frame = self.gpu_timer.as_mut().and_then(|timer| {
+            Some((oracle_view, oracle_cut.fingerprint))
+        } else {
+            None
+        };
+        let mut gpu_frame = self.gpu_timer.as_mut().and_then(|timer| {
             timer.begin_frame(
                 frame_id,
                 GpuPassMask {
@@ -6208,9 +6252,35 @@ impl Renderer {
                     ambient_occlusion: self.options.screen_space_ambient_occlusion,
                     clouds: clouds_active,
                     weather: weather_active,
+                    virtual_terrain: virtual_shadow,
                 },
             )
         });
+        if let Some((oracle_view, oracle_fingerprint)) = virtual_candidate {
+            let timestamps = gpu_frame
+                .as_ref()
+                .map(|frame| VirtualTerrainGpuTimestampWrites {
+                    query_set: &frame.query_set,
+                    traversal_first_query: 24,
+                    compaction_first_query: 26,
+                });
+            if self
+                .virtual_terrain_gpu
+                .encode_traversal(
+                    &self.queue,
+                    &mut encoder,
+                    oracle_view,
+                    oracle_fingerprint,
+                    timestamps,
+                )
+                .is_err()
+            {
+                if let (Some(timer), Some(frame)) = (self.gpu_timer.as_ref(), gpu_frame.take()) {
+                    timer.cancel_frame(frame);
+                }
+                return false;
+            }
+        }
         let mut shadow_draw_calls = 0u32;
         if shadows_active {
             for (cascade_index, draw_list) in shadow_draw_lists.iter().enumerate() {
@@ -6956,6 +7026,10 @@ impl Renderer {
             gpu_cloud_ms: gpu_timing.map(|timing| timing.cloud_ms),
             gpu_weather_ms: gpu_timing.map(|timing| timing.weather_ms),
             gpu_ui_ms: gpu_timing.map(|timing| timing.ui_ms),
+            gpu_virtual_terrain_traversal_ms: gpu_timing
+                .map(|timing| timing.virtual_terrain_traversal_ms),
+            gpu_virtual_terrain_compaction_ms: gpu_timing
+                .map(|timing| timing.virtual_terrain_compaction_ms),
             cpu_cull_ms,
             cpu_lod_plan_ms,
             lod_plan_rebuild_reason,
@@ -11273,8 +11347,11 @@ fn gpu_feedback_matches_cut(
             && feedback.ownerless_roots == 0
             && !feedback.overflowed();
     };
-    if feedback.overflowed()
+    if feedback.submission_id == 0
+        || feedback.overflowed()
+        || feedback.oracle_fingerprint != cut.fingerprint
         || feedback.ownerless_roots != cut.ownerless_roots.len() as u32
+        || feedback.compacted_pages != cut.selected_pages.len() as u32
         || cut.feedback_overflow
         || cut.selection_overflow
         || cut.traversal_overflow
@@ -14590,7 +14667,7 @@ mod tests {
             1_000_000, 2_000_000, 2_100_000, 3_100_000, 3_200_000, 4_200_000, 4_500_000, 6_500_000,
             6_700_000, 7_700_000, 7_900_000, 8_400_000, 8_600_000, 10_600_000, 10_800_000,
             12_800_000, 13_000_000, 13_400_000, 13_600_000, 16_600_000, 16_800_000, 17_100_000,
-            17_300_000, 18_300_000,
+            17_300_000, 18_300_000, 18_500_000, 18_900_000, 19_000_000, 19_800_000,
         ];
         let active = GpuPassMask {
             shadows: true,
@@ -14598,10 +14675,11 @@ mod tests {
             ambient_occlusion: true,
             clouds: true,
             weather: true,
+            virtual_terrain: true,
         };
         let timing = parse_gpu_timestamps(&timestamps, 1.0, active)
             .unwrap_or_else(|| panic!("valid timestamps should parse"));
-        assert!((timing.total_ms - 17.3).abs() < f32::EPSILON);
+        assert!((timing.total_ms - 18.8).abs() < f32::EPSILON);
         assert!((timing.shadow_ms - 3.0).abs() < f32::EPSILON);
         assert!((timing.depth_prepass_ms - 2.0).abs() < f32::EPSILON);
         assert!((timing.ambient_occlusion_ms - 1.5).abs() < f32::EPSILON);
@@ -14610,12 +14688,15 @@ mod tests {
         assert!((timing.cloud_ms - 2.4).abs() < f32::EPSILON);
         assert!((timing.weather_ms - 0.3).abs() < f32::EPSILON);
         assert!((timing.ui_ms - 1.0).abs() < f32::EPSILON);
+        assert!((timing.virtual_terrain_traversal_ms - 0.4).abs() < f32::EPSILON);
+        assert!((timing.virtual_terrain_compaction_ms - 0.8).abs() < f32::EPSILON);
 
         let mut skipped = timestamps;
         skipped[0..6].copy_from_slice(&[90, 80, 70, 60, 50, 40]);
         skipped[6..12].copy_from_slice(&[39, 38, 37, 36, 35, 34]);
         skipped[12..14].copy_from_slice(&[33, 32]);
         skipped[16..22].copy_from_slice(&[31, 30, 29, 28, 27, 26]);
+        skipped[24..28].copy_from_slice(&[25, 24, 23, 22]);
         let timing = parse_gpu_timestamps(&skipped, 1.0, GpuPassMask::default())
             .unwrap_or_else(|| panic!("inactive timestamp pairs should be ignored"));
         assert_eq!(timing.shadow_ms, 0.0);
@@ -14624,6 +14705,8 @@ mod tests {
         assert_eq!(timing.water_ms, 0.0);
         assert_eq!(timing.cloud_ms, 0.0);
         assert_eq!(timing.weather_ms, 0.0);
+        assert_eq!(timing.virtual_terrain_traversal_ms, 0.0);
+        assert_eq!(timing.virtual_terrain_compaction_ms, 0.0);
     }
 
     #[test]
@@ -14638,8 +14721,45 @@ mod tests {
         timestamps[15] = timestamps[14] + 1;
         timestamps[23] = timestamps[14] + 1_100_000_000;
         assert!(parse_gpu_timestamps(&timestamps, 1.0, GpuPassMask::default()).is_none());
-        assert_eq!(GPU_QUERY_BUFFER_BYTES, 192);
+        assert_eq!(GPU_QUERY_BUFFER_BYTES, 224);
         assert_eq!(GPU_RESOLVE_BUFFER_BYTES % 256, 0);
+    }
+
+    #[test]
+    fn virtual_gpu_cut_requires_exact_submission_certificate() {
+        let key = TerrainPageKey {
+            level: 2,
+            coord: [-3, 1, 4],
+        };
+        let cut = VirtualTerrainCut {
+            selected_pages: vec![key],
+            requested_pages: Vec::new(),
+            ownerless_roots: Vec::new(),
+            fingerprint: 0x1234_5678_9abc_def0,
+            visited_nodes: 1,
+            selected_primitives: 4,
+            selected_encoded_bytes: 64,
+            feedback_overflow: false,
+            selection_overflow: false,
+            traversal_overflow: false,
+            incoherent_replacement_groups: 0,
+        };
+        let certified = GpuVirtualTerrainFeedback {
+            submission_id: 9,
+            oracle_fingerprint: cut.fingerprint,
+            selected_pages: vec![key],
+            compacted_pages: 1,
+            ..GpuVirtualTerrainFeedback::default()
+        };
+        assert!(gpu_feedback_matches_cut(&certified, Some(&cut)));
+
+        let mut stale = certified.clone();
+        stale.oracle_fingerprint ^= 1;
+        assert!(!gpu_feedback_matches_cut(&stale, Some(&cut)));
+
+        let mut incomplete = certified;
+        incomplete.compacted_pages = 0;
+        assert!(!gpu_feedback_matches_cut(&incomplete, Some(&cut)));
     }
 
     #[test]

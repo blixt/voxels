@@ -23,8 +23,8 @@ struct TraversalCounters {
   visited_nodes: atomic<u32>,
   overflow_flags: atomic<u32>,
   stack_peak: atomic<u32>,
-  reserved_0: u32,
-  reserved_1: u32,
+  submission_id: vec2<u32>,
+  oracle_fingerprint: vec2<u32>,
 };
 
 @group(0) @binding(0) var<uniform> view: VirtualTerrainView;

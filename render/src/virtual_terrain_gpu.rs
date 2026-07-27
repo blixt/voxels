@@ -15,7 +15,7 @@ use voxels_world::{
     TERRAIN_PAGE_MAX_CHILDREN, TerrainHierarchyDirectoryV1, TerrainHierarchyNode, TerrainPageKey,
 };
 use wgpu::util::DeviceExt;
-use wgpu::{Buffer, CommandEncoder, ComputePipeline, Device, Queue};
+use wgpu::{Buffer, CommandEncoder, ComputePipeline, Device, QuerySet, Queue};
 
 const NODE_HAS_CHILDREN: u32 = 1;
 const NODE_IS_ROOT: u32 = 1 << 1;
@@ -74,10 +74,11 @@ struct GpuVirtualTerrainCounters {
     visited_nodes: u32,
     overflow_flags: u32,
     stack_peak: u32,
-    reserved: [u32; 2],
+    submission_id: [u32; 2],
+    oracle_fingerprint: [u32; 2],
 }
 
-const _: () = assert!(size_of::<GpuVirtualTerrainCounters>() == 32);
+const _: () = assert!(size_of::<GpuVirtualTerrainCounters>() == 40);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
@@ -153,6 +154,8 @@ struct RawGpuVirtualTerrainFeedback {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct GpuVirtualTerrainFeedback {
+    pub submission_id: u64,
+    pub oracle_fingerprint: u64,
     pub selected_pages: Vec<TerrainPageKey>,
     pub requested_pages: Vec<TerrainPageKey>,
     pub ownerless_roots: u32,
@@ -171,6 +174,13 @@ impl GpuVirtualTerrainFeedback {
     pub const fn overflowed(&self) -> bool {
         self.overflow_flags != 0 || self.compaction_overflow_flags != 0
     }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct VirtualTerrainGpuTimestampWrites<'a> {
+    pub query_set: &'a QuerySet,
+    pub traversal_first_query: u32,
+    pub compaction_first_query: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -221,6 +231,7 @@ pub(crate) struct VirtualTerrainGpuControl {
     compaction_finalize_pipeline: ComputePipeline,
     readback_slots: Vec<TraversalReadbackSlot>,
     next_readback_slot: usize,
+    next_submission_id: u64,
     feedback: Arc<Mutex<Option<RawGpuVirtualTerrainFeedback>>>,
 }
 
@@ -463,6 +474,7 @@ impl VirtualTerrainGpuControl {
             compaction_finalize_pipeline,
             readback_slots,
             next_readback_slot: 0,
+            next_submission_id: 1,
             feedback: Arc::new(Mutex::new(None)),
         })
     }
@@ -740,19 +752,24 @@ impl VirtualTerrainGpuControl {
         queue: &Queue,
         encoder: &mut CommandEncoder,
         view: VirtualTerrainView,
-    ) -> Result<(), VirtualTerrainGpuError> {
+        oracle_fingerprint: u64,
+        timestamps: Option<VirtualTerrainGpuTimestampWrites<'_>>,
+    ) -> Result<u64, VirtualTerrainGpuError> {
         let view = pack_view(
             view,
             self.root_indices.len(),
             self.nodes.len(),
             self.capacity,
         )?;
+        let submission_id = self.next_submission_id;
+        self.next_submission_id = self.next_submission_id.wrapping_add(1).max(1);
+        let counters = GpuVirtualTerrainCounters {
+            submission_id: split_u64(submission_id),
+            oracle_fingerprint: split_u64(oracle_fingerprint),
+            ..GpuVirtualTerrainCounters::default()
+        };
         queue.write_buffer(&self.view_buffer, 0, bytemuck::bytes_of(&view));
-        queue.write_buffer(
-            &self.counter_buffer,
-            0,
-            bytemuck::bytes_of(&GpuVirtualTerrainCounters::default()),
-        );
+        queue.write_buffer(&self.counter_buffer, 0, bytemuck::bytes_of(&counters));
         queue.write_buffer(
             &self.compaction_counter_buffer,
             0,
@@ -761,7 +778,11 @@ impl VirtualTerrainGpuControl {
         if !self.root_indices.is_empty() {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("virtual terrain hierarchy traversal"),
-                timestamp_writes: None,
+                timestamp_writes: timestamps.map(|timestamps| wgpu::ComputePassTimestampWrites {
+                    query_set: timestamps.query_set,
+                    beginning_of_pass_write_index: Some(timestamps.traversal_first_query),
+                    end_of_pass_write_index: Some(timestamps.traversal_first_query + 1),
+                }),
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
@@ -774,7 +795,11 @@ impl VirtualTerrainGpuControl {
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("virtual terrain selected geometry compaction"),
-                timestamp_writes: None,
+                timestamp_writes: timestamps.map(|timestamps| wgpu::ComputePassTimestampWrites {
+                    query_set: timestamps.query_set,
+                    beginning_of_pass_write_index: Some(timestamps.compaction_first_query),
+                    end_of_pass_write_index: Some(timestamps.compaction_first_query + 1),
+                }),
             });
             pass.set_bind_group(1, &self.compaction_bind_group, &[]);
             pass.set_pipeline(&self.compaction_prepare_pipeline);
@@ -785,7 +810,7 @@ impl VirtualTerrainGpuControl {
             pass.dispatch_workgroups(1, 1, 1);
         }
         self.schedule_readback(encoder);
-        Ok(())
+        Ok(submission_id)
     }
 
     fn schedule_readback(&mut self, encoder: &mut CommandEncoder) {
@@ -838,7 +863,12 @@ impl VirtualTerrainGpuControl {
                 && let Some(parsed) = parse_feedback(&mapped, capacity)
                 && let Ok(mut destination) = feedback.lock()
             {
-                *destination = Some(parsed);
+                let is_newer = destination.as_ref().is_none_or(|current| {
+                    feedback_submission_id(&parsed) > feedback_submission_id(current)
+                });
+                if is_newer {
+                    *destination = Some(parsed);
+                }
             }
             callback_buffer.unmap();
             available.store(true, Ordering::Release);
@@ -848,6 +878,8 @@ impl VirtualTerrainGpuControl {
     pub(crate) fn latest_feedback(&self) -> Option<GpuVirtualTerrainFeedback> {
         let raw = self.feedback.lock().ok()?.clone()?;
         Some(GpuVirtualTerrainFeedback {
+            submission_id: feedback_submission_id(&raw),
+            oracle_fingerprint: join_u64(raw.counters.oracle_fingerprint),
             selected_pages: raw
                 .selected_indices
                 .into_iter()
@@ -870,6 +902,18 @@ impl VirtualTerrainGpuControl {
             compaction_overflow_flags: raw.compaction.overflow_flags,
         })
     }
+}
+
+const fn split_u64(value: u64) -> [u32; 2] {
+    [value as u32, (value >> 32) as u32]
+}
+
+const fn join_u64(value: [u32; 2]) -> u64 {
+    value[0] as u64 | ((value[1] as u64) << 32)
+}
+
+const fn feedback_submission_id(feedback: &RawGpuVirtualTerrainFeedback) -> u64 {
+    join_u64(feedback.counters.submission_id)
 }
 
 fn pack_node(
@@ -1202,7 +1246,8 @@ mod tests {
             visited_nodes: 4,
             overflow_flags: 3,
             stack_peak: 192,
-            reserved: [0; 2],
+            submission_id: split_u64(0x1234_5678_9abc_def0),
+            oracle_fingerprint: split_u64(0xfedc_ba98_7654_3210),
         };
         let mut bytes = bytemuck::bytes_of(&counters).to_vec();
         let compaction = GpuVirtualTerrainCompactionCounters {
@@ -1218,6 +1263,11 @@ mod tests {
         bytes.extend_from_slice(bytemuck::cast_slice(&[7u32, 8]));
         bytes.extend_from_slice(bytemuck::cast_slice(&[9u32]));
         let parsed = parse_feedback(&bytes, capacity).expect("bounded feedback");
+        assert_eq!(feedback_submission_id(&parsed), 0x1234_5678_9abc_def0);
+        assert_eq!(
+            join_u64(parsed.counters.oracle_fingerprint),
+            0xfedc_ba98_7654_3210
+        );
         assert_eq!(parsed.selected_indices, [7, 8]);
         assert_eq!(parsed.requested_indices, [9]);
         assert_eq!(parsed.counters.ownerless_roots, 3);
