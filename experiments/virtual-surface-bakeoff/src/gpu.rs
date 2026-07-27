@@ -252,40 +252,37 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
             },
         ],
     });
-    let shadow_sample_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("virtual surface shadow sample bindings"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
+    let shadow_sample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("virtual surface shadow sample bindings"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                    count: None,
-                },
-            ],
-        });
-    let color_pipeline_layout =
-        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("virtual surface color pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout), Some(&shadow_sample_layout)],
-            immediate_size: 0,
-        });
-    let shadow_pipeline_layout =
-        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("virtual surface shadow pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            },
+        ],
+    });
+    let color_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("virtual surface color pipeline layout"),
+        bind_group_layouts: &[Some(&bind_group_layout), Some(&shadow_sample_layout)],
+        immediate_size: 0,
+    });
+    let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("virtual surface shadow pipeline layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
+    });
     let depth_state = wgpu::DepthStencilState {
         format: DEPTH_FORMAT,
         depth_write_enabled: Some(true),
@@ -636,8 +633,7 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
                 .filter(|ticks| *ticks != 0)
                 .map(|ticks| ticks as f64 * timestamp_period / 1_000_000.0)
         };
-        let Some((shadow, color)) = duration(base, base + 1)
-            .zip(duration(base + 2, base + 3))
+        let Some((shadow, color)) = duration(base, base + 1).zip(duration(base + 2, base + 3))
         else {
             discarded_timestamp_frames += 1;
             continue;

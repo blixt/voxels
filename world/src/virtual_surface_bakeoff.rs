@@ -7,8 +7,8 @@
 use crate::{
     CanonicalFaceKey, FaceAxis, Material, VoxelBounds, VoxelCoord, canonical_exposed_faces,
 };
-use std::collections::{BTreeMap, BTreeSet};
 use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::mem::size_of;
 use std::time::{Duration, Instant};
@@ -1015,10 +1015,7 @@ fn cluster_page_keys(bounds: VoxelBounds) -> Vec<ClusterPageKey> {
     keys
 }
 
-fn build_cluster_page(
-    volume: &BakeoffVolume,
-    key: ClusterPageKey,
-) -> ClusterPageBuild {
+fn build_cluster_page(volume: &BakeoffVolume, key: ClusterPageKey) -> ClusterPageBuild {
     let faces = cluster_page_bounds(key, volume.bounds).map_or_else(Vec::new, |bounds| {
         canonical_exposed_faces(bounds, |coord| volume.material_at(coord))
     });
@@ -1060,10 +1057,7 @@ pub fn benchmark_clustered_page_rebuild(volume: &BakeoffVolume) -> BakeoffCluste
         .collect::<BTreeMap<_, _>>();
     let initial_build_time = initial_started.elapsed();
     let initial_face_count = pages.values().map(|page| page.faces.len()).sum();
-    let initial_primitive_count = pages
-        .values()
-        .map(|page| page.geometry.quads.len())
-        .sum();
+    let initial_primitive_count = pages.values().map(|page| page.geometry.quads.len()).sum();
     let initial_logical_bytes = pages
         .values()
         .map(|page| {
@@ -1104,9 +1098,7 @@ pub fn benchmark_clustered_page_rebuild(volume: &BakeoffVolume) -> BakeoffCluste
     for coord in &edit_sites {
         let affected = affected_cluster_pages(*coord, volume.bounds);
         maximum_rebuilt_pages = maximum_rebuilt_pages.max(affected.len());
-        boundary_edit_samples += usize::from(
-            boundary_score(*coord) > 0,
-        );
+        boundary_edit_samples += usize::from(boundary_score(*coord) > 0);
         let mut edited = volume.clone();
         if !edited.set_material(*coord, Material::Air) {
             exact_rebuild_violations += 1;
@@ -1127,8 +1119,7 @@ pub fn benchmark_clustered_page_rebuild(volume: &BakeoffVolume) -> BakeoffCluste
             .flat_map(|page| page.faces.iter().copied())
             .collect::<Vec<_>>();
         actual.sort_unstable();
-        let expected =
-            canonical_exposed_faces(edited.bounds, |sample| edited.material_at(sample));
+        let expected = canonical_exposed_faces(edited.bounds, |sample| edited.material_at(sample));
         exact_rebuild_violations += usize::from(actual != expected);
         for key in &affected {
             pages.insert(*key, build_cluster_page(volume, *key));
@@ -1563,8 +1554,7 @@ mod tests {
     #[test]
     fn clustered_page_rebuilds_are_exact_for_negative_boundary_edits() {
         let bounds =
-            VoxelBounds::new(VoxelCoord::new(-65, -33, -65), VoxelCoord::new(65, 34, 65))
-                .unwrap();
+            VoxelBounds::new(VoxelCoord::new(-65, -33, -65), VoxelCoord::new(65, 34, 65)).unwrap();
         let volume = BakeoffVolume::from_sampler(bounds, |coord| {
             if coord.y <= (coord.x.div_euclid(9) + coord.z.div_euclid(11)).rem_euclid(7) - 3 {
                 Material::Stone

@@ -20,7 +20,7 @@ futures-util = { version = "0.3", features = ["sink"] }
 hmac = "0.12"
 voxels-client-config = { path = "../client-config", optional = true }
 voxels-core = { path = "../core" }
-voxels-world = { path = "../world" }
+voxels-world = { path = "../world", features = ["terrain-page-builder"] }
 voxels-world-terrain-diffusion = { path = "../world-terrain-diffusion", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }

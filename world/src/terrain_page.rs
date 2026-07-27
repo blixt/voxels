@@ -100,6 +100,13 @@ pub struct TerrainErrorBounds {
     pub unresolved_topology: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerrainSimplificationBudget {
+    pub target_triangles: u32,
+    pub max_error_millivoxels: u32,
+    pub target_encoded_bytes: u32,
+}
+
 impl TerrainErrorBounds {
     pub const EXACT: Self = Self {
         geometric_millivoxels: 0,
@@ -134,6 +141,26 @@ pub struct TerrainSurfaceQuad {
     pub height: u16,
     pub positive: bool,
     pub material_index: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TerrainClusterVertex {
+    /// Signed canonical 10 cm lattice coordinate.
+    pub position: [i32; 3],
+    /// Duplicated at material seams so simplification cannot move the boundary.
+    pub material_index: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TerrainClusterTriangle {
+    pub vertices: [u32; 3],
+    pub material_index: u8,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerrainTriangleCluster {
+    pub vertices: Vec<TerrainClusterVertex>,
+    pub triangles: Vec<TerrainClusterTriangle>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -175,6 +202,7 @@ pub enum TerrainPageRepresentation {
     SteppedSurfaceResidual(SteppedSurfaceResidual),
     SparseVoxelBrick(SparseVoxelBrickPayload),
     SurfaceCluster(Vec<TerrainSurfaceQuad>),
+    TriangleCluster(TerrainTriangleCluster),
 }
 
 impl TerrainPageRepresentation {
@@ -185,6 +213,7 @@ impl TerrainPageRepresentation {
             }
             Self::SparseVoxelBrick(_) => TerrainPageRepresentationKind::SparseVoxelBrick,
             Self::SurfaceCluster(_) => TerrainPageRepresentationKind::SurfaceCluster,
+            Self::TriangleCluster(_) => TerrainPageRepresentationKind::TriangleCluster,
         }
     }
 }
@@ -195,6 +224,7 @@ pub enum TerrainPageRepresentationKind {
     SteppedSurfaceResidual = 1,
     SparseVoxelBrick = 2,
     SurfaceCluster = 3,
+    TriangleCluster = 4,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -237,6 +267,12 @@ pub enum TerrainPageBuildError {
     InvalidPageKey,
     InvalidChildGroup(TerrainReplacementError),
     UnsupportedChildRepresentation,
+    NoSurfaceToSimplify,
+    NonManifoldSurface,
+    OverlappingSurface,
+    OpenInteriorSurface,
+    InvalidSimplification,
+    SimplificationTargetNotReached,
     SamplingBoundsOverflow,
     MaterialPaletteOverflow,
     PayloadOverflow,
@@ -252,6 +288,24 @@ impl fmt::Display for TerrainPageBuildError {
             }
             Self::UnsupportedChildRepresentation => {
                 formatter.write_str("exact terrain parent requires clustered child surfaces")
+            }
+            Self::NoSurfaceToSimplify => {
+                formatter.write_str("terrain parent has no surface to simplify")
+            }
+            Self::NonManifoldSurface => {
+                formatter.write_str("terrain surface is not a simplifiable two-manifold")
+            }
+            Self::OverlappingSurface => {
+                formatter.write_str("terrain surface contains overlapping triangles")
+            }
+            Self::OpenInteriorSurface => {
+                formatter.write_str("terrain surface contains an interior open edge")
+            }
+            Self::InvalidSimplification => {
+                formatter.write_str("terrain simplifier produced an invalid surface")
+            }
+            Self::SimplificationTargetNotReached => {
+                formatter.write_str("terrain simplifier could not reach the page budget")
             }
             Self::SamplingBoundsOverflow => {
                 formatter.write_str("terrain page halo exceeds canonical coordinates")
@@ -496,12 +550,12 @@ fn build_exact_terrain_page_with_policy(
             stepped_payload
         }
     } else {
-        let sparse_payload =
-            TerrainPageRepresentation::SparseVoxelBrick(SparseVoxelBrickPayload {
-                brick_edge: SPARSE_BRICK_EDGE,
-                bricks: sparse,
-            });
-        if representation_bytes(&cluster_payload).len() <= representation_bytes(&sparse_payload).len()
+        let sparse_payload = TerrainPageRepresentation::SparseVoxelBrick(SparseVoxelBrickPayload {
+            brick_edge: SPARSE_BRICK_EDGE,
+            bricks: sparse,
+        });
+        if representation_bytes(&cluster_payload).len()
+            <= representation_bytes(&sparse_payload).len()
         {
             cluster_payload
         } else {
@@ -545,9 +599,7 @@ pub fn assemble_terrain_parent(
     if key.level == 0 {
         return Err(TerrainReplacementError::InvalidParent);
     }
-    let bounds = key
-        .bounds()
-        .ok_or(TerrainReplacementError::InvalidParent)?;
+    let bounds = key.bounds().ok_or(TerrainReplacementError::InvalidParent)?;
     validate_children_for_key(key, children)?;
     let source_identity_hash = children[0].source_identity_hash;
     let boundary_fingerprints = aggregate_child_boundaries(key, children)?;
@@ -595,10 +647,12 @@ pub fn build_exact_cluster_terrain_parent(
         return Err(TerrainPageBuildError::InvalidPageKey);
     }
     validate_children_for_key(key, children)?;
-    if children
-        .iter()
-        .any(|child| !matches!(child.representation, TerrainPageRepresentation::SurfaceCluster(_)))
-    {
+    if children.iter().any(|child| {
+        !matches!(
+            child.representation,
+            TerrainPageRepresentation::SurfaceCluster(_)
+        )
+    }) {
         return Err(TerrainPageBuildError::UnsupportedChildRepresentation);
     }
 
@@ -678,20 +732,376 @@ pub fn build_exact_cluster_terrain_parent(
     Ok(page)
 }
 
+/// Simplifies a complete exact child group into a boundary-locked triangle page.
+///
+/// This builder is host-only because simplification belongs in the page producer, never in the
+/// renderer. It uses topology-preserving edge collapse with absolute canonical-voxel error and
+/// refuses surfaces that are not two-manifolds. Page-border and material-seam vertices remain
+/// locked, so independently built neighbors retain the same mathematical join.
+#[cfg(feature = "terrain-page-builder")]
+pub fn build_simplified_triangle_terrain_parent(
+    key: TerrainPageKey,
+    revision: u64,
+    children: &[TerrainPageV1],
+    budget: TerrainSimplificationBudget,
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    if budget.target_triangles == 0
+        || budget.max_error_millivoxels == 0
+        || budget.target_encoded_bytes == 0
+        || usize::try_from(budget.target_encoded_bytes).unwrap_or(usize::MAX)
+            > TERRAIN_PAGE_TARGET_COMPRESSED_BYTES
+    {
+        return Err(TerrainPageBuildError::SimplificationTargetNotReached);
+    }
+    let exact = build_exact_cluster_terrain_parent(key, revision, children)?;
+    let TerrainPageRepresentation::SurfaceCluster(quads) = &exact.representation else {
+        unreachable!("exact parent builder always produces clustered quads");
+    };
+    if quads.is_empty() {
+        return Err(TerrainPageBuildError::NoSurfaceToSimplify);
+    }
+    let input = triangulate_surface_quads(quads, exact.bounds)?;
+    if !triangle_cluster_is_valid(&input, exact.bounds, exact.materials.len()) {
+        return Err(TerrainPageBuildError::NonManifoldSurface);
+    }
+    let positions = input
+        .vertices
+        .iter()
+        .map(|vertex| {
+            [
+                (vertex.position[0] - exact.bounds.min.x) as f32,
+                (vertex.position[1] - exact.bounds.min.y) as f32,
+                (vertex.position[2] - exact.bounds.min.z) as f32,
+            ]
+        })
+        .collect::<Vec<_>>();
+    let indices = input
+        .triangles
+        .iter()
+        .flat_map(|triangle| triangle.vertices)
+        .collect::<Vec<_>>();
+    let locks = locked_cluster_vertices(&input, exact.bounds);
+    let target_index_count = usize::try_from(budget.target_triangles)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(3)
+        .min(indices.len());
+    let mut measured_error_voxels = 0.0f32;
+    let simplified_indices = meshopt::simplify_with_locks_decoder(
+        &indices,
+        &positions,
+        &locks,
+        target_index_count,
+        budget.max_error_millivoxels as f32 / 1000.0,
+        meshopt::SimplifyOptions::LockBorder
+            | meshopt::SimplifyOptions::ErrorAbsolute
+            | meshopt::SimplifyOptions::Regularize,
+        Some(&mut measured_error_voxels),
+    );
+    if simplified_indices.is_empty() || simplified_indices.len() % 3 != 0 {
+        return Err(TerrainPageBuildError::InvalidSimplification);
+    }
+    let cluster = compact_simplified_cluster(&input, &simplified_indices)?;
+    if !triangle_cluster_is_valid(&cluster, exact.bounds, exact.materials.len()) {
+        return Err(TerrainPageBuildError::InvalidSimplification);
+    }
+    let reduced = cluster.triangles.len() < input.triangles.len();
+    let introduced_millivoxels = if reduced {
+        (measured_error_voxels.max(0.0) * 1000.0)
+            .ceil()
+            .clamp(0.0, u32::MAX as f32) as u32
+    } else {
+        0
+    };
+    if introduced_millivoxels > budget.max_error_millivoxels {
+        return Err(TerrainPageBuildError::InvalidSimplification);
+    }
+    let child_errors = children
+        .iter()
+        .fold(TerrainErrorBounds::EXACT, |aggregate, child| {
+            max_error_bounds(aggregate, child.errors)
+        });
+    let errors = TerrainErrorBounds {
+        geometric_millivoxels: child_errors
+            .geometric_millivoxels
+            .saturating_add(introduced_millivoxels),
+        silhouette_millivoxels: child_errors
+            .silhouette_millivoxels
+            .saturating_add(introduced_millivoxels),
+        material_boundary_millivoxels: child_errors.material_boundary_millivoxels,
+        normal_milliradians: if reduced {
+            child_errors.normal_milliradians.saturating_add(3_142)
+        } else {
+            child_errors.normal_milliradians
+        },
+        unresolved_topology: child_errors.unresolved_topology,
+    };
+    let page = assemble_terrain_parent(
+        key,
+        revision,
+        errors,
+        exact.topology,
+        exact.materials,
+        TerrainPageRepresentation::TriangleCluster(cluster),
+        children,
+    )?;
+    let encoded = encode_terrain_page(&page).map_err(|_| TerrainPageBuildError::PayloadOverflow)?;
+    if encoded.len() > budget.target_encoded_bytes as usize
+        || page
+            .representation
+            .triangle_count()
+            .is_some_and(|count| count > budget.target_triangles as usize)
+    {
+        return Err(TerrainPageBuildError::SimplificationTargetNotReached);
+    }
+    Ok(page)
+}
+
+/// Publishes the exact clustered parent whenever it already fits, otherwise attempts the
+/// boundary-locked simplifier. Exact geometry therefore never grows merely because a triangle
+/// target was configured for larger ancestors.
+#[cfg(feature = "terrain-page-builder")]
+pub fn build_budgeted_terrain_parent(
+    key: TerrainPageKey,
+    revision: u64,
+    children: &[TerrainPageV1],
+    budget: TerrainSimplificationBudget,
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    let exact = build_exact_cluster_terrain_parent(key, revision, children)?;
+    let exact_bytes =
+        encode_terrain_page(&exact).map_err(|_| TerrainPageBuildError::PayloadOverflow)?;
+    if exact_bytes.len() <= budget.target_encoded_bytes as usize {
+        return Ok(exact);
+    }
+    build_simplified_triangle_terrain_parent(key, revision, children, budget)
+}
+
+#[cfg(feature = "terrain-page-builder")]
+impl TerrainPageRepresentation {
+    fn triangle_count(&self) -> Option<usize> {
+        match self {
+            Self::TriangleCluster(cluster) => Some(cluster.triangles.len()),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "terrain-page-builder")]
+fn triangulate_surface_quads(
+    quads: &[TerrainSurfaceQuad],
+    bounds: VoxelBounds,
+) -> Result<TerrainTriangleCluster, TerrainPageBuildError> {
+    const MAX_INPUT_UNIT_FACES: usize = 2_000_000;
+    let face_count = quads.iter().try_fold(0usize, |count, quad| {
+        count.checked_add(usize::from(quad.width) * usize::from(quad.height))
+    });
+    let Some(face_count) = face_count.filter(|count| *count <= MAX_INPUT_UNIT_FACES) else {
+        return Err(TerrainPageBuildError::PayloadOverflow);
+    };
+    let mut vertex_indices = BTreeMap::<([i32; 3], u8), u32>::new();
+    let mut vertices = Vec::new();
+    let mut triangles = Vec::with_capacity(face_count.saturating_mul(2));
+    for quad in quads {
+        for delta_v in 0..i32::from(quad.height) {
+            for delta_u in 0..i32::from(quad.width) {
+                let u = quad.u + delta_u;
+                let v = quad.v + delta_v;
+                let corners = [
+                    surface_position(quad.axis, quad.plane, u, v),
+                    surface_position(quad.axis, quad.plane, u + 1, v),
+                    surface_position(quad.axis, quad.plane, u + 1, v + 1),
+                    surface_position(quad.axis, quad.plane, u, v + 1),
+                ];
+                let mut corner_indices = [0u32; 4];
+                for (destination, position) in corner_indices.iter_mut().zip(corners) {
+                    *destination =
+                        if let Some(index) = vertex_indices.get(&(position, quad.material_index)) {
+                            *index
+                        } else {
+                            let index = u32::try_from(vertices.len())
+                                .map_err(|_| TerrainPageBuildError::PayloadOverflow)?;
+                            vertex_indices.insert((position, quad.material_index), index);
+                            vertices.push(TerrainClusterVertex {
+                                position,
+                                material_index: quad.material_index,
+                            });
+                            index
+                        };
+                }
+                let base_positive = quad.axis != FaceAxis::Y;
+                let winding = if quad.positive == base_positive {
+                    [[0, 1, 2], [0, 2, 3]]
+                } else {
+                    [[0, 2, 1], [0, 3, 2]]
+                };
+                for triangle in winding {
+                    triangles.push(TerrainClusterTriangle {
+                        vertices: triangle.map(|index| corner_indices[index]),
+                        material_index: quad.material_index,
+                    });
+                }
+            }
+        }
+    }
+    let cluster = TerrainTriangleCluster {
+        vertices,
+        triangles,
+    };
+    if input_cluster_has_geometric_overlap(&cluster) {
+        return Err(TerrainPageBuildError::OverlappingSurface);
+    }
+    if input_cluster_has_open_interior_edge(&cluster, bounds) {
+        return Err(TerrainPageBuildError::OpenInteriorSurface);
+    }
+    if !triangle_cluster_is_valid(&cluster, bounds, usize::from(u8::MAX) + 1) {
+        return Err(TerrainPageBuildError::NonManifoldSurface);
+    }
+    Ok(cluster)
+}
+
+#[cfg(feature = "terrain-page-builder")]
+fn input_cluster_has_geometric_overlap(cluster: &TerrainTriangleCluster) -> bool {
+    let mut unique = BTreeSet::new();
+    cluster.triangles.iter().any(|triangle| {
+        let mut positions = triangle
+            .vertices
+            .map(|index| cluster.vertices[index as usize].position);
+        positions.sort_unstable();
+        !unique.insert(positions)
+    })
+}
+
+#[cfg(feature = "terrain-page-builder")]
+fn input_cluster_has_open_interior_edge(
+    cluster: &TerrainTriangleCluster,
+    bounds: VoxelBounds,
+) -> bool {
+    let mut counts = BTreeMap::<([i32; 3], [i32; 3]), u8>::new();
+    for triangle in &cluster.triangles {
+        let positions = triangle
+            .vertices
+            .map(|index| cluster.vertices[index as usize].position);
+        for [left, right] in [
+            [positions[0], positions[1]],
+            [positions[1], positions[2]],
+            [positions[2], positions[0]],
+        ] {
+            let edge = if left < right {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            *counts.entry(edge).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .any(|((left, right), count)| count % 2 == 1 && !edge_is_on_bounds(left, right, bounds))
+}
+
+#[cfg(feature = "terrain-page-builder")]
+const fn surface_position(axis: FaceAxis, plane: i32, u: i32, v: i32) -> [i32; 3] {
+    match axis {
+        FaceAxis::X => [plane, u, v],
+        FaceAxis::Y => [u, plane, v],
+        FaceAxis::Z => [u, v, plane],
+    }
+}
+
+#[cfg(feature = "terrain-page-builder")]
+fn compact_simplified_cluster(
+    input: &TerrainTriangleCluster,
+    simplified_indices: &[u32],
+) -> Result<TerrainTriangleCluster, TerrainPageBuildError> {
+    let used = simplified_indices.iter().copied().collect::<BTreeSet<_>>();
+    let mut remap = BTreeMap::new();
+    let mut vertices = Vec::with_capacity(used.len());
+    for old_index in used {
+        let vertex = input
+            .vertices
+            .get(old_index as usize)
+            .copied()
+            .ok_or(TerrainPageBuildError::InvalidSimplification)?;
+        let new_index =
+            u32::try_from(vertices.len()).map_err(|_| TerrainPageBuildError::PayloadOverflow)?;
+        remap.insert(old_index, new_index);
+        vertices.push(vertex);
+    }
+    let mut triangles = Vec::with_capacity(simplified_indices.len() / 3);
+    for indices in simplified_indices.chunks_exact(3) {
+        let old = [indices[0], indices[1], indices[2]];
+        let source_vertices = old.map(|index| {
+            input
+                .vertices
+                .get(index as usize)
+                .copied()
+                .ok_or(TerrainPageBuildError::InvalidSimplification)
+        });
+        let [first, second, third] = source_vertices;
+        let (first, second, third) = (first?, second?, third?);
+        if first.material_index != second.material_index
+            || first.material_index != third.material_index
+        {
+            return Err(TerrainPageBuildError::InvalidSimplification);
+        }
+        triangles.push(TerrainClusterTriangle {
+            vertices: old.map(|index| remap[&index]),
+            material_index: first.material_index,
+        });
+    }
+    Ok(TerrainTriangleCluster {
+        vertices,
+        triangles,
+    })
+}
+
+#[cfg(feature = "terrain-page-builder")]
+fn vertex_is_on_bounds(position: [i32; 3], bounds: VoxelBounds) -> bool {
+    let minimum = bounds.min.as_array();
+    let maximum = bounds.max.as_array();
+    (0..3).any(|axis| position[axis] == minimum[axis] || position[axis] == maximum[axis])
+}
+
+#[cfg(feature = "terrain-page-builder")]
+fn locked_cluster_vertices(cluster: &TerrainTriangleCluster, bounds: VoxelBounds) -> Vec<bool> {
+    let mut locks = cluster
+        .vertices
+        .iter()
+        .map(|vertex| vertex_is_on_bounds(vertex.position, bounds))
+        .collect::<Vec<_>>();
+    let mut edge_counts = BTreeMap::<[u32; 2], u8>::new();
+    for triangle in &cluster.triangles {
+        for [left, right] in [
+            [triangle.vertices[0], triangle.vertices[1]],
+            [triangle.vertices[1], triangle.vertices[2]],
+            [triangle.vertices[2], triangle.vertices[0]],
+        ] {
+            let edge = if left < right {
+                [left, right]
+            } else {
+                [right, left]
+            };
+            *edge_counts.entry(edge).or_default() += 1;
+        }
+    }
+    for ([left, right], count) in edge_counts {
+        if count != 2 {
+            locks[left as usize] = true;
+            locks[right as usize] = true;
+        }
+    }
+    locks
+}
+
 fn max_error_bounds(left: TerrainErrorBounds, right: TerrainErrorBounds) -> TerrainErrorBounds {
     TerrainErrorBounds {
-        geometric_millivoxels: left
-            .geometric_millivoxels
-            .max(right.geometric_millivoxels),
+        geometric_millivoxels: left.geometric_millivoxels.max(right.geometric_millivoxels),
         silhouette_millivoxels: left
             .silhouette_millivoxels
             .max(right.silhouette_millivoxels),
         material_boundary_millivoxels: left
             .material_boundary_millivoxels
             .max(right.material_boundary_millivoxels),
-        normal_milliradians: left
-            .normal_milliradians
-            .max(right.normal_milliradians),
+        normal_milliradians: left.normal_milliradians.max(right.normal_milliradians),
         unresolved_topology: left.unresolved_topology || right.unresolved_topology,
     }
 }
@@ -737,16 +1147,10 @@ pub fn validate_terrain_replacement(
     validate_children_for_key(parent.key, children)?;
     let references = children
         .iter()
-        .map(|child| {
-            (
-                child.key,
-                (child.revision, child.content_fingerprint),
-            )
-        })
+        .map(|child| (child.key, (child.revision, child.content_fingerprint)))
         .collect::<BTreeMap<_, _>>();
     if parent.children.iter().any(|reference| {
-        references.get(&reference.key)
-            != Some(&(reference.revision, reference.content_fingerprint))
+        references.get(&reference.key) != Some(&(reference.revision, reference.content_fingerprint))
     }) {
         return Err(TerrainReplacementError::ChildReferenceMismatch);
     }
@@ -785,7 +1189,8 @@ fn validate_children_for_key(
     }
     for (index, left) in children.iter().enumerate() {
         for right in &children[index + 1..] {
-            let Some((left_side, right_side)) = adjacent_page_sides(left.bounds, right.bounds) else {
+            let Some((left_side, right_side)) = adjacent_page_sides(left.bounds, right.bounds)
+            else {
                 continue;
             };
             if left.boundary_fingerprints[left_side as usize]
@@ -810,7 +1215,9 @@ fn aggregate_child_boundaries(
     for side in BoundarySide::ALL {
         let mut side_children = children
             .iter()
-            .filter(|child| boundary_plane(child.bounds, side) == boundary_plane(parent_bounds, side))
+            .filter(|child| {
+                boundary_plane(child.bounds, side) == boundary_plane(parent_bounds, side)
+            })
             .collect::<Vec<_>>();
         side_children.sort_unstable_by_key(|child| tangential_page_coord(child.key, side.axis()));
         if side_children.len() != 4 {
@@ -929,8 +1336,10 @@ fn material_coverage(
     let mut palette_indices = BTreeMap::new();
     let mut materials = Vec::with_capacity(occupied.len());
     for (index, (id, occupied_voxels)) in occupied.into_iter().enumerate() {
-        let material = Material::from_id(id).ok_or(TerrainPageBuildError::MaterialPaletteOverflow)?;
-        let index = u8::try_from(index).map_err(|_| TerrainPageBuildError::MaterialPaletteOverflow)?;
+        let material =
+            Material::from_id(id).ok_or(TerrainPageBuildError::MaterialPaletteOverflow)?;
+        let index =
+            u8::try_from(index).map_err(|_| TerrainPageBuildError::MaterialPaletteOverflow)?;
         palette_indices.insert(id, index);
         materials.push(TerrainMaterialCoverage {
             material,
@@ -946,15 +1355,14 @@ fn build_stepped(
     samples: &ExactPageSamples,
     palette_indices: &BTreeMap<u16, u8>,
 ) -> Result<(SteppedSurfaceResidual, TerrainTopologyClass), TerrainPageBuildError> {
-    let mut columns = Vec::with_capacity(
-        TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize,
-    );
+    let mut columns =
+        Vec::with_capacity(TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize);
     let mut runs = Vec::new();
     let mut topology = TerrainTopologyClass::SingleRunColumns;
     for z in bounds.min.z..bounds.max.z {
         for x in bounds.min.x..bounds.max.x {
-            let first_run = u32::try_from(runs.len())
-                .map_err(|_| TerrainPageBuildError::PayloadOverflow)?;
+            let first_run =
+                u32::try_from(runs.len()).map_err(|_| TerrainPageBuildError::PayloadOverflow)?;
             let mut occupancy_runs = 0u16;
             let mut active: Option<TerrainMaterialRun> = None;
             let mut prior_renderable = false;
@@ -1039,16 +1447,12 @@ fn build_sparse(
                     for local_y in 0..SPARSE_BRICK_EDGE {
                         for local_x in 0..SPARSE_BRICK_EDGE {
                             let coord = VoxelCoord::new(
-                                bounds.min.x
-                                    + i32::from(brick_x * SPARSE_BRICK_EDGE + local_x),
-                                bounds.min.y
-                                    + i32::from(brick_y * SPARSE_BRICK_EDGE + local_y),
-                                bounds.min.z
-                                    + i32::from(brick_z * SPARSE_BRICK_EDGE + local_z),
+                                bounds.min.x + i32::from(brick_x * SPARSE_BRICK_EDGE + local_x),
+                                bounds.min.y + i32::from(brick_y * SPARSE_BRICK_EDGE + local_y),
+                                bounds.min.z + i32::from(brick_z * SPARSE_BRICK_EDGE + local_z),
                             );
                             let material = samples.sample(coord);
-                            let Some(material_index) =
-                                palette_indices.get(&material.id()).copied()
+                            let Some(material_index) = palette_indices.get(&material.id()).copied()
                             else {
                                 continue;
                             };
@@ -1247,6 +1651,22 @@ fn representation_bytes(representation: &TerrainPageRepresentation) -> Vec<u8> {
                 push_u16(&mut bytes, quad.height);
             }
         }
+        TerrainPageRepresentation::TriangleCluster(cluster) => {
+            push_u32(&mut bytes, cluster.vertices.len() as u32);
+            push_u32(&mut bytes, cluster.triangles.len() as u32);
+            for vertex in &cluster.vertices {
+                for component in vertex.position {
+                    push_i32(&mut bytes, component);
+                }
+                bytes.push(vertex.material_index);
+            }
+            for triangle in &cluster.triangles {
+                for vertex in triangle.vertices {
+                    push_u32(&mut bytes, vertex);
+                }
+                bytes.push(triangle.material_index);
+            }
+        }
     }
     bytes
 }
@@ -1279,15 +1699,13 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
                         TERRAIN_PAGE_EDGE_SAMPLES as u16,
                     ]
                 && surface.columns.len()
-                    == TERRAIN_PAGE_EDGE_SAMPLES as usize
-                        * TERRAIN_PAGE_EDGE_SAMPLES as usize
+                    == TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize
                 && surface.columns.iter().all(|column| {
                     let start = column.first_run as usize;
                     let end = start.saturating_add(usize::from(column.run_count));
                     end <= surface.runs.len()
                         && surface.runs[start..end].windows(2).all(|runs| {
-                            runs[0].minimum_y + i32::from(runs[0].length)
-                                == runs[1].minimum_y
+                            runs[0].minimum_y + i32::from(runs[0].length) == runs[1].minimum_y
                         })
                 })
                 && surface.runs.iter().all(|run| {
@@ -1330,6 +1748,9 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
                 && usize::from(quad.material_index) < palette_len
                 && quad_inside_bounds(*quad, page.bounds)
         }),
+        TerrainPageRepresentation::TriangleCluster(cluster) => {
+            triangle_cluster_is_valid(cluster, page.bounds, palette_len)
+        }
     }
 }
 
@@ -1362,6 +1783,108 @@ fn quad_inside_bounds(quad: TerrainSurfaceQuad, bounds: VoxelBounds) -> bool {
                 && quad.v.saturating_add(height) <= bounds.max.y
         }
     }
+}
+
+fn triangle_cluster_is_valid(
+    cluster: &TerrainTriangleCluster,
+    bounds: VoxelBounds,
+    palette_len: usize,
+) -> bool {
+    if cluster.vertices.is_empty()
+        || cluster.triangles.is_empty()
+        || cluster.vertices.len() > u32::MAX as usize
+        || cluster.vertices.iter().any(|vertex| {
+            usize::from(vertex.material_index) >= palette_len
+                || !(bounds.min.x..=bounds.max.x).contains(&vertex.position[0])
+                || !(bounds.min.y..=bounds.max.y).contains(&vertex.position[1])
+                || !(bounds.min.z..=bounds.max.z).contains(&vertex.position[2])
+        })
+    {
+        return false;
+    }
+    let mut used = vec![false; cluster.vertices.len()];
+    let mut unique_triangles = BTreeSet::new();
+    let mut unique_geometric_triangles = BTreeSet::new();
+    let mut edges = BTreeMap::<([i32; 3], [i32; 3]), u8>::new();
+    for triangle in &cluster.triangles {
+        if !unique_triangles.insert(*triangle)
+            || usize::from(triangle.material_index) >= palette_len
+        {
+            return false;
+        }
+        let Some(vertices) = triangle
+            .vertices
+            .map(|index| {
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|index| cluster.vertices.get(index))
+            })
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+        if vertices
+            .iter()
+            .any(|vertex| vertex.material_index != triangle.material_index)
+        {
+            return false;
+        }
+        let mut geometric_triangle = [
+            vertices[0].position,
+            vertices[1].position,
+            vertices[2].position,
+        ];
+        geometric_triangle.sort_unstable();
+        if !unique_geometric_triangles.insert(geometric_triangle) {
+            return false;
+        }
+        for index in triangle.vertices {
+            used[index as usize] = true;
+        }
+        let edge_a = vector_difference(vertices[1].position, vertices[0].position);
+        let edge_b = vector_difference(vertices[2].position, vertices[0].position);
+        if cross_product(edge_a, edge_b) == [0, 0, 0] {
+            return false;
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0)] {
+            let from = vertices[from].position;
+            let to = vertices[to].position;
+            let key = if from < to { (from, to) } else { (to, from) };
+            let entry = edges.entry(key).or_default();
+            *entry = entry.saturating_add(1);
+        }
+    }
+    used.into_iter().all(|used| used)
+        && edges.into_iter().all(|((left, right), count)| {
+            (count >= 2 && count % 2 == 0)
+                || (count % 2 == 1 && edge_is_on_bounds(left, right, bounds))
+        })
+}
+
+fn vector_difference(left: [i32; 3], right: [i32; 3]) -> [i64; 3] {
+    [
+        i64::from(left[0]) - i64::from(right[0]),
+        i64::from(left[1]) - i64::from(right[1]),
+        i64::from(left[2]) - i64::from(right[2]),
+    ]
+}
+
+fn cross_product(left: [i64; 3], right: [i64; 3]) -> [i64; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
+}
+
+fn edge_is_on_bounds(left: [i32; 3], right: [i32; 3], bounds: VoxelBounds) -> bool {
+    let minimum = bounds.min.as_array();
+    let maximum = bounds.max.as_array();
+    (0..3).any(|axis| {
+        (left[axis] == minimum[axis] && right[axis] == minimum[axis])
+            || (left[axis] == maximum[axis] && right[axis] == maximum[axis])
+    })
 }
 
 pub fn encode_terrain_page(page: &TerrainPageV1) -> Result<Vec<u8>, TerrainPageCodecError> {
@@ -1509,6 +2032,7 @@ pub fn decode_terrain_page(
         1 => TerrainPageRepresentationKind::SteppedSurfaceResidual,
         2 => TerrainPageRepresentationKind::SparseVoxelBrick,
         3 => TerrainPageRepresentationKind::SurfaceCluster,
+        4 => TerrainPageRepresentationKind::TriangleCluster,
         _ => {
             return Err(TerrainPageCodecError::InvalidHeader(
                 "unknown representation",
@@ -1568,8 +2092,7 @@ pub fn decode_terrain_page(
     let mut materials = Vec::with_capacity(material_count);
     for _ in 0..material_count {
         let id = cursor.u16()?;
-        let material =
-            Material::from_id(id).ok_or(TerrainPageCodecError::UnknownMaterial(id))?;
+        let material = Material::from_id(id).ok_or(TerrainPageCodecError::UnknownMaterial(id))?;
         if cursor.u16()? != 0 {
             return Err(TerrainPageCodecError::InvalidHeader(
                 "reserved material bytes are nonzero",
@@ -1759,6 +2282,37 @@ fn decode_representation(
             }
             TerrainPageRepresentation::SurfaceCluster(quads)
         }
+        TerrainPageRepresentationKind::TriangleCluster => {
+            let vertex_count = cursor.u32()? as usize;
+            let triangle_count = cursor.u32()? as usize;
+            if vertex_count == 0
+                || triangle_count == 0
+                || vertex_count > TERRAIN_PAGE_MAX_PAYLOAD_BYTES / 13
+                || triangle_count > TERRAIN_PAGE_MAX_PAYLOAD_BYTES / 13
+            {
+                return Err(TerrainPageCodecError::InvalidRepresentation(
+                    "triangle cluster counts",
+                ));
+            }
+            let mut vertices = Vec::with_capacity(vertex_count);
+            for _ in 0..vertex_count {
+                vertices.push(TerrainClusterVertex {
+                    position: [cursor.i32()?, cursor.i32()?, cursor.i32()?],
+                    material_index: cursor.u8()?,
+                });
+            }
+            let mut triangles = Vec::with_capacity(triangle_count);
+            for _ in 0..triangle_count {
+                triangles.push(TerrainClusterTriangle {
+                    vertices: [cursor.u32()?, cursor.u32()?, cursor.u32()?],
+                    material_index: cursor.u8()?,
+                });
+            }
+            TerrainPageRepresentation::TriangleCluster(TerrainTriangleCluster {
+                vertices,
+                triangles,
+            })
+        }
     };
     if cursor.position != payload.len() {
         return Err(TerrainPageCodecError::InvalidRepresentation(
@@ -1798,8 +2352,12 @@ impl<'a> PageCursor<'a> {
     }
 
     fn u8(&mut self) -> Result<u8, TerrainPageCodecError> {
-        self.bytes(1)
-            .and_then(|bytes| bytes.first().copied().ok_or(TerrainPageCodecError::Truncated))
+        self.bytes(1).and_then(|bytes| {
+            bytes
+                .first()
+                .copied()
+                .ok_or(TerrainPageCodecError::Truncated)
+        })
     }
 
     fn u16(&mut self) -> Result<u16, TerrainPageCodecError> {
@@ -1867,8 +2425,7 @@ mod tests {
                     ..column.first_run as usize + usize::from(column.run_count)]
                     .iter()
                     .find(|run| {
-                        coord.y >= run.minimum_y
-                            && coord.y < run.minimum_y + i32::from(run.length)
+                        coord.y >= run.minimum_y && coord.y < run.minimum_y + i32::from(run.length)
                     })
                     .map_or(Material::Air, |run| {
                         palette[usize::from(run.material_index)].material
@@ -1890,8 +2447,9 @@ mod tests {
                 };
                 let local = local.map(|component| component % payload.brick_edge);
                 let edge = usize::from(payload.brick_edge);
-                let index =
-                    usize::from(local[0]) + usize::from(local[1]) * edge + usize::from(local[2]) * edge * edge;
+                let index = usize::from(local[0])
+                    + usize::from(local[1]) * edge
+                    + usize::from(local[2]) * edge * edge;
                 if brick.occupancy[index / 64] & (1u64 << (index % 64)) == 0 {
                     return Material::Air;
                 }
@@ -1899,11 +2457,12 @@ mod tests {
                     .iter()
                     .map(|word| word.count_ones() as usize)
                     .sum::<usize>()
-                    + (brick.occupancy[index / 64] & ((1u64 << (index % 64)) - 1))
-                        .count_ones() as usize;
+                    + (brick.occupancy[index / 64] & ((1u64 << (index % 64)) - 1)).count_ones()
+                        as usize;
                 palette[usize::from(brick.material_indices[rank])].material
             }
-            TerrainPageRepresentation::SurfaceCluster(_) => Material::Air,
+            TerrainPageRepresentation::SurfaceCluster(_)
+            | TerrainPageRepresentation::TriangleCluster(_) => Material::Air,
         }
     }
 
@@ -1946,8 +2505,7 @@ mod tests {
         };
         assert_eq!(
             key.bounds().unwrap(),
-            VoxelBounds::new(VoxelCoord::new(-64, -32, 96), VoxelCoord::new(-32, 0, 128))
-                .unwrap()
+            VoxelBounds::new(VoxelCoord::new(-64, -32, 96), VoxelCoord::new(-32, 0, 128)).unwrap()
         );
         let parent = key.parent().unwrap();
         assert_eq!(parent.coord, [-1, -1, 1]);
@@ -2191,6 +2749,111 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "terrain-page-builder")]
+    type TopologicalVertex = ([i32; 3], u8);
+
+    #[cfg(feature = "terrain-page-builder")]
+    type TopologicalEdge = (TopologicalVertex, TopologicalVertex);
+
+    #[cfg(feature = "terrain-page-builder")]
+    fn topological_boundary_edges(cluster: &TerrainTriangleCluster) -> BTreeSet<TopologicalEdge> {
+        let mut counts = BTreeMap::new();
+        for triangle in &cluster.triangles {
+            for [left, right] in [
+                [triangle.vertices[0], triangle.vertices[1]],
+                [triangle.vertices[1], triangle.vertices[2]],
+                [triangle.vertices[2], triangle.vertices[0]],
+            ] {
+                let left = cluster.vertices[left as usize];
+                let right = cluster.vertices[right as usize];
+                let left = (left.position, left.material_index);
+                let right = (right.position, right.material_index);
+                let key = if left < right {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                *counts.entry(key).or_insert(0u8) += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .filter_map(|(edge, count)| (count == 1).then_some(edge))
+            .collect()
+    }
+
+    #[cfg(feature = "terrain-page-builder")]
+    #[test]
+    fn simplified_triangle_parent_locks_boundaries_and_meets_page_budget() {
+        let key = TerrainPageKey {
+            level: 2,
+            coord: [-1, -1, -1],
+        };
+        let sloped = |coord: VoxelCoord| {
+            let height = -64 + (coord.x + 128).div_euclid(4) + (coord.z + 128).div_euclid(8);
+            if coord.y <= height {
+                if coord.x < -64 {
+                    Material::Stone
+                } else {
+                    Material::Dirt
+                }
+            } else {
+                Material::Air
+            }
+        };
+        let children = key
+            .children()
+            .unwrap()
+            .into_iter()
+            .map(|child_key| {
+                let leaves = child_key
+                    .children()
+                    .unwrap()
+                    .into_iter()
+                    .map(|leaf| build_exact_terrain_page(identity(), leaf, 71, sloped).unwrap())
+                    .collect::<Vec<_>>();
+                build_exact_cluster_terrain_parent(child_key, 72, &leaves).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let exact = build_exact_cluster_terrain_parent(key, 73, &children).unwrap();
+        let TerrainPageRepresentation::SurfaceCluster(exact_quads) = &exact.representation else {
+            unreachable!();
+        };
+        let exact_triangles = triangulate_surface_quads(exact_quads, exact.bounds).unwrap();
+        let budget = TerrainSimplificationBudget {
+            target_triangles: 4_096,
+            max_error_millivoxels: 8_000,
+            target_encoded_bytes: TERRAIN_PAGE_TARGET_COMPRESSED_BYTES as u32,
+        };
+        let budgeted = build_budgeted_terrain_parent(key, 74, &children, budget).unwrap();
+        assert!(matches!(
+            budgeted.representation,
+            TerrainPageRepresentation::SurfaceCluster(_)
+        ));
+        let simplified =
+            build_simplified_triangle_terrain_parent(key, 75, &children, budget).unwrap();
+        let TerrainPageRepresentation::TriangleCluster(cluster) = &simplified.representation else {
+            panic!("expected triangle cluster");
+        };
+        assert!(cluster.triangles.len() < exact_triangles.triangles.len());
+        assert_eq!(
+            topological_boundary_edges(cluster),
+            topological_boundary_edges(&exact_triangles)
+        );
+        assert!(simplified.errors.geometric_millivoxels <= 8_000);
+        assert!(simplified.errors.silhouette_millivoxels <= 8_000);
+        assert_eq!(simplified.errors.material_boundary_millivoxels, 0);
+        assert!(!simplified.errors.unresolved_topology);
+        assert!(simplified.validates_identity());
+        validate_terrain_replacement(&simplified, &children).unwrap();
+        let encoded = encode_terrain_page(&simplified).unwrap();
+        assert!(encoded.len() <= TERRAIN_PAGE_TARGET_COMPRESSED_BYTES);
+        assert_eq!(
+            decode_terrain_page(&encoded, identity()).unwrap(),
+            simplified
+        );
+    }
+
     #[test]
     fn vxtp_codec_rejects_wrong_source_corruption_limits_and_trailing_bytes() {
         let page = build_exact_terrain_page(
@@ -2205,10 +2868,7 @@ mod tests {
         .unwrap();
         let encoded = encode_terrain_page(&page).unwrap();
         assert_eq!(
-            decode_terrain_page(
-                &encoded,
-                WorldSourceIdentityHash::from_bytes([0x33; 32])
-            ),
+            decode_terrain_page(&encoded, WorldSourceIdentityHash::from_bytes([0x33; 32])),
             Err(TerrainPageCodecError::SourceIdentityMismatch)
         );
 
@@ -2311,8 +2971,8 @@ mod tests {
     fn atomic_replacement_rejects_stale_and_boundary_incoherent_children() {
         let (parent, children) = solid_parent_fixture();
         let mut stale = children.clone();
-        stale[0] = build_exact_terrain_page(identity(), stale[0].key, 99, |_| Material::Stone)
-            .unwrap();
+        stale[0] =
+            build_exact_terrain_page(identity(), stale[0].key, 99, |_| Material::Stone).unwrap();
         assert_eq!(
             validate_terrain_replacement(&parent, &stale),
             Err(TerrainReplacementError::ChildReferenceMismatch)
@@ -2320,15 +2980,14 @@ mod tests {
 
         let mut incoherent = children;
         let boundary_x = incoherent[0].bounds.max.x - 1;
-        incoherent[0] =
-            build_exact_terrain_page(identity(), incoherent[0].key, 31, |coord| {
-                if coord.x == boundary_x {
-                    Material::Air
-                } else {
-                    Material::Stone
-                }
-            })
-            .unwrap();
+        incoherent[0] = build_exact_terrain_page(identity(), incoherent[0].key, 31, |coord| {
+            if coord.x == boundary_x {
+                Material::Air
+            } else {
+                Material::Stone
+            }
+        })
+        .unwrap();
         assert_eq!(
             validate_terrain_replacement(&parent, &incoherent),
             Err(TerrainReplacementError::InternalBoundaryMismatch)

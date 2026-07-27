@@ -114,10 +114,7 @@ impl TerrainHierarchyDirectoryV1 {
     pub fn validates_identity(&self) -> bool {
         if self.nodes.is_empty()
             || self.nodes.len() > TERRAIN_DIRECTORY_MAX_NODES
-            || !self
-                .nodes
-                .windows(2)
-                .all(|pair| pair[0].key < pair[1].key)
+            || !self.nodes.windows(2).all(|pair| pair[0].key < pair[1].key)
         {
             return false;
         }
@@ -217,9 +214,8 @@ impl fmt::Display for TerrainDirectoryError {
             Self::SourceMismatch => formatter.write_str("terrain directory page sources differ"),
             Self::DuplicateKey => formatter.write_str("terrain directory contains duplicate keys"),
             Self::MissingChild => formatter.write_str("terrain directory omits a referenced child"),
-            Self::ChildIdentityMismatch => {
-                formatter.write_str("terrain directory child identity differs from parent reference")
-            }
+            Self::ChildIdentityMismatch => formatter
+                .write_str("terrain directory child identity differs from parent reference"),
             Self::Truncated => formatter.write_str("truncated VXTD payload"),
             Self::InvalidMagic => formatter.write_str("invalid VXTD magic"),
             Self::UnsupportedVersion(version) => {
@@ -349,6 +345,7 @@ pub fn decode_terrain_directory(
             1 => TerrainPageRepresentationKind::SteppedSurfaceResidual,
             2 => TerrainPageRepresentationKind::SparseVoxelBrick,
             3 => TerrainPageRepresentationKind::SurfaceCluster,
+            4 => TerrainPageRepresentationKind::TriangleCluster,
             value => return Err(TerrainDirectoryError::UnknownRepresentation(value)),
         };
         let key = TerrainPageKey {
@@ -566,9 +563,7 @@ mod tests {
             .iter()
             .position(|node| !node.has_children)
             .unwrap();
-        directory.nodes[leaf_index]
-            .errors
-            .geometric_millivoxels = 1;
+        directory.nodes[leaf_index].errors.geometric_millivoxels = 1;
         directory.content_fingerprint = directory_fingerprint(&directory);
         assert!(!directory.validates_identity());
     }
@@ -578,10 +573,7 @@ mod tests {
         let directory = TerrainHierarchyDirectoryV1::from_pages(&page_forest()).unwrap();
         let encoded = encode_terrain_directory(&directory).unwrap();
         assert_eq!(
-            decode_terrain_directory(
-                &encoded,
-                WorldSourceIdentityHash::from_bytes([0x1d; 32])
-            ),
+            decode_terrain_directory(&encoded, WorldSourceIdentityHash::from_bytes([0x1d; 32])),
             Err(TerrainDirectoryError::SourceMismatch)
         );
         let mut corrupted = encoded.clone();
@@ -589,9 +581,7 @@ mod tests {
         corrupted[last] ^= 0x40;
         assert_eq!(
             decode_terrain_directory(&corrupted, identity()),
-            Err(TerrainDirectoryError::InvalidHeader(
-                "node reserved bytes"
-            ))
+            Err(TerrainDirectoryError::InvalidHeader("node reserved bytes"))
         );
         let mut trailing = encoded;
         trailing.push(0);

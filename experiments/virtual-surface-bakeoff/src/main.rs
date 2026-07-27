@@ -7,11 +7,13 @@ use std::path::PathBuf;
 use std::time::Instant;
 use voxels_world::{
     BakeoffCamera, BakeoffCandidateKind, BakeoffVolume, Material, SurfaceSampleBlockRequest,
-    TerrainPageKey, TerrainPageRepresentation, TerrainPageV1, VoxelBlockRequest, VoxelBounds,
-    VoxelCoord, WorldProduct, WorldProductBatch, WorldProductPriority, WorldProductRequest,
-    WorldSourceEngine, WorldSourceIdentityHash, benchmark_clustered_page_rebuild,
-    build_compact_exact_terrain_page, build_exact_cluster_terrain_parent,
-    build_exact_terrain_page, encode_terrain_page, run_virtual_surface_bakeoff,
+    TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TerrainPageBuildError, TerrainPageKey,
+    TerrainPageRepresentation, TerrainPageV1, TerrainSimplificationBudget, VoxelBlockRequest,
+    VoxelBounds, VoxelCoord, WorldProduct, WorldProductBatch, WorldProductPriority,
+    WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash,
+    benchmark_clustered_page_rebuild, build_compact_exact_terrain_page,
+    build_exact_cluster_terrain_parent, build_exact_terrain_page,
+    build_simplified_triangle_terrain_parent, encode_terrain_page, run_virtual_surface_bakeoff,
 };
 use voxels_world_service::LoadedWorldServiceConfig;
 
@@ -453,12 +455,21 @@ fn page_kind(page: &TerrainPageV1) -> &'static str {
         TerrainPageRepresentation::SteppedSurfaceResidual(_) => "stepped-surface-residual",
         TerrainPageRepresentation::SparseVoxelBrick(_) => "sparse-voxel-brick",
         TerrainPageRepresentation::SurfaceCluster(_) => "surface-cluster",
+        TerrainPageRepresentation::TriangleCluster(_) => "triangle-cluster",
     }
 }
 
 fn clustered_quad_count(page: &TerrainPageV1) -> usize {
     match &page.representation {
         TerrainPageRepresentation::SurfaceCluster(quads) => quads.len(),
+        TerrainPageRepresentation::TriangleCluster(_) => 0,
+        _ => 0,
+    }
+}
+
+fn triangle_count(page: &TerrainPageV1) -> usize {
+    match &page.representation {
+        TerrainPageRepresentation::TriangleCluster(cluster) => cluster.triangles.len(),
         _ => 0,
     }
 }
@@ -525,6 +536,16 @@ fn page_size_report(volume: &BakeoffVolume) -> Result<Value, Box<dyn std::error:
         let mut encoded_bytes = Vec::new();
         let mut quads = Vec::new();
         let mut build_times = Vec::new();
+        let mut simplified_bytes = Vec::new();
+        let mut simplified_triangles = Vec::new();
+        let mut simplification_errors = Vec::new();
+        let mut non_manifold = 0usize;
+        let mut target_not_reached = 0usize;
+        let mut invalid_simplification = 0usize;
+        let mut input_too_large = 0usize;
+        let mut overlapping_surface = 0usize;
+        let mut open_interior_surface = 0usize;
+        let mut empty_surface = 0usize;
         for (key, children) in grouped {
             if children.len() != 8 {
                 continue;
@@ -534,6 +555,32 @@ fn page_size_report(volume: &BakeoffVolume) -> Result<Value, Box<dyn std::error:
             build_times.push(started.elapsed());
             encoded_bytes.push(encode_terrain_page(&parent)?.len());
             quads.push(clustered_quad_count(&parent));
+            match build_simplified_triangle_terrain_parent(
+                key,
+                u64::from(level) + 10_000,
+                &children,
+                TerrainSimplificationBudget {
+                    target_triangles: 4_096,
+                    max_error_millivoxels: 8_000,
+                    target_encoded_bytes: TERRAIN_PAGE_TARGET_COMPRESSED_BYTES as u32,
+                },
+            ) {
+                Ok(simplified) => {
+                    simplified_bytes.push(encode_terrain_page(&simplified)?.len());
+                    simplified_triangles.push(triangle_count(&simplified));
+                    simplification_errors.push(simplified.errors.geometric_millivoxels as usize);
+                }
+                Err(TerrainPageBuildError::NonManifoldSurface) => non_manifold += 1,
+                Err(TerrainPageBuildError::SimplificationTargetNotReached) => {
+                    target_not_reached += 1
+                }
+                Err(TerrainPageBuildError::InvalidSimplification) => invalid_simplification += 1,
+                Err(TerrainPageBuildError::PayloadOverflow) => input_too_large += 1,
+                Err(TerrainPageBuildError::OverlappingSurface) => overlapping_surface += 1,
+                Err(TerrainPageBuildError::OpenInteriorSurface) => open_interior_surface += 1,
+                Err(TerrainPageBuildError::NoSurfaceToSimplify) => empty_surface += 1,
+                Err(error) => return Err(error.into()),
+            }
             next.insert(key, parent);
         }
         if next.is_empty() {
@@ -545,6 +592,20 @@ fn page_size_report(volume: &BakeoffVolume) -> Result<Value, Box<dyn std::error:
             "compressedBytes": usize_distribution(&encoded_bytes),
             "clusterQuads": usize_distribution(&quads),
             "buildMs": duration_distribution(&build_times),
+            "boundaryLockedSimplification": {
+                "attempted": next.len(),
+                "succeeded": simplified_bytes.len(),
+                "nonManifold": non_manifold,
+                "targetNotReached": target_not_reached,
+                "invalid": invalid_simplification,
+                "inputTooLarge": input_too_large,
+                "overlappingSurface": overlapping_surface,
+                "openInteriorSurface": open_interior_surface,
+                "emptySurface": empty_surface,
+                "compressedBytes": usize_distribution(&simplified_bytes),
+                "triangles": usize_distribution(&simplified_triangles),
+                "geometricErrorMillivoxels": usize_distribution(&simplification_errors),
+            },
         }));
         current = next;
     }
@@ -652,12 +713,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         &BakeoffCandidateKind::ALL
     };
-    let (candidates, comparisons) = run_virtual_surface_bakeoff(
-        &volume,
-        camera,
-        arguments.ray_grid,
-        candidate_kinds,
-    )?;
+    let (candidates, comparisons) =
+        run_virtual_surface_bakeoff(&volume, camera, arguments.ray_grid, candidate_kinds)?;
     let cluster_edit = (!arguments.cluster_only).then(|| benchmark_clustered_page_rebuild(&volume));
     let gpu_report = if arguments.gpu != GpuMode::Disabled {
         let clustered = candidates

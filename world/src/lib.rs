@@ -99,15 +99,17 @@ pub use terrain_page::{
     SparseVoxelBrickPayload, SteppedSurfaceResidual, TERRAIN_PAGE_EDGE_SAMPLES,
     TERRAIN_PAGE_MAX_CHILDREN, TERRAIN_PAGE_MAX_COMPRESSED_BYTES, TERRAIN_PAGE_MAX_LEVEL,
     TERRAIN_PAGE_MAX_PAYLOAD_BYTES, TERRAIN_PAGE_SCHEMA_VERSION,
-    TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TerrainColumn, TerrainErrorBounds,
-    TerrainMaterialCoverage, TerrainMaterialRun, TerrainPageBuildError, TerrainPageChild,
-    TerrainPageCodecError, TerrainPageKey, TerrainPageRepresentation,
-    TerrainPageRepresentationKind, TerrainPageV1, TerrainSparseBrick, TerrainSurfaceQuad,
-    TerrainTopologyClass, TerrainReplacementError, assemble_terrain_parent,
-    build_compact_exact_terrain_page, build_exact_cluster_terrain_parent,
-    build_exact_terrain_page, decode_terrain_page, encode_terrain_page,
-    validate_terrain_replacement,
+    TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TerrainClusterTriangle, TerrainClusterVertex,
+    TerrainColumn, TerrainErrorBounds, TerrainMaterialCoverage, TerrainMaterialRun,
+    TerrainPageBuildError, TerrainPageChild, TerrainPageCodecError, TerrainPageKey,
+    TerrainPageRepresentation, TerrainPageRepresentationKind, TerrainPageV1,
+    TerrainReplacementError, TerrainSimplificationBudget, TerrainSparseBrick, TerrainSurfaceQuad,
+    TerrainTopologyClass, TerrainTriangleCluster, assemble_terrain_parent,
+    build_compact_exact_terrain_page, build_exact_cluster_terrain_parent, build_exact_terrain_page,
+    decode_terrain_page, encode_terrain_page, validate_terrain_replacement,
 };
+#[cfg(feature = "terrain-page-builder")]
+pub use terrain_page::{build_budgeted_terrain_parent, build_simplified_triangle_terrain_parent};
 pub use virtual_surface::{
     BoundaryCertificate, BoundarySide, BoundarySideCertificate, CanonicalBoundarySample,
     CanonicalFaceKey, FaceAxis, VoxelBounds, canonical_exposed_faces,
@@ -115,8 +117,8 @@ pub use virtual_surface::{
 #[cfg(any(test, feature = "virtual-surface-bakeoff"))]
 #[doc(hidden)]
 pub use virtual_surface_bakeoff::{
-    BakeoffCamera, BakeoffCandidate, BakeoffCandidateKind, BakeoffComparison, BakeoffError,
-    BakeoffClusterEditMetrics, BakeoffGpuQuad, BakeoffHit, BakeoffVolume,
+    BakeoffCamera, BakeoffCandidate, BakeoffCandidateKind, BakeoffClusterEditMetrics,
+    BakeoffComparison, BakeoffError, BakeoffGpuQuad, BakeoffHit, BakeoffVolume,
     benchmark_clustered_page_rebuild, run_virtual_surface_bakeoff,
 };
 pub use visibility::{
