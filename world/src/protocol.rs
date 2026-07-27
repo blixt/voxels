@@ -9,20 +9,26 @@ use crate::{
     SURFACE_PARENT_HORIZON_CELL_COUNT, SURFACE_PARENT_SHADING_EDGE_SAMPLES,
     SURFACE_SHADING_EDGE_SAMPLES, SourceDeviceRequirement, SurfaceBounds, SurfaceLodLevel,
     SurfaceMorphClosure, SurfacePatch, SurfaceQuad, SurfaceRegion, SurfaceShading,
-    SurfaceTileCoord, SurfaceTileMesh, SurfaceTileSnapshot, VOXEL_SIZE_METRES, VoxelCoord,
-    WaterPatch, WaterTileMesh, WorldId, WorldManifest, WorldProductPriority, WorldSourceError,
-    WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind, codec,
+    SurfaceTileCoord, SurfaceTileMesh, SurfaceTileSnapshot, TERRAIN_REGION_ROOT_LEVEL,
+    TerrainDirectoryError, TerrainHierarchyDirectoryV1, TerrainPageBatchRequestV1,
+    TerrainPageBatchResultV1, TerrainPageKey, TerrainPageTransferCodecError, VOXEL_SIZE_METRES,
+    VoxelCoord, WaterPatch, WaterTileMesh, WorldId, WorldManifest, WorldProductPriority,
+    WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind, codec,
+    decode_region_terrain_directory, decode_terrain_page_batch_request,
+    decode_terrain_page_batch_result, encode_terrain_directory, encode_terrain_page_batch_request,
+    encode_terrain_page_batch_result,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 34;
+pub const PROTOCOL_VERSION: u16 = 35;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
 pub const MAX_SURFACE_TILES_PER_BATCH: usize = 32;
+pub const MAX_TERRAIN_DIRECTORIES_PER_BATCH: usize = 64;
 pub const MAX_PLAYERS_PER_PRESENCE_DELTA: usize = 1_024;
 pub const MAX_PLAYER_NAME_BYTES: usize = 32;
 pub const MAX_EDIT_MUTATIONS: usize = EDIT_MAX_VOLUME_VOXELS;
@@ -60,6 +66,10 @@ const KIND_EDIT_COMMIT: u16 = 16;
 const KIND_RESYNC_REQUIRED: u16 = 17;
 const KIND_FRAME_FRAGMENT: u16 = 18;
 const KIND_FRAME_FRAGMENT_ABORT: u16 = 19;
+const KIND_TERRAIN_DIRECTORY_BATCH: u16 = 20;
+const KIND_TERRAIN_DIRECTORY_BATCH_RESULT: u16 = 21;
+const KIND_TERRAIN_PAGE_BATCH: u16 = 22;
+const KIND_TERRAIN_PAGE_BATCH_RESULT: u16 = 23;
 const FLAG_NONE: u16 = 0;
 const RESERVED: u16 = 0;
 const RESULT_CODEC_BROTLI: u8 = 1;
@@ -90,6 +100,8 @@ impl WorldCapabilities {
     pub const SPECTATOR_MODE: Self = Self(1 << 9);
     /// The server permits ordinary players to deploy the deterministic airborne glider.
     pub const GLIDING: Self = Self(1 << 10);
+    /// The server can publish versioned virtual microvoxel directories and page batches.
+    pub const VIRTUAL_TERRAIN: Self = Self(1 << 11);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -479,6 +491,46 @@ impl EncodedSurfaceTileBatchItem {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerrainDirectoryBatchRequest {
+    pub request_id: u64,
+    pub priority: WorldProductPriority,
+    pub roots: Vec<TerrainPageKey>,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerrainDirectoryFailure {
+    Unavailable = 1,
+    GenerationFailed = 2,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerrainDirectoryBatchItem {
+    pub root: TerrainPageKey,
+    pub result: Result<TerrainHierarchyDirectoryV1, TerrainDirectoryFailure>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerrainDirectoryBatchResult {
+    pub request_id: u64,
+    pub source_identity_hash: WorldSourceIdentityHash,
+    pub items: Vec<TerrainDirectoryBatchItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VirtualTerrainPageBatchRequest {
+    pub request_id: u64,
+    pub priority: WorldProductPriority,
+    pub batch: TerrainPageBatchRequestV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VirtualTerrainPageBatchResult {
+    pub request_id: u64,
+    pub batch: TerrainPageBatchResultV1,
+}
+
 /// One idempotent server-authoritative gameplay edit.
 ///
 /// The operation ID is scoped to the server-issued edit session and is also carried in the VXWP
@@ -754,6 +806,8 @@ pub enum ProtocolError {
     LimitExceeded(&'static str),
     Compression(&'static str),
     ChunkCodec(codec::CodecError),
+    TerrainDirectory(TerrainDirectoryError),
+    TerrainPageTransfer(TerrainPageTransferCodecError),
 }
 
 impl fmt::Display for ProtocolError {
@@ -774,6 +828,10 @@ impl fmt::Display for ProtocolError {
             Self::LimitExceeded(limit) => write!(formatter, "VXWP {limit} limit exceeded"),
             Self::Compression(reason) => write!(formatter, "VXWP compression: {reason}"),
             Self::ChunkCodec(error) => write!(formatter, "VXWP chunk payload: {error}"),
+            Self::TerrainDirectory(error) => write!(formatter, "VXWP terrain directory: {error}"),
+            Self::TerrainPageTransfer(error) => {
+                write!(formatter, "VXWP terrain page transfer: {error}")
+            }
         }
     }
 }
@@ -783,6 +841,18 @@ impl std::error::Error for ProtocolError {}
 impl From<codec::CodecError> for ProtocolError {
     fn from(error: codec::CodecError) -> Self {
         Self::ChunkCodec(error)
+    }
+}
+
+impl From<TerrainDirectoryError> for ProtocolError {
+    fn from(error: TerrainDirectoryError) -> Self {
+        Self::TerrainDirectory(error)
+    }
+}
+
+impl From<TerrainPageTransferCodecError> for ProtocolError {
+    fn from(error: TerrainPageTransferCodecError) -> Self {
+        Self::TerrainPageTransfer(error)
     }
 }
 
@@ -1552,6 +1622,297 @@ pub fn decode_surface_tile_batch_result(
         source_identity_hash,
         final_item,
         items,
+    })
+}
+
+pub fn encode_terrain_directory_batch(
+    request: &TerrainDirectoryBatchRequest,
+) -> Result<Vec<u8>, ProtocolError> {
+    validate_terrain_directory_roots(request.request_id, &request.roots)?;
+    let mut payload = Vec::with_capacity(8 + request.roots.len() * 16);
+    payload.push(request.priority as u8);
+    payload.extend_from_slice(&[0; 3]);
+    push_u16(&mut payload, request.roots.len() as u16);
+    push_u16(&mut payload, 0);
+    for root in &request.roots {
+        encode_terrain_page_key(&mut payload, *root);
+    }
+    Ok(encode_frame(
+        KIND_TERRAIN_DIRECTORY_BATCH,
+        request.request_id,
+        &payload,
+    ))
+}
+
+pub fn decode_terrain_directory_batch(
+    bytes: &[u8],
+) -> Result<TerrainDirectoryBatchRequest, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_kind(&frame, KIND_TERRAIN_DIRECTORY_BATCH)?;
+    let mut cursor = Cursor::new(frame.payload);
+    let priority = decode_priority(cursor.u8()?)?;
+    if cursor.bytes(3)? != [0; 3] {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved terrain directory request bytes are nonzero",
+        ));
+    }
+    let count = usize::from(cursor.u16()?);
+    if cursor.u16()? != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved terrain directory request field is nonzero",
+        ));
+    }
+    let mut roots = Vec::with_capacity(count);
+    for _ in 0..count {
+        roots.push(decode_terrain_page_key(&mut cursor)?);
+    }
+    cursor.finish()?;
+    validate_terrain_directory_roots(frame.request_id, &roots)?;
+    Ok(TerrainDirectoryBatchRequest {
+        request_id: frame.request_id,
+        priority,
+        roots,
+    })
+}
+
+pub fn encode_terrain_directory_batch_result(
+    result: &TerrainDirectoryBatchResult,
+) -> Result<Vec<u8>, ProtocolError> {
+    validate_terrain_directory_result(result)?;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(result.source_identity_hash.as_bytes());
+    push_u16(&mut payload, result.items.len() as u16);
+    push_u16(&mut payload, 0);
+    for item in &result.items {
+        encode_terrain_page_key(&mut payload, item.root);
+        match &item.result {
+            Ok(directory) => {
+                let encoded = encode_terrain_directory(directory)?;
+                payload.push(0);
+                payload.extend_from_slice(&[0; 3]);
+                push_u32(&mut payload, encoded.len() as u32);
+                payload.extend_from_slice(&encoded);
+            }
+            Err(failure) => {
+                payload.push(*failure as u8);
+                payload.extend_from_slice(&[0; 3]);
+                push_u32(&mut payload, 0);
+            }
+        }
+    }
+    if payload.len().saturating_add(FRAME_HEADER_BYTES) > MAX_PROTOCOL_FRAME_BYTES {
+        return Err(ProtocolError::LimitExceeded(
+            "terrain directory result frame bytes",
+        ));
+    }
+    Ok(encode_frame(
+        KIND_TERRAIN_DIRECTORY_BATCH_RESULT,
+        result.request_id,
+        &payload,
+    ))
+}
+
+pub fn decode_terrain_directory_batch_result(
+    bytes: &[u8],
+) -> Result<TerrainDirectoryBatchResult, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_kind(&frame, KIND_TERRAIN_DIRECTORY_BATCH_RESULT)?;
+    if frame.request_id == 0 {
+        return Err(ProtocolError::InvalidPayload("request id must be nonzero"));
+    }
+    let mut cursor = Cursor::new(frame.payload);
+    let source_identity_hash = WorldSourceIdentityHash::from_bytes(cursor.array()?);
+    let count = usize::from(cursor.u16()?);
+    if count == 0 || count > MAX_TERRAIN_DIRECTORIES_PER_BATCH || cursor.u16()? != 0 {
+        return Err(ProtocolError::LimitExceeded(
+            "terrain directory result batch",
+        ));
+    }
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        let root = decode_terrain_page_key(&mut cursor)?;
+        let status = cursor.u8()?;
+        if cursor.bytes(3)? != [0; 3] {
+            return Err(ProtocolError::InvalidPayload(
+                "reserved terrain directory result bytes are nonzero",
+            ));
+        }
+        let len = cursor.u32()? as usize;
+        let body = cursor.bytes(len)?;
+        let result = match status {
+            0 => {
+                let directory = decode_region_terrain_directory(body, source_identity_hash)?;
+                if directory.roots().map(|node| node.key).collect::<Vec<_>>() != [root] {
+                    return Err(ProtocolError::InvalidPayload(
+                        "terrain directory root mismatch",
+                    ));
+                }
+                Ok(directory)
+            }
+            1 if body.is_empty() => Err(TerrainDirectoryFailure::Unavailable),
+            2 if body.is_empty() => Err(TerrainDirectoryFailure::GenerationFailed),
+            value => {
+                return Err(if body.is_empty() {
+                    ProtocolError::UnknownEnum("terrain directory failure", u64::from(value))
+                } else {
+                    ProtocolError::InvalidPayload("terrain directory failure carries a payload")
+                });
+            }
+        };
+        items.push(TerrainDirectoryBatchItem { root, result });
+    }
+    cursor.finish()?;
+    let result = TerrainDirectoryBatchResult {
+        request_id: frame.request_id,
+        source_identity_hash,
+        items,
+    };
+    validate_terrain_directory_result(&result)?;
+    Ok(result)
+}
+
+pub fn encode_virtual_terrain_page_batch(
+    request: &VirtualTerrainPageBatchRequest,
+) -> Result<Vec<u8>, ProtocolError> {
+    if request.request_id == 0 {
+        return Err(ProtocolError::InvalidPayload("request id must be nonzero"));
+    }
+    let encoded = encode_terrain_page_batch_request(&request.batch)?;
+    let mut payload = Vec::with_capacity(4 + encoded.len());
+    payload.push(request.priority as u8);
+    payload.extend_from_slice(&[0; 3]);
+    payload.extend_from_slice(&encoded);
+    if payload.len().saturating_add(FRAME_HEADER_BYTES) > MAX_PROTOCOL_FRAME_BYTES {
+        return Err(ProtocolError::LimitExceeded(
+            "terrain page request frame bytes",
+        ));
+    }
+    Ok(encode_frame(
+        KIND_TERRAIN_PAGE_BATCH,
+        request.request_id,
+        &payload,
+    ))
+}
+
+pub fn decode_virtual_terrain_page_batch(
+    bytes: &[u8],
+    expected_source: WorldSourceIdentityHash,
+) -> Result<VirtualTerrainPageBatchRequest, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_kind(&frame, KIND_TERRAIN_PAGE_BATCH)?;
+    if frame.request_id == 0 || frame.payload.len() < 4 {
+        return Err(ProtocolError::InvalidPayload(
+            "invalid terrain page request",
+        ));
+    }
+    let priority = decode_priority(frame.payload[0])?;
+    if frame.payload[1..4] != [0; 3] {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved terrain page request bytes are nonzero",
+        ));
+    }
+    let batch = decode_terrain_page_batch_request(&frame.payload[4..], expected_source)?;
+    Ok(VirtualTerrainPageBatchRequest {
+        request_id: frame.request_id,
+        priority,
+        batch,
+    })
+}
+
+pub fn encode_virtual_terrain_page_batch_result(
+    result: &VirtualTerrainPageBatchResult,
+) -> Result<Vec<u8>, ProtocolError> {
+    if result.request_id == 0 {
+        return Err(ProtocolError::InvalidPayload("request id must be nonzero"));
+    }
+    let payload = encode_terrain_page_batch_result(&result.batch)?;
+    if payload.len().saturating_add(FRAME_HEADER_BYTES) > MAX_PROTOCOL_FRAME_BYTES {
+        return Err(ProtocolError::LimitExceeded(
+            "terrain page result frame bytes",
+        ));
+    }
+    Ok(encode_frame(
+        KIND_TERRAIN_PAGE_BATCH_RESULT,
+        result.request_id,
+        &payload,
+    ))
+}
+
+pub fn decode_virtual_terrain_page_batch_result(
+    bytes: &[u8],
+    expected_source: WorldSourceIdentityHash,
+) -> Result<VirtualTerrainPageBatchResult, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_kind(&frame, KIND_TERRAIN_PAGE_BATCH_RESULT)?;
+    if frame.request_id == 0 {
+        return Err(ProtocolError::InvalidPayload("request id must be nonzero"));
+    }
+    let batch = decode_terrain_page_batch_result(frame.payload, expected_source)?;
+    Ok(VirtualTerrainPageBatchResult {
+        request_id: frame.request_id,
+        batch,
+    })
+}
+
+fn validate_terrain_directory_roots(
+    request_id: u64,
+    roots: &[TerrainPageKey],
+) -> Result<(), ProtocolError> {
+    if request_id == 0
+        || roots.is_empty()
+        || roots.len() > MAX_TERRAIN_DIRECTORIES_PER_BATCH
+        || !roots.windows(2).all(|pair| pair[0] < pair[1])
+        || roots
+            .iter()
+            .any(|root| root.level != TERRAIN_REGION_ROOT_LEVEL || root.bounds().is_none())
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "invalid terrain directory roots",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_terrain_directory_result(
+    result: &TerrainDirectoryBatchResult,
+) -> Result<(), ProtocolError> {
+    let roots = result
+        .items
+        .iter()
+        .map(|item| item.root)
+        .collect::<Vec<_>>();
+    validate_terrain_directory_roots(result.request_id, &roots)?;
+    for item in &result.items {
+        if let Ok(directory) = &item.result
+            && (directory.source_identity_hash != result.source_identity_hash
+                || directory.roots().map(|node| node.key).collect::<Vec<_>>() != [item.root])
+        {
+            return Err(ProtocolError::InvalidPayload(
+                "terrain directory result identity mismatch",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn encode_terrain_page_key(payload: &mut Vec<u8>, key: TerrainPageKey) {
+    payload.push(key.level);
+    payload.extend_from_slice(&[0; 3]);
+    for component in key.coord {
+        push_i32(payload, component);
+    }
+}
+
+fn decode_terrain_page_key(cursor: &mut Cursor<'_>) -> Result<TerrainPageKey, ProtocolError> {
+    let level = cursor.u8()?;
+    if cursor.bytes(3)? != [0; 3] {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved terrain page key bytes are nonzero",
+        ));
+    }
+    Ok(TerrainPageKey {
+        level,
+        coord: [cursor.i32()?, cursor.i32()?, cursor.i32()?],
     })
 }
 
@@ -2521,6 +2882,22 @@ pub const fn frame_fragment_kind() -> u16 {
 
 pub const fn frame_fragment_abort_kind() -> u16 {
     KIND_FRAME_FRAGMENT_ABORT
+}
+
+pub const fn terrain_directory_batch_kind() -> u16 {
+    KIND_TERRAIN_DIRECTORY_BATCH
+}
+
+pub const fn terrain_directory_batch_result_kind() -> u16 {
+    KIND_TERRAIN_DIRECTORY_BATCH_RESULT
+}
+
+pub const fn virtual_terrain_page_batch_kind() -> u16 {
+    KIND_TERRAIN_PAGE_BATCH
+}
+
+pub const fn virtual_terrain_page_batch_result_kind() -> u16 {
+    KIND_TERRAIN_PAGE_BATCH_RESULT
 }
 
 fn encode_player_pose_body(output: &mut Vec<u8>, pose: PlayerPoseUpdate) {
@@ -5477,6 +5854,143 @@ mod tests {
             Err(ProtocolError::InvalidPayload(
                 "duplicate chunk result coordinate"
             ))
+        );
+    }
+
+    #[test]
+    fn virtual_terrain_directory_requests_round_trip_fixed_negative_regions() {
+        let request = TerrainDirectoryBatchRequest {
+            request_id: 71,
+            priority: WorldProductPriority::VisibleSurface,
+            roots: vec![
+                TerrainPageKey {
+                    level: TERRAIN_REGION_ROOT_LEVEL,
+                    coord: [-2, 0, -7],
+                },
+                TerrainPageKey {
+                    level: TERRAIN_REGION_ROOT_LEVEL,
+                    coord: [5, 3, 11],
+                },
+            ],
+        };
+        assert_eq!(
+            decode_terrain_directory_batch(
+                &encode_terrain_directory_batch(&request).expect("encode directory request")
+            ),
+            Ok(request.clone())
+        );
+
+        let mut duplicate = request.clone();
+        duplicate.roots[1] = duplicate.roots[0];
+        assert_eq!(
+            encode_terrain_directory_batch(&duplicate),
+            Err(ProtocolError::InvalidPayload(
+                "invalid terrain directory roots"
+            ))
+        );
+
+        let mut unsorted = request;
+        unsorted.roots.reverse();
+        assert_eq!(
+            encode_terrain_directory_batch(&unsorted),
+            Err(ProtocolError::InvalidPayload(
+                "invalid terrain directory roots"
+            ))
+        );
+    }
+
+    #[test]
+    fn virtual_terrain_directory_results_round_trip_complete_partitions() {
+        let source = WorldSourceIdentityHash::from_bytes([41; 32]);
+        let ready_root = TerrainPageKey {
+            level: TERRAIN_REGION_ROOT_LEVEL,
+            coord: [-4, 1, 2],
+        };
+        let missing_root = TerrainPageKey {
+            level: TERRAIN_REGION_ROOT_LEVEL,
+            coord: [3, -5, 8],
+        };
+        let result = TerrainDirectoryBatchResult {
+            request_id: 72,
+            source_identity_hash: source,
+            items: vec![
+                TerrainDirectoryBatchItem {
+                    root: ready_root,
+                    result: Ok(crate::terrain_directory::test_structural_region_directory(
+                        source, ready_root,
+                    )),
+                },
+                TerrainDirectoryBatchItem {
+                    root: missing_root,
+                    result: Err(TerrainDirectoryFailure::Unavailable),
+                },
+            ],
+        };
+
+        assert_eq!(
+            decode_terrain_directory_batch_result(
+                &encode_terrain_directory_batch_result(&result).expect("encode directory result")
+            ),
+            Ok(result)
+        );
+    }
+
+    #[test]
+    fn virtual_terrain_page_requests_and_results_round_trip_exact_pages() {
+        let source = WorldSourceIdentityHash::from_bytes([42; 32]);
+        let page = crate::build_exact_terrain_page(
+            source,
+            TerrainPageKey {
+                level: 0,
+                coord: [-2, 1, 7],
+            },
+            93,
+            |coord| {
+                if coord.y < 37 {
+                    Material::Stone
+                } else {
+                    Material::Air
+                }
+            },
+        )
+        .expect("build exact page");
+        let identity = crate::TerrainPageTransferIdentity {
+            key: page.key,
+            revision: page.revision,
+            content_fingerprint: page.content_fingerprint,
+        };
+        let request = VirtualTerrainPageBatchRequest {
+            request_id: 73,
+            priority: WorldProductPriority::ImmediateSurface,
+            batch: TerrainPageBatchRequestV1 {
+                source_identity_hash: source,
+                pages: vec![identity],
+            },
+        };
+        assert_eq!(
+            decode_virtual_terrain_page_batch(
+                &encode_virtual_terrain_page_batch(&request).expect("encode page request"),
+                source,
+            ),
+            Ok(request)
+        );
+
+        let result = VirtualTerrainPageBatchResult {
+            request_id: 73,
+            batch: TerrainPageBatchResultV1 {
+                source_identity_hash: source,
+                items: vec![crate::TerrainPageBatchItemV1 {
+                    requested: identity,
+                    result: Ok(page),
+                }],
+            },
+        };
+        assert_eq!(
+            decode_virtual_terrain_page_batch_result(
+                &encode_virtual_terrain_page_batch_result(&result).expect("encode page result"),
+                source,
+            ),
+            Ok(result)
         );
     }
 

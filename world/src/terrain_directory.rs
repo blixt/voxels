@@ -552,6 +552,45 @@ impl<'a> Cursor<'a> {
 }
 
 #[cfg(test)]
+pub(crate) fn test_structural_region_directory(
+    source_identity_hash: WorldSourceIdentityHash,
+    root: TerrainPageKey,
+) -> TerrainHierarchyDirectoryV1 {
+    let mut pending = vec![root];
+    let mut keys = BTreeSet::new();
+    while let Some(key) = pending.pop() {
+        if !keys.insert(key) {
+            continue;
+        }
+        if let Some(children) = key.children() {
+            pending.extend(children);
+        }
+    }
+    let nodes = keys
+        .into_iter()
+        .map(|key| TerrainHierarchyNode {
+            key,
+            revision: 9,
+            content_fingerprint: *blake3::hash(format!("{key:?}").as_bytes()).as_bytes(),
+            errors: TerrainErrorBounds::EXACT,
+            topology: TerrainTopologyClass::Volumetric,
+            representation: TerrainPageRepresentationKind::SurfaceCluster,
+            encoded_bytes: 1_024,
+            has_children: key.level > 0,
+            is_root: key == root,
+        })
+        .collect();
+    let mut directory = TerrainHierarchyDirectoryV1 {
+        source_identity_hash,
+        nodes,
+        content_fingerprint: [0; 32],
+    };
+    directory.content_fingerprint = directory_fingerprint(&directory);
+    debug_assert!(directory.validates_region_partition());
+    directory
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
