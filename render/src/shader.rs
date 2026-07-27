@@ -432,7 +432,7 @@ mod tests {
             assert!(shader.contains("@location(4) morph_heights: u32"));
             assert!(shader.contains("unpack_signed_i3(surface_shape >> (corner * 3u))"));
             assert!(shader.contains("surface_morph_delta(morph_heights, uv.y)"));
-            assert!(shader.contains("let flip = surface_quad_flip(face, surface_shape, ao);"));
+            assert!(shader.contains("surface_quad_flip(face, surface_shape, ao)"));
             assert!(
                 shader.contains("select(STANDARD_STRIP[vertex_index], FLIPPED_STRIP[vertex_index]")
             );
@@ -443,8 +443,8 @@ mod tests {
             );
             assert!(!shader.contains("let world = origin + local"));
         }
-        assert!(voxels.contains("vec3<f32>(origin + quad_local(face, uv, extent))"));
-        assert!(shadows.contains("vec3<f32>(origin + local)"));
+        assert!(voxels.contains("vec3<f32>(origin + local)"));
+        assert!(shadows.contains("vec3<f32>(origin + vec3<i32>(local))"));
         assert!(shadows.contains("surface_parent_blend(world, material)"));
         for shader in [voxels, shadows] {
             assert!(shader.contains("const MORPH_CLOSURE_EXTENT_FLAG: u32 = 0x8000u"));
@@ -453,14 +453,14 @@ mod tests {
     }
 
     #[test]
-    fn shaped_surface_diagonals_follow_the_smaller_height_discontinuity() {
+    fn every_shaped_face_diagonal_follows_the_smaller_height_discontinuity() {
         let voxels = include_str!("shaders/voxels.wgsl");
         let shadows = include_str!("shaders/shadow.wgsl");
         for shader in [voxels, shadows] {
             assert!(shader.contains(
-                "fn surface_quad_flip(face: u32, surface_shape: u32, packed_ao: u32) -> bool"
+                "fn surface_quad_flip(_face: u32, surface_shape: u32, packed_ao: u32) -> bool"
             ));
-            assert!(shader.contains("if face == 2u && surface_shape != 0u"));
+            assert!(shader.contains("if surface_shape != 0u"));
             assert!(shader.contains("return diagonal_02 > diagonal_13;"));
         }
 
@@ -491,24 +491,15 @@ mod tests {
     }
 
     #[test]
-    fn terrain_faces_preserve_exact_projected_silhouettes() {
+    fn terrain_faces_do_not_apply_screen_space_seam_repairs() {
         let voxels = include_str!("shaders/voxels.wgsl");
         assert!(!voxels.contains("CONSERVATIVE_EXPANSION_PIXELS"));
         assert!(!voxels.contains("conservative_surface_clip"));
         assert!(!voxels.contains("conservative_axis_offset"));
-        assert!(voxels.contains("fn close_internal_raster_seams("));
-        assert!(voxels.contains("INTERNAL_SEAM_LOW_U_FLAG"));
-        assert!(voxels.contains("const INTERNAL_SEAM_EXPANSION_PIXELS: f32 = 3.0"));
-        assert!(voxels.contains("let streamed_surface = (material & 0x80000000u) != 0u"));
-        assert!(voxels.contains("let far_surface = streamed_surface && surface_shape == 0u"));
-        assert!(voxels.contains("let streamed_top_surface = streamed_surface && face == 2u"));
-        assert!(voxels.contains(
-            "far_surface || streamed_top_surface || (!streamed_surface && (ao & u_flag) != 0u)"
-        ));
-        assert!(voxels.contains("fn outward_edge_normal("));
-        assert!(voxels.contains("let same_u_world = quad_world("));
-        assert!(voxels.contains("clip = close_internal_raster_seams("));
-        assert!(voxels.contains("out.position = clip"));
+        assert!(!voxels.contains("close_internal_raster_seams"));
+        assert!(!voxels.contains("INTERNAL_SEAM_EXPANSION_PIXELS"));
+        assert!(!voxels.contains("outward_edge_normal"));
+        assert!(voxels.contains("out.position = frame.view_projection * vec4<f32>(world, 1.0)"));
         assert!(voxels.contains("out.world = world"));
         assert!(!voxels.contains("let bayer = array<u32, 16>"));
         assert!(!voxels.contains("cut_transition_visible"));
@@ -542,7 +533,8 @@ mod tests {
         assert!(voxels.contains("if cut_transition.phase_role.y == 1.0"));
         assert!(voxels.contains("cut_transition.phase_role.y == 2.0"));
         assert!(voxels.contains("fn cut_transition_parent_blend("));
-        assert!(voxels.contains("fn cut_transition_shape_blend("));
+        assert!(!voxels.contains("cut_transition_shape_blend"));
+        assert!(!voxels.contains("surface_shape_blend"));
     }
 
     #[test]

@@ -16,7 +16,12 @@ const CORNERS = array<vec2<i32>, 4>(
 );
 const STANDARD_STRIP = array<u32, 4>(1u, 2u, 0u, 3u);
 const FLIPPED_STRIP = array<u32, 4>(0u, 1u, 3u, 2u);
+const TRIANGLE_STRIP = array<u32, 4>(1u, 2u, 0u, 0u);
 const MORPH_CLOSURE_EXTENT_FLAG: u32 = 0x8000u;
+const TRANSITION_TRIANGLE_FLAG: u32 = 0x4000u;
+const TRANSITION_TRIANGLE_OFFSET_MASK: u32 = 0x01ffu;
+const CANONICAL_TRIANGLE_FLAG: u32 = 0x2000u;
+const CANONICAL_TRIANGLE_SHADOW_OWNER_FLAG: u32 = 0x4000u;
 
 fn corner_ao(packed: u32, corner: u32) -> f32 {
   return f32((packed >> (corner * 2u)) & 3u) / 3.0;
@@ -32,8 +37,8 @@ fn unpack_signed_i3(value: u32) -> f32 {
   return f32(select(i32(bits), i32(bits) - 8, bits >= 4u));
 }
 
-fn surface_quad_flip(face: u32, surface_shape: u32, packed_ao: u32) -> bool {
-  if face == 2u && surface_shape != 0u {
+fn surface_quad_flip(_face: u32, surface_shape: u32, packed_ao: u32) -> bool {
+  if surface_shape != 0u {
     let diagonal_02 = abs(
       unpack_signed_i3(surface_shape) - unpack_signed_i3(surface_shape >> 6u),
     );
@@ -77,25 +82,38 @@ fn surface_parent_blend(world: vec3<f32>, material: u32) -> f32 {
   return 1.0 - smoothstep(0.0, width, inside);
 }
 
-fn surface_shape_blend(world: vec3<f32>, material: u32) -> f32 {
-  if shadow_frame.lod_options.w < 0.5 || (material & 0x80000000u) == 0u {
-    return 0.0;
-  }
+fn transition_triangle_local(
+  corner: u32,
+  encoded_extent: vec2<u32>,
+  material: u32,
+) -> vec3<i32> {
+  let anchor = (encoded_extent.x >> 9u) & 3u;
+  let edge = (encoded_extent.x >> 11u) & 3u;
   let level = (material >> 27u) & 7u;
-  let inner_half_extent = lod_boundary_half_extent(level);
-  let inner_delta = abs(world.xz - lod_boundary_center(level));
-  let inner_inside = inner_half_extent - max(inner_delta.x, inner_delta.y);
-  let inner_width = max(1.6, inner_half_extent * 0.02);
-  let inner_blend = smoothstep(0.0, inner_width, -inner_inside);
-  if level >= 7u {
-    return inner_blend;
+  let stride = i32(2u << level);
+  let anchor_xz = array<vec2<i32>, 4>(
+    vec2<i32>(0, 0),
+    vec2<i32>(stride, 0),
+    vec2<i32>(stride, stride),
+    vec2<i32>(0, stride),
+  )[anchor];
+  let raw_start = i32(encoded_extent.x & TRANSITION_TRIANGLE_OFFSET_MASK);
+  let raw_end = i32(encoded_extent.y);
+  let reverse = edge == 0u || edge == 3u;
+  let tangent = select(
+    select(raw_start, raw_end, corner == 2u),
+    select(raw_end, raw_start, corner == 2u),
+    reverse,
+  );
+  var boundary_xz = vec2<i32>(0);
+  switch edge {
+    case 0u: { boundary_xz = vec2<i32>(0, tangent); }
+    case 1u: { boundary_xz = vec2<i32>(stride, tangent); }
+    case 2u: { boundary_xz = vec2<i32>(tangent, 0); }
+    default: { boundary_xz = vec2<i32>(tangent, stride); }
   }
-  let outer_boundary = level + 1u;
-  let outer_half_extent = lod_boundary_half_extent(outer_boundary);
-  let outer_delta = abs(world.xz - lod_boundary_center(outer_boundary));
-  let outer_inside = outer_half_extent - max(outer_delta.x, outer_delta.y);
-  let outer_width = max(1.6, outer_half_extent * 0.02);
-  return min(inner_blend, smoothstep(0.0, outer_width, outer_inside));
+  let xz = select(boundary_xz, anchor_xz, corner == 0u);
+  return vec3<i32>(xz.x, 1, xz.y);
 }
 
 fn shadow_vertex(
@@ -111,28 +129,64 @@ fn shadow_vertex(
   let packed_material = material_face & 0xfff8ff1fu;
   let surface_shape = ((packed_material >> 8u) & 255u) | (((ao >> 20u) & 15u) << 8u);
   let material = packed_material & 0xffff00ffu;
-  let morph_closure = (extent_voxels.x & MORPH_CLOSURE_EXTENT_FLAG) != 0u;
+  let transition_triangle = (extent_voxels.x & TRANSITION_TRIANGLE_FLAG) != 0u;
+  let canonical_triangle = (extent_voxels.x & CANONICAL_TRIANGLE_FLAG) != 0u;
+  let morph_closure =
+    (extent_voxels.x & MORPH_CLOSURE_EXTENT_FLAG) != 0u && !canonical_triangle;
+  let canonical_shadow_owner =
+    canonical_triangle && (extent_voxels.y & CANONICAL_TRIANGLE_SHADOW_OWNER_FLAG) != 0u;
+  let custom_triangle = transition_triangle || canonical_triangle;
   let extent = vec2<i32>(vec2<u32>(
-    extent_voxels.x & ~MORPH_CLOSURE_EXTENT_FLAG,
+    select(
+      extent_voxels.x & ~MORPH_CLOSURE_EXTENT_FLAG,
+      0u,
+      custom_triangle,
+    ),
     extent_voxels.y,
   ));
-  let flip = surface_quad_flip(face, surface_shape, ao);
-  let corner = select(STANDARD_STRIP[vertex_index], FLIPPED_STRIP[vertex_index], flip);
+  let flip = !custom_triangle && surface_quad_flip(face, surface_shape, ao);
+  let quad_corner = select(STANDARD_STRIP[vertex_index], FLIPPED_STRIP[vertex_index], flip);
+  let corner = select(
+    quad_corner,
+    TRIANGLE_STRIP[vertex_index],
+    custom_triangle && !canonical_shadow_owner,
+  );
   let uv = CORNERS[corner];
-  var local = vec3<i32>(0);
-  switch face {
-    case 0u: { local = vec3<i32>(1, uv.y * extent.y, uv.x * extent.x); }
-    case 1u: { local = vec3<i32>(0, uv.y * extent.y, uv.x * extent.x); }
-    case 2u: { local = vec3<i32>(uv.x * extent.x, 1, uv.y * extent.y); }
-    case 3u: { local = vec3<i32>(uv.x * extent.x, 0, uv.y * extent.y); }
-    case 4u: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 1); }
-    default: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 0); }
+  var local = vec3<f32>(transition_triangle_local(corner, extent_voxels, material));
+  if canonical_shadow_owner {
+    let width = i32(
+      (((extent_voxels.x >> 6u) & 31u) | ((extent_voxels.x >> 10u) & 32u)) + 1u,
+    );
+    let height = i32(
+      (((extent_voxels.y >> 6u) & 31u) | ((extent_voxels.y >> 10u) & 32u)) + 1u,
+    );
+    switch face {
+      case 0u: { local = vec3<f32>(vec3<i32>(1, uv.y * height, uv.x * width)); }
+      case 1u: { local = vec3<f32>(vec3<i32>(0, uv.y * height, uv.x * width)); }
+      case 2u: { local = vec3<f32>(vec3<i32>(uv.x * width, 1, uv.y * height)); }
+      case 3u: { local = vec3<f32>(vec3<i32>(uv.x * width, 0, uv.y * height)); }
+      case 4u: { local = vec3<f32>(vec3<i32>(uv.x * width, uv.y * height, 1)); }
+      default: { local = vec3<f32>(vec3<i32>(uv.x * width, uv.y * height, 0)); }
+    }
+  } else if canonical_triangle {
+    local = vec3<f32>(0.0, 1.0, 0.0);
+  } else if !transition_triangle {
+    switch face {
+      case 0u: { local = vec3<f32>(vec3<i32>(1, uv.y * extent.y, uv.x * extent.x)); }
+      case 1u: { local = vec3<f32>(vec3<i32>(0, uv.y * extent.y, uv.x * extent.x)); }
+      case 2u: { local = vec3<f32>(vec3<i32>(uv.x * extent.x, 1, uv.y * extent.y)); }
+      case 3u: { local = vec3<f32>(vec3<i32>(uv.x * extent.x, 0, uv.y * extent.y)); }
+      case 4u: { local = vec3<f32>(vec3<i32>(uv.x * extent.x, uv.y * extent.y, 1)); }
+      default: { local = vec3<f32>(vec3<i32>(uv.x * extent.x, uv.y * extent.y, 0)); }
+    }
   }
-  var world = vec3<f32>(origin + local) * shadow_frame.camera_voxel.w;
-  if surface_shape != 0u {
+  var world = vec3<f32>(origin + vec3<i32>(local)) * shadow_frame.camera_voxel.w;
+  if canonical_triangle {
+    world = (vec3<f32>(origin) + local) * shadow_frame.camera_voxel.w;
+  }
+  if surface_shape != 0u && !canonical_triangle {
     world.y += unpack_signed_i3(surface_shape >> (corner * 3u))
-      * shadow_frame.camera_voxel.w
-      * surface_shape_blend(world, material);
+      * shadow_frame.camera_voxel.w;
   }
   if morph_geometry {
     let parent_blend = surface_parent_blend(world, material);

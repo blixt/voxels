@@ -472,16 +472,25 @@ async function compareScreenshots(page: Page, before: Buffer, after: Buffer) {
   );
 }
 
-async function analyzeWatertightTerrain(page: Page, screenshot: Buffer) {
+async function analyzeWatertightTerrain(
+  page: Page,
+  screenshot: Buffer,
+  target: "magenta" | "black" = "magenta",
+) {
   // This fixed camera points 21 degrees below the horizon. Keep the region below the tree-lined
   // silhouette: magenta pockets between distant trunks are legitimate sky, whereas an enclosed
   // component in this lower ground band is missing terrain coverage.
-  return analyzeDiagnosticSky(page, screenshot, {
-    x0: 0.02,
-    x1: 0.98,
-    y0: 0.55,
-    y1: 0.98,
-  });
+  return analyzeDiagnosticSky(
+    page,
+    screenshot,
+    {
+      x0: 0.02,
+      x1: 0.98,
+      y0: 0.55,
+      y1: 0.98,
+    },
+    target,
+  );
 }
 
 function summarizePerformance(timings: LodTimings) {
@@ -528,6 +537,7 @@ interface LodOptions {
   readonly cascadedShadows: boolean;
   readonly screenSpaceAmbientOcclusion: boolean;
   readonly recordVideo: boolean;
+  readonly geometrySourceTravel: boolean;
   readonly travelSeconds: number;
   readonly buildProfile: "debug" | "wasm-dev" | "release";
 }
@@ -615,6 +625,7 @@ function parseOptions(arguments_: readonly string[]): LodOptions {
     cascadedShadows: shadows === "on",
     screenSpaceAmbientOcclusion: ambientOcclusion === "on",
     recordVideo: argumentsReader.flag("video"),
+    geometrySourceTravel: argumentsReader.flag("geometry-source-travel"),
     travelSeconds:
       argumentsReader.number("travel-seconds", {
         fallback: 30,
@@ -649,6 +660,10 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       spawnVoxels: options.spawn,
       spawnPillarHeightVoxels: options.pillarHeight,
       spawnPillarRadiusVoxels: options.pillarRadius,
+      // Sustained travel is a streaming-pressure gate. Match the checked-in production worker
+      // budget so a fast local development machine cannot hide a fallback-coverage race.
+      generationWorkers: travelCoverage ? 2 : undefined,
+      generationWorkersPerClient: travelCoverage ? 1 : undefined,
       cascadedShadows: options.cascadedShadows,
       screenSpaceAmbientOcclusion: options.screenSpaceAmbientOcclusion,
       dayLengthSeconds: 0,
@@ -697,6 +712,8 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
 
   if (travelCoverage) {
     await engine.setSpectator(true);
+    const diagnosticTarget = options.geometrySourceTravel ? "black" : "magenta";
+    if (options.geometrySourceTravel) await engine.setGeometrySourceDebug(true);
     const groundPose = cameraPosition(await readSnapshot(engine, timings));
     if (descentCoverage) {
       // Build a real continuous sky-to-ground trajectory instead of teleporting. The ascent
@@ -725,10 +742,13 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       readonly largestEnclosedComponentPixels: number;
       readonly presentedStrideVoxels: number;
       readonly incompleteTransitionEdges: number;
+      readonly cutTransitionActive: boolean;
+      readonly cutTransitionPhase: number;
       readonly surfaceQueued: number;
     }> = [];
-    let worst = await analyzeWatertightTerrain(page, before);
-    let worstScreenshot = before;
+    let worstScreenshot = options.geometrySourceTravel ? await page.screenshot() : before;
+    let worst = await analyzeWatertightTerrain(page, worstScreenshot, diagnosticTarget);
+    let failureGeometrySources: Buffer | undefined;
     await page.keyboard.down("KeyW");
     if (descentCoverage) await page.keyboard.down("ShiftLeft");
     try {
@@ -736,7 +756,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
         await page.waitForTimeout(200);
         const snapshot = await readSnapshot(engine, timings);
         const screenshot = await page.screenshot();
-        const analysis = await analyzeWatertightTerrain(page, screenshot);
+        const analysis = await analyzeWatertightTerrain(page, screenshot, diagnosticTarget);
         samples.push({
           elapsedMs: Date.now() - travelStartedAt,
           camera: cameraPosition(snapshot),
@@ -746,6 +766,8 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
           largestEnclosedComponentPixels: analysis.largestEnclosedComponentPixels,
           presentedStrideVoxels: snapshotValue(snapshot, "presentedLodStrideVoxels"),
           incompleteTransitionEdges: snapshotValue(snapshot, "lodIncompleteTransitionEdges"),
+          cutTransitionActive: snapshotValue(snapshot, "lodCutTransitionActive") === 1,
+          cutTransitionPhase: snapshotValue(snapshot, "lodCutTransitionPhase"),
           surfaceQueued: snapshotValue(snapshot, "surfaceQueued"),
         });
         if (
@@ -756,7 +778,15 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
           worst = analysis;
           worstScreenshot = screenshot;
         }
-        if (analysis.enclosedPixels > 0) break;
+        if (
+          analysis.enclosedPixels > 0 &&
+          failureGeometrySources === undefined &&
+          !options.geometrySourceTravel
+        ) {
+          await engine.setGeometrySourceDebug(true);
+          failureGeometrySources = await page.screenshot();
+          await engine.setGeometrySourceDebug(false);
+        }
         if (descentCoverage && cameraPosition(snapshot)[1] <= descentStopHeight) break;
       }
     } finally {
@@ -767,7 +797,11 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     const stoppedImmediateSnapshot = await readSnapshot(engine, timings);
     const travelFinishedPose = cameraPosition(stoppedImmediateSnapshot);
     const stoppedImmediateScreenshot = await page.screenshot();
-    const stoppedImmediate = await analyzeWatertightTerrain(page, stoppedImmediateScreenshot);
+    const stoppedImmediate = await analyzeWatertightTerrain(
+      page,
+      stoppedImmediateScreenshot,
+      diagnosticTarget,
+    );
     let settledSamples = 0;
     await engine.waitForSnapshot(
       (snapshot) => {
@@ -788,7 +822,22 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     await page.waitForTimeout(250);
     const stoppedSettledSnapshot = await readSnapshot(engine, timings);
     const stoppedSettledScreenshot = await page.screenshot();
-    const stoppedSettled = await analyzeWatertightTerrain(page, stoppedSettledScreenshot);
+    const stoppedSettled = await analyzeWatertightTerrain(
+      page,
+      stoppedSettledScreenshot,
+      diagnosticTarget,
+    );
+    let stoppedSettledGeometrySources: Buffer | undefined;
+    if (stoppedSettled.enclosedPixels > 0) {
+      if (options.geometrySourceTravel) {
+        stoppedSettledGeometrySources = stoppedSettledScreenshot;
+      } else {
+        await engine.setGeometrySourceDebug(true);
+        stoppedSettledGeometrySources = await page.screenshot();
+        await engine.setGeometrySourceDebug(false);
+      }
+    }
+    if (options.geometrySourceTravel) await engine.setGeometrySourceDebug(false);
     await engine.setDiagnosticSky(null);
     await context.artifacts.write(
       "Worst sustained travel coverage",
@@ -796,6 +845,14 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       worstScreenshot,
       "image/png",
     );
+    if (failureGeometrySources !== undefined) {
+      await context.artifacts.write(
+        "Geometry sources at sustained travel coverage failure",
+        "travel-failure-geometry-sources.png",
+        failureGeometrySources,
+        "image/png",
+      );
+    }
     await context.artifacts.write(
       "Coverage immediately after stopping",
       "travel-stopped-immediate.png",
@@ -808,6 +865,14 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       stoppedSettledScreenshot,
       "image/png",
     );
+    if (stoppedSettledGeometrySources !== undefined) {
+      await context.artifacts.write(
+        "Geometry sources after the LOD handoff window",
+        "travel-stopped-settled-geometry-sources.png",
+        stoppedSettledGeometrySources,
+        "image/png",
+      );
+    }
     const uncoveredOwnerSamples = samples.filter(
       (sample) => sample.presentedStrideVoxels === 0,
     ).length;
@@ -840,6 +905,8 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
         requestedSeconds: options.travelSeconds,
         samples: samples.length,
         distanceMetres: spatialDistance(travelStartedPose, travelFinishedPose),
+        startedPose: travelStartedPose,
+        finishedPose: travelFinishedPose,
         altitude: {
           startedMetres: travelStartedPose[1],
           finishedMetres: travelFinishedPose[1],
@@ -983,6 +1050,8 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       pose: beforePose,
       lod: {
         centres: initialCentres,
+        worldQuads: snapshotValue(beforeSnapshot, "quads"),
+        drawCalls: snapshotValue(beforeSnapshot, "drawCalls"),
         transitionQuads: snapshotValue(beforeSnapshot, "lodTransitionQuads"),
         viewportFingerprint: [
           snapshotValue(beforeSnapshot, "viewportFingerprintLow24"),

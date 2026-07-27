@@ -74,20 +74,23 @@ function validateRegion(region: NormalizedImageRegion): void {
 }
 
 /**
- * Counts the renderer's diagnostic-magenta sky inside a screenshot region.
+ * Counts an exact renderer diagnostic target inside a screenshot region.
  *
  * The HDR scene is tone-mapped before capture, so configured `[255, 0, 255]` arrives near
  * `[241, 34, 241]`. The narrow predicate tolerates browser color conversion while remaining
- * disjoint from every terrain material. Validation fixtures also suppress clouds and precipitation.
+ * disjoint from every terrain material. Geometry-source fixtures instead use exact black, since
+ * every published source receives a non-black debug color. Validation fixtures also suppress
+ * clouds and precipitation.
  */
 export async function analyzeDiagnosticSky(
   page: Page,
   screenshot: Buffer,
   region: NormalizedImageRegion = FULL_IMAGE,
+  target: "magenta" | "black" = "magenta",
 ): Promise<DiagnosticSkyAnalysis> {
   validateRegion(region);
   return page.evaluate(
-    async ({ base64, normalizedRegion }) => {
+    async ({ base64, normalizedRegion, diagnosticTarget }) => {
       const response = await fetch(`data:image/png;base64,${base64}`);
       const bitmap = await createImageBitmap(await response.blob());
       const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
@@ -112,7 +115,11 @@ export async function analyzeDiagnosticSky(
           const red = pixels[source] ?? 0;
           const green = pixels[source + 1] ?? 0;
           const blue = pixels[source + 2] ?? 0;
-          if (red < 232 || green > 48 || blue < 232) continue;
+          const diagnostic =
+            diagnosticTarget === "black"
+              ? red === 0 && green === 0 && blue === 0
+              : red >= 232 && green <= 48 && blue >= 232;
+          if (!diagnostic) continue;
           mask[x - roi.x0 + (y - roi.y0) * width] = 1;
           diagnosticSkyPixels += 1;
           if (coordinates.length < 32) coordinates.push([x, y]);
@@ -186,7 +193,11 @@ export async function analyzeDiagnosticSky(
         enclosedSampleCoordinates: enclosedCoordinates,
       };
     },
-    { base64: screenshot.toString("base64"), normalizedRegion: region },
+    {
+      base64: screenshot.toString("base64"),
+      normalizedRegion: region,
+      diagnosticTarget: target,
+    },
   );
 }
 

@@ -76,12 +76,27 @@ const GPU_SOURCE_FRONTIER: u32 = 1;
 const GPU_SOURCE_LOD_CONNECTOR: u32 = 2;
 const GPU_SOURCE_SURFACE_FALLBACK: u32 = 3;
 const GPU_SOURCE_WATER: u32 = 4;
+const GPU_SOURCE_SKYLINE_PROXY: u32 = 5;
+const GPU_SOURCE_LOD_STITCH_TOP: u32 = 6;
+const GPU_SOURCE_CROSSING_LOD_CONNECTOR: u32 = 7;
 const EXACT_VOLUME_FRONTIER_MESH_KEY: MeshKey = (u8::MAX, 2, 0, 0);
 pub const EXACT_VOLUME_FRONTIER_FACE_WORDS: usize = CHUNK_EDGE * CHUNK_EDGE / 64;
-const INTERNAL_SEAM_LOW_U_FLAG: u32 = 1 << 8;
-const INTERNAL_SEAM_HIGH_U_FLAG: u32 = 1 << 9;
-const INTERNAL_SEAM_LOW_V_FLAG: u32 = 1 << 10;
-const INTERNAL_SEAM_HIGH_V_FLAG: u32 = 1 << 11;
+/// Transition top triangles reuse the compact quad instance format. The vertex shader decodes
+/// one coarse-cell anchor plus two offsets on a boundary edge and degenerates the strip's second
+/// triangle. Only the low nine bits remain an offset; every supported surface stride fits there.
+const TRANSITION_TRIANGLE_FLAG: u16 = 1 << 14;
+const TRANSITION_TRIANGLE_OFFSET_MASK: u16 = (1 << 9) - 1;
+const TRANSITION_TRIANGLE_ANCHOR_SHIFT: u16 = 9;
+const TRANSITION_TRIANGLE_EDGE_SHIFT: u16 = 11;
+/// Greedy canonical rectangles are triangulated from their center to unit boundary segments.
+/// Matching every possible 10 cm boundary vertex prevents merged faces from leaving T-junctions
+/// against differently sized neighbors while retaining perimeter rather than area complexity.
+const CANONICAL_TRIANGLE_FLAG: u16 = 1 << 13;
+const CANONICAL_TRIANGLE_OFFSET_MASK: u16 = (1 << 6) - 1;
+const CANONICAL_TRIANGLE_EXTENT_SHIFT: u16 = 6;
+const CANONICAL_TRIANGLE_EDGE_SHIFT: u16 = 11;
+const CANONICAL_TRIANGLE_ANCHOR_SHIFT: u16 = 11;
+const CANONICAL_TRIANGLE_SHADOW_OWNER_FLAG: u16 = 1 << 14;
 const SURFACE_MACRO_NORMAL_FLAG: u32 = 1 << 24;
 const SURFACE_SHAPE_MATERIAL_SHIFT: u32 = 8;
 const SURFACE_SHAPE_AO_SHIFT: u32 = 20;
@@ -101,7 +116,10 @@ const MORPH_CLOSURE_EXTENT_FLAG: u16 = 1 << 15;
 const SURFACE_MACRO_SLOPE_SCALE: f32 = 0.40;
 const SURFACE_MACRO_SLOPE_MAX: f32 = 0.5;
 const LOD_TRANSITION_MESH_KEYS: [MeshKey; 2] = [(u8::MAX, 0, 0, 0), (u8::MAX, 1, 0, 0)];
-const CUT_TRANSITION_SECONDS: f32 = 0.45;
+// A selected cut is already one complete topology product. Publishing its previous and current
+// draw plans together reintroduced two independent owners and exposed holes while moving. Keep
+// the legacy transition plumbing inert until it can be replaced by vertex morphs inside one mesh.
+const CUT_TRANSITION_SECONDS: f32 = 0.0;
 const LOD_PLAN_REBUILD_FOCUS: u32 = 1;
 const LOD_PLAN_REBUILD_CANONICAL_COLUMNS: u32 = 1 << 1;
 const LOD_PLAN_REBUILD_CANONICAL_PROFILE: u32 = 1 << 2;
@@ -380,6 +398,9 @@ struct SurfaceCell {
     material: Material,
     macro_normal: u32,
     horizon_profile: u16,
+    /// Signed three-bit offsets for the four top corners. LOD stitches subdivide the owning
+    /// coarse face from this exact source instead of placing a second repair surface over it.
+    shape: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -447,6 +468,286 @@ fn pack_surface_horizon_ao(macro_normal: u32, horizon_profile: u16) -> u32 {
     macro_normal | ((u32::from(horizon_profile) >> 9) << SURFACE_HORIZON_AO_SHIFT)
 }
 
+fn packed_ao_corner(packed: u8, corner: usize) -> u8 {
+    (packed >> (corner * 2)) & 3
+}
+
+fn rounded_ao_lerp(start: u8, end: u8, offset: u16, extent: u16) -> u8 {
+    debug_assert!(extent > 0);
+    let numerator =
+        u32::from(start) * u32::from(extent - offset) + u32::from(end) * u32::from(offset);
+    ((numerator + u32::from(extent) / 2) / u32::from(extent)) as u8
+}
+
+fn canonical_triangle_ao(
+    packed: u8,
+    edge: SurfacePatchEdge,
+    bounds: [u16; 2],
+    extent: [u16; 2],
+    anchor: Option<usize>,
+) -> u32 {
+    let corners = std::array::from_fn::<_, 4, _>(|corner| packed_ao_corner(packed, corner));
+    let flip = u16::from(corners[0]) + u16::from(corners[2])
+        > u16::from(corners[1]) + u16::from(corners[3]);
+    let anchor_ao = if let Some(anchor) = anchor {
+        u16::from(corners[anchor])
+    } else if flip {
+        (u16::from(corners[1]) + u16::from(corners[3])).div_ceil(2)
+    } else {
+        (u16::from(corners[0]) + u16::from(corners[2])).div_ceil(2)
+    } as u8;
+    let (edge_corners, edge_extent) = match edge {
+        SurfacePatchEdge::NegativeX => ([corners[0], corners[3]], extent[1]),
+        SurfacePatchEdge::PositiveX => ([corners[1], corners[2]], extent[1]),
+        SurfacePatchEdge::NegativeZ => ([corners[0], corners[1]], extent[0]),
+        SurfacePatchEdge::PositiveZ => ([corners[3], corners[2]], extent[0]),
+    };
+    let mut edge_ao = [
+        rounded_ao_lerp(edge_corners[0], edge_corners[1], bounds[0], edge_extent),
+        rounded_ao_lerp(edge_corners[0], edge_corners[1], bounds[1], edge_extent),
+    ];
+    if matches!(
+        edge,
+        SurfacePatchEdge::NegativeX | SurfacePatchEdge::PositiveZ
+    ) {
+        edge_ao.swap(0, 1);
+    }
+    u32::from(anchor_ao)
+        | (u32::from(edge_ao[0]) << 2)
+        | (u32::from(edge_ao[1]) << 4)
+        | (u32::from(edge_ao[1]) << 6)
+}
+
+fn canonical_gpu_quad(world_origin: [i32; 3], quad: &Quad) -> GpuQuad {
+    let extent = quad.extent.map(u16::from);
+    GpuQuad {
+        origin: [
+            world_origin[0] + i32::from(quad.origin[0]),
+            world_origin[1] + i32::from(quad.origin[1]),
+            world_origin[2] + i32::from(quad.origin[2]),
+        ],
+        extent_voxels: extent,
+        material_face: pack_gpu_material_face(u32::from(quad.material), quad.face),
+        ao: u32::from(quad.ao),
+    }
+}
+
+const fn pack_canonical_triangle_extent(extent: u16) -> u16 {
+    debug_assert!(extent > 0 && extent <= 64);
+    let value = extent - 1;
+    ((value & 31) << CANONICAL_TRIANGLE_EXTENT_SHIFT) | ((value & 32) << (15 - 5))
+}
+
+const fn unpack_canonical_triangle_extent(encoded: u16) -> u16 {
+    (((encoded >> CANONICAL_TRIANGLE_EXTENT_SHIFT) & 31) | ((encoded >> (15 - 5)) & 32)) + 1
+}
+
+fn canonical_quad_point(quad: GpuQuad, u: i32, v: i32) -> [i32; 3] {
+    let face = ((quad.material_face & GPU_FACE_MASK) >> GPU_FACE_SHIFT) as u8;
+    let local = match face {
+        0 => [1, v, u],
+        1 => [0, v, u],
+        2 => [u, 1, v],
+        3 => [u, 0, v],
+        4 => [u, v, 1],
+        _ => [u, v, 0],
+    };
+    std::array::from_fn(|axis| quad.origin[axis].saturating_add(local[axis]))
+}
+
+fn canonical_quad_corners(quad: GpuQuad) -> [[i32; 3]; 4] {
+    let [u, v] = quad.extent_voxels.map(i32::from);
+    [
+        canonical_quad_point(quad, 0, 0),
+        canonical_quad_point(quad, u, 0),
+        canonical_quad_point(quad, u, v),
+        canonical_quad_point(quad, 0, v),
+    ]
+}
+
+fn axis_line_key(axis: usize, point: [i32; 3]) -> (u8, i32, i32) {
+    match axis {
+        0 => (0, point[1], point[2]),
+        1 => (1, point[0], point[2]),
+        _ => (2, point[0], point[1]),
+    }
+}
+
+fn constrain_gpu_quad_t_junctions(
+    base_quads: &[GpuQuad],
+    eligible: impl Fn(usize, GpuQuad) -> bool,
+    force_unit_edge: impl Fn(usize, usize, [i32; 3], [i32; 3]) -> bool,
+    preserve_packed_ao: bool,
+) -> Vec<Vec<GpuQuad>> {
+    let edge_corners = [(0, 3), (1, 2), (0, 1), (3, 2)];
+    let mut line_segments = HashMap::<(u8, i32, i32), Vec<[i32; 2]>>::new();
+    for &quad in base_quads {
+        let corners = canonical_quad_corners(quad);
+        for (start_corner, end_corner) in edge_corners {
+            let start = corners[start_corner];
+            let end = corners[end_corner];
+            let Some(axis) = (0..3).find(|&axis| start[axis] != end[axis]) else {
+                continue;
+            };
+            line_segments
+                .entry(axis_line_key(axis, start))
+                .or_default()
+                .push([start[axis], end[axis]]);
+        }
+    }
+    let mut output = Vec::with_capacity(base_quads.len());
+    for (index, &base) in base_quads.iter().enumerate() {
+        let corners = canonical_quad_corners(base);
+        let mut edge_offsets = std::array::from_fn::<_, 4, _>(|edge_index| {
+            let (start_corner, end_corner) = edge_corners[edge_index];
+            let start = corners[start_corner];
+            let end = corners[end_corner];
+            let Some(axis) = (0..3).find(|&axis| start[axis] != end[axis]) else {
+                return vec![0];
+            };
+            let extent = end[axis].saturating_sub(start[axis]);
+            debug_assert!(extent > 0);
+            let mut offsets = vec![0, extent as u16];
+            if force_unit_edge(index, edge_index, start, end) {
+                offsets.extend(1..extent as u16);
+            }
+            for segment in line_segments
+                .get(&axis_line_key(axis, start))
+                .into_iter()
+                .flatten()
+                .filter(|segment| segment[0] < end[axis] && start[axis] < segment[1])
+            {
+                offsets.extend(segment.iter().filter_map(|&coordinate| {
+                    (start[axis]..=end[axis])
+                        .contains(&coordinate)
+                        .then(|| u16::try_from(coordinate - start[axis]).ok())
+                        .flatten()
+                }));
+            }
+            offsets.sort_unstable();
+            offsets.dedup();
+            offsets
+        });
+        let needs_constraints =
+            eligible(index, base) && edge_offsets.iter().any(|offsets| offsets.len() > 2);
+        if !needs_constraints {
+            output.push(vec![base]);
+            continue;
+        }
+        let constrained = SurfacePatchEdge::ALL
+            .into_iter()
+            .filter(|edge| edge_offsets[edge.index()].len() > 2)
+            .collect::<Vec<_>>();
+        let (anchor, fill_edge) = match constrained.as_slice() {
+            [SurfacePatchEdge::NegativeX] => (Some(1), Some(SurfacePatchEdge::PositiveZ)),
+            [SurfacePatchEdge::PositiveX] => (Some(0), Some(SurfacePatchEdge::PositiveZ)),
+            [SurfacePatchEdge::NegativeZ] => (Some(3), Some(SurfacePatchEdge::PositiveX)),
+            [SurfacePatchEdge::PositiveZ] => (Some(0), Some(SurfacePatchEdge::PositiveX)),
+            [SurfacePatchEdge::NegativeX, SurfacePatchEdge::NegativeZ] => (Some(2), None),
+            [SurfacePatchEdge::PositiveX, SurfacePatchEdge::NegativeZ] => (Some(3), None),
+            [SurfacePatchEdge::PositiveX, SurfacePatchEdge::PositiveZ] => (Some(0), None),
+            [SurfacePatchEdge::NegativeX, SurfacePatchEdge::PositiveZ] => (Some(1), None),
+            _ => (None, None),
+        };
+        let extent = base.extent_voxels;
+        let emitted_edges = if anchor.is_some() {
+            constrained.into_iter().chain(fill_edge).collect::<Vec<_>>()
+        } else {
+            SurfacePatchEdge::ALL.to_vec()
+        };
+        let mut triangles = Vec::new();
+        for edge in emitted_edges {
+            let edge_index = edge.index();
+            let offsets = &mut edge_offsets[edge_index];
+            offsets.sort_unstable();
+            offsets.dedup();
+            let fallback;
+            let offsets = if Some(edge) == fill_edge {
+                fallback = match edge {
+                    SurfacePatchEdge::NegativeX | SurfacePatchEdge::PositiveX => [0, extent[1]],
+                    SurfacePatchEdge::NegativeZ | SurfacePatchEdge::PositiveZ => [0, extent[0]],
+                };
+                fallback.as_slice()
+            } else {
+                offsets.as_slice()
+            };
+            for bounds in offsets.windows(2) {
+                let [start, end] = [bounds[0], bounds[1]];
+                debug_assert!(end <= CANONICAL_TRIANGLE_OFFSET_MASK);
+                triangles.push(GpuQuad {
+                    extent_voxels: [
+                        start
+                            | pack_canonical_triangle_extent(extent[0])
+                            | ((edge.index() as u16) << CANONICAL_TRIANGLE_EDGE_SHIFT)
+                            | CANONICAL_TRIANGLE_FLAG,
+                        end | pack_canonical_triangle_extent(extent[1])
+                            | ((anchor.map_or(0, |corner| corner + 1) as u16)
+                                << CANONICAL_TRIANGLE_ANCHOR_SHIFT),
+                    ],
+                    ao: if preserve_packed_ao {
+                        base.ao
+                    } else {
+                        canonical_triangle_ao(base.ao as u8, edge, [start, end], extent, anchor)
+                    },
+                    ..base
+                });
+            }
+        }
+        if let Some(first) = triangles.first_mut() {
+            first.extent_voxels[1] |= CANONICAL_TRIANGLE_SHADOW_OWNER_FLAG;
+        }
+        output.push(triangles);
+    }
+    output
+}
+
+fn canonical_gpu_quads(world_origin: [i32; 3], quads: &[Quad]) -> Vec<GpuQuad> {
+    let base_quads = quads
+        .iter()
+        .map(|quad| canonical_gpu_quad(world_origin, quad))
+        .collect::<Vec<_>>();
+    constrain_gpu_quad_t_junctions(
+        &base_quads,
+        |_, quad| {
+            ((quad.material_face & GPU_FACE_MASK) >> GPU_FACE_SHIFT) == 2
+                && quad.extent_voxels[0] <= 63
+                && quad.extent_voxels[1] <= 63
+                && quad.extent_voxels.into_iter().all(|extent| extent > 0)
+        },
+        |_, _, _, _| false,
+        false,
+    )
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn split_gpu_quad_vertical_extent(quad: GpuQuad, maximum_extent: u16) -> Vec<GpuQuad> {
+    let face = ((quad.material_face & GPU_FACE_MASK) >> GPU_FACE_SHIFT) as u8;
+    if !matches!(face, 0 | 1 | 4 | 5) || quad.extent_voxels[1] <= maximum_extent {
+        return vec![quad];
+    }
+    let mut output = Vec::new();
+    let mut origin_y = quad.origin[1];
+    let mut remaining = i32::from(quad.extent_voxels[1]);
+    let extent = i32::from(maximum_extent);
+    while remaining > 0 {
+        let next_boundary = origin_y
+            .div_euclid(extent)
+            .saturating_add(1)
+            .saturating_mul(extent);
+        let height = remaining.min(next_boundary.saturating_sub(origin_y).max(1));
+        output.push(GpuQuad {
+            origin: [quad.origin[0], origin_y, quad.origin[2]],
+            extent_voxels: [quad.extent_voxels[0], height as u16],
+            ..quad
+        });
+        origin_y = origin_y.saturating_add(height);
+        remaining -= height;
+    }
+    output
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct LodDrawPlan {
     patches: SurfacePatchSelection,
@@ -503,11 +804,42 @@ impl LodDrawPlan {
         self.canonical_chunks.contains(&coord) || self.enclosed_view_chunks.contains(&coord)
     }
 
-    fn owns_source_edge(&self, patch: SurfacePatchId, edge: SurfacePatchEdge) -> bool {
+    fn owns_surface_top_edge(&self, patch: SurfacePatchId, edge: SurfacePatchEdge) -> bool {
         self.owns_patch(patch)
             && !self
                 .exact_transition_edges
                 .contains(&(patch, edge.index() as u8))
+    }
+
+    fn connector_owns_boundary_edge(&self, patch: SurfacePatchId, edge: SurfacePatchEdge) -> bool {
+        if self
+            .exact_transition_edges
+            .contains(&(patch, edge.index() as u8))
+        {
+            return true;
+        }
+        let Some([[min_x, min_z], [max_x, max_z]]) = patch.voxel_bounds_xz() else {
+            return false;
+        };
+        let center_x = min_x.saturating_add(max_x.saturating_sub(min_x) / 2);
+        let center_z = min_z.saturating_add(max_z.saturating_sub(min_z) / 2);
+        let across = match edge {
+            SurfacePatchEdge::NegativeX => [min_x.saturating_sub(1), center_z],
+            SurfacePatchEdge::PositiveX => [max_x, center_z],
+            SurfacePatchEdge::NegativeZ => [center_x, min_z.saturating_sub(1)],
+            SurfacePatchEdge::PositiveZ => [center_x, max_z],
+        };
+        self.patches
+            .selected_patch_at(across)
+            .filter(|neighbor| neighbor.level.stride_voxels() > patch.level.stride_voxels())
+            .is_some_and(|neighbor| {
+                self.exact_transition_edges
+                    .contains(&(neighbor, opposite_surface_patch_edge(edge).index() as u8))
+            })
+    }
+
+    fn owns_boundary_wall_edge(&self, patch: SurfacePatchId, edge: SurfacePatchEdge) -> bool {
+        self.owns_patch(patch) && !self.connector_owns_boundary_edge(patch, edge)
     }
 
     fn presented_stride_at(
@@ -661,6 +993,9 @@ struct MeshSlice {
     bounds_max: glam::Vec3,
     surface_patch_id: Option<SurfacePatchId>,
     boundary_edge: Option<SurfacePatchEdge>,
+    /// Patch edges touched by a coarse top face. If any of these edges has an exact LOD stitch,
+    /// this source face is suppressed and replaced by the stitch's non-overlapping subfaces.
+    stitch_edges: u8,
     morph_closure: bool,
     /// Synthetic heightfield cover is owned until this exact-volume chunk is resident.
     exact_replacement_chunk: Option<(i32, i32, i32)>,
@@ -718,6 +1053,11 @@ struct WorldDrawLists {
 struct CutDrawLists {
     incoming: WorldDrawLists,
     outgoing: WorldDrawLists,
+    /// Incoming transition geometry is another draw of one exact current slice. Replacing its
+    /// whole patch would also suppress fixed top/wall slices that never entered the transition,
+    /// opening a patch-shaped hole while the camera moves.
+    replaced_current_slices: HashSet<(MeshKey, usize)>,
+    /// A departing set of four fine patches can replace the current coarse parent as a unit.
     replaced_current_patches: HashSet<SurfacePatchId>,
 }
 
@@ -2071,6 +2411,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&frame_layout)],
             immediate_size: 0,
         });
+        let water_scene_layout = water_scene_layout(&device);
         let world_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("world pipeline layout"),
@@ -2093,7 +2434,6 @@ impl Renderer {
                 ],
                 immediate_size: 0,
             });
-        let water_scene_layout = water_scene_layout(&device);
         let water_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("water pipeline layout"),
@@ -2814,6 +3154,7 @@ impl Renderer {
             bounds_max,
             surface_patch_id: None,
             boundary_edge: None,
+            stitch_edges: 0,
             morph_closure: false,
             exact_replacement_chunk: None,
             canonical_water_surface: false,
@@ -3085,8 +3426,11 @@ impl Renderer {
         let cut_transition = self.cut_transition.as_ref().map_or_else(
             || "null".to_owned(),
             |transition| {
-                let phase =
-                    ((self.time - transition.started_at) / CUT_TRANSITION_SECONDS).clamp(0.0, 1.0);
+                let phase = if CUT_TRANSITION_SECONDS > 0.0 {
+                    ((self.time - transition.started_at) / CUT_TRANSITION_SECONDS).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
                 format!(r#"{{"active":true,"phase":{phase}}}"#)
             },
         );
@@ -3232,7 +3576,7 @@ impl Renderer {
         let key = (0, coord.x, coord.y, coord.z);
         let surface_profile = canonical_chunk_profile(chunk);
         let origin = coord.world_origin();
-        let convert = |quad: &Quad, internal_seam_flags: u32| GpuQuad {
+        let convert = |quad: &Quad| GpuQuad {
             origin: [
                 origin[0] + i32::from(quad.origin[0]),
                 origin[1] + i32::from(quad.origin[1]),
@@ -3240,15 +3584,9 @@ impl Renderer {
             ],
             extent_voxels: quad.extent.map(u16::from),
             material_face: pack_gpu_material_face(u32::from(quad.material), quad.face),
-            ao: u32::from(quad.ao) | internal_seam_flags,
+            ao: u32::from(quad.ao),
         };
-        let opaque_seam_flags = canonical_internal_seam_flags(&mesh.opaque);
-        let opaque_quads: Vec<_> = mesh
-            .opaque
-            .iter()
-            .zip(opaque_seam_flags)
-            .map(|(quad, flags)| convert(quad, flags))
-            .collect();
+        let opaque_quads = canonical_gpu_quads(origin, &mesh.opaque);
         let water_surface_count = mesh
             .translucent
             .iter()
@@ -3259,12 +3597,12 @@ impl Renderer {
             .iter()
             .filter(|quad| quad.face == 2)
             .chain(mesh.translucent.iter().filter(|quad| quad.face != 2))
-            .map(|quad| convert(quad, 0))
+            .map(convert)
             .collect();
         let min = glam::Vec3::from_array(origin.map(|value| value as f32 * VOXEL_SIZE_METRES));
         let max = min + glam::Vec3::splat(CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
         let quad_bytes = size_of::<GpuQuad>() as u32;
-        let opaque_count = mesh.opaque.len() as u32;
+        let opaque_count = opaque_quads.len() as u32;
         let opaque_update = if opaque_count == 0 {
             None
         } else {
@@ -3280,6 +3618,7 @@ impl Renderer {
                     bounds_max: max,
                     surface_patch_id: None,
                     boundary_edge: None,
+                    stitch_edges: 0,
                     morph_closure: false,
                     exact_replacement_chunk: None,
                     canonical_water_surface: false,
@@ -3302,6 +3641,7 @@ impl Renderer {
                     bounds_max: max,
                     surface_patch_id: None,
                     boundary_edge: None,
+                    stitch_edges: 0,
                     morph_closure: false,
                     exact_replacement_chunk: None,
                     canonical_water_surface: true,
@@ -3318,6 +3658,7 @@ impl Renderer {
                     bounds_max: max,
                     surface_patch_id: None,
                     boundary_edge: None,
+                    stitch_edges: 0,
                     morph_closure: false,
                     exact_replacement_chunk: None,
                     canonical_water_surface: false,
@@ -3388,14 +3729,12 @@ impl Renderer {
             .collect::<HashSet<_>>();
         let (macro_normals, geometry_shapes) = surface_macro_normals_and_shapes(tile);
         let horizon_profiles = surface_horizon_profiles(tile);
-        let geometry_morphs = surface_geometry_morphs(tile, &macro_normals);
-        let patch_profiles = surface_patch_profiles(tile, &macro_normals, &horizon_profiles);
-        let mut gpu_quads: Vec<_> = tile
+        let encoded_gpu_quads: Vec<_> = tile
             .quads
             .iter()
             .zip(macro_normals.iter().copied())
             .zip(horizon_profiles.iter().copied())
-            .zip(geometry_shapes)
+            .zip(geometry_shapes.iter().copied())
             .map(
                 |(((quad, macro_normal), horizon_profile), surface_shape)| GpuQuad {
                     origin: quad.origin,
@@ -3412,6 +3751,8 @@ impl Renderer {
                         ) | (u32::from(surface_shape & 0xff) << SURFACE_SHAPE_MATERIAL_SHIFT),
                         if quad.synthetic_fallback {
                             GPU_SOURCE_SURFACE_FALLBACK
+                        } else if macro_normal & SURFACE_MACRO_NORMAL_FLAG == 0 {
+                            GPU_SOURCE_SKYLINE_PROXY
                         } else {
                             0
                         },
@@ -3423,23 +3764,57 @@ impl Renderer {
                 },
             )
             .collect();
-        let mut gpu_morph_heights = geometry_morphs;
-        let closure_base = gpu_quads.len() as u32;
-        for (quad, morph_heights) in
-            surface_morph_closure_gpu_quads(tile, &macro_normals, &horizon_profiles)
-        {
-            gpu_quads.push(quad);
-            gpu_morph_heights.push(morph_heights);
-        }
+        let constrained_gpu_quads = if coord.level == SurfaceLodLevel::Stride2 {
+            let mut owners = Vec::new();
+            let mut pieces = Vec::new();
+            for (owner, &quad) in encoded_gpu_quads.iter().enumerate() {
+                for piece in split_gpu_quad_vertical_extent(quad, 63) {
+                    owners.push(owner);
+                    pieces.push(piece);
+                }
+            }
+            let constrained_pieces = constrain_gpu_quad_t_junctions(
+                &pieces,
+                |_, quad| {
+                    let surface_shape = ((quad.material_face >> SURFACE_SHAPE_MATERIAL_SHIFT)
+                        & 0xff)
+                        | (((quad.ao >> SURFACE_SHAPE_AO_SHIFT) & 0x0f) << 8);
+                    surface_shape == 0
+                        && quad.extent_voxels[0] <= 63
+                        && quad.extent_voxels[1] <= 63
+                        && quad.extent_voxels.into_iter().all(|extent| extent > 0)
+                },
+                |_, _, start, end| {
+                    let [tile_min_x, tile_min_z] = coord.voxel_origin();
+                    let tile_max_x = tile_min_x.saturating_add(coord.voxel_span());
+                    let tile_max_z = tile_min_z.saturating_add(coord.voxel_span());
+                    start[0] == end[0]
+                        && start[2] == end[2]
+                        && (start[0] == tile_min_x
+                            || start[0] == tile_max_x
+                            || start[2] == tile_min_z
+                            || start[2] == tile_max_z)
+                },
+                true,
+            );
+            let mut constrained = vec![Vec::new(); encoded_gpu_quads.len()];
+            for (owner, triangles) in owners.into_iter().zip(constrained_pieces) {
+                constrained[owner].extend(triangles);
+            }
+            constrained
+        } else {
+            encoded_gpu_quads
+                .iter()
+                .copied()
+                .map(|quad| vec![quad])
+                .collect()
+        };
+        let patch_profiles =
+            surface_patch_profiles(tile, &macro_normals, &horizon_profiles, &geometry_shapes);
         let exact_replacement_chunks = tile
             .quads
             .iter()
             .map(surface_exact_replacement_chunk)
-            .collect::<Vec<_>>();
-        let closure_exact_replacement_chunks = tile
-            .morph_closures
-            .iter()
-            .map(|closure| surface_exact_replacement_chunk(&closure.quad))
             .collect::<Vec<_>>();
         let water_gpu_quads: Vec<_> = water
             .quads
@@ -3459,6 +3834,7 @@ impl Renderer {
             })
             .collect();
         let quad_bytes = size_of::<GpuQuad>() as u32;
+        let mut gpu_quads = Vec::with_capacity(encoded_gpu_quads.len());
         let mut slices = Vec::new();
         for patch in &tile.patches {
             let Some(patch_id) = SurfacePatchId::from_tile_cell_min(
@@ -3468,54 +3844,54 @@ impl Renderer {
                 continue;
             };
             let (bounds_min, bounds_max) = surface_patch_render_bounds(patch, coord.level);
-            let slice_template = |boundary_edge, morph_closure| MeshSlice {
-                relative_offset: 0,
-                size: 0,
-                quad_count: 0,
-                bounds_min,
-                bounds_max,
-                surface_patch_id: Some(patch_id),
-                boundary_edge,
-                morph_closure,
-                exact_replacement_chunk: None,
-                canonical_water_surface: false,
-                render_layer: RenderLayer::Opaque,
-            };
-            append_surface_slices(
-                &mut slices,
-                patch.quad_range.clone(),
-                0,
-                &exact_replacement_chunks,
-                quad_bytes,
-                slice_template(None, false),
-            );
-            for edge in SurfacePatchEdge::ALL {
-                append_surface_slices(
-                    &mut slices,
-                    patch.edge_ranges[edge.index()].clone(),
-                    0,
-                    &exact_replacement_chunks,
-                    quad_bytes,
-                    slice_template(Some(edge), false),
-                );
+            // Reorder each patch into a handful of ownership groups. Ordinary patch geometry has
+            // no edge tag; terrain top cells touching a patch boundary carry all touched edges;
+            // generated source-edge walls retain their single edge. This lets an exact stitch
+            // replace one coarse top exactly once, including at patch corners, without thousands
+            // of per-cell draw slices or any overlapping repair geometry.
+            let mut groups = BTreeMap::<(u8, u8, Option<(i32, i32, i32)>), Vec<usize>>::new();
+            for quad_index in patch.quad_range.clone() {
+                let index = quad_index as usize;
+                let stitch_edges =
+                    surface_top_stitch_edges(tile, patch, tile.quads[index], macro_normals[index]);
+                groups
+                    .entry((stitch_edges, 0, exact_replacement_chunks[index]))
+                    .or_default()
+                    .push(index);
             }
-            append_surface_slices(
-                &mut slices,
-                patch.morph_closure_range.clone(),
-                closure_base,
-                &closure_exact_replacement_chunks,
-                quad_bytes,
-                slice_template(None, true),
-            );
             for edge in SurfacePatchEdge::ALL {
-                append_surface_slices(
-                    &mut slices,
-                    patch.edge_morph_closure_ranges[edge.index()].clone(),
-                    closure_base,
-                    &closure_exact_replacement_chunks,
-                    quad_bytes,
-                    slice_template(Some(edge), true),
+                for quad_index in patch.edge_ranges[edge.index()].clone() {
+                    let index = quad_index as usize;
+                    groups
+                        .entry((0, edge.index() as u8 + 1, exact_replacement_chunks[index]))
+                        .or_default()
+                        .push(index);
+                }
+            }
+            for ((stitch_edges, encoded_edge, exact_replacement_chunk), source_indices) in groups {
+                let start = gpu_quads.len() as u32;
+                gpu_quads.extend(
+                    source_indices
+                        .iter()
+                        .flat_map(|&index| constrained_gpu_quads[index].iter().copied()),
                 );
+                let end = gpu_quads.len() as u32;
+                slices.push(MeshSlice {
+                    relative_offset: start * quad_bytes,
+                    size: (end - start) * quad_bytes,
+                    quad_count: end - start,
+                    bounds_min,
+                    bounds_max,
+                    surface_patch_id: Some(patch_id),
+                    boundary_edge: encoded_edge
+                        .checked_sub(1)
+                        .and_then(|index| SurfacePatchEdge::ALL.get(index as usize).copied()),
+                    stitch_edges,
+                    morph_closure: false,
+                    exact_replacement_chunk,
+                    canonical_water_surface: false,
+                    render_layer: RenderLayer::Opaque,
+                });
             }
         }
         let water_slices: Vec<_> = water
@@ -3544,6 +3920,7 @@ impl Renderer {
                     ),
                     surface_patch_id: patch_id,
                     boundary_edge: None,
+                    stitch_edges: 0,
                     morph_closure: false,
                     exact_replacement_chunk: None,
                     canonical_water_surface: false,
@@ -3551,7 +3928,7 @@ impl Renderer {
                 }
             })
             .collect();
-        if gpu_quads_match_resident(self.chunks.get(&key), &gpu_quads, Some(&gpu_morph_heights))
+        if gpu_quads_match_resident(self.chunks.get(&key), &gpu_quads, None)
             && mesh_slices_match_resident(self.chunks.get(&key), &slices, gpu_quads.len())
             && gpu_quads_match_resident(self.water_chunks.get(&key), &water_gpu_quads, None)
             && mesh_slices_match_resident(
@@ -3568,9 +3945,7 @@ impl Renderer {
         let opaque_update = if gpu_quads.is_empty() {
             None
         } else {
-            let Some(prepared) =
-                self.prepare_mesh_sliced(key, &gpu_quads, Some(&gpu_morph_heights), slices)
-            else {
+            let Some(prepared) = self.prepare_mesh_sliced(key, &gpu_quads, None, slices) else {
                 return false;
             };
             Some(prepared)
@@ -3993,7 +4368,8 @@ impl Renderer {
             incomplete_transition_edges,
             transition_mesh_key,
         };
-        if next_plan != self.lod_draw_plan
+        if CUT_TRANSITION_SECONDS > 0.0
+            && next_plan != self.lod_draw_plan
             && self.lod_draw_plan.has_geometry()
             && previous_plan_resident
             && self.lod_draw_plan_focus.is_some()
@@ -4039,8 +4415,10 @@ impl Renderer {
             .iter()
             .copied()
             .map(|mut quad| {
-                quad.material_face =
-                    pack_gpu_source_material(quad.material_face, GPU_SOURCE_LOD_CONNECTOR);
+                if quad.material_face & GPU_SOURCE_MASK == 0 {
+                    quad.material_face =
+                        pack_gpu_source_material(quad.material_face, GPU_SOURCE_LOD_CONNECTOR);
+                }
                 quad
             })
             .collect::<Vec<_>>();
@@ -4065,6 +4443,7 @@ impl Renderer {
             bounds_max,
             surface_patch_id: None,
             boundary_edge: None,
+            stitch_edges: 0,
             morph_closure: false,
             exact_replacement_chunk: None,
             canonical_water_surface: false,
@@ -4088,7 +4467,11 @@ impl Renderer {
             self.cut_transition = None;
         }
         let phase = self.cut_transition.as_ref().map(|transition| {
-            ((self.time - transition.started_at) / CUT_TRANSITION_SECONDS).clamp(0.0, 1.0)
+            if CUT_TRANSITION_SECONDS > 0.0 {
+                ((self.time - transition.started_at) / CUT_TRANSITION_SECONDS).clamp(0.0, 1.0)
+            } else {
+                1.0
+            }
         });
         let outgoing_key = self
             .cut_transition
@@ -5238,10 +5621,7 @@ impl Renderer {
             if !chunk.active() || !include_chunk(key, chunk) {
                 continue;
             }
-            debug_assert_eq!(
-                chunk.allocation.size,
-                chunk.quad_count * size_of::<GpuQuad>() as u32
-            );
+            debug_assert!(chunk.allocation.size >= chunk.quad_count * size_of::<GpuQuad>() as u32);
             let mut selected = false;
             for slice in &chunk.slices {
                 tested_slices = tested_slices.saturating_add(1);
@@ -5391,19 +5771,19 @@ fn collect_opaque_draw_lists(
             {
                 continue;
             }
-            let cut_replaces_current = slice.surface_patch_id.is_some_and(|patch| {
-                cut_draw_lists.is_some_and(|lists| lists.replaced_current_patches.contains(&patch))
+            let cut_replaces_current = cut_draw_lists.is_some_and(|lists| {
+                lists.replaced_current_slices.contains(&(*key, slice_index))
+                    || slice
+                        .surface_patch_id
+                        .is_some_and(|patch| lists.replaced_current_patches.contains(&patch))
             });
             if world_chunk_visible
                 && !cut_replaces_current
                 && (world_chunk_clip == AabbClipClassification::Inside
                     || view_clip.contains_aabb(slice.bounds_min, slice.bounds_max))
             {
-                world_builder.select_slice(
-                    chunk,
-                    slice,
-                    slice_uses_geometry_morph(key, geometric_lod_focus, slice),
-                )?;
+                let morphing = slice_uses_geometry_morph(key, geometric_lod_focus, slice);
+                world_builder.select_slice(chunk, slice, morphing)?;
                 world_mesh_selected = true;
             }
             for cascade_index in 0..CASCADE_COUNT {
@@ -5474,9 +5854,13 @@ fn lod_draw_plan_resident(
 
 /// Splits changed, morphable surface ownership away from the ordinary current draw list.
 ///
-/// Incoming fine geometry unfolds from its parent while outgoing fine geometry converges into that
-/// same parent. Fixed old geometry is never overlaid: it cannot converge and was the source of
-/// detached Bayer squares in empty air. The complete current cut remains the coverage authority.
+/// Incoming fine geometry unfolds from its parent in the same exact slice that it replaces.
+///
+/// Coarsening switches to the complete current parent atomically. A departing group of fine
+/// profiles is not proof that its rendered shell covers the new parent: sparse surface cells can
+/// legitimately leave openings that the coarser owner fills. Suppressing that parent exposed
+/// patch-sized sky holes; overlaying both owners instead produced the source mixing and z-fighting
+/// this transition exists to avoid.
 fn collect_cut_transition_draw_lists(
     chunks: &BTreeMap<MeshKey, ChunkMesh>,
     current_plan: &LodDrawPlan,
@@ -5486,9 +5870,7 @@ fn collect_cut_transition_draw_lists(
     view_clip: AabbClipVolume,
 ) -> Result<CutDrawLists, MissingMorphSidecar> {
     let mut incoming = WorldDrawListBuilder::default();
-    let mut outgoing = WorldDrawListBuilder::default();
-    let mut incoming_patches = HashSet::new();
-    let mut outgoing_patches = HashSet::new();
+    let mut replaced_current_slices = HashSet::new();
     for (key, chunk) in chunks {
         if !chunk.active()
             || (key.0 != 0 && *key != EXACT_VOLUME_FRONTIER_MESH_KEY && !far_terrain)
@@ -5497,10 +5879,8 @@ fn collect_cut_transition_draw_lists(
             continue;
         }
         let mut incoming_mesh_selected = false;
-        let mut outgoing_mesh_selected = false;
-        for slice in &chunk.slices {
+        for (slice_index, slice) in chunk.slices.iter().enumerate() {
             incoming.test_slice();
-            outgoing.test_slice();
             if slice.render_layer != RenderLayer::Opaque
                 || !view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
             {
@@ -5517,46 +5897,18 @@ fn collect_cut_transition_draw_lists(
             {
                 incoming.select_slice(chunk, slice, true)?;
                 incoming_mesh_selected = true;
-                if let Some(patch) = slice.surface_patch_id {
-                    incoming_patches.insert(patch);
-                }
-            }
-            if was_owned
-                && !is_owned
-                && parent.is_some_and(|parent| current_plan.owns_patch(parent))
-                && slice_uses_geometry_morph(key, transition.from_focus, slice)
-            {
-                outgoing.select_slice(chunk, slice, true)?;
-                outgoing_mesh_selected = true;
-                if let Some(patch) = slice.surface_patch_id {
-                    outgoing_patches.insert(patch);
-                }
+                replaced_current_slices.insert((*key, slice_index));
             }
         }
         if incoming_mesh_selected {
             incoming.select_mesh(*key, chunk);
         }
-        if outgoing_mesh_selected {
-            outgoing.select_mesh(*key, chunk);
-        }
     }
-    let mut replaced_current_patches = incoming_patches;
-    replaced_current_patches.extend(
-        outgoing_patches
-            .iter()
-            .filter_map(|patch| patch.parent())
-            .filter(|parent| {
-                parent.children().is_some_and(|children| {
-                    children
-                        .into_iter()
-                        .all(|child| outgoing_patches.contains(&child))
-                })
-            }),
-    );
     Ok(CutDrawLists {
         incoming: incoming.finish(),
-        outgoing: outgoing.finish(),
-        replaced_current_patches,
+        outgoing: WorldDrawLists::default(),
+        replaced_current_slices,
+        replaced_current_patches: HashSet::new(),
     })
 }
 
@@ -5610,6 +5962,16 @@ fn prepare_mesh_sliced_into(
     for slice in slices.iter().skip(1) {
         bounds_min = bounds_min.min(slice.bounds_min);
         bounds_max = bounds_max.max(slice.bounds_max);
+    }
+    for slice in &slices {
+        if slice.relative_offset % size_of::<GpuQuad>() as u32 != 0
+            || slice.size != slice.quad_count.saturating_mul(size_of::<GpuQuad>() as u32)
+        {
+            return None;
+        }
+        let first = (slice.relative_offset / size_of::<GpuQuad>() as u32) as usize;
+        let end = first.checked_add(slice.quad_count as usize)?;
+        gpu_quads.get(first..end)?;
     }
     let bytes = bytemuck::cast_slice(gpu_quads);
     let Ok(byte_len) = u32::try_from(bytes.len()) else {
@@ -5668,9 +6030,15 @@ fn prepare_mesh_sliced_into(
             morph_bytes,
         );
     }
-    let content_fingerprint = morph_bytes.map_or_else(
-        || fingerprint_bytes(bytes),
-        |morph_bytes| fingerprint_value(fingerprint_bytes(bytes), fingerprint_bytes(morph_bytes)),
+    let original_bytes = bytemuck::cast_slice(gpu_quads);
+    let content_fingerprint = morph_heights.map_or_else(
+        || fingerprint_bytes(original_bytes),
+        |heights| {
+            fingerprint_value(
+                fingerprint_bytes(original_bytes),
+                fingerprint_bytes(bytemuck::cast_slice(heights)),
+            )
+        },
     );
     Some(ChunkMesh {
         allocation,
@@ -5778,6 +6146,40 @@ fn surface_patch_render_bounds(
         glam::Vec3::from_array(minimum.map(|value| value as f32 * VOXEL_SIZE_METRES)),
         glam::Vec3::from_array(maximum.map(|value| value as f32 * VOXEL_SIZE_METRES)),
     )
+}
+
+fn surface_top_stitch_edges(
+    tile: &SurfaceTileMesh,
+    patch: &SurfacePatch,
+    quad: voxels_world::SurfaceQuad,
+    macro_normal: u32,
+) -> u8 {
+    let stride = tile.coord.stride_voxels();
+    if quad.face != 2
+        || quad.extent != [stride as u16; 2]
+        || macro_normal & SURFACE_MACRO_NORMAL_FLAG == 0
+    {
+        return 0;
+    }
+    let [tile_x, tile_z] = tile.coord.voxel_origin();
+    let min_x = tile_x.saturating_add(i32::from(patch.cell_bounds[0][0]).saturating_mul(stride));
+    let min_z = tile_z.saturating_add(i32::from(patch.cell_bounds[0][1]).saturating_mul(stride));
+    let max_x = tile_x.saturating_add(i32::from(patch.cell_bounds[1][0]).saturating_mul(stride));
+    let max_z = tile_z.saturating_add(i32::from(patch.cell_bounds[1][1]).saturating_mul(stride));
+    let mut mask = 0;
+    if quad.origin[0] == min_x {
+        mask |= 1 << SurfacePatchEdge::NegativeX.index();
+    }
+    if quad.origin[0].saturating_add(stride) == max_x {
+        mask |= 1 << SurfacePatchEdge::PositiveX.index();
+    }
+    if quad.origin[2] == min_z {
+        mask |= 1 << SurfacePatchEdge::NegativeZ.index();
+    }
+    if quad.origin[2].saturating_add(stride) == max_z {
+        mask |= 1 << SurfacePatchEdge::PositiveZ.index();
+    }
+    mask
 }
 
 fn surface_macro_normals_and_shapes(tile: &SurfaceTileMesh) -> (Vec<u32>, Vec<u16>) {
@@ -6146,6 +6548,7 @@ fn surface_parent_height(tile: &SurfaceTileMesh, x: i32, z: i32) -> Option<i32> 
 /// a unit; vertical faces move their lower and upper edges independently, so adjacent cells retain
 /// a closed shell throughout the transition. Skyline proxies and outermost tiles intentionally do
 /// not morph.
+#[cfg(test)]
 fn surface_geometry_morphs(tile: &SurfaceTileMesh, macro_normals: &[u32]) -> Vec<u32> {
     let stride = tile.coord.stride_voxels();
     tile.quads
@@ -6193,6 +6596,7 @@ fn surface_geometry_morphs(tile: &SurfaceTileMesh, macro_normals: &[u32]) -> Vec
         .collect()
 }
 
+#[cfg(test)]
 fn surface_morph_closure_gpu_quads(
     tile: &SurfaceTileMesh,
     macro_normals: &[u32],
@@ -6284,41 +6688,12 @@ fn surface_exact_replacement_chunk(quad: &SurfaceQuad) -> Option<(i32, i32, i32)
         _ => return None,
     };
     let chunk = quad.origin.map(|value| value.div_euclid(chunk_edge));
+    let max_chunk = max.map(|value| value.div_euclid(chunk_edge));
     debug_assert_eq!(
-        chunk,
-        max.map(|value| value.div_euclid(chunk_edge)),
-        "replaceable surface spans must be partitioned on exact chunk boundaries"
+        chunk, max_chunk,
+        "synthetic fallback spans must be partitioned on exact chunk boundaries"
     );
     Some((chunk[0], chunk[1], chunk[2]))
-}
-
-fn append_surface_slices(
-    slices: &mut Vec<MeshSlice>,
-    source_range: std::ops::Range<u32>,
-    gpu_base: u32,
-    exact_replacement_chunks: &[Option<(i32, i32, i32)>],
-    quad_bytes: u32,
-    template: MeshSlice,
-) {
-    let mut start = source_range.start;
-    while start < source_range.end {
-        let exact_replacement_chunk = exact_replacement_chunks[start as usize];
-        let mut end = start + 1;
-        while end < source_range.end
-            && exact_replacement_chunks[end as usize] == exact_replacement_chunk
-        {
-            end += 1;
-        }
-        let gpu_start = gpu_base.saturating_add(start);
-        slices.push(MeshSlice {
-            relative_offset: gpu_start * quad_bytes,
-            size: (end - start) * quad_bytes,
-            quad_count: end - start,
-            exact_replacement_chunk,
-            ..template
-        });
-        start = end;
-    }
 }
 
 fn sampled_shading_normal(
@@ -6462,6 +6837,7 @@ fn surface_patch_profiles(
     tile: &SurfaceTileMesh,
     macro_normals: &[u32],
     horizon_profiles: &[u16],
+    geometry_shapes: &[u16],
 ) -> Vec<(SurfacePatchId, SurfacePatchProfile)> {
     let stride = tile.coord.stride_voxels();
     let [tile_x, tile_z] = tile.coord.voxel_origin();
@@ -6481,7 +6857,10 @@ fn surface_patch_profiles(
             for quad_index in patch.quad_range.clone() {
                 let index = quad_index as usize;
                 let quad = tile.quads[index];
-                if quad.face != 2 || quad.extent != [stride as u16; 2] {
+                if quad.face != 2
+                    || quad.extent != [stride as u16; 2]
+                    || macro_normals[index] & SURFACE_MACRO_NORMAL_FLAG == 0
+                {
                     continue;
                 }
                 let local_x = (quad.origin[0] - origin[0]).div_euclid(stride);
@@ -6495,6 +6874,7 @@ fn surface_patch_profiles(
                     material: quad.material,
                     macro_normal: macro_normals[index],
                     horizon_profile: horizon_profiles[index],
+                    shape: geometry_shapes[index],
                 });
             }
             Some((
@@ -6524,6 +6904,7 @@ fn canonical_chunk_profile(chunk: &Chunk) -> CanonicalChunkProfile {
                         material,
                         macro_normal: 0xff,
                         horizon_profile: 0,
+                        shape: 0,
                     });
                     break;
                 }
@@ -6657,6 +7038,7 @@ fn build_lod_transitions(
         morph_heights: Vec::with_capacity(transitions.len() * 16),
         ..LodTransitionBuild::default()
     };
+    let mut connector_edges = BTreeMap::<(SurfacePatchId, u8), Vec<(GpuQuad, u32)>>::new();
     for (patch, edge) in transitions {
         let Some(coarse) = surface_profiles.get(&patch) else {
             build.incomplete_edges = build.incomplete_edges.saturating_add(1);
@@ -6672,16 +7054,313 @@ fn build_lod_transitions(
             edge,
             coarse,
         ) {
-            build.exact_edges.insert((patch, edge.index() as u8));
-            for (quad, morph_heights) in edge_quads {
-                build.quads.push(quad);
-                build.morph_heights.push(morph_heights);
-            }
+            connector_edges.insert((patch, edge.index() as u8), edge_quads);
         } else {
             build.incomplete_edges = build.incomplete_edges.saturating_add(1);
         }
     }
+    let mut edges_by_patch = BTreeMap::<SurfacePatchId, u8>::new();
+    for &(patch, edge) in connector_edges.keys() {
+        edges_by_patch
+            .entry(patch)
+            .and_modify(|mask| *mask |= 1 << edge)
+            .or_insert(1 << edge);
+    }
+    let mut stitched_tops = Vec::new();
+    for (&patch, &exact_edge_mask) in &edges_by_patch {
+        let Some(coarse) = surface_profiles.get(&patch) else {
+            build.incomplete_edges = build
+                .incomplete_edges
+                .saturating_add(connector_edges.len() as u32);
+            return build;
+        };
+        let Some(patch_stitches) =
+            stitched_patch_top_quads(selection, patch, coarse, exact_edge_mask)
+        else {
+            build.incomplete_edges = build
+                .incomplete_edges
+                .saturating_add(connector_edges.len() as u32);
+            return build;
+        };
+        stitched_tops.extend(patch_stitches);
+    }
+    for ((patch, encoded_edge), edge_quads) in connector_edges {
+        build.exact_edges.insert((patch, encoded_edge));
+        for (quad, morph_heights) in edge_quads {
+            build.quads.push(quad);
+            build.morph_heights.push(morph_heights);
+        }
+    }
+    for mut quad in stitched_tops {
+        quad.material_face =
+            pack_gpu_source_material(quad.material_face, GPU_SOURCE_LOD_STITCH_TOP);
+        build.quads.push(quad);
+        build.morph_heights.push(0);
+    }
     build
+}
+
+fn transition_neighbor_stride(
+    selection: &SurfacePatchSelection,
+    patch: SurfacePatchId,
+    point: [i32; 2],
+) -> Option<i32> {
+    if let Some(neighbor) = selection.selected_patch_at(point) {
+        let stride = neighbor.level.stride_voxels();
+        return (stride < patch.level.stride_voxels()).then_some(stride);
+    }
+    (patch.level == SurfaceLodLevel::Stride2).then_some(1)
+}
+
+fn opposite_surface_patch_edge(edge: SurfacePatchEdge) -> SurfacePatchEdge {
+    match edge {
+        SurfacePatchEdge::NegativeX => SurfacePatchEdge::PositiveX,
+        SurfacePatchEdge::PositiveX => SurfacePatchEdge::NegativeX,
+        SurfacePatchEdge::NegativeZ => SurfacePatchEdge::PositiveZ,
+        SurfacePatchEdge::PositiveZ => SurfacePatchEdge::NegativeZ,
+    }
+}
+
+fn unpack_surface_shape_delta(shape: u16, corner: usize) -> i32 {
+    let bits = i32::from((shape >> (corner * 3)) & 0b111);
+    if bits >= 4 { bits - 8 } else { bits }
+}
+
+fn rounded_ratio(numerator: i64, denominator: i64) -> i32 {
+    debug_assert!(denominator > 0);
+    let rounded = if numerator >= 0 {
+        (numerator + denominator / 2) / denominator
+    } else {
+        (numerator - denominator / 2) / denominator
+    };
+    rounded.clamp(
+        i64::from(SURFACE_SHAPE_MIN_DELTA_VOXELS),
+        i64::from(SURFACE_SHAPE_MAX_DELTA_VOXELS),
+    ) as i32
+}
+
+fn surface_shape_edge_endpoints(cell: SurfaceCell, edge: SurfacePatchEdge) -> [i32; 2] {
+    let corner = |corner| unpack_surface_shape_delta(cell.shape, corner);
+    match edge {
+        SurfacePatchEdge::NegativeX => [corner(0), corner(3)],
+        SurfacePatchEdge::PositiveX => [corner(1), corner(2)],
+        SurfacePatchEdge::NegativeZ => [corner(0), corner(1)],
+        SurfacePatchEdge::PositiveZ => [corner(3), corner(2)],
+    }
+}
+
+fn interpolate_shape_edge(endpoints: [i32; 2], stride: i32, bounds: [i32; 2]) -> [i32; 2] {
+    let interpolate = |offset: i32| {
+        rounded_ratio(
+            i64::from(endpoints[0]) * i64::from(stride - offset)
+                + i64::from(endpoints[1]) * i64::from(offset),
+            i64::from(stride),
+        )
+    };
+    [interpolate(bounds[0]), interpolate(bounds[1])]
+}
+
+fn transition_triangle_shape(
+    cell: SurfaceCell,
+    edge: SurfacePatchEdge,
+    anchor: usize,
+    bounds: [i32; 2],
+    stride: i32,
+) -> u16 {
+    let [mut boundary_start, mut boundary_end] =
+        interpolate_shape_edge(surface_shape_edge_endpoints(cell, edge), stride, bounds);
+    // The positive-X and negative-Z edges run in the A-B-C-D polygon direction as their tangent
+    // increases. The other two run against it. Store all triangle vertices in the same polygon
+    // winding so both the world and shadow pipelines can use one fixed strip order.
+    if matches!(
+        edge,
+        SurfacePatchEdge::NegativeX | SurfacePatchEdge::PositiveZ
+    ) {
+        std::mem::swap(&mut boundary_start, &mut boundary_end);
+    }
+    pack_surface_shape_deltas([
+        unpack_surface_shape_delta(cell.shape, anchor),
+        boundary_start,
+        boundary_end,
+        boundary_end,
+    ])
+}
+
+fn append_transition_top_fan(
+    quads: &mut Vec<GpuQuad>,
+    patch: SurfacePatchId,
+    cell_origin: [i32; 2],
+    cell: SurfaceCell,
+    anchor: usize,
+    edge: SurfacePatchEdge,
+    segment_stride: i32,
+) -> bool {
+    let stride = patch.level.stride_voxels();
+    if segment_stride <= 0
+        || stride % segment_stride != 0
+        || stride > i32::from(TRANSITION_TRIANGLE_OFFSET_MASK)
+    {
+        return false;
+    }
+    let encoded_material = u32::from(cell.material.id())
+        | FAR_MATERIAL_FLAG
+        | (u32::from(patch.level.index()) << SURFACE_LOD_SHIFT);
+    for start in (0..stride).step_by(segment_stride as usize) {
+        let end = start.saturating_add(segment_stride);
+        let Ok(start) = u16::try_from(start) else {
+            return false;
+        };
+        let Ok(end) = u16::try_from(end) else {
+            return false;
+        };
+        let shape = transition_triangle_shape(
+            cell,
+            edge,
+            anchor,
+            [i32::from(start), i32::from(end)],
+            stride,
+        );
+        quads.push(GpuQuad {
+            origin: [cell_origin[0], cell.height, cell_origin[1]],
+            extent_voxels: [
+                start
+                    | TRANSITION_TRIANGLE_FLAG
+                    | ((anchor as u16) << TRANSITION_TRIANGLE_ANCHOR_SHIFT)
+                    | ((edge.index() as u16) << TRANSITION_TRIANGLE_EDGE_SHIFT),
+                end,
+            ],
+            material_face: pack_surface_horizon_material(
+                pack_gpu_material_face(encoded_material, 2),
+                cell.horizon_profile,
+            ) | (u32::from(shape & 0xff) << SURFACE_SHAPE_MATERIAL_SHIFT),
+            ao: pack_surface_horizon_ao(
+                cell.macro_normal | (u32::from(shape >> 8) << SURFACE_SHAPE_AO_SHIFT),
+                cell.horizon_profile,
+            ),
+        });
+    }
+    true
+}
+
+fn stitched_patch_top_quads(
+    selection: &SurfacePatchSelection,
+    patch: SurfacePatchId,
+    coarse: &SurfacePatchProfile,
+    exact_edge_mask: u8,
+) -> Option<Vec<GpuQuad>> {
+    let edge = voxels_world::SURFACE_PATCH_EDGE_CELLS;
+    let stride = coarse.stride;
+    let patch_span = patch.voxel_span();
+    let mut quads = Vec::new();
+    for cell_z in 0..edge {
+        for cell_x in 0..edge {
+            let mut cell_edge_mask = 0;
+            if cell_x == 0 {
+                cell_edge_mask |= 1 << SurfacePatchEdge::NegativeX.index();
+            }
+            if cell_x == edge - 1 {
+                cell_edge_mask |= 1 << SurfacePatchEdge::PositiveX.index();
+            }
+            if cell_z == 0 {
+                cell_edge_mask |= 1 << SurfacePatchEdge::NegativeZ.index();
+            }
+            if cell_z == edge - 1 {
+                cell_edge_mask |= 1 << SurfacePatchEdge::PositiveZ.index();
+            }
+            let active_edges = cell_edge_mask & exact_edge_mask;
+            if active_edges == 0 {
+                continue;
+            }
+            let cell_origin = [
+                coarse.origin[0].saturating_add(cell_x.saturating_mul(stride)),
+                coarse.origin[1].saturating_add(cell_z.saturating_mul(stride)),
+            ];
+            let center = [
+                cell_origin[0].saturating_add(stride / 2),
+                cell_origin[1].saturating_add(stride / 2),
+            ];
+            let mut split_x = stride;
+            let mut split_z = stride;
+            for boundary_edge in SurfacePatchEdge::ALL {
+                if active_edges & (1 << boundary_edge.index()) == 0 {
+                    continue;
+                }
+                let across = match boundary_edge {
+                    SurfacePatchEdge::NegativeX => [coarse.origin[0].saturating_sub(1), center[1]],
+                    SurfacePatchEdge::PositiveX => {
+                        [coarse.origin[0].saturating_add(patch_span), center[1]]
+                    }
+                    SurfacePatchEdge::NegativeZ => [center[0], coarse.origin[1].saturating_sub(1)],
+                    SurfacePatchEdge::PositiveZ => {
+                        [center[0], coarse.origin[1].saturating_add(patch_span)]
+                    }
+                };
+                let fine_stride = transition_neighbor_stride(selection, patch, across)?;
+                if stride % fine_stride != 0 {
+                    return None;
+                }
+                match boundary_edge {
+                    SurfacePatchEdge::NegativeX | SurfacePatchEdge::PositiveX => {
+                        split_z = split_z.min(fine_stride);
+                    }
+                    SurfacePatchEdge::NegativeZ | SurfacePatchEdge::PositiveZ => {
+                        split_x = split_x.min(fine_stride);
+                    }
+                }
+            }
+            let coarse_cell = coarse.sample_world(center[0], center[1])?;
+            let active = SurfacePatchEdge::ALL
+                .into_iter()
+                .filter(|edge| active_edges & (1 << edge.index()) != 0)
+                .collect::<Vec<_>>();
+            let (anchor, fill_edge) = match active.as_slice() {
+                [SurfacePatchEdge::NegativeX] => (1, Some(SurfacePatchEdge::PositiveZ)),
+                [SurfacePatchEdge::PositiveX] => (0, Some(SurfacePatchEdge::PositiveZ)),
+                [SurfacePatchEdge::NegativeZ] => (3, Some(SurfacePatchEdge::PositiveX)),
+                [SurfacePatchEdge::PositiveZ] => (0, Some(SurfacePatchEdge::PositiveX)),
+                [SurfacePatchEdge::NegativeX, SurfacePatchEdge::NegativeZ]
+                | [SurfacePatchEdge::NegativeZ, SurfacePatchEdge::NegativeX] => (2, None),
+                [SurfacePatchEdge::PositiveX, SurfacePatchEdge::NegativeZ]
+                | [SurfacePatchEdge::NegativeZ, SurfacePatchEdge::PositiveX] => (3, None),
+                [SurfacePatchEdge::PositiveX, SurfacePatchEdge::PositiveZ]
+                | [SurfacePatchEdge::PositiveZ, SurfacePatchEdge::PositiveX] => (0, None),
+                [SurfacePatchEdge::NegativeX, SurfacePatchEdge::PositiveZ]
+                | [SurfacePatchEdge::PositiveZ, SurfacePatchEdge::NegativeX] => (1, None),
+                _ => return None,
+            };
+            for edge in active {
+                let segment_stride = match edge {
+                    SurfacePatchEdge::NegativeX | SurfacePatchEdge::PositiveX => split_z,
+                    SurfacePatchEdge::NegativeZ | SurfacePatchEdge::PositiveZ => split_x,
+                };
+                if !append_transition_top_fan(
+                    &mut quads,
+                    patch,
+                    cell_origin,
+                    coarse_cell,
+                    anchor,
+                    edge,
+                    segment_stride,
+                ) {
+                    return None;
+                }
+            }
+            if let Some(fill_edge) = fill_edge
+                && !append_transition_top_fan(
+                    &mut quads,
+                    patch,
+                    cell_origin,
+                    coarse_cell,
+                    anchor,
+                    fill_edge,
+                    stride,
+                )
+            {
+                return None;
+            }
+        }
+    }
+    Some(quads)
 }
 
 fn for_each_fallback_surface_wall_run(
@@ -6852,88 +7531,105 @@ fn append_lod_transition(
         } else {
             return false;
         };
+        let coarse_edge_shape = interpolate_shape_edge(
+            surface_shape_edge_endpoints(coarse_cell, edge),
+            coarse_stride,
+            [
+                tangent.rem_euclid(coarse_stride),
+                tangent.rem_euclid(coarse_stride) + fine_stride,
+            ],
+        );
+        let fine_edge_shape =
+            surface_shape_edge_endpoints(fine_cell, opposite_surface_patch_edge(edge));
+        let endpoint_order_reverses = {
+            let difference = |endpoint: usize| {
+                coarse_cell
+                    .height
+                    .saturating_add(coarse_edge_shape[endpoint])
+                    .saturating_sub(fine_cell.height.saturating_add(fine_edge_shape[endpoint]))
+            };
+            let start = difference(0);
+            let end = difference(1);
+            (start < 0 && end > 0) || (start > 0 && end < 0)
+        };
         if coarse_cell.height == fine_cell.height {
-            let Some(fine_parent_height) = fine_parent_height else {
-                tangent += fine_stride;
-                continue;
-            };
-            if fine_parent_height == fine_cell.height {
-                tangent += fine_stride;
-                continue;
+            if coarse_edge_shape != fine_edge_shape {
+                let shape = pack_surface_shape_deltas([
+                    fine_edge_shape[0],
+                    fine_edge_shape[1],
+                    coarse_edge_shape[1],
+                    coarse_edge_shape[0],
+                ]);
+                let material = u32::from(coarse_cell.material.id())
+                    | FAR_MATERIAL_FLAG
+                    | (u32::from(patch.level.index()) << SURFACE_LOD_SHIFT);
+                let origin_voxels = match outward_face {
+                    0 => [
+                        boundary[0].saturating_sub(1),
+                        coarse_cell.height.saturating_add(1),
+                        boundary[1],
+                    ],
+                    1 => [
+                        boundary[0],
+                        coarse_cell.height.saturating_add(1),
+                        boundary[1],
+                    ],
+                    4 => [
+                        boundary[0],
+                        coarse_cell.height.saturating_add(1),
+                        boundary[1].saturating_sub(1),
+                    ],
+                    5 => [
+                        boundary[0],
+                        coarse_cell.height.saturating_add(1),
+                        boundary[1],
+                    ],
+                    _ => unreachable!(),
+                };
+                let mut quad = GpuQuad {
+                    origin: origin_voxels,
+                    extent_voxels: [fine_stride as u16, 0],
+                    material_face: pack_surface_horizon_material(
+                        pack_gpu_material_face(material, outward_face),
+                        coarse_cell.horizon_profile,
+                    ) | (u32::from(shape & 0xff) << SURFACE_SHAPE_MATERIAL_SHIFT),
+                    ao: pack_surface_horizon_ao(
+                        coarse_cell.macro_normal
+                            | (u32::from(shape >> 8) << SURFACE_SHAPE_AO_SHIFT),
+                        coarse_cell.horizon_profile,
+                    ),
+                };
+                if endpoint_order_reverses {
+                    quad.material_face = pack_gpu_source_material(
+                        quad.material_face,
+                        GPU_SOURCE_CROSSING_LOD_CONNECTOR,
+                    );
+                }
+                quads.push((quad, 0));
             }
-            let Some(fine_level) = SurfaceLodLevel::from_stride_voxels(fine_stride) else {
-                return false;
-            };
-            let (lower, upper, face, surface) = if coarse_cell.height > fine_parent_height {
+            tangent += fine_stride;
+            continue;
+        }
+        let (lower, upper, face, surface, lower_shape, upper_shape) =
+            if coarse_cell.height > fine_cell.height {
                 (
-                    fine_parent_height,
+                    fine_cell.height,
                     coarse_cell.height,
                     outward_face,
                     coarse_cell,
+                    fine_edge_shape,
+                    coarse_edge_shape,
                 )
             } else {
                 (
                     coarse_cell.height,
-                    fine_parent_height,
+                    fine_cell.height,
                     inward_face,
                     fine_cell,
+                    coarse_edge_shape,
+                    fine_edge_shape,
                 )
             };
-            let collapsed_plane = coarse_cell.height.saturating_add(1);
-            for_each_fallback_surface_wall_run(
-                lower,
-                upper,
-                surface.material,
-                |y, vertical_extent, material| {
-                    let origin_voxels = match face {
-                        0 => [boundary[0].saturating_sub(1), y, boundary[1]],
-                        1 => [boundary[0], y, boundary[1]],
-                        4 => [boundary[0], y, boundary[1].saturating_sub(1)],
-                        5 => [boundary[0], y, boundary[1]],
-                        _ => unreachable!(),
-                    };
-                    let top = y.saturating_add(i32::from(vertical_extent));
-                    quads.push((
-                        GpuQuad {
-                            origin: origin_voxels,
-                            extent_voxels: [
-                                fine_stride as u16 | MORPH_CLOSURE_EXTENT_FLAG,
-                                vertical_extent,
-                            ],
-                            material_face: pack_surface_horizon_material(
-                                pack_gpu_material_face(
-                                    u32::from(material.id())
-                                        | FAR_MATERIAL_FLAG
-                                        | (u32::from(fine_level.index()) << SURFACE_LOD_SHIFT),
-                                    face,
-                                ),
-                                fine_cell.horizon_profile,
-                            ),
-                            ao: pack_surface_horizon_ao(
-                                fine_cell.macro_normal,
-                                fine_cell.horizon_profile,
-                            ),
-                        },
-                        pack_surface_morph_heights(
-                            collapsed_plane.saturating_sub(y),
-                            collapsed_plane.saturating_sub(top),
-                        ),
-                    ));
-                },
-            );
-            tangent += fine_stride;
-            continue;
-        }
-        let (lower, upper, face, surface) = if coarse_cell.height > fine_cell.height {
-            (
-                fine_cell.height,
-                coarse_cell.height,
-                outward_face,
-                coarse_cell,
-            )
-        } else {
-            (coarse_cell.height, fine_cell.height, inward_face, fine_cell)
-        };
         let fine_level = SurfaceLodLevel::from_stride_voxels(fine_stride);
         let (encoded_level, transition_normal, transition_horizon, morph_heights) = if let (
             Some(fine_level),
@@ -6970,6 +7666,23 @@ fn append_lod_transition(
             upper,
             surface.material,
             |y, vertical_extent, material| {
+                let bottom_shape = if y == lower.saturating_add(1) {
+                    lower_shape
+                } else {
+                    [0; 2]
+                };
+                let top_shape =
+                    if y.saturating_add(i32::from(vertical_extent)) == upper.saturating_add(1) {
+                        upper_shape
+                    } else {
+                        [0; 2]
+                    };
+                let shape = pack_surface_shape_deltas([
+                    bottom_shape[0],
+                    bottom_shape[1],
+                    top_shape[1],
+                    top_shape[0],
+                ]);
                 let origin_voxels = match face {
                     0 => [boundary[0].saturating_sub(1), y, boundary[1]],
                     1 => [boundary[0], y, boundary[1]],
@@ -6977,26 +7690,33 @@ fn append_lod_transition(
                     5 => [boundary[0], y, boundary[1]],
                     _ => unreachable!(),
                 };
-                quads.push((
-                    GpuQuad {
-                        origin: origin_voxels,
-                        extent_voxels: [fine_stride as u16, vertical_extent],
-                        material_face: pack_surface_horizon_material(
-                            pack_gpu_material_face(
-                                u32::from(material.id())
-                                    | FAR_MATERIAL_FLAG
-                                    | (u32::from(encoded_level.index()) << SURFACE_LOD_SHIFT),
-                                face,
-                            ),
-                            transition_horizon,
+                let mut quad = GpuQuad {
+                    origin: origin_voxels,
+                    extent_voxels: [fine_stride as u16, vertical_extent],
+                    material_face: pack_surface_horizon_material(
+                        pack_gpu_material_face(
+                            u32::from(material.id())
+                                | FAR_MATERIAL_FLAG
+                                | (u32::from(encoded_level.index()) << SURFACE_LOD_SHIFT),
+                            face,
                         ),
-                        // Between surface levels the connector follows the fine level's parent blend
-                        // and collapses exactly as that shell reaches the coarse height. The canonical
-                        // seam remains exact and static because canonical geometry has no sidecar.
-                        ao: pack_surface_horizon_ao(transition_normal, transition_horizon),
-                    },
-                    morph_heights,
-                ));
+                        transition_horizon,
+                    ) | (u32::from(shape & 0xff) << SURFACE_SHAPE_MATERIAL_SHIFT),
+                    // Between surface levels the connector follows the fine level's parent blend
+                    // and collapses exactly as that shell reaches the coarse height. The canonical
+                    // seam remains exact and static because canonical geometry has no sidecar.
+                    ao: pack_surface_horizon_ao(
+                        transition_normal | (u32::from(shape >> 8) << SURFACE_SHAPE_AO_SHIFT),
+                        transition_horizon,
+                    ),
+                };
+                if endpoint_order_reverses {
+                    quad.material_face = pack_gpu_source_material(
+                        quad.material_face,
+                        GPU_SOURCE_CROSSING_LOD_CONNECTOR,
+                    );
+                }
+                quads.push((quad, morph_heights));
             },
         );
         tangent += fine_stride;
@@ -7009,10 +7729,25 @@ fn gpu_quad_bounds(quads: &[GpuQuad]) -> Option<(glam::Vec3, glam::Vec3)> {
     let mut maximum = glam::Vec3::splat(f32::NEG_INFINITY);
     for quad in quads {
         let face = (quad.material_face & GPU_FACE_MASK) >> GPU_FACE_SHIFT;
-        let extent = glam::Vec2::new(
-            f32::from(quad.extent_voxels[0] & !MORPH_CLOSURE_EXTENT_FLAG) * VOXEL_SIZE_METRES,
-            f32::from(quad.extent_voxels[1]) * VOXEL_SIZE_METRES,
-        );
+        let transition_triangle = quad.extent_voxels[0] & TRANSITION_TRIANGLE_FLAG != 0;
+        let canonical_triangle = quad.extent_voxels[0] & CANONICAL_TRIANGLE_FLAG != 0;
+        let extent = if transition_triangle {
+            let level = (quad.material_face >> SURFACE_LOD_SHIFT) & 7;
+            let stride = (2_u16).checked_shl(level).unwrap_or(u16::MAX);
+            glam::Vec2::splat(f32::from(stride) * VOXEL_SIZE_METRES)
+        } else if canonical_triangle {
+            glam::Vec2::new(
+                f32::from(unpack_canonical_triangle_extent(quad.extent_voxels[0]))
+                    * VOXEL_SIZE_METRES,
+                f32::from(unpack_canonical_triangle_extent(quad.extent_voxels[1]))
+                    * VOXEL_SIZE_METRES,
+            )
+        } else {
+            glam::Vec2::new(
+                f32::from(quad.extent_voxels[0] & !MORPH_CLOSURE_EXTENT_FLAG) * VOXEL_SIZE_METRES,
+                f32::from(quad.extent_voxels[1]) * VOXEL_SIZE_METRES,
+            )
+        };
         let size = match face {
             0 | 1 => glam::Vec3::new(VOXEL_SIZE_METRES, extent.y, extent.x),
             2 | 3 => glam::Vec3::new(extent.x, VOXEL_SIZE_METRES, extent.y),
@@ -7020,8 +7755,29 @@ fn gpu_quad_bounds(quads: &[GpuQuad]) -> Option<(glam::Vec3, glam::Vec3)> {
         };
         let origin =
             glam::Vec3::from_array(quad.origin.map(|value| value as f32 * VOXEL_SIZE_METRES));
-        minimum = minimum.min(origin);
-        maximum = maximum.max(origin + size);
+        let mut quad_minimum = origin;
+        let mut quad_maximum = origin + size;
+        let shape = ((quad.material_face >> SURFACE_SHAPE_MATERIAL_SHIFT) & 0xff)
+            | (((quad.ao >> SURFACE_SHAPE_AO_SHIFT) & 0x0f) << 8);
+        if shape != 0 {
+            for corner in 0..4 {
+                let vertical_corner = matches!(face, 0 | 1 | 4 | 5) && corner >= 2;
+                let base_y = origin.y
+                    + if face == 2 {
+                        VOXEL_SIZE_METRES
+                    } else if vertical_corner {
+                        extent.y
+                    } else {
+                        0.0
+                    };
+                let shaped_y = base_y
+                    + unpack_surface_shape_delta(shape as u16, corner) as f32 * VOXEL_SIZE_METRES;
+                quad_minimum.y = quad_minimum.y.min(shaped_y);
+                quad_maximum.y = quad_maximum.y.max(shaped_y);
+            }
+        }
+        minimum = minimum.min(quad_minimum);
+        maximum = maximum.max(quad_maximum);
     }
     minimum.is_finite().then_some((minimum, maximum))
 }
@@ -7166,9 +7922,9 @@ fn slice_owned_by_lod(
     if *key == EXACT_VOLUME_FRONTIER_MESH_KEY {
         return true;
     }
-    let Some(focus) = focus else {
+    if focus.is_none() {
         return key.0 == 0;
-    };
+    }
     let Some(plan) = lod_draw_plan else {
         return false;
     };
@@ -7196,12 +7952,19 @@ fn slice_owned_by_lod(
     if patch_id.level != level {
         return false;
     }
-    if slice.morph_closure && !surface_patch_intersects_morph_band(focus, patch_id) {
+    if slice.morph_closure {
         return false;
+    }
+    if slice.stitch_edges != 0 {
+        return plan.owns_patch(patch_id)
+            && SurfacePatchEdge::ALL.into_iter().all(|edge| {
+                slice.stitch_edges & (1 << edge.index()) == 0
+                    || plan.owns_surface_top_edge(patch_id, edge)
+            });
     }
     slice.boundary_edge.map_or_else(
         || plan.owns_patch(patch_id),
-        |edge| plan.owns_source_edge(patch_id, edge),
+        |edge| plan.owns_boundary_wall_edge(patch_id, edge),
     )
 }
 
@@ -7281,117 +8044,7 @@ fn frontier_face_gpu_quads(frontier: &ExactVolumeFrontierFace) -> Vec<GpuQuad> {
     quads
 }
 
-/// Marks coplanar edges covered by adjacent quads and edges whose continuation crosses a chunk.
-///
-/// Greedy rectangles intentionally meet at T-junctions. Hardware rasterization can round the
-/// independently projected edge equations to opposite subpixels and leave an isolated background
-/// sample. Encoding the genuinely internal edges lets the vertex shader overlap those seams by one
-/// pixel. Chunk-boundary edges receive the same treatment because independently meshed neighbors
-/// cannot share a long-edge subdivision; any exposed turn there is still backed by the closed
-/// voxel surface's perpendicular face rather than open space.
-fn canonical_internal_seam_flags(quads: &[Quad]) -> Vec<u32> {
-    // key: (varying world axis, first fixed coordinate, second fixed coordinate). Unit counts let
-    // several short coplanar or perpendicular neighbors prove complete coverage of one long edge.
-    let mut edge_counts = BTreeMap::<(u8, u8, u8), [u8; CHUNK_EDGE]>::new();
-    let edges = quads
-        .iter()
-        .map(|quad| {
-            [
-                canonical_quad_edge(quad, [0, 0], [0, 1]),
-                canonical_quad_edge(quad, [1, 0], [1, 1]),
-                canonical_quad_edge(quad, [0, 0], [1, 0]),
-                canonical_quad_edge(quad, [0, 1], [1, 1]),
-            ]
-        })
-        .collect::<Vec<_>>();
-    for quad_edges in &edges {
-        for edge in quad_edges.iter().flatten() {
-            let counts = edge_counts.entry(edge.0).or_insert([0; CHUNK_EDGE]);
-            for count in &mut counts[usize::from(edge.1)..usize::from(edge.2)] {
-                *count = count.saturating_add(1);
-            }
-        }
-    }
-    quads
-        .iter()
-        .zip(edges)
-        .map(|(quad, quad_edges)| {
-            if quad.face >= 6 || quad.extent.contains(&0) {
-                return 0;
-            }
-            let shared = |edge: Option<((u8, u8, u8), u8, u8)>| {
-                edge.is_some_and(|(key, start, end)| {
-                    edge_counts.get(&key).is_some_and(|counts| {
-                        counts[usize::from(start)..usize::from(end)]
-                            .iter()
-                            .all(|count| *count >= 2)
-                    })
-                })
-            };
-            let (u, v) = canonical_quad_uv_origin(quad);
-            let [width, height] = quad.extent;
-            (if u == 0 || shared(quad_edges[0]) {
-                INTERNAL_SEAM_LOW_U_FLAG
-            } else {
-                0
-            }) | (if u + width == CHUNK_EDGE as u8 || shared(quad_edges[1]) {
-                INTERNAL_SEAM_HIGH_U_FLAG
-            } else {
-                0
-            }) | (if v == 0 || shared(quad_edges[2]) {
-                INTERNAL_SEAM_LOW_V_FLAG
-            } else {
-                0
-            }) | (if v + height == CHUNK_EDGE as u8 || shared(quad_edges[3]) {
-                INTERNAL_SEAM_HIGH_V_FLAG
-            } else {
-                0
-            })
-        })
-        .collect()
-}
-
-fn canonical_quad_uv_origin(quad: &Quad) -> (u8, u8) {
-    match quad.face {
-        0 | 1 => (quad.origin[2], quad.origin[1]),
-        2 | 3 => (quad.origin[0], quad.origin[2]),
-        4 | 5 => (quad.origin[0], quad.origin[1]),
-        _ => (0, 0),
-    }
-}
-
-fn canonical_quad_edge(quad: &Quad, from: [u8; 2], to: [u8; 2]) -> Option<((u8, u8, u8), u8, u8)> {
-    if quad.face >= 6 || quad.extent.contains(&0) {
-        return None;
-    }
-    let corner = |uv: [u8; 2]| {
-        let u = uv[0] * quad.extent[0];
-        let v = uv[1] * quad.extent[1];
-        match quad.face {
-            0 => [quad.origin[0] + 1, quad.origin[1] + v, quad.origin[2] + u],
-            1 => [quad.origin[0], quad.origin[1] + v, quad.origin[2] + u],
-            2 => [quad.origin[0] + u, quad.origin[1] + 1, quad.origin[2] + v],
-            3 => [quad.origin[0] + u, quad.origin[1], quad.origin[2] + v],
-            4 => [quad.origin[0] + u, quad.origin[1] + v, quad.origin[2] + 1],
-            5 => [quad.origin[0] + u, quad.origin[1] + v, quad.origin[2]],
-            _ => unreachable!(),
-        }
-    };
-    let a = corner(from);
-    let b = corner(to);
-    let axis = (0..3).find(|&axis| a[axis] != b[axis])?;
-    let fixed = match axis {
-        0 => [a[1], a[2]],
-        1 => [a[0], a[2]],
-        _ => [a[0], a[1]],
-    };
-    Some((
-        (axis as u8, fixed[0], fixed[1]),
-        a[axis].min(b[axis]),
-        a[axis].max(b[axis]),
-    ))
-}
-
+#[cfg(test)]
 fn surface_patch_intersects_morph_band(focus: GeometricLodFocus, patch: SurfacePatchId) -> bool {
     let boundary = usize::from(patch.level.index()) + 1;
     let boundary_half_extents = focus.boundary_half_extents();
@@ -7412,23 +8065,29 @@ fn surface_patch_intersects_morph_band(focus: GeometricLodFocus, patch: SurfaceP
         )
         .max()
         .unwrap_or(0);
+    let nearest_axis_delta = |minimum: i32, maximum: i32, centre: i32| {
+        if centre < minimum {
+            i64::from(minimum) - i64::from(centre)
+        } else if centre > maximum {
+            i64::from(centre) - i64::from(maximum)
+        } else {
+            0
+        }
+    };
+    let minimum_axis_delta = nearest_axis_delta(min_x, max_x, centre[0])
+        .max(nearest_axis_delta(min_z, max_z, centre[1]));
     // Matches the shader's max(1.6m, half_extent * 0.02) band in canonical 10cm voxels.
     let width = 16_i64.max((i64::from(half_extent) + 49) / 50);
     maximum_axis_delta >= i64::from(half_extent) - width
+        && minimum_axis_delta <= i64::from(half_extent) + width
 }
 
 fn slice_uses_geometry_morph(
-    key: &MeshKey,
-    focus: Option<GeometricLodFocus>,
-    slice: &MeshSlice,
+    _key: &MeshKey,
+    _focus: Option<GeometricLodFocus>,
+    _slice: &MeshSlice,
 ) -> bool {
-    if LOD_TRANSITION_MESH_KEYS.contains(key) {
-        return true;
-    }
-    let (Some(focus), Some(patch)) = (focus, slice.surface_patch_id) else {
-        return false;
-    };
-    surface_patch_intersects_morph_band(focus, patch)
+    false
 }
 
 fn mesh_casts_directional_shadow(key: &MeshKey) -> bool {
@@ -8154,7 +8813,10 @@ fn pipeline(
             module: shader,
             entry_point: Some(options.vertex_entry),
             buffers,
-            compilation_options: Default::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: options.fragment_constants,
+                ..Default::default()
+            },
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
@@ -8410,12 +9072,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn progressive_plan_changes_do_not_restart_an_active_cut_handoff() {
-        assert!(cut_transition_is_active(Some(10.0), 10.1));
-        assert!(
-            !cut_transition_is_active(Some(10.0), 10.46),
-            "a new handoff can begin after the original transition window"
-        );
+    fn lod_cut_publication_is_atomic() {
+        assert_eq!(CUT_TRANSITION_SECONDS, 0.0);
+        assert!(!cut_transition_is_active(Some(10.0), 10.0));
         assert!(!cut_transition_is_active(None, 10.1));
     }
 
@@ -8481,6 +9140,7 @@ mod tests {
                     material: Material::Stone,
                     macro_normal: pack_surface_macro_normals(glam::Vec3::Y, glam::Vec3::Y),
                     horizon_profile: 0,
+                    shape: 0,
                 });
                 (voxels_world::SURFACE_PATCH_EDGE_CELLS.pow(2)) as usize
             ],
@@ -8774,9 +9434,27 @@ mod tests {
                 - 2,
             0,
         );
+        let beyond_boundary = SurfacePatchId::new(
+            SurfaceLodLevel::Stride2,
+            LOD_BOUNDARY_HALF_EXTENTS[1]
+                / SurfacePatchId::new(SurfaceLodLevel::Stride2, 0, 0).voxel_span()
+                + 8,
+            0,
+        );
+        let beyond_corner = SurfacePatchId::new(
+            SurfaceLodLevel::Stride2,
+            LOD_BOUNDARY_HALF_EXTENTS[1]
+                / SurfacePatchId::new(SurfaceLodLevel::Stride2, 0, 0).voxel_span()
+                - 2,
+            LOD_BOUNDARY_HALF_EXTENTS[1]
+                / SurfacePatchId::new(SurfaceLodLevel::Stride2, 0, 0).voxel_span()
+                + 8,
+        );
         let outermost = SurfacePatchId::new(SurfaceLodLevel::Stride256, 0, 0);
         assert!(!surface_patch_intersects_morph_band(focus, inner));
         assert!(surface_patch_intersects_morph_band(focus, boundary));
+        assert!(!surface_patch_intersects_morph_band(focus, beyond_boundary));
+        assert!(!surface_patch_intersects_morph_band(focus, beyond_corner));
         assert!(!surface_patch_intersects_morph_band(focus, outermost));
     }
 
@@ -8900,44 +9578,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_seam_flags_cover_only_shared_coplanar_edges() {
-        let quad = |origin: [u8; 3], extent: [u8; 2]| Quad {
-            origin,
-            face: 2,
-            extent,
-            material: Material::Stone.id(),
-            ao: 0xff,
-            _pad: 0,
-        };
-        let quads = [
-            quad([4, 4, 4], [4, 2]),
-            quad([4, 4, 6], [2, 2]),
-            quad([6, 4, 6], [2, 2]),
-        ];
-        let flags = canonical_internal_seam_flags(&quads);
-        assert_eq!(flags[0], INTERNAL_SEAM_HIGH_V_FLAG);
-        assert_eq!(
-            flags[1] & INTERNAL_SEAM_LOW_V_FLAG,
-            INTERNAL_SEAM_LOW_V_FLAG
-        );
-        assert_eq!(
-            flags[2] & INTERNAL_SEAM_LOW_V_FLAG,
-            INTERNAL_SEAM_LOW_V_FLAG
-        );
-        assert_eq!(flags[0] & INTERNAL_SEAM_LOW_U_FLAG, 0);
-        assert_eq!(flags[0] & INTERNAL_SEAM_HIGH_U_FLAG, 0);
-        assert_eq!(flags[0] & INTERNAL_SEAM_LOW_V_FLAG, 0);
-
-        let boundary = canonical_internal_seam_flags(&[quad([0, 4, 0], [4, 2])]);
-        assert_eq!(
-            boundary[0] & (INTERNAL_SEAM_LOW_U_FLAG | INTERNAL_SEAM_LOW_V_FLAG),
-            INTERNAL_SEAM_LOW_U_FLAG | INTERNAL_SEAM_LOW_V_FLAG
-        );
-        assert_eq!(boundary[0] & INTERNAL_SEAM_HIGH_U_FLAG, 0);
-        assert_eq!(boundary[0] & INTERNAL_SEAM_HIGH_V_FLAG, 0);
-    }
-
-    #[test]
     fn surface_horizons_distinguish_open_ground_from_a_coarse_valley() {
         let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 0, 0);
         let flat =
@@ -8970,6 +9610,21 @@ mod tests {
             0,
             "the parent horizon remains available for LOD morphing"
         );
+    }
+
+    #[test]
+    fn transition_mesh_bounds_include_actual_shaped_vertices() {
+        let shape = pack_surface_shape_deltas([-4, 3, 3, -4]);
+        let quad = GpuQuad {
+            origin: [10, 20, 30],
+            extent_voxels: [8, 8],
+            material_face: pack_gpu_material_face(u32::from(Material::Stone.id()), 2)
+                | (u32::from(shape & 0xff) << SURFACE_SHAPE_MATERIAL_SHIFT),
+            ao: u32::from(shape >> 8) << SURFACE_SHAPE_AO_SHIFT,
+        };
+        let (minimum, maximum) = gpu_quad_bounds(&[quad]).expect("one quad has finite bounds");
+        assert!(minimum.abs_diff_eq(glam::vec3(1.0, 1.7, 3.0), 1e-5));
+        assert!(maximum.abs_diff_eq(glam::vec3(1.8, 2.4, 3.8), 1e-5));
     }
 
     #[test]
@@ -9045,6 +9700,44 @@ mod tests {
     }
 
     #[test]
+    fn streamed_heightfield_profile_uses_ground_beneath_aligned_proxy_caps() {
+        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride4, 0, 0);
+        let mut tile =
+            voxels_world::generate_surface_tile_mesh_with(coord, |_, _| (10, Material::Grass));
+        let patch_index = tile.patches.len() - 1;
+        let source_range = tile.patches[patch_index].quad_range.clone();
+        let terrain_top = tile.quads[source_range.start as usize..source_range.end as usize]
+            .iter()
+            .copied()
+            .find(|quad| quad.face == 2 && quad.extent == [4, 4])
+            .expect("terrain top exists");
+        tile.quads.push(voxels_world::SurfaceQuad {
+            origin: [
+                terrain_top.origin[0],
+                terrain_top.origin[1] + 80,
+                terrain_top.origin[2],
+            ],
+            material: Material::Stone,
+            ..terrain_top
+        });
+        tile.patches[patch_index].quad_range.end = tile.quads.len() as u32;
+
+        let (macro_normals, shapes) = surface_macro_normals_and_shapes(&tile);
+        let horizons = surface_horizon_profiles(&tile);
+        let profiles = surface_patch_profiles(&tile, &macro_normals, &horizons, &shapes);
+        let profile = profiles
+            .into_iter()
+            .find_map(|(_, profile)| {
+                profile
+                    .sample_world(terrain_top.origin[0], terrain_top.origin[2])
+                    .map(|sample| (profile, sample))
+            })
+            .expect("terrain profile contains the selected cell");
+        assert_eq!(profile.1.height, terrain_top.origin[1]);
+        assert_eq!(profile.1.material, Material::Grass);
+    }
+
+    #[test]
     fn active_lod_transition_exactly_joins_the_two_resident_height_profiles() {
         let focus = GeometricLodFocus::snapped(0, 0);
         let coarse = SurfacePatchId::new(SurfaceLodLevel::Stride4, 8, 0);
@@ -9066,8 +9759,20 @@ mod tests {
         let transitions = build_lod_transitions(&selection, &profiles, &HashMap::new());
         assert_eq!(transitions.incomplete_edges, 0);
         assert_eq!(transitions.exact_edges.len(), 1);
-        assert_eq!(transitions.quads.len(), 16);
-        for (quad, &morph_heights) in transitions.quads.iter().zip(&transitions.morph_heights) {
+        let connectors = transitions
+            .quads
+            .iter()
+            .zip(&transitions.morph_heights)
+            .filter(|(quad, _)| quad.material_face >> GPU_FACE_SHIFT & 7 != 2)
+            .collect::<Vec<_>>();
+        let stitches = transitions
+            .quads
+            .iter()
+            .filter(|quad| quad.material_face >> GPU_FACE_SHIFT & 7 == 2)
+            .collect::<Vec<_>>();
+        assert_eq!(connectors.len(), 16);
+        assert_eq!(stitches.len(), 24);
+        for (quad, &morph_heights) in connectors {
             assert_eq!(quad.extent_voxels, [2, 10]);
             assert_eq!(quad.origin[0], 255);
             assert_eq!(quad.origin[1], 11);
@@ -9084,6 +9789,21 @@ mod tests {
                 "the fine endpoint must meet its own hidden parent at height 12"
             );
         }
+        assert!(stitches.iter().all(|quad| {
+            quad.extent_voxels[0] & TRANSITION_TRIANGLE_FLAG != 0 && quad.origin[1] == 10
+        }));
+        assert_eq!(
+            stitches
+                .iter()
+                .filter(|quad| {
+                    quad.extent_voxels[1]
+                        - (quad.extent_voxels[0] & TRANSITION_TRIANGLE_OFFSET_MASK)
+                        == 2
+                })
+                .count(),
+            16,
+            "two fine segments replace each of the eight coarse boundary edges"
+        );
 
         let main = MeshSlice {
             relative_offset: 0,
@@ -9093,6 +9813,7 @@ mod tests {
             bounds_max: glam::Vec3::ONE,
             surface_patch_id: Some(coarse),
             boundary_edge: None,
+            stitch_edges: 0,
             morph_closure: false,
             exact_replacement_chunk: None,
             canonical_water_surface: false,
@@ -9100,6 +9821,10 @@ mod tests {
         };
         let edge = MeshSlice {
             boundary_edge: Some(SurfacePatchEdge::NegativeX),
+            ..main
+        };
+        let top = MeshSlice {
+            stitch_edges: 1 << SurfacePatchEdge::NegativeX.index(),
             ..main
         };
         let key = (SurfaceLodLevel::Stride4.index() + 1, 0, 0, 0);
@@ -9114,6 +9839,35 @@ mod tests {
         };
         assert!(slice_owned_by_lod(Some(focus), Some(&plan), &key, &main));
         assert!(!slice_owned_by_lod(Some(focus), Some(&plan), &key, &edge));
+        assert!(!slice_owned_by_lod(Some(focus), Some(&plan), &key, &top));
+
+        let fine_main = MeshSlice {
+            surface_patch_id: Some(fine_low),
+            ..main
+        };
+        let fine_edge = MeshSlice {
+            boundary_edge: Some(SurfacePatchEdge::PositiveX),
+            ..fine_main
+        };
+        let fine_top = MeshSlice {
+            stitch_edges: 1 << SurfacePatchEdge::PositiveX.index(),
+            ..fine_main
+        };
+        let fine_key = (SurfaceLodLevel::Stride2.index() + 1, 0, 0, 0);
+        assert!(slice_owned_by_lod(
+            Some(focus),
+            Some(&plan),
+            &fine_key,
+            &fine_main
+        ));
+        assert!(
+            !slice_owned_by_lod(Some(focus), Some(&plan), &fine_key, &fine_edge),
+            "the connector is the sole vertical owner on both sides of the exact seam"
+        );
+        assert!(
+            slice_owned_by_lod(Some(focus), Some(&plan), &fine_key, &fine_top),
+            "only the coarse boundary top is replaced by subdivided stitch tops"
+        );
     }
 
     #[test]
@@ -9138,11 +9892,34 @@ mod tests {
 
         assert_eq!(transitions.incomplete_edges, 0);
         assert_eq!(transitions.exact_edges.len(), 1);
-        assert_eq!(transitions.quads.len(), 64);
-        for (quad, &morph_heights) in transitions.quads.iter().zip(&transitions.morph_heights) {
+        let connectors = transitions
+            .quads
+            .iter()
+            .zip(&transitions.morph_heights)
+            .filter(|(quad, _)| quad.material_face >> GPU_FACE_SHIFT & 7 != 2)
+            .collect::<Vec<_>>();
+        let stitches = transitions
+            .quads
+            .iter()
+            .filter(|quad| quad.material_face >> GPU_FACE_SHIFT & 7 == 2)
+            .collect::<Vec<_>>();
+        assert_eq!(connectors.len(), 64);
+        assert_eq!(stitches.len(), 72);
+        for (quad, &morph_heights) in connectors {
             assert_eq!(quad.extent_voxels, [2, 10]);
             assert_eq!(((morph_heights >> 16) as u16) as i16, -8);
         }
+        assert_eq!(
+            stitches
+                .iter()
+                .filter(|quad| {
+                    quad.extent_voxels[1]
+                        - (quad.extent_voxels[0] & TRANSITION_TRIANGLE_OFFSET_MASK)
+                        == 2
+                })
+                .count(),
+            64
+        );
     }
 
     #[test]
@@ -9166,13 +9943,22 @@ mod tests {
 
         assert_eq!(transitions.incomplete_edges, 0);
         assert_eq!(transitions.exact_edges.len(), 1);
-        assert_eq!(transitions.quads.len(), 16);
+        assert_eq!(transitions.quads.len(), 24);
         for (quad, &morph_heights) in transitions.quads.iter().zip(&transitions.morph_heights) {
-            assert_eq!(quad.extent_voxels, [2 | MORPH_CLOSURE_EXTENT_FLAG, 2]);
-            assert_eq!(quad.origin[1], 11);
+            assert_eq!(quad.material_face >> GPU_FACE_SHIFT & 7, 2);
+            assert_ne!(quad.extent_voxels[0] & TRANSITION_TRIANGLE_FLAG, 0);
+            assert_eq!(quad.origin[1], 10);
             assert_eq!((morph_heights as u16) as i16, 0);
-            assert_eq!(((morph_heights >> 16) as u16) as i16, -2);
+            assert_eq!(((morph_heights >> 16) as u16) as i16, 0);
         }
+        assert_eq!(
+            transitions
+                .quads
+                .iter()
+                .filter(|quad| quad.extent_voxels[0] & TRANSITION_TRIANGLE_FLAG != 0)
+                .count(),
+            24
+        );
     }
 
     #[test]
@@ -9194,8 +9980,19 @@ mod tests {
         let transitions = build_lod_transitions(&selection, &profiles, &HashMap::new());
         assert_eq!(transitions.incomplete_edges, 0);
         assert_eq!(transitions.exact_edges.len(), 1);
-        assert_eq!(transitions.quads.len(), 16 * 3);
-        for segments in transitions.quads.chunks_exact(3) {
+        let connectors = transitions
+            .quads
+            .iter()
+            .filter(|quad| quad.material_face >> GPU_FACE_SHIFT & 7 != 2)
+            .collect::<Vec<_>>();
+        let stitches = transitions
+            .quads
+            .iter()
+            .filter(|quad| quad.material_face >> GPU_FACE_SHIFT & 7 == 2)
+            .collect::<Vec<_>>();
+        assert_eq!(connectors.len(), 16 * 3);
+        assert_eq!(stitches.len(), 24);
+        for segments in connectors.chunks_exact(3) {
             assert_eq!(
                 segments
                     .iter()
@@ -9234,7 +10031,7 @@ mod tests {
             transition_mesh_key: None,
         };
         assert!(
-            incomplete_plan.owns_source_edge(coarse, edge),
+            incomplete_plan.owns_boundary_wall_edge(coarse, edge),
             "a source edge remains authoritative until its whole replacement is available"
         );
 
@@ -9246,6 +10043,7 @@ mod tests {
                 material: Material::Stone,
                 macro_normal: 0xff,
                 horizon_profile: 0,
+                shape: 0,
             });
         }
         let canonical_profiles = HashMap::from([(
@@ -9266,7 +10064,22 @@ mod tests {
         let complete = build_lod_transitions(&complete_selection, &profiles, &canonical_profiles);
         assert_eq!(complete.incomplete_edges, 0);
         assert_eq!(complete.exact_edges.len(), 1);
-        assert_eq!(complete.quads.len(), 16);
+        assert_eq!(
+            complete
+                .quads
+                .iter()
+                .filter(|quad| quad.material_face >> GPU_FACE_SHIFT & 7 != 2)
+                .count(),
+            16
+        );
+        assert_eq!(
+            complete
+                .quads
+                .iter()
+                .filter(|quad| quad.material_face >> GPU_FACE_SHIFT & 7 == 2)
+                .count(),
+            24
+        );
         let complete_plan = LodDrawPlan {
             patches: complete_selection,
             canonical_columns: HashSet::from([(131, 191)]),
@@ -9276,7 +10089,7 @@ mod tests {
             incomplete_transition_edges: complete.incomplete_edges,
             transition_mesh_key: None,
         };
-        assert!(!complete_plan.owns_source_edge(coarse, edge));
+        assert!(!complete_plan.owns_boundary_wall_edge(coarse, edge));
     }
 
     #[test]
@@ -9411,6 +10224,7 @@ mod tests {
                 material: Material::Stone,
                 macro_normal: 0,
                 horizon_profile: 0,
+                shape: 0,
             })
         };
         let mut lower_cells = vec![None; CHUNK_EDGE * CHUNK_EDGE];
@@ -9685,6 +10499,7 @@ mod tests {
             material: Material::Stone,
             macro_normal: 0,
             horizon_profile: 0,
+            shape: 0,
         });
         let changed = vec![(patch, changed_profile)];
         assert_eq!(
@@ -9694,6 +10509,128 @@ mod tests {
         assert_eq!(
             changed_surface_patch_profiles(tile, &previous, &[]),
             HashSet::from([patch])
+        );
+    }
+
+    #[test]
+    fn canonical_greedy_t_junctions_split_only_at_real_top_vertices() {
+        let top = |origin, extent| Quad {
+            origin,
+            face: 2,
+            extent,
+            material: Material::Stone.id(),
+            ao: 0xff,
+            _pad: 0,
+        };
+        let large = top([0, 0, 0], [4, 4]);
+        assert_eq!(
+            canonical_gpu_quads([0; 3], &[large]),
+            vec![canonical_gpu_quad([0; 3], &large)],
+            "an isolated greedy face keeps its single compact instance"
+        );
+
+        let adjacent = top([4, 0, 2], [1, 1]);
+        let constrained = canonical_gpu_quads([0; 3], &[large, adjacent]);
+        let large_triangles = constrained
+            .iter()
+            .filter(|quad| {
+                quad.origin == [0, 0, 0] && quad.extent_voxels[0] & CANONICAL_TRIANGLE_FLAG != 0
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            large_triangles.len(),
+            4,
+            "three exact segments on the touched edge plus one unsplit fill triangle"
+        );
+        let positive_x_offsets = large_triangles
+            .iter()
+            .filter(|quad| {
+                (quad.extent_voxels[0] >> CANONICAL_TRIANGLE_EDGE_SHIFT) & 3
+                    == SurfacePatchEdge::PositiveX.index() as u16
+            })
+            .map(|quad| {
+                [
+                    quad.extent_voxels[0] & CANONICAL_TRIANGLE_OFFSET_MASK,
+                    quad.extent_voxels[1] & CANONICAL_TRIANGLE_OFFSET_MASK,
+                ]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(positive_x_offsets, [[0, 2], [2, 3], [3, 4]]);
+        assert_eq!(
+            constrained
+                .iter()
+                .filter(|quad| quad.origin == [4, 0, 2])
+                .count(),
+            1,
+            "the unit neighbor already has the exact shared endpoints"
+        );
+    }
+
+    #[test]
+    fn vertical_t_junctions_use_shared_lattice_vertices_without_unbounded_wall_instances() {
+        let large = GpuQuad {
+            origin: [0, 0, 0],
+            extent_voxels: [2, 63],
+            material_face: pack_gpu_material_face(u32::from(Material::Stone.id()), 0),
+            ao: 0xff,
+        };
+        let neighbor = GpuQuad {
+            origin: [0, 20, 1],
+            extent_voxels: [1, 10],
+            material_face: pack_gpu_material_face(u32::from(Material::Stone.id()), 4),
+            ao: 0xff,
+        };
+        let constrained = constrain_gpu_quad_t_junctions(
+            &[large, neighbor],
+            |_, _| true,
+            |_, _, _, _| false,
+            true,
+        );
+        assert_eq!(constrained[0].len(), 4);
+        assert_eq!(
+            constrained[0]
+                .iter()
+                .filter(|quad| {
+                    (quad.extent_voxels[0] >> CANONICAL_TRIANGLE_EDGE_SHIFT) & 3
+                        == SurfacePatchEdge::PositiveX.index() as u16
+                })
+                .map(|quad| {
+                    [
+                        quad.extent_voxels[0] & CANONICAL_TRIANGLE_OFFSET_MASK,
+                        quad.extent_voxels[1] & CANONICAL_TRIANGLE_OFFSET_MASK,
+                    ]
+                })
+                .collect::<Vec<_>>(),
+            [[0, 20], [20, 30], [30, 63]]
+        );
+        assert_eq!(
+            constrained[0]
+                .iter()
+                .filter(|quad| {
+                    quad.extent_voxels[1] & CANONICAL_TRIANGLE_SHADOW_OWNER_FLAG != 0
+                })
+                .count(),
+            1
+        );
+        assert!(constrained[0].iter().all(|quad| {
+            unpack_canonical_triangle_extent(quad.extent_voxels[0]) == 2
+                && unpack_canonical_triangle_extent(quad.extent_voxels[1]) == 63
+        }));
+
+        let split = split_gpu_quad_vertical_extent(
+            GpuQuad {
+                origin: [3, -70, 5],
+                extent_voxels: [2, 150],
+                ..large
+            },
+            63,
+        );
+        assert_eq!(
+            split
+                .iter()
+                .map(|quad| (quad.origin[1], quad.extent_voxels[1]))
+                .collect::<Vec<_>>(),
+            [(-70, 7), (-63, 63), (0, 63), (63, 17)]
         );
     }
 
@@ -9935,6 +10872,7 @@ mod tests {
             bounds_max: glam::Vec3::splat(10_000.0),
             surface_patch_id: None,
             boundary_edge: None,
+            stitch_edges: 0,
             morph_closure: false,
             exact_replacement_chunk: None,
             canonical_water_surface: false,
@@ -10332,6 +11270,7 @@ mod tests {
             bounds_max,
             surface_patch_id: None,
             boundary_edge: None,
+            stitch_edges: 0,
             morph_closure: false,
             exact_replacement_chunk: None,
             canonical_water_surface: false,
@@ -10345,6 +11284,7 @@ mod tests {
             bounds_max,
             surface_patch_id: Some(SurfacePatchId::new(SurfaceLodLevel::Stride2, 6, 0)),
             boundary_edge: None,
+            stitch_edges: 0,
             morph_closure: false,
             exact_replacement_chunk: None,
             canonical_water_surface: false,
