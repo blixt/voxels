@@ -16,11 +16,12 @@ use voxels_runtime::{WorkStage, WorkTicket};
 use voxels_world::protocol::{
     self, ChunkBatchRequest, ChunkBatchResult, EditAction, EditCommand, EditCommit,
     FrameReassembler, OpenWorld, PlayerIdentity, SurfaceTileBatchRequest, SurfaceTileBatchResult,
-    WorldCapabilities, WorldOpened,
+    TerrainDirectoryBatchRequest, TerrainDirectoryBatchResult, VirtualTerrainPageBatchRequest,
+    VirtualTerrainPageBatchResult, WorldCapabilities, WorldOpened,
 };
 use voxels_world::{
-    ChunkCoord, SurfaceTileCoord, WorldManifestHash, WorldProductPriority, WorldSourceError,
-    WorldSourceIdentityHash,
+    ChunkCoord, SurfaceTileCoord, TerrainPageBatchRequestV1, TerrainPageTransferIdentity,
+    WorldManifestHash, WorldProductPriority, WorldSourceError, WorldSourceIdentityHash,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -71,7 +72,9 @@ impl std::fmt::Display for RemoteWorldError {
                 formatter.write_str("world WebSocket is above its configured buffer watermark")
             }
             Self::RequestWindowFull => formatter.write_str("world request window is full"),
-            Self::InvalidBatch(reason) => write!(formatter, "invalid world chunk batch: {reason}"),
+            Self::InvalidBatch(reason) => {
+                write!(formatter, "invalid world product batch: {reason}")
+            }
             Self::Protocol(reason) => write!(formatter, "world protocol error: {reason}"),
             Self::ResponseMismatch(reason) => {
                 write!(formatter, "world response mismatch: {reason}")
@@ -109,6 +112,20 @@ pub struct RemoteSurfaceCompletion {
     pub request_id: RemoteRequestId,
     pub tickets: Vec<RemoteSurfaceTicket>,
     pub result: Result<SurfaceTileBatchResult, RemoteWorldError>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RemoteTerrainDirectoryCompletion {
+    pub request_id: RemoteRequestId,
+    pub roots: Vec<voxels_world::TerrainPageKey>,
+    pub result: Result<TerrainDirectoryBatchResult, RemoteWorldError>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RemoteTerrainPageCompletion {
+    pub request_id: RemoteRequestId,
+    pub requested: Vec<TerrainPageTransferIdentity>,
+    pub result: Result<VirtualTerrainPageBatchResult, RemoteWorldError>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -237,6 +254,33 @@ impl RemoteWorldClient {
         self.inner.surface_completions.borrow_mut().pop_front()
     }
 
+    pub fn submit_terrain_directory_batch(
+        &self,
+        priority: WorldProductPriority,
+        roots: Vec<voxels_world::TerrainPageKey>,
+    ) -> Result<RemoteRequestId, RemoteWorldError> {
+        self.inner.send_terrain_directory_request(priority, roots)
+    }
+
+    pub fn next_terrain_directory_completion(&self) -> Option<RemoteTerrainDirectoryCompletion> {
+        self.inner
+            .terrain_directory_completions
+            .borrow_mut()
+            .pop_front()
+    }
+
+    pub fn submit_terrain_page_batch(
+        &self,
+        priority: WorldProductPriority,
+        pages: Vec<TerrainPageTransferIdentity>,
+    ) -> Result<RemoteRequestId, RemoteWorldError> {
+        self.inner.send_terrain_page_request(priority, pages)
+    }
+
+    pub fn next_terrain_page_completion(&self) -> Option<RemoteTerrainPageCompletion> {
+        self.inner.terrain_page_completions.borrow_mut().pop_front()
+    }
+
     /// Cancels surface batches as soon as any tile falls outside the caller's current coverage.
     /// The completion path immediately requeues still-useful siblings, preventing obsolete work
     /// from occupying an equal-priority request slot during sustained travel.
@@ -279,6 +323,8 @@ struct RemoteInner {
     pending: RefCell<BTreeMap<RemoteRequestId, PendingBatch>>,
     completions: RefCell<VecDeque<RemoteChunkCompletion>>,
     surface_completions: RefCell<VecDeque<RemoteSurfaceCompletion>>,
+    terrain_directory_completions: RefCell<VecDeque<RemoteTerrainDirectoryCompletion>>,
+    terrain_page_completions: RefCell<VecDeque<RemoteTerrainPageCompletion>>,
     pending_edits: RefCell<BTreeMap<u64, EditCommand>>,
     edit_events: RefCell<VecDeque<RemoteEditEvent>>,
     frame_reassembler: RefCell<FrameReassembler>,
@@ -297,12 +343,40 @@ enum PendingBatch {
         priority: WorldProductPriority,
         tickets: Vec<RemoteSurfaceTicket>,
     },
+    TerrainDirectories {
+        priority: WorldProductPriority,
+        roots: Vec<voxels_world::TerrainPageKey>,
+    },
+    TerrainPages {
+        priority: WorldProductPriority,
+        requested: Vec<TerrainPageTransferIdentity>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum PendingBatchKind {
+    Chunks,
+    Surface,
+    TerrainDirectories,
+    TerrainPages,
 }
 
 impl PendingBatch {
     const fn priority(&self) -> WorldProductPriority {
         match self {
-            Self::Chunks { priority, .. } | Self::Surface { priority, .. } => *priority,
+            Self::Chunks { priority, .. }
+            | Self::Surface { priority, .. }
+            | Self::TerrainDirectories { priority, .. }
+            | Self::TerrainPages { priority, .. } => *priority,
+        }
+    }
+
+    const fn kind(&self) -> PendingBatchKind {
+        match self {
+            Self::Chunks { .. } => PendingBatchKind::Chunks,
+            Self::Surface { .. } => PendingBatchKind::Surface,
+            Self::TerrainDirectories { .. } => PendingBatchKind::TerrainDirectories,
+            Self::TerrainPages { .. } => PendingBatchKind::TerrainPages,
         }
     }
 }
@@ -335,6 +409,8 @@ impl RemoteInner {
             pending: RefCell::new(BTreeMap::new()),
             completions: RefCell::new(VecDeque::new()),
             surface_completions: RefCell::new(VecDeque::new()),
+            terrain_directory_completions: RefCell::new(VecDeque::new()),
+            terrain_page_completions: RefCell::new(VecDeque::new()),
             pending_edits: RefCell::new(BTreeMap::new()),
             edit_events: RefCell::new(VecDeque::new()),
             frame_reassembler: RefCell::new(FrameReassembler::default()),
@@ -518,6 +594,10 @@ impl RemoteInner {
             self.handle_chunk_result(generation, &bytes);
         } else if kind == protocol::surface_tile_batch_result_kind() {
             self.handle_surface_result(generation, &bytes);
+        } else if kind == protocol::terrain_directory_batch_result_kind() {
+            self.handle_terrain_directory_result(generation, &bytes);
+        } else if kind == protocol::virtual_terrain_page_batch_result_kind() {
+            self.handle_terrain_page_result(generation, &bytes);
         } else if kind == protocol::edit_commit_kind() {
             self.handle_edit_commit(generation, &bytes);
         } else if kind == protocol::resync_required_kind() {
@@ -562,6 +642,9 @@ impl RemoteInner {
             .capabilities
             .contains(WorldCapabilities::CANONICAL_CHUNKS)
             || !opened.capabilities.contains(WorldCapabilities::SURFACE_LOD)
+            || !opened
+                .capabilities
+                .contains(WorldCapabilities::VIRTUAL_TERRAIN)
             || !opened
                 .capabilities
                 .contains(WorldCapabilities::PLAYER_PRESENCE)
@@ -657,7 +740,7 @@ impl RemoteInner {
                 PendingBatch::Chunks {
                     expected_coords, ..
                 } => Some(expected_coords.clone()),
-                PendingBatch::Surface { .. } => None,
+                _ => None,
             });
         let Some(expected) = expected else {
             // Canceled, timed-out, and prior-connection request ids stay retired. Their late
@@ -698,7 +781,7 @@ impl RemoteInner {
                 .get(&result.request_id)
                 .and_then(|pending| match pending {
                     PendingBatch::Surface { tickets, .. } => Some(tickets.clone()),
-                    PendingBatch::Chunks { .. } => None,
+                    _ => None,
                 });
         let Some(tickets) = tickets else {
             return;
@@ -719,6 +802,85 @@ impl RemoteInner {
             return;
         }
         self.accept_surface_item(result);
+    }
+
+    fn handle_terrain_directory_result(self: &Rc<Self>, generation: u64, bytes: &[u8]) {
+        if self.state.get() != RemoteConnectionState::Open {
+            self.disconnect(
+                generation,
+                RemoteWorldError::Protocol(
+                    "terrain directory result arrived before WorldOpened".to_owned(),
+                ),
+            );
+            return;
+        }
+        let result = match protocol::decode_terrain_directory_batch_result(bytes) {
+            Ok(result) => result,
+            Err(error) => {
+                self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()));
+                return;
+            }
+        };
+        let expected = self
+            .pending
+            .borrow()
+            .get(&result.request_id)
+            .and_then(|pending| match pending {
+                PendingBatch::TerrainDirectories { roots, .. } => Some(roots.clone()),
+                _ => None,
+            });
+        let Some(expected) = expected else {
+            return;
+        };
+        let expected_identity = self
+            .opened
+            .borrow()
+            .as_ref()
+            .map(|opened| opened.manifest.source_identity_hash());
+        let validation = validate_terrain_directory_result(&result, &expected, expected_identity);
+        self.finish_terrain_directory_request(result.request_id, validation.map(|()| result));
+    }
+
+    fn handle_terrain_page_result(self: &Rc<Self>, generation: u64, bytes: &[u8]) {
+        if self.state.get() != RemoteConnectionState::Open {
+            self.disconnect(
+                generation,
+                RemoteWorldError::Protocol(
+                    "terrain page result arrived before WorldOpened".to_owned(),
+                ),
+            );
+            return;
+        }
+        let Some(expected_identity) = self
+            .opened
+            .borrow()
+            .as_ref()
+            .map(|opened| opened.manifest.source_identity_hash())
+        else {
+            self.disconnect(generation, RemoteWorldError::NotOpen);
+            return;
+        };
+        let result =
+            match protocol::decode_virtual_terrain_page_batch_result(bytes, expected_identity) {
+                Ok(result) => result,
+                Err(error) => {
+                    self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()));
+                    return;
+                }
+            };
+        let expected = self
+            .pending
+            .borrow()
+            .get(&result.request_id)
+            .and_then(|pending| match pending {
+                PendingBatch::TerrainPages { requested, .. } => Some(requested.clone()),
+                _ => None,
+            });
+        let Some(expected) = expected else {
+            return;
+        };
+        let validation = validate_terrain_page_result(&result, &expected, expected_identity);
+        self.finish_terrain_page_request(result.request_id, validation.map(|()| result));
     }
 
     fn handle_edit_commit(self: &Rc<Self>, generation: u64, bytes: &[u8]) {
@@ -1013,6 +1175,139 @@ impl RemoteInner {
         Ok(request_id)
     }
 
+    fn send_terrain_directory_request(
+        self: &Rc<Self>,
+        priority: WorldProductPriority,
+        roots: Vec<voxels_world::TerrainPageKey>,
+    ) -> Result<RemoteRequestId, RemoteWorldError> {
+        if self.state.get() != RemoteConnectionState::Open {
+            return Err(self.terminal_error().unwrap_or(RemoteWorldError::NotOpen));
+        }
+        protocol::encode_terrain_directory_batch(&TerrainDirectoryBatchRequest {
+            request_id: 1,
+            priority,
+            roots: roots.clone(),
+        })
+        .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
+        let server_window = self.opened.borrow().as_ref().map_or(1, |opened| {
+            usize::from(opened.recommended_in_flight_batches)
+        });
+        if !self.ensure_request_window(
+            priority,
+            server_window.min(self.config.max_in_flight_batches as usize),
+        ) {
+            return Err(RemoteWorldError::RequestWindowFull);
+        }
+        let socket = self.request_socket()?;
+        let request_id = self.allocate_request_id()?;
+        let frame = protocol::encode_terrain_directory_batch(&TerrainDirectoryBatchRequest {
+            request_id,
+            priority,
+            roots: roots.clone(),
+        })
+        .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
+        socket
+            .send_with_u8_array(&frame)
+            .map_err(|error| RemoteWorldError::Socket(js_reason(error)))?;
+        self.pending.borrow_mut().insert(
+            request_id,
+            PendingBatch::TerrainDirectories { priority, roots },
+        );
+        self.schedule_request_timeout(request_id)?;
+        Ok(request_id)
+    }
+
+    fn send_terrain_page_request(
+        self: &Rc<Self>,
+        priority: WorldProductPriority,
+        pages: Vec<TerrainPageTransferIdentity>,
+    ) -> Result<RemoteRequestId, RemoteWorldError> {
+        if self.state.get() != RemoteConnectionState::Open {
+            return Err(self.terminal_error().unwrap_or(RemoteWorldError::NotOpen));
+        }
+        let Some(source_identity_hash) = self
+            .opened
+            .borrow()
+            .as_ref()
+            .map(|opened| opened.manifest.source_identity_hash())
+        else {
+            return Err(RemoteWorldError::NotOpen);
+        };
+        protocol::encode_virtual_terrain_page_batch(&VirtualTerrainPageBatchRequest {
+            request_id: 1,
+            priority,
+            batch: TerrainPageBatchRequestV1 {
+                source_identity_hash,
+                pages: pages.clone(),
+            },
+        })
+        .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
+        let server_window = self.opened.borrow().as_ref().map_or(1, |opened| {
+            usize::from(opened.recommended_in_flight_batches)
+        });
+        if !self.ensure_request_window(
+            priority,
+            server_window.min(self.config.max_in_flight_batches as usize),
+        ) {
+            return Err(RemoteWorldError::RequestWindowFull);
+        }
+        let socket = self.request_socket()?;
+        let request_id = self.allocate_request_id()?;
+        let frame = protocol::encode_virtual_terrain_page_batch(&VirtualTerrainPageBatchRequest {
+            request_id,
+            priority,
+            batch: TerrainPageBatchRequestV1 {
+                source_identity_hash,
+                pages: pages.clone(),
+            },
+        })
+        .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
+        socket
+            .send_with_u8_array(&frame)
+            .map_err(|error| RemoteWorldError::Socket(js_reason(error)))?;
+        self.pending.borrow_mut().insert(
+            request_id,
+            PendingBatch::TerrainPages {
+                priority,
+                requested: pages,
+            },
+        );
+        self.schedule_request_timeout(request_id)?;
+        Ok(request_id)
+    }
+
+    fn request_socket(&self) -> Result<WebSocket, RemoteWorldError> {
+        let Some(socket) = self.socket.borrow().clone() else {
+            return Err(RemoteWorldError::NotOpen);
+        };
+        let buffered = socket.buffered_amount();
+        if self.send_paused.get() {
+            if buffered > self.config.buffered_amount_low_water_bytes {
+                return Err(RemoteWorldError::Backpressured);
+            }
+            self.send_paused.set(false);
+        }
+        if buffered >= self.config.buffered_amount_high_water_bytes {
+            self.send_paused.set(true);
+            return Err(RemoteWorldError::Backpressured);
+        }
+        Ok(socket)
+    }
+
+    fn schedule_request_timeout(self: &Rc<Self>, request_id: u64) -> Result<(), RemoteWorldError> {
+        let weak = Rc::downgrade(self);
+        if let Err(error) = schedule_after(self.config.request_timeout_ms, move || {
+            if let Some(inner) = weak.upgrade() {
+                inner.timeout_request(request_id);
+            }
+        }) {
+            self.pending.borrow_mut().remove(&request_id);
+            self.send_cancel(request_id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn allocate_request_id(&self) -> Result<u64, RemoteWorldError> {
         let start = self.next_request_id.get().max(1);
         let mut candidate = start;
@@ -1107,6 +1402,8 @@ impl RemoteInner {
                     ..
                 }
                 | PendingBatch::Surface { .. }
+                | PendingBatch::TerrainDirectories { .. }
+                | PendingBatch::TerrainPages { .. }
                 | PendingBatch::Chunks { .. } => None,
             })
             .collect::<Vec<_>>();
@@ -1194,16 +1491,62 @@ impl RemoteInner {
             });
     }
 
+    fn finish_terrain_directory_request(
+        &self,
+        request_id: u64,
+        result: Result<TerrainDirectoryBatchResult, RemoteWorldError>,
+    ) {
+        let Some(pending) = self.pending.borrow_mut().remove(&request_id) else {
+            return;
+        };
+        let PendingBatch::TerrainDirectories { roots, .. } = pending else {
+            return;
+        };
+        self.terrain_directory_completions.borrow_mut().push_back(
+            RemoteTerrainDirectoryCompletion {
+                request_id,
+                roots,
+                result,
+            },
+        );
+    }
+
+    fn finish_terrain_page_request(
+        &self,
+        request_id: u64,
+        result: Result<VirtualTerrainPageBatchResult, RemoteWorldError>,
+    ) {
+        let Some(pending) = self.pending.borrow_mut().remove(&request_id) else {
+            return;
+        };
+        let PendingBatch::TerrainPages { requested, .. } = pending else {
+            return;
+        };
+        self.terrain_page_completions
+            .borrow_mut()
+            .push_back(RemoteTerrainPageCompletion {
+                request_id,
+                requested,
+                result,
+            });
+    }
+
     fn finish_pending_error(&self, request_id: u64, error: RemoteWorldError) {
-        let is_surface = self
+        let kind = self
             .pending
             .borrow()
             .get(&request_id)
-            .is_some_and(|pending| matches!(pending, PendingBatch::Surface { .. }));
-        if is_surface {
-            self.finish_surface_request(request_id, Err(error));
-        } else {
-            self.finish_request(request_id, Err(error));
+            .map(PendingBatch::kind);
+        match kind {
+            Some(PendingBatchKind::Chunks) => self.finish_request(request_id, Err(error)),
+            Some(PendingBatchKind::Surface) => self.finish_surface_request(request_id, Err(error)),
+            Some(PendingBatchKind::TerrainDirectories) => {
+                self.finish_terrain_directory_request(request_id, Err(error))
+            }
+            Some(PendingBatchKind::TerrainPages) => {
+                self.finish_terrain_page_request(request_id, Err(error))
+            }
+            None => {}
         }
     }
 
@@ -1387,6 +1730,55 @@ fn validate_surface_result(
                 "surface snapshot key or identity differs from envelope",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_terrain_directory_result(
+    result: &TerrainDirectoryBatchResult,
+    expected_roots: &[voxels_world::TerrainPageKey],
+    expected_identity: Option<WorldSourceIdentityHash>,
+) -> Result<(), RemoteWorldError> {
+    if Some(result.source_identity_hash) != expected_identity {
+        return Err(RemoteWorldError::ResponseMismatch(
+            "terrain directory source identity changed",
+        ));
+    }
+    if result.items.len() != expected_roots.len()
+        || !result
+            .items
+            .iter()
+            .zip(expected_roots)
+            .all(|(item, expected)| item.root == *expected)
+    {
+        return Err(RemoteWorldError::ResponseMismatch(
+            "terrain directory roots differ from request",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_terrain_page_result(
+    result: &VirtualTerrainPageBatchResult,
+    expected_pages: &[TerrainPageTransferIdentity],
+    expected_identity: WorldSourceIdentityHash,
+) -> Result<(), RemoteWorldError> {
+    if result.batch.source_identity_hash != expected_identity {
+        return Err(RemoteWorldError::ResponseMismatch(
+            "terrain page source identity changed",
+        ));
+    }
+    if result.batch.items.len() != expected_pages.len()
+        || !result
+            .batch
+            .items
+            .iter()
+            .zip(expected_pages)
+            .all(|(item, expected)| item.requested == *expected)
+    {
+        return Err(RemoteWorldError::ResponseMismatch(
+            "terrain page identities differ from request",
+        ));
     }
     Ok(())
 }
