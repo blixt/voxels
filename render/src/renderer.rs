@@ -101,7 +101,7 @@ const MORPH_CLOSURE_EXTENT_FLAG: u16 = 1 << 15;
 const SURFACE_MACRO_SLOPE_SCALE: f32 = 0.40;
 const SURFACE_MACRO_SLOPE_MAX: f32 = 0.5;
 const LOD_TRANSITION_MESH_KEYS: [MeshKey; 2] = [(u8::MAX, 0, 0, 0), (u8::MAX, 1, 0, 0)];
-const CUT_TRANSITION_SECONDS: f32 = 0.24;
+const CUT_TRANSITION_SECONDS: f32 = 0.45;
 const LOD_PLAN_REBUILD_FOCUS: u32 = 1;
 const LOD_PLAN_REBUILD_CANONICAL_COLUMNS: u32 = 1 << 1;
 const LOD_PLAN_REBUILD_CANONICAL_PROFILE: u32 = 1 << 2;
@@ -716,7 +716,9 @@ struct WorldDrawLists {
 
 #[derive(Debug, Default, Eq, PartialEq)]
 struct CutDrawLists {
+    incoming: WorldDrawLists,
     outgoing: WorldDrawLists,
+    replaced_current_patches: HashSet<SurfacePatchId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2047,9 +2049,10 @@ impl Renderer {
                 }],
             });
         let cut_transition_buffers = std::array::from_fn(|role| {
+            let encoded_role = if role == 0 { 2.0 } else { 1.0 };
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("complete cut transition uniform"),
-                contents: bytemuck::bytes_of(&gpu_cut_transition(1.0, role as f32, None)),
+                contents: bytemuck::bytes_of(&gpu_cut_transition(1.0, encoded_role, None)),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             })
         });
@@ -4098,6 +4101,11 @@ impl Renderer {
         }
         if let Some(phase) = phase {
             self.queue.write_buffer(
+                &self.cut_transition_buffers[0],
+                0,
+                bytemuck::bytes_of(&gpu_cut_transition(phase, 2.0, self.lod_draw_plan_focus)),
+            );
+            self.queue.write_buffer(
                 &self.cut_transition_buffers[1],
                 0,
                 bytemuck::bytes_of(&gpu_cut_transition(
@@ -4382,19 +4390,6 @@ impl Renderer {
         // columns can still replace atomically and retained surface tiles can be incomplete. Keep
         // the cached resident hierarchy authoritative after settling as well as while streaming.
         let lod_draw_plan = resident_hierarchy.then_some(&self.lod_draw_plan);
-        let Ok((shadow_draw_lists, world_draw_list, lod_ownership_refreshes)) =
-            collect_opaque_draw_lists(
-                &mut self.chunks,
-                lod_draw_plan,
-                self.options.far_terrain,
-                shadows_active,
-                geometric_lod_focus,
-                view_clip,
-                shadow_clips,
-            )
-        else {
-            return false;
-        };
         let cut_draw_lists = if let Some(transition) = self.cut_transition.as_ref() {
             let Ok(draw_lists) = collect_cut_transition_draw_lists(
                 &self.chunks,
@@ -4410,6 +4405,20 @@ impl Renderer {
         } else {
             None
         };
+        let Ok((shadow_draw_lists, world_draw_list, lod_ownership_refreshes)) =
+            collect_opaque_draw_lists(
+                &mut self.chunks,
+                lod_draw_plan,
+                cut_draw_lists.as_ref(),
+                self.options.far_terrain,
+                shadows_active,
+                geometric_lod_focus,
+                view_clip,
+                shadow_clips,
+            )
+        else {
+            return false;
+        };
         let water_draw_list = self.collect_draw_list(
             &self.water_chunks,
             |key, chunk| {
@@ -4423,35 +4432,10 @@ impl Renderer {
                     && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
             },
         );
-        let outgoing_water_draw_list =
-            self.cut_transition
-                .as_ref()
-                .map_or_else(DrawList::default, |transition| {
-                    self.collect_draw_list(
-                        &self.water_chunks,
-                        |key, chunk| {
-                            self.options.water
-                                && (key.0 == 0 || self.options.far_terrain)
-                                && view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max)
-                        },
-                        |key, slice| {
-                            slice.render_layer == RenderLayer::Translucent
-                                && slice_owned_by_lod(
-                                    transition.from_focus,
-                                    Some(&transition.from),
-                                    key,
-                                    slice,
-                                )
-                                && !slice_owned_by_lod(
-                                    geometric_lod_focus,
-                                    lod_draw_plan,
-                                    key,
-                                    slice,
-                                )
-                                && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
-                        },
-                    )
-                });
+        // Water has no parent-height sidecar. Drawing its stale cut through a screen-space Bayer
+        // mask produced detached square fragments, so it switches atomically with the complete
+        // current owner instead of overlaying old geometry.
+        let outgoing_water_draw_list = DrawList::default();
         let cpu_cull_ms = (now_ms() - cull_started).max(0.0) as f32;
         let encode_started = now_ms();
         self.avatar_gpu
@@ -4577,6 +4561,14 @@ impl Renderer {
                     draw_morph_spans(&mut pass, &self.arena_buffers, &world_draw_list.morphing),
                 );
                 if let Some(cut_draw_lists) = &cut_draw_lists {
+                    pass.set_pipeline(&self.depth_prepass_transition_pipeline);
+                    pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
+                    depth_prepass_draw_calls =
+                        depth_prepass_draw_calls.saturating_add(draw_morph_spans(
+                            &mut pass,
+                            &self.arena_buffers,
+                            &cut_draw_lists.incoming.morphing,
+                        ));
                     pass.set_pipeline(&self.depth_prepass_transition_fixed_pipeline);
                     pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
                     depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
@@ -4704,6 +4696,13 @@ impl Renderer {
             pass.set_pipeline(morph_pipeline);
             draw_morph_spans(&mut pass, &self.arena_buffers, &world_draw_list.morphing);
             if let Some(cut_draw_lists) = &cut_draw_lists {
+                pass.set_pipeline(morph_transition_pipeline);
+                pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
+                draw_morph_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    &cut_draw_lists.incoming.morphing,
+                );
                 pass.set_pipeline(transition_pipeline);
                 pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
                 draw_spans(
@@ -4837,14 +4836,64 @@ impl Renderer {
         );
         let shadow_bytes = shadow_resolution * shadow_resolution * CASCADE_COUNT as u64 * 4;
         let gpu_timing = self.gpu_timer.as_ref().and_then(GpuTimer::latest);
+        let cut_draw_calls = cut_draw_lists.as_ref().map_or(0, |lists| {
+            lists
+                .incoming
+                .fixed
+                .spans
+                .len()
+                .saturating_add(lists.incoming.morphing.spans.len())
+                .saturating_add(lists.outgoing.fixed.spans.len())
+                .saturating_add(lists.outgoing.morphing.spans.len())
+        });
+        let cut_quads = cut_draw_lists.as_ref().map_or(0, |lists| {
+            lists
+                .incoming
+                .quad_count
+                .saturating_add(lists.outgoing.quad_count)
+        });
+        let cut_meshes = cut_draw_lists.as_ref().map_or(0, |lists| {
+            lists
+                .incoming
+                .mesh_count
+                .saturating_add(lists.outgoing.mesh_count)
+        });
+        let cut_tested_slices = cut_draw_lists.as_ref().map_or(0, |lists| {
+            lists
+                .incoming
+                .tested_slices
+                .saturating_add(lists.outgoing.tested_slices)
+        });
+        let cut_selected_slices = cut_draw_lists.as_ref().map_or(0, |lists| {
+            lists
+                .incoming
+                .selected_slices
+                .saturating_add(lists.outgoing.selected_slices)
+        });
+        let viewport_fingerprint = fingerprint_value(
+            fingerprint_value(
+                fingerprint_value(FINGERPRINT_OFFSET, world_draw_list.fingerprint),
+                water_draw_list.fingerprint,
+            ),
+            outgoing_water_draw_list.fingerprint,
+        );
+        let viewport_fingerprint = cut_draw_lists
+            .as_ref()
+            .map_or(viewport_fingerprint, |lists| {
+                fingerprint_value(
+                    fingerprint_value(viewport_fingerprint, lists.incoming.fingerprint),
+                    lists.outgoing.fingerprint,
+                )
+            });
         self.diagnostics = RenderDiagnostics {
             resident_chunks: self.chunks.len() as u32,
-            visible_chunks: world_draw_list.mesh_count,
+            visible_chunks: world_draw_list.mesh_count.saturating_add(cut_meshes),
             draw_calls: world_draw_list
                 .fixed
                 .spans
                 .len()
                 .saturating_add(world_draw_list.morphing.spans.len())
+                .saturating_add(cut_draw_calls)
                 .saturating_add(water_draw_list.spans.len())
                 .saturating_add(outgoing_water_draw_list.spans.len())
                 .saturating_add(usize::from(has_avatars)) as u32,
@@ -4861,18 +4910,13 @@ impl Renderer {
             },
             quads: world_draw_list
                 .quad_count
+                .saturating_add(cut_quads)
                 .saturating_add(water_draw_list.quad_count)
                 .saturating_add(outgoing_water_draw_list.quad_count),
             water_quads: water_draw_list
                 .quad_count
                 .saturating_add(outgoing_water_draw_list.quad_count),
-            viewport_fingerprint: fingerprint_value(
-                fingerprint_value(
-                    fingerprint_value(FINGERPRINT_OFFSET, world_draw_list.fingerprint),
-                    water_draw_list.fingerprint,
-                ),
-                outgoing_water_draw_list.fingerprint,
-            ),
+            viewport_fingerprint,
             refraction_copy_bytes: refraction_copy_bytes(
                 self.config.width,
                 self.config.height,
@@ -4922,6 +4966,7 @@ impl Renderer {
                 .map(|draw_list| draw_list.tested_slices)
                 .sum::<u32>()
                 .saturating_add(world_draw_list.tested_slices)
+                .saturating_add(cut_tested_slices)
                 .saturating_add(water_draw_list.tested_slices)
                 .saturating_add(outgoing_water_draw_list.tested_slices),
             draw_list_selected_slices: shadow_draw_lists
@@ -4929,6 +4974,7 @@ impl Renderer {
                 .map(|draw_list| draw_list.selected_slices)
                 .sum::<u32>()
                 .saturating_add(world_draw_list.selected_slices)
+                .saturating_add(cut_selected_slices)
                 .saturating_add(water_draw_list.selected_slices)
                 .saturating_add(outgoing_water_draw_list.selected_slices),
             lod_transition_quads: self
@@ -5293,6 +5339,7 @@ fn draw_morph_spans<'pass>(
 fn collect_opaque_draw_lists(
     chunks: &mut BTreeMap<MeshKey, ChunkMesh>,
     lod_draw_plan: Option<&LodDrawPlan>,
+    cut_draw_lists: Option<&CutDrawLists>,
     far_terrain: bool,
     shadows: bool,
     geometric_lod_focus: Option<GeometricLodFocus>,
@@ -5344,7 +5391,11 @@ fn collect_opaque_draw_lists(
             {
                 continue;
             }
+            let cut_replaces_current = slice.surface_patch_id.is_some_and(|patch| {
+                cut_draw_lists.is_some_and(|lists| lists.replaced_current_patches.contains(&patch))
+            });
             if world_chunk_visible
+                && !cut_replaces_current
                 && (world_chunk_clip == AabbClipClassification::Inside
                     || view_clip.contains_aabb(slice.bounds_min, slice.bounds_max))
             {
@@ -5421,9 +5472,11 @@ fn lod_draw_plan_resident(
     surface_resident && canonical_resident && enclosed_resident && connector_resident
 }
 
-/// Collects only old-cut geometry that the complete current draw list no longer owns. The current
-/// list remains the single opaque coverage authority; this overlay can therefore dither away
-/// without reconstructing or weakening the incoming cut.
+/// Splits changed, morphable surface ownership away from the ordinary current draw list.
+///
+/// Incoming fine geometry unfolds from its parent while outgoing fine geometry converges into that
+/// same parent. Fixed old geometry is never overlaid: it cannot converge and was the source of
+/// detached Bayer squares in empty air. The complete current cut remains the coverage authority.
 fn collect_cut_transition_draw_lists(
     chunks: &BTreeMap<MeshKey, ChunkMesh>,
     current_plan: &LodDrawPlan,
@@ -5432,7 +5485,10 @@ fn collect_cut_transition_draw_lists(
     far_terrain: bool,
     view_clip: AabbClipVolume,
 ) -> Result<CutDrawLists, MissingMorphSidecar> {
+    let mut incoming = WorldDrawListBuilder::default();
     let mut outgoing = WorldDrawListBuilder::default();
+    let mut incoming_patches = HashSet::new();
+    let mut outgoing_patches = HashSet::new();
     for (key, chunk) in chunks {
         if !chunk.active()
             || (key.0 != 0 && *key != EXACT_VOLUME_FRONTIER_MESH_KEY && !far_terrain)
@@ -5440,8 +5496,10 @@ fn collect_cut_transition_draw_lists(
         {
             continue;
         }
-        let mut selected_mesh = false;
+        let mut incoming_mesh_selected = false;
+        let mut outgoing_mesh_selected = false;
         for slice in &chunk.slices {
+            incoming.test_slice();
             outgoing.test_slice();
             if slice.render_layer != RenderLayer::Opaque
                 || !view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
@@ -5451,18 +5509,54 @@ fn collect_cut_transition_draw_lists(
             let was_owned =
                 slice_owned_by_lod(transition.from_focus, Some(&transition.from), key, slice);
             let is_owned = slice_owned_by_lod(current_focus, Some(current_plan), key, slice);
-            if was_owned && !is_owned {
-                let morphing = slice_uses_geometry_morph(key, transition.from_focus, slice);
-                outgoing.select_slice(chunk, slice, morphing)?;
-                selected_mesh = true;
+            let parent = slice.surface_patch_id.and_then(SurfacePatchId::parent);
+            if is_owned
+                && !was_owned
+                && parent.is_some_and(|parent| transition.from.owns_patch(parent))
+                && slice_uses_geometry_morph(key, current_focus, slice)
+            {
+                incoming.select_slice(chunk, slice, true)?;
+                incoming_mesh_selected = true;
+                if let Some(patch) = slice.surface_patch_id {
+                    incoming_patches.insert(patch);
+                }
+            }
+            if was_owned
+                && !is_owned
+                && parent.is_some_and(|parent| current_plan.owns_patch(parent))
+                && slice_uses_geometry_morph(key, transition.from_focus, slice)
+            {
+                outgoing.select_slice(chunk, slice, true)?;
+                outgoing_mesh_selected = true;
+                if let Some(patch) = slice.surface_patch_id {
+                    outgoing_patches.insert(patch);
+                }
             }
         }
-        if selected_mesh {
+        if incoming_mesh_selected {
+            incoming.select_mesh(*key, chunk);
+        }
+        if outgoing_mesh_selected {
             outgoing.select_mesh(*key, chunk);
         }
     }
+    let mut replaced_current_patches = incoming_patches;
+    replaced_current_patches.extend(
+        outgoing_patches
+            .iter()
+            .filter_map(|patch| patch.parent())
+            .filter(|parent| {
+                parent.children().is_some_and(|children| {
+                    children
+                        .into_iter()
+                        .all(|child| outgoing_patches.contains(&child))
+                })
+            }),
+    );
     Ok(CutDrawLists {
+        incoming: incoming.finish(),
         outgoing: outgoing.finish(),
+        replaced_current_patches,
     })
 }
 
@@ -8319,7 +8413,7 @@ mod tests {
     fn progressive_plan_changes_do_not_restart_an_active_cut_handoff() {
         assert!(cut_transition_is_active(Some(10.0), 10.1));
         assert!(
-            !cut_transition_is_active(Some(10.0), 10.25),
+            !cut_transition_is_active(Some(10.0), 10.46),
             "a new handoff can begin after the original transition window"
         );
         assert!(!cut_transition_is_active(None, 10.1));
@@ -8715,17 +8809,24 @@ mod tests {
     }
 
     #[test]
-    fn outgoing_cut_uniform_freezes_the_previous_lod_coordinate_system() {
+    fn cut_uniforms_freeze_outgoing_and_follow_current_incoming_lod_coordinates() {
         let previous = GeometricLodFocus::snapped(1_614, 294);
-        let uniform = gpu_cut_transition(0.25, 1.0, Some(previous));
-        assert_eq!(uniform.phase_role, [0.25, 1.0, 0.0, 0.0]);
+        let outgoing = gpu_cut_transition(0.25, 1.0, Some(previous));
+        assert_eq!(outgoing.phase_role, [0.25, 1.0, 0.0, 0.0]);
         assert_eq!(
-            uniform.lod_boundary_centres,
+            outgoing.lod_boundary_centres,
             lod_boundary_centres_uniform(Some(previous))
         );
         assert_eq!(
-            uniform.lod_boundary_half_extents,
+            outgoing.lod_boundary_half_extents,
             lod_boundary_half_extents_uniform(Some(previous))
+        );
+        let current = GeometricLodFocus::snapped(1_742, 422);
+        let incoming = gpu_cut_transition(0.75, 2.0, Some(current));
+        assert_eq!(incoming.phase_role, [0.75, 2.0, 0.0, 0.0]);
+        assert_eq!(
+            incoming.lod_boundary_centres,
+            lod_boundary_centres_uniform(Some(current))
         );
     }
 
@@ -10324,6 +10425,7 @@ mod tests {
         let (actual_shadows, actual_world, _) = collect_opaque_draw_lists(
             &mut chunks,
             Some(&lod_draw_plan),
+            None,
             true,
             true,
             focus,
@@ -10367,6 +10469,7 @@ mod tests {
         let cached_world = collect_opaque_draw_lists(
             &mut chunks,
             Some(&lod_draw_plan),
+            None,
             true,
             true,
             focus,
@@ -10400,6 +10503,7 @@ mod tests {
         let moved_world = collect_opaque_draw_lists(
             &mut chunks,
             Some(&lod_draw_plan),
+            None,
             true,
             true,
             moved_focus,

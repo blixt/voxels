@@ -158,7 +158,7 @@ mod tests {
             .split_once("fn screen_space_ambient_visibility")
             .expect("water fragment terminator")
             .0;
-        assert!(water_fragment.contains("if !cut_transition_visible(input.position.xy)"));
+        assert!(!water_fragment.contains("cut_transition_visible"));
         assert!(water_fragment.contains("var fresnel = fresnel_schlick("));
         assert!(water_fragment.contains("fresnel = vec3<f32>(1.0);"));
         assert!(voxels.contains("if refracted_background.w > input.position.z + 0.000001"));
@@ -510,8 +510,10 @@ mod tests {
         assert!(voxels.contains("clip = close_internal_raster_seams("));
         assert!(voxels.contains("out.position = clip"));
         assert!(voxels.contains("out.world = world"));
-        assert!(voxels.contains("if role == 0u"));
-        assert!(voxels.contains("return threshold >= clamp(cut_transition.phase_role.x"));
+        assert!(!voxels.contains("let bayer = array<u32, 16>"));
+        assert!(!voxels.contains("cut_transition_visible"));
+        assert!(voxels.contains("return mix(spatial_blend, 1.0, phase)"));
+        assert!(voxels.contains("return mix(1.0, spatial_blend, phase)"));
     }
 
     #[test]
@@ -531,13 +533,16 @@ mod tests {
     }
 
     #[test]
-    fn outgoing_cut_uses_its_frozen_lod_coordinate_system() {
+    fn cut_handoff_uses_frozen_outgoing_and_current_incoming_lod_coordinates() {
         let voxels = include_str!("shaders/voxels.wgsl");
         assert!(voxels.contains("cut_transition.lod_boundary_centres"));
         assert!(voxels.contains("cut_transition.lod_boundary_half_extents"));
         assert!(voxels.contains("fn vs_transition_fixed("));
         assert!(voxels.contains("fn vs_transition_morph("));
         assert!(voxels.contains("if cut_transition.phase_role.y == 1.0"));
+        assert!(voxels.contains("cut_transition.phase_role.y == 2.0"));
+        assert!(voxels.contains("fn cut_transition_parent_blend("));
+        assert!(voxels.contains("fn cut_transition_shape_blend("));
     }
 
     #[test]

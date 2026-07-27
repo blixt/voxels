@@ -187,11 +187,38 @@ fn lod_boundary_half_extent(
   return boundary_half_extents[boundary / 4u][boundary & 3u];
 }
 
+fn cut_transition_parent_blend(spatial_blend: f32, phase_role: vec2<f32>) -> f32 {
+  let phase = clamp(phase_role.x, 0.0, 1.0);
+  let role = u32(round(phase_role.y));
+  if role == 1u {
+    // A departing fine patch converges into the current coarse owner.
+    return mix(spatial_blend, 1.0, phase);
+  }
+  if role == 2u {
+    // An arriving fine patch unfolds from the previous coarse owner.
+    return mix(1.0, spatial_blend, phase);
+  }
+  return spatial_blend;
+}
+
+fn cut_transition_shape_blend(spatial_blend: f32, phase_role: vec2<f32>) -> f32 {
+  let phase = clamp(phase_role.x, 0.0, 1.0);
+  let role = u32(round(phase_role.y));
+  if role == 1u {
+    return mix(spatial_blend, 0.0, phase);
+  }
+  if role == 2u {
+    return mix(0.0, spatial_blend, phase);
+  }
+  return spatial_blend;
+}
+
 fn surface_parent_normal_blend(
   world: vec3<f32>,
   material: u32,
   boundary_centres: array<vec4<f32>, 4>,
   boundary_half_extents: array<vec4<f32>, 2>,
+  transition_phase_role: vec2<f32>,
 ) -> f32 {
   if frame.lod_options.w < 0.5 || (material & 0x80000000u) == 0u {
     return 0.0;
@@ -207,7 +234,10 @@ fn surface_parent_normal_blend(
   // At sprint speed this remains a roughly 200ms spatial morph at the nearest ring while avoiding
   // vertex-sidecar work on a second full row of Stride2 patches.
   let width = max(1.6, half_extent * 0.02);
-  return 1.0 - smoothstep(0.0, width, inside);
+  return cut_transition_parent_blend(
+    1.0 - smoothstep(0.0, width, inside),
+    transition_phase_role,
+  );
 }
 
 fn surface_shape_blend(
@@ -215,6 +245,7 @@ fn surface_shape_blend(
   material: u32,
   boundary_centres: array<vec4<f32>, 4>,
   boundary_half_extents: array<vec4<f32>, 2>,
+  transition_phase_role: vec2<f32>,
 ) -> f32 {
   if frame.lod_options.w < 0.5 || (material & 0x80000000u) == 0u {
     return 0.0;
@@ -226,14 +257,17 @@ fn surface_shape_blend(
   let inner_width = max(1.6, inner_half_extent * 0.02);
   let inner_blend = smoothstep(0.0, inner_width, -inner_inside);
   if level >= 7u {
-    return inner_blend;
+    return cut_transition_shape_blend(inner_blend, transition_phase_role);
   }
   let outer_boundary = level + 1u;
   let outer_half_extent = lod_boundary_half_extent(outer_boundary, boundary_half_extents);
   let outer_delta = abs(world.xz - lod_boundary_center(outer_boundary, boundary_centres));
   let outer_inside = outer_half_extent - max(outer_delta.x, outer_delta.y);
   let outer_width = max(1.6, outer_half_extent * 0.02);
-  return min(inner_blend, smoothstep(0.0, outer_width, outer_inside));
+  return cut_transition_shape_blend(
+    min(inner_blend, smoothstep(0.0, outer_width, outer_inside)),
+    transition_phase_role,
+  );
 }
 
 fn surface_wall_macro_blend(world: vec3<f32>) -> f32 {
@@ -275,12 +309,19 @@ fn quad_world(
   morph_geometry: bool,
   boundary_centres: array<vec4<f32>, 4>,
   boundary_half_extents: array<vec4<f32>, 2>,
+  transition_phase_role: vec2<f32>,
 ) -> MorphedQuadPosition {
   var world = vec3<f32>(origin + quad_local(face, uv, extent)) * frame.viewport_voxel.z;
   if surface_shape != 0u {
     world.y += unpack_signed_i3(surface_shape >> (corner * 3u))
       * frame.viewport_voxel.z
-      * surface_shape_blend(world, material, boundary_centres, boundary_half_extents);
+      * surface_shape_blend(
+        world,
+        material,
+        boundary_centres,
+        boundary_half_extents,
+        transition_phase_role,
+      );
   }
   var parent_blend = 0.0;
   if morph_geometry && (ao & 0x01000000u) != 0u {
@@ -289,6 +330,7 @@ fn quad_world(
       material,
       boundary_centres,
       boundary_half_extents,
+      transition_phase_role,
     );
     let morph_blend = select(parent_blend, 1.0 - parent_blend, morph_closure);
     world.y += surface_morph_delta(morph_heights, uv.y)
@@ -390,6 +432,7 @@ fn voxel_vertex(
   morph_geometry: bool,
   boundary_centres: array<vec4<f32>, 4>,
   boundary_half_extents: array<vec4<f32>, 2>,
+  transition_phase_role: vec2<f32>,
 ) -> VertexOut {
   let face = (material_face >> 16u) & 7u;
   let encoded_source = (material_face >> GPU_SOURCE_SHIFT) & 7u;
@@ -427,6 +470,7 @@ fn voxel_vertex(
     morph_geometry,
     boundary_centres,
     boundary_half_extents,
+    transition_phase_role,
   );
   let world = morphed_position.world;
   let surface_macro_normal = (ao & 0x01000000u) != 0u;
@@ -475,6 +519,7 @@ fn voxel_vertex(
       morph_geometry,
       boundary_centres,
       boundary_half_extents,
+      transition_phase_role,
     ).world;
     let same_v_world = quad_world(
       origin,
@@ -490,6 +535,7 @@ fn voxel_vertex(
       morph_geometry,
       boundary_centres,
       boundary_half_extents,
+      transition_phase_role,
     ).world;
     clip = close_internal_raster_seams(
       clip,
@@ -528,6 +574,7 @@ fn vs_main_fixed(
     false,
     frame.lod_boundary_centres,
     frame.lod_boundary_half_extents,
+    vec2<f32>(0.0),
   );
 }
 
@@ -550,6 +597,7 @@ fn vs_main_morph(
     true,
     frame.lod_boundary_centres,
     frame.lod_boundary_half_extents,
+    vec2<f32>(0.0),
   );
 }
 
@@ -585,6 +633,7 @@ fn vs_transition_fixed(
     false,
     transition_boundary_centres(),
     transition_boundary_half_extents(),
+    cut_transition.phase_role.xy,
   );
 }
 
@@ -607,6 +656,7 @@ fn vs_transition_morph(
     true,
     transition_boundary_centres(),
     transition_boundary_half_extents(),
+    cut_transition.phase_role.xy,
   );
 }
 
@@ -809,7 +859,12 @@ fn geometry_source_debug_color(input: VertexOut) -> vec3<f32> {
   }
   if CUT_TRANSITION != 0u {
     let checker = (u32(input.position.x) + u32(input.position.y)) & 4u;
-    color = select(vec3<f32>(1.00, 0.02, 0.02), vec3<f32>(1.00), checker != 0u);
+    let transition_color = select(
+      vec3<f32>(1.00, 0.02, 0.02),
+      vec3<f32>(0.02, 1.00, 0.88),
+      cut_transition.phase_role.y == 2.0,
+    );
+    color = select(transition_color, vec3<f32>(1.00), checker != 0u);
   }
 
   // Draw the source's actual sampling lattice in world space. Canonical cyan therefore carries a
@@ -830,34 +885,8 @@ fn hash31(position: vec3<f32>) -> f32 {
   return fract(sin(value) * 43758.5453);
 }
 
-fn cut_transition_visible(position: vec2<f32>) -> bool {
-  if CUT_TRANSITION == 0u {
-    return true;
-  }
-  let role = u32(round(cut_transition.phase_role.y));
-  if role == 0u {
-    return true;
-  }
-  let x = u32(max(floor(position.x), 0.0)) & 3u;
-  let y = u32(max(floor(position.y), 0.0)) & 3u;
-  let bayer = array<u32, 16>(
-    0u, 8u, 2u, 10u,
-    12u, 4u, 14u, 6u,
-    3u, 11u, 1u, 9u,
-    15u, 7u, 13u, 5u,
-  );
-  let threshold = (f32(bayer[x + y * 4u]) + 0.5) / 16.0;
-  // The ordinary current-cut draw is already complete and opaque. This transition pipeline is
-  // used only for old-only geometry layered over it, so discarding can never uncover the sky.
-  return threshold >= clamp(cut_transition.phase_role.x, 0.0, 1.0);
-}
-
 @fragment
-fn fs_depth_transition(input: VertexOut) {
-  if !cut_transition_visible(input.position.xy) {
-    discard;
-  }
-}
+fn fs_depth_transition() {}
 
 fn cloud_surface_weather(world: vec3<f32>) -> vec2<f32> {
   let coverage_control = clamp(frame.fog_exposure.z, 0.0, 1.0);
@@ -1007,9 +1036,6 @@ fn reflected_environment(direction: vec3<f32>) -> vec3<f32> {
 fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   let material = input.material & 0xffffu;
   if material != 13u {
-    discard;
-  }
-  if !cut_transition_visible(input.position.xy) {
     discard;
   }
   if frame.lod_options.x > 0.5 {
@@ -1242,10 +1268,6 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let continuous_uv = surface_uv(input.world, input.normal) * material_scale;
   let detail_uv_dx = dpdx(continuous_uv);
   let detail_uv_dy = dpdy(continuous_uv);
-  // Keep derivatives in uniform flow, then apply the coverage-preserving cut transition mask.
-  if !cut_transition_visible(input.position.xy) {
-    discard;
-  }
   if frame.lod_options.x > 0.5 {
     return vec4<f32>(geometry_source_debug_color(input), 1.0);
   }
