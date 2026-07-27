@@ -249,6 +249,7 @@ const COMPACTION_OVERFLOW_SOURCE: u32 = 32u;
 
 var<workgroup> compact_destinations: array<u32, 4>;
 var<workgroup> compact_enabled: array<u32, 4>;
+var<workgroup> compact_page_valid: u32;
 
 @compute @workgroup_size(1)
 fn prepare_compaction() {
@@ -266,85 +267,86 @@ fn compact_selected(
   @builtin(workgroup_id) workgroup: vec3<u32>,
   @builtin(local_invocation_id) local: vec3<u32>,
 ) {
-  let selected_count = min(
-    atomicLoad(&compact_traversal.selected_count),
-    arrayLength(&compact_selected_pages),
-  );
-  if workgroup.x >= selected_count {
-    return;
-  }
+  // The indirect dispatch count is already clamped by `prepare_compaction`. Do not branch or
+  // return on its atomic counter here: every invocation in this workgroup must reach the barrier
+  // below through statically uniform control flow on all WebGPU implementations.
   let page_index = compact_selected_pages[workgroup.x];
-  if page_index >= arrayLength(&geometry_pages) {
-    if local.x == 0u {
-      atomicOr(&compaction.overflow_flags, COMPACTION_OVERFLOW_DIRECTORY);
-    }
-    return;
-  }
-  let page = geometry_pages[page_index];
+  let page_index_valid = page_index < arrayLength(&geometry_pages);
+  let safe_page_index = min(page_index, arrayLength(&geometry_pages) - 1u);
+  let page = geometry_pages[safe_page_index];
 
   if local.x == 0u {
+    compact_page_valid = select(0u, 1u, page_index_valid);
     compact_enabled = array<u32, 4>(0u, 0u, 0u, 0u);
-    let offsets = array<u32, 4>(
-      page.opaque_surface_offset,
-      page.opaque_triangle_offset,
-      page.water_surface_offset,
-      page.water_triangle_offset,
-    );
-    let counts = array<u32, 4>(
-      page.opaque_surface_count,
-      page.opaque_triangle_count,
-      page.water_surface_count,
-      page.water_triangle_count,
-    );
-    var source_valid = true;
-    for (var stream = 0u; stream < 4u; stream += 1u) {
-      let source_words = counts[stream] * GEOMETRY_WORDS_PER_ELEMENT;
-      if counts[stream] > 0xffffffffu / GEOMETRY_WORDS_PER_ELEMENT
-          || offsets[stream] > arrayLength(&geometry_source)
-          || source_words > arrayLength(&geometry_source) - offsets[stream] {
-        source_valid = false;
-      }
-    }
-    if !source_valid {
-      atomicOr(&compaction.overflow_flags, COMPACTION_OVERFLOW_SOURCE);
+    if !page_index_valid {
+      atomicOr(&compaction.overflow_flags, COMPACTION_OVERFLOW_DIRECTORY);
     } else {
-      compact_destinations[0] =
-        atomicAdd(&compaction.surface_elements, page.opaque_surface_count);
-      compact_destinations[1] =
-        atomicAdd(&compaction.triangle_elements, page.opaque_triangle_count);
-      compact_destinations[2] =
-        atomicAdd(&compaction.water_surface_elements, page.water_surface_count);
-      compact_destinations[3] =
-        atomicAdd(&compaction.water_triangle_elements, page.water_triangle_count);
-      let capacities = array<u32, 4>(
-        compaction.surface_capacity,
-        compaction.triangle_capacity,
-        compaction.water_surface_capacity,
-        compaction.water_triangle_capacity,
+      let offsets = array<u32, 4>(
+        page.opaque_surface_offset,
+        page.opaque_triangle_offset,
+        page.water_surface_offset,
+        page.water_triangle_offset,
       );
-      let overflow_flags = array<u32, 4>(
-        COMPACTION_OVERFLOW_SURFACE,
-        COMPACTION_OVERFLOW_TRIANGLE,
-        COMPACTION_OVERFLOW_WATER_SURFACE,
-        COMPACTION_OVERFLOW_WATER_TRIANGLE,
+      let counts = array<u32, 4>(
+        page.opaque_surface_count,
+        page.opaque_triangle_count,
+        page.water_surface_count,
+        page.water_triangle_count,
       );
-      var page_valid = true;
+      var source_valid = true;
       for (var stream = 0u; stream < 4u; stream += 1u) {
-        let destination = compact_destinations[stream];
-        if destination <= capacities[stream]
-            && counts[stream] <= capacities[stream] - destination {
-          compact_enabled[stream] = 1u;
-        } else {
-          page_valid = false;
-          atomicOr(&compaction.overflow_flags, overflow_flags[stream]);
+        let source_words = counts[stream] * GEOMETRY_WORDS_PER_ELEMENT;
+        if counts[stream] > 0xffffffffu / GEOMETRY_WORDS_PER_ELEMENT
+            || offsets[stream] > arrayLength(&geometry_source)
+            || source_words > arrayLength(&geometry_source) - offsets[stream] {
+          source_valid = false;
         }
       }
-      if page_valid {
-        atomicAdd(&compaction.copied_pages, 1u);
+      if !source_valid {
+        compact_page_valid = 0u;
+        atomicOr(&compaction.overflow_flags, COMPACTION_OVERFLOW_SOURCE);
+      } else {
+        compact_destinations[0] =
+          atomicAdd(&compaction.surface_elements, page.opaque_surface_count);
+        compact_destinations[1] =
+          atomicAdd(&compaction.triangle_elements, page.opaque_triangle_count);
+        compact_destinations[2] =
+          atomicAdd(&compaction.water_surface_elements, page.water_surface_count);
+        compact_destinations[3] =
+          atomicAdd(&compaction.water_triangle_elements, page.water_triangle_count);
+        let capacities = array<u32, 4>(
+          compaction.surface_capacity,
+          compaction.triangle_capacity,
+          compaction.water_surface_capacity,
+          compaction.water_triangle_capacity,
+        );
+        let overflow_flags = array<u32, 4>(
+          COMPACTION_OVERFLOW_SURFACE,
+          COMPACTION_OVERFLOW_TRIANGLE,
+          COMPACTION_OVERFLOW_WATER_SURFACE,
+          COMPACTION_OVERFLOW_WATER_TRIANGLE,
+        );
+        var page_valid = true;
+        for (var stream = 0u; stream < 4u; stream += 1u) {
+          let destination = compact_destinations[stream];
+          if destination <= capacities[stream]
+              && counts[stream] <= capacities[stream] - destination {
+            compact_enabled[stream] = 1u;
+          } else {
+            page_valid = false;
+            atomicOr(&compaction.overflow_flags, overflow_flags[stream]);
+          }
+        }
+        if page_valid {
+          atomicAdd(&compaction.copied_pages, 1u);
+        }
       }
     }
   }
   workgroupBarrier();
+  if compact_page_valid == 0u {
+    return;
+  }
   for (var element = local.x; element < page.opaque_surface_count; element += 64u) {
     let source = page.opaque_surface_offset + element * GEOMETRY_WORDS_PER_ELEMENT;
     let destination = (compact_destinations[0] + element) * GEOMETRY_WORDS_PER_ELEMENT;

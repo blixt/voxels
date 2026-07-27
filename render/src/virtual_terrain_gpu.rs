@@ -226,6 +226,8 @@ pub(crate) struct VirtualTerrainGpuControl {
     pipeline: ComputePipeline,
     compaction_layout: wgpu::BindGroupLayout,
     compaction_bind_group: wgpu::BindGroup,
+    compaction_copy_layout: wgpu::BindGroupLayout,
+    compaction_copy_bind_group: wgpu::BindGroup,
     compaction_prepare_pipeline: ComputePipeline,
     compaction_pipeline: ComputePipeline,
     compaction_finalize_pipeline: ComputePipeline,
@@ -399,10 +401,40 @@ impl VirtualTerrainGpuControl {
             &compaction_counter_buffer,
             &indirect_buffer,
         );
+        let compaction_copy_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("virtual terrain compaction copy layout"),
+                entries: &[
+                    storage_entry(0, true),
+                    storage_entry(1, false),
+                    storage_entry(2, true),
+                    storage_entry(3, true),
+                    storage_entry(4, false),
+                    storage_entry(5, false),
+                    storage_entry(6, false),
+                ],
+            });
+        let compaction_copy_bind_group = create_compaction_copy_bind_group(
+            device,
+            &compaction_copy_layout,
+            &selected_buffer,
+            &counter_buffer,
+            &geometry_page_buffer,
+            &geometry_source_placeholder,
+            &compact_surface_buffer,
+            &compact_triangle_buffer,
+            &compaction_counter_buffer,
+        );
         let compaction_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("virtual terrain compaction pipeline layout"),
                 bind_group_layouts: &[None, Some(&compaction_layout)],
+                immediate_size: 0,
+            });
+        let compaction_copy_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("virtual terrain compaction copy pipeline layout"),
+                bind_group_layouts: &[None, Some(&compaction_copy_layout)],
                 immediate_size: 0,
             });
         let compaction_prepare_pipeline =
@@ -417,7 +449,7 @@ impl VirtualTerrainGpuControl {
         let compaction_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("compact selected virtual terrain"),
-                layout: Some(&compaction_pipeline_layout),
+                layout: Some(&compaction_copy_pipeline_layout),
                 module: &shader,
                 entry_point: Some("compact_selected"),
                 compilation_options: Default::default(),
@@ -469,6 +501,8 @@ impl VirtualTerrainGpuControl {
             pipeline,
             compaction_layout,
             compaction_bind_group,
+            compaction_copy_layout,
+            compaction_copy_bind_group,
             compaction_prepare_pipeline,
             compaction_pipeline,
             compaction_finalize_pipeline,
@@ -655,6 +689,17 @@ impl VirtualTerrainGpuControl {
             &self.compact_triangle_buffer,
             &self.compaction_counter_buffer,
             &self.indirect_buffer,
+        );
+        self.compaction_copy_bind_group = create_compaction_copy_bind_group(
+            device,
+            &self.compaction_copy_layout,
+            &self.selected_buffer,
+            &self.counter_buffer,
+            &self.geometry_page_buffer,
+            source,
+            &self.compact_surface_buffer,
+            &self.compact_triangle_buffer,
+            &self.compaction_counter_buffer,
         );
         self.geometry_source_bytes = source.size();
         self.geometry_source_bound = true;
@@ -871,18 +916,40 @@ impl VirtualTerrainGpuControl {
         }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("virtual terrain selected geometry compaction"),
+                label: Some("prepare virtual terrain selected geometry compaction"),
                 timestamp_writes: timestamps.map(|timestamps| wgpu::ComputePassTimestampWrites {
                     query_set: timestamps.query_set,
                     beginning_of_pass_write_index: Some(timestamps.compaction_first_query),
-                    end_of_pass_write_index: Some(timestamps.compaction_first_query + 1),
+                    end_of_pass_write_index: None,
                 }),
             });
             pass.set_bind_group(1, &self.compaction_bind_group, &[]);
             pass.set_pipeline(&self.compaction_prepare_pipeline);
             pass.dispatch_workgroups(1, 1, 1);
+        }
+        {
+            // WebGPU synchronization scopes are pass-wide. Keep the storage write that prepares
+            // `indirect_buffer`, its indirect read, and the storage writes that finalize the draw
+            // commands in separate passes so the buffer never has writable and indirect usages in
+            // the same scope.
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("virtual terrain selected geometry compaction"),
+                timestamp_writes: None,
+            });
+            pass.set_bind_group(1, &self.compaction_copy_bind_group, &[]);
             pass.set_pipeline(&self.compaction_pipeline);
             pass.dispatch_workgroups_indirect(&self.indirect_buffer, 0);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("finalize virtual terrain selected geometry compaction"),
+                timestamp_writes: timestamps.map(|timestamps| wgpu::ComputePassTimestampWrites {
+                    query_set: timestamps.query_set,
+                    beginning_of_pass_write_index: None,
+                    end_of_pass_write_index: Some(timestamps.compaction_first_query + 1),
+                }),
+            });
+            pass.set_bind_group(1, &self.compaction_bind_group, &[]);
             pass.set_pipeline(&self.compaction_finalize_pipeline);
             pass.dispatch_workgroups(1, 1, 1);
         }
@@ -1270,6 +1337,36 @@ fn create_compaction_bind_group(
             entire_entry(5, compact_triangles),
             entire_entry(6, compaction_counters),
             entire_entry(7, indirect_commands),
+        ],
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the fixed copy layout has seven independently bounded storage roles"
+)]
+fn create_compaction_copy_bind_group(
+    device: &Device,
+    layout: &wgpu::BindGroupLayout,
+    selected: &Buffer,
+    traversal_counters: &Buffer,
+    geometry_pages: &Buffer,
+    geometry_source: &Buffer,
+    compact_surfaces: &Buffer,
+    compact_triangles: &Buffer,
+    compaction_counters: &Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("virtual terrain compaction copy bind group"),
+        layout,
+        entries: &[
+            entire_entry(0, selected),
+            entire_entry(1, traversal_counters),
+            entire_entry(2, geometry_pages),
+            entire_entry(3, geometry_source),
+            entire_entry(4, compact_surfaces),
+            entire_entry(5, compact_triangles),
+            entire_entry(6, compaction_counters),
         ],
     })
 }
