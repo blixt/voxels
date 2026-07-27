@@ -23,6 +23,7 @@ mod terrain_error;
 pub mod terrain_page;
 #[cfg(feature = "terrain-page-builder")]
 pub mod terrain_region;
+pub mod terrain_stream;
 pub mod terrain_transport;
 pub mod virtual_surface;
 #[cfg(any(test, feature = "virtual-surface-bakeoff"))]
@@ -119,6 +120,11 @@ pub use terrain_page::{
 pub use terrain_page::{build_budgeted_terrain_parent, build_simplified_triangle_terrain_parent};
 #[cfg(feature = "terrain-page-builder")]
 pub use terrain_region::{TerrainRegionBuildError, TerrainRegionBuildV1, build_terrain_region};
+pub use terrain_stream::{
+    TerrainDemandGroup, TerrainPageCacheError, TerrainPageDemand, TerrainPageMemoryCache,
+    TerrainRequestBatch, TerrainStreamConfig, TerrainStreamError, TerrainStreamScheduler,
+    TerrainStreamStats,
+};
 pub use terrain_transport::{
     TERRAIN_PAGE_TRANSFER_MAX_BYTES, TERRAIN_PAGE_TRANSFER_MAX_ITEMS,
     TERRAIN_PAGE_TRANSFER_SCHEMA_VERSION, TerrainPageBatchItemV1, TerrainPageBatchRequestV1,
