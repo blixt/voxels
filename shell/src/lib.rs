@@ -1255,9 +1255,9 @@ mod request_window;
 mod web {
     use crate::presence_remote::RemotePresenceClient;
     use crate::remote::{
-        RemoteChunkCompletion, RemoteEditEvent, RemoteSurfaceCompletion, RemoteSurfaceTicket,
-        RemoteTerrainDirectoryCompletion, RemoteTerrainPageCompletion, RemoteWorldClient,
-        RemoteWorldError,
+        RemoteChunkCompletion, RemoteEditEvent, RemoteRequestId, RemoteSurfaceCompletion,
+        RemoteSurfaceTicket, RemoteTerrainDirectoryCompletion, RemoteTerrainPageCompletion,
+        RemoteWorldClient, RemoteWorldError,
     };
     use crate::{
         ChunkPortalMask, INTERACTIVE_SURFACE_LOD_LEVELS, SurfaceStreamFocus,
@@ -1377,8 +1377,9 @@ mod web {
     #[derive(Default)]
     struct VirtualTerrainStreamingState {
         registered_roots: BTreeSet<TerrainPageKey>,
-        directory_in_flight: BTreeSet<TerrainPageKey>,
+        directory_in_flight: BTreeMap<TerrainPageKey, RemoteRequestId>,
         directory_retry_after_ms: BTreeMap<TerrainPageKey, u64>,
+        minimum_region_revisions: BTreeMap<TerrainPageKey, u64>,
         nodes: BTreeMap<TerrainPageKey, TerrainHierarchyNode>,
     }
 
@@ -3451,7 +3452,7 @@ mod web {
                     .iter()
                     .filter(|root| {
                         !state.registered_roots.contains(root)
-                            && !state.directory_in_flight.contains(root)
+                            && !state.directory_in_flight.contains_key(root)
                             && state
                                 .directory_retry_after_ms
                                 .get(root)
@@ -3464,29 +3465,32 @@ mod web {
             if roots.is_empty() {
                 return;
             }
-            self.virtual_terrain
-                .borrow_mut()
-                .directory_in_flight
-                .extend(roots.iter().copied());
-            if let Err(error) = self.remote.submit_terrain_directory_batch(
+            match self.remote.submit_terrain_directory_batch(
                 WorldProductPriority::ImmediateSurface,
                 roots.clone(),
             ) {
-                let mut state = self.virtual_terrain.borrow_mut();
-                for root in roots {
-                    state.directory_in_flight.remove(&root);
-                    state.directory_retry_after_ms.insert(
-                        root,
-                        now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
-                    );
+                Ok(request_id) => {
+                    self.virtual_terrain
+                        .borrow_mut()
+                        .directory_in_flight
+                        .extend(roots.into_iter().map(|root| (root, request_id)));
                 }
-                if !matches!(
-                    error,
-                    RemoteWorldError::Backpressured
-                        | RemoteWorldError::RequestWindowFull
-                        | RemoteWorldError::NotOpen
-                ) {
-                    log_gpu_error(&format!("request virtual terrain directories: {error}"));
+                Err(error) => {
+                    let mut state = self.virtual_terrain.borrow_mut();
+                    for root in roots {
+                        state.directory_retry_after_ms.insert(
+                            root,
+                            now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
+                        );
+                    }
+                    if !matches!(
+                        error,
+                        RemoteWorldError::Backpressured
+                            | RemoteWorldError::RequestWindowFull
+                            | RemoteWorldError::NotOpen
+                    ) {
+                        log_gpu_error(&format!("request virtual terrain directories: {error}"));
+                    }
                 }
             }
         }
@@ -3613,6 +3617,28 @@ mod web {
                         );
                     continue;
                 };
+                let minimum_revision = self
+                    .virtual_terrain
+                    .borrow()
+                    .minimum_region_revisions
+                    .get(&root)
+                    .copied()
+                    .unwrap_or(0);
+                let directory_revision = directory
+                    .nodes
+                    .iter()
+                    .find(|node| node.key == root && node.is_root)
+                    .map_or(0, |node| node.revision);
+                if directory_revision < minimum_revision {
+                    self.virtual_terrain
+                        .borrow_mut()
+                        .directory_retry_after_ms
+                        .insert(
+                            root,
+                            now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
+                        );
+                    continue;
+                }
                 if self
                     .virtual_terrain
                     .borrow()
@@ -3645,6 +3671,113 @@ mod web {
                         log_gpu_error(&format!("register virtual terrain directory: {error}"));
                     }
                 }
+            }
+        }
+
+        fn invalidate_virtual_terrain_regions(
+            &self,
+            affected_chunks: &[ChunkCoord],
+            minimum_revision: Option<u64>,
+        ) {
+            let invalid = affected_chunks
+                .iter()
+                .filter_map(|coord| {
+                    TerrainPageKey {
+                        level: 0,
+                        coord: [coord.x, coord.y, coord.z],
+                    }
+                    .ancestor_at(TERRAIN_REGION_ROOT_LEVEL)
+                })
+                .collect::<BTreeSet<_>>();
+            if invalid.is_empty() {
+                return;
+            }
+            let keep = {
+                let state = self.virtual_terrain.borrow();
+                state
+                    .registered_roots
+                    .difference(&invalid)
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+            };
+            let canceled_requests = {
+                let mut state = self.virtual_terrain.borrow_mut();
+                let request_ids = invalid
+                    .iter()
+                    .filter_map(|root| state.directory_in_flight.get(root).copied())
+                    .collect::<BTreeSet<_>>();
+                if !request_ids.is_empty() {
+                    let canceled_roots = state
+                        .directory_in_flight
+                        .iter()
+                        .filter(|(_, request_id)| request_ids.contains(request_id))
+                        .map(|(root, _)| *root)
+                        .collect::<Vec<_>>();
+                    for root in canceled_roots {
+                        state.directory_in_flight.remove(&root);
+                        state.directory_retry_after_ms.remove(&root);
+                    }
+                }
+                request_ids
+            };
+            for request_id in canceled_requests {
+                self.remote.cancel(request_id);
+            }
+            if let Err(error) = self
+                .renderer
+                .borrow_mut()
+                .retain_virtual_terrain_regions(keep.iter().copied())
+            {
+                log_gpu_error(&format!(
+                    "invalidate edited virtual terrain regions: {error}"
+                ));
+                return;
+            }
+            let mut state = self.virtual_terrain.borrow_mut();
+            state
+                .registered_roots
+                .retain(|root| !invalid.contains(root));
+            state.nodes.retain(|key, _| {
+                key.ancestor_at(TERRAIN_REGION_ROOT_LEVEL)
+                    .is_none_or(|root| !invalid.contains(&root))
+            });
+            for root in invalid {
+                state.directory_retry_after_ms.remove(&root);
+                if let Some(revision) = minimum_revision {
+                    state
+                        .minimum_region_revisions
+                        .entry(root)
+                        .and_modify(|minimum| *minimum = (*minimum).max(revision))
+                        .or_insert(revision);
+                }
+            }
+        }
+
+        fn reset_virtual_terrain_streaming(&self) {
+            let request_ids = self
+                .virtual_terrain
+                .borrow()
+                .directory_in_flight
+                .values()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            for request_id in request_ids {
+                self.remote.cancel(request_id);
+            }
+            if let Err(error) = self
+                .renderer
+                .borrow_mut()
+                .retain_virtual_terrain_regions(std::iter::empty())
+            {
+                log_gpu_error(&format!("reset virtual terrain regions: {error}"));
+            }
+            *self.virtual_terrain.borrow_mut() = VirtualTerrainStreamingState::default();
+            if let Err(error) = self
+                .virtual_terrain_scheduler
+                .borrow_mut()
+                .reconcile(std::iter::empty())
+            {
+                log_gpu_error(&format!("reset virtual terrain scheduler: {error}"));
             }
         }
 
@@ -4793,6 +4926,7 @@ mod web {
                     }
                 }
                 self.last_enclosure_probe.set(f64::NEG_INFINITY);
+                self.invalidate_virtual_terrain_regions(affected_chunks, Some(server_revision));
             }
             let canonical: Vec<CanonicalRequirement> = {
                 let mut scheduler = self.scheduler.borrow_mut();
@@ -4877,6 +5011,7 @@ mod web {
             self.pending_uploads.borrow_mut().clear();
             self.canonical_publications.borrow_mut().clear();
             self.scheduler.borrow_mut().invalidate_all_generation();
+            self.reset_virtual_terrain_streaming();
             let replacement = self.surface_revisions.borrow_mut().begin_edit();
             let retained = self
                 .surface_resident
