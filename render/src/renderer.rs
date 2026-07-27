@@ -27,8 +27,11 @@ use crate::virtual_terrain::{
 };
 use crate::virtual_terrain_gpu::{
     GpuVirtualTerrainFeedback, VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES,
-    VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES, VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET,
-    VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET, VirtualTerrainGpuControl,
+    VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES, VIRTUAL_TERRAIN_COMPACT_WATER_SURFACE_BYTES,
+    VIRTUAL_TERRAIN_COMPACT_WATER_TRIANGLE_BYTES, VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET,
+    VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET, VIRTUAL_TERRAIN_WATER_SURFACE_INDIRECT_OFFSET,
+    VIRTUAL_TERRAIN_WATER_TRIANGLE_INDIRECT_OFFSET, VirtualTerrainGpuControl,
+    VirtualTerrainGpuGeometry, VirtualTerrainGpuGeometryRange,
 };
 use bytemuck::{Pod, Zeroable};
 use hashbrown::{HashMap, HashSet};
@@ -841,6 +844,58 @@ fn virtual_triangle_gpu_vertices(
     Ok(vertices)
 }
 
+fn virtual_terrain_surface_slice(
+    relative_offset: u32,
+    size: u32,
+    quad_count: u32,
+    bounds_min: glam::Vec3,
+    bounds_max: glam::Vec3,
+    render_layer: RenderLayer,
+) -> MeshSlice {
+    MeshSlice {
+        relative_offset,
+        size,
+        quad_count,
+        bounds_min,
+        bounds_max,
+        surface_patch_id: None,
+        boundary_edge: None,
+        stitch_edges: 0,
+        morph_closure: false,
+        exact_replacement_chunk: None,
+        canonical_water_surface: render_layer == RenderLayer::Translucent,
+        render_layer,
+    }
+}
+
+fn partition_virtual_surface_geometry(quads: Vec<GpuQuad>) -> Option<(Vec<GpuQuad>, u32, u32)> {
+    let (opaque, water): (Vec<_>, Vec<_>) = quads
+        .into_iter()
+        .partition(|quad| quad.material_face & !GPU_FACE_MASK != u32::from(Material::Water.id()));
+    let opaque_count = u32::try_from(opaque.len()).ok()?;
+    let water_count = u32::try_from(water.len()).ok()?;
+    Some((
+        opaque.into_iter().chain(water).collect(),
+        opaque_count,
+        water_count,
+    ))
+}
+
+fn partition_virtual_triangle_geometry(
+    vertices: Vec<GpuTerrainVertex>,
+) -> Option<(Vec<GpuTerrainVertex>, u32, u32)> {
+    let (opaque, water): (Vec<_>, Vec<_>) = vertices
+        .into_iter()
+        .partition(|vertex| vertex.material != u32::from(Material::Water.id()));
+    let opaque_count = u32::try_from(opaque.len()).ok()?;
+    let water_count = u32::try_from(water.len()).ok()?;
+    Some((
+        opaque.into_iter().chain(water).collect(),
+        opaque_count,
+        water_count,
+    ))
+}
+
 const fn pack_canonical_triangle_extent(extent: u16) -> u16 {
     debug_assert!(extent > 0 && extent <= 64);
     let value = extent - 1;
@@ -1247,6 +1302,8 @@ enum VirtualTerrainGpuMesh {
 struct TerrainTriangleMesh {
     allocation: Allocation,
     vertex_count: u32,
+    opaque_vertex_count: u32,
+    water_vertex_count: u32,
     content_fingerprint: u64,
     bounds_min: glam::Vec3,
     bounds_max: glam::Vec3,
@@ -1424,6 +1481,8 @@ struct TerrainTriangleDrawList {
 struct VirtualTerrainDrawLists {
     surfaces: DrawList,
     triangles: TerrainTriangleDrawList,
+    water_surfaces: DrawList,
+    water_triangles: TerrainTriangleDrawList,
     fingerprint: u64,
     mesh_count: u32,
     primitive_count: u32,
@@ -1677,6 +1736,8 @@ pub struct RenderDiagnostics {
     pub virtual_terrain_gpu_stack_peak: u32,
     pub virtual_terrain_gpu_compacted_surface_elements: u32,
     pub virtual_terrain_gpu_compacted_triangle_elements: u32,
+    pub virtual_terrain_gpu_compacted_water_surface_elements: u32,
+    pub virtual_terrain_gpu_compacted_water_triangle_elements: u32,
     pub virtual_terrain_gpu_compacted_pages: u32,
     pub virtual_terrain_gpu_compaction_overflow_flags: u32,
     pub virtual_terrain_gpu_matches_cpu_cut: bool,
@@ -2234,6 +2295,7 @@ pub struct Renderer {
     screenshot_diagnostic_transition_pipeline: RenderPipeline,
     screenshot_diagnostic_morph_transition_pipeline: RenderPipeline,
     water_pipeline: RenderPipeline,
+    virtual_triangle_water_pipeline: RenderPipeline,
     water_transition_pipeline: RenderPipeline,
     weather_pipeline: RenderPipeline,
     avatar_gpu: AvatarGpu,
@@ -3216,6 +3278,12 @@ impl Renderer {
                 fragment_constants: &[],
             },
         );
+        let virtual_triangle_water_pipeline = create_virtual_triangle_water_pipeline(
+            &device,
+            "virtual terrain triangle water pipeline",
+            &water_pipeline_layout,
+            &voxel_shader,
+        );
         let water_transition_pipeline = pipeline(
             &device,
             "outgoing water transition pipeline",
@@ -3308,6 +3376,7 @@ impl Renderer {
             screenshot_diagnostic_transition_pipeline,
             screenshot_diagnostic_morph_transition_pipeline,
             water_pipeline,
+            virtual_triangle_water_pipeline,
             water_transition_pipeline,
             weather_pipeline,
             avatar_gpu,
@@ -4331,6 +4400,9 @@ impl Renderer {
             | TerrainPageRepresentation::SparseVoxelBrick(_)
             | TerrainPageRepresentation::SurfaceCluster(_) => {
                 let gpu_quads = virtual_surface_gpu_quads(&page)?;
+                let (gpu_quads, opaque_quad_count, water_quad_count) =
+                    partition_virtual_surface_geometry(gpu_quads)
+                        .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
                 let gpu_bytes = gpu_quads
                     .len()
                     .checked_mul(size_of::<GpuQuad>())
@@ -4341,25 +4413,33 @@ impl Renderer {
                 if gpu_quads.is_empty() {
                     VirtualTerrainGpuMesh::Empty
                 } else {
-                    let quad_count = u32::try_from(gpu_quads.len())
-                        .map_err(|_| VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
-                    let size = quad_count
+                    let opaque_size = opaque_quad_count
                         .checked_mul(size_of::<GpuQuad>() as u32)
                         .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
-                    let slice = MeshSlice {
-                        relative_offset: 0,
-                        size,
-                        quad_count,
-                        bounds_min: minimum,
-                        bounds_max: maximum,
-                        surface_patch_id: None,
-                        boundary_edge: None,
-                        stitch_edges: 0,
-                        morph_closure: false,
-                        exact_replacement_chunk: None,
-                        canonical_water_surface: false,
-                        render_layer: RenderLayer::Opaque,
-                    };
+                    let water_size = water_quad_count
+                        .checked_mul(size_of::<GpuQuad>() as u32)
+                        .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
+                    let mut slices = Vec::with_capacity(2);
+                    if opaque_quad_count > 0 {
+                        slices.push(virtual_terrain_surface_slice(
+                            0,
+                            opaque_size,
+                            opaque_quad_count,
+                            minimum,
+                            maximum,
+                            RenderLayer::Opaque,
+                        ));
+                    }
+                    if water_quad_count > 0 {
+                        slices.push(virtual_terrain_surface_slice(
+                            opaque_size,
+                            water_size,
+                            water_quad_count,
+                            minimum,
+                            maximum,
+                            RenderLayer::Translucent,
+                        ));
+                    }
                     VirtualTerrainGpuMesh::Surface(
                         prepare_mesh_sliced_into(
                             &self.device,
@@ -4369,7 +4449,7 @@ impl Renderer {
                             None,
                             &gpu_quads,
                             None,
-                            vec![slice],
+                            slices,
                             u8::MAX,
                             "bounded virtual terrain page pool",
                         )
@@ -4379,6 +4459,9 @@ impl Renderer {
             }
             TerrainPageRepresentation::TriangleCluster(_) => {
                 let vertices = virtual_triangle_gpu_vertices(&page)?;
+                let (vertices, opaque_vertex_count, water_vertex_count) =
+                    partition_virtual_triangle_geometry(vertices)
+                        .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
                 let gpu_bytes = vertices
                     .len()
                     .checked_mul(size_of::<GpuTerrainVertex>())
@@ -4396,6 +4479,8 @@ impl Renderer {
                             &mut self.virtual_terrain_arena,
                             &mut self.virtual_terrain_arena_buffers,
                             &vertices,
+                            opaque_vertex_count,
+                            water_vertex_count,
                             minimum,
                             maximum,
                             "bounded virtual terrain page pool",
@@ -4406,17 +4491,37 @@ impl Renderer {
             }
         };
         let geometry = match &mesh {
-            VirtualTerrainGpuMesh::Empty => (0, 0, None),
-            VirtualTerrainGpuMesh::Surface(mesh) => (
-                u64::from(mesh.allocation.offset),
-                mesh.quad_count,
-                Some(TerrainPageRepresentationKind::SurfaceCluster),
-            ),
-            VirtualTerrainGpuMesh::Triangle(mesh) => (
-                u64::from(mesh.allocation.offset),
-                mesh.vertex_count,
-                Some(TerrainPageRepresentationKind::TriangleCluster),
-            ),
+            VirtualTerrainGpuMesh::Empty => VirtualTerrainGpuGeometry::default(),
+            VirtualTerrainGpuMesh::Surface(mesh) => {
+                let mut geometry = VirtualTerrainGpuGeometry::default();
+                for slice in &mesh.slices {
+                    let range = VirtualTerrainGpuGeometryRange {
+                        source_offset_bytes: u64::from(
+                            mesh.allocation.offset + slice.relative_offset,
+                        ),
+                        element_count: slice.quad_count,
+                    };
+                    match slice.render_layer {
+                        RenderLayer::Opaque => geometry.opaque_surface = range,
+                        RenderLayer::Translucent => geometry.water_surface = range,
+                        RenderLayer::Empty => {}
+                    }
+                }
+                geometry
+            }
+            VirtualTerrainGpuMesh::Triangle(mesh) => VirtualTerrainGpuGeometry {
+                opaque_triangle: VirtualTerrainGpuGeometryRange {
+                    source_offset_bytes: u64::from(mesh.allocation.offset),
+                    element_count: mesh.opaque_vertex_count,
+                },
+                water_triangle: VirtualTerrainGpuGeometryRange {
+                    source_offset_bytes: u64::from(mesh.allocation.offset)
+                        + u64::from(mesh.opaque_vertex_count)
+                            * size_of::<GpuTerrainVertex>() as u64,
+                    element_count: mesh.water_vertex_count,
+                },
+                ..VirtualTerrainGpuGeometry::default()
+            },
         };
         let allocation_page = match &mesh {
             VirtualTerrainGpuMesh::Empty => None,
@@ -4447,7 +4552,7 @@ impl Renderer {
         }
         if self
             .virtual_terrain_gpu
-            .update_page_geometry(&self.queue, page.key, geometry.0, geometry.1, geometry.2)
+            .update_page_geometry(&self.queue, page.key, geometry)
             .and_then(|()| {
                 self.virtual_terrain_gpu.update_page_residency(
                     &self.queue,
@@ -4534,7 +4639,9 @@ impl Renderer {
         let (pages, encoded_bytes, primitives) = self.virtual_terrain.resident_usage();
         let gpu = self.virtual_terrain_arena.stats();
         let compact_capacity = VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES
-            .saturating_add(VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES);
+            .saturating_add(VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES)
+            .saturating_add(VIRTUAL_TERRAIN_COMPACT_WATER_SURFACE_BYTES)
+            .saturating_add(VIRTUAL_TERRAIN_COMPACT_WATER_TRIANGLE_BYTES);
         let compact_allocated =
             self.virtual_terrain_gpu
                 .latest_feedback()
@@ -4543,6 +4650,14 @@ impl Renderer {
                         .saturating_mul(size_of::<GpuQuad>() as u64)
                         .saturating_add(
                             u64::from(feedback.compacted_triangle_elements)
+                                .saturating_mul(size_of::<GpuTerrainVertex>() as u64),
+                        )
+                        .saturating_add(
+                            u64::from(feedback.compacted_water_surface_elements)
+                                .saturating_mul(size_of::<GpuQuad>() as u64),
+                        )
+                        .saturating_add(
+                            u64::from(feedback.compacted_water_triangle_elements)
                                 .saturating_mul(size_of::<GpuTerrainVertex>() as u64),
                         )
                 });
@@ -4561,6 +4676,8 @@ impl Renderer {
     ) -> Result<(), VirtualTerrainRendererError> {
         let mut surface_bytes = 0u64;
         let mut triangle_bytes = 0u64;
+        let mut water_surface_bytes = 0u64;
+        let mut water_triangle_bytes = 0u64;
         for key in &cut.selected_pages {
             let page = self
                 .virtual_terrain_pages
@@ -4569,18 +4686,33 @@ impl Renderer {
             match &page.mesh {
                 VirtualTerrainGpuMesh::Empty => {}
                 VirtualTerrainGpuMesh::Surface(mesh) => {
-                    surface_bytes = surface_bytes
-                        .saturating_add(u64::from(mesh.quad_count) * size_of::<GpuQuad>() as u64);
+                    for slice in &mesh.slices {
+                        let bytes = u64::from(slice.quad_count) * size_of::<GpuQuad>() as u64;
+                        match slice.render_layer {
+                            RenderLayer::Opaque => {
+                                surface_bytes = surface_bytes.saturating_add(bytes);
+                            }
+                            RenderLayer::Translucent => {
+                                water_surface_bytes = water_surface_bytes.saturating_add(bytes);
+                            }
+                            RenderLayer::Empty => {}
+                        }
+                    }
                 }
                 VirtualTerrainGpuMesh::Triangle(mesh) => {
                     triangle_bytes = triangle_bytes.saturating_add(
-                        u64::from(mesh.vertex_count) * size_of::<GpuTerrainVertex>() as u64,
+                        u64::from(mesh.opaque_vertex_count) * size_of::<GpuTerrainVertex>() as u64,
+                    );
+                    water_triangle_bytes = water_triangle_bytes.saturating_add(
+                        u64::from(mesh.water_vertex_count) * size_of::<GpuTerrainVertex>() as u64,
                     );
                 }
             }
         }
         if surface_bytes > VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES
             || triangle_bytes > VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES
+            || water_surface_bytes > VIRTUAL_TERRAIN_COMPACT_WATER_SURFACE_BYTES
+            || water_triangle_bytes > VIRTUAL_TERRAIN_COMPACT_WATER_TRIANGLE_BYTES
         {
             return Err(VirtualTerrainRendererError::SelectedCutCompactionCapacity);
         }
@@ -5985,19 +6117,23 @@ impl Renderer {
         } else {
             VirtualTerrainDrawLists::default()
         };
-        let water_draw_list = self.collect_draw_list(
-            &self.water_chunks,
-            |key, chunk| {
-                self.options.water
-                    && (key.0 == 0 || self.options.far_terrain)
-                    && view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max)
-            },
-            |key, slice| {
-                slice.render_layer == RenderLayer::Translucent
-                    && slice_owned_by_lod(geometric_lod_focus, lod_draw_plan, key, slice)
-                    && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
-            },
-        );
+        let water_draw_list = if virtual_visible {
+            DrawList::default()
+        } else {
+            self.collect_draw_list(
+                &self.water_chunks,
+                |key, chunk| {
+                    self.options.water
+                        && (key.0 == 0 || self.options.far_terrain)
+                        && view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max)
+                },
+                |key, slice| {
+                    slice.render_layer == RenderLayer::Translucent
+                        && slice_owned_by_lod(geometric_lod_focus, lod_draw_plan, key, slice)
+                        && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
+                },
+            )
+        };
         // Water has no parent-height sidecar. Drawing its stale cut through a screen-space Bayer
         // mask produced detached square fragments, so it switches atomically with the complete
         // current owner instead of overlaying old geometry.
@@ -6008,8 +6144,13 @@ impl Renderer {
             .prepare(&self.queue, &self.remote_avatars, self.time);
         let avatar_instances = self.avatar_gpu.instance_count();
         let has_avatars = avatar_instances != 0;
-        let refract_water =
-            !water_draw_list.spans.is_empty() || !outgoing_water_draw_list.spans.is_empty();
+        let refract_water = self.options.water
+            && if virtual_visible {
+                virtual_world_draw_lists.water_surfaces.quad_count > 0
+                    || virtual_world_draw_lists.water_triangles.vertex_count > 0
+            } else {
+                !water_draw_list.spans.is_empty() || !outgoing_water_draw_list.spans.is_empty()
+            };
         let diagnostic_sky = self.runtime_config.diagnostic_sky_color.is_some();
         let diagnostic_geometry = self.geometry_source_debug;
         let clouds_active =
@@ -6510,19 +6651,22 @@ impl Renderer {
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
             pass.set_bind_group(1, &self.water_scene_bind_group, &[]);
             pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
-            for span in &water_draw_list.spans {
-                let Some(buffer) = self.water_arena_buffers.get(span.page as usize) else {
-                    continue;
-                };
-                let start = u64::from(span.offset);
-                let end = start + u64::from(span.size);
-                pass.set_vertex_buffer(0, buffer.slice(start..end));
-                pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
-            }
-            if !outgoing_water_draw_list.spans.is_empty() {
-                pass.set_pipeline(&self.water_transition_pipeline);
-                pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
-                for span in &outgoing_water_draw_list.spans {
+            if virtual_visible {
+                pass.set_pipeline(&self.water_pipeline);
+                pass.set_vertex_buffer(0, self.virtual_terrain_gpu.compact_water_surface_slice());
+                pass.draw_indirect(
+                    self.virtual_terrain_gpu.indirect_buffer(),
+                    VIRTUAL_TERRAIN_WATER_SURFACE_INDIRECT_OFFSET,
+                );
+                pass.set_pipeline(&self.virtual_triangle_water_pipeline);
+                pass.set_vertex_buffer(0, self.virtual_terrain_gpu.compact_water_triangle_slice());
+                pass.draw_indirect(
+                    self.virtual_terrain_gpu.indirect_buffer(),
+                    VIRTUAL_TERRAIN_WATER_TRIANGLE_INDIRECT_OFFSET,
+                );
+            } else {
+                pass.set_pipeline(&self.water_pipeline);
+                for span in &water_draw_list.spans {
                     let Some(buffer) = self.water_arena_buffers.get(span.page as usize) else {
                         continue;
                     };
@@ -6530,6 +6674,19 @@ impl Renderer {
                     let end = start + u64::from(span.size);
                     pass.set_vertex_buffer(0, buffer.slice(start..end));
                     pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
+                }
+                if !outgoing_water_draw_list.spans.is_empty() {
+                    pass.set_pipeline(&self.water_transition_pipeline);
+                    pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                    for span in &outgoing_water_draw_list.spans {
+                        let Some(buffer) = self.water_arena_buffers.get(span.page as usize) else {
+                            continue;
+                        };
+                        let start = u64::from(span.offset);
+                        let end = start + u64::from(span.size);
+                        pass.set_vertex_buffer(0, buffer.slice(start..end));
+                        pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
+                    }
                 }
             }
         }
@@ -6647,6 +6804,24 @@ impl Renderer {
         } else {
             world_draw_list.quad_count.saturating_add(cut_quads)
         };
+        let visible_water_draw_calls = if virtual_visible {
+            u32::from(refract_water) * 2
+        } else {
+            water_draw_list
+                .spans
+                .len()
+                .saturating_add(outgoing_water_draw_list.spans.len()) as u32
+        };
+        let visible_water_primitives = if virtual_visible {
+            virtual_world_draw_lists
+                .water_surfaces
+                .quad_count
+                .saturating_add(virtual_world_draw_lists.water_triangles.vertex_count / 3)
+        } else {
+            water_draw_list
+                .quad_count
+                .saturating_add(outgoing_water_draw_list.quad_count)
+        };
         let gpu_virtual_feedback = self.virtual_terrain_gpu.latest_feedback();
         let gpu_virtual_matches_cpu = gpu_virtual_feedback.as_ref().is_some_and(|feedback| {
             gpu_feedback_matches_cut(feedback, self.virtual_terrain_oracle_cut.as_ref())
@@ -6659,26 +6834,17 @@ impl Renderer {
             },
             visible_chunks: visible_terrain_meshes,
             draw_calls: visible_terrain_draw_calls
-                .saturating_add(water_draw_list.spans.len())
-                .saturating_add(outgoing_water_draw_list.spans.len())
+                .saturating_add(visible_water_draw_calls as usize)
                 .saturating_add(usize::from(has_avatars)) as u32,
-            water_draw_calls: water_draw_list
-                .spans
-                .len()
-                .saturating_add(outgoing_water_draw_list.spans.len())
-                as u32,
+            water_draw_calls: visible_water_draw_calls,
             shadow_draw_calls,
             shadow_cascades: if shadows_active {
                 CASCADE_COUNT as u32
             } else {
                 0
             },
-            quads: visible_terrain_primitives
-                .saturating_add(water_draw_list.quad_count)
-                .saturating_add(outgoing_water_draw_list.quad_count),
-            water_quads: water_draw_list
-                .quad_count
-                .saturating_add(outgoing_water_draw_list.quad_count),
+            quads: visible_terrain_primitives,
+            water_quads: visible_water_primitives,
             virtual_terrain_gpu_selected_pages: gpu_virtual_feedback
                 .as_ref()
                 .map_or(0, |feedback| feedback.selected_pages.len() as u32),
@@ -6703,6 +6869,12 @@ impl Renderer {
             virtual_terrain_gpu_compacted_triangle_elements: gpu_virtual_feedback
                 .as_ref()
                 .map_or(0, |feedback| feedback.compacted_triangle_elements),
+            virtual_terrain_gpu_compacted_water_surface_elements: gpu_virtual_feedback
+                .as_ref()
+                .map_or(0, |feedback| feedback.compacted_water_surface_elements),
+            virtual_terrain_gpu_compacted_water_triangle_elements: gpu_virtual_feedback
+                .as_ref()
+                .map_or(0, |feedback| feedback.compacted_water_triangle_elements),
             virtual_terrain_gpu_compacted_pages: gpu_virtual_feedback
                 .as_ref()
                 .map_or(0, |feedback| feedback.compacted_pages),
@@ -6728,7 +6900,9 @@ impl Renderer {
                 .saturating_add(water_arena.capacity_bytes)
                 .saturating_add(virtual_terrain_arena.capacity_bytes)
                 .saturating_add(VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES)
-                .saturating_add(VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES),
+                .saturating_add(VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES)
+                .saturating_add(VIRTUAL_TERRAIN_COMPACT_WATER_SURFACE_BYTES)
+                .saturating_add(VIRTUAL_TERRAIN_COMPACT_WATER_TRIANGLE_BYTES),
             arena_allocated_bytes: arena
                 .allocated_bytes
                 .saturating_add(morph_arena.allocated_bytes)
@@ -6741,6 +6915,14 @@ impl Renderer {
                             u64::from(feedback.compacted_triangle_elements)
                                 .saturating_mul(size_of::<GpuTerrainVertex>() as u64),
                         )
+                        .saturating_add(
+                            u64::from(feedback.compacted_water_surface_elements)
+                                .saturating_mul(size_of::<GpuQuad>() as u64),
+                        )
+                        .saturating_add(
+                            u64::from(feedback.compacted_water_triangle_elements)
+                                .saturating_mul(size_of::<GpuTerrainVertex>() as u64),
+                        )
                 })),
             core_gpu_bytes: arena
                 .capacity_bytes
@@ -6749,6 +6931,8 @@ impl Renderer {
                 .saturating_add(virtual_terrain_arena.capacity_bytes)
                 .saturating_add(VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES)
                 .saturating_add(VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES)
+                .saturating_add(VIRTUAL_TERRAIN_COMPACT_WATER_SURFACE_BYTES)
+                .saturating_add(VIRTUAL_TERRAIN_COMPACT_WATER_TRIANGLE_BYTES)
                 // Two RGBA16F scene targets plus writable and sampled Depth32Float targets.
                 .saturating_add(scene_pixels.saturating_mul(24))
                 .saturating_add(shadow_bytes)
@@ -7037,21 +7221,37 @@ impl Renderer {
             if refract_water {
                 pass.set_pipeline(&self.screenshot_diagnostic_pipeline);
                 pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
-                draw_diagnostic_spans(
-                    &mut pass,
-                    &self.water_arena_buffers,
-                    water_owners,
-                    &water_draw_list,
-                );
-                if !outgoing_water_draw_list.spans.is_empty() {
-                    pass.set_pipeline(&self.screenshot_diagnostic_transition_pipeline);
-                    pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                if virtual_visible {
+                    draw_diagnostic_spans(
+                        &mut pass,
+                        &self.virtual_terrain_arena_buffers,
+                        opaque_owners,
+                        &virtual_world_draw_lists.water_surfaces,
+                    );
+                    pass.set_pipeline(&self.virtual_triangle_diagnostic_pipeline);
+                    draw_diagnostic_triangle_spans(
+                        &mut pass,
+                        &self.virtual_terrain_arena_buffers,
+                        opaque_owners,
+                        &virtual_world_draw_lists.water_triangles,
+                    );
+                } else {
                     draw_diagnostic_spans(
                         &mut pass,
                         &self.water_arena_buffers,
                         water_owners,
-                        &outgoing_water_draw_list,
+                        &water_draw_list,
                     );
+                    if !outgoing_water_draw_list.spans.is_empty() {
+                        pass.set_pipeline(&self.screenshot_diagnostic_transition_pipeline);
+                        pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                        draw_diagnostic_spans(
+                            &mut pass,
+                            &self.water_arena_buffers,
+                            water_owners,
+                            &outgoing_water_draw_list,
+                        );
+                    }
                 }
             }
         }
@@ -7340,17 +7540,26 @@ impl Renderer {
         };
         let mut surface_items = Vec::new();
         let mut triangle_items = Vec::new();
+        let mut water_surface_items = Vec::new();
+        let mut water_triangle_items = Vec::new();
         let mut mesh_count = 0u32;
         let mut primitive_count = 0u32;
         let mut surface_mesh_count = 0u32;
         let mut surface_quad_count = 0u32;
         let mut triangle_mesh_count = 0u32;
         let mut triangle_vertex_count = 0u32;
+        let mut water_surface_quads = 0u32;
+        let mut water_triangle_vertices = 0u32;
+        let mut water_surface_mesh_count = 0u32;
+        let mut water_triangle_mesh_count = 0u32;
         let mut fingerprint = cut.fingerprint;
         let mut surface_fingerprint = cut.fingerprint;
         let mut triangle_fingerprint = cut.fingerprint;
+        let mut water_surface_fingerprint = cut.fingerprint;
+        let mut water_triangle_fingerprint = cut.fingerprint;
         let mut tested_slices = 0u32;
         let mut selected_slices = 0u32;
+        let mut water_selected_slices = 0u32;
         for key in &cut.selected_pages {
             let page = self
                 .virtual_terrain_pages
@@ -7374,10 +7583,33 @@ impl Renderer {
                     fingerprint = fingerprint_value(fingerprint, mesh.content_fingerprint);
                     surface_fingerprint =
                         fingerprint_value(surface_fingerprint, mesh.content_fingerprint);
+                    let mut has_water_surface = false;
                     for slice in &mesh.slices {
                         tested_slices = tested_slices.saturating_add(1);
-                        if slice.render_layer != RenderLayer::Opaque {
-                            continue;
+                        match slice.render_layer {
+                            RenderLayer::Opaque => {}
+                            RenderLayer::Translucent => {
+                                has_water_surface = true;
+                                water_selected_slices = water_selected_slices.saturating_add(1);
+                                water_surface_quads =
+                                    water_surface_quads.saturating_add(slice.quad_count);
+                                water_surface_items.push(DrawItem {
+                                    page: mesh.allocation.page,
+                                    offset: mesh.allocation.offset + slice.relative_offset,
+                                    size: slice.size,
+                                    quad_count: slice.quad_count,
+                                    morph_page: None,
+                                    morph_offset: 0,
+                                });
+                                water_surface_fingerprint = fingerprint_value(
+                                    water_surface_fingerprint,
+                                    mesh.content_fingerprint,
+                                );
+                                primitive_count = primitive_count
+                                    .saturating_add(slice.quad_count.saturating_mul(2));
+                                continue;
+                            }
+                            RenderLayer::Empty => continue,
                         }
                         selected_slices = selected_slices.saturating_add(1);
                         surface_items.push(DrawItem {
@@ -7392,6 +7624,8 @@ impl Renderer {
                         primitive_count =
                             primitive_count.saturating_add(slice.quad_count.saturating_mul(2));
                     }
+                    water_surface_mesh_count =
+                        water_surface_mesh_count.saturating_add(u32::from(has_water_surface));
                 }
                 VirtualTerrainGpuMesh::Triangle(mesh) => {
                     if !view_clip.contains_aabb(mesh.bounds_min, mesh.bounds_max) {
@@ -7402,13 +7636,37 @@ impl Renderer {
                     fingerprint = fingerprint_value(fingerprint, mesh.content_fingerprint);
                     triangle_fingerprint =
                         fingerprint_value(triangle_fingerprint, mesh.content_fingerprint);
-                    triangle_items.push(TerrainTriangleDrawSpan {
-                        page: mesh.allocation.page,
-                        offset: mesh.allocation.offset,
-                        size: mesh.allocation.size,
-                        vertex_count: mesh.vertex_count,
-                    });
-                    triangle_vertex_count = triangle_vertex_count.saturating_add(mesh.vertex_count);
+                    if mesh.opaque_vertex_count > 0 {
+                        triangle_items.push(TerrainTriangleDrawSpan {
+                            page: mesh.allocation.page,
+                            offset: mesh.allocation.offset,
+                            size: mesh
+                                .opaque_vertex_count
+                                .saturating_mul(size_of::<GpuTerrainVertex>() as u32),
+                            vertex_count: mesh.opaque_vertex_count,
+                        });
+                        triangle_vertex_count =
+                            triangle_vertex_count.saturating_add(mesh.opaque_vertex_count);
+                    }
+                    water_triangle_vertices =
+                        water_triangle_vertices.saturating_add(mesh.water_vertex_count);
+                    if mesh.water_vertex_count > 0 {
+                        water_triangle_mesh_count = water_triangle_mesh_count.saturating_add(1);
+                        let offset = mesh.allocation.offset.saturating_add(
+                            mesh.opaque_vertex_count
+                                .saturating_mul(size_of::<GpuTerrainVertex>() as u32),
+                        );
+                        water_triangle_items.push(TerrainTriangleDrawSpan {
+                            page: mesh.allocation.page,
+                            offset,
+                            size: mesh
+                                .water_vertex_count
+                                .saturating_mul(size_of::<GpuTerrainVertex>() as u32),
+                            vertex_count: mesh.water_vertex_count,
+                        });
+                        water_triangle_fingerprint =
+                            fingerprint_value(water_triangle_fingerprint, mesh.content_fingerprint);
+                    }
                     primitive_count = primitive_count.saturating_add(mesh.vertex_count / 3);
                 }
             }
@@ -7427,6 +7685,20 @@ impl Renderer {
                 mesh_count: triangle_mesh_count,
                 vertex_count: triangle_vertex_count,
                 fingerprint: triangle_fingerprint,
+            },
+            water_surfaces: DrawList {
+                spans: coalesce_draw_items(water_surface_items),
+                mesh_count: water_surface_mesh_count,
+                quad_count: water_surface_quads,
+                fingerprint: water_surface_fingerprint,
+                tested_slices,
+                selected_slices: water_selected_slices,
+            },
+            water_triangles: TerrainTriangleDrawList {
+                spans: coalesce_triangle_draw_spans(water_triangle_items),
+                mesh_count: water_triangle_mesh_count,
+                vertex_count: water_triangle_vertices,
+                fingerprint: water_triangle_fingerprint,
             },
             fingerprint,
             mesh_count,
@@ -8119,11 +8391,19 @@ fn prepare_terrain_triangle_mesh_into(
     arena: &mut ArenaAllocator,
     arena_buffers: &mut Vec<Buffer>,
     vertices: &[GpuTerrainVertex],
+    opaque_vertex_count: u32,
+    water_vertex_count: u32,
     bounds_min: glam::Vec3,
     bounds_max: glam::Vec3,
     buffer_label: &'static str,
 ) -> Option<TerrainTriangleMesh> {
     if vertices.is_empty() || !vertices.len().is_multiple_of(3) {
+        return None;
+    }
+    if opaque_vertex_count
+        .checked_add(water_vertex_count)
+        .is_none_or(|count| count != vertices.len() as u32)
+    {
         return None;
     }
     let bytes = bytemuck::cast_slice(vertices);
@@ -8152,6 +8432,8 @@ fn prepare_terrain_triangle_mesh_into(
     Some(TerrainTriangleMesh {
         allocation,
         vertex_count: vertices.len() as u32,
+        opaque_vertex_count,
+        water_vertex_count,
         content_fingerprint: fingerprint_bytes(bytes),
         bounds_min,
         bounds_max,
@@ -11228,6 +11510,48 @@ fn create_virtual_triangle_pipeline(
             } else {
                 wgpu::CompareFunction::Greater
             }),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_virtual_triangle_water_pipeline(
+    device: &Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+) -> RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_virtual_cluster"),
+            buffers: &[Some(terrain_triangle_layout())],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_water"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: SCENE_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Greater),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
@@ -15053,6 +15377,57 @@ mod tests {
             quad.extent_voxels.into_iter().all(|extent| extent > 0)
                 && quad.material_face & !GPU_FACE_MASK == u32::from(Material::Basalt.id())
         }));
+    }
+
+    #[test]
+    fn virtual_geometry_partition_keeps_water_in_the_same_page_but_a_distinct_stream() {
+        let quad = |material: Material| GpuQuad {
+            origin: [0; 3],
+            extent_voxels: [1; 2],
+            material_face: pack_gpu_material_face(u32::from(material.id()), 2),
+            ao: u32::from(u8::MAX),
+        };
+        let (quads, opaque_quads, water_quads) = partition_virtual_surface_geometry(vec![
+            quad(Material::Water),
+            quad(Material::Stone),
+            quad(Material::Water),
+            quad(Material::Grass),
+        ])
+        .unwrap();
+        assert_eq!((opaque_quads, water_quads), (2, 2));
+        assert!(quads[..opaque_quads as usize].iter().all(|quad| {
+            quad.material_face & !GPU_FACE_MASK != u32::from(Material::Water.id())
+        }));
+        assert!(quads[opaque_quads as usize..].iter().all(|quad| {
+            quad.material_face & !GPU_FACE_MASK == u32::from(Material::Water.id())
+        }));
+
+        let vertex = |material: Material| GpuTerrainVertex {
+            position: [0; 3],
+            material: u32::from(material.id()),
+            normal: [0, i16::MAX, 0, 0],
+        };
+        let (vertices, opaque_vertices, water_vertices) =
+            partition_virtual_triangle_geometry(vec![
+                vertex(Material::Water),
+                vertex(Material::Water),
+                vertex(Material::Water),
+                vertex(Material::Basalt),
+                vertex(Material::Basalt),
+                vertex(Material::Basalt),
+            ])
+            .unwrap();
+        assert_eq!((opaque_vertices, water_vertices), (3, 3));
+        assert!(
+            vertices[..3]
+                .iter()
+                .all(|vertex| { vertex.material == u32::from(Material::Basalt.id()) })
+        );
+        assert!(
+            vertices[3..]
+                .iter()
+                .all(|vertex| { vertex.material == u32::from(Material::Water.id()) })
+        );
     }
 
     #[test]

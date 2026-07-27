@@ -13,7 +13,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use voxels_world::{
     TERRAIN_PAGE_MAX_CHILDREN, TerrainHierarchyDirectoryV1, TerrainHierarchyNode, TerrainPageKey,
-    TerrainPageRepresentationKind,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{Buffer, CommandEncoder, ComputePipeline, Device, Queue};
@@ -28,11 +27,16 @@ const GPU_TRAVERSAL_READBACK_SLOTS: usize = 3;
 const GPU_TRAVERSAL_WORKGROUP_SIZE: u32 = 64;
 pub(crate) const VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES: u64 = 64 * 1_024 * 1_024;
 pub(crate) const VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES: u64 = 64 * 1_024 * 1_024;
+pub(crate) const VIRTUAL_TERRAIN_COMPACT_WATER_SURFACE_BYTES: u64 = 16 * 1_024 * 1_024;
+pub(crate) const VIRTUAL_TERRAIN_COMPACT_WATER_TRIANGLE_BYTES: u64 = 16 * 1_024 * 1_024;
+const VIRTUAL_TERRAIN_SURFACE_BUFFER_BYTES: u64 =
+    VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES + VIRTUAL_TERRAIN_COMPACT_WATER_SURFACE_BYTES;
+const VIRTUAL_TERRAIN_TRIANGLE_BUFFER_BYTES: u64 =
+    VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES + VIRTUAL_TERRAIN_COMPACT_WATER_TRIANGLE_BYTES;
 pub(crate) const VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET: u64 = 16;
 pub(crate) const VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET: u64 = 32;
-const GEOMETRY_KIND_NONE: u32 = 0;
-const GEOMETRY_KIND_SURFACE: u32 = 1;
-const GEOMETRY_KIND_TRIANGLE: u32 = 2;
+pub(crate) const VIRTUAL_TERRAIN_WATER_SURFACE_INDIRECT_OFFSET: u64 = 48;
+pub(crate) const VIRTUAL_TERRAIN_WATER_TRIANGLE_INDIRECT_OFFSET: u64 = 64;
 const GPU_GEOMETRY_ELEMENT_BYTES: u64 = 24;
 
 #[repr(C)]
@@ -78,24 +82,66 @@ const _: () = assert!(size_of::<GpuVirtualTerrainCounters>() == 32);
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
 struct GpuVirtualTerrainGeometryPage {
-    source_word_offset: u32,
-    element_count: u32,
-    kind: u32,
-    reserved: u32,
+    opaque_surface_offset: u32,
+    opaque_surface_count: u32,
+    opaque_triangle_offset: u32,
+    opaque_triangle_count: u32,
+    water_surface_offset: u32,
+    water_surface_count: u32,
+    water_triangle_offset: u32,
+    water_triangle_count: u32,
 }
 
-const _: () = assert!(size_of::<GpuVirtualTerrainGeometryPage>() == 16);
+const _: () = assert!(size_of::<GpuVirtualTerrainGeometryPage>() == 32);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
 struct GpuVirtualTerrainCompactionCounters {
     surface_elements: u32,
     triangle_elements: u32,
+    water_surface_elements: u32,
+    water_triangle_elements: u32,
     copied_pages: u32,
     overflow_flags: u32,
+    surface_capacity: u32,
+    triangle_capacity: u32,
+    water_surface_capacity: u32,
+    water_triangle_capacity: u32,
+    surface_water_word_offset: u32,
+    triangle_water_word_offset: u32,
 }
 
-const _: () = assert!(size_of::<GpuVirtualTerrainCompactionCounters>() == 16);
+const _: () = assert!(size_of::<GpuVirtualTerrainCompactionCounters>() == 48);
+
+impl GpuVirtualTerrainCompactionCounters {
+    fn reset() -> Result<Self, VirtualTerrainGpuError> {
+        Ok(Self {
+            surface_capacity: element_capacity(VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES)?,
+            triangle_capacity: element_capacity(VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES)?,
+            water_surface_capacity: element_capacity(VIRTUAL_TERRAIN_COMPACT_WATER_SURFACE_BYTES)?,
+            water_triangle_capacity: element_capacity(
+                VIRTUAL_TERRAIN_COMPACT_WATER_TRIANGLE_BYTES,
+            )?,
+            surface_water_word_offset: word_offset(VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES)?,
+            triangle_water_word_offset: word_offset(VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES)?,
+            ..Self::default()
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct VirtualTerrainGpuGeometryRange {
+    pub source_offset_bytes: u64,
+    pub element_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct VirtualTerrainGpuGeometry {
+    pub opaque_surface: VirtualTerrainGpuGeometryRange,
+    pub opaque_triangle: VirtualTerrainGpuGeometryRange,
+    pub water_surface: VirtualTerrainGpuGeometryRange,
+    pub water_triangle: VirtualTerrainGpuGeometryRange,
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct RawGpuVirtualTerrainFeedback {
@@ -115,6 +161,8 @@ pub(crate) struct GpuVirtualTerrainFeedback {
     pub stack_peak: u32,
     pub compacted_surface_elements: u32,
     pub compacted_triangle_elements: u32,
+    pub compacted_water_surface_elements: u32,
+    pub compacted_water_triangle_elements: u32,
     pub compacted_pages: u32,
     pub compaction_overflow_flags: u32,
 }
@@ -194,8 +242,8 @@ impl VirtualTerrainGpuControl {
             selected_bytes,
             request_bytes,
             geometry_page_bytes,
-            VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES,
-            VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES,
+            VIRTUAL_TERRAIN_SURFACE_BUFFER_BYTES,
+            VIRTUAL_TERRAIN_TRIANGLE_BUFFER_BYTES,
         ]
         .into_iter()
         .any(|bytes| bytes > maximum_storage)
@@ -253,27 +301,27 @@ impl VirtualTerrainGpuControl {
         });
         let compact_surface_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bounded compact virtual terrain surface stream"),
-            size: VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES,
+            size: VIRTUAL_TERRAIN_SURFACE_BUFFER_BYTES,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
             mapped_at_creation: false,
         });
         let compact_triangle_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bounded compact virtual terrain triangle stream"),
-            size: VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES,
+            size: VIRTUAL_TERRAIN_TRIANGLE_BUFFER_BYTES,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
             mapped_at_creation: false,
         });
         let compaction_counter_buffer =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("virtual terrain compaction counters"),
-                contents: bytemuck::bytes_of(&GpuVirtualTerrainCompactionCounters::default()),
+                contents: bytemuck::bytes_of(&GpuVirtualTerrainCompactionCounters::reset()?),
                 usage: wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::COPY_DST
                     | wgpu::BufferUsages::COPY_SRC,
             });
         let indirect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("virtual terrain dispatch and draw indirect commands"),
-            size: 48,
+            size: 80,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
             mapped_at_creation: false,
         });
@@ -528,39 +576,25 @@ impl VirtualTerrainGpuControl {
         &mut self,
         queue: &Queue,
         key: TerrainPageKey,
-        source_offset_bytes: u64,
-        element_count: u32,
-        representation: Option<TerrainPageRepresentationKind>,
+        geometry: VirtualTerrainGpuGeometry,
     ) -> Result<(), VirtualTerrainGpuError> {
         let index = *self
             .node_indices
             .get(&key)
             .ok_or(VirtualTerrainGpuError::UnknownPage(key))?;
-        if !source_offset_bytes.is_multiple_of(size_of::<u32>() as u64) {
-            return Err(VirtualTerrainGpuError::InvalidGeometry);
-        }
-        let kind = match representation {
-            None if element_count == 0 => GEOMETRY_KIND_NONE,
-            Some(TerrainPageRepresentationKind::SurfaceCluster) => GEOMETRY_KIND_SURFACE,
-            Some(TerrainPageRepresentationKind::TriangleCluster) => GEOMETRY_KIND_TRIANGLE,
-            _ => return Err(VirtualTerrainGpuError::InvalidGeometry),
-        };
-        let byte_count = u64::from(element_count)
-            .checked_mul(GPU_GEOMETRY_ELEMENT_BYTES)
-            .ok_or(VirtualTerrainGpuError::GeometryCapacity)?;
-        if source_offset_bytes
-            .checked_add(byte_count)
-            .is_none_or(|end| end > self.geometry_source_bytes)
-        {
-            return Err(VirtualTerrainGpuError::GeometryCapacity);
-        }
-        let source_word_offset = u32::try_from(source_offset_bytes / size_of::<u32>() as u64)
-            .map_err(|_| VirtualTerrainGpuError::GeometryCapacity)?;
+        let opaque_surface = self.pack_geometry_range(geometry.opaque_surface)?;
+        let opaque_triangle = self.pack_geometry_range(geometry.opaque_triangle)?;
+        let water_surface = self.pack_geometry_range(geometry.water_surface)?;
+        let water_triangle = self.pack_geometry_range(geometry.water_triangle)?;
         let record = GpuVirtualTerrainGeometryPage {
-            source_word_offset,
-            element_count,
-            kind,
-            reserved: 0,
+            opaque_surface_offset: opaque_surface.0,
+            opaque_surface_count: opaque_surface.1,
+            opaque_triangle_offset: opaque_triangle.0,
+            opaque_triangle_count: opaque_triangle.1,
+            water_surface_offset: water_surface.0,
+            water_surface_count: water_surface.1,
+            water_triangle_offset: water_triangle.0,
+            water_triangle_count: water_triangle.1,
         };
         let destination = self
             .geometry_pages
@@ -578,12 +612,50 @@ impl VirtualTerrainGpuControl {
         Ok(())
     }
 
+    fn pack_geometry_range(
+        &self,
+        range: VirtualTerrainGpuGeometryRange,
+    ) -> Result<(u32, u32), VirtualTerrainGpuError> {
+        if range.element_count == 0 {
+            return Ok((0, 0));
+        }
+        if !range
+            .source_offset_bytes
+            .is_multiple_of(size_of::<u32>() as u64)
+        {
+            return Err(VirtualTerrainGpuError::InvalidGeometry);
+        }
+        let byte_count = u64::from(range.element_count)
+            .checked_mul(GPU_GEOMETRY_ELEMENT_BYTES)
+            .ok_or(VirtualTerrainGpuError::GeometryCapacity)?;
+        if range
+            .source_offset_bytes
+            .checked_add(byte_count)
+            .is_none_or(|end| end > self.geometry_source_bytes)
+        {
+            return Err(VirtualTerrainGpuError::GeometryCapacity);
+        }
+        let source_word_offset = u32::try_from(range.source_offset_bytes / size_of::<u32>() as u64)
+            .map_err(|_| VirtualTerrainGpuError::GeometryCapacity)?;
+        Ok((source_word_offset, range.element_count))
+    }
+
     pub(crate) const fn compact_surface_buffer(&self) -> &Buffer {
         &self.compact_surface_buffer
     }
 
     pub(crate) const fn compact_triangle_buffer(&self) -> &Buffer {
         &self.compact_triangle_buffer
+    }
+
+    pub(crate) fn compact_water_surface_slice(&self) -> wgpu::BufferSlice<'_> {
+        self.compact_surface_buffer
+            .slice(VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES..)
+    }
+
+    pub(crate) fn compact_water_triangle_slice(&self) -> wgpu::BufferSlice<'_> {
+        self.compact_triangle_buffer
+            .slice(VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES..)
     }
 
     pub(crate) const fn indirect_buffer(&self) -> &Buffer {
@@ -684,7 +756,7 @@ impl VirtualTerrainGpuControl {
         queue.write_buffer(
             &self.compaction_counter_buffer,
             0,
-            bytemuck::bytes_of(&GpuVirtualTerrainCompactionCounters::default()),
+            bytemuck::bytes_of(&GpuVirtualTerrainCompactionCounters::reset()?),
         );
         if !self.root_indices.is_empty() {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -792,6 +864,8 @@ impl VirtualTerrainGpuControl {
             stack_peak: raw.counters.stack_peak,
             compacted_surface_elements: raw.compaction.surface_elements,
             compacted_triangle_elements: raw.compaction.triangle_elements,
+            compacted_water_surface_elements: raw.compaction.water_surface_elements,
+            compacted_water_triangle_elements: raw.compaction.water_triangle_elements,
             compacted_pages: raw.compaction.copied_pages,
             compaction_overflow_flags: raw.compaction.overflow_flags,
         })
@@ -1002,6 +1076,18 @@ fn buffer_bytes<T>(count: usize) -> Result<u64, VirtualTerrainGpuError> {
     u64::try_from(bytes.max(size_of::<T>())).map_err(|_| VirtualTerrainGpuError::DeviceLimit)
 }
 
+fn element_capacity(bytes: u64) -> Result<u32, VirtualTerrainGpuError> {
+    u32::try_from(bytes / GPU_GEOMETRY_ELEMENT_BYTES)
+        .map_err(|_| VirtualTerrainGpuError::DeviceLimit)
+}
+
+fn word_offset(bytes: u64) -> Result<u32, VirtualTerrainGpuError> {
+    if !bytes.is_multiple_of(size_of::<u32>() as u64) {
+        return Err(VirtualTerrainGpuError::DeviceLimit);
+    }
+    u32::try_from(bytes / size_of::<u32>() as u64).map_err(|_| VirtualTerrainGpuError::DeviceLimit)
+}
+
 fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -1122,8 +1208,11 @@ mod tests {
         let compaction = GpuVirtualTerrainCompactionCounters {
             surface_elements: 11,
             triangle_elements: 12,
+            water_surface_elements: 13,
+            water_triangle_elements: 14,
             copied_pages: 2,
             overflow_flags: 4,
+            ..GpuVirtualTerrainCompactionCounters::reset().unwrap()
         };
         bytes.extend_from_slice(bytemuck::bytes_of(&compaction));
         bytes.extend_from_slice(bytemuck::cast_slice(&[7u32, 8]));
@@ -1133,6 +1222,31 @@ mod tests {
         assert_eq!(parsed.requested_indices, [9]);
         assert_eq!(parsed.counters.ownerless_roots, 3);
         assert_eq!(parsed.compaction, compaction);
+    }
+
+    #[test]
+    fn compact_stream_partitions_are_bounded_disjoint_and_vertex_aligned() {
+        let counters = GpuVirtualTerrainCompactionCounters::reset().unwrap();
+        assert_eq!(
+            u64::from(counters.surface_water_word_offset) * size_of::<u32>() as u64,
+            VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES
+        );
+        assert_eq!(
+            u64::from(counters.triangle_water_word_offset) * size_of::<u32>() as u64,
+            VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES
+        );
+        assert!(
+            u64::from(counters.surface_water_word_offset) * size_of::<u32>() as u64
+                + u64::from(counters.water_surface_capacity) * GPU_GEOMETRY_ELEMENT_BYTES
+                <= VIRTUAL_TERRAIN_SURFACE_BUFFER_BYTES
+        );
+        assert!(
+            u64::from(counters.triangle_water_word_offset) * size_of::<u32>() as u64
+                + u64::from(counters.water_triangle_capacity) * GPU_GEOMETRY_ELEMENT_BYTES
+                <= VIRTUAL_TERRAIN_TRIANGLE_BUFFER_BYTES
+        );
+        assert_eq!(VIRTUAL_TERRAIN_WATER_SURFACE_INDIRECT_OFFSET, 48);
+        assert_eq!(VIRTUAL_TERRAIN_WATER_TRIANGLE_INDIRECT_OFFSET, 64);
     }
 
     #[test]
