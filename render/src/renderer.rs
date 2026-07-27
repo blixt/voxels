@@ -35,7 +35,7 @@ use crate::virtual_terrain_gpu::{
 };
 use bytemuck::{Pod, Zeroable};
 use hashbrown::{HashMap, HashSet};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -45,9 +45,10 @@ use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, FaceAxis, Material,
     MeshedChunk, Quad, RenderLayer, SURFACE_PATCHES_PER_TILE_EDGE, SurfaceLodLevel, SurfacePatch,
     SurfacePatchEdge, SurfacePatchId, SurfaceQuad, SurfaceRegion, SurfaceTileCoord,
-    SurfaceTileMesh, TerrainHierarchyDirectoryV1, TerrainPageKey, TerrainPageRepresentation,
-    TerrainPageRepresentationKind, TerrainPageV1, VOXEL_SIZE_METRES, WaterTileMesh, WorldManifest,
-    fallback_surface_wall_material, reconstruct_exact_terrain_surface,
+    SurfaceTileMesh, TERRAIN_REGION_ROOT_LEVEL, TerrainHierarchyDirectoryV1, TerrainPageKey,
+    TerrainPageRepresentation, TerrainPageRepresentationKind, TerrainPageV1, VOXEL_SIZE_METRES,
+    WaterTileMesh, WorldManifest, fallback_surface_wall_material,
+    reconstruct_exact_terrain_surface,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -290,6 +291,8 @@ pub enum VirtualTerrainRendererError {
     NoRenderableCut,
     SelectedPageMissingGpu(TerrainPageKey),
     GpuCutNotCertified,
+    IncompleteRootPartition(TerrainPageKey),
+    LegacyOwnerCrossesVirtualBoundary,
 }
 
 impl std::fmt::Display for VirtualTerrainRendererError {
@@ -340,6 +343,14 @@ impl std::fmt::Display for VirtualTerrainRendererError {
             }
             Self::GpuCutNotCertified => formatter
                 .write_str("virtual terrain GPU cut has not been certified for publication"),
+            Self::IncompleteRootPartition(key) => {
+                write!(
+                    formatter,
+                    "virtual terrain root {key:?} is not a complete selected partition"
+                )
+            }
+            Self::LegacyOwnerCrossesVirtualBoundary => formatter
+                .write_str("legacy terrain ownership crosses a virtual terrain root boundary"),
         }
     }
 }
@@ -1489,6 +1500,144 @@ struct VirtualTerrainDrawLists {
     fingerprint: u64,
     mesh_count: u32,
     primitive_count: u32,
+}
+
+/// Complete fixed-region volumes owned by the currently published virtual cut.
+///
+/// The renderer never guesses ownership from visual depth. A region joins this set only when the
+/// selected pages form a complete octree partition of its 25.6 m root. Legacy slices can then be
+/// retired iff their entire conservative bounds are covered by this set; a crossing slice blocks
+/// publication rather than allowing either a gap or overlapping sources.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct VirtualTerrainOwnership {
+    roots: BTreeSet<TerrainPageKey>,
+}
+
+impl VirtualTerrainOwnership {
+    fn from_cut(cut: &VirtualTerrainCut) -> Result<Self, VirtualTerrainRendererError> {
+        let selected = cut.selected_pages.iter().copied().collect::<BTreeSet<_>>();
+        let roots = cut
+            .selected_pages
+            .iter()
+            .filter_map(|key| key.ancestor_at(TERRAIN_REGION_ROOT_LEVEL))
+            .collect::<BTreeSet<_>>();
+        for root in &roots {
+            if !selected_pages_cover(*root, &selected) {
+                return Err(VirtualTerrainRendererError::IncompleteRootPartition(*root));
+            }
+        }
+        Ok(Self { roots })
+    }
+
+    fn covers_aabb(&self, minimum: glam::Vec3, maximum: glam::Vec3) -> bool {
+        let Some((minimum, maximum)) = voxel_bounds_from_metres(minimum, maximum) else {
+            return false;
+        };
+        self.covers_voxel_bounds(minimum, maximum)
+    }
+
+    fn intersects_aabb(&self, minimum: glam::Vec3, maximum: glam::Vec3) -> bool {
+        let Some((minimum, maximum)) = voxel_bounds_from_metres(minimum, maximum) else {
+            return false;
+        };
+        terrain_root_coords_for_bounds(minimum, maximum)
+            .is_some_and(|ranges| terrain_root_coords(ranges).any(|key| self.roots.contains(&key)))
+    }
+
+    fn covers_voxel_bounds(&self, minimum: [i32; 3], maximum: [i32; 3]) -> bool {
+        let Some(ranges) = terrain_root_coords_for_bounds(minimum, maximum) else {
+            return false;
+        };
+        let required = ranges
+            .iter()
+            .map(|[minimum, maximum]| {
+                i64::from(*maximum)
+                    .saturating_sub(i64::from(*minimum))
+                    .saturating_add(1)
+            })
+            .try_fold(1_i64, i64::checked_mul);
+        if required.is_none_or(|required| required as usize > self.roots.len()) {
+            return false;
+        }
+        terrain_root_coords(ranges).all(|key| self.roots.contains(&key))
+    }
+}
+
+fn selected_pages_cover(key: TerrainPageKey, selected: &BTreeSet<TerrainPageKey>) -> bool {
+    selected.contains(&key)
+        || key.children().is_some_and(|children| {
+            children
+                .into_iter()
+                .all(|child| selected_pages_cover(child, selected))
+        })
+}
+
+fn voxel_bounds_from_metres(
+    minimum: glam::Vec3,
+    maximum: glam::Vec3,
+) -> Option<([i32; 3], [i32; 3])> {
+    let convert = |value: f32, upper: bool| {
+        let scaled = f64::from(value) / f64::from(VOXEL_SIZE_METRES);
+        if !scaled.is_finite() {
+            return None;
+        }
+        // All terrain bounds originate as integer voxel coordinates, but f32 multiplication by
+        // 0.1 is not exact. Snap only numerical dust; genuinely displaced bounds still expand
+        // conservatively.
+        let nearest = scaled.round();
+        let coordinate = if (scaled - nearest).abs() <= 1.0e-4 {
+            nearest
+        } else if upper {
+            scaled.ceil()
+        } else {
+            scaled.floor()
+        };
+        (coordinate >= f64::from(i32::MIN) && coordinate <= f64::from(i32::MAX))
+            .then_some(coordinate as i32)
+    };
+    let minimum = [
+        convert(minimum.x, false)?,
+        convert(minimum.y, false)?,
+        convert(minimum.z, false)?,
+    ];
+    let maximum = [
+        convert(maximum.x, true)?,
+        convert(maximum.y, true)?,
+        convert(maximum.z, true)?,
+    ];
+    minimum
+        .into_iter()
+        .zip(maximum)
+        .all(|(minimum, maximum)| minimum < maximum)
+        .then_some((minimum, maximum))
+}
+
+fn terrain_root_coords_for_bounds(minimum: [i32; 3], maximum: [i32; 3]) -> Option<[[i32; 2]; 3]> {
+    let root_span =
+        i32::try_from(32_u32.checked_shl(u32::from(TERRAIN_REGION_ROOT_LEVEL))?).ok()?;
+    minimum
+        .into_iter()
+        .zip(maximum)
+        .all(|(minimum, maximum)| minimum < maximum)
+        .then(|| {
+            std::array::from_fn(|axis| {
+                [
+                    minimum[axis].div_euclid(root_span),
+                    maximum[axis].saturating_sub(1).div_euclid(root_span),
+                ]
+            })
+        })
+}
+
+fn terrain_root_coords(ranges: [[i32; 2]; 3]) -> impl Iterator<Item = TerrainPageKey> {
+    (ranges[0][0]..=ranges[0][1]).flat_map(move |x| {
+        (ranges[1][0]..=ranges[1][1]).flat_map(move |y| {
+            (ranges[2][0]..=ranges[2][1]).map(move |z| TerrainPageKey {
+                level: TERRAIN_REGION_ROOT_LEVEL,
+                coord: [x, y, z],
+            })
+        })
+    })
 }
 
 /// Camera-visible opaque geometry split by whether its vertices can move in the current LOD band.
@@ -3822,10 +3971,48 @@ impl Renderer {
         &mut self,
         frontiers: &[ExactVolumeFrontierFace],
     ) -> bool {
-        let gpu_quads = frontiers
-            .iter()
-            .flat_map(frontier_face_gpu_quads)
-            .collect::<Vec<_>>();
+        let mut quads_by_root = BTreeMap::<TerrainPageKey, Vec<GpuQuad>>::new();
+        for frontier in frontiers {
+            let Some(root) = (TerrainPageKey {
+                level: 0,
+                coord: [frontier.chunk.x, frontier.chunk.y, frontier.chunk.z],
+            })
+            .ancestor_at(TERRAIN_REGION_ROOT_LEVEL) else {
+                return false;
+            };
+            quads_by_root
+                .entry(root)
+                .or_default()
+                .extend(frontier_face_gpu_quads(frontier));
+        }
+        let mut gpu_quads = Vec::new();
+        let mut slices = Vec::new();
+        let quad_bytes = size_of::<GpuQuad>() as u32;
+        for quads in quads_by_root.into_values() {
+            if quads.is_empty() {
+                continue;
+            }
+            let Some((bounds_min, bounds_max)) = gpu_quad_bounds(&quads) else {
+                return false;
+            };
+            let start = gpu_quads.len() as u32;
+            gpu_quads.extend(quads);
+            let end = gpu_quads.len() as u32;
+            slices.push(MeshSlice {
+                relative_offset: start * quad_bytes,
+                size: (end - start) * quad_bytes,
+                quad_count: end - start,
+                bounds_min,
+                bounds_max,
+                surface_patch_id: None,
+                boundary_edge: None,
+                stitch_edges: 0,
+                morph_closure: false,
+                exact_replacement_chunk: None,
+                canonical_water_surface: false,
+                render_layer: RenderLayer::Opaque,
+            });
+        }
         if gpu_quads.is_empty() {
             let existed = self.chunks.contains_key(&EXACT_VOLUME_FRONTIER_MESH_KEY);
             self.remove_opaque_mesh(EXACT_VOLUME_FRONTIER_MESH_KEY);
@@ -3835,33 +4022,16 @@ impl Renderer {
             self.chunks.get(&EXACT_VOLUME_FRONTIER_MESH_KEY),
             &gpu_quads,
             None,
+        ) && mesh_slices_match_resident(
+            self.chunks.get(&EXACT_VOLUME_FRONTIER_MESH_KEY),
+            &slices,
+            gpu_quads.len(),
         ) {
             return false;
         }
-        let Some((bounds_min, bounds_max)) = gpu_quad_bounds(&gpu_quads) else {
-            return false;
-        };
-        let quad_count = gpu_quads.len() as u32;
-        let slice = MeshSlice {
-            relative_offset: 0,
-            size: quad_count * size_of::<GpuQuad>() as u32,
-            quad_count,
-            bounds_min,
-            bounds_max,
-            surface_patch_id: None,
-            boundary_edge: None,
-            stitch_edges: 0,
-            morph_closure: false,
-            exact_replacement_chunk: None,
-            canonical_water_surface: false,
-            render_layer: RenderLayer::Opaque,
-        };
-        let Some(prepared) = self.prepare_mesh_sliced(
-            EXACT_VOLUME_FRONTIER_MESH_KEY,
-            &gpu_quads,
-            None,
-            vec![slice],
-        ) else {
+        let Some(prepared) =
+            self.prepare_mesh_sliced(EXACT_VOLUME_FRONTIER_MESH_KEY, &gpu_quads, None, slices)
+        else {
             return false;
         };
         commit_prepared_mesh(
@@ -4263,12 +4433,17 @@ impl Renderer {
         let (cut_manifest, cut_fingerprint) =
             if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible {
                 let cut = self.virtual_terrain_cut.as_ref();
+                let virtual_fingerprint = cut.map_or(0, |cut| cut.fingerprint);
                 (
                     format!(
-                        r#"{{"kind":"virtualMicrovoxel","cut":{}}}"#,
-                        screenshot_virtual_cut_json(cut)
+                        r#"{{"kind":"spatialHybrid","legacy":{},"virtual":{}}}"#,
+                        legacy_cut_manifest,
+                        screenshot_virtual_cut_json(cut),
                     ),
-                    cut.map_or(0, |cut| cut.fingerprint),
+                    fingerprint_value(
+                        fingerprint_bytes(legacy_cut_manifest.as_bytes()),
+                        virtual_fingerprint,
+                    ),
                 )
             } else {
                 (
@@ -4285,7 +4460,7 @@ impl Renderer {
         .to_cols_array();
         let representation_kinds = if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible
         {
-            r#"{"steppedSurfaceResidual":1,"sparseVoxelBrick":2,"surfaceCluster":3,"triangleCluster":4}"#
+            r#"{"legacy":{"canonical":1,"steppedSurface":2,"rendererProduct":3},"virtual":{"steppedSurfaceResidual":17,"sparseVoxelBrick":18,"surfaceCluster":19,"triangleCluster":20}}"#
         } else {
             r#"{"canonical":1,"steppedSurface":2,"rendererProduct":3}"#
         };
@@ -4694,6 +4869,8 @@ impl Renderer {
                     *missing,
                 ));
             }
+            let ownership = VirtualTerrainOwnership::from_cut(cut)?;
+            self.validate_virtual_terrain_handoff(&ownership)?;
             self.virtual_terrain_cut_fits_compaction(cut)?;
             let certified = self
                 .virtual_terrain_gpu
@@ -4704,6 +4881,36 @@ impl Renderer {
             }
         }
         self.virtual_terrain_mode = mode;
+        Ok(())
+    }
+
+    fn validate_virtual_terrain_handoff(
+        &self,
+        ownership: &VirtualTerrainOwnership,
+    ) -> Result<(), VirtualTerrainRendererError> {
+        let focus = active_geometric_lod_focus(self.geometric_lod_focus, self.options.far_terrain);
+        let lod_draw_plan = focus.is_some().then_some(&self.lod_draw_plan);
+        for chunks in [&self.chunks, &self.water_chunks] {
+            for (key, chunk) in chunks {
+                if !chunk.active()
+                    || (key.0 != 0
+                        && *key != EXACT_VOLUME_FRONTIER_MESH_KEY
+                        && !self.options.far_terrain)
+                {
+                    continue;
+                }
+                for slice in &chunk.slices {
+                    if !slice_owned_by_lod(focus, lod_draw_plan, key, slice)
+                        || !ownership.intersects_aabb(slice.bounds_min, slice.bounds_max)
+                    {
+                        continue;
+                    }
+                    if !ownership.covers_aabb(slice.bounds_min, slice.bounds_max) {
+                        return Err(VirtualTerrainRendererError::LegacyOwnerCrossesVirtualBoundary);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -6140,6 +6347,31 @@ impl Renderer {
         };
         let cut_transition_phase = self.maintain_cut_transition(resident_hierarchy);
         let cpu_lod_plan_ms = (now_ms() - lod_plan_started).max(0.0) as f32;
+        let (virtual_visible, virtual_ownership) =
+            if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible {
+                let Some(cut) = self
+                    .virtual_terrain_cut
+                    .as_ref()
+                    .filter(|cut| cut.is_renderable())
+                else {
+                    return false;
+                };
+                let Ok(ownership) = VirtualTerrainOwnership::from_cut(cut) else {
+                    return false;
+                };
+                if self.validate_virtual_terrain_handoff(&ownership).is_ok() {
+                    (true, ownership)
+                } else {
+                    // The legacy LOD plan can change after a cut was certified. Fall back
+                    // atomically rather than allowing a newly crossing slice to overlap a virtual
+                    // root for even one frame.
+                    self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
+                    (false, VirtualTerrainOwnership::default())
+                }
+            } else {
+                (false, VirtualTerrainOwnership::default())
+            };
+        let virtual_shadow = self.virtual_terrain_mode == VirtualTerrainRenderMode::Shadow;
         // Queue readiness is not a proof that every fixed geometric owner is resident. Canonical
         // columns can still replace atomically and retained surface tiles can be incomplete. Keep
         // the cached resident hierarchy authoritative after settling as well as while streaming.
@@ -6152,6 +6384,7 @@ impl Renderer {
                 transition,
                 self.options.far_terrain,
                 view_clip,
+                &virtual_ownership,
             ) else {
                 return false;
             };
@@ -6169,23 +6402,14 @@ impl Renderer {
                 geometric_lod_focus,
                 view_clip,
                 shadow_clips,
+                &virtual_ownership,
             )
         else {
             return false;
         };
-        let virtual_visible = self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible;
-        let virtual_shadow = self.virtual_terrain_mode == VirtualTerrainRenderMode::Shadow;
-        if virtual_visible
-            && !self
-                .virtual_terrain_cut
-                .as_ref()
-                .is_some_and(VirtualTerrainCut::is_renderable)
-        {
-            return false;
-        }
         // Shadow mode builds the same bounded directories without mixing their geometry into the
-        // visible legacy owner. Visible mode atomically chooses the virtual directory for every
-        // opaque terrain pass below.
+        // visible legacy owner. Visible mode replaces only complete fixed-region volumes; legacy
+        // remains authoritative everywhere else.
         let virtual_world_draw_lists = if virtual_visible {
             let Ok(draw_lists) = self.collect_virtual_terrain_draw_list(view_clip) else {
                 return false;
@@ -6194,23 +6418,20 @@ impl Renderer {
         } else {
             VirtualTerrainDrawLists::default()
         };
-        let water_draw_list = if virtual_visible {
-            DrawList::default()
-        } else {
-            self.collect_draw_list(
-                &self.water_chunks,
-                |key, chunk| {
-                    self.options.water
-                        && (key.0 == 0 || self.options.far_terrain)
-                        && view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max)
-                },
-                |key, slice| {
-                    slice.render_layer == RenderLayer::Translucent
-                        && slice_owned_by_lod(geometric_lod_focus, lod_draw_plan, key, slice)
-                        && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
-                },
-            )
-        };
+        let water_draw_list = self.collect_draw_list(
+            &self.water_chunks,
+            |key, chunk| {
+                self.options.water
+                    && (key.0 == 0 || self.options.far_terrain)
+                    && view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max)
+            },
+            |key, slice| {
+                slice.render_layer == RenderLayer::Translucent
+                    && slice_owned_by_lod(geometric_lod_focus, lod_draw_plan, key, slice)
+                    && !virtual_ownership.covers_aabb(slice.bounds_min, slice.bounds_max)
+                    && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
+            },
+        );
         // Water has no parent-height sidecar. Drawing its stale cut through a screen-space Bayer
         // mask produced detached square fragments, so it switches atomically with the complete
         // current owner instead of overlaying old geometry.
@@ -6222,12 +6443,11 @@ impl Renderer {
         let avatar_instances = self.avatar_gpu.instance_count();
         let has_avatars = avatar_instances != 0;
         let refract_water = self.options.water
-            && if virtual_visible {
-                virtual_world_draw_lists.water_surfaces.quad_count > 0
-                    || virtual_world_draw_lists.water_triangles.vertex_count > 0
-            } else {
-                !water_draw_list.spans.is_empty() || !outgoing_water_draw_list.spans.is_empty()
-            };
+            && (!water_draw_list.spans.is_empty()
+                || !outgoing_water_draw_list.spans.is_empty()
+                || (virtual_visible
+                    && (virtual_world_draw_lists.water_surfaces.quad_count > 0
+                        || virtual_world_draw_lists.water_triangles.vertex_count > 0)));
         let diagnostic_sky = self.runtime_config.diagnostic_sky_color.is_some();
         let diagnostic_geometry = self.geometry_source_debug;
         let clouds_active =
@@ -6334,6 +6554,19 @@ impl Renderer {
                     multiview_mask: None,
                 });
                 pass.set_bind_group(0, &self.shadow_gpu.bind_groups[cascade_index], &[]);
+                pass.set_pipeline(&self.shadow_gpu.fixed_pipeline);
+                shadow_draw_calls = shadow_draw_calls.saturating_add(draw_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    &draw_list.fixed,
+                ));
+                pass.set_pipeline(&self.shadow_gpu.morph_pipeline);
+                shadow_draw_calls = shadow_draw_calls.saturating_add(draw_morph_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    &self.morph_arena_buffers,
+                    &draw_list.morphing,
+                ));
                 if virtual_visible {
                     pass.set_pipeline(&self.shadow_gpu.fixed_pipeline);
                     pass.set_vertex_buffer(
@@ -6354,20 +6587,6 @@ impl Renderer {
                         VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET,
                     );
                     shadow_draw_calls = shadow_draw_calls.saturating_add(2);
-                } else {
-                    pass.set_pipeline(&self.shadow_gpu.fixed_pipeline);
-                    shadow_draw_calls = shadow_draw_calls.saturating_add(draw_spans(
-                        &mut pass,
-                        &self.arena_buffers,
-                        &draw_list.fixed,
-                    ));
-                    pass.set_pipeline(&self.shadow_gpu.morph_pipeline);
-                    shadow_draw_calls = shadow_draw_calls.saturating_add(draw_morph_spans(
-                        &mut pass,
-                        &self.arena_buffers,
-                        &self.morph_arena_buffers,
-                        &draw_list.morphing,
-                    ));
                 }
                 if has_avatars {
                     self.avatar_gpu.draw_shadow(&mut pass);
@@ -6414,48 +6633,46 @@ impl Renderer {
                         VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET,
                     );
                     depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(2);
-                } else {
-                    pass.set_pipeline(&self.depth_prepass_fast_pipeline);
-                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
+                }
+                pass.set_pipeline(&self.depth_prepass_fast_pipeline);
+                depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    &world_draw_list.fixed,
+                ));
+                pass.set_pipeline(&self.depth_prepass_morph_pipeline);
+                depth_prepass_draw_calls =
+                    depth_prepass_draw_calls.saturating_add(draw_morph_spans(
                         &mut pass,
                         &self.arena_buffers,
-                        &world_draw_list.fixed,
+                        &self.morph_arena_buffers,
+                        &world_draw_list.morphing,
                     ));
-                    pass.set_pipeline(&self.depth_prepass_morph_pipeline);
+                if let Some(cut_draw_lists) = &cut_draw_lists {
+                    pass.set_pipeline(&self.depth_prepass_transition_pipeline);
+                    pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
                     depth_prepass_draw_calls =
                         depth_prepass_draw_calls.saturating_add(draw_morph_spans(
                             &mut pass,
                             &self.arena_buffers,
                             &self.morph_arena_buffers,
-                            &world_draw_list.morphing,
+                            &cut_draw_lists.incoming.morphing,
                         ));
-                    if let Some(cut_draw_lists) = &cut_draw_lists {
-                        pass.set_pipeline(&self.depth_prepass_transition_pipeline);
-                        pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
-                        depth_prepass_draw_calls =
-                            depth_prepass_draw_calls.saturating_add(draw_morph_spans(
-                                &mut pass,
-                                &self.arena_buffers,
-                                &self.morph_arena_buffers,
-                                &cut_draw_lists.incoming.morphing,
-                            ));
-                        pass.set_pipeline(&self.depth_prepass_transition_fixed_pipeline);
-                        pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
-                        depth_prepass_draw_calls =
-                            depth_prepass_draw_calls.saturating_add(draw_spans(
-                                &mut pass,
-                                &self.arena_buffers,
-                                &cut_draw_lists.outgoing.fixed,
-                            ));
-                        pass.set_pipeline(&self.depth_prepass_transition_pipeline);
-                        depth_prepass_draw_calls =
-                            depth_prepass_draw_calls.saturating_add(draw_morph_spans(
-                                &mut pass,
-                                &self.arena_buffers,
-                                &self.morph_arena_buffers,
-                                &cut_draw_lists.outgoing.morphing,
-                            ));
-                    }
+                    pass.set_pipeline(&self.depth_prepass_transition_fixed_pipeline);
+                    pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        &cut_draw_lists.outgoing.fixed,
+                    ));
+                    pass.set_pipeline(&self.depth_prepass_transition_pipeline);
+                    depth_prepass_draw_calls =
+                        depth_prepass_draw_calls.saturating_add(draw_morph_spans(
+                            &mut pass,
+                            &self.arena_buffers,
+                            &self.morph_arena_buffers,
+                            &cut_draw_lists.outgoing.morphing,
+                        ));
                 }
                 if has_avatars {
                     self.avatar_gpu.draw_depth(&mut pass);
@@ -6485,40 +6702,44 @@ impl Renderer {
         } else {
             self.ui_gpu.scene_view()
         };
-        let (screenshot_opaque_owners, screenshot_water_owners) = if self.screenshot_requested {
-            let opaque = if virtual_visible {
-                screenshot_virtual_terrain_owner_buffers(
-                    &self.device,
-                    &self.queue,
-                    &self.virtual_terrain_arena_buffers,
-                    &self.virtual_terrain_pages,
-                    "screenshot virtual terrain owner sidecar",
-                )
-            } else {
-                screenshot_diagnostic_owner_buffers(
+        let (screenshot_opaque_owners, screenshot_virtual_opaque_owners, screenshot_water_owners) =
+            if self.screenshot_requested {
+                let Some(opaque) = screenshot_diagnostic_owner_buffers(
                     &self.device,
                     &self.queue,
                     &self.arena_buffers,
                     &self.chunks,
                     "screenshot opaque terrain owner sidecar",
-                )
+                ) else {
+                    return false;
+                };
+                let virtual_opaque = if virtual_visible {
+                    let Some(owners) = screenshot_virtual_terrain_owner_buffers(
+                        &self.device,
+                        &self.queue,
+                        &self.virtual_terrain_arena_buffers,
+                        &self.virtual_terrain_pages,
+                        "screenshot virtual terrain owner sidecar",
+                    ) else {
+                        return false;
+                    };
+                    Some(owners)
+                } else {
+                    None
+                };
+                let Some(water) = screenshot_diagnostic_owner_buffers(
+                    &self.device,
+                    &self.queue,
+                    &self.water_arena_buffers,
+                    &self.water_chunks,
+                    "screenshot water terrain owner sidecar",
+                ) else {
+                    return false;
+                };
+                (Some(opaque), virtual_opaque, Some(water))
+            } else {
+                (None, None, None)
             };
-            let Some(opaque) = opaque else {
-                return false;
-            };
-            let Some(water) = screenshot_diagnostic_owner_buffers(
-                &self.device,
-                &self.queue,
-                &self.water_arena_buffers,
-                &self.water_chunks,
-                "screenshot water terrain owner sidecar",
-            ) else {
-                return false;
-            };
-            (Some(opaque), Some(water))
-        } else {
-            (None, None)
-        };
         let screenshot_target = self.screenshot_requested.then(|| {
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("screenshot composite target"),
@@ -6660,40 +6881,39 @@ impl Renderer {
                     self.virtual_terrain_gpu.indirect_buffer(),
                     VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET,
                 );
-            } else {
-                pass.set_pipeline(fixed_pipeline);
-                draw_spans(&mut pass, &self.arena_buffers, &world_draw_list.fixed);
-                pass.set_pipeline(morph_pipeline);
+            }
+            pass.set_pipeline(fixed_pipeline);
+            draw_spans(&mut pass, &self.arena_buffers, &world_draw_list.fixed);
+            pass.set_pipeline(morph_pipeline);
+            draw_morph_spans(
+                &mut pass,
+                &self.arena_buffers,
+                &self.morph_arena_buffers,
+                &world_draw_list.morphing,
+            );
+            if let Some(cut_draw_lists) = &cut_draw_lists {
+                pass.set_pipeline(morph_transition_pipeline);
+                pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
                 draw_morph_spans(
                     &mut pass,
                     &self.arena_buffers,
                     &self.morph_arena_buffers,
-                    &world_draw_list.morphing,
+                    &cut_draw_lists.incoming.morphing,
                 );
-                if let Some(cut_draw_lists) = &cut_draw_lists {
-                    pass.set_pipeline(morph_transition_pipeline);
-                    pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
-                    draw_morph_spans(
-                        &mut pass,
-                        &self.arena_buffers,
-                        &self.morph_arena_buffers,
-                        &cut_draw_lists.incoming.morphing,
-                    );
-                    pass.set_pipeline(transition_pipeline);
-                    pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
-                    draw_spans(
-                        &mut pass,
-                        &self.arena_buffers,
-                        &cut_draw_lists.outgoing.fixed,
-                    );
-                    pass.set_pipeline(morph_transition_pipeline);
-                    draw_morph_spans(
-                        &mut pass,
-                        &self.arena_buffers,
-                        &self.morph_arena_buffers,
-                        &cut_draw_lists.outgoing.morphing,
-                    );
-                }
+                pass.set_pipeline(transition_pipeline);
+                pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                draw_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    &cut_draw_lists.outgoing.fixed,
+                );
+                pass.set_pipeline(morph_transition_pipeline);
+                draw_morph_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    &self.morph_arena_buffers,
+                    &cut_draw_lists.outgoing.morphing,
+                );
             }
             self.avatar_gpu
                 .draw_scene(&mut pass, self.options.screen_space_ambient_occlusion);
@@ -6766,9 +6986,21 @@ impl Renderer {
                     self.virtual_terrain_gpu.indirect_buffer(),
                     VIRTUAL_TERRAIN_WATER_TRIANGLE_INDIRECT_OFFSET,
                 );
-            } else {
-                pass.set_pipeline(&self.water_pipeline);
-                for span in &water_draw_list.spans {
+            }
+            pass.set_pipeline(&self.water_pipeline);
+            for span in &water_draw_list.spans {
+                let Some(buffer) = self.water_arena_buffers.get(span.page as usize) else {
+                    continue;
+                };
+                let start = u64::from(span.offset);
+                let end = start + u64::from(span.size);
+                pass.set_vertex_buffer(0, buffer.slice(start..end));
+                pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
+            }
+            if !outgoing_water_draw_list.spans.is_empty() {
+                pass.set_pipeline(&self.water_transition_pipeline);
+                pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                for span in &outgoing_water_draw_list.spans {
                     let Some(buffer) = self.water_arena_buffers.get(span.page as usize) else {
                         continue;
                     };
@@ -6776,19 +7008,6 @@ impl Renderer {
                     let end = start + u64::from(span.size);
                     pass.set_vertex_buffer(0, buffer.slice(start..end));
                     pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
-                }
-                if !outgoing_water_draw_list.spans.is_empty() {
-                    pass.set_pipeline(&self.water_transition_pipeline);
-                    pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
-                    for span in &outgoing_water_draw_list.spans {
-                        let Some(buffer) = self.water_arena_buffers.get(span.page as usize) else {
-                            continue;
-                        };
-                        let start = u64::from(span.offset);
-                        let end = start + u64::from(span.size);
-                        pass.set_vertex_buffer(0, buffer.slice(start..end));
-                        pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
-                    }
                 }
             }
         }
@@ -6867,7 +7086,10 @@ impl Renderer {
                 .saturating_add(lists.outgoing.selected_slices)
         });
         let terrain_fingerprint = if virtual_visible {
-            virtual_world_draw_lists.fingerprint
+            fingerprint_value(
+                world_draw_list.fingerprint,
+                virtual_world_draw_lists.fingerprint,
+            )
         } else {
             world_draw_list.fingerprint
         };
@@ -6886,54 +7108,54 @@ impl Renderer {
                     lists.outgoing.fingerprint,
                 )
             });
-        let visible_terrain_meshes = if virtual_visible {
-            virtual_world_draw_lists.mesh_count
-        } else {
-            world_draw_list.mesh_count.saturating_add(cut_meshes)
-        };
-        let visible_terrain_draw_calls = if virtual_visible {
-            2
-        } else {
-            world_draw_list
-                .fixed
-                .spans
-                .len()
-                .saturating_add(world_draw_list.morphing.spans.len())
-                .saturating_add(cut_draw_calls)
-        };
-        let visible_terrain_primitives = if virtual_visible {
-            virtual_world_draw_lists.primitive_count
-        } else {
-            world_draw_list.quad_count.saturating_add(cut_quads)
-        };
-        let visible_water_draw_calls = if virtual_visible {
-            u32::from(refract_water) * 2
-        } else {
-            water_draw_list
-                .spans
-                .len()
-                .saturating_add(outgoing_water_draw_list.spans.len()) as u32
-        };
-        let visible_water_primitives = if virtual_visible {
-            virtual_world_draw_lists
-                .water_surfaces
-                .quad_count
-                .saturating_add(virtual_world_draw_lists.water_triangles.vertex_count / 3)
-        } else {
-            water_draw_list
-                .quad_count
-                .saturating_add(outgoing_water_draw_list.quad_count)
-        };
+        let visible_terrain_meshes = world_draw_list
+            .mesh_count
+            .saturating_add(cut_meshes)
+            .saturating_add(if virtual_visible {
+                virtual_world_draw_lists.mesh_count
+            } else {
+                0
+            });
+        let visible_terrain_draw_calls = world_draw_list
+            .fixed
+            .spans
+            .len()
+            .saturating_add(world_draw_list.morphing.spans.len())
+            .saturating_add(cut_draw_calls)
+            .saturating_add(usize::from(virtual_visible) * 2);
+        let visible_terrain_primitives = world_draw_list
+            .quad_count
+            .saturating_add(cut_quads)
+            .saturating_add(if virtual_visible {
+                virtual_world_draw_lists.primitive_count
+            } else {
+                0
+            });
+        let visible_water_draw_calls = water_draw_list
+            .spans
+            .len()
+            .saturating_add(outgoing_water_draw_list.spans.len())
+            .saturating_add(usize::from(virtual_visible && refract_water) * 2)
+            as u32;
+        let visible_water_primitives = water_draw_list
+            .quad_count
+            .saturating_add(outgoing_water_draw_list.quad_count)
+            .saturating_add(if virtual_visible {
+                virtual_world_draw_lists
+                    .water_surfaces
+                    .quad_count
+                    .saturating_add(virtual_world_draw_lists.water_triangles.vertex_count / 3)
+            } else {
+                0
+            });
         let gpu_virtual_feedback = self.virtual_terrain_gpu.latest_feedback();
         let gpu_virtual_matches_cpu = gpu_virtual_feedback.as_ref().is_some_and(|feedback| {
             gpu_feedback_matches_cut(feedback, self.virtual_terrain_oracle_cut.as_ref())
         });
         self.diagnostics = RenderDiagnostics {
-            resident_chunks: if virtual_visible {
-                self.virtual_terrain_pages.len() as u32
-            } else {
-                self.chunks.len() as u32
-            },
+            resident_chunks: (self.chunks.len()
+                + usize::from(virtual_visible) * self.virtual_terrain_pages.len())
+                as u32,
             visible_chunks: visible_terrain_meshes,
             draw_calls: visible_terrain_draw_calls
                 .saturating_add(visible_water_draw_calls as usize)
@@ -7068,30 +7290,32 @@ impl Renderer {
             cpu_encode_ms: 0.0,
             cpu_submit_ms: 0.0,
             lod_ownership_refreshes,
-            draw_list_tested_slices: if virtual_visible {
-                virtual_world_draw_lists.surfaces.tested_slices
-            } else {
-                shadow_draw_lists
-                    .iter()
-                    .map(|draw_list| draw_list.tested_slices)
-                    .sum::<u32>()
-                    .saturating_add(world_draw_list.tested_slices)
-                    .saturating_add(cut_tested_slices)
-            }
-            .saturating_add(water_draw_list.tested_slices)
-            .saturating_add(outgoing_water_draw_list.tested_slices),
-            draw_list_selected_slices: if virtual_visible {
-                virtual_world_draw_lists.surfaces.selected_slices
-            } else {
-                shadow_draw_lists
-                    .iter()
-                    .map(|draw_list| draw_list.selected_slices)
-                    .sum::<u32>()
-                    .saturating_add(world_draw_list.selected_slices)
-                    .saturating_add(cut_selected_slices)
-            }
-            .saturating_add(water_draw_list.selected_slices)
-            .saturating_add(outgoing_water_draw_list.selected_slices),
+            draw_list_tested_slices: shadow_draw_lists
+                .iter()
+                .map(|draw_list| draw_list.tested_slices)
+                .sum::<u32>()
+                .saturating_add(world_draw_list.tested_slices)
+                .saturating_add(cut_tested_slices)
+                .saturating_add(if virtual_visible {
+                    virtual_world_draw_lists.surfaces.tested_slices
+                } else {
+                    0
+                })
+                .saturating_add(water_draw_list.tested_slices)
+                .saturating_add(outgoing_water_draw_list.tested_slices),
+            draw_list_selected_slices: shadow_draw_lists
+                .iter()
+                .map(|draw_list| draw_list.selected_slices)
+                .sum::<u32>()
+                .saturating_add(world_draw_list.selected_slices)
+                .saturating_add(cut_selected_slices)
+                .saturating_add(if virtual_visible {
+                    virtual_world_draw_lists.surfaces.selected_slices
+                } else {
+                    0
+                })
+                .saturating_add(water_draw_list.selected_slices)
+                .saturating_add(outgoing_water_draw_list.selected_slices),
             lod_transition_quads: self
                 .lod_draw_plan
                 .transition_mesh_key
@@ -7265,99 +7489,97 @@ impl Renderer {
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
             pass.set_bind_group(2, self.ambient_occlusion_gpu.sample_bind_group(), &[]);
             pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
-            if virtual_visible {
+            if let Some(virtual_owners) = screenshot_virtual_opaque_owners.as_ref() {
                 pass.set_pipeline(&self.screenshot_diagnostic_pipeline);
                 draw_diagnostic_spans(
                     &mut pass,
                     &self.virtual_terrain_arena_buffers,
-                    opaque_owners,
+                    virtual_owners,
                     &virtual_world_draw_lists.surfaces,
                 );
                 pass.set_pipeline(&self.virtual_triangle_diagnostic_pipeline);
                 draw_diagnostic_triangle_spans(
                     &mut pass,
                     &self.virtual_terrain_arena_buffers,
-                    opaque_owners,
+                    virtual_owners,
                     &virtual_world_draw_lists.triangles,
                 );
-            } else {
-                pass.set_pipeline(&self.screenshot_diagnostic_pipeline);
-                draw_diagnostic_spans(
-                    &mut pass,
-                    &self.arena_buffers,
-                    opaque_owners,
-                    &world_draw_list.fixed,
-                );
-                pass.set_pipeline(&self.screenshot_diagnostic_morph_pipeline);
+            }
+            pass.set_pipeline(&self.screenshot_diagnostic_pipeline);
+            draw_diagnostic_spans(
+                &mut pass,
+                &self.arena_buffers,
+                opaque_owners,
+                &world_draw_list.fixed,
+            );
+            pass.set_pipeline(&self.screenshot_diagnostic_morph_pipeline);
+            draw_diagnostic_morph_spans(
+                &mut pass,
+                &self.arena_buffers,
+                opaque_owners,
+                &self.morph_arena_buffers,
+                &world_draw_list.morphing,
+            );
+            if let Some(cut_draw_lists) = &cut_draw_lists {
+                pass.set_pipeline(&self.screenshot_diagnostic_morph_transition_pipeline);
+                pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
                 draw_diagnostic_morph_spans(
                     &mut pass,
                     &self.arena_buffers,
                     opaque_owners,
                     &self.morph_arena_buffers,
-                    &world_draw_list.morphing,
+                    &cut_draw_lists.incoming.morphing,
                 );
-                if let Some(cut_draw_lists) = &cut_draw_lists {
-                    pass.set_pipeline(&self.screenshot_diagnostic_morph_transition_pipeline);
-                    pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
-                    draw_diagnostic_morph_spans(
-                        &mut pass,
-                        &self.arena_buffers,
-                        opaque_owners,
-                        &self.morph_arena_buffers,
-                        &cut_draw_lists.incoming.morphing,
-                    );
-                    pass.set_pipeline(&self.screenshot_diagnostic_transition_pipeline);
-                    pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
-                    draw_diagnostic_spans(
-                        &mut pass,
-                        &self.arena_buffers,
-                        opaque_owners,
-                        &cut_draw_lists.outgoing.fixed,
-                    );
-                    pass.set_pipeline(&self.screenshot_diagnostic_morph_transition_pipeline);
-                    draw_diagnostic_morph_spans(
-                        &mut pass,
-                        &self.arena_buffers,
-                        opaque_owners,
-                        &self.morph_arena_buffers,
-                        &cut_draw_lists.outgoing.morphing,
-                    );
-                }
+                pass.set_pipeline(&self.screenshot_diagnostic_transition_pipeline);
+                pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
+                draw_diagnostic_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    opaque_owners,
+                    &cut_draw_lists.outgoing.fixed,
+                );
+                pass.set_pipeline(&self.screenshot_diagnostic_morph_transition_pipeline);
+                draw_diagnostic_morph_spans(
+                    &mut pass,
+                    &self.arena_buffers,
+                    opaque_owners,
+                    &self.morph_arena_buffers,
+                    &cut_draw_lists.outgoing.morphing,
+                );
             }
             if refract_water {
                 pass.set_pipeline(&self.screenshot_diagnostic_pipeline);
                 pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
-                if virtual_visible {
+                if let Some(virtual_owners) = screenshot_virtual_opaque_owners.as_ref() {
                     draw_diagnostic_spans(
                         &mut pass,
                         &self.virtual_terrain_arena_buffers,
-                        opaque_owners,
+                        virtual_owners,
                         &virtual_world_draw_lists.water_surfaces,
                     );
                     pass.set_pipeline(&self.virtual_triangle_diagnostic_pipeline);
                     draw_diagnostic_triangle_spans(
                         &mut pass,
                         &self.virtual_terrain_arena_buffers,
-                        opaque_owners,
+                        virtual_owners,
                         &virtual_world_draw_lists.water_triangles,
                     );
-                } else {
+                }
+                draw_diagnostic_spans(
+                    &mut pass,
+                    &self.water_arena_buffers,
+                    water_owners,
+                    &water_draw_list,
+                );
+                if !outgoing_water_draw_list.spans.is_empty() {
+                    pass.set_pipeline(&self.screenshot_diagnostic_transition_pipeline);
+                    pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
                     draw_diagnostic_spans(
                         &mut pass,
                         &self.water_arena_buffers,
                         water_owners,
-                        &water_draw_list,
+                        &outgoing_water_draw_list,
                     );
-                    if !outgoing_water_draw_list.spans.is_empty() {
-                        pass.set_pipeline(&self.screenshot_diagnostic_transition_pipeline);
-                        pass.set_bind_group(3, &self.cut_transition_bind_groups[1], &[]);
-                        draw_diagnostic_spans(
-                            &mut pass,
-                            &self.water_arena_buffers,
-                            water_owners,
-                            &outgoing_water_draw_list,
-                        );
-                    }
                 }
             }
         }
@@ -7903,7 +8125,7 @@ fn screenshot_virtual_terrain_owner_buffers(
         .collect::<Vec<_>>();
     for (key, page) in pages {
         let owner = diagnostic_owner_id(
-            u32::from(page.representation as u8),
+            DIAGNOSTIC_VIRTUAL_REPRESENTATION_BASE + u32::from(page.representation as u8),
             u32::from(key.level),
             key.coord[0],
             key.coord[1],
@@ -8084,6 +8306,7 @@ fn collect_opaque_draw_lists(
     geometric_lod_focus: Option<GeometricLodFocus>,
     view_clip: AabbClipVolume,
     shadow_clips: [AabbClipVolume; CASCADE_COUNT],
+    virtual_ownership: &VirtualTerrainOwnership,
 ) -> Result<([WorldDrawLists; CASCADE_COUNT], WorldDrawLists, u32), MissingMorphSidecar> {
     let mut shadow_builders: [WorldDrawListBuilder; CASCADE_COUNT] =
         std::array::from_fn(|_| WorldDrawListBuilder::default());
@@ -8127,6 +8350,7 @@ fn collect_opaque_draw_lists(
             }
             if slice.render_layer != RenderLayer::Opaque
                 || !chunk.lod_owns_slice(key, geometric_lod_focus, slice_index)
+                || virtual_ownership.covers_aabb(slice.bounds_min, slice.bounds_max)
             {
                 continue;
             }
@@ -8227,6 +8451,7 @@ fn collect_cut_transition_draw_lists(
     transition: &CutTransition,
     far_terrain: bool,
     view_clip: AabbClipVolume,
+    virtual_ownership: &VirtualTerrainOwnership,
 ) -> Result<CutDrawLists, MissingMorphSidecar> {
     let mut incoming = WorldDrawListBuilder::default();
     let mut replaced_current_slices = HashSet::new();
@@ -8241,6 +8466,7 @@ fn collect_cut_transition_draw_lists(
         for (slice_index, slice) in chunk.slices.iter().enumerate() {
             incoming.test_slice();
             if slice.render_layer != RenderLayer::Opaque
+                || virtual_ownership.covers_aabb(slice.bounds_min, slice.bounds_max)
                 || !view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
             {
                 continue;
@@ -8291,6 +8517,7 @@ fn fingerprint_value(fingerprint: u64, value: u64) -> u64 {
 
 const DIAGNOSTIC_FNV32_OFFSET: u32 = 2_166_136_261;
 const DIAGNOSTIC_FNV32_PRIME: u32 = 16_777_619;
+const DIAGNOSTIC_VIRTUAL_REPRESENTATION_BASE: u32 = 16;
 
 fn diagnostic_owner_id(
     representation_kind: u32,
@@ -15253,6 +15480,7 @@ mod tests {
             focus,
             view_clip,
             shadow_clips,
+            &VirtualTerrainOwnership::default(),
         )
         .unwrap_or_else(|_| panic!("test meshes must have every required morph sidecar"));
         let expected_world = reference_draw_list(
@@ -15297,6 +15525,7 @@ mod tests {
             focus,
             view_clip,
             shadow_clips,
+            &VirtualTerrainOwnership::default(),
         )
         .unwrap_or_else(|_| panic!("test meshes must have every required morph sidecar"))
         .1;
@@ -15331,6 +15560,7 @@ mod tests {
             moved_focus,
             view_clip,
             shadow_clips,
+            &VirtualTerrainOwnership::default(),
         )
         .unwrap_or_else(|_| panic!("test meshes must have every required morph sidecar"))
         .1;
@@ -15869,5 +16099,62 @@ mod tests {
             0,
             0,
         )));
+    }
+
+    fn virtual_cut_with_selected(selected_pages: Vec<TerrainPageKey>) -> VirtualTerrainCut {
+        VirtualTerrainCut {
+            selected_pages,
+            requested_pages: Vec::new(),
+            ownerless_roots: Vec::new(),
+            fingerprint: 1,
+            visited_nodes: 1,
+            selected_primitives: 0,
+            selected_encoded_bytes: 0,
+            feedback_overflow: false,
+            selection_overflow: false,
+            traversal_overflow: false,
+            incoherent_replacement_groups: 0,
+        }
+    }
+
+    #[test]
+    fn virtual_ownership_rejects_an_incomplete_root_partition() {
+        let root = TerrainPageKey {
+            level: TERRAIN_REGION_ROOT_LEVEL,
+            coord: [-1, 0, 2],
+        };
+        let incomplete = root.children().unwrap()[..4].to_vec();
+        assert_eq!(
+            VirtualTerrainOwnership::from_cut(&virtual_cut_with_selected(incomplete)),
+            Err(VirtualTerrainRendererError::IncompleteRootPartition(root))
+        );
+    }
+
+    #[test]
+    fn virtual_ownership_covers_only_complete_half_open_root_volumes() {
+        let root = TerrainPageKey {
+            level: TERRAIN_REGION_ROOT_LEVEL,
+            coord: [-1, 0, 2],
+        };
+        let ownership = VirtualTerrainOwnership::from_cut(&virtual_cut_with_selected(
+            root.children().unwrap().to_vec(),
+        ))
+        .unwrap();
+        assert!(ownership.covers_aabb(
+            glam::Vec3::new(-25.6, 0.0, 51.2),
+            glam::Vec3::new(0.0, 25.6, 76.8),
+        ));
+        assert!(ownership.intersects_aabb(
+            glam::Vec3::new(-1.0, 1.0, 52.0),
+            glam::Vec3::new(1.0, 2.0, 53.0),
+        ));
+        assert!(!ownership.covers_aabb(
+            glam::Vec3::new(-1.0, 1.0, 52.0),
+            glam::Vec3::new(1.0, 2.0, 53.0),
+        ));
+        assert!(!ownership.intersects_aabb(
+            glam::Vec3::new(0.0, 0.0, 51.2),
+            glam::Vec3::new(25.6, 25.6, 76.8),
+        ));
     }
 }

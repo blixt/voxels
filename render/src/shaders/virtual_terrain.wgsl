@@ -150,9 +150,10 @@ fn traverse(@builtin(global_invocation_id) invocation: vec3<u32>) {
       atomicOr(&counters.overflow_flags, OVERFLOW_TRAVERSAL);
       continue;
     }
-    if !page_visible(nodes[node_index]) {
-      continue;
-    }
+    // The root was conservatively frustum-tested before traversal. Descendants deliberately stay
+    // unculled so every refined root remains a complete spatial partition. This is required for
+    // exact handoff from the legacy owner; a visible root with off-frustum child holes is not a
+    // publishable owner.
     let visited = atomicAdd(&counters.visited_nodes, 1u);
     if visited >= view.counts_flags.w {
       atomicOr(&counters.overflow_flags, OVERFLOW_TRAVERSAL);
