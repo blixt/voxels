@@ -28,14 +28,34 @@ interface PoseReport {
   readonly candidates: readonly CandidateReport[];
   readonly gpu: null | {
     readonly schema: string;
-    readonly adapter: Readonly<Record<string, unknown>>;
-    readonly workload: Readonly<Record<string, unknown>>;
-    readonly gpuMs: {
-      readonly shadow: { readonly p95: number };
-      readonly color: { readonly p95: number };
-      readonly total: { readonly p95: number; readonly p99: number };
+    readonly exactClusterRaster: {
+      readonly schema: string;
+      readonly adapter: Readonly<Record<string, unknown>>;
+      readonly workload: Readonly<Record<string, unknown>>;
+      readonly gpuMs: {
+        readonly shadow: { readonly p95: number };
+        readonly color: { readonly p95: number };
+        readonly total: { readonly p95: number; readonly p99: number };
+      };
+      readonly allocatedBytes: Readonly<Record<string, number>>;
     };
-    readonly allocatedBytes: Readonly<Record<string, number>>;
+    readonly denseVoxelRayCasterLowerBound: {
+      readonly schema: string;
+      readonly classification: string;
+      readonly workload: Readonly<Record<string, unknown>>;
+      readonly gpuMs: {
+        readonly shadow: { readonly p95: number };
+        readonly color: { readonly p95: number };
+        readonly total: { readonly p95: number; readonly p99: number };
+      };
+      readonly readbackVerification: {
+        readonly primaryHitPixels: number;
+        readonly shadowHitPixels: number;
+        readonly invalidShadowPixels: number;
+        readonly fnv1a64: string;
+      };
+      readonly allocatedBytes: Readonly<Record<string, number>>;
+    };
   };
 }
 
@@ -212,11 +232,22 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
   if (
     gpu === null ||
     gpu === undefined ||
-    gpu.schema !== "voxels.virtual-surface-gpu-bakeoff.v1" ||
-    !Number.isFinite(gpu.gpuMs.total.p95)
+    gpu.schema !== "voxels.virtual-surface-gpu-competition.v1" ||
+    gpu.exactClusterRaster.schema !== "voxels.virtual-surface-gpu-bakeoff.v1" ||
+    gpu.denseVoxelRayCasterLowerBound.schema !==
+      "voxels.virtual-surface-dense-voxel-gpu-bakeoff.v1" ||
+    !Number.isFinite(gpu.exactClusterRaster.gpuMs.total.p95) ||
+    !Number.isFinite(gpu.denseVoxelRayCasterLowerBound.gpuMs.total.p95) ||
+    gpu.denseVoxelRayCasterLowerBound.readbackVerification.primaryHitPixels === 0 ||
+    gpu.denseVoxelRayCasterLowerBound.readbackVerification.shadowHitPixels === 0 ||
+    gpu.denseVoxelRayCasterLowerBound.readbackVerification.invalidShadowPixels !== 0
   ) {
-    throw new Error("supplied-world bake-off omitted valid Metal/WGPU timestamps");
+    throw new Error("supplied-world bake-off omitted valid, nontrivial Metal/WGPU results");
   }
+  const rayCasterPrimaryDecision =
+    gpu.denseVoxelRayCasterLowerBound.gpuMs.total.p95 > 4
+      ? "rejected: optimistic dense traversal already exceeds 4ms p95 terrain budget"
+      : "continue: sparse traversal still requires a full implementation benchmark";
   const exactCandidates = candidates.filter(
     (candidate) =>
       candidate.kind !== "stepped-surface" || candidate.volumetricExceptionColumns === 0,
@@ -246,6 +277,11 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
     sourceIdentityHashes: [...new Set(reports.map((report) => report.source.identityHash))],
     candidates,
     gpu,
+    decisions: {
+      pureSteppedSurface: "rejected: cannot conservatively represent required topology",
+      sparseBrickPrimaryRenderer: rayCasterPrimaryDecision,
+      exactClusterRaster: "continue to hierarchy scaling and edit-build tests",
+    },
     topologyStress: {
       steppedSurface: topologyStepped,
       exactCapableViolations: topologyExactViolations,
@@ -262,7 +298,8 @@ async function run(context: ScenarioContext, rawArguments: readonly string[]) {
       correctnessViolations: correctnessViolations.length,
       steppedSurfaceExceptionColumns: topologyStepped.volumetricExceptionColumns,
       steppedSurfaceOwnerlessHits: topologyStepped.ownerlessReferenceHits,
-      clusteredRasterGpuP95Ms: gpu.gpuMs.total.p95,
+      clusteredRasterGpuP95Ms: gpu.exactClusterRaster.gpuMs.total.p95,
+      denseVoxelRayCasterGpuP95Ms: gpu.denseVoxelRayCasterLowerBound.gpuMs.total.p95,
     },
     details: summary,
   };

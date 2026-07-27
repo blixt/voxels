@@ -12,6 +12,7 @@ use voxels_world::{
 use voxels_world_service::LoadedWorldServiceConfig;
 
 mod gpu;
+mod gpu_voxel;
 
 const SUPPLIED_SOURCE_HASH: &str =
     "82bdc2f68c8aa5a845927e52c2e3c5c781e96a7fe83b1bc723384df91daae09f";
@@ -460,7 +461,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let quads = clustered
             .gpu_quads()
             .ok_or("clustered candidate omitted exact GPU leaves")?;
-        pollster::block_on(gpu::run(camera, &quads))?
+        let exact_cluster_raster = pollster::block_on(gpu::run(camera, &quads))?;
+        let dense_voxel_ray_caster = pollster::block_on(gpu_voxel::run(camera, &volume))?;
+        json!({
+            "schema": "voxels.virtual-surface-gpu-competition.v1",
+            "exactClusterRaster": exact_cluster_raster,
+            "denseVoxelRayCasterLowerBound": dense_voxel_ray_caster,
+        })
     } else {
         Value::Null
     };

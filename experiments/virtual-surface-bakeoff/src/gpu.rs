@@ -468,21 +468,30 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
     readback.unmap();
     let mut shadow_ms = Vec::with_capacity(SAMPLE_FRAMES as usize);
     let mut color_ms = Vec::with_capacity(SAMPLE_FRAMES as usize);
+    let mut discarded_timestamp_frames = 0u32;
     for frame in 0..SAMPLE_FRAMES as usize {
         let base = frame * QUERIES_PER_FRAME as usize;
-        let duration = |first: usize, last: usize| -> Result<f64, Box<dyn Error>> {
-            let ticks = timestamps[last]
+        let duration = |first: usize, last: usize| {
+            timestamps[last]
                 .checked_sub(timestamps[first])
-                .ok_or_else(|| {
-                    format!(
-                        "GPU timestamp order is invalid for queries {first}..{last}: {} -> {}",
-                        timestamps[first], timestamps[last]
-                    )
-                })?;
-            Ok(ticks as f64 * timestamp_period / 1_000_000.0)
+                .filter(|ticks| *ticks != 0)
+                .map(|ticks| ticks as f64 * timestamp_period / 1_000_000.0)
         };
-        shadow_ms.push(duration(base, base + 1)?);
-        color_ms.push(duration(base + 2, base + 3)?);
+        let Some((shadow, color)) = duration(base, base + 1)
+            .zip(duration(base + 2, base + 3))
+        else {
+            discarded_timestamp_frames += 1;
+            continue;
+        };
+        shadow_ms.push(shadow);
+        color_ms.push(color);
+    }
+    if shadow_ms.len() < 32 {
+        return Err(format!(
+            "Metal supplied only {} valid timestamp frames out of {SAMPLE_FRAMES}",
+            shadow_ms.len()
+        )
+        .into());
     }
     let total_ms = shadow_ms
         .iter()
@@ -512,6 +521,8 @@ pub async fn run(camera: BakeoffCamera, quads: &[BakeoffGpuQuad]) -> Result<Valu
             "pixelSize": [WIDTH, HEIGHT],
             "shadowSize": [SHADOW_EDGE, SHADOW_EDGE],
             "samples": SAMPLE_FRAMES,
+            "measuredFrames": shadow_ms.len(),
+            "discardedTimestampFrames": discarded_timestamp_frames,
             "warmupFrames": WARMUP_FRAMES,
             "quadCount": quads.len(),
             "triangleCountPerPass": quads.len() * 2,
