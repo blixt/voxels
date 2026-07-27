@@ -430,6 +430,43 @@ impl CameraState {
         }
     }
 
+    /// Constructs an exact frozen camera state from a reproduction package.
+    ///
+    /// Ordinary persistence intentionally discards derived motion/fluid state. A renderer failure
+    /// package needs the opposite contract: every camera value that can affect culling, streaming,
+    /// water, or shading is restored verbatim after validation.
+    pub fn for_reproduction(
+        position: Vec3,
+        velocity: Vec3,
+        yaw: f32,
+        pitch: f32,
+        grounded: bool,
+        locomotion: LocomotionMode,
+        fluid: FluidState,
+    ) -> Option<Self> {
+        if !position.is_finite()
+            || !velocity.is_finite()
+            || !yaw.is_finite()
+            || !pitch.is_finite()
+            || !(-1.5..=1.5).contains(&pitch)
+            || !fluid.immersion.is_finite()
+            || !(0.0..=1.0).contains(&fluid.immersion)
+            || !fluid.eye_depth_metres.is_finite()
+            || !fluid.signed_eye_depth_metres.is_finite()
+            || !fluid.surface_y_metres.is_finite()
+        {
+            return None;
+        }
+        let mut camera = Self::spawn(position);
+        camera.velocity = velocity;
+        camera.yaw = yaw;
+        camera.pitch = pitch;
+        camera.grounded = grounded;
+        camera.locomotion = locomotion;
+        camera.fluid = fluid;
+        Some(camera)
+    }
+
     pub fn look(&mut self, delta: Vec2) {
         const SENSITIVITY: f32 = 0.0022;
         // Pointer movement right turns right; browser Y grows downward, so moving up raises pitch.
@@ -1351,6 +1388,66 @@ mod tests {
         assert_eq!(restored.yaw, 0.0);
         assert_eq!(restored.pitch, default.pitch);
         assert!(restored.forward().is_finite());
+    }
+
+    #[test]
+    fn reproduction_camera_restores_every_render_affecting_field_exactly() {
+        let fluid = FluidState {
+            immersion: 0.75,
+            eyes_submerged: true,
+            eye_depth_metres: 0.4,
+            signed_eye_depth_metres: 0.4,
+            surface_y_metres: 12.5,
+            surface_known: true,
+            swimming: true,
+        };
+        let camera = CameraState::for_reproduction(
+            Vec3::new(-101.25, 12.1, 204.75),
+            Vec3::new(4.0, -0.5, 7.0),
+            -2.75,
+            0.65,
+            false,
+            LocomotionMode::Spectator,
+            fluid,
+        )
+        .expect("valid reproduction camera");
+        assert_eq!(camera.position, Vec3::new(-101.25, 12.1, 204.75));
+        assert_eq!(camera.velocity, Vec3::new(4.0, -0.5, 7.0));
+        assert_eq!(camera.yaw, -2.75);
+        assert_eq!(camera.pitch, 0.65);
+        assert_eq!(camera.locomotion(), LocomotionMode::Spectator);
+        assert_eq!(camera.fluid_state(), fluid);
+    }
+
+    #[test]
+    fn reproduction_camera_rejects_values_that_would_be_sanitized() {
+        assert!(
+            CameraState::for_reproduction(
+                Vec3::ZERO,
+                Vec3::ZERO,
+                0.0,
+                f32::NAN,
+                false,
+                LocomotionMode::Walking,
+                FluidState::default(),
+            )
+            .is_none()
+        );
+        assert!(
+            CameraState::for_reproduction(
+                Vec3::ZERO,
+                Vec3::ZERO,
+                0.0,
+                0.0,
+                false,
+                LocomotionMode::Walking,
+                FluidState {
+                    immersion: 1.1,
+                    ..FluidState::default()
+                },
+            )
+            .is_none()
+        );
     }
 
     #[test]

@@ -17,10 +17,28 @@ const root = new URL("../", import.meta.url);
 
 describe("WASM build inputs", () => {
   it("never reuses an artifact built with a different profile", () => {
-    assert.equal(wasmBuildIsCurrent("wasm-dev", "wasm-dev", 20, 10, true), true);
-    assert.equal(wasmBuildIsCurrent("release", "wasm-dev", 20, 10, true), false);
-    assert.equal(wasmBuildIsCurrent("wasm-dev", "wasm-dev", 10, 20, true), false);
-    assert.equal(wasmBuildIsCurrent("wasm-dev", "wasm-dev", 20, 10, false), false);
+    const identity = '{"commit":"a","dirty":false,"profile":"wasm-dev"}';
+    assert.equal(
+      wasmBuildIsCurrent("wasm-dev", "wasm-dev", 20, 10, true, identity, identity),
+      true,
+    );
+    assert.equal(
+      wasmBuildIsCurrent("release", "wasm-dev", 20, 10, true, identity, identity),
+      false,
+    );
+    assert.equal(
+      wasmBuildIsCurrent("wasm-dev", "wasm-dev", 10, 20, true, identity, identity),
+      false,
+    );
+    assert.equal(
+      wasmBuildIsCurrent("wasm-dev", "wasm-dev", 20, 10, false, identity, identity),
+      false,
+    );
+    assert.equal(
+      wasmBuildIsCurrent("wasm-dev", "wasm-dev", 20, 10, true, identity, `${identity} `),
+      false,
+    );
+    assert.equal(wasmBuildIsCurrent("wasm-dev", "wasm-dev", 20, 10, true), false);
   });
 
   it("tracks every local crate in the browser shell dependency graph", () => {
@@ -111,6 +129,10 @@ export interface InitOutput {
       mkdirSync(output);
       writeFileSync(join(staging, "blocked"), "new artifact");
       writeFileSync(join(staging, "voxels-build-profile"), "release\n");
+      writeFileSync(
+        join(staging, "voxels-build-identity"),
+        '{"commit":"a","dirty":false,"profile":"release"}\n',
+      );
       mkdirSync(join(output, "blocked"));
       writeFileSync(join(output, "blocked", "in-use"), "prevents replacement");
       writeFileSync(join(output, "voxels-build-profile"), "wasm-dev\n");

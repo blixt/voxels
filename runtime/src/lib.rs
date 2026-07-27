@@ -838,6 +838,20 @@ impl StreamScheduler {
             })
     }
 
+    /// Stable coordinate-ordered scheduler state for reproduction packages and host diagnostics.
+    ///
+    /// Payload ownership stays with the host; this exposes only the request capabilities already
+    /// represented by the scheduler. Captures can therefore distinguish a genuinely absent page
+    /// from one that was queued, executing, or waiting for upload at the captured frame.
+    pub fn statuses(&self) -> impl Iterator<Item = ChunkStatus> + '_ {
+        self.entries.values().map(|entry| ChunkStatus {
+            coord: entry.coord,
+            state: entry.state.public(),
+            revision: entry.revision,
+            desired: entry.desired,
+        })
+    }
+
     /// Reports uploaded canonical chunks inside a horizontal cylinder around the current focus.
     /// The configured vertical span is included so the renderer can activate every counted X/Z
     /// column atomically and collision never begins against missing data.

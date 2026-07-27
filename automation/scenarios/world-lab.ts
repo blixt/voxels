@@ -170,6 +170,14 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
   }
   const reproduction = JSON.parse(reproductionText) as {
     schema?: string;
+    runtime?: {
+      buildCommit?: string;
+      buildDirty?: boolean;
+      buildProfile?: string;
+      protocolVersion?: number;
+      clientConfigHash?: string;
+    };
+    gpu?: { supportedFeatures?: string[]; enabledFeatures?: string[]; limits?: string };
     image?: { pixelWidth?: number; pixelHeight?: number; devicePixelRatio?: number };
     camera?: {
       eyeMetres?: number[];
@@ -179,7 +187,18 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     };
     world?: { worldId?: string; sourceIdentityHash?: string; seed?: string };
     environment?: { dayFraction?: number; weatherFraction?: number };
-    presentation?: { viewportFingerprint?: string; incompleteTransitionEdges?: number };
+    presentation?: {
+      viewportFingerprint?: string;
+      selectedCutFingerprint?: string;
+      selectedCut?: {
+        current?: {
+          ownerCounts?: { surfacePatches?: number; canonicalChunks?: number };
+          surfacePatches?: unknown[];
+        };
+      };
+      incompleteTransitionEdges?: number;
+    };
+    streaming?: { surfaceEpoch?: string; surfacePages?: unknown[]; canonicalPages?: unknown[] };
     render?: {
       worldLabOpen?: boolean;
       geometrySourceDebug?: boolean;
@@ -189,7 +208,15 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
   };
   const eye = reproduction.camera?.eyeMetres;
   if (
-    reproduction.schema !== "voxels.reproduction.v1" ||
+    reproduction.schema !== "voxels.reproduction.v2" ||
+    !/^[0-9a-f]{40}$/u.test(reproduction.runtime?.buildCommit ?? "") ||
+    typeof reproduction.runtime?.buildDirty !== "boolean" ||
+    !["debug", "wasm-dev", "release"].includes(reproduction.runtime?.buildProfile ?? "") ||
+    !Number.isSafeInteger(reproduction.runtime?.protocolVersion) ||
+    !/^[0-9a-f]{64}$/u.test(reproduction.runtime?.clientConfigHash ?? "") ||
+    reproduction.gpu?.supportedFeatures?.length !== 2 ||
+    reproduction.gpu.enabledFeatures?.length !== 2 ||
+    typeof reproduction.gpu.limits !== "string" ||
     reproduction.image?.pixelWidth !== VIEWPORT.width ||
     reproduction.image.pixelHeight !== VIEWPORT.height ||
     reproduction.image.devicePixelRatio !== 1 ||
@@ -208,7 +235,18 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     !near(reproduction.environment?.dayFraction ?? Number.NaN, 0.5) ||
     !near(reproduction.environment?.weatherFraction ?? Number.NaN, 0.08) ||
     !/^[0-9a-f]{16}$/u.test(reproduction.presentation?.viewportFingerprint ?? "") ||
+    !/^[0-9a-f]{16}$/u.test(reproduction.presentation?.selectedCutFingerprint ?? "") ||
+    !Number.isSafeInteger(
+      reproduction.presentation?.selectedCut?.current?.ownerCounts?.surfacePatches,
+    ) ||
+    !Number.isSafeInteger(
+      reproduction.presentation?.selectedCut?.current?.ownerCounts?.canonicalChunks,
+    ) ||
+    !Array.isArray(reproduction.presentation?.selectedCut?.current?.surfacePatches) ||
     reproduction.presentation?.incompleteTransitionEdges !== 0 ||
+    !/^\d+$/u.test(reproduction.streaming?.surfaceEpoch ?? "") ||
+    !Array.isArray(reproduction.streaming?.surfacePages) ||
+    !Array.isArray(reproduction.streaming?.canonicalPages) ||
     reproduction.render?.worldLabOpen !== false ||
     reproduction.render.geometrySourceDebug !== true ||
     !Number.isFinite(reproduction.render.viewDistanceMetres) ||

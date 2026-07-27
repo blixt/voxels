@@ -85,6 +85,41 @@ export class EngineClient {
     return assertSnapshotSchema(await this.#page.evaluate(() => globalThis.__VOXELS__!.snapshot()));
   }
 
+  async applyReproduction(metadata: string): Promise<readonly number[]> {
+    if (metadata.length === 0) throw new Error("reproduction metadata must not be empty");
+    await this.#page.evaluate(
+      (reproduction) => globalThis.__VOXELS__!.applyReproduction(reproduction),
+      metadata,
+    );
+    const expected = JSON.parse(metadata) as {
+      camera?: { eyeMetres?: number[]; yawRadians?: number; pitchRadians?: number };
+    };
+    const eye = expected.camera?.eyeMetres;
+    if (
+      eye?.length !== 3 ||
+      !eye.every(Number.isFinite) ||
+      !Number.isFinite(expected.camera?.yawRadians) ||
+      !Number.isFinite(expected.camera?.pitchRadians)
+    ) {
+      throw new Error("reproduction metadata omitted the exact camera pose");
+    }
+    return this.waitForSnapshot(
+      (snapshot) =>
+        Math.hypot(
+          snapshotValue(snapshot, "cameraX") - eye[0]!,
+          snapshotValue(snapshot, "cameraY") - eye[1]!,
+          snapshotValue(snapshot, "cameraZ") - eye[2]!,
+        ) <= 0.000_01 &&
+        Math.abs(snapshotValue(snapshot, "yaw") - expected.camera!.yawRadians!) <= 0.000_01 &&
+        Math.abs(snapshotValue(snapshot, "pitch") - expected.camera!.pitchRadians!) <= 0.000_01,
+      { description: "engine did not freeze the exact reproduction camera" },
+    );
+  }
+
+  async clearReproduction(): Promise<void> {
+    await this.#page.evaluate(() => globalThis.__VOXELS__!.clearReproduction());
+  }
+
   async value(field: SnapshotField): Promise<number> {
     const snapshot = await this.snapshot();
     const value = snapshot[SNAPSHOT[field]];

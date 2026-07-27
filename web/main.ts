@@ -123,6 +123,10 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     number,
     { resolve: (value: EngineAutomationContract) => void; reject: (reason: Error) => void }
   >();
+  const reproductionResolvers = new Map<
+    number,
+    { resolve: () => void; reject: (reason: Error) => void }
+  >();
   const editResolvers = new Map<
     number,
     { resolve: (submitted: boolean) => void; reject: (reason: Error) => void }
@@ -168,6 +172,8 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     snapshotResolvers.clear();
     for (const { reject } of contractResolvers.values()) reject(error);
     contractResolvers.clear();
+    for (const { reject } of reproductionResolvers.values()) reject(error);
+    reproductionResolvers.clear();
     for (const { reject } of editResolvers.values()) reject(error);
     editResolvers.clear();
     for (const { reject } of spectatorResolvers.values()) reject(error);
@@ -220,6 +226,14 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
         worker.postMessage({ kind: "snapshot", requestId });
       }),
     profile: (profileId) => worker.postMessage({ kind: "profile", profileId }),
+    applyReproduction: (metadata) =>
+      new Promise<void>((resolve, reject) => {
+        const requestId = nextSnapshotRequest;
+        nextSnapshotRequest += 1;
+        reproductionResolvers.set(requestId, { resolve, reject });
+        worker.postMessage({ kind: "applyReproduction", requestId, metadata });
+      }),
+    clearReproduction: () => worker.postMessage({ kind: "clearReproduction" }),
     spectator: (active) =>
       new Promise<boolean>((resolve, reject) => {
         const requestId = nextSnapshotRequest;
@@ -387,6 +401,14 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     } else if (event.data.kind === "snapshot") {
       snapshotResolvers.get(event.data.requestId)?.resolve(event.data.values);
       snapshotResolvers.delete(event.data.requestId);
+    } else if (event.data.kind === "applyReproduction") {
+      const resolver = reproductionResolvers.get(event.data.requestId);
+      if (event.data.error === "") {
+        resolver?.resolve();
+      } else {
+        resolver?.reject(new Error(event.data.error));
+      }
+      reproductionResolvers.delete(event.data.requestId);
     } else if (event.data.kind === "spectator") {
       spectatorResolvers.get(event.data.requestId)?.resolve(event.data.active);
       spectatorResolvers.delete(event.data.requestId);

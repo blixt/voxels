@@ -1267,6 +1267,7 @@ mod web {
     };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
+    use serde::Deserialize;
     use std::cell::{Cell, RefCell};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::rc::Rc;
@@ -1277,9 +1278,12 @@ mod web {
         ProfileAutomation, ProfileConfig, ProfilePhase, ProfileRoute, SpectatorFlightConfig,
         VoxelHit, VoxelPhysics, probe_enclosure, raycast_voxels, voxel_segment_is_clear,
     };
+    use voxels_render::environment::WorldEnvironmentState;
     use voxels_render::renderer::{
         ChunkActivationReason, HostUiAction, LocalLightVisibility, MissionControlConfig, Renderer,
-        RendererConfig, RendererFeatureConfig, ScreenshotCapture, VolumetricCloudConfig,
+        RendererConfig, RendererFeatureConfig, ScreenshotCanonicalPageState, ScreenshotCapture,
+        ScreenshotFeatureState, ScreenshotMutableRenderState, ScreenshotReproductionIdentity,
+        ScreenshotStreamingManifest, ScreenshotSurfacePageState, VolumetricCloudConfig,
     };
     use voxels_render::shadow::DirectionalShadowConfig;
     use voxels_render::ui::{LiveStats, NavigationTelemetry};
@@ -1581,11 +1585,154 @@ mod web {
         web_sys::console::error_1(&JsValue::from_str(message));
     }
 
+    fn reproduction_config_hash(config: &ClientConfig) -> Result<String, serde_json::Error> {
+        let mut reproducible = config.clone();
+        // Connection coordinates and credentials do not affect simulation, streaming policy, or
+        // presentation and necessarily change in hermetic replay stacks. Every behavioral
+        // transport limit and all runtime/render settings remain in the hashed value.
+        reproducible.world.endpoint = "<world-endpoint>".to_owned();
+        reproducible.world.presence_endpoint = "<presence-endpoint>".to_owned();
+        reproducible.world.auth_subprotocol_token = "<authorization>".to_owned();
+        Ok(blake3::hash(&serde_json::to_vec(&reproducible)?)
+            .to_hex()
+            .to_string())
+    }
+
+    fn reproduction_u64(value: &str, field: &str) -> Result<u64, String> {
+        value
+            .parse()
+            .map_err(|_| format!("capture {field} is not an unsigned 64-bit integer"))
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionV2 {
+        schema: String,
+        runtime: ReproductionRuntime,
+        image: ReproductionImage,
+        camera: ReproductionCamera,
+        world: ReproductionWorld,
+        environment: ReproductionEnvironment,
+        render: ReproductionRender,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionRuntime {
+        build_commit: String,
+        build_dirty: bool,
+        build_profile: String,
+        protocol_version: u16,
+        client_config_hash: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionImage {
+        pixel_width: u32,
+        pixel_height: u32,
+        device_pixel_ratio: f32,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionCamera {
+        eye_metres: [f32; 3],
+        velocity_metres_per_second: [f32; 3],
+        yaw_radians: f32,
+        pitch_radians: f32,
+        vertical_fov_radians: f32,
+        near_plane_metres: f32,
+        far_plane_metres: f32,
+        grounded: bool,
+        locomotion: String,
+        fluid: ReproductionFluid,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionFluid {
+        immersion: f32,
+        eye_depth_metres: f32,
+        signed_eye_depth_metres: f32,
+        surface_y_metres: f32,
+        surface_known: bool,
+        eyes_submerged: bool,
+        swimming: bool,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionWorld {
+        world_id: String,
+        source_identity_hash: String,
+        seed: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionEnvironment {
+        server_time_seconds: f32,
+        world_days: f64,
+        day_fraction: f32,
+        year_fraction: f32,
+        moon_orbit_fraction: f32,
+        twinkle_phase: f32,
+        planet_circumference_metres: f32,
+        axial_tilt_radians: f32,
+        moon_orbit_inclination_radians: f32,
+        celestial_seed: String,
+        celestial_revision: String,
+        weather_fraction: f32,
+        weather_cycle_seconds: f32,
+        cloud_offset_metres: [f32; 2],
+        cloud_velocity_metres_per_second: [f32; 2],
+        cloud_coverage: f32,
+        cloud_base_metres: f32,
+        cloud_top_metres: f32,
+        weather_seed: String,
+        weather_revision: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionRender {
+        world_lab_open: bool,
+        features: ReproductionFeatures,
+        diagnostic_sky_color: Option<[f32; 3]>,
+        geometry_source_debug: bool,
+        view_distance_metres: f32,
+        lod_focus: Option<ReproductionLodFocus>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionFeatures {
+        shadows: bool,
+        voxel_ambient_occlusion: bool,
+        screen_space_ambient_occlusion: bool,
+        fog: bool,
+        far_terrain: bool,
+        water: bool,
+        target_outline: bool,
+        material_detail: bool,
+        cave_headlamp: bool,
+        local_lighting: bool,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionLodFocus {
+        boundary_half_extents_voxels: [i32; 8],
+    }
+
     struct Engine {
         config: EngineConfig,
         renderer: RefCell<Renderer>,
         viewport_size: Cell<[u32; 2]>,
         camera: RefCell<CameraState>,
+        reproduction_camera: Cell<Option<CameraState>>,
+        reproduction_restore_camera: Cell<Option<CameraState>>,
         spectator_body: Cell<Option<CameraState>>,
         input: RefCell<InputState>,
         remote: RemoteWorldClient,
@@ -1692,6 +1839,223 @@ mod web {
                 .unwrap_or(self.source_identity_hash)
         }
 
+        fn screenshot_streaming_manifest(&self) -> ScreenshotStreamingManifest {
+            let resident = self.surface_resident.borrow();
+            let queue = self.surface_queue.borrow();
+            let in_flight = self.surface_in_flight.borrow();
+            let dirty = self.surface_dirty.borrow();
+            let mut surface_coords = resident.iter().copied().collect::<BTreeSet<_>>();
+            surface_coords.extend(queue.iter().copied());
+            surface_coords.extend(in_flight.iter().copied());
+            surface_coords.extend(dirty.iter().copied());
+            let revisions = self.surface_revisions.borrow();
+            let surface_pages = surface_coords
+                .into_iter()
+                .map(|coord| ScreenshotSurfacePageState {
+                    coord,
+                    resident_revision: revisions.resident_revision(coord),
+                    requested_revision: revisions.requested_revision(coord),
+                    queued: queue.contains(&coord),
+                    in_flight: in_flight.contains(&coord),
+                    dirty: dirty.contains(&coord),
+                })
+                .collect();
+            let canonical_pages = self
+                .scheduler
+                .borrow()
+                .statuses()
+                .map(|status| ScreenshotCanonicalPageState {
+                    coord: status.coord,
+                    revision: status.revision,
+                    phase: match status.state {
+                        ChunkState::QueuedGeneration => 0,
+                        ChunkState::Generating => 1,
+                        ChunkState::QueuedMeshing => 2,
+                        ChunkState::Meshing => 3,
+                        ChunkState::QueuedUpload => 4,
+                        ChunkState::Uploading => 5,
+                        ChunkState::Resident => 6,
+                    },
+                    desired: status.desired,
+                })
+                .collect();
+            ScreenshotStreamingManifest {
+                surface_epoch: revisions.epoch(),
+                surface_pages,
+                canonical_pages,
+            }
+        }
+
+        fn apply_reproduction(&self, metadata: &str) -> Result<(), String> {
+            let reproduction: ReproductionV2 = serde_json::from_str(metadata)
+                .map_err(|error| format!("parse voxels.reproduction.v2: {error}"))?;
+            if reproduction.schema != "voxels.reproduction.v2" {
+                return Err(format!(
+                    "unsupported reproduction schema {}",
+                    reproduction.schema
+                ));
+            }
+            if (reproduction.camera.far_plane_metres - reproduction.render.view_distance_metres)
+                .abs()
+                > 1.0e-3
+            {
+                return Err("capture camera and renderer view distances disagree".to_owned());
+            }
+            let identity = ScreenshotReproductionIdentity {
+                build_commit: reproduction.runtime.build_commit,
+                build_dirty: reproduction.runtime.build_dirty,
+                build_profile: reproduction.runtime.build_profile,
+                protocol_version: reproduction.runtime.protocol_version,
+                client_config_hash: reproduction.runtime.client_config_hash,
+            };
+            let world_seed = reproduction_u64(&reproduction.world.seed, "world seed")?;
+            let feature_state = ScreenshotFeatureState {
+                shadows: reproduction.render.features.shadows,
+                voxel_ambient_occlusion: reproduction.render.features.voxel_ambient_occlusion,
+                screen_space_ambient_occlusion: reproduction
+                    .render
+                    .features
+                    .screen_space_ambient_occlusion,
+                fog: reproduction.render.features.fog,
+                far_terrain: reproduction.render.features.far_terrain,
+                water: reproduction.render.features.water,
+                target_outline: reproduction.render.features.target_outline,
+                cave_headlamp: reproduction.render.features.cave_headlamp,
+                local_lighting: reproduction.render.features.local_lighting,
+            };
+            self.renderer
+                .borrow()
+                .validate_screenshot_reproduction_contract(
+                    &identity,
+                    &reproduction.world.world_id,
+                    &reproduction.world.source_identity_hash,
+                    world_seed,
+                    reproduction.image.pixel_width,
+                    reproduction.image.pixel_height,
+                    reproduction.image.device_pixel_ratio,
+                    reproduction.camera.vertical_fov_radians,
+                    reproduction.camera.near_plane_metres,
+                    reproduction.camera.far_plane_metres,
+                    feature_state,
+                )?;
+            let locomotion = match reproduction.camera.locomotion.as_str() {
+                "walking" => LocomotionMode::Walking,
+                "gliding" => LocomotionMode::Gliding,
+                "spectator" => LocomotionMode::Spectator,
+                other => return Err(format!("capture has unknown locomotion mode {other}")),
+            };
+            let fluid = voxels_core::FluidState {
+                immersion: reproduction.camera.fluid.immersion,
+                eyes_submerged: reproduction.camera.fluid.eyes_submerged,
+                eye_depth_metres: reproduction.camera.fluid.eye_depth_metres,
+                signed_eye_depth_metres: reproduction.camera.fluid.signed_eye_depth_metres,
+                surface_y_metres: reproduction.camera.fluid.surface_y_metres,
+                surface_known: reproduction.camera.fluid.surface_known,
+                swimming: reproduction.camera.fluid.swimming,
+            };
+            let camera = CameraState::for_reproduction(
+                Vec3::from_array(reproduction.camera.eye_metres),
+                Vec3::from_array(reproduction.camera.velocity_metres_per_second),
+                reproduction.camera.yaw_radians,
+                reproduction.camera.pitch_radians,
+                reproduction.camera.grounded,
+                locomotion,
+                fluid,
+            )
+            .ok_or_else(|| "capture camera contains invalid values".to_owned())?;
+            let environment = WorldEnvironmentState {
+                server_time_seconds: reproduction.environment.server_time_seconds,
+                world_days: reproduction.environment.world_days,
+                day_fraction: reproduction.environment.day_fraction,
+                year_fraction: reproduction.environment.year_fraction,
+                moon_orbit_fraction: reproduction.environment.moon_orbit_fraction,
+                twinkle_phase: reproduction.environment.twinkle_phase,
+                planet_circumference_metres: reproduction.environment.planet_circumference_metres,
+                axial_tilt_radians: reproduction.environment.axial_tilt_radians,
+                moon_orbit_inclination_radians: reproduction
+                    .environment
+                    .moon_orbit_inclination_radians,
+                celestial_seed: reproduction_u64(
+                    &reproduction.environment.celestial_seed,
+                    "celestial seed",
+                )?,
+                celestial_revision: reproduction_u64(
+                    &reproduction.environment.celestial_revision,
+                    "celestial revision",
+                )?,
+                weather_fraction: reproduction.environment.weather_fraction,
+                weather_cycle_seconds: reproduction.environment.weather_cycle_seconds,
+                cloud_offset_metres: reproduction.environment.cloud_offset_metres,
+                cloud_velocity_metres_per_second: reproduction
+                    .environment
+                    .cloud_velocity_metres_per_second,
+                cloud_coverage: reproduction.environment.cloud_coverage,
+                cloud_base_metres: reproduction.environment.cloud_base_metres,
+                cloud_top_metres: reproduction.environment.cloud_top_metres,
+                weather_seed: reproduction_u64(
+                    &reproduction.environment.weather_seed,
+                    "weather seed",
+                )?,
+                weather_revision: reproduction_u64(
+                    &reproduction.environment.weather_revision,
+                    "weather revision",
+                )?,
+            };
+            if environment != environment.sanitized() {
+                return Err("capture environment contains invalid values".to_owned());
+            }
+            if reproduction
+                .render
+                .diagnostic_sky_color
+                .is_some_and(|color| {
+                    color
+                        .into_iter()
+                        .any(|channel| !channel.is_finite() || !(0.0..=1.0).contains(&channel))
+                })
+            {
+                return Err("capture diagnostic sky color is invalid".to_owned());
+            }
+            let mut renderer = self.renderer.borrow_mut();
+            if let Some(focus) = reproduction.render.lod_focus
+                && !renderer
+                    .set_lod_boundary_half_extents_voxels(focus.boundary_half_extents_voxels)
+            {
+                return Err("capture LOD boundary policy is invalid".to_owned());
+            }
+            if !renderer.set_reproduction_environment(Some(environment))
+                || !renderer.set_reproduction_render_state(ScreenshotMutableRenderState {
+                    world_lab_open: reproduction.render.world_lab_open,
+                    diagnostic_sky_color: reproduction.render.diagnostic_sky_color,
+                    geometry_source_debug: reproduction.render.geometry_source_debug,
+                    material_detail: reproduction.render.features.material_detail,
+                })
+            {
+                return Err("capture renderer state is invalid".to_owned());
+            }
+            drop(renderer);
+            if self.reproduction_restore_camera.get().is_none() {
+                self.reproduction_restore_camera
+                    .set(Some(*self.camera.borrow()));
+            }
+            self.reproduction_camera.set(Some(camera));
+            *self.camera.borrow_mut() = camera;
+            self.input.borrow_mut().clear();
+            self.simulation_accumulator.set(0.0);
+            Ok(())
+        }
+
+        fn clear_reproduction(&self) {
+            self.reproduction_camera.set(None);
+            if let Some(camera) = self.reproduction_restore_camera.take() {
+                *self.camera.borrow_mut() = camera;
+            }
+            _ = self
+                .renderer
+                .borrow_mut()
+                .set_reproduction_environment(None);
+            self.simulation_accumulator.set(0.0);
+        }
+
         fn cached_surface_sample(&self, x: i32, z: i32) -> Result<SurfaceSample, String> {
             resident_surface_sample(&self.chunks.borrow(), x, z, self.remote_environment.1)
                 .ok_or_else(|| "native surface column is not resident yet".to_owned())
@@ -1764,10 +2128,19 @@ mod web {
                 }
                 self.input.borrow_mut().clear();
             }
-            let profiling = self.profile.borrow().running();
+            let reproducing = self.reproduction_camera.get().is_some();
+            if let Some(reproduction_camera) = self.reproduction_camera.get() {
+                *camera = reproduction_camera;
+                self.input.borrow_mut().clear();
+            }
+            let profiling = !reproducing && self.profile.borrow().running();
             let chunks = self.chunks.borrow();
-            let mut accumulator = (self.simulation_accumulator.get() + dt.min(0.1))
-                .min(self.config.fixed_step_seconds * self.config.max_steps_per_frame as f32);
+            let mut accumulator = if reproducing {
+                0.0
+            } else {
+                (self.simulation_accumulator.get() + dt.min(0.1))
+                    .min(self.config.fixed_step_seconds * self.config.max_steps_per_frame as f32)
+            };
             if !self.startup_ready.get() {
                 accumulator = 0.0;
             }
@@ -1874,7 +2247,7 @@ mod web {
                 simulation_ms,
             ));
             let stream_start = performance_now(performance.as_ref());
-            let streaming_velocity = if profiling {
+            let streaming_velocity = if profiling || reproducing {
                 camera.velocity
             } else {
                 camera.streaming_velocity(&self.input.borrow())
@@ -1889,7 +2262,9 @@ mod web {
             // The streaming profiler moves a synthetic camera outside gameplay simulation. It may
             // stream/render that route, but it must never update authoritative player position or
             // gain edit reach from benchmark-only motion.
-            let remote_avatars = self.presence.update(&camera, time, dt, !profiling);
+            let remote_avatars =
+                self.presence
+                    .update(&camera, time, dt, !profiling && !reproducing);
             if let Some(error) = self.presence.take_error() {
                 log_gpu_error(&format!("player presence: {error}"));
             }
@@ -1898,13 +2273,16 @@ mod web {
             let stream_ms = (performance_now(performance.as_ref()) - stream_start) as f32;
             self.stream_milliseconds
                 .set(smoothed_ms(self.stream_milliseconds.get(), stream_ms));
-            let target = if camera.locomotion() == LocomotionMode::Spectator {
+            let target = if reproducing || camera.locomotion() == LocomotionMode::Spectator {
                 None
             } else {
                 let shape = self.renderer.borrow().edit_shape();
                 self.dig_target(&camera, shape)
             };
             let mut renderer = self.renderer.borrow_mut();
+            if renderer.screenshot_pending() {
+                renderer.set_screenshot_streaming_manifest(self.screenshot_streaming_manifest());
+            }
             renderer.set_spectator_available(spectator_available);
             renderer.set_spectator_active(camera.locomotion() == LocomotionMode::Spectator);
             renderer.set_remote_avatars(&remote_avatars);
@@ -3461,6 +3839,10 @@ mod web {
             if let Some(restore) = self.profile_restore_camera.take() {
                 *self.camera.borrow_mut() = restore;
             }
+            self.reproduction_camera.set(None);
+            if let Some(restore) = self.reproduction_restore_camera.take() {
+                *self.camera.borrow_mut() = restore;
+            }
             self.stopped.set(true);
             let id = self.frame_id.replace(0);
             if id != 0 {
@@ -4165,6 +4547,24 @@ mod web {
                  {EDIT_SPHERE_RADIUS_VOXELS},{EDIT_SPHERE_VOLUME_VOXELS}\n\
                  {SNAPSHOT_FIELD_NAMES}"
             )
+        }
+
+        /// Applies one embedded `voxels.reproduction.v2` document atomically. An empty return
+        /// value means success; a non-empty value explains the exact identity or state mismatch.
+        pub fn apply_reproduction(&self, metadata: &str) -> String {
+            let Some(engine) = self.engine.as_ref() else {
+                return "engine is unavailable".to_owned();
+            };
+            engine
+                .apply_reproduction(metadata)
+                .err()
+                .unwrap_or_default()
+        }
+
+        pub fn clear_reproduction(&self) {
+            if let Some(engine) = self.engine.as_ref() {
+                engine.clear_reproduction();
+            }
         }
 
         pub fn start_profile(&self, profile_id: u32) -> bool {
@@ -4880,6 +5280,8 @@ mod web {
             .map_err(|error| JsValue::from_str(&format!("player identity: {error}")))?;
         let client_config = ClientConfig::from_toml(&config_toml)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let client_config_hash = reproduction_config_hash(&client_config)
+            .map_err(|error| JsValue::from_str(&format!("hash client configuration: {error}")))?;
         let developer_controls_enabled = client_config.developer.controls_enabled;
         let world_transport = client_config.world.clone();
         let runtime = client_config.runtime;
@@ -5016,6 +5418,17 @@ mod web {
         renderer.set_reduced_motion(reduced_motion);
         renderer.set_inventory_counts(opened.inventory.counts);
         renderer.set_screenshot_world_manifest(&opened.manifest);
+        renderer.set_screenshot_reproduction_identity(ScreenshotReproductionIdentity {
+            build_commit: option_env!("VOXELS_BUILD_COMMIT")
+                .unwrap_or("unknown")
+                .to_owned(),
+            build_dirty: option_env!("VOXELS_BUILD_DIRTY") == Some("true"),
+            build_profile: option_env!("VOXELS_BUILD_PROFILE")
+                .unwrap_or("unknown")
+                .to_owned(),
+            protocol_version: voxels_world::protocol::PROTOCOL_VERSION,
+            client_config_hash,
+        });
         let scheduler = StreamScheduler::new(StreamConfig {
             load_radius_chunks: streaming.load_radius_chunks as i32,
             vertical_radius_chunks: streaming.vertical_radius_chunks as i32,
@@ -5041,6 +5454,8 @@ mod web {
             renderer: RefCell::new(renderer),
             viewport_size: Cell::new([width, height]),
             camera: RefCell::new(camera),
+            reproduction_camera: Cell::new(None),
+            reproduction_restore_camera: Cell::new(None),
             spectator_body: Cell::new(None),
             input: RefCell::new(InputState::default()),
             remote,

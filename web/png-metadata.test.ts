@@ -43,7 +43,7 @@ function minimalPng(): Uint8Array {
 describe("PNG screenshot metadata", () => {
   it("embeds round-trippable JSON in a CRC-valid tEXt chunk", () => {
     const source = minimalPng();
-    const json = '{"schema":"voxels.reproduction.v1","pixelWidth":1280}';
+    const json = '{"schema":"voxels.reproduction.v2","pixelWidth":1280}';
     const encoded = embedPngText(source, "voxels.reproduction", json);
 
     expect(readPngText(encoded, "voxels.reproduction")).toBe(json);

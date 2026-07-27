@@ -191,6 +191,16 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
     case "profile":
       handle?.start_profile(message.profileId);
       break;
+    case "applyReproduction":
+      scope.postMessage({
+        kind: "applyReproduction",
+        requestId: message.requestId,
+        error: handle?.apply_reproduction(message.metadata) ?? "engine is unavailable",
+      });
+      break;
+    case "clearReproduction":
+      handle?.clear_reproduction();
+      break;
     case "spectator":
       scope.postMessage({
         kind: "spectator",

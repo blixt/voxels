@@ -243,6 +243,8 @@ export interface EngineAutomationApi {
   contract(): Promise<EngineAutomationContract>;
   snapshot(): Promise<number[]>;
   profile(profileId: number): void;
+  applyReproduction(metadata: string): Promise<void>;
+  clearReproduction(): void;
   spectator(active: boolean): Promise<boolean>;
   diagnosticSky(rgb: readonly [number, number, number] | null): Promise<boolean>;
   geometrySourceDebug(enabled: boolean): Promise<boolean>;

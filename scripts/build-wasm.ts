@@ -19,6 +19,7 @@ const OUT = join(ROOT, "web/generated");
 const TARGET = "wasm32-unknown-unknown";
 const CARGO_BIN = join(homedir(), ".cargo/bin");
 const PROFILE_MARKER = "voxels-build-profile";
+const IDENTITY_MARKER = "voxels-build-identity";
 
 export type WasmBuildProfile = "debug" | "wasm-dev" | "release";
 
@@ -124,7 +125,11 @@ function emitsWasm(compiler: string): boolean {
   }
 }
 
-function run(command: string, args: string[]): void {
+function run(
+  command: string,
+  args: string[],
+  environment: Readonly<Record<string, string>> = {},
+): void {
   execFileSync(command, args, {
     cwd: ROOT,
     stdio: "inherit",
@@ -132,15 +137,47 @@ function run(command: string, args: string[]): void {
       ...process.env,
       PATH: prependPathEntry(CARGO_BIN),
       ...wasmCcEnv(),
+      ...environment,
     },
   });
 }
 
+export interface WasmBuildIdentity {
+  readonly commit: string;
+  readonly dirty: boolean;
+  readonly profile: WasmBuildProfile;
+}
+
+function gitOutput(args: readonly string[]): string {
+  return execFileSync("git", [...args], {
+    cwd: ROOT,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+}
+
+export function wasmBuildIdentity(profile: WasmBuildProfile): WasmBuildIdentity {
+  const commit = gitOutput(["rev-parse", "--verify", "HEAD"]);
+  if (!/^[0-9a-f]{40}$/u.test(commit)) {
+    throw new Error(`git returned an invalid build commit: ${commit}`);
+  }
+  return {
+    commit,
+    dirty: gitOutput(["status", "--porcelain", "--untracked-files=normal"]) !== "",
+    profile,
+  };
+}
+
 export function buildWasm(profile: WasmBuildProfile = "wasm-dev"): void {
   const wasmBindgen = wasmBindgenTool();
+  const identity = wasmBuildIdentity(profile);
   const cargoArgs = ["build", "--target", TARGET, "-p", "voxels-shell"];
   if (profile !== "debug") cargoArgs.push("--profile", profile);
-  run(rustTool("cargo"), cargoArgs);
+  run(rustTool("cargo"), cargoArgs, {
+    VOXELS_BUILD_COMMIT: identity.commit,
+    VOXELS_BUILD_DIRTY: String(identity.dirty),
+    VOXELS_BUILD_PROFILE: identity.profile,
+  });
 
   mkdirSync(join(ROOT, "target"), { recursive: true });
   const staging = mkdtempSync(join(ROOT, "target/wasm-bindgen-"));
@@ -155,6 +192,7 @@ export function buildWasm(profile: WasmBuildProfile = "wasm-dev"): void {
       join(ROOT, "target", TARGET, profile, "voxels.wasm"),
     ]);
     writeFileSync(join(staging, PROFILE_MARKER), `${profile}\n`);
+    writeFileSync(join(staging, IDENTITY_MARKER), `${JSON.stringify(identity)}\n`);
     publishWasmArtifacts(staging);
   } finally {
     rmSync(staging, { recursive: true, force: true });
@@ -171,6 +209,9 @@ export function publishWasmArtifacts(staging: string, output = OUT): void {
   const next = readdirSync(staging);
   if (!next.includes(PROFILE_MARKER)) {
     throw new Error(`staged WASM build is missing ${PROFILE_MARKER}`);
+  }
+  if (!next.includes(IDENTITY_MARKER)) {
+    throw new Error(`staged WASM build is missing ${IDENTITY_MARKER}`);
   }
   const artifacts = next
     .filter((name) => name !== PROFILE_MARKER)
@@ -237,6 +278,10 @@ export function ensureWasmBuilt(profile: WasmBuildProfile = "wasm-dev"): void {
   const publishedProfile = existsSync(join(OUT, PROFILE_MARKER))
     ? readFileSync(join(OUT, PROFILE_MARKER), "utf8").trim()
     : "";
+  const requestedIdentity = wasmBuildIdentity(profile);
+  const publishedIdentity = existsSync(join(OUT, IDENTITY_MARKER))
+    ? readFileSync(join(OUT, IDENTITY_MARKER), "utf8").trim()
+    : "";
   const newest = Math.max(
     ...RUST_SOURCE_DIRS.map((path) => newestSource(join(ROOT, path))),
     ...RUST_INPUT_FILES.map((path) => newestSource(join(ROOT, path))),
@@ -248,6 +293,8 @@ export function ensureWasmBuilt(profile: WasmBuildProfile = "wasm-dev"): void {
       built,
       newest,
       existsSync(join(OUT, "voxels.js")),
+      publishedIdentity,
+      JSON.stringify(requestedIdentity),
     )
   ) {
     buildWasm(profile);
@@ -260,11 +307,15 @@ export function wasmBuildIsCurrent(
   artifactModifiedMs: number,
   newestInputModifiedMs: number,
   hasJavaScriptGlue: boolean,
+  publishedIdentity = "",
+  requestedIdentity = "",
 ): boolean {
   return (
     publishedProfile === requestedProfile &&
     artifactModifiedMs >= newestInputModifiedMs &&
-    hasJavaScriptGlue
+    hasJavaScriptGlue &&
+    publishedIdentity !== "" &&
+    publishedIdentity === requestedIdentity
   );
 }
 

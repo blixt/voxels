@@ -3645,10 +3645,13 @@ dependencies = [
 name = "voxels-shell"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "bytemuck",
  "console_error_panic_hook",
  "glam",
  "js-sys",
+ "serde",
+ "serde_json",
  "voxels-client-config",
  "voxels-core",
  "voxels-render",

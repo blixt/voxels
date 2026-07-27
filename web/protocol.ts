@@ -60,6 +60,8 @@ export type ToWorker =
   | { kind: "missionControlCopyResult"; copied: boolean }
   | { kind: "missionControlScreenshotResult"; saved: boolean }
   | { kind: "profile"; profileId: number }
+  | { kind: "applyReproduction"; requestId: number; metadata: string }
+  | { kind: "clearReproduction" }
   | { kind: "spectator"; requestId: number; active: boolean }
   | {
       kind: "diagnosticSky";
@@ -103,6 +105,7 @@ export type FromWorker =
   | { kind: "error"; message: string }
   | { kind: "automationContract"; requestId: number; value: string }
   | { kind: "snapshot"; requestId: number; values: number[] }
+  | { kind: "applyReproduction"; requestId: number; error: string }
   | { kind: "spectator"; requestId: number; active: boolean }
   | { kind: "diagnosticSky"; requestId: number; active: boolean }
   | { kind: "geometrySourceDebug"; requestId: number; accepted: boolean }

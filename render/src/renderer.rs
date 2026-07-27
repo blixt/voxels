@@ -253,6 +253,66 @@ pub struct RendererConfig {
     pub diagnostic_sky_color: Option<[f32; 3]>,
 }
 
+/// Source/build identity embedded in every screenshot reproduction package.
+///
+/// This is supplied by the host because the portable renderer deliberately has no knowledge of a
+/// browser bundle, repository, or client configuration format.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScreenshotReproductionIdentity {
+    pub build_commit: String,
+    pub build_dirty: bool,
+    pub build_profile: String,
+    pub protocol_version: u16,
+    pub client_config_hash: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScreenshotSurfacePageState {
+    pub coord: SurfaceTileCoord,
+    pub resident_revision: Option<u64>,
+    pub requested_revision: Option<u64>,
+    pub queued: bool,
+    pub in_flight: bool,
+    pub dirty: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScreenshotCanonicalPageState {
+    pub coord: ChunkCoord,
+    pub revision: u64,
+    pub phase: u8,
+    pub desired: bool,
+}
+
+/// Exact host-side residency/request state captured on the frame that owns screenshot readback.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ScreenshotStreamingManifest {
+    pub surface_epoch: u64,
+    pub surface_pages: Vec<ScreenshotSurfacePageState>,
+    pub canonical_pages: Vec<ScreenshotCanonicalPageState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenshotMutableRenderState {
+    pub world_lab_open: bool,
+    pub diagnostic_sky_color: Option<[f32; 3]>,
+    pub geometry_source_debug: bool,
+    pub material_detail: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScreenshotFeatureState {
+    pub shadows: bool,
+    pub voxel_ambient_occlusion: bool,
+    pub screen_space_ambient_occlusion: bool,
+    pub fog: bool,
+    pub far_terrain: bool,
+    pub water: bool,
+    pub target_outline: bool,
+    pub cave_headlamp: bool,
+    pub local_lighting: bool,
+}
+
 impl Default for RendererConfig {
     fn default() -> Self {
         Self {
@@ -1428,9 +1488,27 @@ pub struct ScreenshotCapture {
 struct ScreenshotWorldIdentity {
     world_id: String,
     source_identity_hash: String,
+    source_kind: u8,
     seed: u64,
     world_schema_version: u32,
     material_schema_version: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ScreenshotGpuIdentity {
+    name: String,
+    vendor: u32,
+    device: u32,
+    device_type: String,
+    device_pci_bus_id: String,
+    driver: String,
+    driver_info: String,
+    backend: String,
+    subgroup_min_size: u32,
+    subgroup_max_size: u32,
+    supported_features: [u64; 2],
+    enabled_features: [u64; 2],
+    limits: String,
 }
 
 #[derive(Default)]
@@ -1900,6 +1978,7 @@ pub struct Renderer {
     environment: OutdoorEnvironment,
     server_world_environment: WorldEnvironmentState,
     debug_environment_override: DebugEnvironmentOverride,
+    reproduction_environment_override: Option<WorldEnvironmentState>,
     world_environment: WorldEnvironmentState,
     observer_world_xz_metres: [f64; 2],
     celestial_observation: CelestialObservation,
@@ -1915,6 +1994,9 @@ pub struct Renderer {
     diagnostics_copy_requested: bool,
     screenshot_requested: bool,
     screenshot_world_identity: Option<ScreenshotWorldIdentity>,
+    screenshot_reproduction_identity: Option<ScreenshotReproductionIdentity>,
+    screenshot_streaming_manifest: ScreenshotStreamingManifest,
+    screenshot_gpu_identity: ScreenshotGpuIdentity,
     screenshot_readback: Arc<Mutex<ScreenshotReadbackState>>,
     host_ui_action: Option<HostUiAction>,
     interior: InteriorEnvironment,
@@ -2177,7 +2259,9 @@ impl Renderer {
             })
             .await
             .map_err(|error| format!("request_adapter: {error:?}"))?;
-        let timestamp_queries = adapter.features().contains(Features::TIMESTAMP_QUERY);
+        let adapter_info = adapter.get_info();
+        let supported_features = adapter.features();
+        let timestamp_queries = supported_features.contains(Features::TIMESTAMP_QUERY);
         let required_features = if timestamp_queries {
             Features::TIMESTAMP_QUERY
         } else {
@@ -2191,6 +2275,22 @@ impl Renderer {
             })
             .await
             .map_err(|error| format!("request_device: {error:?}"))?;
+        let enabled_features = device.features();
+        let screenshot_gpu_identity = ScreenshotGpuIdentity {
+            name: adapter_info.name,
+            vendor: adapter_info.vendor,
+            device: adapter_info.device,
+            device_type: format!("{:?}", adapter_info.device_type),
+            device_pci_bus_id: adapter_info.device_pci_bus_id,
+            driver: adapter_info.driver,
+            driver_info: adapter_info.driver_info,
+            backend: format!("{:?}", adapter_info.backend),
+            subgroup_min_size: adapter_info.subgroup_min_size,
+            subgroup_max_size: adapter_info.subgroup_max_size,
+            supported_features: supported_features.bits().0,
+            enabled_features: enabled_features.bits().0,
+            limits: format!("{:?}", device.limits()),
+        };
         validate_shadow_allocation(
             runtime_config.directional_shadows.shadow_map_resolution,
             device.limits().max_texture_dimension_2d,
@@ -2841,6 +2941,7 @@ impl Renderer {
             environment,
             server_world_environment: world_environment,
             debug_environment_override: DebugEnvironmentOverride::default(),
+            reproduction_environment_override: None,
             world_environment,
             observer_world_xz_metres,
             celestial_observation,
@@ -2856,6 +2957,9 @@ impl Renderer {
             diagnostics_copy_requested: false,
             screenshot_requested: false,
             screenshot_world_identity: None,
+            screenshot_reproduction_identity: None,
+            screenshot_streaming_manifest: ScreenshotStreamingManifest::default(),
+            screenshot_gpu_identity,
             screenshot_readback: Arc::new(Mutex::new(ScreenshotReadbackState::default())),
             host_ui_action: None,
             interior: InteriorEnvironment::default(),
@@ -2954,15 +3058,26 @@ impl Renderer {
 
     pub fn set_world_environment(&mut self, state: WorldEnvironmentState) {
         self.server_world_environment = state.sanitized();
-        self.world_environment = self
-            .debug_environment_override
-            .apply(self.server_world_environment);
+        self.world_environment = self.effective_environment_state();
+    }
+
+    pub fn set_reproduction_environment(&mut self, state: Option<WorldEnvironmentState>) -> bool {
+        if state.is_some_and(|state| state != state.sanitized()) {
+            return false;
+        }
+        self.reproduction_environment_override = state;
+        self.refresh_effective_environment()
+    }
+
+    fn effective_environment_state(&self) -> WorldEnvironmentState {
+        self.reproduction_environment_override.unwrap_or_else(|| {
+            self.debug_environment_override
+                .apply(self.server_world_environment)
+        })
     }
 
     fn refresh_effective_environment(&mut self) -> bool {
-        let state = self
-            .debug_environment_override
-            .apply(self.server_world_environment);
+        let state = self.effective_environment_state();
         self.world_environment = state;
         let Some(celestial_observation) =
             state.celestial_observation(self.observer_world_xz_metres)
@@ -3351,10 +3466,104 @@ impl Renderer {
         self.screenshot_world_identity = Some(ScreenshotWorldIdentity {
             world_id: hex_bytes(manifest.world_id.as_bytes()),
             source_identity_hash: manifest.source_identity_hash().to_string(),
+            source_kind: manifest.source.source_kind as u8,
             seed: manifest.seed,
             world_schema_version: manifest.world_schema_version,
             material_schema_version: manifest.material_schema_version,
         });
+    }
+
+    pub fn set_screenshot_reproduction_identity(
+        &mut self,
+        identity: ScreenshotReproductionIdentity,
+    ) {
+        self.screenshot_reproduction_identity = Some(identity);
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the reproduction contract mirrors independently validated capture fields"
+    )]
+    pub fn validate_screenshot_reproduction_contract(
+        &self,
+        identity: &ScreenshotReproductionIdentity,
+        world_id: &str,
+        source_identity_hash: &str,
+        seed: u64,
+        pixel_width: u32,
+        pixel_height: u32,
+        device_pixel_ratio: f32,
+        vertical_fov_radians: f32,
+        near_plane_metres: f32,
+        far_plane_metres: f32,
+        features: ScreenshotFeatureState,
+    ) -> Result<(), String> {
+        if self.screenshot_reproduction_identity.as_ref() != Some(identity) {
+            return Err(
+                "capture build, protocol, or client configuration does not match".to_owned(),
+            );
+        }
+        let world_matches = self
+            .screenshot_world_identity
+            .as_ref()
+            .is_some_and(|world| {
+                world.world_id == world_id
+                    && world.source_identity_hash == source_identity_hash
+                    && world.seed == seed
+            });
+        if !world_matches {
+            return Err("capture world identity does not match the connected world".to_owned());
+        }
+        if self.config.width != pixel_width
+            || self.config.height != pixel_height
+            || self.dpr != valid_dpr(device_pixel_ratio)
+        {
+            return Err(format!(
+                "capture viewport is {pixel_width}x{pixel_height} at DPR {device_pixel_ratio}, current viewport is {}x{} at DPR {}",
+                self.config.width, self.config.height, self.dpr
+            ));
+        }
+        let expected_fov = 68.0_f32.to_radians();
+        if (vertical_fov_radians - expected_fov).abs() > 1.0e-6
+            || (near_plane_metres - 0.05).abs() > 1.0e-6
+            || (far_plane_metres - self.runtime_config.view_distance_metres).abs() > 1.0e-3
+        {
+            return Err("capture projection does not match the active renderer".to_owned());
+        }
+        let active_features = ScreenshotFeatureState {
+            shadows: self.options.shadows,
+            voxel_ambient_occlusion: self.options.ambient_occlusion,
+            screen_space_ambient_occlusion: self.options.screen_space_ambient_occlusion,
+            fog: self.options.fog,
+            far_terrain: self.options.far_terrain,
+            water: self.options.water,
+            target_outline: self.options.target_outline,
+            cave_headlamp: self.options.cave_headlamp,
+            local_lighting: self.options.local_lighting,
+        };
+        if features != active_features {
+            return Err("capture renderer features do not match the active client".to_owned());
+        }
+        Ok(())
+    }
+
+    pub fn set_reproduction_render_state(&mut self, state: ScreenshotMutableRenderState) -> bool {
+        if state.diagnostic_sky_color.is_some_and(|color| {
+            color
+                .into_iter()
+                .any(|channel| !channel.is_finite() || !(0.0..=1.0).contains(&channel))
+        }) {
+            return false;
+        }
+        _ = self.ui.set_open(state.world_lab_open);
+        self.set_diagnostic_sky_color(state.diagnostic_sky_color);
+        self.set_geometry_source_debug(state.geometry_source_debug);
+        self.set_material_detail_enabled(state.material_detail);
+        true
+    }
+
+    pub fn set_screenshot_streaming_manifest(&mut self, manifest: ScreenshotStreamingManifest) {
+        self.screenshot_streaming_manifest = manifest;
     }
 
     pub fn take_screenshot_capture(&mut self) -> Option<ScreenshotCapture> {
@@ -3456,11 +3665,12 @@ impl Renderer {
             |world| {
                 format!(
                     concat!(
-                        r#"{{"worldId":"{}","sourceIdentityHash":"{}","seed":"{}","#,
+                        r#"{{"worldId":"{}","sourceIdentityHash":"{}","sourceKind":{},"seed":"{}","#,
                         r#""worldSchemaVersion":{},"materialSchemaVersion":{}}}"#
                     ),
                     world.world_id,
                     world.source_identity_hash,
+                    world.source_kind,
                     world.seed,
                     world.world_schema_version,
                     world.material_schema_version,
@@ -3502,16 +3712,30 @@ impl Renderer {
         let celestial = self.celestial_observation;
         let options = self.options;
         let vertical_fov_radians = 68.0_f32.to_radians();
+        let runtime_identity =
+            screenshot_runtime_identity_json(self.screenshot_reproduction_identity.as_ref());
+        let gpu_identity = screenshot_gpu_identity_json(&self.screenshot_gpu_identity);
+        let streaming_manifest =
+            screenshot_streaming_manifest_json(&self.screenshot_streaming_manifest);
+        let cut_manifest = screenshot_cut_manifest_json(
+            &self.lod_draw_plan,
+            self.lod_draw_plan_focus,
+            self.cut_transition.as_ref(),
+        );
+        let cut_fingerprint = fingerprint_bytes(cut_manifest.as_bytes());
         format!(
             concat!(
-                r#"{{"schema":"voxels.reproduction.v1","frameSequence":{},"image":{{"#,
+                r#"{{"schema":"voxels.reproduction.v2","frameSequence":{},"runtime":{},"gpu":{},"image":{{"#,
                 r#""pixelWidth":{},"pixelHeight":{},"cssWidth":{},"cssHeight":{},"devicePixelRatio":{}}},"#,
-                r#""camera":{{"eyeMetres":{:?},"velocityMetresPerSecond":{:?},"yawRadians":{},"pitchRadians":{},"headingDegrees":{},"verticalFovRadians":{},"nearPlaneMetres":0.05,"farPlaneMetres":{},"grounded":{},"locomotion":"{}","fluid":{{"immersion":{},"eyeDepthMetres":{},"eyesSubmerged":{},"swimming":{}}}}},"#,
-                r#""world":{},"environment":{{"serverTimeSeconds":{},"worldDays":{},"dayFraction":{},"yearFraction":{},"moonOrbitFraction":{},"twinklePhase":{},"weatherFraction":{},"weatherCycleSeconds":{},"cloudOffsetMetres":{:?},"cloudVelocityMetresPerSecond":{:?},"cloudCoverage":{},"celestialRevision":"{}","weatherRevision":"{}","sunDirection":{:?},"moonDirection":{:?},"debugDayFraction":{},"debugWeatherFraction":{},"surfaceRegion":{}}},"#,
-                r#""presentation":{{"viewportFingerprint":"{:016x}","worldQuads":{},"waterQuads":{},"drawCalls":{},"waterDrawCalls":{},"lodTransitionQuads":{},"incompleteTransitionEdges":{},"lodCutTransitionActive":{},"lodCutTransitionPhase":{},"surfaceWidth":{},"surfaceHeight":{}}},"#,
+                r#""camera":{{"eyeMetres":{:?},"velocityMetresPerSecond":{:?},"yawRadians":{},"pitchRadians":{},"headingDegrees":{},"verticalFovRadians":{},"nearPlaneMetres":0.05,"farPlaneMetres":{},"grounded":{},"locomotion":"{}","fluid":{{"immersion":{},"eyeDepthMetres":{},"signedEyeDepthMetres":{},"surfaceYMetres":{},"surfaceKnown":{},"eyesSubmerged":{},"swimming":{}}}}},"#,
+                r#""world":{},"environment":{{"serverTimeSeconds":{},"worldDays":{},"dayFraction":{},"yearFraction":{},"moonOrbitFraction":{},"twinklePhase":{},"planetCircumferenceMetres":{},"axialTiltRadians":{},"moonOrbitInclinationRadians":{},"celestialSeed":"{}","celestialRevision":"{}","weatherFraction":{},"weatherCycleSeconds":{},"cloudOffsetMetres":{:?},"cloudVelocityMetresPerSecond":{:?},"cloudCoverage":{},"cloudBaseMetres":{},"cloudTopMetres":{},"weatherSeed":"{}","weatherRevision":"{}","sunDirection":{:?},"moonDirection":{:?},"debugDayFraction":{},"debugWeatherFraction":{},"reproductionOverride":{},"surfaceRegion":{}}},"#,
+                r#""presentation":{{"viewportFingerprint":"{:016x}","selectedCutFingerprint":"{:016x}","selectedCut":{},"worldQuads":{},"waterQuads":{},"drawCalls":{},"waterDrawCalls":{},"lodTransitionQuads":{},"incompleteTransitionEdges":{},"lodCutTransitionActive":{},"lodCutTransitionPhase":{},"surfaceWidth":{},"surfaceHeight":{}}},"#,
+                r#""streaming":{},"#,
                 r#""render":{{"worldLabOpen":{},"features":{{"shadows":{},"voxelAmbientOcclusion":{},"screenSpaceAmbientOcclusion":{},"fog":{},"farTerrain":{},"water":{},"targetOutline":{},"materialDetail":{},"caveHeadlamp":{},"localLighting":{}}},"diagnosticSkyColor":{},"geometrySourceDebug":{},"viewDistanceMetres":{},"lodFocus":{},"cutTransition":{}}}}}"#
             ),
             frame_id,
+            runtime_identity,
+            gpu_identity,
             self.config.width,
             self.config.height,
             self.config.width as f32 / self.dpr,
@@ -3528,6 +3752,9 @@ impl Renderer {
             locomotion,
             fluid.immersion,
             fluid.eye_depth_metres,
+            fluid.signed_eye_depth_metres,
+            fluid.surface_y_metres,
+            fluid.surface_known,
             fluid.eyes_submerged,
             fluid.swimming,
             world,
@@ -3537,19 +3764,29 @@ impl Renderer {
             environment.year_fraction,
             environment.moon_orbit_fraction,
             environment.twinkle_phase,
+            environment.planet_circumference_metres,
+            environment.axial_tilt_radians,
+            environment.moon_orbit_inclination_radians,
+            environment.celestial_seed,
+            environment.celestial_revision,
             environment.weather_fraction,
             environment.weather_cycle_seconds,
             environment.cloud_offset_metres,
             environment.cloud_velocity_metres_per_second,
             environment.cloud_coverage,
-            environment.celestial_revision,
+            environment.cloud_base_metres,
+            environment.cloud_top_metres,
+            environment.weather_seed,
             environment.weather_revision,
             celestial.sun_direction,
             celestial.moon_direction,
             debug_day_fraction,
             debug_weather_fraction,
+            self.reproduction_environment_override.is_some(),
             self.surface_region as u8,
             self.diagnostics.viewport_fingerprint,
+            cut_fingerprint,
+            cut_manifest,
             self.diagnostics.quads,
             self.diagnostics.water_quads,
             self.diagnostics.draw_calls,
@@ -3560,6 +3797,7 @@ impl Renderer {
             self.diagnostics.lod_cut_transition_phase,
             self.diagnostics.surface_width,
             self.diagnostics.surface_height,
+            streaming_manifest,
             self.ui.open(),
             options.shadows,
             options.ambient_occlusion,
@@ -9499,6 +9737,270 @@ fn json_optional_vec3(value: Option<[f32; 3]>) -> String {
     value.map_or_else(|| "null".to_owned(), |value| format!("{value:?}"))
 }
 
+fn json_string(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len() + 2);
+    encoded.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => encoded.push_str("\\\""),
+            '\\' => encoded.push_str("\\\\"),
+            '\u{08}' => encoded.push_str("\\b"),
+            '\u{0c}' => encoded.push_str("\\f"),
+            '\n' => encoded.push_str("\\n"),
+            '\r' => encoded.push_str("\\r"),
+            '\t' => encoded.push_str("\\t"),
+            character if character <= '\u{1f}' => {
+                let _ = write!(encoded, "\\u{:04x}", character as u32);
+            }
+            character if !character.is_ascii() => {
+                for unit in character.encode_utf16(&mut [0; 2]) {
+                    let _ = write!(encoded, "\\u{unit:04x}");
+                }
+            }
+            character => encoded.push(character),
+        }
+    }
+    encoded.push('"');
+    encoded
+}
+
+fn screenshot_runtime_identity_json(identity: Option<&ScreenshotReproductionIdentity>) -> String {
+    identity.map_or_else(
+        || "null".to_owned(),
+        |identity| {
+            format!(
+                concat!(
+                    r#"{{"buildCommit":{},"buildDirty":{},"buildProfile":{},"#,
+                    r#""protocolVersion":{},"clientConfigHash":{}}}"#
+                ),
+                json_string(&identity.build_commit),
+                identity.build_dirty,
+                json_string(&identity.build_profile),
+                identity.protocol_version,
+                json_string(&identity.client_config_hash),
+            )
+        },
+    )
+}
+
+fn screenshot_gpu_identity_json(identity: &ScreenshotGpuIdentity) -> String {
+    format!(
+        concat!(
+            r#"{{"adapterName":{},"vendor":{},"device":{},"deviceType":{},"#,
+            r#""devicePciBusId":{},"driver":{},"driverInfo":{},"backend":{},"#,
+            r#""subgroupMinSize":{},"subgroupMaxSize":{},"supportedFeatures":["{:016x}","{:016x}"],"#,
+            r#""enabledFeatures":["{:016x}","{:016x}"],"limits":{}}}"#
+        ),
+        json_string(&identity.name),
+        identity.vendor,
+        identity.device,
+        json_string(&identity.device_type),
+        json_string(&identity.device_pci_bus_id),
+        json_string(&identity.driver),
+        json_string(&identity.driver_info),
+        json_string(&identity.backend),
+        identity.subgroup_min_size,
+        identity.subgroup_max_size,
+        identity.supported_features[0],
+        identity.supported_features[1],
+        identity.enabled_features[0],
+        identity.enabled_features[1],
+        json_string(&identity.limits),
+    )
+}
+
+fn screenshot_streaming_manifest_json(manifest: &ScreenshotStreamingManifest) -> String {
+    let mut surface_pages = manifest.surface_pages.clone();
+    surface_pages.sort_unstable_by_key(|page| page.coord);
+    let mut canonical_pages = manifest.canonical_pages.clone();
+    canonical_pages.sort_unstable_by_key(|page| {
+        (
+            page.coord.x,
+            page.coord.y,
+            page.coord.z,
+            page.phase,
+            page.revision,
+        )
+    });
+    let mut encoded = format!(
+        r#"{{"surfaceEpoch":"{}","surfacePages":["#,
+        manifest.surface_epoch
+    );
+    for (index, page) in surface_pages.iter().enumerate() {
+        if index != 0 {
+            encoded.push(',');
+        }
+        let _ = write!(
+            encoded,
+            concat!(
+                r#"{{"key":"surface:{}:{}:{}","hierarchyDepth":{},"strideVoxels":{},"x":{},"z":{},"#,
+                r#""residentRevision":{},"requestedRevision":{},"queued":{},"inFlight":{},"dirty":{}}}"#
+            ),
+            page.coord.stride_voxels(),
+            page.coord.x,
+            page.coord.z,
+            page.coord.level.index(),
+            page.coord.stride_voxels(),
+            page.coord.x,
+            page.coord.z,
+            json_optional_u64(page.resident_revision),
+            json_optional_u64(page.requested_revision),
+            page.queued,
+            page.in_flight,
+            page.dirty,
+        );
+    }
+    encoded.push_str("],\"canonicalPages\":[");
+    for (index, page) in canonical_pages.iter().enumerate() {
+        if index != 0 {
+            encoded.push(',');
+        }
+        let _ = write!(
+            encoded,
+            concat!(
+                r#"{{"key":"canonical:{}:{}:{}","x":{},"y":{},"z":{},"revision":"{}","#,
+                r#""phase":{},"desired":{}}}"#
+            ),
+            page.coord.x,
+            page.coord.y,
+            page.coord.z,
+            page.coord.x,
+            page.coord.y,
+            page.coord.z,
+            page.revision,
+            page.phase,
+            page.desired,
+        );
+    }
+    encoded.push_str("]}");
+    encoded
+}
+
+fn json_optional_u64(value: Option<u64>) -> String {
+    value.map_or_else(|| "null".to_owned(), |value| format!(r#""{value}""#))
+}
+
+fn screenshot_cut_manifest_json(
+    current: &LodDrawPlan,
+    current_focus: Option<GeometricLodFocus>,
+    transition: Option<&CutTransition>,
+) -> String {
+    let current = screenshot_cut_plan_json(current, current_focus);
+    let outgoing = transition.map_or_else(
+        || "null".to_owned(),
+        |transition| screenshot_cut_plan_json(&transition.from, transition.from_focus),
+    );
+    format!(r#"{{"current":{current},"outgoing":{outgoing}}}"#)
+}
+
+fn screenshot_cut_plan_json(plan: &LodDrawPlan, focus: Option<GeometricLodFocus>) -> String {
+    let mut patches = plan.patches.owned_patches().collect::<Vec<_>>();
+    patches.sort_unstable();
+    let mut canonical_columns = plan.canonical_columns.iter().copied().collect::<Vec<_>>();
+    canonical_columns.sort_unstable();
+    let mut canonical_chunks = plan.canonical_chunks.iter().copied().collect::<Vec<_>>();
+    canonical_chunks.sort_unstable();
+    let mut enclosed_chunks = plan
+        .enclosed_view_chunks
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    enclosed_chunks.sort_unstable();
+    let mut transition_edges = plan
+        .exact_transition_edges
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    transition_edges.sort_unstable();
+    let focus = focus.map_or_else(
+        || "null".to_owned(),
+        |focus| {
+            format!(
+                r#"{{"boundaryCentresVoxels":{:?},"boundaryHalfExtentsVoxels":{:?}}}"#,
+                focus.boundary_centres(),
+                focus.boundary_half_extents(),
+            )
+        },
+    );
+    let mut encoded = format!(
+        concat!(
+            r#"{{"focus":{},"ownerCounts":{{"surfacePatches":{},"canonicalColumns":{},"#,
+            r#""canonicalChunks":{},"enclosedViewChunks":{},"transitionEdges":{},"#,
+            r#""ownerlessVisibleSamples":null,"conflictingVisibleSamples":null}},"surfacePatches":["#
+        ),
+        focus,
+        patches.len(),
+        canonical_columns.len(),
+        canonical_chunks.len(),
+        enclosed_chunks.len(),
+        transition_edges.len(),
+    );
+    for (index, patch) in patches.iter().enumerate() {
+        if index != 0 {
+            encoded.push(',');
+        }
+        let _ = write!(
+            encoded,
+            r#"{{"key":"surface-patch:{}:{}:{}","hierarchyDepth":{},"strideVoxels":{},"x":{},"z":{}}}"#,
+            patch.level.stride_voxels(),
+            patch.x,
+            patch.z,
+            patch.level.index(),
+            patch.level.stride_voxels(),
+            patch.x,
+            patch.z,
+        );
+    }
+    encoded.push_str("],\"canonicalColumns\":[");
+    write_pairs(&mut encoded, &canonical_columns);
+    encoded.push_str("],\"canonicalChunks\":[");
+    write_triples(&mut encoded, &canonical_chunks);
+    encoded.push_str("],\"enclosedViewChunks\":[");
+    write_triples(&mut encoded, &enclosed_chunks);
+    encoded.push_str("],\"transitionEdges\":[");
+    for (index, (patch, edge)) in transition_edges.iter().enumerate() {
+        if index != 0 {
+            encoded.push(',');
+        }
+        let _ = write!(
+            encoded,
+            r#"["surface-patch:{}:{}:{}",{}]"#,
+            patch.level.stride_voxels(),
+            patch.x,
+            patch.z,
+            edge,
+        );
+    }
+    let transition_mesh = plan.transition_mesh_key.map_or_else(
+        || "null".to_owned(),
+        |key| format!("[{},{},{},{}]", key.0, key.1, key.2, key.3),
+    );
+    let _ = write!(
+        encoded,
+        r#"],"incompleteTransitionEdges":{},"transitionMeshKey":{}}}"#,
+        plan.incomplete_transition_edges, transition_mesh,
+    );
+    encoded
+}
+
+fn write_pairs(destination: &mut String, values: &[(i32, i32)]) {
+    for (index, (x, z)) in values.iter().enumerate() {
+        if index != 0 {
+            destination.push(',');
+        }
+        let _ = write!(destination, "[{x},{z}]");
+    }
+}
+
+fn write_triples(destination: &mut String, values: &[(i32, i32, i32)]) {
+    for (index, (x, y, z)) in values.iter().enumerate() {
+        if index != 0 {
+            destination.push(',');
+        }
+        let _ = write!(destination, "[{x},{y},{z}]");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9508,6 +10010,37 @@ mod tests {
         assert_eq!(CUT_TRANSITION_SECONDS, 0.0);
         assert!(!cut_transition_is_active(Some(10.0), 10.0));
         assert!(!cut_transition_is_active(None, 10.1));
+    }
+
+    #[test]
+    fn screenshot_json_escaping_preserves_adapter_text_as_data() {
+        assert_eq!(
+            json_string("gpu \"driver\"\\Málaga\n\u{0001}"),
+            "\"gpu \\\"driver\\\"\\\\M\\u00e1laga\\n\\u0001\""
+        );
+    }
+
+    #[test]
+    fn screenshot_cut_manifest_is_stable_across_hash_insertion_order() {
+        let focus = GeometricLodFocus::snapped(0, 0);
+        let first = SurfacePatchId::new(SurfaceLodLevel::Stride2, -1, 2);
+        let second = SurfacePatchId::new(SurfaceLodLevel::Stride4, 3, -4);
+        let mut left = LodDrawPlan::default();
+        left.patches.rebuild(
+            focus,
+            &[first, second].into_iter().collect(),
+            &HashSet::new(),
+        );
+        let mut right = LodDrawPlan::default();
+        right.patches.rebuild(
+            focus,
+            &[second, first].into_iter().collect(),
+            &HashSet::new(),
+        );
+        assert_eq!(
+            screenshot_cut_plan_json(&left, Some(focus)),
+            screenshot_cut_plan_json(&right, Some(focus))
+        );
     }
 
     #[test]

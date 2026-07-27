@@ -4,7 +4,13 @@
 export class EngineHandle {
     private constructor();
     free(): void;
+    /**
+     * Applies one embedded `voxels.reproduction.v2` document atomically. An empty return
+     * value means success; a non-empty value explains the exact identity or state mismatch.
+     */
+    apply_reproduction(metadata: string): string;
     automation_contract(): string;
+    clear_reproduction(): void;
     destroy(): Promise<void>;
     /**
      * Reports actual current/outgoing cut ownership for one canonical voxel. This is a
@@ -85,7 +91,9 @@ export interface InitOutput {
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
     readonly create_engine: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: any) => any;
+    readonly enginehandle_apply_reproduction: (a: number, b: number, c: number) => [number, number];
     readonly enginehandle_automation_contract: (a: number) => [number, number];
+    readonly enginehandle_clear_reproduction: (a: number) => void;
     readonly enginehandle_destroy: (a: number) => any;
     readonly enginehandle_exact_volume_presented: (a: number, b: number, c: number, d: number) => number;
     readonly enginehandle_feed_input: (a: number, b: number, c: number) => number;

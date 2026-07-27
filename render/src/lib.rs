@@ -7,6 +7,7 @@ pub mod clouds;
 pub mod environment;
 pub mod lod;
 mod material_detail;
+pub mod reference;
 pub mod renderer;
 mod shader;
 pub mod shadow;
