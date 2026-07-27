@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use voxels_world::{
     TERRAIN_PAGE_MAX_CHILDREN, TerrainHierarchyDirectoryV1, TerrainHierarchyNode, TerrainPageKey,
+    TerrainPageRepresentationKind,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{Buffer, CommandEncoder, ComputePipeline, Device, Queue};
@@ -25,6 +26,14 @@ const NODE_PRIOR_REFINED: u32 = 1 << 4;
 const INVALID_NODE: u32 = u32::MAX;
 const GPU_TRAVERSAL_READBACK_SLOTS: usize = 3;
 const GPU_TRAVERSAL_WORKGROUP_SIZE: u32 = 64;
+pub(crate) const VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES: u64 = 64 * 1_024 * 1_024;
+pub(crate) const VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES: u64 = 64 * 1_024 * 1_024;
+pub(crate) const VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET: u64 = 16;
+pub(crate) const VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET: u64 = 32;
+const GEOMETRY_KIND_NONE: u32 = 0;
+const GEOMETRY_KIND_SURFACE: u32 = 1;
+const GEOMETRY_KIND_TRIANGLE: u32 = 2;
+const GPU_GEOMETRY_ELEMENT_BYTES: u64 = 24;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
@@ -66,9 +75,32 @@ struct GpuVirtualTerrainCounters {
 
 const _: () = assert!(size_of::<GpuVirtualTerrainCounters>() == 32);
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
+struct GpuVirtualTerrainGeometryPage {
+    source_word_offset: u32,
+    element_count: u32,
+    kind: u32,
+    reserved: u32,
+}
+
+const _: () = assert!(size_of::<GpuVirtualTerrainGeometryPage>() == 16);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
+struct GpuVirtualTerrainCompactionCounters {
+    surface_elements: u32,
+    triangle_elements: u32,
+    copied_pages: u32,
+    overflow_flags: u32,
+}
+
+const _: () = assert!(size_of::<GpuVirtualTerrainCompactionCounters>() == 16);
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct RawGpuVirtualTerrainFeedback {
     counters: GpuVirtualTerrainCounters,
+    compaction: GpuVirtualTerrainCompactionCounters,
     selected_indices: Vec<u32>,
     requested_indices: Vec<u32>,
 }
@@ -81,11 +113,15 @@ pub(crate) struct GpuVirtualTerrainFeedback {
     pub visited_nodes: u32,
     pub overflow_flags: u32,
     pub stack_peak: u32,
+    pub compacted_surface_elements: u32,
+    pub compacted_triangle_elements: u32,
+    pub compacted_pages: u32,
+    pub compaction_overflow_flags: u32,
 }
 
 impl GpuVirtualTerrainFeedback {
     pub const fn overflowed(&self) -> bool {
-        self.overflow_flags != 0
+        self.overflow_flags != 0 || self.compaction_overflow_flags != 0
     }
 }
 
@@ -93,6 +129,8 @@ impl GpuVirtualTerrainFeedback {
 pub(crate) enum VirtualTerrainGpuError {
     DirectoryCapacity,
     RootCapacity,
+    GeometryCapacity,
+    InvalidGeometry,
     DuplicateNodeMismatch(TerrainPageKey),
     MissingChild(TerrainPageKey),
     UnknownPage(TerrainPageKey),
@@ -112,14 +150,27 @@ pub(crate) struct VirtualTerrainGpuControl {
     node_keys: Vec<TerrainPageKey>,
     root_indices: Vec<u32>,
     prior_refined: BTreeSet<TerrainPageKey>,
+    geometry_pages: Vec<GpuVirtualTerrainGeometryPage>,
+    geometry_source_bytes: u64,
+    geometry_source_bound: bool,
     node_buffer: Buffer,
     root_buffer: Buffer,
     view_buffer: Buffer,
     counter_buffer: Buffer,
     selected_buffer: Buffer,
     request_buffer: Buffer,
+    geometry_page_buffer: Buffer,
+    compact_surface_buffer: Buffer,
+    compact_triangle_buffer: Buffer,
+    compaction_counter_buffer: Buffer,
+    indirect_buffer: Buffer,
     bind_group: wgpu::BindGroup,
     pipeline: ComputePipeline,
+    compaction_layout: wgpu::BindGroupLayout,
+    compaction_bind_group: wgpu::BindGroup,
+    compaction_prepare_pipeline: ComputePipeline,
+    compaction_pipeline: ComputePipeline,
+    compaction_finalize_pipeline: ComputePipeline,
     readback_slots: Vec<TraversalReadbackSlot>,
     next_readback_slot: usize,
     feedback: Arc<Mutex<Option<RawGpuVirtualTerrainFeedback>>>,
@@ -134,10 +185,21 @@ impl VirtualTerrainGpuControl {
         let root_bytes = buffer_bytes::<u32>(capacity.max_roots)?;
         let selected_bytes = buffer_bytes::<u32>(capacity.max_selected_pages)?;
         let request_bytes = buffer_bytes::<u32>(capacity.max_feedback_pages)?;
+        let geometry_page_bytes =
+            buffer_bytes::<GpuVirtualTerrainGeometryPage>(capacity.max_directory_nodes)?;
         let maximum_storage = device.limits().max_storage_buffer_binding_size;
-        if [node_bytes, root_bytes, selected_bytes, request_bytes]
-            .into_iter()
-            .any(|bytes| bytes > maximum_storage)
+        if [
+            node_bytes,
+            root_bytes,
+            selected_bytes,
+            request_bytes,
+            geometry_page_bytes,
+            VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES,
+            VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES,
+        ]
+        .into_iter()
+        .any(|bytes| bytes > maximum_storage)
+            || device.limits().max_storage_buffers_per_shader_stage < 8
         {
             return Err(VirtualTerrainGpuError::DeviceLimit);
         }
@@ -175,6 +237,44 @@ impl VirtualTerrainGpuControl {
             label: Some("bounded virtual terrain request feedback"),
             size: request_bytes,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let geometry_page_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bounded virtual terrain geometry page directory"),
+            size: geometry_page_bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let geometry_source_placeholder = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("empty virtual terrain geometry source"),
+            size: size_of::<GpuVirtualTerrainGeometryPage>() as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let compact_surface_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bounded compact virtual terrain surface stream"),
+            size: VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: false,
+        });
+        let compact_triangle_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bounded compact virtual terrain triangle stream"),
+            size: VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: false,
+        });
+        let compaction_counter_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("virtual terrain compaction counters"),
+                contents: bytemuck::bytes_of(&GpuVirtualTerrainCompactionCounters::default()),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+            });
+        let indirect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("virtual terrain dispatch and draw indirect commands"),
+            size: 48,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
             mapped_at_creation: false,
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -215,6 +315,64 @@ impl VirtualTerrainGpuControl {
             compilation_options: Default::default(),
             cache: None,
         });
+        let compaction_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("virtual terrain compaction layout"),
+            entries: &[
+                storage_entry(0, true),
+                storage_entry(1, false),
+                storage_entry(2, true),
+                storage_entry(3, true),
+                storage_entry(4, false),
+                storage_entry(5, false),
+                storage_entry(6, false),
+                storage_entry(7, false),
+            ],
+        });
+        let compaction_bind_group = create_compaction_bind_group(
+            device,
+            &compaction_layout,
+            &selected_buffer,
+            &counter_buffer,
+            &geometry_page_buffer,
+            &geometry_source_placeholder,
+            &compact_surface_buffer,
+            &compact_triangle_buffer,
+            &compaction_counter_buffer,
+            &indirect_buffer,
+        );
+        let compaction_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("virtual terrain compaction pipeline layout"),
+                bind_group_layouts: &[None, Some(&compaction_layout)],
+                immediate_size: 0,
+            });
+        let compaction_prepare_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("prepare virtual terrain compaction"),
+                layout: Some(&compaction_pipeline_layout),
+                module: &shader,
+                entry_point: Some("prepare_compaction"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let compaction_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("compact selected virtual terrain"),
+                layout: Some(&compaction_pipeline_layout),
+                module: &shader,
+                entry_point: Some("compact_selected"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let compaction_finalize_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("finalize virtual terrain compaction"),
+                layout: Some(&compaction_pipeline_layout),
+                module: &shader,
+                entry_point: Some("finalize_compaction"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let readback_bytes = readback_bytes(capacity)?;
         let readback_slots = (0..GPU_TRAVERSAL_READBACK_SLOTS)
             .map(|_| TraversalReadbackSlot {
@@ -234,14 +392,27 @@ impl VirtualTerrainGpuControl {
             node_keys: Vec::new(),
             root_indices: Vec::new(),
             prior_refined: BTreeSet::new(),
+            geometry_pages: Vec::new(),
+            geometry_source_bytes: geometry_source_placeholder.size(),
+            geometry_source_bound: false,
             node_buffer,
             root_buffer,
             view_buffer,
             counter_buffer,
             selected_buffer,
             request_buffer,
+            geometry_page_buffer,
+            compact_surface_buffer,
+            compact_triangle_buffer,
+            compaction_counter_buffer,
+            indirect_buffer,
             bind_group,
             pipeline,
+            compaction_layout,
+            compaction_bind_group,
+            compaction_prepare_pipeline,
+            compaction_pipeline,
+            compaction_finalize_pipeline,
             readback_slots,
             next_readback_slot: 0,
             feedback: Arc::new(Mutex::new(None)),
@@ -310,6 +481,8 @@ impl VirtualTerrainGpuControl {
                 bytemuck::cast_slice(&packed_nodes),
             );
             self.nodes.extend(packed_nodes);
+            self.geometry_pages
+                .resize(self.nodes.len(), GpuVirtualTerrainGeometryPage::default());
         }
         if !self.root_indices.is_empty() {
             queue.write_buffer(
@@ -319,6 +492,102 @@ impl VirtualTerrainGpuControl {
             );
         }
         Ok(())
+    }
+
+    pub(crate) fn bind_geometry_source(
+        &mut self,
+        device: &Device,
+        source: &Buffer,
+    ) -> Result<(), VirtualTerrainGpuError> {
+        if source.size() > device.limits().max_storage_buffer_binding_size
+            || !source.usage().contains(wgpu::BufferUsages::STORAGE)
+        {
+            return Err(VirtualTerrainGpuError::DeviceLimit);
+        }
+        if self.geometry_source_bound && self.geometry_source_bytes == source.size() {
+            return Ok(());
+        }
+        self.compaction_bind_group = create_compaction_bind_group(
+            device,
+            &self.compaction_layout,
+            &self.selected_buffer,
+            &self.counter_buffer,
+            &self.geometry_page_buffer,
+            source,
+            &self.compact_surface_buffer,
+            &self.compact_triangle_buffer,
+            &self.compaction_counter_buffer,
+            &self.indirect_buffer,
+        );
+        self.geometry_source_bytes = source.size();
+        self.geometry_source_bound = true;
+        Ok(())
+    }
+
+    pub(crate) fn update_page_geometry(
+        &mut self,
+        queue: &Queue,
+        key: TerrainPageKey,
+        source_offset_bytes: u64,
+        element_count: u32,
+        representation: Option<TerrainPageRepresentationKind>,
+    ) -> Result<(), VirtualTerrainGpuError> {
+        let index = *self
+            .node_indices
+            .get(&key)
+            .ok_or(VirtualTerrainGpuError::UnknownPage(key))?;
+        if !source_offset_bytes.is_multiple_of(size_of::<u32>() as u64) {
+            return Err(VirtualTerrainGpuError::InvalidGeometry);
+        }
+        let kind = match representation {
+            None if element_count == 0 => GEOMETRY_KIND_NONE,
+            Some(TerrainPageRepresentationKind::SurfaceCluster) => GEOMETRY_KIND_SURFACE,
+            Some(TerrainPageRepresentationKind::TriangleCluster) => GEOMETRY_KIND_TRIANGLE,
+            _ => return Err(VirtualTerrainGpuError::InvalidGeometry),
+        };
+        let byte_count = u64::from(element_count)
+            .checked_mul(GPU_GEOMETRY_ELEMENT_BYTES)
+            .ok_or(VirtualTerrainGpuError::GeometryCapacity)?;
+        if source_offset_bytes
+            .checked_add(byte_count)
+            .is_none_or(|end| end > self.geometry_source_bytes)
+        {
+            return Err(VirtualTerrainGpuError::GeometryCapacity);
+        }
+        let source_word_offset = u32::try_from(source_offset_bytes / size_of::<u32>() as u64)
+            .map_err(|_| VirtualTerrainGpuError::GeometryCapacity)?;
+        let record = GpuVirtualTerrainGeometryPage {
+            source_word_offset,
+            element_count,
+            kind,
+            reserved: 0,
+        };
+        let destination = self
+            .geometry_pages
+            .get_mut(index as usize)
+            .ok_or(VirtualTerrainGpuError::UnknownPage(key))?;
+        *destination = record;
+        let offset = u64::from(index)
+            .checked_mul(size_of::<GpuVirtualTerrainGeometryPage>() as u64)
+            .ok_or(VirtualTerrainGpuError::GeometryCapacity)?;
+        queue.write_buffer(
+            &self.geometry_page_buffer,
+            offset,
+            bytemuck::bytes_of(&record),
+        );
+        Ok(())
+    }
+
+    pub(crate) const fn compact_surface_buffer(&self) -> &Buffer {
+        &self.compact_surface_buffer
+    }
+
+    pub(crate) const fn compact_triangle_buffer(&self) -> &Buffer {
+        &self.compact_triangle_buffer
+    }
+
+    pub(crate) const fn indirect_buffer(&self) -> &Buffer {
+        &self.indirect_buffer
     }
 
     pub(crate) fn update_page_residency(
@@ -412,6 +681,11 @@ impl VirtualTerrainGpuControl {
             0,
             bytemuck::bytes_of(&GpuVirtualTerrainCounters::default()),
         );
+        queue.write_buffer(
+            &self.compaction_counter_buffer,
+            0,
+            bytemuck::bytes_of(&GpuVirtualTerrainCompactionCounters::default()),
+        );
         if !self.root_indices.is_empty() {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("virtual terrain hierarchy traversal"),
@@ -424,6 +698,19 @@ impl VirtualTerrainGpuControl {
                 1,
                 1,
             );
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("virtual terrain selected geometry compaction"),
+                timestamp_writes: None,
+            });
+            pass.set_bind_group(1, &self.compaction_bind_group, &[]);
+            pass.set_pipeline(&self.compaction_prepare_pipeline);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(&self.compaction_pipeline);
+            pass.dispatch_workgroups_indirect(&self.indirect_buffer, 0);
+            pass.set_pipeline(&self.compaction_finalize_pipeline);
+            pass.dispatch_workgroups(1, 1, 1);
         }
         self.schedule_readback(encoder);
         Ok(())
@@ -444,21 +731,29 @@ impl VirtualTerrainGpuControl {
         };
         self.next_readback_slot = (slot_index + 1) % self.readback_slots.len();
         let counter_bytes = size_of::<GpuVirtualTerrainCounters>() as u64;
+        let compaction_bytes = size_of::<GpuVirtualTerrainCompactionCounters>() as u64;
         let selected_bytes = (self.capacity.max_selected_pages * size_of::<u32>()) as u64;
         let request_bytes = (self.capacity.max_feedback_pages * size_of::<u32>()) as u64;
         encoder.copy_buffer_to_buffer(&self.counter_buffer, 0, &slot.buffer, 0, counter_bytes);
         encoder.copy_buffer_to_buffer(
-            &self.selected_buffer,
+            &self.compaction_counter_buffer,
             0,
             &slot.buffer,
             counter_bytes,
+            compaction_bytes,
+        );
+        encoder.copy_buffer_to_buffer(
+            &self.selected_buffer,
+            0,
+            &slot.buffer,
+            counter_bytes + compaction_bytes,
             selected_bytes,
         );
         encoder.copy_buffer_to_buffer(
             &self.request_buffer,
             0,
             &slot.buffer,
-            counter_bytes + selected_bytes,
+            counter_bytes + compaction_bytes + selected_bytes,
             request_bytes,
         );
         let callback_buffer = slot.buffer.clone();
@@ -495,6 +790,10 @@ impl VirtualTerrainGpuControl {
             visited_nodes: raw.counters.visited_nodes,
             overflow_flags: raw.counters.overflow_flags,
             stack_peak: raw.counters.stack_peak,
+            compacted_surface_elements: raw.compaction.surface_elements,
+            compacted_triangle_elements: raw.compaction.triangle_elements,
+            compacted_pages: raw.compaction.copied_pages,
+            compaction_overflow_flags: raw.compaction.overflow_flags,
         })
     }
 }
@@ -659,6 +958,14 @@ fn parse_feedback(
         bytemuck::try_from_bytes::<GpuVirtualTerrainCounters>(bytes.get(..counter_bytes)?)
             .ok()?
             .to_owned();
+    let compaction_start = counter_bytes;
+    let compaction_end =
+        compaction_start.checked_add(size_of::<GpuVirtualTerrainCompactionCounters>())?;
+    let compaction = bytemuck::try_from_bytes::<GpuVirtualTerrainCompactionCounters>(
+        bytes.get(compaction_start..compaction_end)?,
+    )
+    .ok()?
+    .to_owned();
     let selected_count = usize::try_from(counters.selected_count)
         .ok()?
         .min(capacity.max_selected_pages);
@@ -666,7 +973,7 @@ fn parse_feedback(
         .ok()?
         .min(capacity.max_feedback_pages);
     let selected_region_bytes = capacity.max_selected_pages.checked_mul(size_of::<u32>())?;
-    let selected_start = counter_bytes;
+    let selected_start = compaction_end;
     let selected_end = selected_start.checked_add(selected_region_bytes)?;
     let request_start = selected_end;
     let selected =
@@ -674,6 +981,7 @@ fn parse_feedback(
     let request = bytemuck::try_cast_slice::<u8, u32>(bytes.get(request_start..)?).ok()?;
     Some(RawGpuVirtualTerrainFeedback {
         counters,
+        compaction,
         selected_indices: selected.get(..selected_count)?.to_vec(),
         requested_indices: request.get(..request_count)?.to_vec(),
     })
@@ -681,7 +989,8 @@ fn parse_feedback(
 
 fn readback_bytes(capacity: VirtualTerrainCapacity) -> Result<u64, VirtualTerrainGpuError> {
     (size_of::<GpuVirtualTerrainCounters>() as u64)
-        .checked_add(buffer_bytes::<u32>(capacity.max_selected_pages)?)
+        .checked_add(size_of::<GpuVirtualTerrainCompactionCounters>() as u64)
+        .and_then(|bytes| bytes.checked_add(buffer_bytes::<u32>(capacity.max_selected_pages).ok()?))
         .and_then(|bytes| bytes.checked_add(buffer_bytes::<u32>(capacity.max_feedback_pages).ok()?))
         .ok_or(VirtualTerrainGpuError::DeviceLimit)
 }
@@ -724,6 +1033,38 @@ fn entire_entry(binding: u32, buffer: &Buffer) -> wgpu::BindGroupEntry<'_> {
         binding,
         resource: buffer.as_entire_binding(),
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the fixed WebGPU layout has eight independently bounded storage roles"
+)]
+fn create_compaction_bind_group(
+    device: &Device,
+    layout: &wgpu::BindGroupLayout,
+    selected: &Buffer,
+    traversal_counters: &Buffer,
+    geometry_pages: &Buffer,
+    geometry_source: &Buffer,
+    compact_surfaces: &Buffer,
+    compact_triangles: &Buffer,
+    compaction_counters: &Buffer,
+    indirect_commands: &Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("virtual terrain compaction bind group"),
+        layout,
+        entries: &[
+            entire_entry(0, selected),
+            entire_entry(1, traversal_counters),
+            entire_entry(2, geometry_pages),
+            entire_entry(3, geometry_source),
+            entire_entry(4, compact_surfaces),
+            entire_entry(5, compact_triangles),
+            entire_entry(6, compaction_counters),
+            entire_entry(7, indirect_commands),
+        ],
+    })
 }
 
 fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
@@ -778,12 +1119,20 @@ mod tests {
             reserved: [0; 2],
         };
         let mut bytes = bytemuck::bytes_of(&counters).to_vec();
+        let compaction = GpuVirtualTerrainCompactionCounters {
+            surface_elements: 11,
+            triangle_elements: 12,
+            copied_pages: 2,
+            overflow_flags: 4,
+        };
+        bytes.extend_from_slice(bytemuck::bytes_of(&compaction));
         bytes.extend_from_slice(bytemuck::cast_slice(&[7u32, 8]));
         bytes.extend_from_slice(bytemuck::cast_slice(&[9u32]));
         let parsed = parse_feedback(&bytes, capacity).expect("bounded feedback");
         assert_eq!(parsed.selected_indices, [7, 8]);
         assert_eq!(parsed.requested_indices, [9]);
         assert_eq!(parsed.counters.ownerless_roots, 3);
+        assert_eq!(parsed.compaction, compaction);
     }
 
     #[test]
