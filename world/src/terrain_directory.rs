@@ -4,9 +4,10 @@
 //! select a valid ancestor while individual payloads move through memory and persistent caches.
 
 use crate::{
-    TERRAIN_PAGE_MAX_COMPRESSED_BYTES, TERRAIN_PAGE_MAX_LEVEL, TerrainErrorBounds,
-    TerrainPageCodecError, TerrainPageKey, TerrainPageRepresentationKind, TerrainPageV1,
-    TerrainTopologyClass, WorldSourceIdentityHash, encode_terrain_page,
+    TERRAIN_PAGE_MAX_COMPRESSED_BYTES, TERRAIN_PAGE_MAX_LEVEL,
+    TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TerrainErrorBounds, TerrainPageCodecError,
+    TerrainPageKey, TerrainPageRepresentationKind, TerrainPageV1, TerrainTopologyClass,
+    WorldSourceIdentityHash, encode_terrain_page,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -14,6 +15,12 @@ use std::fmt;
 pub const TERRAIN_DIRECTORY_SCHEMA_VERSION: u16 = 1;
 pub const TERRAIN_DIRECTORY_MAX_NODES: usize = 131_072;
 pub const TERRAIN_DIRECTORY_MAX_ROOTS: usize = 4_096;
+/// Production region roots cover a fixed 25.6 m cube (256 canonical 10 cm voxels per edge).
+///
+/// Fixed roots cap hierarchy build fanout and keep regional directories independently cacheable.
+/// The world is a forest of these roots; it is deliberately not one octree that grows until it
+/// encloses arbitrary coordinates.
+pub const TERRAIN_REGION_ROOT_LEVEL: u8 = 3;
 const DIRECTORY_MAGIC: &[u8; 4] = b"VXTD";
 const DIRECTORY_HEADER_BYTES: usize = 80;
 const DIRECTORY_NODE_BYTES: usize = 80;
@@ -111,6 +118,16 @@ impl TerrainHierarchyDirectoryV1 {
         Ok(directory)
     }
 
+    /// Builds the production directory form: a forest of fixed, independently cacheable region
+    /// roots with complete refinement to exact level-0 leaves.
+    pub fn from_region_pages(pages: &[TerrainPageV1]) -> Result<Self, TerrainDirectoryError> {
+        let directory = Self::from_pages(pages)?;
+        if !directory.validates_region_partition() {
+            return Err(TerrainDirectoryError::InvalidRegionPartition);
+        }
+        Ok(directory)
+    }
+
     pub fn validates_identity(&self) -> bool {
         if self.nodes.is_empty()
             || self.nodes.len() > TERRAIN_DIRECTORY_MAX_NODES
@@ -169,6 +186,36 @@ impl TerrainHierarchyDirectoryV1 {
         self.nodes.iter().filter(|node| node.is_root)
     }
 
+    pub fn validates_region_partition(&self) -> bool {
+        if !self.validates_identity()
+            || self
+                .nodes
+                .iter()
+                .any(|node| node.key.level > TERRAIN_REGION_ROOT_LEVEL)
+        {
+            return false;
+        }
+        let roots = self
+            .roots()
+            .map(|root| (root.key, root))
+            .collect::<BTreeMap<_, _>>();
+        if roots
+            .values()
+            .any(|root| root.key.level != TERRAIN_REGION_ROOT_LEVEL)
+        {
+            return false;
+        }
+        self.nodes.iter().all(|node| {
+            usize::try_from(node.encoded_bytes)
+                .is_ok_and(|bytes| bytes <= TERRAIN_PAGE_TARGET_COMPRESSED_BYTES)
+                && node
+                    .key
+                    .ancestor_at(TERRAIN_REGION_ROOT_LEVEL)
+                    .is_some_and(|root| roots.contains_key(&root))
+                && (node.has_children || node.key.level == 0)
+        })
+    }
+
     pub fn node(&self, key: TerrainPageKey) -> Option<&TerrainHierarchyNode> {
         self.nodes
             .binary_search_by_key(&key, |node| node.key)
@@ -190,6 +237,7 @@ pub enum TerrainDirectoryError {
     Empty,
     InvalidPage,
     InvalidHierarchy,
+    InvalidRegionPartition,
     SourceMismatch,
     DuplicateKey,
     MissingChild,
@@ -211,6 +259,9 @@ impl fmt::Display for TerrainDirectoryError {
             Self::Empty => formatter.write_str("terrain directory is empty"),
             Self::InvalidPage => formatter.write_str("terrain directory contains an invalid page"),
             Self::InvalidHierarchy => formatter.write_str("terrain directory hierarchy is invalid"),
+            Self::InvalidRegionPartition => {
+                formatter.write_str("terrain directory is not a complete fixed region forest")
+            }
             Self::SourceMismatch => formatter.write_str("terrain directory page sources differ"),
             Self::DuplicateKey => formatter.write_str("terrain directory contains duplicate keys"),
             Self::MissingChild => formatter.write_str("terrain directory omits a referenced child"),
@@ -394,6 +445,17 @@ pub fn decode_terrain_directory(
     Ok(directory)
 }
 
+pub fn decode_region_terrain_directory(
+    encoded: &[u8],
+    expected_source: WorldSourceIdentityHash,
+) -> Result<TerrainHierarchyDirectoryV1, TerrainDirectoryError> {
+    let directory = decode_terrain_directory(encoded, expected_source)?;
+    if !directory.validates_region_partition() {
+        return Err(TerrainDirectoryError::InvalidRegionPartition);
+    }
+    Ok(directory)
+}
+
 fn directory_fingerprint(directory: &TerrainHierarchyDirectoryV1) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(DIRECTORY_FINGERPRINT_DOMAIN);
@@ -527,6 +589,49 @@ mod tests {
         leaves.into_iter().chain([root]).collect()
     }
 
+    fn structural_region_forest(root_coords: &[[i32; 3]]) -> TerrainHierarchyDirectoryV1 {
+        let root_keys = root_coords
+            .iter()
+            .copied()
+            .map(|coord| TerrainPageKey {
+                level: TERRAIN_REGION_ROOT_LEVEL,
+                coord,
+            })
+            .collect::<BTreeSet<_>>();
+        let mut pending = root_keys.iter().copied().collect::<Vec<_>>();
+        let mut keys = BTreeSet::new();
+        while let Some(key) = pending.pop() {
+            if !keys.insert(key) {
+                continue;
+            }
+            if let Some(children) = key.children() {
+                pending.extend(children);
+            }
+        }
+        let nodes = keys
+            .into_iter()
+            .map(|key| TerrainHierarchyNode {
+                key,
+                revision: 9,
+                content_fingerprint: *blake3::hash(format!("{key:?}").as_bytes()).as_bytes(),
+                errors: TerrainErrorBounds::EXACT,
+                topology: TerrainTopologyClass::Volumetric,
+                representation: TerrainPageRepresentationKind::SurfaceCluster,
+                encoded_bytes: 1_024,
+                has_children: key.level > 0,
+                is_root: root_keys.contains(&key),
+            })
+            .collect();
+        let mut directory = TerrainHierarchyDirectoryV1 {
+            source_identity_hash: identity(),
+            nodes,
+            content_fingerprint: [0; 32],
+        };
+        directory.content_fingerprint = directory_fingerprint(&directory);
+        assert!(directory.validates_identity());
+        directory
+    }
+
     #[test]
     fn directory_round_trips_a_complete_negative_coordinate_forest() {
         let pages = page_forest();
@@ -607,5 +712,59 @@ mod tests {
                 TerrainPageRepresentation::SurfaceCluster(_)
             ));
         }
+    }
+
+    #[test]
+    fn fixed_region_forest_is_complete_bounded_and_negative_coordinate_safe() {
+        let directory = structural_region_forest(&[[-1, -1, -1], [0, -1, -1]]);
+        assert!(directory.validates_region_partition());
+        assert_eq!(directory.roots().count(), 2);
+        assert_eq!(directory.nodes.len(), 2 * (1 + 8 + 64 + 512));
+        let encoded = encode_terrain_directory(&directory).unwrap();
+        assert_eq!(
+            decode_region_terrain_directory(&encoded, identity()).unwrap(),
+            directory
+        );
+
+        let mut oversized = directory.clone();
+        oversized.nodes[0].encoded_bytes =
+            u32::try_from(TERRAIN_PAGE_TARGET_COMPRESSED_BYTES + 1).unwrap();
+        oversized.content_fingerprint = directory_fingerprint(&oversized);
+        assert!(oversized.validates_identity());
+        assert!(!oversized.validates_region_partition());
+    }
+
+    #[test]
+    fn production_region_directory_rejects_arbitrary_or_terminal_coarse_roots() {
+        assert_eq!(
+            TerrainHierarchyDirectoryV1::from_region_pages(&page_forest()),
+            Err(TerrainDirectoryError::InvalidRegionPartition)
+        );
+
+        let key = TerrainPageKey {
+            level: TERRAIN_REGION_ROOT_LEVEL,
+            coord: [-2, 0, 3],
+        };
+        let mut terminal = TerrainHierarchyDirectoryV1 {
+            source_identity_hash: identity(),
+            nodes: vec![TerrainHierarchyNode {
+                key,
+                revision: 1,
+                content_fingerprint: [7; 32],
+                errors: TerrainErrorBounds {
+                    unresolved_topology: true,
+                    ..TerrainErrorBounds::EXACT
+                },
+                topology: TerrainTopologyClass::Volumetric,
+                representation: TerrainPageRepresentationKind::SurfaceCluster,
+                encoded_bytes: 1_024,
+                has_children: false,
+                is_root: true,
+            }],
+            content_fingerprint: [0; 32],
+        };
+        terminal.content_fingerprint = directory_fingerprint(&terminal);
+        assert!(terminal.validates_identity());
+        assert!(!terminal.validates_region_partition());
     }
 }

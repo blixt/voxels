@@ -68,6 +68,17 @@ impl TerrainPageKey {
         })
     }
 
+    pub fn ancestor_at(self, level: u8) -> Option<Self> {
+        if level < self.level || level > TERRAIN_PAGE_MAX_LEVEL {
+            return None;
+        }
+        let scale = 1i32.checked_shl(u32::from(level - self.level))?;
+        Some(Self {
+            level,
+            coord: self.coord.map(|component| component.div_euclid(scale)),
+        })
+    }
+
     pub fn children(self) -> Option<[Self; 8]> {
         let child_level = self.level.checked_sub(1)?;
         Some(std::array::from_fn(|index| Self {
@@ -643,11 +654,73 @@ pub fn build_exact_cluster_terrain_parent(
     revision: u64,
     children: &[TerrainPageV1],
 ) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    let page = assemble_exact_cluster_terrain_parent(key, revision, children)?;
+    encode_terrain_page(&page).map_err(|_| TerrainPageBuildError::PayloadOverflow)?;
+    Ok(page)
+}
+
+fn assemble_exact_cluster_terrain_parent(
+    key: TerrainPageKey,
+    revision: u64,
+    children: &[TerrainPageV1],
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    assemble_exact_cluster_terrain_parent_from_surfaces(key, revision, children, children)
+}
+
+#[cfg(feature = "terrain-page-builder")]
+pub(crate) fn assemble_exact_cluster_terrain_parent_from_surfaces(
+    key: TerrainPageKey,
+    revision: u64,
+    children: &[TerrainPageV1],
+    exact_surface_children: &[TerrainPageV1],
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    assemble_exact_cluster_terrain_parent_from_surfaces_impl(
+        key,
+        revision,
+        children,
+        exact_surface_children,
+    )
+}
+
+#[cfg(not(feature = "terrain-page-builder"))]
+fn assemble_exact_cluster_terrain_parent_from_surfaces(
+    key: TerrainPageKey,
+    revision: u64,
+    children: &[TerrainPageV1],
+    exact_surface_children: &[TerrainPageV1],
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    assemble_exact_cluster_terrain_parent_from_surfaces_impl(
+        key,
+        revision,
+        children,
+        exact_surface_children,
+    )
+}
+
+fn assemble_exact_cluster_terrain_parent_from_surfaces_impl(
+    key: TerrainPageKey,
+    revision: u64,
+    children: &[TerrainPageV1],
+    exact_surface_children: &[TerrainPageV1],
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
     if key.level == 0 || key.bounds().is_none() {
         return Err(TerrainPageBuildError::InvalidPageKey);
     }
     validate_children_for_key(key, children)?;
-    if children.iter().any(|child| {
+    validate_children_for_key(key, exact_surface_children)?;
+    if children[0].source_identity_hash != exact_surface_children[0].source_identity_hash {
+        return Err(TerrainPageBuildError::InvalidChildGroup(
+            TerrainReplacementError::SourceMismatch,
+        ));
+    }
+    if aggregate_child_boundaries(key, children)?
+        != aggregate_child_boundaries(key, exact_surface_children)?
+    {
+        return Err(TerrainPageBuildError::InvalidChildGroup(
+            TerrainReplacementError::OuterBoundaryMismatch,
+        ));
+    }
+    if exact_surface_children.iter().any(|child| {
         !matches!(
             child.representation,
             TerrainPageRepresentation::SurfaceCluster(_)
@@ -659,7 +732,7 @@ pub fn build_exact_cluster_terrain_parent(
     let mut occupied_by_material = BTreeMap::<u16, u32>::new();
     let mut exposed_by_material = BTreeMap::<u16, u32>::new();
     let mut material_by_id = BTreeMap::<u16, Material>::new();
-    for child in children {
+    for child in exact_surface_children {
         for coverage in &child.materials {
             let material_id = coverage.material.id();
             material_by_id.insert(material_id, coverage.material);
@@ -689,7 +762,7 @@ pub fn build_exact_cluster_terrain_parent(
     }
 
     let mut faces = BTreeSet::new();
-    for child in children {
+    for child in exact_surface_children {
         let TerrainPageRepresentation::SurfaceCluster(quads) = &child.representation else {
             unreachable!("child representation was checked above");
         };
@@ -703,9 +776,6 @@ pub fn build_exact_cluster_terrain_parent(
     let faces = faces.into_iter().collect::<Vec<_>>();
     let representation =
         TerrainPageRepresentation::SurfaceCluster(merge_surface_faces(&faces, &palette_indices));
-    if representation_bytes(&representation).len() > TERRAIN_PAGE_MAX_PAYLOAD_BYTES {
-        return Err(TerrainPageBuildError::PayloadOverflow);
-    }
     let errors = children
         .iter()
         .fold(TerrainErrorBounds::EXACT, |aggregate, child| {
@@ -719,7 +789,7 @@ pub fn build_exact_cluster_terrain_parent(
     } else {
         TerrainTopologyClass::SingleRunColumns
     };
-    let page = assemble_terrain_parent(
+    Ok(assemble_terrain_parent(
         key,
         revision,
         errors,
@@ -727,9 +797,7 @@ pub fn build_exact_cluster_terrain_parent(
         materials,
         representation,
         children,
-    )?;
-    encode_terrain_page(&page).map_err(|_| TerrainPageBuildError::PayloadOverflow)?;
-    Ok(page)
+    )?)
 }
 
 /// Simplifies a complete exact child group into a boundary-locked triangle page.
@@ -745,6 +813,15 @@ pub fn build_simplified_triangle_terrain_parent(
     children: &[TerrainPageV1],
     budget: TerrainSimplificationBudget,
 ) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    validate_simplification_budget(budget)?;
+    let exact = assemble_exact_cluster_terrain_parent(key, revision, children)?;
+    simplify_exact_terrain_parent(&exact, children, budget)
+}
+
+#[cfg(feature = "terrain-page-builder")]
+fn validate_simplification_budget(
+    budget: TerrainSimplificationBudget,
+) -> Result<(), TerrainPageBuildError> {
     if budget.target_triangles == 0
         || budget.max_error_millivoxels == 0
         || budget.target_encoded_bytes == 0
@@ -753,7 +830,15 @@ pub fn build_simplified_triangle_terrain_parent(
     {
         return Err(TerrainPageBuildError::SimplificationTargetNotReached);
     }
-    let exact = build_exact_cluster_terrain_parent(key, revision, children)?;
+    Ok(())
+}
+
+#[cfg(feature = "terrain-page-builder")]
+fn simplify_exact_terrain_parent(
+    exact: &TerrainPageV1,
+    children: &[TerrainPageV1],
+    budget: TerrainSimplificationBudget,
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
     let TerrainPageRepresentation::SurfaceCluster(quads) = &exact.representation else {
         unreachable!("exact parent builder always produces clustered quads");
     };
@@ -761,9 +846,8 @@ pub fn build_simplified_triangle_terrain_parent(
         return Err(TerrainPageBuildError::NoSurfaceToSimplify);
     }
     let input = triangulate_surface_quads(quads, exact.bounds)?;
-    if !triangle_cluster_is_valid(&input, exact.bounds, exact.materials.len()) {
-        return Err(TerrainPageBuildError::NonManifoldSurface);
-    }
+    triangle_cluster_validation_error(&input, exact.bounds, exact.materials.len())
+        .map_err(|_| TerrainPageBuildError::NonManifoldSurface)?;
     let positions = input
         .vertices
         .iter()
@@ -801,9 +885,8 @@ pub fn build_simplified_triangle_terrain_parent(
         return Err(TerrainPageBuildError::InvalidSimplification);
     }
     let cluster = compact_simplified_cluster(&input, &simplified_indices)?;
-    if !triangle_cluster_is_valid(&cluster, exact.bounds, exact.materials.len()) {
-        return Err(TerrainPageBuildError::InvalidSimplification);
-    }
+    triangle_cluster_validation_error(&cluster, exact.bounds, exact.materials.len())
+        .map_err(simplification_validation_build_error)?;
     let reduced = cluster.triangles.len() < input.triangles.len();
     let introduced_millivoxels = if reduced {
         (measured_error_voxels.max(0.0) * 1000.0)
@@ -823,24 +906,24 @@ pub fn build_simplified_triangle_terrain_parent(
     let errors = TerrainErrorBounds {
         geometric_millivoxels: child_errors
             .geometric_millivoxels
-            .saturating_add(introduced_millivoxels),
+            .max(introduced_millivoxels),
         silhouette_millivoxels: child_errors
             .silhouette_millivoxels
-            .saturating_add(introduced_millivoxels),
+            .max(introduced_millivoxels),
         material_boundary_millivoxels: child_errors.material_boundary_millivoxels,
         normal_milliradians: if reduced {
-            child_errors.normal_milliradians.saturating_add(3_142)
+            child_errors.normal_milliradians.max(3_142)
         } else {
             child_errors.normal_milliradians
         },
         unresolved_topology: child_errors.unresolved_topology,
     };
     let page = assemble_terrain_parent(
-        key,
-        revision,
+        exact.key,
+        exact.revision,
         errors,
         exact.topology,
-        exact.materials,
+        exact.materials.clone(),
         TerrainPageRepresentation::TriangleCluster(cluster),
         children,
     )?;
@@ -866,13 +949,41 @@ pub fn build_budgeted_terrain_parent(
     children: &[TerrainPageV1],
     budget: TerrainSimplificationBudget,
 ) -> Result<TerrainPageV1, TerrainPageBuildError> {
-    let exact = build_exact_cluster_terrain_parent(key, revision, children)?;
-    let exact_bytes =
-        encode_terrain_page(&exact).map_err(|_| TerrainPageBuildError::PayloadOverflow)?;
-    if exact_bytes.len() <= budget.target_encoded_bytes as usize {
-        return Ok(exact);
+    build_budgeted_terrain_parent_from_surfaces(key, revision, children, children, budget)
+}
+
+#[cfg(feature = "terrain-page-builder")]
+pub(crate) fn build_budgeted_terrain_parent_from_surfaces(
+    key: TerrainPageKey,
+    revision: u64,
+    children: &[TerrainPageV1],
+    exact_surface_children: &[TerrainPageV1],
+    budget: TerrainSimplificationBudget,
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    validate_simplification_budget(budget)?;
+    let exact = assemble_exact_cluster_terrain_parent_from_surfaces(
+        key,
+        revision,
+        children,
+        exact_surface_children,
+    )?;
+    select_budgeted_exact_terrain_parent(&exact, children, budget)
+}
+
+#[cfg(feature = "terrain-page-builder")]
+pub(crate) fn select_budgeted_exact_terrain_parent(
+    exact: &TerrainPageV1,
+    children: &[TerrainPageV1],
+    budget: TerrainSimplificationBudget,
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    validate_simplification_budget(budget)?;
+    if representation_bytes(&exact.representation).len() <= TERRAIN_PAGE_MAX_PAYLOAD_BYTES
+        && encode_terrain_page(exact)
+            .is_ok_and(|encoded| encoded.len() <= budget.target_encoded_bytes as usize)
+    {
+        return Ok(exact.clone());
     }
-    build_simplified_triangle_terrain_parent(key, revision, children, budget)
+    simplify_exact_terrain_parent(exact, children, budget)
 }
 
 #[cfg(feature = "terrain-page-builder")]
@@ -952,10 +1063,24 @@ fn triangulate_surface_quads(
     if input_cluster_has_open_interior_edge(&cluster, bounds) {
         return Err(TerrainPageBuildError::OpenInteriorSurface);
     }
-    if !triangle_cluster_is_valid(&cluster, bounds, usize::from(u8::MAX) + 1) {
-        return Err(TerrainPageBuildError::NonManifoldSurface);
-    }
+    triangle_cluster_validation_error(&cluster, bounds, usize::from(u8::MAX) + 1)
+        .map_err(|_| TerrainPageBuildError::NonManifoldSurface)?;
     Ok(cluster)
+}
+
+#[cfg(feature = "terrain-page-builder")]
+fn simplification_validation_build_error(
+    error: TriangleClusterValidationError,
+) -> TerrainPageBuildError {
+    match error {
+        TriangleClusterValidationError::DuplicateGeometricTriangle => {
+            TerrainPageBuildError::OverlappingSurface
+        }
+        TriangleClusterValidationError::OpenInteriorEdge => {
+            TerrainPageBuildError::OpenInteriorSurface
+        }
+        _ => TerrainPageBuildError::InvalidSimplification,
+    }
 }
 
 #[cfg(feature = "terrain-page-builder")]
@@ -1749,7 +1874,7 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
                 && quad_inside_bounds(*quad, page.bounds)
         }),
         TerrainPageRepresentation::TriangleCluster(cluster) => {
-            triangle_cluster_is_valid(cluster, page.bounds, palette_len)
+            triangle_cluster_validation_error(cluster, page.bounds, palette_len).is_ok()
         }
     }
 }
@@ -1785,32 +1910,54 @@ fn quad_inside_bounds(quad: TerrainSurfaceQuad, bounds: VoxelBounds) -> bool {
     }
 }
 
-fn triangle_cluster_is_valid(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TriangleClusterValidationError {
+    Empty,
+    VertexLimit,
+    VertexOutsideBounds,
+    InvalidVertexMaterial,
+    DuplicateTriangle,
+    InvalidTriangleMaterial,
+    MissingVertex,
+    TriangleMaterialMismatch,
+    DuplicateGeometricTriangle,
+    DegenerateTriangle,
+    UnusedVertex,
+    OpenInteriorEdge,
+}
+
+fn triangle_cluster_validation_error(
     cluster: &TerrainTriangleCluster,
     bounds: VoxelBounds,
     palette_len: usize,
-) -> bool {
-    if cluster.vertices.is_empty()
-        || cluster.triangles.is_empty()
-        || cluster.vertices.len() > u32::MAX as usize
-        || cluster.vertices.iter().any(|vertex| {
-            usize::from(vertex.material_index) >= palette_len
-                || !(bounds.min.x..=bounds.max.x).contains(&vertex.position[0])
-                || !(bounds.min.y..=bounds.max.y).contains(&vertex.position[1])
-                || !(bounds.min.z..=bounds.max.z).contains(&vertex.position[2])
-        })
-    {
-        return false;
+) -> Result<(), TriangleClusterValidationError> {
+    if cluster.vertices.is_empty() || cluster.triangles.is_empty() {
+        return Err(TriangleClusterValidationError::Empty);
+    }
+    if cluster.vertices.len() > u32::MAX as usize {
+        return Err(TriangleClusterValidationError::VertexLimit);
+    }
+    for vertex in &cluster.vertices {
+        if usize::from(vertex.material_index) >= palette_len {
+            return Err(TriangleClusterValidationError::InvalidVertexMaterial);
+        }
+        if !(bounds.min.x..=bounds.max.x).contains(&vertex.position[0])
+            || !(bounds.min.y..=bounds.max.y).contains(&vertex.position[1])
+            || !(bounds.min.z..=bounds.max.z).contains(&vertex.position[2])
+        {
+            return Err(TriangleClusterValidationError::VertexOutsideBounds);
+        }
     }
     let mut used = vec![false; cluster.vertices.len()];
     let mut unique_triangles = BTreeSet::new();
     let mut unique_geometric_triangles = BTreeSet::new();
     let mut edges = BTreeMap::<([i32; 3], [i32; 3]), u8>::new();
     for triangle in &cluster.triangles {
-        if !unique_triangles.insert(*triangle)
-            || usize::from(triangle.material_index) >= palette_len
-        {
-            return false;
+        if !unique_triangles.insert(*triangle) {
+            return Err(TriangleClusterValidationError::DuplicateTriangle);
+        }
+        if usize::from(triangle.material_index) >= palette_len {
+            return Err(TriangleClusterValidationError::InvalidTriangleMaterial);
         }
         let Some(vertices) = triangle
             .vertices
@@ -1822,13 +1969,13 @@ fn triangle_cluster_is_valid(
             .into_iter()
             .collect::<Option<Vec<_>>>()
         else {
-            return false;
+            return Err(TriangleClusterValidationError::MissingVertex);
         };
         if vertices
             .iter()
             .any(|vertex| vertex.material_index != triangle.material_index)
         {
-            return false;
+            return Err(TriangleClusterValidationError::TriangleMaterialMismatch);
         }
         let mut geometric_triangle = [
             vertices[0].position,
@@ -1837,7 +1984,7 @@ fn triangle_cluster_is_valid(
         ];
         geometric_triangle.sort_unstable();
         if !unique_geometric_triangles.insert(geometric_triangle) {
-            return false;
+            return Err(TriangleClusterValidationError::DuplicateGeometricTriangle);
         }
         for index in triangle.vertices {
             used[index as usize] = true;
@@ -1845,7 +1992,7 @@ fn triangle_cluster_is_valid(
         let edge_a = vector_difference(vertices[1].position, vertices[0].position);
         let edge_b = vector_difference(vertices[2].position, vertices[0].position);
         if cross_product(edge_a, edge_b) == [0, 0, 0] {
-            return false;
+            return Err(TriangleClusterValidationError::DegenerateTriangle);
         }
         for (from, to) in [(0, 1), (1, 2), (2, 0)] {
             let from = vertices[from].position;
@@ -1855,11 +2002,16 @@ fn triangle_cluster_is_valid(
             *entry = entry.saturating_add(1);
         }
     }
-    used.into_iter().all(|used| used)
-        && edges.into_iter().all(|((left, right), count)| {
-            (count >= 2 && count % 2 == 0)
-                || (count % 2 == 1 && edge_is_on_bounds(left, right, bounds))
-        })
+    if used.into_iter().any(|used| !used) {
+        return Err(TriangleClusterValidationError::UnusedVertex);
+    }
+    if edges.into_iter().any(|((left, right), count)| {
+        !((count >= 2 && count % 2 == 0)
+            || (count % 2 == 1 && edge_is_on_bounds(left, right, bounds)))
+    }) {
+        return Err(TriangleClusterValidationError::OpenInteriorEdge);
+    }
+    Ok(())
 }
 
 fn vector_difference(left: [i32; 3], right: [i32; 3]) -> [i64; 3] {
@@ -2510,6 +2662,9 @@ mod tests {
         let parent = key.parent().unwrap();
         assert_eq!(parent.coord, [-1, -1, 1]);
         assert!(parent.children().unwrap().contains(&key));
+        assert_eq!(key.ancestor_at(3).unwrap().coord, [-1, -1, 0]);
+        assert_eq!(key.ancestor_at(3).unwrap().level, 3);
+        assert_eq!(parent.ancestor_at(0), None);
     }
 
     #[test]
@@ -2851,6 +3006,78 @@ mod tests {
         assert_eq!(
             decode_terrain_page(&encoded, identity()).unwrap(),
             simplified
+        );
+    }
+
+    #[cfg(feature = "terrain-page-builder")]
+    #[test]
+    fn exact_surface_sidecars_build_ancestors_over_simplified_children() {
+        let root_key = TerrainPageKey {
+            level: 2,
+            coord: [-1, -1, 0],
+        };
+        let sloped = |coord: VoxelCoord| {
+            let height = -32 + coord.x.div_euclid(5) - coord.z.div_euclid(7);
+            if coord.y <= height {
+                Material::Stone
+            } else {
+                Material::Air
+            }
+        };
+        let budget = TerrainSimplificationBudget {
+            target_triangles: 4_096,
+            max_error_millivoxels: 8_000,
+            target_encoded_bytes: TERRAIN_PAGE_TARGET_COMPRESSED_BYTES as u32,
+        };
+        let mut published_children = Vec::new();
+        let mut exact_children = Vec::new();
+        for child_key in root_key.children().unwrap() {
+            let leaves = child_key
+                .children()
+                .unwrap()
+                .into_iter()
+                .map(|leaf| build_exact_terrain_page(identity(), leaf, 81, sloped).unwrap())
+                .collect::<Vec<_>>();
+            let exact = assemble_exact_cluster_terrain_parent(child_key, 82, &leaves).unwrap();
+            let published = match &exact.representation {
+                TerrainPageRepresentation::SurfaceCluster(quads) if quads.is_empty() => {
+                    exact.clone()
+                }
+                TerrainPageRepresentation::SurfaceCluster(_) => {
+                    simplify_exact_terrain_parent(&exact, &leaves, budget).unwrap()
+                }
+                _ => unreachable!(),
+            };
+            validate_terrain_replacement(&published, &leaves).unwrap();
+            exact_children.push(exact);
+            published_children.push(published);
+        }
+        assert!(published_children.iter().any(|page| matches!(
+            page.representation,
+            TerrainPageRepresentation::TriangleCluster(_)
+        )));
+
+        let exact_root = assemble_exact_cluster_terrain_parent_from_surfaces(
+            root_key,
+            83,
+            &published_children,
+            &exact_children,
+        )
+        .unwrap();
+        let published_root =
+            select_budgeted_exact_terrain_parent(&exact_root, &published_children, budget).unwrap();
+        validate_terrain_replacement(&published_root, &published_children).unwrap();
+        assert!(
+            published_root.errors.geometric_millivoxels
+                >= published_children
+                    .iter()
+                    .map(|child| child.errors.geometric_millivoxels)
+                    .max()
+                    .unwrap()
+        );
+        assert_eq!(
+            clustered_face_set(&exact_root),
+            exact_children.iter().flat_map(clustered_face_set).collect()
         );
     }
 
