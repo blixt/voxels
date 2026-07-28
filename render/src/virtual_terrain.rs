@@ -270,7 +270,7 @@ impl VirtualTerrainHierarchy {
         let Some(parent) = self.resident.get(&key).map(|resident| &resident.page) else {
             return false;
         };
-        let Some(children) = key.children() else {
+        let Some(children) = key.refinement_children() else {
             return false;
         };
         let child_pages = children
@@ -281,7 +281,7 @@ impl VirtualTerrainHierarchy {
                     .map(|resident| resident.page.clone())
             })
             .collect::<Vec<_>>();
-        child_pages.len() == TERRAIN_PAGE_MAX_CHILDREN
+        child_pages.len() == children.len()
             && validate_terrain_replacement(parent, &child_pages).is_ok()
     }
 
@@ -416,8 +416,8 @@ impl VirtualTerrainHierarchy {
                 continue;
             }
             let expected = parent
-                .children()
-                .map(BTreeSet::from)
+                .refinement_children()
+                .map(|children| children.into_iter().collect())
                 .ok_or(VirtualTerrainError::IncompleteRootReplacement(*parent))?;
             if replacements != expected {
                 return Err(VirtualTerrainError::IncompleteRootReplacement(*parent));
@@ -440,8 +440,8 @@ impl VirtualTerrainHierarchy {
                 continue;
             }
             let expected = parent
-                .children()
-                .map(BTreeSet::from)
+                .refinement_children()
+                .map(|children| children.into_iter().collect())
                 .ok_or(VirtualTerrainError::IncompleteRootReplacement(*parent))?;
             if replacements != expected {
                 return Err(VirtualTerrainError::IncompleteRootReplacement(*parent));
@@ -604,7 +604,13 @@ impl VirtualTerrainHierarchy {
             .active_roots
             .iter()
             .copied()
-            .filter(|key| page_is_visible(*key, view))
+            .filter(|key| {
+                builder
+                    .hierarchy
+                    .nodes
+                    .get(key)
+                    .is_some_and(|node| page_is_visible(node.bounds, view))
+            })
             .collect::<Vec<_>>();
         for root in roots {
             if builder.selected.len() >= builder.hierarchy.capacity.max_selected_pages {
@@ -672,7 +678,13 @@ impl CutBuilder<'_> {
         // refinement remains a complete octree partition of that root. Culling individual
         // descendants made `is_renderable` lie: the selected pages no longer covered the volume
         // whose legacy owner was being retired, which could expose gaps at the frustum edge.
-        if root && !page_is_visible(key, self.view) {
+        let Some(node) = self.hierarchy.nodes.get(&key).cloned() else {
+            if root {
+                self.ownerless_roots.push(key);
+            }
+            return;
+        };
+        if root && !page_is_visible(node.bounds, self.view) {
             return;
         }
         if self.visited_nodes >= self.hierarchy.capacity.max_traversal_nodes {
@@ -685,12 +697,6 @@ impl CutBuilder<'_> {
             return;
         }
         self.visited_nodes += 1;
-        let Some(node) = self.hierarchy.nodes.get(&key).cloned() else {
-            if root {
-                self.ownerless_roots.push(key);
-            }
-            return;
-        };
         if !self.hierarchy.resident.contains_key(&key) {
             self.request(key);
             if root {
@@ -707,13 +713,12 @@ impl CutBuilder<'_> {
         let wants_refinement =
             node.has_children && (self.view.force_exact_leaves || projected_error > threshold);
         if wants_refinement
-            && self
-                .selected
-                .len()
-                .saturating_add(TERRAIN_PAGE_MAX_CHILDREN)
-                <= self.hierarchy.capacity.max_selected_pages
+            && self.selected.len().saturating_add(
+                key.refinement_children()
+                    .map_or(TERRAIN_PAGE_MAX_CHILDREN, |children| children.len()),
+            ) <= self.hierarchy.capacity.max_selected_pages
         {
-            let Some(children) = key.children() else {
+            let Some(children) = key.refinement_children() else {
                 self.select(key);
                 return;
             };
@@ -726,7 +731,7 @@ impl CutBuilder<'_> {
                         .map(|resident| resident.page.clone())
                 })
                 .collect::<Vec<_>>();
-            if child_pages.len() == TERRAIN_PAGE_MAX_CHILDREN {
+            if child_pages.len() == children.len() {
                 let Some(parent) = self
                     .hierarchy
                     .resident
@@ -844,7 +849,7 @@ fn projected_page_error_pixels(node: &TerrainHierarchyNode, view: VirtualTerrain
         .max(node.errors.material_boundary_millivoxels);
     let positional_error_metres = f64::from(positional_error_millivoxels) * 0.000_1;
     let distance =
-        distance_to_page_metres(node.key, view.camera_position_metres).max(view.near_metres);
+        distance_to_page_metres(node.bounds, view.camera_position_metres).max(view.near_metres);
     let projection_scale =
         f64::from(view.viewport_height_pixels) / (2.0 * (view.vertical_fov_radians * 0.5).tan());
     let positional_pixels = positional_error_metres * projection_scale / distance;
@@ -855,10 +860,7 @@ fn projected_page_error_pixels(node: &TerrainHierarchyNode, view: VirtualTerrain
     positional_pixels.max(normal_pixels)
 }
 
-fn distance_to_page_metres(key: TerrainPageKey, point: [f64; 3]) -> f64 {
-    let Some(bounds) = key.bounds() else {
-        return f64::INFINITY;
-    };
+fn distance_to_page_metres(bounds: voxels_world::VoxelBounds, point: [f64; 3]) -> f64 {
     let minimum = bounds.min.as_array().map(|value| f64::from(value) * 0.1);
     let maximum = bounds.max.as_array().map(|value| f64::from(value) * 0.1);
     (0..3)
@@ -876,10 +878,7 @@ fn distance_to_page_metres(key: TerrainPageKey, point: [f64; 3]) -> f64 {
         .sqrt()
 }
 
-fn page_is_visible(key: TerrainPageKey, view: VirtualTerrainView) -> bool {
-    let Some(bounds) = key.bounds() else {
-        return false;
-    };
+fn page_is_visible(bounds: voxels_world::VoxelBounds, view: VirtualTerrainView) -> bool {
     let minimum = bounds.min.as_array().map(|value| f64::from(value) * 0.1);
     let maximum = bounds.max.as_array().map(|value| f64::from(value) * 0.1);
     let center = [
@@ -1231,9 +1230,11 @@ mod tests {
             level: 0,
             coord: [0, 0, 0],
         };
-        assert_eq!(distance_to_page_metres(key, [0.0, 0.0, 6.4]), 3.2);
+        let bounds = key.bounds().expect("page bounds");
+        assert_eq!(distance_to_page_metres(bounds, [0.0, 0.0, 6.4]), 3.2);
         let node = TerrainHierarchyNode {
             key,
+            bounds,
             revision: 1,
             content_fingerprint: [1; 32],
             errors: TerrainErrorBounds {
@@ -1258,7 +1259,9 @@ mod tests {
             TerrainPageKey {
                 level: 1,
                 coord: [-1, 0, -1],
-            },
+            }
+            .bounds()
+            .expect("page bounds"),
             view(false),
         );
         assert!(visible);

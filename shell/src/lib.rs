@@ -1530,6 +1530,21 @@ mod web {
     }
 
     fn terrain_page_bounds_metres(key: TerrainPageKey) -> Option<([f64; 3], [f64; 3])> {
+        if key.is_surface() {
+            let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = key.horizontal_bounds()?;
+            return Some((
+                [
+                    f64::from(minimum_x) * 0.1,
+                    f64::from(i32::MIN) * 0.1,
+                    f64::from(minimum_z) * 0.1,
+                ],
+                [
+                    f64::from(maximum_x) * 0.1,
+                    f64::from(i32::MAX) * 0.1,
+                    f64::from(maximum_z) * 0.1,
+                ],
+            ));
+        }
         let bounds = key.bounds()?;
         Some((
             bounds.min.as_array().map(|value| f64::from(value) * 0.1),
@@ -3479,22 +3494,16 @@ mod web {
             streaming_velocity: Vec3,
         ) -> Vec<[i32; 2]> {
             let camera_chunk = world_to_chunk(camera.position);
-            let camera_leaf = TerrainPageKey {
-                level: 0,
-                coord: [camera_chunk.x, camera_chunk.y, camera_chunk.z],
-            };
+            let camera_leaf = TerrainPageKey::surface(0, camera_chunk.x, camera_chunk.z);
             let Some(camera_root) = camera_leaf.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL) else {
                 return Vec::new();
             };
             let predicted_position = camera.position
                 + streaming_velocity * self.config.stream_velocity_lookahead_seconds.max(0.0);
             let predicted_chunk = world_to_chunk(predicted_position);
-            let predicted_root = TerrainPageKey {
-                level: 0,
-                coord: [predicted_chunk.x, predicted_chunk.y, predicted_chunk.z],
-            }
-            .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
-            .unwrap_or(camera_root);
+            let predicted_root = TerrainPageKey::surface(0, predicted_chunk.x, predicted_chunk.z)
+                .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                .unwrap_or(camera_root);
             let camera_position = camera.position.to_array().map(f64::from);
             let predicted_position = predicted_position.to_array().map(f64::from);
             let forward = camera.forward().to_array().map(f64::from);
@@ -3510,11 +3519,9 @@ mod web {
                         camera_root.coord[0].saturating_add(offset_x),
                         camera_root.coord[2].saturating_add(offset_z),
                     ];
-                    let probe = TerrainPageKey {
-                        level: TERRAIN_COVERAGE_ROOT_LEVEL,
-                        coord: [column[0], camera_root.coord[1], column[1]],
-                    };
-                    if probe.bounds().is_none() {
+                    let probe =
+                        TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, column[0], column[1]);
+                    if probe.horizontal_bounds().is_none() {
                         continue;
                     }
                     let center = terrain_page_center_metres(probe);
@@ -3626,11 +3633,9 @@ mod web {
             let prioritized_roots =
                 self.desired_virtual_terrain_roots(&prioritized_columns, camera);
             let camera_chunk = world_to_chunk(camera.position);
-            let Some(camera_root) = (TerrainPageKey {
-                level: 0,
-                coord: [camera_chunk.x, camera_chunk.y, camera_chunk.z],
-            })
-            .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL) else {
+            let Some(camera_root) = TerrainPageKey::surface(0, camera_chunk.x, camera_chunk.z)
+                .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+            else {
                 return;
             };
             let retained_roots = {
@@ -3925,7 +3930,7 @@ mod web {
                 .filter_map(|key| key.parent())
                 .collect::<BTreeSet<_>>();
             for parent in parents {
-                let Some(children) = parent.children() else {
+                let Some(children) = parent.refinement_children() else {
                     continue;
                 };
                 if !children.iter().all(|child| requested.contains_key(child)) {
@@ -4225,11 +4230,8 @@ mod web {
             let invalid = affected_chunks
                 .iter()
                 .filter_map(|coord| {
-                    TerrainPageKey {
-                        level: 0,
-                        coord: [coord.x, coord.y, coord.z],
-                    }
-                    .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                    TerrainPageKey::surface(0, coord.x, coord.z)
+                        .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
                 })
                 .collect::<BTreeSet<_>>();
             if invalid.is_empty() {
@@ -6289,12 +6291,9 @@ mod web {
                 ) = {
                     let state = engine.virtual_terrain.borrow();
                     let camera_chunk = world_to_chunk(camera.position);
-                    let current_column = (TerrainPageKey {
-                        level: 0,
-                        coord: [camera_chunk.x, camera_chunk.y, camera_chunk.z],
-                    })
-                    .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
-                    .map(|root| [root.coord[0], root.coord[2]]);
+                    let current_column = TerrainPageKey::surface(0, camera_chunk.x, camera_chunk.z)
+                        .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                        .map(|root| [root.coord[0], root.coord[2]]);
                     let current_roots =
                         current_column.and_then(|column| state.columns.get(&column));
                     let current_registered_roots = current_roots.map_or(0, |column| {
@@ -7832,10 +7831,7 @@ mod tests {
     fn incomplete_candidate_cut_keeps_prior_registered_roots() {
         use voxels_world::{TERRAIN_COVERAGE_ROOT_LEVEL, TerrainPageKey};
 
-        let root = |x| TerrainPageKey {
-            level: TERRAIN_COVERAGE_ROOT_LEVEL,
-            coord: [x, 3, -4],
-        };
+        let root = |x| TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, x, -4);
         let registered = [root(8), root(9), root(10), root(11)];
 
         let keep = virtual_terrain_root_working_set(&[root(12)], registered, root(11), 4);
@@ -7847,10 +7843,7 @@ mod tests {
     fn virtual_terrain_root_working_set_evicts_only_when_bounded() {
         use voxels_world::{TERRAIN_COVERAGE_ROOT_LEVEL, TerrainPageKey};
 
-        let root = |x| TerrainPageKey {
-            level: TERRAIN_COVERAGE_ROOT_LEVEL,
-            coord: [x, -2, 7],
-        };
+        let root = |x| TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, x, 7);
         let registered = [root(0), root(1), root(2), root(3), root(4)];
 
         let keep = virtual_terrain_root_working_set(&[root(4)], registered, root(4), 3);

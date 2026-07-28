@@ -15,10 +15,12 @@ use std::io::Read;
 #[cfg(feature = "terrain-page-builder")]
 use crate::terrain_error::certify_bidirectional_surface_error;
 
-pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 3;
+pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 4;
 pub const TERRAIN_PAGE_EDGE_SAMPLES: u32 = 32;
 pub const TERRAIN_PAGE_MAX_LEVEL: u8 = 20;
 pub const TERRAIN_PAGE_MAX_CHILDREN: usize = 8;
+pub const TERRAIN_SURFACE_PAGE_CHILDREN: usize = 4;
+pub const TERRAIN_SURFACE_PAGE_COORD_Y: i32 = i32::MIN;
 /// Builder target selected from the 12.8–51.2 m Terrain Diffusion sizing corpus.
 ///
 /// Exact pages may temporarily exceed this while an ancestor is being simplified, but published
@@ -28,7 +30,7 @@ pub const TERRAIN_PAGE_TARGET_COMPRESSED_BYTES: usize = 65_536;
 pub const TERRAIN_PAGE_MAX_COMPRESSED_BYTES: usize = 262_144;
 pub const TERRAIN_PAGE_MAX_PAYLOAD_BYTES: usize = 2_097_152;
 const SPARSE_BRICK_EDGE: u8 = 8;
-const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v3\0";
+const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v4\0";
 const PARENT_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-parent-boundary-v1\0";
 const HEIGHTFIELD_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-heightfield-boundary-v1\0";
 const PAGE_MAGIC: &[u8; 4] = b"VXTP";
@@ -47,8 +49,40 @@ pub struct TerrainPageKey {
 }
 
 impl TerrainPageKey {
-    pub fn bounds(self) -> Option<VoxelBounds> {
+    pub const fn surface(level: u8, x: i32, z: i32) -> Self {
+        Self {
+            level,
+            coord: [x, TERRAIN_SURFACE_PAGE_COORD_Y, z],
+        }
+    }
+
+    pub const fn is_surface(self) -> bool {
+        self.coord[1] == TERRAIN_SURFACE_PAGE_COORD_Y
+    }
+
+    pub fn horizontal_bounds(self) -> Option<[[i32; 2]; 2]> {
         if self.level > TERRAIN_PAGE_MAX_LEVEL {
+            return None;
+        }
+        let span = i64::from(TERRAIN_PAGE_EDGE_SAMPLES).checked_shl(u32::from(self.level))?;
+        let minimum_x = i64::from(self.coord[0]).checked_mul(span)?;
+        let minimum_z = i64::from(self.coord[2]).checked_mul(span)?;
+        let maximum_x = minimum_x.checked_add(span)?;
+        let maximum_z = minimum_z.checked_add(span)?;
+        Some([
+            [
+                i32::try_from(minimum_x).ok()?,
+                i32::try_from(minimum_z).ok()?,
+            ],
+            [
+                i32::try_from(maximum_x).ok()?,
+                i32::try_from(maximum_z).ok()?,
+            ],
+        ])
+    }
+
+    pub fn bounds(self) -> Option<VoxelBounds> {
+        if self.level > TERRAIN_PAGE_MAX_LEVEL || self.is_surface() {
             return None;
         }
         let span = i64::from(TERRAIN_PAGE_EDGE_SAMPLES).checked_shl(u32::from(self.level))?;
@@ -70,7 +104,15 @@ impl TerrainPageKey {
     pub fn parent(self) -> Option<Self> {
         (self.level < TERRAIN_PAGE_MAX_LEVEL).then(|| Self {
             level: self.level + 1,
-            coord: self.coord.map(|component| component.div_euclid(2)),
+            coord: if self.is_surface() {
+                [
+                    self.coord[0].div_euclid(2),
+                    TERRAIN_SURFACE_PAGE_COORD_Y,
+                    self.coord[2].div_euclid(2),
+                ]
+            } else {
+                self.coord.map(|component| component.div_euclid(2))
+            },
         })
     }
 
@@ -81,11 +123,22 @@ impl TerrainPageKey {
         let scale = 1i32.checked_shl(u32::from(level - self.level))?;
         Some(Self {
             level,
-            coord: self.coord.map(|component| component.div_euclid(scale)),
+            coord: if self.is_surface() {
+                [
+                    self.coord[0].div_euclid(scale),
+                    TERRAIN_SURFACE_PAGE_COORD_Y,
+                    self.coord[2].div_euclid(scale),
+                ]
+            } else {
+                self.coord.map(|component| component.div_euclid(scale))
+            },
         })
     }
 
     pub fn children(self) -> Option<[Self; 8]> {
+        if self.is_surface() {
+            return None;
+        }
         let child_level = self.level.checked_sub(1)?;
         Some(std::array::from_fn(|index| Self {
             level: child_level,
@@ -95,6 +148,26 @@ impl TerrainPageKey {
                 self.coord[2].saturating_mul(2) + ((index >> 2) & 1) as i32,
             ],
         }))
+    }
+
+    pub fn refinement_children(self) -> Option<Vec<Self>> {
+        let child_level = self.level.checked_sub(1)?;
+        if self.is_surface() {
+            let base_x = self.coord[0].checked_mul(2)?;
+            let base_z = self.coord[2].checked_mul(2)?;
+            return Some(
+                (0..TERRAIN_SURFACE_PAGE_CHILDREN)
+                    .map(|index| {
+                        Self::surface(
+                            child_level,
+                            base_x + (index & 1) as i32,
+                            base_z + ((index >> 1) & 1) as i32,
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        self.children().map(Vec::from)
     }
 }
 
@@ -292,8 +365,14 @@ pub struct TerrainPageV1 {
 
 impl TerrainPageV1 {
     pub fn validates_identity(&self) -> bool {
-        self.key.bounds() == Some(self.bounds)
-            && matches!(self.children.len(), 0 | TERRAIN_PAGE_MAX_CHILDREN)
+        page_bounds_match_key(self.key, self.bounds)
+            && (self.children.is_empty()
+                || self.children.len()
+                    == if self.key.is_surface() {
+                        TERRAIN_SURFACE_PAGE_CHILDREN
+                    } else {
+                        TERRAIN_PAGE_MAX_CHILDREN
+                    })
             && children_are_complete(self)
             && self.materials.len() <= Material::ALL.len()
             && self
@@ -676,7 +755,6 @@ pub fn build_sampled_heightfield_terrain_page(
     samples: &[SurfaceSample],
     mut errors: TerrainErrorBounds,
 ) -> Result<TerrainPageV1, TerrainPageBuildError> {
-    let bounds = key.bounds().ok_or(TerrainPageBuildError::InvalidPageKey)?;
     let stride = 1u32
         .checked_shl(u32::from(key.level))
         .ok_or(TerrainPageBuildError::InvalidPageKey)?;
@@ -688,6 +766,33 @@ pub fn build_sampled_heightfield_terrain_page(
     if samples.len() != sample_count {
         return Err(TerrainPageBuildError::InvalidSurfaceLattice);
     }
+    let bounds = if key.is_surface() {
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = key
+            .horizontal_bounds()
+            .ok_or(TerrainPageBuildError::InvalidPageKey)?;
+        let mut minimum_y = i32::MAX;
+        let mut maximum_y = i32::MIN;
+        for sample in samples {
+            let ground = sample
+                .height
+                .checked_add(1)
+                .ok_or(TerrainPageBuildError::InvalidSurfaceLattice)?;
+            minimum_y = minimum_y.min(ground);
+            maximum_y = maximum_y.max(ground).max(
+                sample
+                    .water_level
+                    .and_then(|height| height.checked_add(1))
+                    .unwrap_or(ground),
+            );
+        }
+        VoxelBounds::new(
+            VoxelCoord::new(minimum_x, minimum_y.saturating_sub(1), minimum_z),
+            VoxelCoord::new(maximum_x, maximum_y.saturating_add(1), maximum_z),
+        )
+        .ok_or(TerrainPageBuildError::InvalidSurfaceLattice)?
+    } else {
+        key.bounds().ok_or(TerrainPageBuildError::InvalidPageKey)?
+    };
 
     let mut ground_heights = Vec::with_capacity(sample_count);
     let mut water_heights = Vec::with_capacity(sample_count);
@@ -862,8 +967,29 @@ pub fn assemble_terrain_parent(
     if key.level == 0 {
         return Err(TerrainReplacementError::InvalidParent);
     }
-    let bounds = key.bounds().ok_or(TerrainReplacementError::InvalidParent)?;
     validate_children_for_key(key, children)?;
+    let bounds = if key.is_surface() {
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = key
+            .horizontal_bounds()
+            .ok_or(TerrainReplacementError::InvalidParent)?;
+        let minimum_y = children
+            .iter()
+            .map(|child| child.bounds.min.y)
+            .min()
+            .ok_or(TerrainReplacementError::InvalidParent)?;
+        let maximum_y = children
+            .iter()
+            .map(|child| child.bounds.max.y)
+            .max()
+            .ok_or(TerrainReplacementError::InvalidParent)?;
+        VoxelBounds::new(
+            VoxelCoord::new(minimum_x, minimum_y, minimum_z),
+            VoxelCoord::new(maximum_x, maximum_y, maximum_z),
+        )
+        .ok_or(TerrainReplacementError::InvalidParent)?
+    } else {
+        key.bounds().ok_or(TerrainReplacementError::InvalidParent)?
+    };
     let source_identity_hash = children[0].source_identity_hash;
     let boundary_fingerprints = aggregate_child_boundaries(key, children)?;
     let mut child_references = children
@@ -1594,7 +1720,10 @@ fn validate_children_for_key(
     parent_key: TerrainPageKey,
     children: &[TerrainPageV1],
 ) -> Result<(), TerrainReplacementError> {
-    if children.len() != TERRAIN_PAGE_MAX_CHILDREN {
+    let expected = parent_key
+        .refinement_children()
+        .ok_or(TerrainReplacementError::InvalidParent)?;
+    if children.len() != expected.len() {
         return Err(TerrainReplacementError::WrongChildCount);
     }
     if children.iter().any(|child| !child.validates_identity()) {
@@ -1607,20 +1736,21 @@ fn validate_children_for_key(
     {
         return Err(TerrainReplacementError::SourceMismatch);
     }
-    let expected = parent_key
-        .children()
-        .ok_or(TerrainReplacementError::InvalidParent)?;
     let actual = children
         .iter()
         .map(|child| child.key)
         .collect::<BTreeSet<_>>();
-    if actual != BTreeSet::from(expected) {
+    if actual != expected.into_iter().collect() {
         return Err(TerrainReplacementError::IncompleteChildKeys);
     }
     for (index, left) in children.iter().enumerate() {
         for right in &children[index + 1..] {
-            let Some((left_side, right_side)) = adjacent_page_sides(left.bounds, right.bounds)
-            else {
+            let sides = if parent_key.is_surface() {
+                adjacent_surface_page_sides(left.key, right.key)
+            } else {
+                adjacent_page_sides(left.bounds, right.bounds)
+            };
+            let Some((left_side, right_side)) = sides else {
                 continue;
             };
             if left.boundary_fingerprints[left_side as usize]
@@ -1638,19 +1768,60 @@ fn aggregate_child_boundaries(
     children: &[TerrainPageV1],
 ) -> Result<[[u8; 32]; 6], TerrainReplacementError> {
     validate_children_for_key(parent_key, children)?;
-    let parent_bounds = parent_key
-        .bounds()
-        .ok_or(TerrainReplacementError::InvalidParent)?;
+    let parent_bounds = if parent_key.is_surface() {
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = parent_key
+            .horizontal_bounds()
+            .ok_or(TerrainReplacementError::InvalidParent)?;
+        VoxelBounds::new(
+            VoxelCoord::new(
+                minimum_x,
+                children
+                    .iter()
+                    .map(|child| child.bounds.min.y)
+                    .min()
+                    .ok_or(TerrainReplacementError::InvalidParent)?,
+                minimum_z,
+            ),
+            VoxelCoord::new(
+                maximum_x,
+                children
+                    .iter()
+                    .map(|child| child.bounds.max.y)
+                    .max()
+                    .ok_or(TerrainReplacementError::InvalidParent)?,
+                maximum_z,
+            ),
+        )
+        .ok_or(TerrainReplacementError::InvalidParent)?
+    } else {
+        parent_key
+            .bounds()
+            .ok_or(TerrainReplacementError::InvalidParent)?
+    };
     let mut fingerprints = [[0u8; 32]; 6];
     for side in BoundarySide::ALL {
         let mut side_children = children
             .iter()
             .filter(|child| {
-                boundary_plane(child.bounds, side) == boundary_plane(parent_bounds, side)
+                parent_key.is_surface()
+                    && matches!(side, BoundarySide::NegativeY | BoundarySide::PositiveY)
+                    || boundary_plane(child.bounds, side) == boundary_plane(parent_bounds, side)
             })
             .collect::<Vec<_>>();
         side_children.sort_unstable_by_key(|child| tangential_page_coord(child.key, side.axis()));
-        if side_children.len() != 4 {
+        let expected_side_children = if parent_key.is_surface()
+            && matches!(
+                side,
+                BoundarySide::NegativeX
+                    | BoundarySide::PositiveX
+                    | BoundarySide::NegativeZ
+                    | BoundarySide::PositiveZ
+            ) {
+            2
+        } else {
+            4
+        };
+        if side_children.len() != expected_side_children {
             return Err(TerrainReplacementError::IncompleteChildKeys);
         }
         let mut hasher = blake3::Hasher::new();
@@ -1686,6 +1857,28 @@ fn tangential_page_coord(key: TerrainPageKey, axis: FaceAxis) -> [i32; 2] {
         FaceAxis::Y => [key.coord[0], key.coord[2]],
         FaceAxis::Z => [key.coord[0], key.coord[1]],
     }
+}
+
+fn adjacent_surface_page_sides(
+    left: TerrainPageKey,
+    right: TerrainPageKey,
+) -> Option<(BoundarySide, BoundarySide)> {
+    if !left.is_surface() || !right.is_surface() || left.level != right.level {
+        return None;
+    }
+    if left.coord[2] == right.coord[2] && left.coord[0].checked_add(1) == Some(right.coord[0]) {
+        return Some((BoundarySide::PositiveX, BoundarySide::NegativeX));
+    }
+    if left.coord[2] == right.coord[2] && right.coord[0].checked_add(1) == Some(left.coord[0]) {
+        return Some((BoundarySide::NegativeX, BoundarySide::PositiveX));
+    }
+    if left.coord[0] == right.coord[0] && left.coord[2].checked_add(1) == Some(right.coord[2]) {
+        return Some((BoundarySide::PositiveZ, BoundarySide::NegativeZ));
+    }
+    if left.coord[0] == right.coord[0] && right.coord[2].checked_add(1) == Some(left.coord[2]) {
+        return Some((BoundarySide::NegativeZ, BoundarySide::PositiveZ));
+    }
+    None
 }
 
 fn adjacent_page_sides(
@@ -2293,7 +2486,7 @@ fn children_are_complete(page: &TerrainPageV1) -> bool {
     if page.children.is_empty() {
         return true;
     }
-    let Some(expected) = page.key.children() else {
+    let Some(expected) = page.key.refinement_children() else {
         return false;
     };
     let actual = page
@@ -2301,7 +2494,19 @@ fn children_are_complete(page: &TerrainPageV1) -> bool {
         .iter()
         .map(|child| child.key)
         .collect::<BTreeSet<_>>();
-    actual == BTreeSet::from(expected)
+    actual == expected.into_iter().collect()
+}
+
+fn page_bounds_match_key(key: TerrainPageKey, bounds: VoxelBounds) -> bool {
+    if !key.is_surface() {
+        return key.bounds() == Some(bounds);
+    }
+    key.horizontal_bounds().is_some_and(|[minimum, maximum]| {
+        bounds.min.x == minimum[0]
+            && bounds.min.z == minimum[1]
+            && bounds.max.x == maximum[0]
+            && bounds.max.z == maximum[1]
+    })
 }
 
 fn representation_is_valid(page: &TerrainPageV1) -> bool {
@@ -2742,7 +2947,10 @@ pub fn decode_terrain_page(
     let material_count = usize::from(cursor.u16()?);
     let payload_len = cursor.u32()? as usize;
     let compressed_len = cursor.u32()? as usize;
-    if !matches!(child_count, 0 | TERRAIN_PAGE_MAX_CHILDREN) {
+    if !matches!(
+        child_count,
+        0 | TERRAIN_SURFACE_PAGE_CHILDREN | TERRAIN_PAGE_MAX_CHILDREN
+    ) {
         return Err(TerrainPageCodecError::LimitExceeded("child count"));
     }
     if material_count > Material::ALL.len() {
@@ -2824,7 +3032,7 @@ pub fn decode_terrain_page(
         content_fingerprint,
     };
     if !representation_is_valid(&page)
-        || page.key.bounds() != Some(page.bounds)
+        || !page_bounds_match_key(page.key, page.bounds)
         || !children_are_complete(&page)
     {
         return Err(TerrainPageCodecError::InvalidRepresentation(
@@ -3185,6 +3393,27 @@ mod tests {
             .collect()
     }
 
+    fn surface_heightfield_samples(key: TerrainPageKey) -> Vec<SurfaceSample> {
+        let [[minimum_x, minimum_z], _] = key.horizontal_bounds().unwrap();
+        let stride = 1i32 << key.level;
+        (0..=TERRAIN_PAGE_EDGE_SAMPLES as i32)
+            .flat_map(|z| {
+                (0..=TERRAIN_PAGE_EDGE_SAMPLES as i32).map(move |x| {
+                    let world_x = minimum_x + x * stride;
+                    let world_z = minimum_z + z * stride;
+                    let height = (world_x + world_z).div_euclid(8);
+                    let material =
+                        if (world_x.div_euclid(16) + world_z.div_euclid(16)).rem_euclid(2) == 0 {
+                            Material::Dirt
+                        } else {
+                            Material::Grass
+                        };
+                    sampled_surface(height, material, None)
+                })
+            })
+            .collect()
+    }
+
     #[test]
     fn sampled_heightfield_round_trips_and_adjacent_negative_pages_share_their_edge() {
         let left_key = TerrainPageKey {
@@ -3245,6 +3474,79 @@ mod tests {
                 TerrainErrorBounds::EXACT,
             ),
             Err(TerrainPageBuildError::InvalidSurfaceLattice)
+        );
+    }
+
+    #[test]
+    fn signed_surface_page_keys_form_an_exact_horizontal_quadtree() {
+        let key = TerrainPageKey::surface(2, -1, 1);
+        assert!(key.is_surface());
+        assert_eq!(key.coord[1], TERRAIN_SURFACE_PAGE_COORD_Y);
+        assert_eq!(key.bounds(), None);
+        assert_eq!(key.horizontal_bounds(), Some([[-128, 128], [0, 256]]));
+
+        let children = key.refinement_children().unwrap();
+        assert_eq!(children.len(), TERRAIN_SURFACE_PAGE_CHILDREN);
+        assert_eq!(
+            children,
+            vec![
+                TerrainPageKey::surface(1, -2, 2),
+                TerrainPageKey::surface(1, -1, 2),
+                TerrainPageKey::surface(1, -2, 3),
+                TerrainPageKey::surface(1, -1, 3),
+            ]
+        );
+        assert!(children.iter().all(|child| child.parent() == Some(key)));
+        assert_eq!(
+            TerrainPageKey::surface(0, -1, -1).ancestor_at(2).unwrap(),
+            TerrainPageKey::surface(2, -1, -1)
+        );
+    }
+
+    #[test]
+    fn surface_quadtree_replacement_crosses_zero_height_without_clipping() {
+        let key = TerrainPageKey::surface(1, -1, 0);
+        let children = key
+            .refinement_children()
+            .unwrap()
+            .into_iter()
+            .map(|child| {
+                build_sampled_heightfield_terrain_page(
+                    identity(),
+                    child,
+                    27,
+                    &surface_heightfield_samples(child),
+                    TerrainErrorBounds::EXACT,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let sampled_parent = build_sampled_heightfield_terrain_page(
+            identity(),
+            key,
+            28,
+            &surface_heightfield_samples(key),
+            TerrainErrorBounds::EXACT,
+        )
+        .unwrap();
+        let parent = assemble_terrain_parent(
+            key,
+            28,
+            sampled_parent.errors,
+            sampled_parent.topology,
+            sampled_parent.materials.clone(),
+            sampled_parent.representation.clone(),
+            &children,
+        )
+        .unwrap();
+
+        assert!(parent.bounds.min.y < 0);
+        assert!(parent.bounds.max.y > 0);
+        assert_eq!(parent.children.len(), TERRAIN_SURFACE_PAGE_CHILDREN);
+        validate_terrain_replacement(&parent, &children).unwrap();
+        assert_eq!(
+            decode_terrain_page(&encode_terrain_page(&parent).unwrap(), identity()).unwrap(),
+            parent
         );
     }
 

@@ -8,11 +8,12 @@ use crate::terrain_page::{
     assemble_exact_cluster_terrain_parent_from_surfaces, select_budgeted_exact_terrain_parent,
 };
 use crate::{
-    Material, SurfaceSample, TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_TARGET_COMPRESSED_BYTES,
-    TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError, TerrainErrorBounds,
-    TerrainHierarchyDirectoryV1, TerrainPageBuildError, TerrainPageCodecError, TerrainPageKey,
-    TerrainPageV1, TerrainSimplificationBudget, VoxelCoord, WorldSourceIdentityHash,
-    build_exact_terrain_page, build_sampled_heightfield_terrain_page, encode_terrain_page,
+    Material, SurfaceSample, TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_EDGE_SAMPLES,
+    TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError,
+    TerrainErrorBounds, TerrainHierarchyDirectoryV1, TerrainPageBuildError, TerrainPageCodecError,
+    TerrainPageKey, TerrainPageV1, TerrainReplacementError, TerrainSimplificationBudget,
+    VoxelCoord, WorldSourceIdentityHash, assemble_terrain_parent, build_exact_terrain_page,
+    build_sampled_heightfield_terrain_page, encode_terrain_page,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -29,6 +30,7 @@ pub enum TerrainRegionBuildError {
     InvalidRoot,
     MissingChild(TerrainPageKey),
     Page(TerrainPageBuildError),
+    Replacement(TerrainReplacementError),
     Codec(TerrainPageCodecError),
     Directory(TerrainDirectoryError),
     PublishedPageOverBudget {
@@ -43,6 +45,12 @@ impl fmt::Display for TerrainRegionBuildError {
             Self::InvalidRoot => formatter.write_str("terrain region root is invalid"),
             Self::MissingChild(key) => write!(formatter, "terrain region is missing child {key:?}"),
             Self::Page(error) => write!(formatter, "terrain region page build failed: {error}"),
+            Self::Replacement(error) => {
+                write!(
+                    formatter,
+                    "terrain region replacement build failed: {error}"
+                )
+            }
             Self::Codec(error) => write!(formatter, "terrain region page codec failed: {error}"),
             Self::Directory(error) => {
                 write!(formatter, "terrain region directory build failed: {error}")
@@ -66,6 +74,12 @@ impl From<TerrainPageBuildError> for TerrainRegionBuildError {
 impl From<TerrainPageCodecError> for TerrainRegionBuildError {
     fn from(error: TerrainPageCodecError) -> Self {
         Self::Codec(error)
+    }
+}
+
+impl From<TerrainReplacementError> for TerrainRegionBuildError {
+    fn from(error: TerrainReplacementError) -> Self {
+        Self::Replacement(error)
     }
 }
 
@@ -143,7 +157,7 @@ pub fn build_terrain_region(
     })
 }
 
-/// Builds one cheap, independently usable large-area fallback root.
+/// Builds an independently usable large-area root plus its first refinement group.
 pub fn build_terrain_coverage_root(
     source_identity_hash: WorldSourceIdentityHash,
     root: TerrainPageKey,
@@ -151,18 +165,74 @@ pub fn build_terrain_coverage_root(
     samples: &[SurfaceSample],
     errors: TerrainErrorBounds,
 ) -> Result<TerrainRegionBuildV1, TerrainRegionBuildError> {
-    if root.level != TERRAIN_COVERAGE_ROOT_LEVEL || root.bounds().is_none() {
+    if root.level != TERRAIN_COVERAGE_ROOT_LEVEL
+        || !root.is_surface()
+        || root.horizontal_bounds().is_none()
+    {
         return Err(TerrainRegionBuildError::InvalidRoot);
     }
-    let page = build_sampled_heightfield_terrain_page(
+    let fine_edge = usize::try_from(TERRAIN_PAGE_EDGE_SAMPLES * 2 + 1)
+        .map_err(|_| TerrainRegionBuildError::InvalidRoot)?;
+    if samples.len() != fine_edge * fine_edge {
+        return Err(TerrainRegionBuildError::Page(
+            TerrainPageBuildError::InvalidSurfaceLattice,
+        ));
+    }
+    let children = root
+        .refinement_children()
+        .ok_or(TerrainRegionBuildError::InvalidRoot)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, key)| {
+            let offset_x = (index & 1) * TERRAIN_PAGE_EDGE_SAMPLES as usize;
+            let offset_z = ((index >> 1) & 1) * TERRAIN_PAGE_EDGE_SAMPLES as usize;
+            let child_samples = (0..=TERRAIN_PAGE_EDGE_SAMPLES as usize)
+                .flat_map(|z| {
+                    (0..=TERRAIN_PAGE_EDGE_SAMPLES as usize)
+                        .map(move |x| samples[offset_x + x + (offset_z + z) * fine_edge])
+                })
+                .collect::<Vec<_>>();
+            let page = build_sampled_heightfield_terrain_page(
+                source_identity_hash,
+                key,
+                revision,
+                &child_samples,
+                TerrainErrorBounds {
+                    geometric_millivoxels: errors.geometric_millivoxels / 2,
+                    silhouette_millivoxels: errors.silhouette_millivoxels / 2,
+                    material_boundary_millivoxels: errors.material_boundary_millivoxels / 2,
+                    normal_milliradians: errors.normal_milliradians,
+                    unresolved_topology: errors.unresolved_topology,
+                },
+            )?;
+            ensure_publication_budget(&page)?;
+            Ok(page)
+        })
+        .collect::<Result<Vec<_>, TerrainRegionBuildError>>()?;
+    let root_samples = (0..=TERRAIN_PAGE_EDGE_SAMPLES as usize)
+        .flat_map(|z| {
+            (0..=TERRAIN_PAGE_EDGE_SAMPLES as usize)
+                .map(move |x| samples[x * 2 + z * 2 * fine_edge])
+        })
+        .collect::<Vec<_>>();
+    let sampled_root = build_sampled_heightfield_terrain_page(
         source_identity_hash,
         root,
         revision,
-        samples,
+        &root_samples,
         errors,
     )?;
+    let page = assemble_terrain_parent(
+        root,
+        revision,
+        sampled_root.errors,
+        sampled_root.topology,
+        sampled_root.materials,
+        sampled_root.representation,
+        &children,
+    )?;
     ensure_publication_budget(&page)?;
-    let pages = vec![page];
+    let pages = children.into_iter().chain([page]).collect::<Vec<_>>();
     let directory = TerrainHierarchyDirectoryV1::from_pages(&pages)?;
     Ok(TerrainRegionBuildV1 {
         root,

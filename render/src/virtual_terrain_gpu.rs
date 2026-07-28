@@ -22,6 +22,7 @@ const NODE_IS_ROOT: u32 = 1 << 1;
 const NODE_RESIDENT: u32 = 1 << 2;
 const NODE_REPLACEMENT_COHERENT: u32 = 1 << 3;
 const NODE_PRIOR_REFINED: u32 = 1 << 4;
+const NODE_SURFACE: u32 = 1 << 5;
 const INVALID_NODE: u32 = u32::MAX;
 const GPU_TRAVERSAL_READBACK_SLOTS: usize = 3;
 const GPU_TRAVERSAL_WORKGROUP_SIZE: u32 = 64;
@@ -1098,25 +1099,17 @@ fn pack_node(
     node: &TerrainHierarchyNode,
     indices: &BTreeMap<TerrainPageKey, u32>,
 ) -> Result<GpuVirtualTerrainNode, VirtualTerrainGpuError> {
-    let bounds = node
-        .key
-        .bounds()
-        .ok_or(VirtualTerrainGpuError::MissingChild(node.key))?;
-    let children = if node.has_children {
-        node.key
-            .children()
-            .ok_or(VirtualTerrainGpuError::MissingChild(node.key))?
-            .map(|child| {
-                indices
-                    .get(&child)
-                    .copied()
-                    .ok_or(VirtualTerrainGpuError::MissingChild(child))
-            })
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        vec![INVALID_NODE; TERRAIN_PAGE_MAX_CHILDREN]
-    };
+    let bounds = node.bounds;
+    let mut children = vec![INVALID_NODE; TERRAIN_PAGE_MAX_CHILDREN];
+    if node.has_children {
+        let keys = node
+            .key
+            .refinement_children()
+            .ok_or(VirtualTerrainGpuError::MissingChild(node.key))?;
+        for (destination, child) in children.iter_mut().zip(keys) {
+            *destination = indices.get(&child).copied().unwrap_or(INVALID_NODE);
+        }
+    }
     let positional_error = node
         .errors
         .geometric_millivoxels
@@ -1148,21 +1141,16 @@ fn pack_node(
 }
 
 fn static_flags(node: &TerrainHierarchyNode) -> u32 {
-    (u32::from(node.has_children) * NODE_HAS_CHILDREN) | (u32::from(node.is_root) * NODE_IS_ROOT)
+    (u32::from(node.has_children) * NODE_HAS_CHILDREN)
+        | (u32::from(node.is_root) * NODE_IS_ROOT)
+        | (u32::from(node.key.is_surface()) * NODE_SURFACE)
 }
 
 fn node_static_identity(node: &TerrainHierarchyNode) -> ([i32; 4], [i32; 3], [u32; 4]) {
-    let bounds = node
-        .key
-        .bounds()
-        .map(|bounds| bounds.min.as_array())
-        .unwrap_or([0; 3]);
+    let bounds = node.bounds.min.as_array();
     (
         [bounds[0], bounds[1], bounds[2], i32::from(node.key.level)],
-        node.key
-            .bounds()
-            .map(|bounds| bounds.max.as_array())
-            .unwrap_or([0; 3]),
+        node.bounds.max.as_array(),
         [
             node.errors
                 .geometric_millivoxels

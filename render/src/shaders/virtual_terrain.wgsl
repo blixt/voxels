@@ -39,6 +39,7 @@ const NODE_IS_ROOT: u32 = 2u;
 const NODE_RESIDENT: u32 = 4u;
 const NODE_REPLACEMENT_COHERENT: u32 = 8u;
 const NODE_PRIOR_REFINED: u32 = 16u;
+const NODE_SURFACE: u32 = 32u;
 const OVERFLOW_SELECTION: u32 = 1u;
 const OVERFLOW_FEEDBACK: u32 = 2u;
 const OVERFLOW_TRAVERSAL: u32 = 4u;
@@ -168,7 +169,7 @@ fn traverse(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let flags = node_flags(node);
     if (flags & NODE_RESIDENT) == 0u {
       append_request(node_index);
-      if (flags & NODE_IS_ROOT) != 0u {
+      if node_index == root_index {
         atomicAdd(&counters.ownerless_roots, 1u);
       }
       continue;
@@ -182,17 +183,19 @@ fn traverse(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let wants_refinement = (flags & NODE_HAS_CHILDREN) != 0u
       && (force_exact || projected_error_pixels(node) > threshold);
     if wants_refinement && (flags & NODE_REPLACEMENT_COHERENT) != 0u {
-      if stack_count + 8u <= STACK_CAPACITY {
-        for (var child = 0u; child < 8u; child += 1u) {
-          stack[stack_count + child] = child_index(node, 7u - child);
+      let child_count = select(8u, 4u, (flags & NODE_SURFACE) != 0u);
+      if stack_count + child_count <= STACK_CAPACITY {
+        for (var child = 0u; child < child_count; child += 1u) {
+          stack[stack_count + child] = child_index(node, child_count - 1u - child);
         }
-        stack_count += 8u;
+        stack_count += child_count;
         atomicMax(&counters.stack_peak, stack_count);
         continue;
       }
       atomicOr(&counters.overflow_flags, OVERFLOW_STACK);
     } else if wants_refinement {
-      for (var child = 0u; child < 8u; child += 1u) {
+      let child_count = select(8u, 4u, (flags & NODE_SURFACE) != 0u);
+      for (var child = 0u; child < child_count; child += 1u) {
         let child_node = child_index(node, child);
         if child_node < view.options.z
             && (node_flags(nodes[child_node]) & NODE_RESIDENT) == 0u {

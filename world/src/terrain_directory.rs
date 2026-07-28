@@ -12,7 +12,7 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-pub const TERRAIN_DIRECTORY_SCHEMA_VERSION: u16 = 2;
+pub const TERRAIN_DIRECTORY_SCHEMA_VERSION: u16 = 3;
 pub const TERRAIN_DIRECTORY_MAX_NODES: usize = 131_072;
 pub const TERRAIN_DIRECTORY_MAX_ROOTS: usize = 4_096;
 /// Initial always-resident coverage spans 3.2768 km per root at 10 cm canonical scale.
@@ -29,8 +29,8 @@ pub const TERRAIN_COVERAGE_ROOT_LEVEL: u8 = 10;
 pub const TERRAIN_REGION_ROOT_LEVEL: u8 = 2;
 const DIRECTORY_MAGIC: &[u8; 4] = b"VXTD";
 const DIRECTORY_HEADER_BYTES: usize = 80;
-const DIRECTORY_NODE_BYTES: usize = 80;
-const DIRECTORY_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-directory-v2\0";
+const DIRECTORY_NODE_BYTES: usize = 104;
+const DIRECTORY_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-directory-v3\0";
 const NODE_FLAG_HAS_CHILDREN: u8 = 1 << 0;
 const NODE_FLAG_ROOT: u8 = 1 << 1;
 const NODE_FLAG_UNRESOLVED_TOPOLOGY: u8 = 1 << 2;
@@ -40,6 +40,7 @@ const NODE_FLAGS_KNOWN: u8 =
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerrainHierarchyNode {
     pub key: TerrainPageKey,
+    pub bounds: crate::VoxelBounds,
     pub revision: u64,
     pub content_fingerprint: [u8; 32],
     pub errors: TerrainErrorBounds,
@@ -102,6 +103,7 @@ impl TerrainHierarchyDirectoryV1 {
                 .map_err(|_| TerrainDirectoryError::LimitExceeded("encoded page bytes"))?;
             nodes.push(TerrainHierarchyNode {
                 key: page.key,
+                bounds: page.bounds,
                 revision: page.revision,
                 content_fingerprint: page.content_fingerprint,
                 errors: page.errors,
@@ -156,14 +158,15 @@ impl TerrainHierarchyDirectoryV1 {
         let mut referenced = BTreeSet::new();
         for node in &self.nodes {
             if node.key.level > TERRAIN_PAGE_MAX_LEVEL
-                || node.key.bounds().is_none()
+                || !directory_node_bounds_match_key(node)
                 || node.encoded_bytes == 0
                 || usize::try_from(node.encoded_bytes).unwrap_or(usize::MAX)
                     > TERRAIN_PAGE_MAX_COMPRESSED_BYTES + 4_096
             {
                 return false;
             }
-            let Some(children) = node.key.children().filter(|_| node.has_children) else {
+            let Some(children) = node.key.refinement_children().filter(|_| node.has_children)
+            else {
                 if node.has_children {
                     return false;
                 }
@@ -197,7 +200,7 @@ impl TerrainHierarchyDirectoryV1 {
             || self
                 .nodes
                 .iter()
-                .any(|node| node.key.level > TERRAIN_REGION_ROOT_LEVEL)
+                .any(|node| node.key.is_surface() || node.key.level > TERRAIN_REGION_ROOT_LEVEL)
         {
             return false;
         }
@@ -228,6 +231,20 @@ impl TerrainHierarchyDirectoryV1 {
             .ok()
             .and_then(|index| self.nodes.get(index))
     }
+}
+
+fn directory_node_bounds_match_key(node: &TerrainHierarchyNode) -> bool {
+    if !node.key.is_surface() {
+        return node.key.bounds() == Some(node.bounds);
+    }
+    node.key
+        .horizontal_bounds()
+        .is_some_and(|[minimum, maximum]| {
+            node.bounds.min.x == minimum[0]
+                && node.bounds.min.z == minimum[1]
+                && node.bounds.max.x == maximum[0]
+                && node.bounds.max.z == maximum[1]
+        })
 }
 
 fn errors_cover(parent: TerrainErrorBounds, child: TerrainErrorBounds) -> bool {
@@ -327,6 +344,16 @@ pub fn encode_terrain_directory(
         for component in node.key.coord {
             push_i32(&mut encoded, component);
         }
+        for component in [
+            node.bounds.min.x,
+            node.bounds.min.y,
+            node.bounds.min.z,
+            node.bounds.max.x,
+            node.bounds.max.y,
+            node.bounds.max.z,
+        ] {
+            push_i32(&mut encoded, component);
+        }
         push_u64(&mut encoded, node.revision);
         encoded.extend_from_slice(&node.content_fingerprint);
         push_u32(&mut encoded, node.errors.geometric_millivoxels);
@@ -410,6 +437,11 @@ pub fn decode_terrain_directory(
             level,
             coord: [cursor.i32()?, cursor.i32()?, cursor.i32()?],
         };
+        let bounds = crate::VoxelBounds::new(
+            crate::VoxelCoord::new(cursor.i32()?, cursor.i32()?, cursor.i32()?),
+            crate::VoxelCoord::new(cursor.i32()?, cursor.i32()?, cursor.i32()?),
+        )
+        .ok_or(TerrainDirectoryError::InvalidHeader("node bounds"))?;
         let revision = cursor.u64()?;
         let page_fingerprint = cursor.array::<32>()?;
         let errors = TerrainErrorBounds {
@@ -425,6 +457,7 @@ pub fn decode_terrain_directory(
         }
         nodes.push(TerrainHierarchyNode {
             key,
+            bounds,
             revision,
             content_fingerprint: page_fingerprint,
             errors,
@@ -472,6 +505,16 @@ fn directory_fingerprint(directory: &TerrainHierarchyDirectoryV1) -> [u8; 32] {
     for node in &directory.nodes {
         hasher.update(&[node.key.level]);
         for component in node.key.coord {
+            hasher.update(&component.to_le_bytes());
+        }
+        for component in [
+            node.bounds.min.x,
+            node.bounds.min.y,
+            node.bounds.min.z,
+            node.bounds.max.x,
+            node.bounds.max.y,
+            node.bounds.max.z,
+        ] {
             hasher.update(&component.to_le_bytes());
         }
         hasher.update(&node.revision.to_le_bytes());
@@ -619,6 +662,7 @@ mod tests {
             .into_iter()
             .map(|key| TerrainHierarchyNode {
                 key,
+                bounds: key.bounds().expect("structural volume page bounds"),
                 revision: 9,
                 content_fingerprint: *blake3::hash(format!("{key:?}").as_bytes()).as_bytes(),
                 errors: TerrainErrorBounds::EXACT,
@@ -659,6 +703,63 @@ mod tests {
             directory
         );
         assert_eq!(encode_terrain_directory(&directory).unwrap(), encoded);
+    }
+
+    #[test]
+    fn directory_round_trips_surface_quadtree_bounds_independent_of_key_y() {
+        let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 0);
+        let children = root.refinement_children().unwrap();
+        let mut nodes = children
+            .iter()
+            .copied()
+            .chain([root])
+            .enumerate()
+            .map(|(index, key)| {
+                let [[minimum_x, minimum_z], [maximum_x, maximum_z]] =
+                    key.horizontal_bounds().unwrap();
+                TerrainHierarchyNode {
+                    key,
+                    bounds: crate::VoxelBounds::new(
+                        VoxelCoord::new(minimum_x, -73 - index as i32, minimum_z),
+                        VoxelCoord::new(maximum_x, 91 + index as i32, maximum_z),
+                    )
+                    .unwrap(),
+                    revision: 12,
+                    content_fingerprint: [index as u8 + 1; 32],
+                    errors: TerrainErrorBounds {
+                        geometric_millivoxels: if key == root { 2_000 } else { 1_000 },
+                        silhouette_millivoxels: if key == root { 2_000 } else { 1_000 },
+                        material_boundary_millivoxels: 0,
+                        normal_milliradians: 0,
+                        unresolved_topology: false,
+                    },
+                    topology: TerrainTopologyClass::SingleRunColumns,
+                    representation: TerrainPageRepresentationKind::HeightfieldGrid,
+                    encoded_bytes: 1_024,
+                    has_children: key == root,
+                    is_root: key == root,
+                }
+            })
+            .collect::<Vec<_>>();
+        nodes.sort_unstable_by_key(|node| node.key);
+        let mut directory = TerrainHierarchyDirectoryV1 {
+            source_identity_hash: identity(),
+            nodes,
+            content_fingerprint: [0; 32],
+        };
+        directory.content_fingerprint = directory_fingerprint(&directory);
+        assert!(directory.validates_identity());
+
+        let encoded = encode_terrain_directory(&directory).unwrap();
+        assert_eq!(
+            decode_terrain_directory(&encoded, identity()).unwrap(),
+            directory
+        );
+        assert!(
+            directory
+                .node(root)
+                .is_some_and(|node| node.bounds.min.y < 0 && node.bounds.max.y > 0)
+        );
     }
 
     #[test]
@@ -759,6 +860,7 @@ mod tests {
             source_identity_hash: identity(),
             nodes: vec![TerrainHierarchyNode {
                 key,
+                bounds: key.bounds().expect("terminal volume page bounds"),
                 revision: 1,
                 content_fingerprint: [7; 32],
                 errors: TerrainErrorBounds {

@@ -116,7 +116,7 @@ impl TerrainDemandGroup {
         let Some(parent) = self.replacement_parent else {
             return self.pages.len() == 1;
         };
-        parent.children().is_some_and(|children| {
+        parent.refinement_children().is_some_and(|children| {
             self.pages.len() == children.len()
                 && children
                     .into_iter()

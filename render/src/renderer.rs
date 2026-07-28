@@ -45,10 +45,11 @@ use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, FaceAxis, Material,
     MeshedChunk, Quad, RenderLayer, SURFACE_PATCHES_PER_TILE_EDGE, SurfaceLodLevel, SurfacePatch,
     SurfacePatchEdge, SurfacePatchId, SurfaceQuad, SurfaceRegion, SurfaceTileCoord,
-    SurfaceTileMesh, TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_REGION_ROOT_LEVEL,
-    TerrainHierarchyDirectoryV1, TerrainPageKey, TerrainPageRepresentation,
-    TerrainPageRepresentationKind, TerrainPageV1, VOXEL_SIZE_METRES, WaterTileMesh, WorldManifest,
-    fallback_surface_wall_material, reconstruct_exact_terrain_surface,
+    SurfaceTileMesh, TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_EDGE_SAMPLES,
+    TERRAIN_REGION_ROOT_LEVEL, TerrainHierarchyDirectoryV1, TerrainPageKey,
+    TerrainPageRepresentation, TerrainPageRepresentationKind, TerrainPageV1, VOXEL_SIZE_METRES,
+    WaterTileMesh, WorldManifest, fallback_surface_wall_material,
+    reconstruct_exact_terrain_surface,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -1632,12 +1633,13 @@ struct VirtualTerrainDrawLists {
     primitive_count: u32,
 }
 
-/// Complete fixed-region volumes owned by the currently published virtual cut.
+/// Complete surface columns owned by the currently published virtual cut.
 ///
 /// The renderer never guesses ownership from visual depth. A region joins this set only when the
-/// selected pages form a complete octree partition of its 25.6 m root. Legacy slices can then be
-/// retired iff their entire conservative bounds are covered by this set; a crossing slice blocks
-/// publication rather than allowing either a gap or overlapping sources.
+/// selected pages form a complete quadtree partition of its coverage root. During the hard-cutover
+/// window, fixed-ring slices can then be retired iff their entire X/Z footprint is covered by this
+/// set; a crossing slice blocks publication rather than allowing either a gap or overlapping
+/// sources.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct VirtualTerrainOwnership {
     roots: BTreeSet<TerrainPageKey>,
@@ -1649,8 +1651,17 @@ impl VirtualTerrainOwnership {
         let roots = cut
             .selected_pages
             .iter()
-            .filter_map(|key| key.ancestor_at(TERRAIN_REGION_ROOT_LEVEL))
+            .filter_map(|key| {
+                key.is_surface()
+                    .then(|| key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL))
+                    .flatten()
+            })
             .collect::<BTreeSet<_>>();
+        if roots.is_empty() && !selected.is_empty() {
+            return Err(VirtualTerrainRendererError::IncompleteRootPartition(
+                cut.selected_pages[0],
+            ));
+        }
         for root in &roots {
             if !selected_pages_cover(*root, &selected) {
                 return Err(VirtualTerrainRendererError::IncompleteRootPartition(*root));
@@ -1670,12 +1681,13 @@ impl VirtualTerrainOwnership {
         let Some((minimum, maximum)) = voxel_bounds_from_metres(minimum, maximum) else {
             return false;
         };
-        terrain_root_coords_for_bounds(minimum, maximum)
-            .is_some_and(|ranges| terrain_root_coords(ranges).any(|key| self.roots.contains(&key)))
+        terrain_surface_root_coords_for_bounds(minimum, maximum).is_some_and(|ranges| {
+            terrain_surface_root_coords(ranges).any(|key| self.roots.contains(&key))
+        })
     }
 
     fn covers_voxel_bounds(&self, minimum: [i32; 3], maximum: [i32; 3]) -> bool {
-        let Some(ranges) = terrain_root_coords_for_bounds(minimum, maximum) else {
+        let Some(ranges) = terrain_surface_root_coords_for_bounds(minimum, maximum) else {
             return false;
         };
         let required = ranges
@@ -1689,13 +1701,13 @@ impl VirtualTerrainOwnership {
         if required.is_none_or(|required| required as usize > self.roots.len()) {
             return false;
         }
-        terrain_root_coords(ranges).all(|key| self.roots.contains(&key))
+        terrain_surface_root_coords(ranges).all(|key| self.roots.contains(&key))
     }
 }
 
 fn selected_pages_cover(key: TerrainPageKey, selected: &BTreeSet<TerrainPageKey>) -> bool {
     selected.contains(&key)
-        || key.children().is_some_and(|children| {
+        || key.refinement_children().is_some_and(|children| {
             children
                 .into_iter()
                 .all(|child| selected_pages_cover(child, selected))
@@ -1742,15 +1754,18 @@ fn voxel_bounds_from_metres(
         .then_some((minimum, maximum))
 }
 
-fn terrain_root_coords_for_bounds(minimum: [i32; 3], maximum: [i32; 3]) -> Option<[[i32; 2]; 3]> {
+fn terrain_surface_root_coords_for_bounds(
+    minimum: [i32; 3],
+    maximum: [i32; 3],
+) -> Option<[[i32; 2]; 2]> {
     let root_span =
-        i32::try_from(32_u32.checked_shl(u32::from(TERRAIN_REGION_ROOT_LEVEL))?).ok()?;
+        i32::try_from(32_u32.checked_shl(u32::from(TERRAIN_COVERAGE_ROOT_LEVEL))?).ok()?;
     minimum
         .into_iter()
         .zip(maximum)
         .all(|(minimum, maximum)| minimum < maximum)
         .then(|| {
-            std::array::from_fn(|axis| {
+            [0, 2].map(|axis| {
                 [
                     minimum[axis].div_euclid(root_span),
                     maximum[axis].saturating_sub(1).div_euclid(root_span),
@@ -1759,14 +1774,10 @@ fn terrain_root_coords_for_bounds(minimum: [i32; 3], maximum: [i32; 3]) -> Optio
         })
 }
 
-fn terrain_root_coords(ranges: [[i32; 2]; 3]) -> impl Iterator<Item = TerrainPageKey> {
+fn terrain_surface_root_coords(ranges: [[i32; 2]; 2]) -> impl Iterator<Item = TerrainPageKey> {
     (ranges[0][0]..=ranges[0][1]).flat_map(move |x| {
-        (ranges[1][0]..=ranges[1][1]).flat_map(move |y| {
-            (ranges[2][0]..=ranges[2][1]).map(move |z| TerrainPageKey {
-                level: TERRAIN_REGION_ROOT_LEVEL,
-                coord: [x, y, z],
-            })
-        })
+        (ranges[1][0]..=ranges[1][1])
+            .map(move |z| TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, x, z))
     })
 }
 
@@ -16530,11 +16541,8 @@ mod tests {
 
     #[test]
     fn virtual_ownership_rejects_an_incomplete_root_partition() {
-        let root = TerrainPageKey {
-            level: TERRAIN_REGION_ROOT_LEVEL,
-            coord: [-1, 0, 2],
-        };
-        let incomplete = root.children().unwrap()[..4].to_vec();
+        let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 2);
+        let incomplete = root.refinement_children().unwrap()[..2].to_vec();
         assert_eq!(
             VirtualTerrainOwnership::from_cut(&virtual_cut_with_selected(incomplete)),
             Err(VirtualTerrainRendererError::IncompleteRootPartition(root))
@@ -16542,30 +16550,27 @@ mod tests {
     }
 
     #[test]
-    fn virtual_ownership_covers_only_complete_half_open_root_volumes() {
-        let root = TerrainPageKey {
-            level: TERRAIN_REGION_ROOT_LEVEL,
-            coord: [-1, 0, 2],
-        };
+    fn virtual_ownership_covers_only_complete_half_open_surface_columns() {
+        let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 2);
         let ownership = VirtualTerrainOwnership::from_cut(&virtual_cut_with_selected(
-            root.children().unwrap().to_vec(),
+            root.refinement_children().unwrap(),
         ))
         .unwrap();
         assert!(ownership.covers_aabb(
-            glam::Vec3::new(-25.6, 0.0, 51.2),
-            glam::Vec3::new(0.0, 25.6, 76.8),
+            glam::Vec3::new(-100.0, -10_000.0, 6_600.0),
+            glam::Vec3::new(-50.0, 10_000.0, 6_650.0),
         ));
         assert!(ownership.intersects_aabb(
-            glam::Vec3::new(-1.0, 1.0, 52.0),
-            glam::Vec3::new(1.0, 2.0, 53.0),
+            glam::Vec3::new(-1.0, -1.0, 6_600.0),
+            glam::Vec3::new(1.0, 1.0, 6_650.0),
         ));
         assert!(!ownership.covers_aabb(
-            glam::Vec3::new(-1.0, 1.0, 52.0),
-            glam::Vec3::new(1.0, 2.0, 53.0),
+            glam::Vec3::new(-1.0, -1.0, 6_600.0),
+            glam::Vec3::new(1.0, 1.0, 6_650.0),
         ));
         assert!(!ownership.intersects_aabb(
-            glam::Vec3::new(0.0, 0.0, 51.2),
-            glam::Vec3::new(25.6, 25.6, 76.8),
+            glam::Vec3::new(0.0, -1.0, 6_600.0),
+            glam::Vec3::new(50.0, 1.0, 6_650.0),
         ));
     }
 }

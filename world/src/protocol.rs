@@ -24,7 +24,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 38;
+pub const PROTOCOL_VERSION: u16 = 39;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -2108,9 +2108,13 @@ fn validate_terrain_directory_roots(
         || !roots.windows(2).all(|pair| pair[0] < pair[1])
         || roots.iter().any(|root| {
             !matches!(
-                root.level,
-                TERRAIN_REGION_ROOT_LEVEL | TERRAIN_COVERAGE_ROOT_LEVEL
-            ) || root.bounds().is_none()
+                (root.level, root.is_surface()),
+                (TERRAIN_REGION_ROOT_LEVEL, false) | (TERRAIN_COVERAGE_ROOT_LEVEL, true)
+            ) || if root.is_surface() {
+                root.horizontal_bounds().is_none()
+            } else {
+                root.bounds().is_none()
+            }
         })
     {
         return Err(ProtocolError::InvalidPayload(
@@ -2164,12 +2168,9 @@ fn validate_terrain_region_columns(
         || columns.len() > MAX_TERRAIN_REGION_COLUMNS_PER_BATCH
         || !columns.windows(2).all(|pair| pair[0] < pair[1])
         || columns.iter().any(|[x, z]| {
-            TerrainPageKey {
-                level: TERRAIN_COVERAGE_ROOT_LEVEL,
-                coord: [*x, 0, *z],
-            }
-            .bounds()
-            .is_none()
+            TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, *x, *z)
+                .horizontal_bounds()
+                .is_none()
         })
     {
         return Err(ProtocolError::InvalidPayload(
@@ -2196,8 +2197,9 @@ fn validate_terrain_region_column_result(
                 || !column.roots.windows(2).all(|pair| pair[0] < pair[1])
                 || column.roots.iter().any(|root| {
                     root.level != TERRAIN_COVERAGE_ROOT_LEVEL
+                        || !root.is_surface()
                         || [root.coord[0], root.coord[2]] != item.column
-                        || root.bounds().is_none()
+                        || root.horizontal_bounds().is_none()
                 }))
         {
             return Err(ProtocolError::InvalidPayload(
@@ -6297,13 +6299,10 @@ mod tests {
 
     #[cfg(feature = "terrain-page-builder")]
     #[test]
-    fn virtual_terrain_directory_results_round_trip_terminal_coverage_roots() {
+    fn virtual_terrain_directory_results_round_trip_refinable_coverage_roots() {
         let source = ProceduralWorldSource::new(43);
         let source_identity_hash = source.identity().identity_hash();
-        let root = TerrainPageKey {
-            level: TERRAIN_COVERAGE_ROOT_LEVEL,
-            coord: [0, 0, 0],
-        };
+        let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, 0, 0);
         let mut sample = source
             .surface_sample_lattice(WorldProductPriority::VirtualTerrain, [0, 0], [1, 1], 1)
             .expect("coverage sample")
@@ -6313,8 +6312,8 @@ mod tests {
         sample.height = 0;
         sample.material = Material::Stone;
         sample.water_level = None;
-        let sample_edge =
-            usize::try_from(crate::TERRAIN_PAGE_EDGE_SAMPLES + 1).expect("coverage sample edge");
+        let sample_edge = usize::try_from(crate::TERRAIN_PAGE_EDGE_SAMPLES * 2 + 1)
+            .expect("coverage sample edge");
         let samples = vec![sample; sample_edge * sample_edge];
         let build = crate::build_terrain_coverage_root(
             source_identity_hash,
@@ -6330,6 +6329,12 @@ mod tests {
             },
         )
         .expect("coverage root");
+        let root_page = build
+            .pages
+            .iter()
+            .find(|page| page.key == root)
+            .cloned()
+            .expect("root page");
         let result = TerrainDirectoryBatchResult {
             request_id: 73,
             source_identity_hash,
@@ -6337,7 +6342,7 @@ mod tests {
                 root,
                 result: Ok(TerrainDirectoryBootstrap {
                     directory: build.directory,
-                    root_page: build.pages.into_iter().next().expect("root page"),
+                    root_page,
                 }),
             }],
         };
@@ -6375,16 +6380,7 @@ mod tests {
                     result: Ok(TerrainRegionColumn {
                         column: [-8, 2],
                         revision: 17,
-                        roots: vec![
-                            TerrainPageKey {
-                                level: TERRAIN_COVERAGE_ROOT_LEVEL,
-                                coord: [-8, -2, 2],
-                            },
-                            TerrainPageKey {
-                                level: TERRAIN_COVERAGE_ROOT_LEVEL,
-                                coord: [-8, -1, 2],
-                            },
-                        ],
+                        roots: vec![TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -8, 2)],
                     }),
                 },
                 TerrainRegionColumnBatchItem {
