@@ -214,6 +214,7 @@ pub struct VirtualTerrainHierarchy {
     resident: BTreeMap<TerrainPageKey, ResidentPage>,
     resident_encoded_bytes: usize,
     resident_primitives: usize,
+    coherent_replacements: BTreeSet<TerrainPageKey>,
     refined_last_cut: BTreeSet<TerrainPageKey>,
     frame: u64,
 }
@@ -234,6 +235,7 @@ impl VirtualTerrainHierarchy {
             resident: BTreeMap::new(),
             resident_encoded_bytes: 0,
             resident_primitives: 0,
+            coherent_replacements: BTreeSet::new(),
             refined_last_cut: BTreeSet::new(),
             frame: 0,
         })
@@ -268,11 +270,16 @@ impl VirtualTerrainHierarchy {
     }
 
     pub fn replacement_is_resident_and_coherent(&self, key: TerrainPageKey) -> bool {
+        self.coherent_replacements.contains(&key)
+    }
+
+    fn refresh_replacement_coherence(&mut self, key: TerrainPageKey) {
+        self.coherent_replacements.remove(&key);
         let Some(parent) = self.resident.get(&key).map(|resident| &resident.page) else {
-            return false;
+            return;
         };
         let Some(children) = key.refinement_children() else {
-            return false;
+            return;
         };
         let child_pages = children
             .iter()
@@ -282,8 +289,11 @@ impl VirtualTerrainHierarchy {
                     .map(|resident| resident.page.clone())
             })
             .collect::<Vec<_>>();
-        child_pages.len() == children.len()
+        if child_pages.len() == children.len()
             && validate_terrain_replacement(parent, &child_pages).is_ok()
+        {
+            self.coherent_replacements.insert(key);
+        }
     }
 
     pub fn register_region_directory(
@@ -306,8 +316,11 @@ impl VirtualTerrainHierarchy {
 
     /// Extends an existing surface node with one four-child directory segment.
     ///
-    /// The segment root repeats the already-known geometry identity. Only its directory
-    /// `has_children` bit is upgraded; it never becomes another active render root.
+    /// The existing node remains the authoritative parent predictor while its replacement group
+    /// streams. An edit may have already rebuilt the independently generated segment root; that
+    /// repeated root is metadata, not a second owner, so its newer identity does not replace the
+    /// resident parent. The complete children still have to pass the ordinary boundary-coherence
+    /// proof before the cut can refine.
     pub fn register_refinement_directory(
         &mut self,
         directory: &TerrainHierarchyDirectoryV1,
@@ -383,6 +396,9 @@ impl VirtualTerrainHierarchy {
         for node in &directory.nodes {
             if let Some(existing) = self.nodes.get(&node.key) {
                 let collision = if refinement {
+                    if node.is_root {
+                        continue;
+                    }
                     let mut normalized = *node;
                     normalized.has_children = existing.has_children;
                     normalized.is_root = existing.is_root;
@@ -563,8 +579,9 @@ impl VirtualTerrainHierarchy {
         }
         self.resident_encoded_bytes += encoded_bytes;
         self.resident_primitives += primitive_count;
+        let key = page.key;
         self.resident.insert(
-            page.key,
+            key,
             ResidentPage {
                 page,
                 encoded_bytes,
@@ -572,6 +589,10 @@ impl VirtualTerrainHierarchy {
                 last_selected_frame: 0,
             },
         );
+        self.refresh_replacement_coherence(key);
+        if let Some(parent) = key.parent() {
+            self.refresh_replacement_coherence(parent);
+        }
         Ok(())
     }
 
@@ -597,8 +618,10 @@ impl VirtualTerrainHierarchy {
         self.resident_primitives = self
             .resident_primitives
             .saturating_sub(resident.primitive_count);
+        self.coherent_replacements.remove(&key);
         self.refined_last_cut.remove(&key);
         if let Some(parent) = key.parent() {
+            self.coherent_replacements.remove(&parent);
             self.refined_last_cut.remove(&parent);
         }
         true
@@ -806,35 +829,17 @@ impl CutBuilder<'_> {
                 self.select(key);
                 return;
             };
-            let child_pages = children
-                .iter()
-                .filter_map(|child| {
-                    self.hierarchy
-                        .resident
-                        .get(child)
-                        .map(|resident| resident.page.clone())
-                })
-                .collect::<Vec<_>>();
-            if child_pages.len() == children.len() {
-                let Some(parent) = self
-                    .hierarchy
-                    .resident
-                    .get(&key)
-                    .map(|resident| resident.page.clone())
-                else {
-                    self.request(key);
-                    if root {
-                        self.ownerless_roots.push(key);
-                    }
-                    return;
-                };
-                if validate_terrain_replacement(&parent, &child_pages).is_ok() {
-                    self.next_refined.insert(key);
-                    for child in children {
-                        self.visit(child, false);
-                    }
-                    return;
+            if self.hierarchy.replacement_is_resident_and_coherent(key) {
+                self.next_refined.insert(key);
+                for child in children {
+                    self.visit(child, false);
                 }
+                return;
+            }
+            if children
+                .iter()
+                .all(|child| self.hierarchy.resident.contains_key(child))
+            {
                 self.incoherent_replacement_groups =
                     self.incoherent_replacement_groups.saturating_add(1);
             } else {

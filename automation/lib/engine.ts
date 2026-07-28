@@ -239,7 +239,17 @@ export class EngineClient {
       rgb,
     );
     if (!accepted) throw new Error("engine rejected the diagnostic sky override");
-    await this.#page.waitForTimeout(50);
+    if (this.#contract === undefined) {
+      await this.#page.waitForTimeout(50);
+    } else {
+      // The snapshot request is ordered after the worker command and therefore acknowledges that
+      // the state was applied. Wait one complete frame beyond that acknowledgement so a browser
+      // screenshot cannot capture the canvas commit immediately preceding the command.
+      const acknowledged = await this.snapshot();
+      await this.waitForFrameAfter(snapshotValue(acknowledged, "frameSequence"), {
+        description: "diagnostic sky override was not presented",
+      });
+    }
   }
 
   async setGeometrySourceDebug(enabled: boolean): Promise<void> {
@@ -250,7 +260,14 @@ export class EngineClient {
     if (!accepted) {
       throw new Error("engine rejected the geometry-source diagnostic");
     }
-    await this.#page.waitForTimeout(50);
+    if (this.#contract === undefined) {
+      await this.#page.waitForTimeout(50);
+    } else {
+      const acknowledged = await this.snapshot();
+      await this.waitForFrameAfter(snapshotValue(acknowledged, "frameSequence"), {
+        description: "geometry-source diagnostic was not presented",
+      });
+    }
   }
 
   async setMaterialDetail(enabled: boolean): Promise<readonly number[]> {

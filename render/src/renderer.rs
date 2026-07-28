@@ -3151,6 +3151,7 @@ pub struct Renderer {
     virtual_terrain: VirtualTerrainHierarchy,
     virtual_terrain_gpu: VirtualTerrainGpuControl,
     virtual_terrain_mode: VirtualTerrainRenderMode,
+    virtual_terrain_legacy_handoff_certified: bool,
     virtual_terrain_cut: Option<VirtualTerrainCut>,
     virtual_terrain_oracle_cut: Option<VirtualTerrainCut>,
     virtual_terrain_oracle_view: Option<VirtualTerrainView>,
@@ -4232,6 +4233,7 @@ impl Renderer {
             virtual_terrain,
             virtual_terrain_gpu,
             virtual_terrain_mode: VirtualTerrainRenderMode::Disabled,
+            virtual_terrain_legacy_handoff_certified: false,
             virtual_terrain_cut: None,
             virtual_terrain_oracle_cut: None,
             virtual_terrain_oracle_view: None,
@@ -4551,6 +4553,38 @@ impl Renderer {
                 .cut_transition
                 .as_ref()
                 .is_some_and(|transition| transition.from.owns_exact_volume_coord(coord))
+    }
+
+    /// Whether an edited canonical chunk is represented by either remaining exact-volume
+    /// ownership or the exact level-0 page in the published virtual hierarchy.
+    pub fn edited_chunk_presented(&self, coord: ChunkCoord) -> bool {
+        if self.exact_volume_chunk_presented(coord) {
+            return true;
+        }
+        if self.virtual_terrain_mode != VirtualTerrainRenderMode::Visible {
+            return false;
+        }
+        let key = TerrainPageKey::surface(0, coord.x, coord.z);
+        if !self
+            .virtual_terrain_cut
+            .as_ref()
+            .is_some_and(|cut| cut.selected_pages.contains(&key))
+        {
+            return false;
+        }
+        let Some(page) = self.virtual_terrain.resident_page(key) else {
+            return false;
+        };
+        let chunk_minimum_y = coord.world_origin()[1];
+        let chunk_maximum_y = chunk_minimum_y.saturating_add(CHUNK_EDGE as i32);
+        page.topology == voxels_world::TerrainTopologyClass::Volumetric
+            && page.errors == voxels_world::TerrainErrorBounds::EXACT
+            && matches!(
+                page.representation,
+                TerrainPageRepresentation::SurfaceCluster(_)
+            )
+            && page.bounds.min.y < chunk_maximum_y
+            && chunk_minimum_y < page.bounds.max.y
     }
 
     /// Whether a sparse exact surface column can replace a whole resident stride-two column in
@@ -5250,6 +5284,8 @@ impl Renderer {
         directory: &TerrainHierarchyDirectoryV1,
     ) -> Result<(), VirtualTerrainRendererError> {
         self.virtual_terrain.register_region_directory(directory)?;
+        self.virtual_terrain_oracle_cut = None;
+        self.virtual_terrain_oracle_view = None;
         self.virtual_terrain_gpu
             .register_directory(&self.queue, directory)
             .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
@@ -5376,6 +5412,10 @@ impl Renderer {
                 if gpu_bytes > ARENA_PAGE_BYTES as usize {
                     return Err(VirtualTerrainRendererError::GpuPageTooLarge(page.key));
                 }
+                self.ensure_virtual_terrain_gpu_allocation(
+                    u32::try_from(gpu_bytes)
+                        .map_err(|_| VirtualTerrainRendererError::GpuPageTooLarge(page.key))?,
+                )?;
                 if gpu_quads.is_empty() {
                     VirtualTerrainGpuMesh::Empty
                 } else {
@@ -5437,6 +5477,10 @@ impl Renderer {
                 if gpu_bytes > ARENA_PAGE_BYTES as usize {
                     return Err(VirtualTerrainRendererError::GpuPageTooLarge(page.key));
                 }
+                self.ensure_virtual_terrain_gpu_allocation(
+                    u32::try_from(gpu_bytes)
+                        .map_err(|_| VirtualTerrainRendererError::GpuPageTooLarge(page.key))?,
+                )?;
                 if vertices.is_empty() {
                     VirtualTerrainGpuMesh::Empty
                 } else {
@@ -5486,6 +5530,10 @@ impl Renderer {
             discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, mesh);
             return Err(error.into());
         }
+        // Residency can make a complete child replacement selectable without changing the view.
+        // Invalidate the CPU demand oracle; GPU traversal sees the same flag update directly.
+        self.virtual_terrain_oracle_cut = None;
+        self.virtual_terrain_oracle_view = None;
         if self
             .virtual_terrain_gpu
             .update_page_geometry(&self.queue, page.key, geometry)
@@ -5517,9 +5565,16 @@ impl Renderer {
         &mut self,
         view: VirtualTerrainView,
     ) -> Result<VirtualTerrainCut, VirtualTerrainRendererError> {
-        self.virtual_terrain_gpu
+        let refinement_changed = self
+            .virtual_terrain_gpu
             .synchronize_prior_refinement(&self.queue, &self.virtual_terrain)
             .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
+        if !refinement_changed
+            && self.virtual_terrain_oracle_view == Some(view)
+            && let Some(cut) = self.virtual_terrain_oracle_cut.as_ref()
+        {
+            return Ok(cut.clone());
+        }
         let cut = self.virtual_terrain.select_cut(view)?;
         self.virtual_terrain_oracle_view = Some(view);
         self.virtual_terrain_oracle_cut = Some(cut.clone());
@@ -5541,6 +5596,18 @@ impl Renderer {
         mode: VirtualTerrainRenderMode,
     ) -> Result<(), VirtualTerrainRendererError> {
         if mode == VirtualTerrainRenderMode::Visible {
+            if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible
+                && self
+                    .virtual_terrain_cut
+                    .as_ref()
+                    .zip(self.virtual_terrain_oracle_cut.as_ref())
+                    .is_some_and(|(published, candidate)| {
+                        published.fingerprint == candidate.fingerprint
+                            && published.selected_pages == candidate.selected_pages
+                    })
+            {
+                return Ok(());
+            }
             let Some(cut) = self
                 .virtual_terrain_oracle_cut
                 .as_ref()
@@ -5559,16 +5626,24 @@ impl Renderer {
                 ));
             }
             let ownership = VirtualTerrainOwnership::from_cut(&cut)?;
-            self.validate_virtual_terrain_handoff(&ownership)?;
+            let initial_legacy_handoff = !self.virtual_terrain_legacy_handoff_certified;
+            if initial_legacy_handoff {
+                self.validate_virtual_terrain_handoff(&ownership)?;
+            }
             self.virtual_terrain_cut_fits_compaction(&cut)?;
             let certified = self
                 .virtual_terrain_gpu
                 .latest_feedback()
                 .is_some_and(|feedback| gpu_feedback_matches_cut(&feedback, Some(&cut)));
-            if !certified {
+            if initial_legacy_handoff && !certified {
                 return Err(VirtualTerrainRendererError::GpuCutNotCertified);
             }
+            // Once virtual terrain owns the frame, a complete CPU-oracle cut is the safe
+            // correctness fallback while asynchronous GPU feedback catches up. Rendering that
+            // cut through the bounded direct path is strictly safer than reviving stale fixed-ring
+            // ownership after an edit or directory compaction.
             self.virtual_terrain_cut = Some(cut);
+            self.virtual_terrain_legacy_handoff_certified = true;
         }
         self.virtual_terrain_mode = mode;
         Ok(())
@@ -5709,6 +5784,74 @@ impl Renderer {
             })
             .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
         Ok(true)
+    }
+
+    /// Retains only pages that can contribute to the current or next certified ownership cut.
+    ///
+    /// Immutable encoded pages remain in the shell's memory cache and directory nodes remain on
+    /// the GPU, so an evicted page can be restored without rebuilding hierarchy metadata. This
+    /// bounds expanded GPU geometry independently from the much smaller encoded-page budget.
+    pub fn retain_virtual_terrain_pages(
+        &mut self,
+        keep: impl IntoIterator<Item = TerrainPageKey>,
+    ) -> Result<usize, VirtualTerrainRendererError> {
+        let mut keep = keep.into_iter().collect::<BTreeSet<_>>();
+        if let Some(cut) = &self.virtual_terrain_cut {
+            keep.extend(cut.selected_pages.iter().copied());
+        }
+        if let Some(cut) = &self.virtual_terrain_oracle_cut {
+            keep.extend(cut.selected_pages.iter().copied());
+            for identity in &cut.requested_pages {
+                keep.insert(identity.key);
+                if let Some(children) = identity
+                    .key
+                    .parent()
+                    .and_then(TerrainPageKey::refinement_children)
+                {
+                    keep.extend(children);
+                }
+            }
+        }
+        let remove = self
+            .virtual_terrain_pages
+            .keys()
+            .filter(|key| !keep.contains(key))
+            .copied()
+            .collect::<Vec<_>>();
+        for key in &remove {
+            if !self.virtual_terrain.remove_page(*key) {
+                continue;
+            }
+            self.virtual_terrain_gpu
+                .update_page_geometry(&self.queue, *key, VirtualTerrainGpuGeometry::default())
+                .and_then(|()| {
+                    self.virtual_terrain_gpu.update_page_residency(
+                        &self.queue,
+                        &self.virtual_terrain,
+                        *key,
+                    )
+                })
+                .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
+            if let Some(page) = self.virtual_terrain_pages.remove(key) {
+                discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
+            }
+        }
+        Ok(remove.len())
+    }
+
+    fn ensure_virtual_terrain_gpu_allocation(
+        &mut self,
+        requested_bytes: u32,
+    ) -> Result<(), VirtualTerrainRendererError> {
+        if requested_bytes == 0 || self.virtual_terrain_arena.can_allocate(requested_bytes) {
+            return Ok(());
+        }
+        self.retain_virtual_terrain_pages(std::iter::empty())?;
+        if self.virtual_terrain_arena.can_allocate(requested_bytes) {
+            Ok(())
+        } else {
+            Err(VirtualTerrainRendererError::GpuPoolCapacity)
+        }
     }
 
     /// Resident page count, encoded CPU bytes, primitive count, GPU capacity, and GPU allocation.
@@ -6919,6 +7062,18 @@ impl Renderer {
             voxel_x.div_euclid(CHUNK_EDGE as i32),
             voxel_z.div_euclid(CHUNK_EDGE as i32),
         );
+        let virtual_leaf = TerrainPageKey::surface(0, column.0, column.1);
+        if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible
+            && self.virtual_terrain_cut.as_ref().is_some_and(|cut| {
+                cut.selected_pages.iter().any(|selected| {
+                    selected.is_surface()
+                        && virtual_leaf.ancestor_at(selected.level) == Some(*selected)
+                })
+            })
+        {
+            let required = (CHUNK_EDGE * CHUNK_EDGE) as u16;
+            return (required, required);
+        }
         let covered = canonical_surface_cell_coverage(column, &self.canonical_surface_ready_chunks);
         (covered as u16, (CHUNK_EDGE * CHUNK_EDGE) as u16)
     }
@@ -7152,15 +7307,11 @@ impl Renderer {
                 let Ok(ownership) = VirtualTerrainOwnership::from_cut(cut) else {
                     return false;
                 };
-                if self.validate_virtual_terrain_handoff(&ownership).is_ok() {
-                    (true, ownership)
-                } else {
-                    // The legacy LOD plan can change after a cut was certified. Fall back
-                    // atomically rather than allowing a newly crossing slice to overlap a virtual
-                    // root for even one frame.
-                    self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
-                    (false, VirtualTerrainOwnership::default())
-                }
+                // The first Visible transition is certified against legacy ownership in
+                // `set_virtual_terrain_render_mode`. After that transition the fixed-ring stream
+                // is suspended and cannot acquire ownership again. Rechecking its stale retained
+                // slices here made ordinary virtual refinements fall back to an obsolete renderer.
+                (true, ownership)
             } else {
                 (false, VirtualTerrainOwnership::default())
             };

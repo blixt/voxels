@@ -34,6 +34,20 @@ impl TerrainStreamConfig {
         retry_max_ms: 5_000,
     };
 
+    /// Browser-facing pacing that keeps decode and GPU publication inside a 120 Hz frame budget.
+    ///
+    /// Four pages are also the atomic replacement-group width, so reducing the batch does not
+    /// split a sibling handoff. The larger portable development profile remains available for
+    /// native throughput benchmarks.
+    pub const INTERACTIVE_CLIENT: Self = Self {
+        max_pending_pages: 2_048,
+        max_in_flight_pages: 64,
+        max_batch_items: 4,
+        max_batch_bytes: 2 * 1_024 * 1_024,
+        retry_base_ms: 100,
+        retry_max_ms: 5_000,
+    };
+
     pub fn validates(self) -> bool {
         self.max_pending_pages >= TERRAIN_PAGE_MAX_CHILDREN
             && self.max_in_flight_pages > 0
@@ -606,6 +620,21 @@ mod tests {
             silhouette_critical: false,
             estimated_encoded_bytes: 1_024,
         }
+    }
+
+    #[test]
+    fn interactive_client_pacing_preserves_one_atomic_replacement_batch() {
+        let config = TerrainStreamConfig::INTERACTIVE_CLIENT;
+        assert!(config.validates());
+        let surface_parent = TerrainPageKey::surface(1, 0, 0);
+        assert_eq!(
+            config.max_batch_items,
+            surface_parent
+                .refinement_children()
+                .expect("surface parent children")
+                .len()
+        );
+        assert!(config.max_in_flight_pages >= config.max_batch_items);
     }
 
     #[test]

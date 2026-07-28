@@ -553,6 +553,7 @@ fn sample_exact_surface_edits(
         .horizontal_bounds()
         .ok_or(VirtualTerrainError::InvalidRoot)?;
     let mut edited_columns = BTreeSet::new();
+    let mut edited_bounds = BTreeMap::<voxels_world::ChunkCoord, [VoxelCoord; 2]>::new();
     let mut minimum_y = samples
         .iter()
         .map(|sample| sample.height)
@@ -569,6 +570,17 @@ fn sample_exact_surface_edits(
                 && (minimum_z..=maximum_z).contains(&coord.z)
             {
                 edited_columns.insert((coord.x, coord.z));
+                edited_bounds
+                    .entry(chunk)
+                    .and_modify(|bounds| {
+                        bounds[0].x = bounds[0].x.min(coord.x);
+                        bounds[0].y = bounds[0].y.min(coord.y);
+                        bounds[0].z = bounds[0].z.min(coord.z);
+                        bounds[1].x = bounds[1].x.max(coord.x);
+                        bounds[1].y = bounds[1].y.max(coord.y);
+                        bounds[1].z = bounds[1].z.max(coord.z);
+                    })
+                    .or_insert([coord, coord]);
                 minimum_y = minimum_y.min(coord.y);
                 maximum_y = maximum_y.max(coord.y);
             }
@@ -614,21 +626,89 @@ fn sample_exact_surface_edits(
         materials: vec![Material::Air; sample_count],
     };
 
-    let mut requests = Vec::new();
-    let mut segment_minimum_y = sample_minimum.y;
-    while segment_minimum_y < sample_maximum_y {
-        let remaining = u32::try_from(i64::from(sample_maximum_y) - i64::from(segment_minimum_y))
-            .map_err(|_| VirtualTerrainError::InvalidRoot)?;
-        let height = remaining.min(REGION_SAMPLE_YZ_SEGMENT_EDGE);
-        requests.push(VoxelBlockRequest {
-            min: VoxelCoord::new(sample_minimum.x, segment_minimum_y, sample_minimum.z),
-            sample_shape: [EXACT_SAMPLE_EDGE as u32, height, EXACT_SAMPLE_EDGE as u32],
-        });
-        segment_minimum_y = segment_minimum_y
-            .checked_add(i32::try_from(height).map_err(|_| VirtualTerrainError::InvalidRoot)?)
-            .ok_or(VirtualTerrainError::InvalidRoot)?;
+    // The ordinary surface predictor already certifies the unedited part of this page. Populate
+    // that complete, hole-free owner first, then replace only the small neighborhoods that can
+    // expose canonical material through an edit. Resampling the whole 66 x N x 66 volume made a
+    // four-voxel dig wait tens of seconds on unrelated procedural samples.
+    let predictor = source
+        .surface_sample_lattice(
+            priority,
+            [sample_minimum.x, sample_minimum.z],
+            [EXACT_SAMPLE_EDGE as u32; 2],
+            1,
+        )
+        .map_err(|error| VirtualTerrainError::Source(error.to_string()))?;
+    if predictor.len() != EXACT_SAMPLE_EDGE * EXACT_SAMPLE_EDGE {
+        return Err(VirtualTerrainError::Source(
+            "source returned a mismatched edited surface predictor".to_owned(),
+        ));
+    }
+    for z in 0..EXACT_SAMPLE_EDGE {
+        for y in 0..shape_y {
+            let world_y = sample_minimum.y + y as i32;
+            for x in 0..EXACT_SAMPLE_EDGE {
+                let column = predictor[x + z * EXACT_SAMPLE_EDGE];
+                let material = if world_y <= column.height {
+                    column.material
+                } else if column
+                    .water_level
+                    .is_some_and(|water_level| world_y <= water_level)
+                {
+                    Material::Water
+                } else {
+                    Material::Air
+                };
+                exact.materials[x + y * exact.shape[0] + z * exact.shape[0] * exact.shape[1]] =
+                    material;
+            }
+        }
     }
 
+    let sample_maximum = VoxelCoord::new(
+        sample_minimum
+            .x
+            .checked_add(i32::try_from(shape[0]).map_err(|_| VirtualTerrainError::InvalidRoot)?)
+            .ok_or(VirtualTerrainError::InvalidRoot)?,
+        sample_maximum_y,
+        sample_minimum
+            .z
+            .checked_add(i32::try_from(shape[2]).map_err(|_| VirtualTerrainError::InvalidRoot)?)
+            .ok_or(VirtualTerrainError::InvalidRoot)?,
+    );
+    let mut requests = edited_bounds
+        .into_values()
+        .map(|[minimum, maximum]| {
+            let minimum = VoxelCoord::new(
+                minimum.x.saturating_sub(1).max(sample_minimum.x),
+                minimum.y.saturating_sub(1).max(sample_minimum.y),
+                minimum.z.saturating_sub(1).max(sample_minimum.z),
+            );
+            let maximum = VoxelCoord::new(
+                maximum.x.saturating_add(2).min(sample_maximum.x),
+                maximum.y.saturating_add(2).min(sample_maximum.y),
+                maximum.z.saturating_add(2).min(sample_maximum.z),
+            );
+            let shape = [
+                u32::try_from(maximum.x - minimum.x),
+                u32::try_from(maximum.y - minimum.y),
+                u32::try_from(maximum.z - minimum.z),
+            ];
+            shape
+                .map(|component| component.map_err(|_| VirtualTerrainError::InvalidRoot))
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|shape| {
+                    let [x, y, z]: [u32; 3] = shape
+                        .try_into()
+                        .map_err(|_| VirtualTerrainError::InvalidRoot)?;
+                    Ok(VoxelBlockRequest {
+                        min: minimum,
+                        sample_shape: [x, y, z],
+                    })
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    requests.sort_unstable_by_key(|request| request.min);
     for batch in requests.chunks(REQUEST_BATCH) {
         let requested = batch
             .iter()
@@ -668,11 +748,12 @@ fn sample_exact_surface_edits(
             };
             let shape_x = request.sample_shape[0] as usize;
             let shape_y = request.sample_shape[1] as usize;
-            for z in 0..EXACT_SAMPLE_EDGE {
+            let shape_z = request.sample_shape[2] as usize;
+            for z in 0..shape_z {
                 let world_z = request.min.z + z as i32;
                 for y in 0..shape_y {
                     let world_y = request.min.y + y as i32;
-                    for x in 0..EXACT_SAMPLE_EDGE {
+                    for x in 0..shape_x {
                         let world_x = request.min.x + x as i32;
                         let source_index = x + y * shape_x + z * shape_x * shape_y;
                         let generated = snapshot_block
@@ -759,20 +840,9 @@ fn prepare_region(
     }
     let revision = built
         .directory
-        .nodes
-        .first()
+        .node(built.root)
         .map(|node| node.revision)
-        .ok_or_else(|| VirtualTerrainError::Build("terrain directory is empty".to_owned()))?;
-    if built
-        .directory
-        .nodes
-        .iter()
-        .any(|node| node.revision != revision)
-    {
-        return Err(VirtualTerrainError::Build(
-            "terrain region contains mixed revisions".to_owned(),
-        ));
-    }
+        .ok_or_else(|| VirtualTerrainError::Build("terrain directory omits its root".to_owned()))?;
     Ok(Arc::new(PreparedTerrainRegion {
         root: built.root,
         revision,
@@ -1026,6 +1096,38 @@ mod tests {
             .find(|page| page.key == child_root)
             .expect("independent child");
         assert_eq!(independent, embedded);
+    }
+
+    #[test]
+    fn prepared_surface_segment_keeps_page_local_revisions() {
+        let source = ProceduralWorldSource::new(17);
+        let root = TerrainPageKey::surface(1, 0, 0);
+        let revised_child = root.refinement_children().unwrap()[2];
+        let built = build_coverage_region(
+            &source,
+            root,
+            TerrainEditSnapshot {
+                edits: voxels_world::EditMap::default(),
+                revision: 41,
+            },
+            source.source_identity_hash(),
+            WorldProductPriority::VirtualTerrain,
+            |key| Some(if key == revised_child { 43 } else { 41 }),
+        )
+        .expect("coverage");
+        let prepared = prepare_region(built).expect("prepared mixed-revision segment");
+        assert_eq!(prepared.revision, 41);
+        let child_node = prepared.directory.node(revised_child).unwrap();
+        assert_eq!(child_node.revision, 43);
+        let child = prepared
+            .page(TerrainPageTransferIdentity {
+                key: revised_child,
+                revision: child_node.revision,
+                content_fingerprint: child_node.content_fingerprint,
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(child.revision, 43);
     }
 
     #[test]

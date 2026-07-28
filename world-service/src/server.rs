@@ -2828,7 +2828,12 @@ async fn serve_virtual_terrain_pages(
             Err(*failure)
         } else {
             match regions.get(&root) {
-                Some(region) if region.revision != identity.revision => {
+                Some(region)
+                    if region
+                        .directory
+                        .node(identity.key)
+                        .is_some_and(|node| node.revision != identity.revision) =>
+                {
                     Err(TerrainPageTransferFailure::StaleRevision)
                 }
                 Some(region) => match region.page(identity) {

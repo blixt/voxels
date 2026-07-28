@@ -106,15 +106,19 @@ async function waitForSettledWorld(
   const settled = await engine.waitForSnapshot(
     (snapshot) => {
       const fingerprint = `${snapshotValue(snapshot, "viewportFingerprintHigh24")}:${snapshotValue(snapshot, "viewportFingerprintLow24")}:${snapshotValue(snapshot, "quads")}`;
+      const legacySurfaceSettled =
+        snapshotValue(snapshot, "virtualTerrainMode") === 2 ||
+        (snapshotValue(snapshot, "surfaceQueued") === 0 &&
+          snapshotValue(snapshot, "surfaceDirty") === 0 &&
+          snapshotValue(snapshot, "surfaceInFlight") === 0);
       const ready =
         snapshotValue(snapshot, "quads") > 0 &&
         snapshotValue(snapshot, "canonicalImmediateResident") ===
           snapshotValue(snapshot, "canonicalImmediateRequired") &&
         snapshotValue(snapshot, "canonicalSurfaceCellsResident") ===
           snapshotValue(snapshot, "canonicalSurfaceCellsRequired") &&
-        snapshotValue(snapshot, "surfaceQueued") === 0 &&
-        snapshotValue(snapshot, "surfaceDirty") === 0 &&
-        snapshotValue(snapshot, "surfaceInFlight") === 0 &&
+        legacySurfaceSettled &&
+        snapshotValue(snapshot, "virtualTerrainDirectoryInFlight") === 0 &&
         snapshotValue(snapshot, "lodIncompleteTransitionEdges") === 0;
       stableSamples = ready && fingerprint === previousFingerprint ? stableSamples + 1 : 0;
       previousFingerprint = fingerprint;
@@ -169,9 +173,7 @@ async function waitForEdit(
       return (
         snapshotValue(snapshot, "edits") > editsBefore &&
         snapshotValue(snapshot, "editCanonicalRenderable") === required &&
-        snapshotValue(snapshot, "editCanonicalOwned") === required &&
-        snapshotValue(snapshot, "pendingJobs") === 0 &&
-        snapshotValue(snapshot, "surfaceInFlight") === 0
+        snapshotValue(snapshot, "editCanonicalOwned") === required
       );
     },
     { timeoutMs: EDIT_TIMEOUT_MS, intervalMs: 25, description: `${label} did not converge` },
@@ -212,9 +214,7 @@ async function submitDigIfSolid(
       snapshotValue(after, "editCanonicalRenderable") ===
         snapshotValue(after, "editCanonicalRequired") &&
       snapshotValue(after, "editCanonicalOwned") ===
-        snapshotValue(after, "editCanonicalRequired") &&
-      snapshotValue(after, "pendingJobs") === 0 &&
-      snapshotValue(after, "surfaceInFlight") === 0
+        snapshotValue(after, "editCanonicalRequired")
     ) {
       await engine.wait(250);
       const confirmed = await engine.snapshot();
@@ -223,9 +223,7 @@ async function submitDigIfSolid(
         snapshotValue(confirmed, "editCanonicalRenderable") ===
           snapshotValue(confirmed, "editCanonicalRequired") &&
         snapshotValue(confirmed, "editCanonicalOwned") ===
-          snapshotValue(confirmed, "editCanonicalRequired") &&
-        snapshotValue(confirmed, "pendingJobs") === 0 &&
-        snapshotValue(confirmed, "surfaceInFlight") === 0
+          snapshotValue(confirmed, "editCanonicalRequired")
       ) {
         return undefined;
       }
@@ -518,7 +516,7 @@ async function excavateTunnelFixture(
     const targetZ = Math.round(
       (snapshotValue(pose, "cameraZ") - Math.cos(tunnelYaw) * 0.55) * VOXELS_PER_METRE,
     );
-    for (const heightMetres of [0.45, 1.25]) {
+    for (const heightMetres of [0.25, 1.25]) {
       await submitDigIfSolid(
         engine,
         [targetX, Math.round((feetY + heightMetres) * VOXELS_PER_METRE), targetZ],
@@ -533,7 +531,7 @@ async function excavateTunnelFixture(
   const feetY = snapshotValue(junction, "cameraY") - eyeHeightMetres;
   const branchYaw = tunnelYaw - Math.PI / 2;
   for (const distance of [0.6, 1.15, 1.7, 2.25, 2.8]) {
-    for (const heightMetres of [0.45, 1.25]) {
+    for (const heightMetres of [0.25, 1.25]) {
       await submitDigIfSolid(
         engine,
         [

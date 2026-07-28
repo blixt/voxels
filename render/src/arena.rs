@@ -127,6 +127,34 @@ impl ArenaAllocator {
         Some(allocation)
     }
 
+    pub fn can_allocate(&self, requested_size: u32) -> bool {
+        let Some(size) = align_up(requested_size, self.alignment) else {
+            return false;
+        };
+        if size == 0 {
+            return false;
+        }
+        if self
+            .pages
+            .iter()
+            .any(|page| page.free.iter().any(|(_, free_size)| *free_size >= size))
+        {
+            return true;
+        }
+        if self.pages.len() >= self.maximum_pages.unwrap_or(u16::MAX as usize) {
+            return false;
+        }
+        let minimum = self.default_page_size.max(size);
+        let capacity = minimum.checked_next_power_of_two().unwrap_or(minimum);
+        let current_capacity = self
+            .pages
+            .iter()
+            .map(|page| u64::from(page.capacity))
+            .sum::<u64>();
+        self.maximum_capacity_bytes
+            .is_none_or(|maximum| current_capacity.saturating_add(u64::from(capacity)) <= maximum)
+    }
+
     pub fn free(&mut self, allocation: Allocation) -> bool {
         let key = (allocation.page, allocation.offset);
         if self.active.get(&key) != Some(&(allocation.size, allocation.generation)) {
@@ -225,11 +253,15 @@ mod tests {
     fn bounded_allocator_never_grows_past_byte_or_page_ceiling() -> Result<(), &'static str> {
         let mut byte_bounded =
             ArenaAllocator::new_bounded(64, 8, 128, 8).ok_or("invalid byte bound")?;
+        assert!(byte_bounded.can_allocate(64));
         let first = byte_bounded.allocate(64).ok_or("first byte allocation")?;
+        assert!(byte_bounded.can_allocate(64));
         let second = byte_bounded.allocate(64).ok_or("second byte allocation")?;
+        assert!(!byte_bounded.can_allocate(1));
         assert!(byte_bounded.allocate(1).is_none());
         assert_eq!(byte_bounded.stats().capacity_bytes, 128);
         assert!(byte_bounded.free(first));
+        assert!(byte_bounded.can_allocate(1));
         assert!(byte_bounded.allocate(1).is_some());
         assert_eq!(byte_bounded.stats().capacity_bytes, 128);
         assert!(byte_bounded.free(second));
@@ -237,6 +269,7 @@ mod tests {
         let mut page_bounded =
             ArenaAllocator::new_bounded(32, 4, 1_024, 1).ok_or("invalid page bound")?;
         assert!(page_bounded.allocate(32).is_some());
+        assert!(!page_bounded.can_allocate(4));
         assert!(page_bounded.allocate(4).is_none());
         assert_eq!(page_bounded.stats().pages, 1);
         Ok(())

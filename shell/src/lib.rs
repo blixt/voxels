@@ -1241,6 +1241,31 @@ fn virtual_terrain_root_working_set(
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn virtual_terrain_edit_revision_keys(
+    affected_chunks: &[voxels_world::ChunkCoord],
+) -> (
+    std::collections::BTreeSet<voxels_world::TerrainPageKey>,
+    std::collections::BTreeSet<voxels_world::TerrainPageKey>,
+) {
+    let leaves = affected_chunks
+        .iter()
+        .map(|coord| voxels_world::TerrainPageKey::surface(0, coord.x, coord.z))
+        .collect::<std::collections::BTreeSet<_>>();
+    let roots = leaves
+        .iter()
+        .filter_map(|leaf| leaf.ancestor_at(voxels_world::TERRAIN_COVERAGE_ROOT_LEVEL))
+        .collect::<std::collections::BTreeSet<_>>();
+    let revision_keys = leaves
+        .into_iter()
+        .flat_map(|leaf| {
+            (1..=voxels_world::TERRAIN_COVERAGE_ROOT_LEVEL)
+                .filter_map(move |level| leaf.ancestor_at(level))
+        })
+        .collect();
+    (roots, revision_keys)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const ATMOSPHERE_MOTION_PERIOD_SECONDS: f64 = 4_096.0;
@@ -1472,6 +1497,8 @@ mod web {
     const VIRTUAL_TERRAIN_REGION_WORKING_SET: usize = 128;
     const VIRTUAL_TERRAIN_MAX_DIRECTORY_BATCHES_IN_FLIGHT: usize = 2;
     const VIRTUAL_TERRAIN_MAX_REFINEMENT_DIRECTORY_BATCHES_IN_FLIGHT: usize = 1;
+    const VIRTUAL_TERRAIN_PAGE_COMPLETIONS_PER_FRAME: usize = 1;
+    const VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME: usize = 4;
     const VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS: u64 = 1_000;
     const VIRTUAL_TERRAIN_PAGE_CACHE_BYTES: usize = 128 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_REFINE_ABOVE_PIXELS: f64 = 0.75;
@@ -3526,6 +3553,29 @@ mod web {
             let predicted_root = TerrainPageKey::surface(0, predicted_chunk.x, predicted_chunk.z)
                 .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
                 .unwrap_or(camera_root);
+            let current_column = [camera_root.coord[0], camera_root.coord[2]];
+            let predicted_column = [predicted_root.coord[0], predicted_root.coord[2]];
+            let mut prioritized = Vec::with_capacity(VIRTUAL_TERRAIN_MAX_COLUMNS);
+            let mut included = BTreeSet::new();
+            // Current ownership is needed immediately. The predicted endpoint follows so the
+            // slowest build starts against its deadline, then every crossed fixed column is
+            // enumerated explicitly. Pure endpoint ranking skipped the intervening 12.8 m roots
+            // at flight speed and made successful lookahead useless.
+            for column in std::iter::once(current_column)
+                .chain(std::iter::once(predicted_column))
+                .chain(virtual_terrain_column_corridor(
+                    current_column,
+                    predicted_column,
+                ))
+            {
+                if included.insert(column) {
+                    prioritized.push(column);
+                    if prioritized.len() == VIRTUAL_TERRAIN_MAX_COLUMNS {
+                        return prioritized;
+                    }
+                }
+            }
+
             let camera_position = camera.position.to_array().map(f64::from);
             let predicted_position = predicted_position.to_array().map(f64::from);
             let forward = camera.forward().to_array().map(f64::from);
@@ -3534,13 +3584,25 @@ mod web {
             let radius = (f64::from(self.config.view_distance_metres) / root_span_metres)
                 .ceil()
                 .clamp(1.0, 64.0) as i32;
-            let mut ranked = BTreeMap::new();
-            for offset_z in -radius..=radius {
-                for offset_x in -radius..=radius {
+            // Only the remaining bounded request slots can be admitted. The directional score's
+            // lead is two coverage columns, so the best remaining candidates are contained by a
+            // radius derived from the square root of the slot count plus that lead and one
+            // camera-within-column margin. Predicted and crossed columns outside this local search
+            // were already reserved above.
+            let ranking_radius =
+                radius.min((VIRTUAL_TERRAIN_MAX_COLUMNS as f64).sqrt().ceil() as i32 + 2 + 1);
+            let mut ranked = Vec::with_capacity(
+                (ranking_radius.saturating_mul(2).saturating_add(1) as usize).pow(2),
+            );
+            for offset_z in -ranking_radius..=ranking_radius {
+                for offset_x in -ranking_radius..=ranking_radius {
                     let column = [
                         camera_root.coord[0].saturating_add(offset_x),
                         camera_root.coord[2].saturating_add(offset_z),
                     ];
+                    if included.contains(&column) {
+                        continue;
+                    }
                     let probe =
                         TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, column[0], column[1]);
                     if probe.horizontal_bounds().is_none() {
@@ -3566,38 +3628,22 @@ mod web {
                     // distance term guarantees that the camera-containing column ranks first.
                     let score =
                         distance_squared - forward_distance.max(0.0) * root_span_metres * 2.0;
-                    ranked.insert(column, score);
+                    ranked.push((column, score));
                 }
             }
-            let mut ranked = ranked.into_iter().collect::<Vec<_>>();
-            ranked.sort_by(|left, right| {
+            let ranked_order = |left: &([i32; 2], f64), right: &([i32; 2], f64)| {
                 left.1
                     .total_cmp(&right.1)
                     .then_with(|| left.0.cmp(&right.0))
-            });
-            let current_column = [camera_root.coord[0], camera_root.coord[2]];
-            let predicted_column = [predicted_root.coord[0], predicted_root.coord[2]];
-            let mut prioritized = Vec::with_capacity(VIRTUAL_TERRAIN_MAX_COLUMNS);
-            let mut included = BTreeSet::new();
-            // Current ownership is needed immediately. The predicted endpoint follows so the
-            // slowest build starts against its deadline, then every crossed fixed column is
-            // enumerated explicitly. Pure endpoint ranking skipped the intervening 12.8 m roots
-            // at flight speed and made successful lookahead useless.
-            for column in std::iter::once(current_column)
-                .chain(std::iter::once(predicted_column))
-                .chain(virtual_terrain_column_corridor(
-                    current_column,
-                    predicted_column,
-                ))
-                .chain(ranked.into_iter().map(|(column, _)| column))
-            {
-                if included.insert(column) {
-                    prioritized.push(column);
-                    if prioritized.len() == VIRTUAL_TERRAIN_MAX_COLUMNS {
-                        break;
-                    }
-                }
+            };
+            let remaining = VIRTUAL_TERRAIN_MAX_COLUMNS.saturating_sub(prioritized.len());
+            let ranked_prefix = remaining.min(ranked.len());
+            if ranked_prefix < ranked.len() {
+                ranked.select_nth_unstable_by(ranked_prefix, ranked_order);
+                ranked.truncate(ranked_prefix);
             }
+            ranked.sort_by(ranked_order);
+            prioritized.extend(ranked.into_iter().map(|(column, _)| column));
             prioritized
         }
 
@@ -3723,6 +3769,7 @@ mod web {
                 }
             }
 
+            self.request_virtual_terrain_edit_directories(now_ms);
             self.request_virtual_terrain_directories(
                 &prioritized_roots,
                 now_ms,
@@ -3748,9 +3795,14 @@ mod web {
             }
 
             if self
-                .renderer
+                .virtual_terrain
                 .borrow()
-                .virtual_terrain_candidate_is_gpu_certified()
+                .minimum_region_revisions
+                .is_empty()
+                && self
+                    .renderer
+                    .borrow()
+                    .virtual_terrain_candidate_is_gpu_certified()
             {
                 // Install only one refinement-directory mutation at a time, and do not begin the
                 // next until the GPU has certified the current CPU cut. The fixed-ring streamer
@@ -3956,9 +4008,86 @@ mod web {
             }
         }
 
+        fn request_virtual_terrain_edit_directories(&self, now_ms: u64) {
+            let roots = {
+                let state = self.virtual_terrain.borrow();
+                if state
+                    .directory_in_flight
+                    .values()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    >= VIRTUAL_TERRAIN_MAX_DIRECTORY_BATCHES_IN_FLIGHT
+                {
+                    return;
+                }
+                let mut roots = state
+                    .minimum_region_revisions
+                    .keys()
+                    .filter(|root| {
+                        !virtual_terrain_directory_is_registered(&state, **root)
+                            && !state.directory_in_flight.contains_key(root)
+                            && state
+                                .directory_retry_after_ms
+                                .get(root)
+                                .is_none_or(|retry_at| *retry_at <= now_ms)
+                    })
+                    .copied()
+                    .collect::<Vec<_>>();
+                // The server can generate the complete spatial chain independently. Parent-first
+                // order lets the completion install every refinement into the renderer in one
+                // response instead of paying one network/GPU-feedback round trip per level.
+                roots.sort_unstable_by(|left, right| {
+                    right.level.cmp(&left.level).then_with(|| left.cmp(right))
+                });
+                roots.truncate(voxels_world::protocol::MAX_TERRAIN_DIRECTORIES_PER_BATCH);
+                roots
+            };
+            if roots.is_empty() {
+                return;
+            }
+            match self
+                .remote
+                .submit_terrain_directory_batch(WorldProductPriority::VirtualTerrain, roots.clone())
+            {
+                Ok(request_id) => {
+                    self.virtual_terrain
+                        .borrow_mut()
+                        .directory_in_flight
+                        .extend(roots.into_iter().map(|root| (root, request_id)));
+                }
+                Err(error) => {
+                    let mut state = self.virtual_terrain.borrow_mut();
+                    state.stats.directory_submit_deferred =
+                        state.stats.directory_submit_deferred.saturating_add(1);
+                    for root in roots {
+                        state.directory_retry_after_ms.insert(
+                            root,
+                            now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
+                        );
+                    }
+                    drop(state);
+                    if !matches!(
+                        error,
+                        RemoteWorldError::Backpressured
+                            | RemoteWorldError::RequestWindowFull
+                            | RemoteWorldError::NotOpen
+                    ) {
+                        log_gpu_error(&format!(
+                            "request edited virtual terrain directory chain: {error}"
+                        ));
+                    }
+                }
+            }
+        }
+
         fn hydrate_virtual_terrain_from_cache(&self, cut: &VirtualTerrainCut) -> bool {
             let mut uploaded = false;
-            for identity in &cut.requested_pages {
+            for identity in cut
+                .requested_pages
+                .iter()
+                .take(VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME)
+            {
                 let encoded = self
                     .virtual_terrain_cache
                     .borrow_mut()
@@ -4128,11 +4257,23 @@ mod web {
             completion: RemoteTerrainDirectoryCompletion,
         ) {
             let now_ms = self.last_time.get().max(0.0) as u64;
-            {
+            let accepted = {
                 let mut state = self.virtual_terrain.borrow_mut();
-                for root in &completion.roots {
+                let accepted = completion
+                    .roots
+                    .iter()
+                    .copied()
+                    .filter(|root| {
+                        state.directory_in_flight.get(root) == Some(&completion.request_id)
+                    })
+                    .collect::<BTreeSet<_>>();
+                for root in &accepted {
                     state.directory_in_flight.remove(root);
                 }
+                accepted
+            };
+            if accepted.is_empty() {
+                return;
             }
             let result = match completion.result {
                 Ok(result) => result,
@@ -4152,7 +4293,11 @@ mod web {
                                 state.stats.directory_other_failed.saturating_add(1);
                         }
                     }
-                    for root in completion.roots {
+                    for root in completion
+                        .roots
+                        .into_iter()
+                        .filter(|root| accepted.contains(root))
+                    {
                         state.directory_retry_after_ms.insert(
                             root,
                             now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
@@ -4167,31 +4312,42 @@ mod web {
                 log_gpu_error("virtual terrain directory identity changed");
                 return;
             }
-            for item in result.items {
+            let mut items = result.items;
+            items.sort_unstable_by(|left, right| {
+                right
+                    .root
+                    .level
+                    .cmp(&left.root.level)
+                    .then_with(|| left.root.cmp(&right.root))
+            });
+            for item in items {
                 let root = item.root;
-                let is_refinement = root.is_surface() && root.level < TERRAIN_COVERAGE_ROOT_LEVEL;
-                let Ok(bootstrap) = item.result else {
-                    let mut state = self.virtual_terrain.borrow_mut();
-                    state.stats.directory_other_failed =
-                        state.stats.directory_other_failed.saturating_add(1);
-                    state.directory_retry_after_ms.insert(
-                        root,
-                        now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
-                    );
-                    drop(state);
-                    log_gpu_error(&format!(
-                        "virtual terrain directory producer failed for {root:?}"
-                    ));
+                if !accepted.contains(&root) {
                     continue;
+                }
+                let is_refinement = root.is_surface() && root.level < TERRAIN_COVERAGE_ROOT_LEVEL;
+                let bootstrap = match item.result {
+                    Ok(bootstrap) => bootstrap,
+                    Err(error) => {
+                        let mut state = self.virtual_terrain.borrow_mut();
+                        state.stats.directory_other_failed =
+                            state.stats.directory_other_failed.saturating_add(1);
+                        state.directory_retry_after_ms.insert(
+                            root,
+                            now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
+                        );
+                        drop(state);
+                        log_gpu_error(&format!(
+                            "virtual terrain directory producer failed for {root:?}: {error:?}"
+                        ));
+                        continue;
+                    }
                 };
-                let revision_root = root
-                    .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
-                    .unwrap_or(root);
                 let minimum_revision = self
                     .virtual_terrain
                     .borrow()
                     .minimum_region_revisions
-                    .get(&revision_root)
+                    .get(&root)
                     .copied()
                     .unwrap_or(0);
                 let directory_revision = bootstrap
@@ -4274,6 +4430,7 @@ mod web {
                         state.stats.directory_accepted =
                             state.stats.directory_accepted.saturating_add(1);
                         state.directory_retry_after_ms.remove(&root);
+                        state.minimum_region_revisions.remove(&root);
                         for mut node in bootstrap.directory.nodes {
                             if is_refinement {
                                 node.is_root = false;
@@ -4294,7 +4451,9 @@ mod web {
                             now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
                         );
                         drop(state);
-                        log_gpu_error(&format!("register virtual terrain directory: {error}"));
+                        log_gpu_error(&format!(
+                            "register virtual terrain directory {root:?}: {error}"
+                        ));
                         if let Some(rollback_error) = rollback_error {
                             log_gpu_error(&format!(
                                 "rollback virtual terrain bootstrap: {rollback_error}"
@@ -4310,17 +4469,12 @@ mod web {
             affected_chunks: &[ChunkCoord],
             minimum_revision: Option<u64>,
         ) {
-            let invalid = affected_chunks
-                .iter()
-                .filter_map(|coord| {
-                    TerrainPageKey::surface(0, coord.x, coord.z)
-                        .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
-                })
-                .collect::<BTreeSet<_>>();
-            if invalid.is_empty() {
+            let (invalid_roots, revision_keys) =
+                crate::virtual_terrain_edit_revision_keys(affected_chunks);
+            if invalid_roots.is_empty() {
                 return;
             }
-            let invalid_columns = invalid
+            let invalid_columns = invalid_roots
                 .iter()
                 .map(|root| [root.coord[0], root.coord[2]])
                 .collect::<BTreeSet<_>>();
@@ -4328,7 +4482,7 @@ mod web {
                 let state = self.virtual_terrain.borrow();
                 state
                     .registered_roots
-                    .difference(&invalid)
+                    .difference(&invalid_roots)
                     .copied()
                     .collect::<BTreeSet<_>>()
             };
@@ -4338,8 +4492,10 @@ mod web {
                     .directory_in_flight
                     .iter()
                     .filter(|(key, _)| {
-                        key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
-                            .is_some_and(|root| invalid.contains(&root))
+                        key.level < TERRAIN_COVERAGE_ROOT_LEVEL
+                            || key
+                                .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                                .is_some_and(|root| invalid_roots.contains(&root))
                     })
                     .map(|(_, request_id)| *request_id)
                     .chain(
@@ -4399,24 +4555,24 @@ mod web {
             }
             state
                 .registered_roots
-                .retain(|root| !invalid.contains(root));
+                .retain(|root| !invalid_roots.contains(root));
             state.registered_refinements.retain(|key| {
                 key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
-                    .is_none_or(|root| !invalid.contains(&root))
+                    .is_none_or(|root| !invalid_roots.contains(&root))
             });
             state.nodes.retain(|key, _| {
                 key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
-                    .is_none_or(|root| !invalid.contains(&root))
+                    .is_none_or(|root| !invalid_roots.contains(&root))
             });
             state.directory_retry_after_ms.retain(|key, _| {
                 key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
-                    .is_none_or(|root| !invalid.contains(&root))
+                    .is_none_or(|root| !invalid_roots.contains(&root))
             });
-            for root in invalid {
+            for key in revision_keys {
                 if let Some(revision) = minimum_revision {
                     state
                         .minimum_region_revisions
-                        .entry(root)
+                        .entry(key)
                         .and_modify(|minimum| *minimum = (*minimum).max(revision))
                         .or_insert(revision);
                 }
@@ -4540,7 +4696,7 @@ mod web {
                 };
                 self.accept_remote_terrain_directory_completion(completion);
             }
-            for _ in 0..4 {
+            for _ in 0..VIRTUAL_TERRAIN_PAGE_COMPLETIONS_PER_FRAME {
                 let Some(completion) = self.remote.next_terrain_page_completion() else {
                     break;
                 };
@@ -5634,39 +5790,41 @@ mod web {
                     .collect()
             };
             self.register_canonical_publication(server_revision, &canonical);
-            let surface_revision = if affected_surface_tiles.is_empty() {
-                self.surface_revisions.borrow().epoch()
-            } else {
-                self.surface_revisions.borrow_mut().begin_edit()
-            };
-            let presented_surface_tiles = self
-                .renderer
-                .borrow()
-                .presented_surface_tiles()
-                .into_iter()
-                .collect::<BTreeSet<_>>();
             let mut surface = Vec::new();
-            for &coord in affected_surface_tiles {
-                let active =
-                    self.surface_tile_relevant(coord) || presented_surface_tiles.contains(&coord);
-                let resident = self.surface_resident.borrow().contains(&coord);
-                if !active && !resident {
-                    continue;
+            if !self.surface_stream_suspended.get() {
+                let surface_revision = if affected_surface_tiles.is_empty() {
+                    self.surface_revisions.borrow().epoch()
+                } else {
+                    self.surface_revisions.borrow_mut().begin_edit()
+                };
+                let presented_surface_tiles = self
+                    .renderer
+                    .borrow()
+                    .presented_surface_tiles()
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
+                for &coord in affected_surface_tiles {
+                    let active = self.surface_tile_relevant(coord)
+                        || presented_surface_tiles.contains(&coord);
+                    let resident = self.surface_resident.borrow().contains(&coord);
+                    if !active && !resident {
+                        continue;
+                    }
+                    self.surface_revisions
+                        .borrow_mut()
+                        .request(coord, surface_revision);
+                    // Retained off-cut tiles stay revision-stale without masquerading as queued
+                    // work. `prepare_focus` turns them back into a replacement when desired.
+                    if !active {
+                        continue;
+                    }
+                    self.surface_dirty.borrow_mut().insert(coord);
+                    self.enqueue_surface_front(coord);
+                    surface.push(SurfaceRequirement {
+                        coord,
+                        revision: surface_revision,
+                    });
                 }
-                self.surface_revisions
-                    .borrow_mut()
-                    .request(coord, surface_revision);
-                // Retained off-cut tiles stay revision-stale without masquerading as queued work.
-                // `prepare_focus` turns them back into a replacement when they become desired.
-                if !active {
-                    continue;
-                }
-                self.surface_dirty.borrow_mut().insert(coord);
-                self.enqueue_surface_front(coord);
-                surface.push(SurfaceRequirement {
-                    coord,
-                    revision: surface_revision,
-                });
             }
             let performance = self.scope.performance();
             let started_ms = performance_now(performance.as_ref());
@@ -6113,9 +6271,10 @@ mod web {
         /// read-only automation assertion over renderer state, not an alternate streaming path.
         pub fn exact_volume_presented(&self, voxel_x: i32, voxel_y: i32, voxel_z: i32) -> bool {
             self.engine.as_ref().is_some_and(|engine| {
-                engine.renderer.borrow().exact_volume_chunk_presented(
-                    VoxelCoord::new(voxel_x, voxel_y, voxel_z).chunk(),
-                )
+                engine
+                    .renderer
+                    .borrow()
+                    .edited_chunk_presented(VoxelCoord::new(voxel_x, voxel_y, voxel_z).chunk())
             })
         }
 
@@ -6308,14 +6467,18 @@ mod web {
                     let scheduler = engine.scheduler.borrow();
                     edit_canonical_coords
                         .iter()
-                        .filter(|coord| scheduler.desired_chunk_renderable(**coord))
+                        .filter(|coord| {
+                            scheduler.status(**coord).is_none_or(|status| {
+                                !status.desired || status.state == ChunkState::Resident
+                            })
+                        })
                         .count()
                 };
                 let edit_canonical_owned = {
                     let renderer = engine.renderer.borrow();
                     edit_canonical_coords
                         .iter()
-                        .filter(|coord| renderer.exact_volume_chunk_presented(**coord))
+                        .filter(|coord| renderer.edited_chunk_presented(**coord))
                         .count()
                 };
                 let lod_focus_lag_voxels = i64::from(camera_voxel_x)
@@ -7036,7 +7199,7 @@ mod web {
             surface_stream_suspended: Cell::new(false),
             virtual_terrain: RefCell::new(VirtualTerrainStreamingState::default()),
             virtual_terrain_scheduler: RefCell::new(
-                TerrainStreamScheduler::new(TerrainStreamConfig::DEVELOPMENT)
+                TerrainStreamScheduler::new(TerrainStreamConfig::INTERACTIVE_CLIENT)
                     .map_err(|error| JsValue::from_str(&error.to_string()))?,
             ),
             virtual_terrain_cache: RefCell::new(
@@ -7963,6 +8126,38 @@ mod tests {
         let keep = virtual_terrain_root_working_set(&[root(4)], registered, root(4), 3);
 
         assert_eq!(keep, BTreeSet::from([root(2), root(3), root(4)]));
+    }
+
+    #[test]
+    fn edit_revision_floors_follow_only_affected_surface_ancestor_chains() {
+        use voxels_world::{ChunkCoord, TERRAIN_COVERAGE_ROOT_LEVEL, TerrainPageKey};
+
+        let affected = [ChunkCoord::new(13, 4, -7), ChunkCoord::new(1_024, 4, -7)];
+        let (roots, revision_keys) = virtual_terrain_edit_revision_keys(&affected);
+        let first_leaf = TerrainPageKey::surface(0, 13, -7);
+        let second_leaf = TerrainPageKey::surface(0, 1_024, -7);
+
+        assert_eq!(
+            roots,
+            BTreeSet::from([
+                first_leaf.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL).unwrap(),
+                second_leaf
+                    .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                    .unwrap(),
+            ])
+        );
+        assert!(
+            (1..=TERRAIN_COVERAGE_ROOT_LEVEL)
+                .all(|level| revision_keys.contains(&first_leaf.ancestor_at(level).unwrap()))
+        );
+        assert!(
+            (1..=TERRAIN_COVERAGE_ROOT_LEVEL)
+                .all(|level| revision_keys.contains(&second_leaf.ancestor_at(level).unwrap()))
+        );
+        assert!(
+            !revision_keys.contains(&TerrainPageKey::surface(1, 7, -4)),
+            "an unedited sibling must keep its own older spatial revision"
+        );
     }
 
     #[test]

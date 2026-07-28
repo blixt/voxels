@@ -856,18 +856,19 @@ impl VirtualTerrainGpuControl {
         &mut self,
         queue: &Queue,
         hierarchy: &VirtualTerrainHierarchy,
-    ) -> Result<(), VirtualTerrainGpuError> {
+    ) -> Result<bool, VirtualTerrainGpuError> {
         let next = hierarchy.refined_last_cut().collect::<BTreeSet<_>>();
         let changed = self
             .prior_refined
             .symmetric_difference(&next)
             .copied()
             .collect::<Vec<_>>();
+        let changed_any = !changed.is_empty();
         self.prior_refined = next;
         for key in changed {
             self.update_node_flags(queue, hierarchy, key)?;
         }
-        Ok(())
+        Ok(changed_any)
     }
 
     fn update_node_flags(
