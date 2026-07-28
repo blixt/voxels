@@ -11,9 +11,6 @@ use voxels_world::{
     CHUNK_EDGE, ChunkCoord, EditMap, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
 };
 
-mod surface;
-pub use surface::{SurfaceFocusAction, SurfaceRevisionCache, SurfaceRevisionStatus};
-
 /// Physical edge length of a full-resolution chunk.
 pub const CHUNK_EDGE_METRES: f32 = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
 
