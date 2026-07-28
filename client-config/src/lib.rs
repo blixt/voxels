@@ -350,6 +350,17 @@ impl ClientConfig {
             1,
             MAX_TRACKED_CHUNKS,
         )?;
+        if u64::from(self.streaming.max_tracked_chunks)
+            < startup_chunk_count(
+                self.streaming.startup_ready_radius_chunks,
+                self.streaming.vertical_radius_chunks,
+            )
+        {
+            return invalid(
+                "streaming.max_tracked_chunks",
+                "must cover the complete startup-ready cylinder",
+            );
+        }
         ensure_integer_range(
             self.streaming.max_secondary_interest_chunks,
             "streaming.max_secondary_interest_chunks",
@@ -798,6 +809,15 @@ fn is_websocket_protocol_token(value: &str) -> bool {
         })
 }
 
+fn startup_chunk_count(horizontal_radius: u32, vertical_radius: u32) -> u64 {
+    let radius = i64::from(horizontal_radius);
+    let horizontal = (-radius..=radius)
+        .flat_map(|z| (-radius..=radius).map(move |x| (x, z)))
+        .filter(|(x, z)| x * x + z * z <= radius * radius)
+        .count() as u64;
+    horizontal * (u64::from(vertical_radius) * 2 + 1)
+}
+
 fn is_websocket_url(value: &str) -> bool {
     (value.starts_with("ws://") || value.starts_with("wss://"))
         && !value.chars().any(char::is_whitespace)
@@ -1042,6 +1062,12 @@ mod tests {
         assert_invalid_field(&config, "streaming.retention_margin_chunks");
 
         let mut config = valid_config();
+        config.streaming.max_tracked_chunks = 14;
+        assert_invalid_field(&config, "streaming.max_tracked_chunks");
+
+        let mut config = valid_config();
+        config.streaming.startup_ready_radius_chunks = 0;
+        config.streaming.vertical_radius_chunks = 0;
         config.streaming.max_tracked_chunks = 1;
         config.streaming.max_secondary_interest_chunks = 2;
         assert_invalid_field(&config, "streaming.max_secondary_interest_chunks");
