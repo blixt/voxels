@@ -207,12 +207,6 @@ pub(crate) struct ChunkEditSnapshot {
 }
 
 #[derive(Clone)]
-pub(crate) struct SurfaceEditSnapshot {
-    pub(crate) edits: EditMap,
-    pub(crate) revisions: Vec<u64>,
-}
-
-#[derive(Clone)]
 pub(crate) struct TerrainEditSnapshot {
     pub(crate) edits: EditMap,
     pub(crate) revision: u64,
@@ -599,23 +593,6 @@ impl EditAuthority {
                 .map(|coord| {
                     state
                         .chunk_revisions
-                        .get(coord)
-                        .copied()
-                        .unwrap_or(INITIAL_REVISION)
-                })
-                .collect(),
-        }
-    }
-
-    pub(crate) fn snapshot_surface(&self, coords: &[SurfaceTileCoord]) -> SurfaceEditSnapshot {
-        let state = self.lock();
-        SurfaceEditSnapshot {
-            edits: state.edits.snapshot_for_surface_tiles(coords),
-            revisions: coords
-                .iter()
-                .map(|coord| {
-                    state
-                        .surface_revisions
                         .get(coord)
                         .copied()
                         .unwrap_or(INITIAL_REVISION)
@@ -3342,13 +3319,6 @@ mod tests {
                     .all(|revision| *revision == edit_revision)
             );
             assert!(!affected_surfaces.is_empty());
-            assert!(
-                reopened
-                    .snapshot_surface(&affected_surfaces)
-                    .revisions
-                    .iter()
-                    .all(|revision| *revision == edit_revision)
-            );
         }
         remove_sqlite_files(&path);
     }

@@ -3,7 +3,7 @@
 use crate::{
     EnvironmentConfig, LoadedWorldServiceConfig, WorldServiceConfig, WorldServiceConfigError,
     WorldServiceSourceError,
-    edits::{ChunkEditSnapshot, EditAuthority, LoadedPlayer, ProtectedSpawn, SurfaceEditSnapshot},
+    edits::{ChunkEditSnapshot, EditAuthority, LoadedPlayer, ProtectedSpawn},
     generation_limiter::PriorityGenerationLimiter,
     presence::{PoseAdmission, PresenceHub, PresenceStreamState},
     traffic::{ClientTrafficRegistry, ClientTrafficShaper, TrafficPriority},
@@ -38,9 +38,8 @@ use voxels_core::{PLAYER_EYE_HEIGHT_METRES, PLAYER_RADIUS_METRES};
 use voxels_world::protocol::EditShape;
 use voxels_world::protocol::{
     BrowserUserId, ChunkBatchItem, ChunkBatchRequest, EditSessionId, EditVolume,
-    EncodedChunkBatchItem, EncodedSurfaceTileBatchItem, FRAME_FRAGMENT_OVERHEAD_BYTES, PlayerId,
-    PlayerIdentity, PlayerResume, PresenceOpened, PresencePong, ResyncRequired, SpawnPoint,
-    SurfaceTileBatchItem, SurfaceTileBatchRequest, TerrainDirectoryBatchItem,
+    EncodedChunkBatchItem, FRAME_FRAGMENT_OVERHEAD_BYTES, PlayerId, PlayerIdentity, PlayerResume,
+    PresenceOpened, PresencePong, ResyncRequired, SpawnPoint, TerrainDirectoryBatchItem,
     TerrainDirectoryBatchRequest, TerrainDirectoryBatchResult, TerrainDirectoryBootstrap,
     TerrainDirectoryFailure, TerrainRegionColumn, TerrainRegionColumnBatchItem,
     TerrainRegionColumnBatchRequest, TerrainRegionColumnBatchResult, TerrainRegionColumnFailure,
@@ -48,23 +47,22 @@ use voxels_world::protocol::{
     WorldCapabilities, WorldEnvironmentSnapshot, WorldOpened, cancel_kind, chunk_batch_kind,
     clone_message_with_request_id, decode_cancel, decode_chunk_batch, decode_edit_command,
     decode_open_presence, decode_open_world, decode_player_pose, decode_presence_ping,
-    decode_surface_tile_batch, decode_terrain_directory_batch, decode_terrain_region_column_batch,
+    decode_terrain_directory_batch, decode_terrain_region_column_batch,
     decode_virtual_terrain_page_batch, edit_command_kind, encode_chunk_batch_item,
     encode_chunk_batch_result_from_items, encode_edit_commit, encode_error, encode_frame_fragment,
     encode_frame_fragment_abort, encode_presence_opened, encode_presence_pong,
-    encode_resync_required, encode_surface_tile_batch_item,
-    encode_surface_tile_batch_result_from_items, encode_terrain_directory_batch_result,
+    encode_resync_required, encode_terrain_directory_batch_result,
     encode_terrain_region_column_batch_result, encode_virtual_terrain_page_batch_result,
     encode_world_opened, message_kind, message_request_id, open_presence_kind, open_world_kind,
-    player_pose_kind, presence_ping_kind, surface_tile_batch_kind, terrain_directory_batch_kind,
+    player_pose_kind, presence_ping_kind, terrain_directory_batch_kind,
     terrain_region_column_batch_kind, virtual_terrain_page_batch_kind,
 };
 use voxels_world::{
     CHUNK_EDGE, ChunkCoord, Material, MeshingHalo, SurfaceSampleBlockRequest,
     TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_REGION_ROOT_LEVEL, TerrainPageBatchItemV1,
     TerrainPageBatchResultV1, TerrainPageKey, TerrainPageTransferFailure, WORLD_SCHEMA_VERSION,
-    WorldManifest, WorldManifestError, WorldProduct, WorldProductBatch, WorldProductBatchItem,
-    WorldProductPriority, WorldProductRequest, WorldSourceEngine, WorldSourceError,
+    WorldManifest, WorldManifestError, WorldProduct, WorldProductBatch, WorldProductPriority,
+    WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
 pub const WORLD_WEBSOCKET_PATH: &str = "/v39/world";
@@ -72,7 +70,6 @@ pub const PRESENCE_WEBSOCKET_PATH: &str = "/v39/presence";
 pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v39";
 pub const HEALTH_PATH: &str = "/healthz";
 const PREFETCH_WORKER_DIVISOR: usize = 4;
-const RESPONSE_ASSEMBLY_WORKER_DIVISOR: usize = 2;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 const INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -136,10 +133,6 @@ impl WorldServer {
             (usize::from(config.transport.generation_workers) / 4).clamp(1, 2),
             config.transport.virtual_terrain_cache_bytes,
         );
-        let response_assembly_workers = (usize::from(config.transport.generation_workers)
-            / RESPONSE_ASSEMBLY_WORKER_DIVISOR)
-            .max(1);
-        let response_assembly_limiter = PriorityGenerationLimiter::new(response_assembly_workers);
         let prefetch_workers =
             (usize::from(config.transport.generation_workers) / PREFETCH_WORKER_DIVISOR).max(1);
         let prefetch_semaphore = Arc::new(Semaphore::new(prefetch_workers));
@@ -148,7 +141,6 @@ impl WorldServer {
             Arc::clone(&generation_cancellations),
             Arc::clone(&source),
             generation_limiter,
-            response_assembly_limiter,
             prefetch_semaphore,
             GenerationDispatcherLimits {
                 max_frame_bytes: config.transport.max_frame_bytes,
@@ -924,7 +916,6 @@ struct SessionRequests {
     generation_cancellations: Arc<Notify>,
     generation_permits: Arc<PriorityGenerationLimiter>,
     collision_generation_permits: Arc<Semaphore>,
-    response_assembly_permits: Arc<PriorityGenerationLimiter>,
     outbound_bytes: Arc<Semaphore>,
 }
 
@@ -945,8 +936,6 @@ impl SessionRequests {
         max_outbound_bytes: usize,
         generation_cancellations: Arc<Notify>,
     ) -> Self {
-        let response_assembly_workers =
-            (usize::from(generation_workers) / RESPONSE_ASSEMBLY_WORKER_DIVISOR).max(1);
         Self {
             max_in_flight: usize::from(max_in_flight),
             closed: AtomicBool::new(false),
@@ -956,7 +945,6 @@ impl SessionRequests {
             collision_generation_permits: Arc::new(Semaphore::new(usize::from(
                 collision_generation_workers,
             ))),
-            response_assembly_permits: PriorityGenerationLimiter::new(response_assembly_workers),
             outbound_bytes: Arc::new(Semaphore::new(max_outbound_bytes)),
         }
     }
@@ -976,13 +964,6 @@ impl SessionRequests {
                 _permit: self.generation_permits.acquire(priority).await,
             })
         }
-    }
-
-    async fn acquire_response_assembly(
-        self: &Arc<Self>,
-        priority: WorldProductPriority,
-    ) -> crate::generation_limiter::PriorityGenerationPermit {
-        self.response_assembly_permits.acquire(priority).await
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<u64, Arc<CancellationSignal>>> {
@@ -1219,10 +1200,6 @@ enum GenerationRequest {
         request: ChunkBatchRequest,
         snapshot: ChunkEditSnapshot,
     },
-    SurfaceTiles {
-        request: SurfaceTileBatchRequest,
-        snapshot: SurfaceEditSnapshot,
-    },
 }
 
 impl GenerationRequest {
@@ -1231,22 +1208,15 @@ impl GenerationRequest {
         Self::Chunks { request, snapshot }
     }
 
-    fn surface_tiles(request: SurfaceTileBatchRequest, edits: &EditAuthority) -> Self {
-        let snapshot = edits.snapshot_surface(&request.coords);
-        Self::SurfaceTiles { request, snapshot }
-    }
-
     fn request_id(&self) -> u64 {
         match self {
             Self::Chunks { request, .. } => request.request_id,
-            Self::SurfaceTiles { request, .. } => request.request_id,
         }
     }
 
     fn priority(&self) -> WorldProductPriority {
         match self {
             Self::Chunks { request, .. } => request.priority,
-            Self::SurfaceTiles { request, .. } => request.priority,
         }
     }
 
@@ -1258,16 +1228,6 @@ impl GenerationRequest {
                 .copied()
                 .zip(snapshot.revisions.iter().copied())
                 .map(|(coord, edit_revision)| ProductKey::Chunk {
-                    coord,
-                    edit_revision,
-                })
-                .collect(),
-            Self::SurfaceTiles { request, snapshot } => request
-                .coords
-                .iter()
-                .copied()
-                .zip(snapshot.revisions.iter().copied())
-                .map(|(coord, edit_revision)| ProductKey::SurfaceTile {
                     coord,
                     edit_revision,
                 })
@@ -1291,20 +1251,6 @@ impl GenerationRequest {
                         .collect(),
                 },
             },
-            Self::SurfaceTiles { request, snapshot } => Self::SurfaceTiles {
-                request: SurfaceTileBatchRequest {
-                    request_id: request.request_id,
-                    priority: request.priority,
-                    coords: indices.iter().map(|&index| request.coords[index]).collect(),
-                },
-                snapshot: SurfaceEditSnapshot {
-                    edits: snapshot.edits.clone(),
-                    revisions: indices
-                        .iter()
-                        .map(|&index| snapshot.revisions[index])
-                        .collect(),
-                },
-            },
         }
     }
 }
@@ -1313,10 +1259,6 @@ impl GenerationRequest {
 enum ProductKey {
     Chunk {
         coord: ChunkCoord,
-        edit_revision: u64,
-    },
-    SurfaceTile {
-        coord: voxels_world::SurfaceTileCoord,
         edit_revision: u64,
     },
 }
@@ -1330,7 +1272,6 @@ struct ProductFlightKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum EncodedProduct {
     Chunk(EncodedChunkBatchItem),
-    SurfaceTile(EncodedSurfaceTileBatchItem),
 }
 
 impl EncodedProduct {
@@ -1340,17 +1281,12 @@ impl EncodedProduct {
                 coord: item.coord(),
                 edit_revision: item.edit_revision(),
             },
-            Self::SurfaceTile(item) => ProductKey::SurfaceTile {
-                coord: item.coord(),
-                edit_revision: item.edit_revision(),
-            },
         }
     }
 
     fn encoded_len(&self) -> usize {
         match self {
             Self::Chunk(item) => item.encoded_len(),
-            Self::SurfaceTile(item) => item.encoded_len(),
         }
     }
 }
@@ -1438,7 +1374,6 @@ impl ProductCache {
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct BatchResponseKey {
     products: Box<[ProductKey]>,
-    final_surface_item: bool,
 }
 
 impl BatchResponseKey {
@@ -1449,14 +1384,6 @@ impl BatchResponseKey {
                 .map(|product| product.key())
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
-            final_surface_item: false,
-        }
-    }
-
-    fn from_surface_product(product: &Arc<EncodedProduct>, final_item: bool) -> Self {
-        Self {
-            products: vec![product.key()].into_boxed_slice(),
-            final_surface_item: final_item,
         }
     }
 }
@@ -1621,27 +1548,11 @@ impl ProductGenerationFlight {
     }
 }
 
-enum PendingGenerationDelivery {
-    Batch(GenerationJob),
-    Surface {
-        sender: mpsc::Sender<Result<Arc<EncodedProduct>, String>>,
-        request_id: u64,
-        cancelled: Arc<CancellationSignal>,
-        session: Arc<SessionRequests>,
-    },
-}
-
 struct PendingGenerationBatch {
     request: GenerationRequest,
-    delivery: PendingGenerationDelivery,
+    job: GenerationJob,
     items: Vec<Option<Result<Arc<EncodedProduct>, String>>>,
     remaining: usize,
-    next_ready: usize,
-}
-
-struct SurfaceGenerationDelivery {
-    job: GenerationJob,
-    products: mpsc::Receiver<Result<Arc<EncodedProduct>, String>>,
 }
 
 impl PendingGenerationBatch {
@@ -1649,37 +1560,10 @@ impl PendingGenerationBatch {
         let request = job.request.clone();
         Self {
             request,
-            delivery: PendingGenerationDelivery::Batch(job),
+            job,
             items: vec![None; item_count],
             remaining: item_count,
-            next_ready: 0,
         }
-    }
-
-    fn new_surface(job: GenerationJob, item_count: usize) -> (Self, SurfaceGenerationDelivery) {
-        let request = job.request.clone();
-        let request_id = job.tracked.request_id;
-        let cancelled = Arc::clone(&job.tracked.cancelled);
-        let session = Arc::clone(&job.tracked.session);
-        // A batch can publish each index only once, so this channel is strictly bounded by the
-        // request's own product count even when compression or the outbound queue applies
-        // backpressure.
-        let (sender, products) = mpsc::channel(item_count.max(1));
-        (
-            Self {
-                request,
-                delivery: PendingGenerationDelivery::Surface {
-                    sender,
-                    request_id,
-                    cancelled,
-                    session,
-                },
-                items: vec![None; item_count],
-                remaining: item_count,
-                next_ready: 0,
-            },
-            SurfaceGenerationDelivery { job, products },
-        )
     }
 
     fn fill(&mut self, item_index: usize, result: Result<Arc<EncodedProduct>, String>) -> bool {
@@ -1690,43 +1574,15 @@ impl PendingGenerationBatch {
             *slot = Some(result);
             self.remaining -= 1;
         }
-        if let PendingGenerationDelivery::Surface { sender, .. } = &self.delivery {
-            while let Some(Some(result)) = self.items.get_mut(self.next_ready).map(Option::take) {
-                // Capacity equals the number of unique batch items, so Full is unreachable.
-                // Closed means cancellation or outbound shutdown already made the result stale.
-                match sender.try_send(result) {
-                    Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        unreachable!("surface delivery channel capacity matches its item count")
-                    }
-                }
-                self.next_ready += 1;
-            }
-        }
         self.remaining == 0
     }
 
     fn is_cancelled(&self) -> bool {
-        match &self.delivery {
-            PendingGenerationDelivery::Batch(job) => job.tracked.is_cancelled(),
-            PendingGenerationDelivery::Surface { cancelled, .. } => cancelled.is_cancelled(),
-        }
+        self.job.tracked.is_cancelled()
     }
 
     fn finish(self) {
-        match self.delivery {
-            PendingGenerationDelivery::Batch(job) => job.tracked.finish(),
-            PendingGenerationDelivery::Surface {
-                request_id,
-                cancelled,
-                session,
-                ..
-            } => session.finish(request_id, &cancelled),
-        }
-    }
-
-    fn is_surface(&self) -> bool {
-        matches!(&self.delivery, PendingGenerationDelivery::Surface { .. })
+        self.job.tracked.finish();
     }
 }
 
@@ -1931,51 +1787,6 @@ async fn run_session(
             };
             let job = GenerationJob {
                 request: GenerationRequest::chunks(request, state.edits.as_ref()),
-                outbound: outbound.clone(),
-                tracked,
-            };
-            match state.generation_tx.try_send(job) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(job)) => {
-                    job.tracked.finish();
-                    let _ =
-                        send_control_error(&outbound, request_id, "world generator is busy").await;
-                }
-                Err(mpsc::error::TrySendError::Closed(job)) => {
-                    job.tracked.finish();
-                    let _ =
-                        send_control_error(&outbound, request_id, "world generator stopped").await;
-                    break;
-                }
-            }
-        } else if kind == surface_tile_batch_kind() {
-            let request = match decode_surface_tile_batch(&bytes) {
-                Ok(request) => request,
-                Err(error) => {
-                    let _ = send_control_error(&outbound, 0, &error.to_string()).await;
-                    break;
-                }
-            };
-            let cancelled = match session.insert(request.request_id) {
-                Ok(cancelled) => cancelled,
-                Err(error) => {
-                    let message = match error {
-                        RequestAdmissionError::Closed => "world session is closing",
-                        RequestAdmissionError::Duplicate => "request id is already in flight",
-                        RequestAdmissionError::WindowFull => "negotiated request window is full",
-                    };
-                    let _ = send_control_error(&outbound, request.request_id, message).await;
-                    continue;
-                }
-            };
-            let request_id = request.request_id;
-            let tracked = TrackedRequest {
-                request_id,
-                cancelled,
-                session: Arc::clone(&session),
-            };
-            let job = GenerationJob {
-                request: GenerationRequest::surface_tiles(request, state.edits.as_ref()),
                 outbound: outbound.clone(),
                 tracked,
             };
@@ -3167,7 +2978,6 @@ async fn run_generation_dispatcher(
     cancellations: Arc<Notify>,
     source: Arc<dyn WorldSourceEngine>,
     generation_limiter: Arc<PriorityGenerationLimiter>,
-    response_assembly_limiter: Arc<PriorityGenerationLimiter>,
     prefetch_semaphore: Arc<Semaphore>,
     limits: GenerationDispatcherLimits,
 ) {
@@ -3230,15 +3040,13 @@ async fn run_generation_dispatcher(
                     let Some(batch) = pending.remove(&batch_id) else {
                         continue;
                     };
-                    if !batch.is_surface() {
-                        spawn_generation_assembly(
-                            batch,
-                            source_identity_hash,
-                            Arc::clone(&generation_limiter),
-                            Arc::clone(&response_cache),
-                            limits.max_frame_bytes,
-                        );
-                    }
+                    spawn_generation_assembly(
+                        batch,
+                        source_identity_hash,
+                        Arc::clone(&generation_limiter),
+                        Arc::clone(&response_cache),
+                        limits.max_frame_bytes,
+                    );
                 }
             }
             job = jobs.recv(), if jobs_open => {
@@ -3259,23 +3067,7 @@ async fn run_generation_dispatcher(
                 let session = Arc::clone(&job.tracked.session);
                 let batch_id = next_batch_id;
                 next_batch_id = next_batch_id.wrapping_add(1).max(1);
-                let (mut batch, surface_delivery) =
-                    if matches!(job.request, GenerationRequest::SurfaceTiles { .. }) {
-                        let (batch, delivery) =
-                            PendingGenerationBatch::new_surface(job, product_keys.len());
-                        (batch, Some(delivery))
-                    } else {
-                        (PendingGenerationBatch::new(job, product_keys.len()), None)
-                    };
-                if let Some(delivery) = surface_delivery {
-                    spawn_surface_generation_delivery(
-                        delivery,
-                        source_identity_hash,
-                        Arc::clone(&response_assembly_limiter),
-                        Arc::clone(&response_cache),
-                        limits.max_frame_bytes,
-                    );
-                }
+                let mut batch = PendingGenerationBatch::new(job, product_keys.len());
                 let mut miss_indices = Vec::new();
                 let mut miss_keys = Vec::new();
                 for (item_index, product) in product_keys.into_iter().enumerate() {
@@ -3293,15 +3085,13 @@ async fn run_generation_dispatcher(
                     }
                 }
                 if batch.remaining == 0 {
-                    if !batch.is_surface() {
-                        spawn_generation_assembly(
-                            batch,
-                            source_identity_hash,
-                            Arc::clone(&generation_limiter),
-                            Arc::clone(&response_cache),
-                            limits.max_frame_bytes,
-                        );
-                    }
+                    spawn_generation_assembly(
+                        batch,
+                        source_identity_hash,
+                        Arc::clone(&generation_limiter),
+                        Arc::clone(&response_cache),
+                        limits.max_frame_bytes,
+                    );
                     continue;
                 }
                 let miss_request = batch.request.select(&miss_indices);
@@ -3475,7 +3265,7 @@ async fn generate_single_flight_products(
     let blocking_tx = completion_tx.clone();
     let blocking_generation = Arc::clone(&generation);
     let result = tokio::task::spawn_blocking(move || {
-        let mut emit = |result: Result<EncodedProduct, String>| {
+        let emit = |result: Result<EncodedProduct, String>| {
             if blocking_generation.cancellation.is_cancelled() {
                 return ControlFlow::Break(());
             }
@@ -3508,9 +3298,6 @@ async fn generate_single_flight_products(
                     }
                 }
                 Ok(())
-            }
-            GenerationRequest::SurfaceTiles { request, snapshot } => {
-                emit_surface_tile_products(source.as_ref(), request, snapshot, &mut emit)
             }
         }
     })
@@ -3577,9 +3364,7 @@ async fn assemble_and_deliver_generation_batch(
     response_cache: Arc<Mutex<BatchResponseCache>>,
     max_frame_bytes: usize,
 ) {
-    let PendingGenerationDelivery::Batch(job) = batch.delivery else {
-        return;
-    };
+    let job = batch.job;
     if job.tracked.is_cancelled() {
         job.tracked.finish();
         return;
@@ -3601,15 +3386,6 @@ async fn assemble_and_deliver_generation_batch(
             return;
         }
     };
-    if matches!(job.request, GenerationRequest::SurfaceTiles { .. }) {
-        deliver_generation_job(
-            job,
-            Err("surface generation batch reached non-progressive assembly".to_owned()),
-            max_frame_bytes,
-        )
-        .await;
-        return;
-    }
     let response_key = BatchResponseKey::from_products(&products);
     match get_cached_batch_response(&response_cache, &response_key, request_id) {
         Ok(Some(response)) => {
@@ -3712,219 +3488,6 @@ async fn assemble_and_deliver_generation_batch(
     deliver_generation_job(job, response, max_frame_bytes).await;
 }
 
-fn spawn_surface_generation_delivery(
-    delivery: SurfaceGenerationDelivery,
-    source_identity_hash: voxels_world::WorldSourceIdentityHash,
-    response_assembly_limiter: Arc<PriorityGenerationLimiter>,
-    response_cache: Arc<Mutex<BatchResponseCache>>,
-    max_frame_bytes: usize,
-) {
-    tokio::spawn(async move {
-        deliver_surface_generation_stream(
-            delivery,
-            source_identity_hash,
-            response_assembly_limiter,
-            response_cache,
-            max_frame_bytes,
-        )
-        .await;
-    });
-}
-
-async fn deliver_surface_generation_stream(
-    mut delivery: SurfaceGenerationDelivery,
-    source_identity_hash: voxels_world::WorldSourceIdentityHash,
-    response_assembly_limiter: Arc<PriorityGenerationLimiter>,
-    response_cache: Arc<Mutex<BatchResponseCache>>,
-    max_frame_bytes: usize,
-) {
-    let item_count = match &delivery.job.request {
-        GenerationRequest::SurfaceTiles { request, .. } => request.coords.len(),
-        GenerationRequest::Chunks { .. } => {
-            deliver_generation_job(
-                delivery.job,
-                Err("chunk batch reached progressive surface delivery".to_owned()),
-                max_frame_bytes,
-            )
-            .await;
-            return;
-        }
-    };
-    let request_id = delivery.job.request.request_id();
-    let priority = delivery.job.request.priority();
-    let session = Arc::clone(&delivery.job.tracked.session);
-    let cancelled = Arc::clone(&delivery.job.tracked.cancelled);
-    let mut frames = GenerationFrameDelivery::new(delivery.job);
-    for index in 0..item_count {
-        let product = tokio::select! {
-            biased;
-            _ = cancelled.cancelled() => {
-                frames.finish();
-                return;
-            }
-            product = delivery.products.recv() => product,
-        };
-        let product = match product {
-            Some(Ok(product)) => product,
-            Some(Err(message)) => {
-                frames
-                    .send(encode_error(request_id, &message), true, max_frame_bytes)
-                    .await;
-                return;
-            }
-            None => {
-                frames
-                    .send(
-                        encode_error(
-                            request_id,
-                            "surface generation ended before its terminal item",
-                        ),
-                        true,
-                        max_frame_bytes,
-                    )
-                    .await;
-                return;
-            }
-        };
-        let final_item = index + 1 == item_count;
-        let response = assemble_cached_surface_item_response(
-            request_id,
-            source_identity_hash,
-            product,
-            final_item,
-            priority,
-            Arc::clone(&session),
-            Arc::clone(&response_assembly_limiter),
-            &cancelled,
-            Arc::clone(&response_cache),
-            max_frame_bytes,
-        )
-        .await;
-        match response {
-            Ok(response) => {
-                if !frames.send(response, final_item, max_frame_bytes).await {
-                    return;
-                }
-            }
-            Err(_message) if cancelled.is_cancelled() => {
-                frames.finish();
-                return;
-            }
-            Err(message) => {
-                frames
-                    .send(encode_error(request_id, &message), true, max_frame_bytes)
-                    .await;
-                return;
-            }
-        }
-    }
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one surface item carries explicit cache, priority, cancellation, and frame-limit authorities"
-)]
-async fn assemble_cached_surface_item_response(
-    request_id: u64,
-    source_identity_hash: voxels_world::WorldSourceIdentityHash,
-    product: Arc<EncodedProduct>,
-    final_item: bool,
-    priority: WorldProductPriority,
-    session: Arc<SessionRequests>,
-    response_assembly_limiter: Arc<PriorityGenerationLimiter>,
-    cancelled: &Arc<CancellationSignal>,
-    response_cache: Arc<Mutex<BatchResponseCache>>,
-    max_frame_bytes: usize,
-) -> Result<Vec<u8>, String> {
-    let response_key = BatchResponseKey::from_surface_product(&product, final_item);
-    if let Some(response) = get_cached_batch_response(&response_cache, &response_key, request_id)? {
-        return Ok(response);
-    }
-    let _session_permit = tokio::select! {
-        biased;
-        _ = cancelled.cancelled() => return Err("world response assembly cancelled".to_owned()),
-        permit = session.acquire_response_assembly(priority) => permit,
-    };
-    let _global_permit = tokio::select! {
-        biased;
-        _ = cancelled.cancelled() => return Err("world response assembly cancelled".to_owned()),
-        permit = response_assembly_limiter.acquire(priority) => permit,
-    };
-    if let Some(response) = get_cached_batch_response(&response_cache, &response_key, request_id)? {
-        return Ok(response);
-    }
-    let response_flight = { lock_batch_response_cache(&response_cache).flight_lock(&response_key) };
-    let response_flight_guard = tokio::select! {
-        biased;
-        _ = cancelled.cancelled() => {
-            lock_batch_response_cache(&response_cache)
-                .abandon_flight(&response_key, &response_flight);
-            return Err("world response assembly cancelled".to_owned());
-        }
-        guard = response_flight.lock() => guard,
-    };
-    match get_cached_batch_response(&response_cache, &response_key, request_id) {
-        Ok(Some(response)) => {
-            lock_batch_response_cache(&response_cache)
-                .finish_flight(&response_key, &response_flight);
-            drop(response_flight_guard);
-            return Ok(response);
-        }
-        Ok(None) => {}
-        Err(message) => {
-            lock_batch_response_cache(&response_cache)
-                .finish_flight(&response_key, &response_flight);
-            drop(response_flight_guard);
-            return Err(message);
-        }
-    }
-    let response = tokio::task::spawn_blocking(move || {
-        assemble_surface_item_response(
-            request_id,
-            source_identity_hash,
-            product.as_ref(),
-            final_item,
-        )
-    })
-    .await
-    .map_err(|_| "world response assembly task failed".to_owned())
-    .and_then(|result| result);
-    match &response {
-        Ok(bytes) => {
-            if bytes.len() <= max_frame_bytes {
-                lock_batch_response_cache(&response_cache)
-                    .insert(response_key.clone(), Arc::from(bytes.clone()));
-            }
-            lock_batch_response_cache(&response_cache)
-                .finish_flight(&response_key, &response_flight);
-        }
-        Err(_) => {
-            lock_batch_response_cache(&response_cache)
-                .abandon_flight(&response_key, &response_flight);
-        }
-    }
-    drop(response_flight_guard);
-    response
-}
-
-fn assemble_surface_item_response(
-    request_id: u64,
-    source_identity_hash: voxels_world::WorldSourceIdentityHash,
-    product: &EncodedProduct,
-    final_item: bool,
-) -> Result<Vec<u8>, String> {
-    let EncodedProduct::SurfaceTile(item) = product else {
-        return Err("chunk product cannot satisfy a surface batch".to_owned());
-    };
-    encode_surface_tile_batch_result_from_items(
-        request_id,
-        source_identity_hash,
-        std::iter::once(item),
-        final_item,
-    )
-    .map_err(|error| error.to_string())
-}
-
 fn assemble_generation_response(
     request: &GenerationRequest,
     source_identity_hash: voxels_world::WorldSourceIdentityHash,
@@ -3935,17 +3498,11 @@ fn assemble_generation_response(
             let items = products
                 .iter()
                 .map(|product| match product.as_ref() {
-                    EncodedProduct::Chunk(item) => Ok(item),
-                    EncodedProduct::SurfaceTile(_) => {
-                        Err("surface product cannot satisfy a chunk batch".to_owned())
-                    }
+                    EncodedProduct::Chunk(item) => item,
                 })
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Vec<_>>();
             encode_chunk_batch_result_from_items(request.request_id, source_identity_hash, items)
                 .map_err(|error| error.to_string())
-        }
-        GenerationRequest::SurfaceTiles { .. } => {
-            Err("surface batches require progressive item assembly".to_owned())
         }
     }
 }
@@ -4112,109 +3669,6 @@ fn traffic_priority(priority: WorldProductPriority) -> TrafficPriority {
     }
 }
 
-fn emit_surface_tile_products(
-    source: &dyn WorldSourceEngine,
-    request: SurfaceTileBatchRequest,
-    snapshot: SurfaceEditSnapshot,
-    emit: &mut dyn FnMut(Result<EncodedProduct, String>) -> ControlFlow<()>,
-) -> Result<(), String> {
-    let coords = request.coords.clone();
-    if snapshot.revisions.len() != coords.len() {
-        return Err("surface edit snapshot has a mismatched revision count".to_owned());
-    }
-    let source_identity_hash = source.identity().identity_hash();
-    if snapshot.edits.is_empty() {
-        let mut next_index = 0;
-        let mut callback_error = None;
-        let mut emitter_stopped = false;
-        let returned_identity = source
-            .generate_surface_tiles(
-                request.priority,
-                &coords,
-                &mut |item: WorldProductBatchItem| {
-                    let Some((&coord, &edit_revision)) = coords
-                        .get(next_index)
-                        .zip(snapshot.revisions.get(next_index))
-                    else {
-                        callback_error =
-                            Some("world source returned too many surface tiles".to_owned());
-                        return ControlFlow::Break(());
-                    };
-                    if item.request != WorldProductRequest::SurfaceTile(coord) {
-                        callback_error =
-                            Some("world source returned a mismatched surface tile key".to_owned());
-                        return ControlFlow::Break(());
-                    }
-                    let item_result = match item.result {
-                        Ok(WorldProduct::SurfaceTile(snapshot)) => Ok(snapshot),
-                        Ok(_) => {
-                            callback_error =
-                                Some("world source returned a non-surface product".to_owned());
-                            return ControlFlow::Break(());
-                        }
-                        Err(error) => Err(error),
-                    };
-                    let product = encode_surface_tile_batch_item(
-                        source_identity_hash,
-                        &SurfaceTileBatchItem {
-                            coord,
-                            edit_revision,
-                            result: item_result,
-                        },
-                    )
-                    .map(EncodedProduct::SurfaceTile)
-                    .map_err(|error| error.to_string());
-                    next_index += 1;
-                    if let Err(message) = &product {
-                        callback_error = Some(message.clone());
-                    }
-                    let flow = emit(product);
-                    emitter_stopped = flow.is_break();
-                    if callback_error.is_some() {
-                        ControlFlow::Break(())
-                    } else {
-                        flow
-                    }
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        if let Some(message) = callback_error {
-            return Err(message);
-        }
-        if emitter_stopped {
-            return Err("world generation cancelled".to_owned());
-        }
-        if returned_identity != source_identity_hash || next_index != coords.len() {
-            return Err("world source returned a mismatched surface tile batch".to_owned());
-        }
-        return Ok(());
-    }
-    for (coord, edit_revision) in coords
-        .iter()
-        .copied()
-        .zip(snapshot.revisions.iter().copied())
-    {
-        let product = encode_surface_tile_batch_item(
-            source_identity_hash,
-            &SurfaceTileBatchItem {
-                coord,
-                edit_revision,
-                result: source.generate_edited_surface_tile(&snapshot.edits, coord),
-            },
-        )
-        .map(EncodedProduct::SurfaceTile)
-        .map_err(|error| error.to_string());
-        let failed = product.is_err();
-        if emit(product).is_break() {
-            return Err("world generation cancelled".to_owned());
-        }
-        if failed {
-            return Err("world source returned an unencodable edited surface tile".to_owned());
-        }
-    }
-    Ok(())
-}
-
 fn generate_chunk_products(
     source: &dyn WorldSourceEngine,
     request: ChunkBatchRequest,
@@ -4281,7 +3735,6 @@ mod tests {
         TerrainDiffusionProviderConfig, WORLD_SERVICE_CONFIG_SCHEMA_VERSION, WorldSourceMode,
     };
     use futures_util::{SinkExt, StreamExt};
-    use std::sync::Condvar;
     use std::sync::atomic::AtomicUsize;
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::Error as ClientError;
@@ -4292,13 +3745,11 @@ mod tests {
     use voxels_world::protocol::{
         BrowserUserId, ChunkBatchRequest, EditCommand, EditCommit, FrameReassembler, OpenPresence,
         OpenWorld, PLAYER_POSE_GROUNDED, PlayerId, PlayerIdentity, PlayerPoseUpdate, PresenceDelta,
-        PresenceOpened, PresenceSessionId, SurfaceTileBatchRequest, SurfaceTileBatchResult,
-        decode_chunk_batch_result, decode_edit_commit, decode_error, decode_frame_fragment,
-        decode_frame_fragment_abort, decode_presence_delta, decode_presence_opened,
-        decode_surface_tile_batch_result, decode_world_opened, edit_commit_kind,
-        encode_chunk_batch, encode_edit_command, encode_open_presence, encode_open_world,
-        encode_player_pose, encode_surface_tile_batch, error_kind, frame_fragment_kind,
-        presence_delta_kind,
+        PresenceOpened, PresenceSessionId, decode_chunk_batch_result, decode_edit_commit,
+        decode_error, decode_frame_fragment, decode_frame_fragment_abort, decode_presence_delta,
+        decode_presence_opened, decode_world_opened, edit_commit_kind, encode_chunk_batch,
+        encode_edit_command, encode_open_presence, encode_open_world, encode_player_pose,
+        error_kind, frame_fragment_kind, presence_delta_kind,
     };
     use voxels_world::{
         ChunkCoord, EditMap, ProceduralWorldSource, SurfaceLodLevel, SurfaceTileCoord, VoxelCoord,
@@ -4643,83 +4094,6 @@ mod tests {
         assert!(second_reassembled);
     }
 
-    #[tokio::test]
-    async fn progressive_frames_keep_the_request_window_until_the_terminal_item() {
-        let session = Arc::new(SessionRequests::new(
-            1,
-            1,
-            1,
-            4_096,
-            Arc::new(Notify::new()),
-        ));
-        let Ok(cancellation) = session.insert(7) else {
-            panic!("first request must fit the empty window");
-        };
-        let tracked = TrackedRequest {
-            request_id: 7,
-            cancelled: Arc::clone(&cancellation),
-            session: Arc::clone(&session),
-        };
-        let (outbound, mut receiver) = mpsc::channel(4);
-        let job = GenerationJob {
-            request: GenerationRequest::SurfaceTiles {
-                request: SurfaceTileBatchRequest {
-                    request_id: 7,
-                    priority: WorldProductPriority::VisibleSurface,
-                    coords: vec![
-                        SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 0, 0),
-                        SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 1, 0),
-                    ],
-                },
-                snapshot: SurfaceEditSnapshot {
-                    edits: EditMap::default(),
-                    revisions: vec![1, 1],
-                },
-            },
-            outbound,
-            tracked,
-        };
-
-        deliver_generation_frames(
-            job,
-            Ok(vec![encode_error(7, "first"), encode_error(7, "final")]),
-            4_096,
-        )
-        .await;
-        let first = receiver.recv().await.expect("intermediate frame");
-        assert!(first.tracked.is_none());
-        assert!(Arc::ptr_eq(
-            first.cancellation.as_ref().expect("cancellation"),
-            &cancellation
-        ));
-        assert!(matches!(
-            session.insert(8),
-            Err(RequestAdmissionError::WindowFull)
-        ));
-
-        let final_frame = receiver.recv().await.expect("terminal frame");
-        assert!(Arc::ptr_eq(
-            final_frame.cancellation.as_ref().expect("cancellation"),
-            &cancellation
-        ));
-        let terminal = final_frame.tracked.expect("terminal tracker");
-        assert!(session.cancel(7));
-        assert!(
-            first
-                .cancellation
-                .as_ref()
-                .is_some_and(|signal| signal.is_cancelled())
-        );
-        assert!(
-            final_frame
-                .cancellation
-                .as_ref()
-                .is_some_and(|signal| signal.is_cancelled())
-        );
-        terminal.finish();
-        assert!(session.insert(8).is_ok());
-    }
-
     #[test]
     fn default_spawn_bootstrap_builds_the_full_raised_platform() {
         let config = WorldServiceConfig::default();
@@ -4802,11 +4176,6 @@ mod tests {
         inner: ProceduralWorldSource,
         batch_calls: Arc<AtomicUsize>,
         product_calls: Arc<Mutex<HashMap<WorldProductRequest, usize>>>,
-    }
-
-    struct GatedSurfaceSource {
-        inner: ProceduralWorldSource,
-        release_second: Arc<(Mutex<bool>, Condvar)>,
     }
 
     struct TestClient<S> {
@@ -4920,218 +4289,6 @@ mod tests {
             self.inner
                 .nearest_prominent_skyline_feature(x, z, kind, max_radius_cells)
         }
-    }
-
-    impl WorldSourceEngine for GatedSurfaceSource {
-        fn identity(&self) -> &voxels_world::WorldSourceIdentity {
-            self.inner.identity()
-        }
-
-        fn generate_batch(
-            &self,
-            request: WorldProductBatch,
-        ) -> Result<voxels_world::WorldProductBatchResult, WorldSourceError> {
-            self.inner.generate_batch(request)
-        }
-
-        fn generate_surface_tiles(
-            &self,
-            priority: WorldProductPriority,
-            coords: &[SurfaceTileCoord],
-            emit: &mut dyn FnMut(WorldProductBatchItem) -> ControlFlow<()>,
-        ) -> Result<voxels_world::WorldSourceIdentityHash, WorldSourceError> {
-            for (index, &coord) in coords.iter().enumerate() {
-                if index == 1 {
-                    let (released, changed) = self.release_second.as_ref();
-                    let mut released = released
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    while !*released {
-                        released = changed
-                            .wait(released)
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    }
-                }
-                let mut stopped = false;
-                self.inner.generate_surface_tiles(
-                    priority,
-                    std::slice::from_ref(&coord),
-                    &mut |item| {
-                        let flow = emit(item);
-                        stopped = flow.is_break();
-                        flow
-                    },
-                )?;
-                if stopped {
-                    break;
-                }
-            }
-            Ok(self.inner.identity().identity_hash())
-        }
-
-        fn generate_edited_surface_tile(
-            &self,
-            edits: &voxels_world::EditMap,
-            coord: SurfaceTileCoord,
-        ) -> Result<voxels_world::SurfaceTileSnapshot, WorldSourceError> {
-            self.inner.generate_edited_surface_tile(edits, coord)
-        }
-
-        fn surface_tiles_affected_by_voxel(
-            &self,
-            edits: &voxels_world::EditMap,
-            level: SurfaceLodLevel,
-            coord: voxels_world::VoxelCoord,
-        ) -> Vec<SurfaceTileCoord> {
-            self.inner
-                .surface_tiles_affected_by_voxel(edits, level, coord)
-        }
-
-        fn atmosphere_sample(
-            &self,
-            x: i32,
-            z: i32,
-        ) -> (voxels_world::AtmosphereSample, voxels_world::SurfaceRegion) {
-            self.inner.atmosphere_sample(x, z)
-        }
-
-        fn skyline_features_anchored_in(
-            &self,
-            bounds: [[i32; 2]; 2],
-        ) -> Vec<voxels_world::SkylineFeature> {
-            self.inner.skyline_features_anchored_in(bounds)
-        }
-
-        fn skyline_features_at(
-            &self,
-            coord: voxels_world::VoxelCoord,
-        ) -> Vec<voxels_world::SkylineFeature> {
-            self.inner.skyline_features_at(coord)
-        }
-
-        fn nearest_skyline_feature(
-            &self,
-            x: i32,
-            z: i32,
-            kind: voxels_world::SkylineFeatureKind,
-            max_radius_cells: i32,
-        ) -> Option<voxels_world::SkylineFeature> {
-            self.inner
-                .nearest_skyline_feature(x, z, kind, max_radius_cells)
-        }
-
-        fn nearest_prominent_skyline_feature(
-            &self,
-            x: i32,
-            z: i32,
-            kind: voxels_world::SkylineFeatureKind,
-            max_radius_cells: i32,
-        ) -> Option<voxels_world::SkylineFeature> {
-            self.inner
-                .nearest_prominent_skyline_feature(x, z, kind, max_radius_cells)
-        }
-    }
-
-    #[tokio::test]
-    async fn dispatcher_publishes_the_first_surface_item_before_a_later_source_item_finishes() {
-        let release_second = Arc::new((Mutex::new(false), Condvar::new()));
-        let source: Arc<dyn WorldSourceEngine> = Arc::new(GatedSurfaceSource {
-            inner: ProceduralWorldSource::new(42),
-            release_second: Arc::clone(&release_second),
-        });
-        let cancellations = Arc::new(Notify::new());
-        let (jobs, job_rx) = mpsc::channel(4);
-        let dispatcher = tokio::spawn(run_generation_dispatcher(
-            job_rx,
-            Arc::clone(&cancellations),
-            source,
-            PriorityGenerationLimiter::new(1),
-            PriorityGenerationLimiter::new(1),
-            Arc::new(Semaphore::new(1)),
-            GenerationDispatcherLimits {
-                max_frame_bytes: 4 * 1024 * 1024,
-                product_cache_bytes: 4 * 1024 * 1024,
-                response_cache_bytes: 4 * 1024 * 1024,
-                completion_queue_capacity: 1,
-            },
-        ));
-        let session = Arc::new(SessionRequests::new(
-            1,
-            1,
-            1,
-            8 * 1024 * 1024,
-            cancellations,
-        ));
-        let request_id = 71;
-        let cancelled = session
-            .insert(request_id)
-            .ok()
-            .expect("surface request admission");
-        let coords = vec![
-            SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 0, 0),
-            SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 1, 0),
-        ];
-        let (outbound, mut received) = mpsc::channel(4);
-        jobs.send(GenerationJob {
-            request: GenerationRequest::SurfaceTiles {
-                request: SurfaceTileBatchRequest {
-                    request_id,
-                    priority: WorldProductPriority::ImmediateSurface,
-                    coords: coords.clone(),
-                },
-                snapshot: SurfaceEditSnapshot {
-                    edits: EditMap::default(),
-                    revisions: vec![0; coords.len()],
-                },
-            },
-            outbound,
-            tracked: TrackedRequest {
-                request_id,
-                cancelled,
-                session,
-            },
-        })
-        .await
-        .expect("generation dispatcher");
-
-        let first = tokio::time::timeout(Duration::from_secs(2), received.recv()).await;
-        {
-            let (released, changed) = release_second.as_ref();
-            *released
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
-            changed.notify_all();
-        }
-        let first = first
-            .expect("first item waited for the gated sibling")
-            .expect("first surface frame");
-        let first_result =
-            decode_surface_tile_batch_result(&first.bytes).expect("first surface result");
-        assert_eq!(first_result.items.len(), 1);
-        assert_eq!(first_result.items[0].coord, coords[0]);
-        assert!(!first_result.final_item);
-        assert!(first.tracked.is_none());
-
-        let mut final_frame = tokio::time::timeout(Duration::from_secs(2), received.recv())
-            .await
-            .expect("terminal item did not follow gate release")
-            .expect("terminal surface frame");
-        let final_result =
-            decode_surface_tile_batch_result(&final_frame.bytes).expect("terminal surface result");
-        assert_eq!(final_result.items.len(), 1);
-        assert_eq!(final_result.items[0].coord, coords[1]);
-        assert!(final_result.final_item);
-        final_frame
-            .tracked
-            .take()
-            .expect("terminal request tracker")
-            .finish();
-
-        drop(jobs);
-        tokio::time::timeout(Duration::from_secs(2), dispatcher)
-            .await
-            .expect("generation dispatcher shutdown")
-            .expect("generation dispatcher task");
     }
 
     fn test_generation_job(
@@ -5619,7 +4776,6 @@ mod tests {
                     edit_revision: 1,
                 }]
                 .into_boxed_slice(),
-                final_surface_item: false,
             }
         }
 
@@ -5655,31 +4811,12 @@ mod tests {
                 edit_revision: 2,
             }]
             .into_boxed_slice(),
-            final_surface_item: false,
         };
         assert_ne!(old_revision, new_revision);
         assert!(
             get_cached_batch_response(&cache, &new_revision, 100)
                 .expect("cache lookup")
                 .is_none()
-        );
-
-        let surface_products = vec![ProductKey::SurfaceTile {
-            coord: SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 3, -4),
-            edit_revision: 7,
-        }]
-        .into_boxed_slice();
-        let intermediate = BatchResponseKey {
-            products: surface_products.clone(),
-            final_surface_item: false,
-        };
-        let terminal = BatchResponseKey {
-            products: surface_products,
-            final_surface_item: true,
-        };
-        assert_ne!(
-            intermediate, terminal,
-            "the compressed cache must not reuse a terminal item as an intermediate item"
         );
     }
 
@@ -5691,7 +4828,6 @@ mod tests {
                 edit_revision: 1,
             }]
             .into_boxed_slice(),
-            final_surface_item: false,
         };
         let mut cache = BatchResponseCache::new(1024);
         let first = cache.flight_lock(&key);
@@ -5710,7 +4846,6 @@ mod tests {
                 edit_revision: 1,
             }]
             .into_boxed_slice(),
-            final_surface_item: false,
         };
         let mut cache = BatchResponseCache::new(1024);
         let owner = cache.flight_lock(&key);
@@ -5927,84 +5062,6 @@ mod tests {
         );
         assert_eq!(batch_calls.load(Ordering::Relaxed), 2);
 
-        let surface_a = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 20, -12);
-        let surface_b = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 21, -12);
-        let surface_c = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 22, -12);
-        for (socket, request_id, coords) in [
-            (&mut first, 43, vec![surface_a, surface_b]),
-            (&mut second, 100, vec![surface_b, surface_c]),
-        ] {
-            socket
-                .send(ClientMessage::Binary(
-                    encode_surface_tile_batch(&SurfaceTileBatchRequest {
-                        request_id,
-                        priority: WorldProductPriority::VisibleSurface,
-                        coords,
-                    })?
-                    .into(),
-                ))
-                .await?;
-        }
-        let first_surface = next_surface_sequence(&mut first, 43, 2).await?;
-        let second_surface = next_surface_sequence(&mut second, 100, 2).await?;
-        assert_eq!(
-            first_surface
-                .iter()
-                .flat_map(|result| result.items.iter().map(|item| item.coord))
-                .collect::<Vec<_>>(),
-            vec![surface_a, surface_b]
-        );
-        assert!(!first_surface[0].final_item);
-        assert!(first_surface[1].final_item);
-        assert_eq!(
-            second_surface
-                .iter()
-                .flat_map(|result| result.items.iter().map(|item| item.coord))
-                .collect::<Vec<_>>(),
-            vec![surface_b, surface_c]
-        );
-        assert!(!second_surface[0].final_item);
-        assert!(second_surface[1].final_item);
-        assert_eq!(batch_calls.load(Ordering::Relaxed), 4);
-        {
-            let counts = product_calls
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            for coord in [surface_a, surface_b, surface_c] {
-                assert_eq!(
-                    counts.get(&WorldProductRequest::SurfaceTile(coord)),
-                    Some(&1)
-                );
-            }
-        }
-
-        first
-            .send(ClientMessage::Binary(
-                encode_surface_tile_batch(&SurfaceTileBatchRequest {
-                    request_id: 44,
-                    priority: WorldProductPriority::Prefetch,
-                    coords: vec![surface_c, surface_b, surface_a],
-                })?
-                .into(),
-            ))
-            .await?;
-        let cached_surface = next_surface_sequence(&mut first, 44, 3).await?;
-        assert_eq!(
-            cached_surface
-                .iter()
-                .flat_map(|result| result.items.iter().map(|item| item.coord))
-                .collect::<Vec<_>>(),
-            vec![surface_c, surface_b, surface_a]
-        );
-        assert_eq!(
-            cached_surface
-                .iter()
-                .map(|result| result.final_item)
-                .collect::<Vec<_>>(),
-            vec![false, false, true]
-        );
-        assert_eq!(batch_calls.load(Ordering::Relaxed), 4);
-
         first.close(None).await?;
         second.close(None).await?;
         server_task.abort();
@@ -6039,24 +5096,20 @@ mod tests {
         assert_eq!(request_id, 0);
         assert_eq!(message, "player is already connected");
         duplicate.close(None).await?;
-        let first_coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, -400, 200);
-        let second_coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 700, -600);
+        let first_coord = ChunkCoord::new(-400, 0, 200);
+        let second_coord = ChunkCoord::new(700, 0, -600);
         for (socket, coord) in [(&mut first, first_coord), (&mut second, second_coord)] {
-            let request = SurfaceTileBatchRequest {
+            let request = ChunkBatchRequest {
                 request_id: 7,
-                priority: WorldProductPriority::VisibleSurface,
+                priority: WorldProductPriority::VisibleChunk,
                 coords: vec![coord],
             };
             socket
-                .send(ClientMessage::Binary(
-                    encode_surface_tile_batch(&request)?.into(),
-                ))
+                .send(ClientMessage::Binary(encode_chunk_batch(&request)?.into()))
                 .await?;
         }
-        let first_result =
-            decode_surface_tile_batch_result(&next_client_binary(&mut first).await?)?;
-        let second_result =
-            decode_surface_tile_batch_result(&next_client_binary(&mut second).await?)?;
+        let first_result = decode_chunk_batch_result(&next_client_binary(&mut first).await?)?;
+        let second_result = decode_chunk_batch_result(&next_client_binary(&mut second).await?)?;
         assert_eq!(first_result.request_id, 7);
         assert_eq!(second_result.request_id, 7);
         assert_eq!(first_result.items[0].coord, first_coord);
@@ -6152,7 +5205,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn five_builders_stream_a_far_lod_tower_only_to_interested_players()
+    async fn five_builders_publish_a_far_tower_only_to_interested_players()
     -> Result<(), Box<dyn std::error::Error>> {
         const BUILDER_COUNT: usize = 5;
         const DIGS_PER_BUILDER: usize = 3;
@@ -6485,52 +5538,6 @@ mod tests {
             assert_eq!(snapshot.chunk.get(x, y, z), *material);
         }
 
-        let coarse_coord =
-            SurfaceTileCoord::containing(SurfaceLodLevel::Stride16, tower[0].x, tower[0].z);
-        worlds[OBSERVER_INDEX]
-            .send(ClientMessage::Binary(
-                encode_surface_tile_batch(&SurfaceTileBatchRequest {
-                    request_id: 901,
-                    priority: WorldProductPriority::VisibleSurface,
-                    coords: vec![coarse_coord],
-                })?
-                .into(),
-            ))
-            .await?;
-        let surface = decode_surface_tile_batch_result(
-            &tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                next_client_binary(&mut worlds[OBSERVER_INDEX]),
-            )
-            .await??,
-        )?;
-        let item = surface.items.first().ok_or("missing coarse surface tile")?;
-        assert_eq!(item.coord, coarse_coord);
-        let expected_surface_revision = observer_commits
-            .iter()
-            .filter(|commit| commit.affected_surface_tiles.contains(&coarse_coord))
-            .map(|commit| commit.revision)
-            .max()
-            .ok_or("tower commits did not invalidate their coarse surface tile")?;
-        assert_eq!(item.edit_revision, expected_surface_revision);
-        let snapshot = item.result.as_ref().map_err(|error| error.to_string())?;
-        let tower_top = VoxelCoord::new(
-            tower.last().unwrap().x,
-            tower.last().unwrap().y + 5,
-            tower.last().unwrap().z,
-        );
-        assert!(
-            snapshot.terrain.quads.iter().any(|quad| {
-                quad.material == builder_materials[BUILDER_COUNT - 1]
-                    && quad.origin[1] == tower_top.y
-                    && quad.origin[0] <= tower_top.x
-                    && tower_top.x < quad.origin[0] + i32::from(quad.extent[0])
-                    && quad.origin[2] <= tower_top.z
-                    && tower_top.z < quad.origin[2] + i32::from(quad.extent[1])
-            }),
-            "the five-player tower vanished from the 1.6 m coarse LOD seen at 120 m"
-        );
-
         for world in &mut worlds {
             world.close(None).await?;
         }
@@ -6543,7 +5550,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn digging_converges_editor_observer_inventory_chunks_halos_and_surface_lod()
+    async fn digging_converges_editor_observer_inventory_chunks_and_halos()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut config = test_config();
         config.transport.max_connections = 3;
@@ -6747,25 +5754,6 @@ mod tests {
         let [x, y, z] = unrelated.local();
         assert_eq!(unrelated_item.chunk.get(x, y, z), unrelated_before);
 
-        assert!(!editor_commit.affected_surface_tiles.is_empty());
-        let surface_coord = editor_commit.affected_surface_tiles[0];
-        observer_world
-            .send(ClientMessage::Binary(
-                encode_surface_tile_batch(&SurfaceTileBatchRequest {
-                    request_id: 1_002,
-                    priority: WorldProductPriority::VisibleSurface,
-                    coords: vec![surface_coord],
-                })?
-                .into(),
-            ))
-            .await?;
-        let surface =
-            decode_surface_tile_batch_result(&next_client_binary(&mut observer_world).await?)?;
-        assert_eq!(surface.request_id, 1_002);
-        assert_eq!(surface.items[0].coord, surface_coord);
-        assert_eq!(surface.items[0].edit_revision, editor_commit.revision);
-        assert!(surface.items[0].result.is_ok());
-
         editor_world.close(None).await?;
         observer_world.close(None).await?;
         editor_presence.close(None).await?;
@@ -6946,27 +5934,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    async fn next_surface_sequence<S>(
-        socket: &mut TestClient<S>,
-        request_id: u64,
-        item_count: usize,
-    ) -> Result<Vec<SurfaceTileBatchResult>, Box<dyn std::error::Error>>
-    where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-    {
-        let mut results = Vec::with_capacity(item_count);
-        for index in 0..item_count {
-            let result = decode_surface_tile_batch_result(&next_client_binary(socket).await?)?;
-            if result.request_id != request_id
-                || result.items.len() != 1
-                || result.final_item != (index + 1 == item_count)
-            {
-                return Err("server returned an invalid progressive surface sequence".into());
-            }
-            results.push(result);
-        }
-        Ok(results)
     }
 }
