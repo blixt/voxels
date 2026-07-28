@@ -137,7 +137,7 @@ replacement.
 
 When the server advertises `VIRTUAL_TERRAIN`, the browser also discovers bounded horizontal region
 columns and fetches each region's hierarchy directory plus its independently renderable root page.
-Further `VXTP` v5 pages are requested by key, revision, and semantic content fingerprint. They may
+Further `VXTP` v6 pages are requested by key, revision, and semantic content fingerprint. They may
 encode stepped surfaces, sparse voxel bricks, quad or triangle clusters, or 33x33 sampled
 heightfields, but representation never changes half-open spatial ownership. Source identity,
 boundary certificates, error bounds, material coverage, child identities, payload limits, and the
