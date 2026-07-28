@@ -2692,6 +2692,10 @@ async fn serve_virtual_terrain_region_columns(
     delivery.send(bytes, true, max_frame_bytes).await;
 }
 
+#[allow(
+    clippy::print_stderr,
+    reason = "a collapsed wire failure must retain its server-side generation cause"
+)]
 async fn serve_virtual_terrain_directories(
     request: TerrainDirectoryBatchRequest,
     authority: Arc<VirtualTerrainAuthority>,
@@ -2727,15 +2731,21 @@ async fn serve_virtual_terrain_directories(
             generated = authority.ensure_region(root, request.priority) => generated,
         };
         let result = match generated {
-            Ok(region) => region
-                .root_page()
-                .map(|root_page| TerrainDirectoryBootstrap {
+            Ok(region) => match region.root_page() {
+                Ok(root_page) => Ok(TerrainDirectoryBootstrap {
                     directory: region.directory.clone(),
                     root_page,
-                })
-                .map_err(|_| TerrainDirectoryFailure::GenerationFailed),
+                }),
+                Err(error) => {
+                    eprintln!("virtual terrain root page recovery failed for {root:?}: {error}");
+                    Err(TerrainDirectoryFailure::GenerationFailed)
+                }
+            },
             Err(VirtualTerrainError::InvalidRoot) => Err(TerrainDirectoryFailure::Unavailable),
-            Err(_) => Err(TerrainDirectoryFailure::GenerationFailed),
+            Err(error) => {
+                eprintln!("virtual terrain directory build failed for {root:?}: {error}");
+                Err(TerrainDirectoryFailure::GenerationFailed)
+            }
         };
         items.push(TerrainDirectoryBatchItem { root, result });
     }

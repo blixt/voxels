@@ -3600,12 +3600,7 @@ mod web {
         }
 
         fn stream_virtual_terrain(&self, camera: &CameraState, streaming_velocity: Vec3) {
-            if !self.virtual_terrain_supported()
-                // Migration-only scheduling fence: do not let expensive virtual-region builds
-                // occupy the old renderer's request/generation capacity before its startup cut is
-                // complete. This disappears with the surface-ring renderer at hard cutover.
-                || self.initialized_surface_level_count.get() < SURFACE_LOD_LEVEL_COUNT
-            {
+            if !self.virtual_terrain_supported() {
                 return;
             }
             let now_ms = self.last_time.get().max(0.0) as u64;
@@ -4090,6 +4085,8 @@ mod web {
                             now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
                         );
                     }
+                    drop(state);
+                    log_gpu_error(&format!("virtual terrain directory batch failed: {error}"));
                     return;
                 }
             };
@@ -4107,6 +4104,10 @@ mod web {
                         root,
                         now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
                     );
+                    drop(state);
+                    log_gpu_error(&format!(
+                        "virtual terrain directory producer failed for {root:?}"
+                    ));
                     continue;
                 };
                 let minimum_revision = self

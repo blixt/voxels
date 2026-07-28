@@ -192,6 +192,35 @@ function virtualTerrainState(snapshot: readonly number[]) {
   };
 }
 
+function virtualTerrainReady(snapshot: readonly number[]): boolean {
+  const currentRoots = snapshotValue(snapshot, "virtualTerrainCurrentColumnRoots");
+  const currentRegisteredRoots = snapshotValue(
+    snapshot,
+    "virtualTerrainCurrentColumnRegisteredRoots",
+  );
+  const selectedPages = snapshotValue(snapshot, "virtualTerrainSelectedPages");
+  return (
+    snapshotValue(snapshot, "virtualTerrainMode") >= 1 &&
+    snapshotValue(snapshot, "virtualTerrainCurrentColumnKnown") === 1 &&
+    currentRoots > 0 &&
+    currentRegisteredRoots === currentRoots &&
+    selectedPages > 0 &&
+    snapshotValue(snapshot, "virtualTerrainResidentPages") >= selectedPages &&
+    snapshotValue(snapshot, "virtualTerrainOwnerlessRoots") === 0 &&
+    snapshotValue(snapshot, "virtualTerrainGpuMatchesCpuCut") === 1
+  );
+}
+
+function terrainPresentationReady(snapshot: readonly number[]): boolean {
+  return (
+    (snapshotValue(snapshot, "pendingJobs") === 0 &&
+      snapshotValue(snapshot, "surfaceInFlight") === 0 &&
+      snapshotValue(snapshot, "allLodsReady") === 1 &&
+      snapshotValue(snapshot, "lodTransitionQuads") > 0) ||
+    virtualTerrainReady(snapshot)
+  );
+}
+
 function planarDistance(left: Vector3, right: Vector3): number {
   return Math.hypot(left[0] - right[0], left[2] - right[2]);
 }
@@ -272,19 +301,34 @@ async function readSnapshot(engine: EngineClient, timings: LodTimings): Promise<
 async function waitForEngine(
   engine: EngineClient,
   timings: LodTimings,
+  serviceLogs: readonly string[],
+  browserFailures: readonly {
+    readonly source: string;
+    readonly page: string;
+    readonly message: string;
+  }[],
 ): Promise<readonly number[]> {
-  return engine.waitForSnapshot(
-    (snapshot) =>
-      snapshotValue(snapshot, "quads") > 0 &&
-      snapshotValue(snapshot, "pendingJobs") === 0 &&
-      snapshotValue(snapshot, "surfaceInFlight") === 0 &&
-      snapshotValue(snapshot, "allLodsReady") === 1 &&
-      snapshotValue(snapshot, "lodTransitionQuads") > 0,
-    {
-      timeoutMs: 60_000,
-      description: "LOD browser fixture did not settle",
-      onSnapshot: (snapshot) => collectTiming(snapshot, timings),
-    },
+  const deadline = Date.now() + 60_000;
+  let latest: readonly number[] = [];
+  while (Date.now() < deadline) {
+    latest = await engine.snapshot();
+    collectTiming(latest, timings);
+    if (snapshotValue(latest, "quads") > 0 && terrainPresentationReady(latest)) return latest;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `LOD browser fixture did not settle; blockers ${JSON.stringify({
+      quads: snapshotValue(latest, "quads"),
+      pendingJobs: snapshotValue(latest, "pendingJobs"),
+      surfaceInFlight: snapshotValue(latest, "surfaceInFlight"),
+      allLodsReady: snapshotValue(latest, "allLodsReady"),
+      lodTransitionQuads: snapshotValue(latest, "lodTransitionQuads"),
+      virtualTerrain: virtualTerrainState(latest),
+    })}\n\nBrowser failures:\n${
+      browserFailures
+        .map((failure) => `${failure.source} (${failure.page}): ${failure.message}`)
+        .join("\n") || "(none)"
+    }\n\nNative world-service output:\n${serviceLogs.join("") || "(no output captured)"}`,
   );
 }
 
@@ -375,17 +419,25 @@ async function waitForStableFrame(
       snapshotValue(latest, "grounded") === 1 &&
       previousPosition !== undefined &&
       spatialDistance(position, previousPosition) < 0.0015 &&
-      snapshotValue(latest, "pendingJobs") === 0 &&
-      snapshotValue(latest, "surfaceInFlight") === 0 &&
-      snapshotValue(latest, "allLodsReady") === 1 &&
-      snapshotValue(latest, "lodTransitionQuads") > 0;
+      terrainPresentationReady(latest);
     stable = settled ? stable + 1 : 0;
     previousPosition = position;
     await page.waitForTimeout(16);
   }
   if (stable < 12) {
+    const blockers = {
+      grounded: snapshotValue(latest, "grounded"),
+      pendingJobs: snapshotValue(latest, "pendingJobs"),
+      surfaceInFlight: snapshotValue(latest, "surfaceInFlight"),
+      allLodsReady: snapshotValue(latest, "allLodsReady"),
+      lodTransitionQuads: snapshotValue(latest, "lodTransitionQuads"),
+      virtualTerrainRegisteredRegions: snapshotValue(latest, "virtualTerrainRegisteredRegions"),
+      virtualTerrainDirectoryInFlight: snapshotValue(latest, "virtualTerrainDirectoryInFlight"),
+      virtualTerrainResidentPages: snapshotValue(latest, "virtualTerrainResidentPages"),
+      virtualTerrainOwnerlessRoots: snapshotValue(latest, "virtualTerrainOwnerlessRoots"),
+    };
     throw new Error(
-      `LOD frame did not stabilize at ${JSON.stringify(expectedCentres)}; latest ${JSON.stringify(boundaryCentres(latest))}`,
+      `LOD frame did not stabilize at ${JSON.stringify(expectedCentres)}; latest ${JSON.stringify(boundaryCentres(latest))}; blockers ${JSON.stringify(blockers)}`,
     );
   }
   return latest;
@@ -925,7 +977,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
   });
   const { engine, page } = viewport;
   const videoStartedAtMs = Date.now();
-  let beforeSnapshot = await waitForEngine(engine, timings);
+  let beforeSnapshot = await waitForEngine(engine, timings, world.service.logs, viewport.failures);
   beforeSnapshot = await setCameraLook(engine, options.look[0], options.look[1], timings);
   if (options.stepOffPillar) {
     await page.keyboard.down("KeyD");
@@ -1043,19 +1095,27 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     await engine.waitForSnapshot(
       (snapshot) => {
         collectTiming(snapshot, timings);
+        const virtual = virtualTerrainState(snapshot);
         const settled =
-          snapshotValue(snapshot, "presentedLodStrideVoxels") === 1 &&
-          snapshotValue(snapshot, "lodIncompleteTransitionEdges") === 0;
+          (snapshotValue(snapshot, "presentedLodStrideVoxels") === 1 &&
+            snapshotValue(snapshot, "lodIncompleteTransitionEdges") === 0) ||
+          (virtual.mode === 2 &&
+            virtual.selectedPages > 0 &&
+            virtual.ownerlessRoots === 0 &&
+            virtual.gpuMatchesCpuCut &&
+            virtual.currentColumnKnown &&
+            virtual.currentColumnRoots > 0 &&
+            virtual.currentColumnRegisteredRoots === virtual.currentColumnRoots);
         settledSamples = settled ? settledSamples + 1 : 0;
         return settledSamples >= 3;
       },
       {
         timeoutMs: 10_000,
         intervalMs: 50,
-        description: "nearby surface did not return to three stable canonical samples",
+        description: "terrain did not return to three stable owned samples",
       },
     );
-    // Let the short old-cut overlay retire after the canonical cut has stabilized.
+    // Let any subpixel cut transition retire after ownership has stabilized.
     await page.waitForTimeout(250);
     const stoppedSettledSnapshot = await readSnapshot(engine, timings);
     const stoppedSettledScreenshot = await page.screenshot();
@@ -1111,7 +1171,14 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       );
     }
     const uncoveredOwnerSamples = samples.filter(
-      (sample) => sample.presentedStrideVoxels === 0,
+      (sample) =>
+        sample.presentedStrideVoxels === 0 &&
+        !(
+          sample.virtualTerrain.mode === 2 &&
+          sample.virtualTerrain.selectedPages > 0 &&
+          sample.virtualTerrain.ownerlessRoots === 0 &&
+          sample.virtualTerrain.gpuMatchesCpuCut
+        ),
     ).length;
     const violations: string[] = [];
     if (worst.enclosedPixels > 0) {

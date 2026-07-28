@@ -14,10 +14,10 @@ use crate::{
     TerrainPageBatchRequestV1, TerrainPageBatchResultV1, TerrainPageCodecError, TerrainPageKey,
     TerrainPageTransferCodecError, TerrainPageV1, VOXEL_SIZE_METRES, VoxelCoord, WaterPatch,
     WaterTileMesh, WorldId, WorldManifest, WorldProductPriority, WorldSourceError,
-    WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind, codec,
-    decode_region_terrain_directory, decode_terrain_page, decode_terrain_page_batch_request,
-    decode_terrain_page_batch_result, encode_terrain_directory, encode_terrain_page,
-    encode_terrain_page_batch_request, encode_terrain_page_batch_result,
+    WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind, codec, decode_terrain_directory,
+    decode_terrain_page, decode_terrain_page_batch_request, decode_terrain_page_batch_result,
+    encode_terrain_directory, encode_terrain_page, encode_terrain_page_batch_request,
+    encode_terrain_page_batch_result,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -1803,11 +1803,21 @@ pub fn decode_terrain_directory_batch_result(
         let root_body = cursor.bytes(root_len)?;
         let result = match status {
             0 => {
-                let directory =
-                    decode_region_terrain_directory(directory_body, source_identity_hash)?;
+                let directory = decode_terrain_directory(directory_body, source_identity_hash)?;
                 if directory.roots().map(|node| node.key).collect::<Vec<_>>() != [root] {
                     return Err(ProtocolError::InvalidPayload(
                         "terrain directory root mismatch",
+                    ));
+                }
+                if (root.level == TERRAIN_REGION_ROOT_LEVEL
+                    && !directory.validates_region_partition())
+                    || (root.level == TERRAIN_COVERAGE_ROOT_LEVEL
+                        && directory.nodes.iter().any(|node| {
+                            node.key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL) != Some(root)
+                        }))
+                {
+                    return Err(ProtocolError::InvalidPayload(
+                        "terrain directory does not partition its requested root",
                     ));
                 }
                 let root_page = decode_terrain_page(root_body, source_identity_hash)?;
@@ -6280,6 +6290,62 @@ mod tests {
         assert_eq!(
             decode_terrain_directory_batch_result(
                 &encode_terrain_directory_batch_result(&result).expect("encode directory result")
+            ),
+            Ok(result)
+        );
+    }
+
+    #[cfg(feature = "terrain-page-builder")]
+    #[test]
+    fn virtual_terrain_directory_results_round_trip_terminal_coverage_roots() {
+        let source = ProceduralWorldSource::new(43);
+        let source_identity_hash = source.identity().identity_hash();
+        let root = TerrainPageKey {
+            level: TERRAIN_COVERAGE_ROOT_LEVEL,
+            coord: [0, 0, 0],
+        };
+        let mut sample = source
+            .surface_sample_lattice(WorldProductPriority::VirtualTerrain, [0, 0], [1, 1], 1)
+            .expect("coverage sample")
+            .into_iter()
+            .next()
+            .expect("one coverage sample");
+        sample.height = 0;
+        sample.material = Material::Stone;
+        sample.water_level = None;
+        let sample_edge =
+            usize::try_from(crate::TERRAIN_PAGE_EDGE_SAMPLES + 1).expect("coverage sample edge");
+        let samples = vec![sample; sample_edge * sample_edge];
+        let build = crate::build_terrain_coverage_root(
+            source_identity_hash,
+            root,
+            11,
+            &samples,
+            crate::TerrainErrorBounds {
+                geometric_millivoxels: 1_024_000,
+                silhouette_millivoxels: 1_024_000,
+                material_boundary_millivoxels: 1_024_000,
+                normal_milliradians: 3_142,
+                unresolved_topology: false,
+            },
+        )
+        .expect("coverage root");
+        let result = TerrainDirectoryBatchResult {
+            request_id: 73,
+            source_identity_hash,
+            items: vec![TerrainDirectoryBatchItem {
+                root,
+                result: Ok(TerrainDirectoryBootstrap {
+                    directory: build.directory,
+                    root_page: build.pages.into_iter().next().expect("root page"),
+                }),
+            }],
+        };
+
+        assert_eq!(
+            decode_terrain_directory_batch_result(
+                &encode_terrain_directory_batch_result(&result)
+                    .expect("encode coverage directory result")
             ),
             Ok(result)
         );
