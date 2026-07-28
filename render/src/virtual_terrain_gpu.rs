@@ -1107,7 +1107,7 @@ fn pack_node(
     indices: &BTreeMap<TerrainPageKey, u32>,
 ) -> Result<GpuVirtualTerrainNode, VirtualTerrainGpuError> {
     let bounds = node.bounds;
-    let mut children = vec![INVALID_NODE; TERRAIN_PAGE_MAX_CHILDREN];
+    let mut children = [INVALID_NODE; TERRAIN_PAGE_MAX_CHILDREN];
     if node.has_children {
         let keys = node
             .key

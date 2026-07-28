@@ -15,7 +15,7 @@ use std::io::Read;
 #[cfg(feature = "terrain-page-builder")]
 use crate::terrain_error::certify_bidirectional_surface_error;
 
-pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 5;
+pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 6;
 pub const TERRAIN_PAGE_EDGE_SAMPLES: u32 = 32;
 pub const TERRAIN_PAGE_MAX_LEVEL: u8 = 20;
 pub const TERRAIN_PAGE_MAX_CHILDREN: usize = 8;
@@ -30,9 +30,9 @@ pub const TERRAIN_PAGE_TARGET_COMPRESSED_BYTES: usize = 65_536;
 pub const TERRAIN_PAGE_MAX_COMPRESSED_BYTES: usize = 262_144;
 pub const TERRAIN_PAGE_MAX_PAYLOAD_BYTES: usize = 2_097_152;
 const SPARSE_BRICK_EDGE: u8 = 8;
-const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v5\0";
+const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v6\0";
 const PARENT_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-parent-boundary-v1\0";
-const HEIGHTFIELD_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-heightfield-boundary-v1\0";
+const HEIGHTFIELD_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-heightfield-boundary-v2\0";
 const PAGE_MAGIC: &[u8; 4] = b"VXTP";
 const PAGE_HEADER_LEN: u16 = 344;
 const PAGE_COMPRESSION_BROTLI: u8 = 1;
@@ -268,6 +268,9 @@ pub struct TerrainHeightfieldGrid {
     pub shape_xz: [u16; 2],
     /// Canonical Y plane coordinates (`solid surface height + 1`), X fastest then Z.
     pub ground_heights: Vec<i32>,
+    /// One palette index per lattice sample. Level-0 presentation uses this source material
+    /// directly for exact 10 cm tops and risers; coarse cells retain a filtered material below.
+    pub sample_material_indices: Vec<u8>,
     /// One material palette index per 32x32 cell, X fastest then Z.
     pub cell_material_indices: Vec<u8>,
     /// Canonical water top plane coordinates, or `i32::MIN` for a dry lattice vertex.
@@ -841,26 +844,39 @@ pub fn build_sampled_heightfield_terrain_page(
         .collect::<Result<BTreeMap<_, _>, _>>()?;
 
     let edge = shape as usize;
+    let sample_material_indices = samples
+        .iter()
+        .map(|sample| {
+            palette_indices
+                .get(&sample.material.id())
+                .copied()
+                .ok_or(TerrainPageBuildError::MaterialPaletteOverflow)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut cell_material_indices =
         Vec::with_capacity(TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize);
     let mut cell_counts = BTreeMap::<u16, u32>::new();
     for z in 0..TERRAIN_PAGE_EDGE_SAMPLES as usize {
         for x in 0..TERRAIN_PAGE_EDGE_SAMPLES as usize {
-            let corners = [
-                samples[x + z * edge].material,
-                samples[x + 1 + z * edge].material,
-                samples[x + (z + 1) * edge].material,
-                samples[x + 1 + (z + 1) * edge].material,
-            ];
-            let mut counts = BTreeMap::<u16, u8>::new();
-            for material in corners {
-                *counts.entry(material.id()).or_default() += 1;
-            }
-            let material_id = counts
-                .into_iter()
-                .max_by_key(|(id, count)| (*count, std::cmp::Reverse(*id)))
-                .map(|(id, _)| id)
-                .ok_or(TerrainPageBuildError::InvalidSurfaceLattice)?;
+            let material_id = if key.level == 0 {
+                samples[x + z * edge].material.id()
+            } else {
+                let corners = [
+                    samples[x + z * edge].material,
+                    samples[x + 1 + z * edge].material,
+                    samples[x + (z + 1) * edge].material,
+                    samples[x + 1 + (z + 1) * edge].material,
+                ];
+                let mut counts = BTreeMap::<u16, u8>::new();
+                for material in corners {
+                    *counts.entry(material.id()).or_default() += 1;
+                }
+                counts
+                    .into_iter()
+                    .max_by_key(|(id, count)| (*count, std::cmp::Reverse(*id)))
+                    .map(|(id, _)| id)
+                    .ok_or(TerrainPageBuildError::InvalidSurfaceLattice)?
+            };
             cell_material_indices.push(
                 *palette_indices
                     .get(&material_id)
@@ -894,10 +910,11 @@ pub fn build_sampled_heightfield_terrain_page(
         sample_stride_voxels: stride,
         shape_xz: [shape as u16; 2],
         ground_heights,
+        sample_material_indices,
         cell_material_indices,
         water_heights,
     };
-    let boundary_fingerprints = heightfield_boundary_fingerprints(bounds, &grid);
+    let boundary_fingerprints = heightfield_boundary_fingerprints(bounds, &grid, &materials);
     let mut page = TerrainPageV1 {
         source_identity_hash,
         key,
@@ -919,6 +936,7 @@ pub fn build_sampled_heightfield_terrain_page(
 fn heightfield_boundary_fingerprints(
     bounds: VoxelBounds,
     grid: &TerrainHeightfieldGrid,
+    materials: &[TerrainMaterialCoverage],
 ) -> [[u8; 32]; 6] {
     let edge = usize::from(grid.shape_xz[0]);
     std::array::from_fn(|index| {
@@ -934,6 +952,12 @@ fn heightfield_boundary_fingerprints(
                     let sample = x + z * edge;
                     hasher.update(&grid.ground_heights[sample].to_le_bytes());
                     hasher.update(&grid.water_heights[sample].to_le_bytes());
+                    let material_id = grid
+                        .sample_material_indices
+                        .get(sample)
+                        .and_then(|index| materials.get(usize::from(*index)))
+                        .map_or(u16::MAX, |coverage| coverage.material.id());
+                    hasher.update(&material_id.to_le_bytes());
                 }
             }
             BoundarySide::NegativeZ | BoundarySide::PositiveZ => {
@@ -942,6 +966,12 @@ fn heightfield_boundary_fingerprints(
                     let sample = x + z * edge;
                     hasher.update(&grid.ground_heights[sample].to_le_bytes());
                     hasher.update(&grid.water_heights[sample].to_le_bytes());
+                    let material_id = grid
+                        .sample_material_indices
+                        .get(sample)
+                        .and_then(|index| materials.get(usize::from(*index)))
+                        .map_or(u16::MAX, |coverage| coverage.material.id());
+                    hasher.update(&material_id.to_le_bytes());
                 }
             }
             BoundarySide::NegativeY | BoundarySide::PositiveY => {}
@@ -1758,6 +1788,8 @@ fn validate_surface_heightfield_replacement(
                 != child_grid.ground_heights.get(child_sample)
                 || parent_grid.water_heights.get(parent_sample)
                     != child_grid.water_heights.get(child_sample)
+                || heightfield_sample_material(parent, parent_grid, parent_sample)
+                    != heightfield_sample_material(child, child_grid, child_sample)
             {
                 return Err(TerrainReplacementError::OuterBoundaryMismatch);
             }
@@ -1769,6 +1801,17 @@ fn validate_surface_heightfield_replacement(
     // samples in dyadic fixed point, recursively through the hierarchy. This preserves the exact
     // integer source samples in the payload while making the rendered replacement conforming.
     Ok(())
+}
+
+fn heightfield_sample_material(
+    page: &TerrainPageV1,
+    grid: &TerrainHeightfieldGrid,
+    sample: usize,
+) -> Option<Material> {
+    grid.sample_material_indices
+        .get(sample)
+        .and_then(|index| page.materials.get(usize::from(*index)))
+        .map(|coverage| coverage.material)
 }
 
 fn validate_children_for_key(
@@ -2510,11 +2553,13 @@ fn representation_bytes(representation: &TerrainPageRepresentation) -> Vec<u8> {
                 push_u16(&mut bytes, component);
             }
             push_u32(&mut bytes, grid.ground_heights.len() as u32);
+            push_u32(&mut bytes, grid.sample_material_indices.len() as u32);
             push_u32(&mut bytes, grid.cell_material_indices.len() as u32);
             push_u32(&mut bytes, grid.water_heights.len() as u32);
             for height in &grid.ground_heights {
                 push_i32(&mut bytes, *height);
             }
+            bytes.extend_from_slice(&grid.sample_material_indices);
             bytes.extend_from_slice(&grid.cell_material_indices);
             for height in &grid.water_heights {
                 push_i32(&mut bytes, *height);
@@ -2643,6 +2688,7 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
                         (TERRAIN_PAGE_EDGE_SAMPLES + 1) as u16,
                     ]
                 && grid.ground_heights.len() == edge * edge
+                && grid.sample_material_indices.len() == edge * edge
                 && grid.water_heights.len() == edge * edge
                 && grid.cell_material_indices.len() == cells
                 && grid
@@ -2658,6 +2704,10 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
                             || (*water >= *ground
                                 && (page.bounds.min.y..=page.bounds.max.y).contains(water))
                     })
+                && grid
+                    .sample_material_indices
+                    .iter()
+                    .all(|index| usize::from(*index) < palette_len)
                 && grid
                     .cell_material_indices
                     .iter()
@@ -3255,14 +3305,16 @@ fn decode_representation(
             let sample_stride_voxels = cursor.u32()?;
             let shape_xz = [cursor.u16()?, cursor.u16()?];
             let ground_count = cursor.u32()? as usize;
-            let material_count = cursor.u32()? as usize;
+            let sample_material_count = cursor.u32()? as usize;
+            let cell_material_count = cursor.u32()? as usize;
             let water_count = cursor.u32()? as usize;
             let expected_edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
             let expected_samples = expected_edge * expected_edge;
             let expected_materials =
                 TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize;
             if ground_count != expected_samples
-                || material_count != expected_materials
+                || sample_material_count != expected_samples
+                || cell_material_count != expected_materials
                 || water_count != expected_samples
             {
                 return Err(TerrainPageCodecError::InvalidRepresentation(
@@ -3273,7 +3325,8 @@ fn decode_representation(
             for _ in 0..ground_count {
                 ground_heights.push(cursor.i32()?);
             }
-            let cell_material_indices = cursor.bytes(material_count)?.to_vec();
+            let sample_material_indices = cursor.bytes(sample_material_count)?.to_vec();
+            let cell_material_indices = cursor.bytes(cell_material_count)?.to_vec();
             let mut water_heights = Vec::with_capacity(water_count);
             for _ in 0..water_count {
                 water_heights.push(cursor.i32()?);
@@ -3282,6 +3335,7 @@ fn decode_representation(
                 sample_stride_voxels,
                 shape_xz,
                 ground_heights,
+                sample_material_indices,
                 cell_material_indices,
                 water_heights,
             })
@@ -3505,6 +3559,36 @@ mod tests {
         let encoded = encode_terrain_page(&left).unwrap();
         assert!(encoded.len() <= TERRAIN_PAGE_TARGET_COMPRESSED_BYTES);
         assert_eq!(decode_terrain_page(&encoded, identity()).unwrap(), left);
+    }
+
+    #[test]
+    fn level_zero_heightfield_preserves_exact_sample_materials() {
+        let key = TerrainPageKey::surface(0, 0, 0);
+        let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+        let mut samples =
+            vec![sampled_surface(4, Material::Grass, None); edge.saturating_mul(edge)];
+        // Three other corners disagree, so a majority-filtered cell would erase the authoritative
+        // lower-left material. A level-0 cell must retain the exact source sample instead.
+        samples[1].material = Material::Dirt;
+        samples[edge].material = Material::Dirt;
+        samples[edge + 1].material = Material::Dirt;
+        let page = build_sampled_heightfield_terrain_page(
+            identity(),
+            key,
+            19,
+            &samples,
+            TerrainErrorBounds::EXACT,
+        )
+        .unwrap();
+        let TerrainPageRepresentation::HeightfieldGrid(grid) = &page.representation else {
+            panic!("level-0 surface did not produce a heightfield");
+        };
+        let material = |index: u8| page.materials[usize::from(index)].material;
+        assert_eq!(material(grid.sample_material_indices[0]), Material::Grass);
+        assert_eq!(material(grid.sample_material_indices[1]), Material::Dirt);
+        assert_eq!(material(grid.cell_material_indices[0]), Material::Grass);
+        let encoded = encode_terrain_page(&page).unwrap();
+        assert_eq!(decode_terrain_page(&encoded, identity()).unwrap(), page);
     }
 
     #[test]
