@@ -96,6 +96,35 @@ fn page_distance_squared(node: VirtualTerrainNode) -> f32 {
   return max(dot(delta, delta), view.camera_near.w * view.camera_near.w);
 }
 
+fn page_intersects_exact_surface_radius(node: VirtualTerrainNode, flags: u32) -> bool {
+  if (flags & NODE_SURFACE) == 0u {
+    return false;
+  }
+  let bounds = page_bounds_metres(node);
+  let point = view.camera_near.xz;
+  let minimum = bounds[0].xz;
+  let maximum = bounds[1].xz;
+  let delta = max(max(minimum - point, point - maximum), vec2<f32>(0.0));
+  let radius = bitcast<f32>(view.options.w);
+  return dot(delta, delta) <= radius * radius;
+}
+
+fn page_intersects_surface_lod_guard(node: VirtualTerrainNode, flags: u32) -> bool {
+  let level = node.minimum_level.w;
+  if (flags & NODE_SURFACE) == 0u || level <= 0 {
+    return false;
+  }
+  let bounds = page_bounds_metres(node);
+  let point = view.camera_near.xz;
+  let minimum = bounds[0].xz;
+  let maximum = bounds[1].xz;
+  let delta = max(max(minimum - point, point - maximum), vec2<f32>(0.0));
+  let exact_radius = bitcast<f32>(view.options.w);
+  let page_width = bounds[1].x - bounds[0].x;
+  let radius = exact_radius + page_width * 2.0;
+  return dot(delta, delta) <= radius * radius;
+}
+
 fn projected_error_exceeds(node: VirtualTerrainNode, threshold: f32) -> bool {
   if (node.errors.w & 0x100u) != 0u {
     return true;
@@ -145,7 +174,9 @@ fn traverse(@builtin(workgroup_id) workgroup: vec3<u32>) {
     atomicAdd(&counters.ownerless_roots, 1u);
     return;
   }
-  if !page_visible(nodes[root_index]) {
+  let root_flags = node_flags(nodes[root_index]);
+  if !page_visible(nodes[root_index])
+      && !page_intersects_exact_surface_radius(nodes[root_index], root_flags) {
     return;
   }
   traversal_stack[0] = root_index;
@@ -190,8 +221,11 @@ fn traverse(@builtin(workgroup_id) workgroup: vec3<u32>) {
       view.projection_thresholds.z,
       (flags & NODE_PRIOR_REFINED) != 0u,
     );
-    let wants_refinement = (flags & NODE_HAS_CHILDREN) != 0u
-      && (view.options.x != 0u || projected_error_exceeds(node, threshold));
+    let wants_more_detail = view.options.x != 0u
+      || page_intersects_exact_surface_radius(node, flags)
+      || page_intersects_surface_lod_guard(node, flags)
+      || projected_error_exceeds(node, threshold);
+    let wants_refinement = (flags & NODE_HAS_CHILDREN) != 0u && wants_more_detail;
     if wants_refinement && (flags & NODE_REPLACEMENT_COHERENT) != 0u {
       let child_count = select(8u, 4u, (flags & NODE_SURFACE) != 0u);
       if traversal_stack_count <= STACK_CAPACITY - child_count {

@@ -69,6 +69,8 @@ pub struct VirtualTerrainView {
     pub refine_above_pixels: f64,
     pub coarsen_below_pixels: f64,
     pub wet_specular_sensitivity: f64,
+    /// Surface pages intersecting this horizontal radius must resolve to the 10 cm leaf lattice.
+    pub exact_surface_radius_metres: f64,
     /// Reference/debug override. Production selection normally follows certified error.
     pub force_exact_leaves: bool,
 }
@@ -96,6 +98,8 @@ impl VirtualTerrainView {
             && self.coarsen_below_pixels >= 0.0
             && self.wet_specular_sensitivity.is_finite()
             && (0.0..=1.0).contains(&self.wet_specular_sensitivity)
+            && self.exact_surface_radius_metres.is_finite()
+            && self.exact_surface_radius_metres >= 0.0
     }
 }
 
@@ -113,6 +117,7 @@ pub struct VirtualTerrainCut {
     pub selection_overflow: bool,
     pub traversal_overflow: bool,
     pub incoherent_replacement_groups: usize,
+    pub exact_surface_lod_discontinuities: usize,
 }
 
 impl VirtualTerrainCut {
@@ -121,6 +126,56 @@ impl VirtualTerrainCut {
             && self.ownerless_roots.is_empty()
             && !self.selection_overflow
             && !self.traversal_overflow
+            && self.exact_surface_lod_discontinuities == 0
+    }
+
+    /// Returns whether every selected surface owner intersecting the player's required vicinity
+    /// is an exact 10 cm leaf.
+    ///
+    /// Renderability alone proves only that a cut is a complete partition. A complete coarse cut
+    /// is a valid distant fallback, but publishing it underneath the player creates giant
+    /// polygons and repeated coarse/detail oscillation.
+    pub fn has_exact_surface_vicinity(
+        &self,
+        camera_position_metres: [f64; 3],
+        radius_metres: f64,
+    ) -> bool {
+        if !camera_position_metres.into_iter().all(f64::is_finite)
+            || !radius_metres.is_finite()
+            || radius_metres < 0.0
+        {
+            return false;
+        }
+        let mut intersecting_pages = 0usize;
+        for key in self.selected_pages.iter().filter(|key| key.is_surface()) {
+            let Some([minimum, maximum]) = key.horizontal_bounds() else {
+                return false;
+            };
+            let distance_squared = [0, 1]
+                .into_iter()
+                .map(|axis| {
+                    let point = camera_position_metres[axis * 2];
+                    let minimum = f64::from(minimum[axis]) * 0.1;
+                    let maximum = f64::from(maximum[axis]) * 0.1;
+                    let distance = if point < minimum {
+                        minimum - point
+                    } else if point > maximum {
+                        point - maximum
+                    } else {
+                        0.0
+                    };
+                    distance * distance
+                })
+                .sum::<f64>();
+            if distance_squared > radius_metres * radius_metres {
+                continue;
+            }
+            intersecting_pages += 1;
+            if key.level != 0 {
+                return false;
+            }
+        }
+        intersecting_pages > 0
     }
 }
 
@@ -255,6 +310,10 @@ impl VirtualTerrainHierarchy {
 
     pub fn refined_last_cut(&self) -> impl Iterator<Item = TerrainPageKey> + '_ {
         self.refined_last_cut.iter().copied()
+    }
+
+    pub fn selected_fingerprint(&self, selected: &[TerrainPageKey]) -> u64 {
+        cut_fingerprint(selected, self)
     }
 
     pub fn nodes(&self) -> impl Iterator<Item = TerrainHierarchyNode> + '_ {
@@ -702,11 +761,11 @@ impl VirtualTerrainHierarchy {
             .iter()
             .copied()
             .filter(|key| {
-                builder
-                    .hierarchy
-                    .nodes
-                    .get(key)
-                    .is_some_and(|node| page_is_visible(node.bounds, view))
+                builder.hierarchy.nodes.get(key).is_some_and(|node| {
+                    page_is_visible(node.bounds, view)
+                        || (key.is_surface()
+                            && page_intersects_exact_surface_radius(node.bounds, view))
+                })
             })
             .collect::<Vec<_>>();
         for root in roots {
@@ -720,6 +779,8 @@ impl VirtualTerrainHierarchy {
         }
         builder.selected.sort_unstable();
         builder.ownerless_roots.sort_unstable();
+        let exact_surface_lod_discontinuities =
+            exact_surface_lod_discontinuity_edges(&builder.selected);
         let mut requested_pages = builder.requests.into_iter().collect::<Vec<_>>();
         requested_pages.sort_unstable_by_key(|identity| identity.key);
         let refinement_roots = builder.refinement_requests.into_iter().collect();
@@ -738,8 +799,49 @@ impl VirtualTerrainHierarchy {
             selection_overflow: builder.selection_overflow,
             traversal_overflow: builder.traversal_overflow,
             incoherent_replacement_groups: builder.incoherent_replacement_groups,
+            exact_surface_lod_discontinuities,
         })
     }
+}
+
+/// Counts fine edge segments whose selected neighbor skips an intermediate surface level.
+///
+/// Looking outward from the finer page makes the audit bounded by four directions times the
+/// hierarchy depth rather than comparing every selected page with every other page.
+fn exact_surface_lod_discontinuity_edges(selected: &[TerrainPageKey]) -> usize {
+    let selected = selected.iter().copied().collect::<BTreeSet<_>>();
+    let maximum_level = selected
+        .iter()
+        .filter(|key| key.is_surface())
+        .map(|key| key.level)
+        .max()
+        .unwrap_or(0);
+    selected
+        .iter()
+        .copied()
+        // Levels 1 and 2 are the transition rings around the exact level-0 lattice. Letting either
+        // ring skip a level merely moves the same sharp step a few metres outward where a moving
+        // player can immediately catch it.
+        .filter(|key| key.is_surface() && key.level <= 2)
+        .map(|key| {
+            [
+                [key.coord[0].saturating_sub(1), key.coord[2]],
+                [key.coord[0].saturating_add(1), key.coord[2]],
+                [key.coord[0], key.coord[2].saturating_sub(1)],
+                [key.coord[0], key.coord[2].saturating_add(1)],
+            ]
+            .into_iter()
+            .filter(|neighbor| {
+                let same_level = TerrainPageKey::surface(key.level, neighbor[0], neighbor[1]);
+                ((key.level.saturating_add(2))..=maximum_level).any(|level| {
+                    same_level
+                        .ancestor_at(level)
+                        .is_some_and(|ancestor| selected.contains(&ancestor))
+                })
+            })
+            .count()
+        })
+        .sum()
 }
 
 fn terrain_page_keys_overlap(left: TerrainPageKey, right: TerrainPageKey) -> bool {
@@ -784,7 +886,11 @@ impl CutBuilder<'_> {
             }
             return;
         };
-        if root && !page_is_visible(node.bounds, self.view) {
+        let exact_surface =
+            key.is_surface() && page_intersects_exact_surface_radius(node.bounds, self.view);
+        let graded_surface = key.is_surface()
+            && page_intersects_surface_lod_guard(node.bounds, key.level, self.view);
+        if root && !page_is_visible(node.bounds, self.view) && !exact_surface {
             return;
         }
         if self.visited_nodes >= self.hierarchy.capacity.max_traversal_nodes {
@@ -810,7 +916,10 @@ impl CutBuilder<'_> {
             self.view.refine_above_pixels
         };
         let projected_error = projected_page_error_pixels(&node, self.view);
-        let wants_more_detail = self.view.force_exact_leaves || projected_error > threshold;
+        let wants_more_detail = self.view.force_exact_leaves
+            || exact_surface
+            || graded_surface
+            || projected_error > threshold;
         if wants_more_detail && !node.has_children && key.is_surface() && key.level > 0 {
             if self.refinement_requests.len() < self.hierarchy.capacity.max_feedback_pages {
                 self.refinement_requests.insert(key);
@@ -967,6 +1076,57 @@ fn distance_to_page_metres(bounds: voxels_world::VoxelBounds, point: [f64; 3]) -
         .sqrt()
 }
 
+fn page_intersects_exact_surface_radius(
+    bounds: voxels_world::VoxelBounds,
+    view: VirtualTerrainView,
+) -> bool {
+    page_horizontal_distance_squared(bounds, view)
+        <= view.exact_surface_radius_metres * view.exact_surface_radius_metres
+}
+
+/// Grades the surface quadtree outward one spatial page at a time.
+///
+/// Without this guard, an exact level-0 page can share an edge directly with a level-3 or
+/// coarser page even though all intermediate directories are resident. Besides looking like a
+/// giant block beside 10 cm terrain, that discontinuity makes any conforming boundary needlessly
+/// large. Each hierarchy level gets one page-width guard band, so adjacent selected pages can
+/// converge incrementally instead of jumping several levels at once.
+fn page_intersects_surface_lod_guard(
+    bounds: voxels_world::VoxelBounds,
+    level: u8,
+    view: VirtualTerrainView,
+) -> bool {
+    if level == 0 {
+        return false;
+    }
+    let page_width_metres = f64::from(bounds.max.x.saturating_sub(bounds.min.x)) * 0.1;
+    // Two page widths leave a complete intermediate ring even at a diagonal corner, where the
+    // Euclidean distance across one square alone is not enough to prevent a two-level jump.
+    let radius = view.exact_surface_radius_metres + page_width_metres * 2.0;
+    page_horizontal_distance_squared(bounds, view) <= radius * radius
+}
+
+fn page_horizontal_distance_squared(
+    bounds: voxels_world::VoxelBounds,
+    view: VirtualTerrainView,
+) -> f64 {
+    let minimum = bounds.min.as_array().map(|value| f64::from(value) * 0.1);
+    let maximum = bounds.max.as_array().map(|value| f64::from(value) * 0.1);
+    [0, 2]
+        .into_iter()
+        .map(|axis| {
+            let distance = if view.camera_position_metres[axis] < minimum[axis] {
+                minimum[axis] - view.camera_position_metres[axis]
+            } else if view.camera_position_metres[axis] > maximum[axis] {
+                view.camera_position_metres[axis] - maximum[axis]
+            } else {
+                0.0
+            };
+            distance * distance
+        })
+        .sum()
+}
+
 fn page_is_visible(bounds: voxels_world::VoxelBounds, view: VirtualTerrainView) -> bool {
     let minimum = bounds.min.as_array().map(|value| f64::from(value) * 0.1);
     let maximum = bounds.max.as_array().map(|value| f64::from(value) * 0.1);
@@ -1108,8 +1268,33 @@ mod tests {
             refine_above_pixels: 0.65,
             coarsen_below_pixels: 0.35,
             wet_specular_sensitivity: 1.0,
+            exact_surface_radius_metres: 0.0,
             force_exact_leaves,
         }
+    }
+
+    #[test]
+    fn surface_cut_rejects_skipped_neighbor_levels_without_geometry_inspection() {
+        let fine = TerrainPageKey::surface(0, 7, 0);
+        let adjacent_level_one = TerrainPageKey::surface(1, 4, 0);
+        let adjacent_level_three = TerrainPageKey::surface(3, 1, 0);
+
+        assert_eq!(
+            exact_surface_lod_discontinuity_edges(&[fine, adjacent_level_one]),
+            0
+        );
+        assert_eq!(
+            exact_surface_lod_discontinuity_edges(&[fine, adjacent_level_three]),
+            1
+        );
+        assert_eq!(
+            exact_surface_lod_discontinuity_edges(&[
+                TerrainPageKey::surface(2, -1, -4),
+                TerrainPageKey::surface(4, -1, -2),
+            ]),
+            1,
+            "negative-coordinate transition edges must use Euclidean ancestry",
+        );
     }
 
     fn hierarchy() -> (VirtualTerrainHierarchy, Vec<TerrainPageV1>) {
@@ -1202,6 +1387,7 @@ mod tests {
         assert_eq!(initial.selected_pages, vec![root]);
         assert_eq!(initial.requested_pages.len(), 4);
         assert!(initial.refinement_roots.is_empty());
+        assert!(!initial.has_exact_surface_vicinity([-3.2, 3.2, 8.0], 10.0));
 
         for child in base_pages.iter().filter(|page| page.key != root) {
             hierarchy.install_page(child.clone()).unwrap();
@@ -1365,6 +1551,7 @@ mod tests {
         assert_eq!(cut.selected_pages, vec![root.key]);
         assert_eq!(cut.requested_pages.len(), TERRAIN_PAGE_MAX_CHILDREN);
         assert!(cut.ownerless_roots.is_empty());
+        assert!(!cut.has_exact_surface_vicinity([-3.2, 3.2, -3.2], 1.0));
     }
 
     #[test]
@@ -1378,6 +1565,10 @@ mod tests {
         assert_eq!(cut.selected_pages.len(), TERRAIN_PAGE_MAX_CHILDREN);
         assert!(cut.selected_pages.iter().all(|key| key.level == 0));
         assert!(cut.requested_pages.is_empty());
+        assert_eq!(
+            cut.fingerprint,
+            hierarchy.selected_fingerprint(&cut.selected_pages)
+        );
         for (index, left) in cut.selected_pages.iter().enumerate() {
             for right in &cut.selected_pages[index + 1..] {
                 assert_ne!(left.ancestor_at(1), Some(*right));
@@ -1411,6 +1602,26 @@ mod tests {
         assert_eq!(cut.selected_pages.len(), 1);
         assert_eq!(cut.selected_pages[0].level, 1);
         assert_eq!(cut.selected_primitives, 1);
+    }
+
+    #[test]
+    fn exact_surface_radius_selects_leaf_lattice_without_debug_override() {
+        let root = TerrainPageKey::surface(1, -1, -1);
+        let (directory, pages) = surface_segment(root);
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        hierarchy.register_region_directory(&directory).unwrap();
+        for page in pages {
+            hierarchy.install_page(page).unwrap();
+        }
+        let mut exact_view = view(false);
+        exact_view.camera_position_metres = [-3.2, 3.2, 1.0];
+        exact_view.exact_surface_radius_metres = 4.0;
+        let cut = hierarchy.select_cut(exact_view).unwrap();
+        assert_eq!(cut.selected_pages.len(), 4);
+        assert!(cut.selected_pages.iter().all(|key| key.level == 0));
+        assert!(cut.requested_pages.is_empty());
+        assert!(cut.has_exact_surface_vicinity(exact_view.camera_position_metres, 4.0));
     }
 
     #[test]

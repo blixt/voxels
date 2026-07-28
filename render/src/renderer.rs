@@ -93,6 +93,9 @@ const CANONICAL_TRIANGLE_EXTENT_SHIFT: u16 = 6;
 const CANONICAL_TRIANGLE_EDGE_SHIFT: u16 = 11;
 const CANONICAL_TRIANGLE_ANCHOR_SHIFT: u16 = 11;
 const CANONICAL_TRIANGLE_SHADOW_OWNER_FLAG: u16 = 1 << 14;
+const CANONICAL_TRIANGLE_LATTICE_ANCHOR: u16 = 5;
+const CANONICAL_TRIANGLE_ANCHOR_U_SHIFT: u32 = 8;
+const CANONICAL_TRIANGLE_ANCHOR_V_SHIFT: u32 = 14;
 const GPU_QUERY_COUNT: u32 = 28;
 const PRECIPITATION_INSTANCE_COUNT: u32 = 48 * 48 * 2;
 const QUAD_VERTEX_COUNT: u32 = 4;
@@ -233,7 +236,7 @@ pub enum VirtualTerrainRendererError {
     GpuPageTooLarge(TerrainPageKey),
     GpuPoolCapacity,
     GpuTraversal,
-    SelectedCutCompactionCapacity,
+    SelectedCutCompactionCapacity { required_bytes: [u64; 4] },
     NoRenderableCut,
     SelectedPageMissingGpu(TerrainPageKey),
     GpuCutNotCertified,
@@ -274,8 +277,15 @@ impl std::fmt::Display for VirtualTerrainRendererError {
             Self::GpuTraversal => {
                 formatter.write_str("virtual terrain GPU traversal state is inconsistent")
             }
-            Self::SelectedCutCompactionCapacity => {
-                formatter.write_str("selected virtual terrain cut exceeds compact draw capacity")
+            Self::SelectedCutCompactionCapacity { required_bytes } => {
+                write!(
+                    formatter,
+                    "selected virtual terrain cut exceeds compact draw capacity: surface/triangle/water-surface/water-triangle = {:.1}/{:.1}/{:.1}/{:.1} MiB",
+                    required_bytes[0] as f64 / (1024.0 * 1024.0),
+                    required_bytes[1] as f64 / (1024.0 * 1024.0),
+                    required_bytes[2] as f64 / (1024.0 * 1024.0),
+                    required_bytes[3] as f64 / (1024.0 * 1024.0),
+                )
             }
             Self::NoRenderableCut => {
                 formatter.write_str("virtual terrain has no complete renderable cut")
@@ -523,6 +533,10 @@ fn pack_gpu_source_material(material_face: u32, source: u32) -> u32 {
     material_face | (source << GPU_SOURCE_SHIFT)
 }
 
+fn pack_virtual_material(material: Material, level: u8) -> u32 {
+    u32::from(material.id()) | (u32::from(level.min(7)) << 27) | (1 << 31)
+}
+
 fn packed_ao_corner(packed: u8, corner: usize) -> u8 {
     (packed >> (corner * 2)) & 3
 }
@@ -688,7 +702,10 @@ fn virtual_surface_gpu_quads(
         gpu_quads.push(GpuQuad {
             origin,
             extent_voxels,
-            material_face: pack_gpu_material_face(u32::from(material.id()), face),
+            material_face: pack_gpu_material_face(
+                pack_virtual_material(material, page.key.level),
+                face,
+            ),
             // Page clusters do not currently carry per-corner occluders. Encode fully open
             // corners instead of zero, which in the canonical AO convention means maximally
             // occluded.
@@ -702,6 +719,16 @@ fn virtual_surface_gpu_quads(
 struct VirtualHeightfieldSamples {
     ground: Vec<f32>,
     water: Vec<Option<f32>>,
+    exact_neighbor_sides: [bool; 4],
+    finer_neighbor_sides: [bool; 4],
+}
+
+#[derive(Clone, Debug)]
+struct CachedVirtualHeightfieldSamples {
+    revision: u64,
+    content_fingerprint: [u8; 32],
+    ancestor_fingerprint: u64,
+    samples: VirtualHeightfieldSamples,
 }
 
 fn virtual_triangle_gpu_vertices(
@@ -819,6 +846,25 @@ fn virtual_triangle_gpu_vertices(
                             (page.bounds.min.z + (z as i32 + 1) * stride) as f32,
                         ],
                     ];
+                    let [negative_x, positive_x, negative_z, positive_z] =
+                        heightfield.finer_neighbor_sides;
+                    let refined_sides = [
+                        z == 0 && negative_z,
+                        x + 1 == TERRAIN_PAGE_EDGE_SAMPLES as usize && positive_x,
+                        z + 1 == TERRAIN_PAGE_EDGE_SAMPLES as usize && positive_z,
+                        x == 0 && negative_x,
+                    ];
+                    if refined_sides.into_iter().any(|refined| refined) {
+                        push_virtual_heightfield_boundary_cell(
+                            &mut vertices,
+                            positions,
+                            refined_sides,
+                            page.key.level == 1,
+                            material,
+                            page.key,
+                        )?;
+                        continue;
+                    }
                     for triangle in [[0, 2, 1], [0, 3, 2]] {
                         push_virtual_triangle(
                             &mut vertices,
@@ -838,6 +884,97 @@ fn virtual_triangle_gpu_vertices(
             page.representation.kind(),
         )),
     }
+}
+
+/// Emits one non-overlapping coarse boundary cell with the midpoint required by the next-finer
+/// heightfield.
+///
+/// Recursive edge constraints make that midpoint identical on both owners. At the L1/L0 boundary,
+/// the two half-edges instead follow the exact lower-coordinate voxel-height convention. The cell
+/// fans once to its ordinary coarse center, so this is a conforming triangulation rather than an
+/// overlapping seam cover.
+fn push_virtual_heightfield_boundary_cell(
+    vertices: &mut Vec<GpuTerrainVertex>,
+    positions: [[f32; 3]; 4],
+    refined: [bool; 4],
+    exact_staircase: bool,
+    material: Material,
+    key: TerrainPageKey,
+) -> Result<(), VirtualTerrainRendererError> {
+    let sides = [
+        [positions[0], positions[1]],
+        [positions[1], positions[2]],
+        [positions[2], positions[3]],
+        [positions[3], positions[0]],
+    ];
+    let mut segments = Vec::with_capacity(8);
+    for (side, [start, end]) in sides.into_iter().enumerate() {
+        if !refined[side] {
+            segments.push([start, end]);
+            continue;
+        }
+        for offset in 0..2 {
+            let fraction = offset as f32 * 0.5;
+            let next_fraction = (offset + 1) as f32 * 0.5;
+            let horizontal_axis = if start[0] != end[0] { 0 } else { 2 };
+            // The exact L0 surface assigns each 10 cm top cell the sample at its
+            // lower X/Z coordinate. Two sides of the clockwise coarse polygon run
+            // in the opposite direction, so using traversal order here shifts the
+            // staircase by one voxel on positive-Z and negative-X boundaries.
+            let canonical_fraction = if start[horizontal_axis] < end[horizontal_axis] {
+                fraction
+            } else {
+                next_fraction
+            };
+            let height_at = |height_fraction: f32| {
+                let height = start[1] + (end[1] - start[1]) * height_fraction;
+                if exact_staircase {
+                    height.round()
+                } else {
+                    height
+                }
+            };
+            let interpolate_position = |amount: f32, height: f32| {
+                [
+                    start[0] + (end[0] - start[0]) * amount,
+                    height,
+                    start[2] + (end[2] - start[2]) * amount,
+                ]
+            };
+            let start_height = height_at(if exact_staircase {
+                canonical_fraction
+            } else {
+                fraction
+            });
+            let end_height = height_at(if exact_staircase {
+                canonical_fraction
+            } else {
+                next_fraction
+            });
+            segments.push([
+                interpolate_position(fraction, start_height),
+                interpolate_position(next_fraction, end_height),
+            ]);
+        }
+    }
+    let center = std::array::from_fn(|axis| {
+        positions.iter().map(|position| position[axis]).sum::<f32>() * 0.25
+    });
+    let Some(first) = segments.first().copied() else {
+        return Err(VirtualTerrainRendererError::InvalidTriangleCluster(key));
+    };
+    let mut previous = first[0];
+    for [start, end] in &segments {
+        if previous != *start {
+            push_virtual_triangle(vertices, [previous, center, *start], material, key)?;
+        }
+        push_virtual_triangle(vertices, [*start, center, *end], material, key)?;
+        previous = *end;
+    }
+    if previous != first[0] {
+        push_virtual_triangle(vertices, [previous, center, first[0]], material, key)?;
+    }
+    Ok(())
 }
 
 fn push_virtual_heightfield_water(
@@ -913,43 +1050,87 @@ fn push_virtual_heightfield_water(
     push_virtual_flat_water_rectangles(vertices, page, grid, heightfield, material)
 }
 
-fn push_virtual_microvoxel_ground(
-    vertices: &mut Vec<GpuTerrainVertex>,
+fn push_bounded_virtual_quad(quads: &mut Vec<GpuQuad>, quad: GpuQuad) {
+    let [width, height] = quad.extent_voxels;
+    for v in (0..height).step_by(63) {
+        for u in (0..width).step_by(63) {
+            quads.push(canonical_gpu_subrectangle(
+                quad,
+                i32::from(u),
+                i32::from(v),
+                [(width - u).min(63), (height - v).min(63)],
+            ));
+        }
+    }
+}
+
+/// Encodes the exact level-0 heightfield as compact axis-aligned voxel-face instances.
+///
+/// The earlier unindexed triangle stream stored three 24-byte vertices for every conforming
+/// triangle. These instances preserve the same unit perimeter segments in 24 bytes per triangle,
+/// keeping a complete replacement cut resident beside the published cut without eviction churn.
+fn virtual_microvoxel_gpu_quads(
     page: &TerrainPageV1,
     grid: &voxels_world::TerrainHeightfieldGrid,
     heightfield: &VirtualHeightfieldSamples,
-) -> Result<(), VirtualTerrainRendererError> {
-    let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
-    let edge = cells + 1;
-    if grid.sample_stride_voxels != 1
-        || grid.sample_material_indices.len() != edge * edge
-        || heightfield.ground.len() != edge * edge
-    {
+) -> Result<Option<Vec<GpuQuad>>, VirtualTerrainRendererError> {
+    if page.key.level != 0 || grid.sample_stride_voxels != 1 {
         return Err(VirtualTerrainRendererError::InvalidTriangleCluster(
             page.key,
         ));
     }
-    let coordinate = |origin: i32, cell: usize| {
-        i32::try_from(cell)
-            .ok()
-            .and_then(|offset| origin.checked_add(offset))
-            .map(|value| value as f32)
-            .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(
-                page.key,
-            ))
+    let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+    let edge = cells + 1;
+    if heightfield.ground.len() != edge * edge || heightfield.water.len() != edge * edge {
+        return Err(VirtualTerrainRendererError::InvalidTriangleCluster(
+            page.key,
+        ));
+    }
+    let is_lattice_height = |height: f32| {
+        let integer = height as i32;
+        height.is_finite() && integer as f32 == height
     };
-    let material_at = |sample: usize| {
+    let lattice_height = |height: f32| {
+        let integer = height as i32;
+        is_lattice_height(height).then_some(integer).ok_or(
+            VirtualTerrainRendererError::InvalidTriangleCluster(page.key),
+        )
+    };
+    let ground_at = |x: usize, z: usize| {
+        let height = heightfield.ground[x + z * edge];
+        height.is_finite().then_some(height.round() as i32).ok_or(
+            VirtualTerrainRendererError::InvalidTriangleCluster(page.key),
+        )
+    };
+    let material_at = |x: usize, z: usize| {
         grid.sample_material_indices
-            .get(sample)
+            .get(x + z * edge)
             .and_then(|index| page.materials.get(usize::from(*index)))
             .map(|coverage| coverage.material)
             .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(
                 page.key,
             ))
     };
+    let coordinate = |origin: i32, offset: usize| {
+        i32::try_from(offset)
+            .ok()
+            .and_then(|offset| origin.checked_add(offset))
+            .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(
+                page.key,
+            ))
+    };
+    let make_quad =
+        |origin: [i32; 3], extent_voxels: [u16; 2], face: u8, material: Material| GpuQuad {
+            origin,
+            extent_voxels,
+            material_face: pack_gpu_material_face(
+                pack_virtual_material(material, page.key.level),
+                face,
+            ),
+            ao: u32::from(u8::MAX),
+        };
 
-    // Greedy top rectangles retain every height and material discontinuity while removing only
-    // faces that are mathematically coplanar and indistinguishable from the exact 10 cm grid.
+    let mut base = Vec::new();
     let mut emitted = vec![false; cells * cells];
     for z in 0..cells {
         for x in 0..cells {
@@ -957,15 +1138,14 @@ fn push_virtual_microvoxel_ground(
             if emitted[cell] {
                 continue;
             }
-            let sample = x + z * edge;
-            let height = heightfield.ground[sample];
-            let material = material_at(sample)?;
+            let height = ground_at(x, z)?;
+            let material = material_at(x, z)?;
             let matches = |candidate_x: usize, candidate_z: usize| {
-                let candidate_cell = candidate_x + candidate_z * cells;
-                let candidate_sample = candidate_x + candidate_z * edge;
-                !emitted[candidate_cell]
-                    && heightfield.ground[candidate_sample].to_bits() == height.to_bits()
-                    && material_at(candidate_sample).is_ok_and(|candidate| candidate == material)
+                let candidate = candidate_x + candidate_z * cells;
+                !emitted[candidate]
+                    && ground_at(candidate_x, candidate_z).is_ok_and(|value| value == height)
+                    && material_at(candidate_x, candidate_z)
+                        .is_ok_and(|candidate| candidate == material)
             };
             let mut width = 1usize;
             while x + width < cells && matches(x + width, z) {
@@ -983,41 +1163,34 @@ fn push_virtual_microvoxel_ground(
             for row in z..z + depth {
                 emitted[row * cells + x..row * cells + x + width].fill(true);
             }
-            let rectangle = [
-                [
-                    coordinate(page.bounds.min.x, x)?,
-                    height,
-                    coordinate(page.bounds.min.z, z)?,
-                ],
-                [
-                    coordinate(page.bounds.min.x, x + width)?,
-                    height,
-                    coordinate(page.bounds.min.z, z)?,
-                ],
-                [
-                    coordinate(page.bounds.min.x, x + width)?,
-                    height,
-                    coordinate(page.bounds.min.z, z + depth)?,
-                ],
-                [
-                    coordinate(page.bounds.min.x, x)?,
-                    height,
-                    coordinate(page.bounds.min.z, z + depth)?,
-                ],
-            ];
-            push_virtual_rectangle(vertices, rectangle, true, material, page.key)?;
+            push_bounded_virtual_quad(
+                &mut base,
+                make_quad(
+                    [
+                        coordinate(page.bounds.min.x, x)?,
+                        height.saturating_sub(1),
+                        coordinate(page.bounds.min.z, z)?,
+                    ],
+                    [
+                        u16::try_from(width).map_err(|_| {
+                            VirtualTerrainRendererError::InvalidTriangleCluster(page.key)
+                        })?,
+                        u16::try_from(depth).map_err(|_| {
+                            VirtualTerrainRendererError::InvalidTriangleCluster(page.key)
+                        })?,
+                    ],
+                    2,
+                    material,
+                ),
+            );
         }
     }
 
-    // One owner per positive X edge. Runs merge only when their complete geometric and material
-    // identity agrees, so no face crosses a voxel-height or material boundary.
     for x in 0..cells {
         let mut z = 0usize;
         while z < cells {
-            let left_sample = x + z * edge;
-            let right_sample = x + 1 + z * edge;
-            let left = heightfield.ground[left_sample];
-            let right = heightfield.ground[right_sample];
+            let left = ground_at(x, z)?;
+            let right = ground_at(x + 1, z)?;
             if left == right {
                 z += 1;
                 continue;
@@ -1025,18 +1198,345 @@ fn push_virtual_microvoxel_ground(
             let positive = left > right;
             let lower = left.min(right);
             let upper = left.max(right);
-            let material = material_at(if positive { left_sample } else { right_sample })?;
+            let material = material_at(if positive { x } else { x + 1 }, z)?;
             let mut depth = 1usize;
             while z + depth < cells {
-                let next_left = x + (z + depth) * edge;
-                let next_right = x + 1 + (z + depth) * edge;
-                let next_left_height = heightfield.ground[next_left];
-                let next_right_height = heightfield.ground[next_right];
-                let next_positive = next_left_height > next_right_height;
-                let next_material =
-                    material_at(if next_positive { next_left } else { next_right })?;
-                if next_left_height.min(next_right_height) != lower
-                    || next_left_height.max(next_right_height) != upper
+                let next_left = ground_at(x, z + depth)?;
+                let next_right = ground_at(x + 1, z + depth)?;
+                let next_positive = next_left > next_right;
+                if next_left.min(next_right) != lower
+                    || next_left.max(next_right) != upper
+                    || next_positive != positive
+                    || material_at(if next_positive { x } else { x + 1 }, z + depth)? != material
+                {
+                    break;
+                }
+                depth += 1;
+            }
+            let extent = [
+                u16::try_from(depth)
+                    .map_err(|_| VirtualTerrainRendererError::InvalidTriangleCluster(page.key))?,
+                u16::try_from(upper - lower)
+                    .map_err(|_| VirtualTerrainRendererError::InvalidTriangleCluster(page.key))?,
+            ];
+            push_bounded_virtual_quad(
+                &mut base,
+                make_quad(
+                    [
+                        coordinate(page.bounds.min.x, x + 1)?.saturating_sub(i32::from(positive)),
+                        lower,
+                        coordinate(page.bounds.min.z, z)?,
+                    ],
+                    extent,
+                    if positive { 0 } else { 1 },
+                    material,
+                ),
+            );
+            z += depth;
+        }
+    }
+
+    for z in 0..cells {
+        let mut x = 0usize;
+        while x < cells {
+            let near = ground_at(x, z)?;
+            let far = ground_at(x, z + 1)?;
+            if near == far {
+                x += 1;
+                continue;
+            }
+            let positive = near > far;
+            let lower = near.min(far);
+            let upper = near.max(far);
+            let material = material_at(x, if positive { z } else { z + 1 })?;
+            let mut width = 1usize;
+            while x + width < cells {
+                let next_near = ground_at(x + width, z)?;
+                let next_far = ground_at(x + width, z + 1)?;
+                let next_positive = next_near > next_far;
+                if next_near.min(next_far) != lower
+                    || next_near.max(next_far) != upper
+                    || next_positive != positive
+                    || material_at(x + width, if next_positive { z } else { z + 1 })? != material
+                {
+                    break;
+                }
+                width += 1;
+            }
+            let extent = [
+                u16::try_from(width)
+                    .map_err(|_| VirtualTerrainRendererError::InvalidTriangleCluster(page.key))?,
+                u16::try_from(upper - lower)
+                    .map_err(|_| VirtualTerrainRendererError::InvalidTriangleCluster(page.key))?,
+            ];
+            push_bounded_virtual_quad(
+                &mut base,
+                make_quad(
+                    [
+                        coordinate(page.bounds.min.x, x)?,
+                        lower,
+                        coordinate(page.bounds.min.z, z + 1)?.saturating_sub(i32::from(positive)),
+                    ],
+                    extent,
+                    if positive { 4 } else { 5 },
+                    material,
+                ),
+            );
+            x += width;
+        }
+    }
+
+    let water = page
+        .materials
+        .iter()
+        .find(|coverage| coverage.material == Material::Water)
+        .map(|coverage| coverage.material);
+    if let Some(water) = water {
+        let mut flat_heights = vec![None; cells * cells];
+        for z in 0..cells {
+            for x in 0..cells {
+                let samples = [
+                    x + z * edge,
+                    x + 1 + z * edge,
+                    x + 1 + (z + 1) * edge,
+                    x + (z + 1) * edge,
+                ];
+                let heights = samples.map(|sample| heightfield.water[sample]);
+                if heights.into_iter().all(|height| height.is_some()) {
+                    let values = heights.map(|height| lattice_height(height.unwrap()));
+                    let [left, right, far_right, far_left] = values;
+                    let [left, right, far_right, far_left] = [left?, right?, far_right?, far_left?];
+                    if left != right || left != far_right || left != far_left {
+                        return Ok(None);
+                    }
+                    flat_heights[x + z * cells] = Some(left);
+                }
+            }
+        }
+        let mut water_emitted = vec![false; cells * cells];
+        for z in 0..cells {
+            for x in 0..cells {
+                let cell = x + z * cells;
+                let Some(height) = flat_heights[cell].filter(|_| !water_emitted[cell]) else {
+                    continue;
+                };
+                let mut width = 1usize;
+                while x + width < cells
+                    && !water_emitted[x + width + z * cells]
+                    && flat_heights[x + width + z * cells] == Some(height)
+                {
+                    width += 1;
+                }
+                let mut depth = 1usize;
+                'water: while z + depth < cells {
+                    for offset in 0..width {
+                        let candidate = x + offset + (z + depth) * cells;
+                        if water_emitted[candidate] || flat_heights[candidate] != Some(height) {
+                            break 'water;
+                        }
+                    }
+                    depth += 1;
+                }
+                for row in z..z + depth {
+                    water_emitted[row * cells + x..row * cells + x + width].fill(true);
+                }
+                push_bounded_virtual_quad(
+                    &mut base,
+                    make_quad(
+                        [
+                            coordinate(page.bounds.min.x, x)?,
+                            height.saturating_sub(1),
+                            coordinate(page.bounds.min.z, z)?,
+                        ],
+                        [
+                            u16::try_from(width).map_err(|_| {
+                                VirtualTerrainRendererError::InvalidTriangleCluster(page.key)
+                            })?,
+                            u16::try_from(depth).map_err(|_| {
+                                VirtualTerrainRendererError::InvalidTriangleCluster(page.key)
+                            })?,
+                        ],
+                        2,
+                        water,
+                    ),
+                );
+            }
+        }
+    }
+
+    Ok(Some(
+        constrain_gpu_quad_t_junctions(&base, |_, _| true, |_, _, _, _| true, false)
+            .into_iter()
+            .flatten()
+            .collect(),
+    ))
+}
+
+fn push_virtual_microvoxel_ground(
+    vertices: &mut Vec<GpuTerrainVertex>,
+    page: &TerrainPageV1,
+    grid: &voxels_world::TerrainHeightfieldGrid,
+    heightfield: &VirtualHeightfieldSamples,
+) -> Result<(), VirtualTerrainRendererError> {
+    let coarse_cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+    let coarse_edge = coarse_cells + 1;
+    let stride = usize::try_from(grid.sample_stride_voxels)
+        .map_err(|_| VirtualTerrainRendererError::InvalidTriangleCluster(page.key))?;
+    let cells = coarse_cells.checked_mul(stride).ok_or(
+        VirtualTerrainRendererError::InvalidTriangleCluster(page.key),
+    )?;
+    if stride != 1
+        || grid.sample_material_indices.len() != coarse_edge * coarse_edge
+        || grid.cell_material_indices.len() != coarse_cells * coarse_cells
+        || heightfield.ground.len() != coarse_edge * coarse_edge
+    {
+        return Err(VirtualTerrainRendererError::InvalidTriangleCluster(
+            page.key,
+        ));
+    }
+    let coordinate = |origin: i32, cell: usize| {
+        i32::try_from(cell)
+            .ok()
+            .and_then(|offset| origin.checked_add(offset))
+            .map(|value| value as f32)
+            .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(
+                page.key,
+            ))
+    };
+    let ground_at = |x: usize, z: usize| {
+        let coarse_x = (x / stride).min(coarse_cells);
+        let coarse_z = (z / stride).min(coarse_cells);
+        let next_x = (coarse_x + 1).min(coarse_cells);
+        let next_z = (coarse_z + 1).min(coarse_cells);
+        let fraction_x = if coarse_x == coarse_cells {
+            0.0
+        } else {
+            (x % stride) as f32 / stride as f32
+        };
+        let fraction_z = if coarse_z == coarse_cells {
+            0.0
+        } else {
+            (z % stride) as f32 / stride as f32
+        };
+        let near_left = heightfield.ground[coarse_x + coarse_z * coarse_edge];
+        let near_right = heightfield.ground[next_x + coarse_z * coarse_edge];
+        let far_left = heightfield.ground[coarse_x + next_z * coarse_edge];
+        let far_right = heightfield.ground[next_x + next_z * coarse_edge];
+        let near = near_left + (near_right - near_left) * fraction_x;
+        let far = far_left + (far_right - far_left) * fraction_x;
+        // L1 carries the same values as its L0 children, interpolated locally instead of
+        // transmitted. Rounding on the canonical integer lattice gives both owners the same
+        // axis-aligned 10 cm boundary trace.
+        (near + (far - near) * fraction_z).round()
+    };
+    let material_at = |x: usize, z: usize| {
+        let material_index = if stride == 1 {
+            grid.sample_material_indices
+                .get(x + z * coarse_edge)
+                .copied()
+        } else {
+            let coarse_x = (x / stride).min(coarse_cells - 1);
+            let coarse_z = (z / stride).min(coarse_cells - 1);
+            grid.cell_material_indices
+                .get(coarse_x + coarse_z * coarse_cells)
+                .copied()
+        };
+        material_index
+            .and_then(|index| page.materials.get(usize::from(index)))
+            .map(|coverage| coverage.material)
+            .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(
+                page.key,
+            ))
+    };
+
+    // Merge coplanar cells, but preserve every 10 cm perimeter vertex so the result remains a
+    // conforming tessellation against wall faces and independently merged neighboring pages.
+    let mut emitted = vec![false; cells * cells];
+    for z in 0..cells {
+        for x in 0..cells {
+            let cell = x + z * cells;
+            if emitted[cell] {
+                continue;
+            }
+            let height = ground_at(x, z);
+            let material = material_at(x, z)?;
+            let matches = |candidate_x: usize, candidate_z: usize| {
+                let candidate_cell = candidate_x + candidate_z * cells;
+                !emitted[candidate_cell]
+                    && ground_at(candidate_x, candidate_z).to_bits() == height.to_bits()
+                    && material_at(candidate_x, candidate_z)
+                        .is_ok_and(|candidate| candidate == material)
+            };
+            let mut width = 1usize;
+            while x + width < cells && matches(x + width, z) {
+                width += 1;
+            }
+            let mut depth = 1usize;
+            'grow: while z + depth < cells {
+                for offset in 0..width {
+                    if !matches(x + offset, z + depth) {
+                        break 'grow;
+                    }
+                }
+                depth += 1;
+            }
+            for row in z..z + depth {
+                emitted[row * cells + x..row * cells + x + width].fill(true);
+            }
+            push_virtual_conforming_rectangle(
+                vertices,
+                [
+                    [
+                        coordinate(page.bounds.min.x, x)?,
+                        height,
+                        coordinate(page.bounds.min.z, z)?,
+                    ],
+                    [
+                        coordinate(page.bounds.min.x, x + width)?,
+                        height,
+                        coordinate(page.bounds.min.z, z)?,
+                    ],
+                    [
+                        coordinate(page.bounds.min.x, x + width)?,
+                        height,
+                        coordinate(page.bounds.min.z, z + depth)?,
+                    ],
+                    [
+                        coordinate(page.bounds.min.x, x)?,
+                        height,
+                        coordinate(page.bounds.min.z, z + depth)?,
+                    ],
+                ],
+                true,
+                material,
+                page.key,
+            )?;
+        }
+    }
+
+    // The positive-X half-open edge is the sole owner of each exact vertical step. Compatible
+    // runs share one conforming rectangle without removing their unit edge vertices.
+    for x in 0..cells {
+        let mut z = 0usize;
+        while z < cells {
+            let left = ground_at(x, z);
+            let right = ground_at(x + 1, z);
+            if left == right {
+                z += 1;
+                continue;
+            }
+            let positive = left > right;
+            let lower = left.min(right);
+            let upper = left.max(right);
+            let material = material_at(if positive { x } else { x + 1 }, z)?;
+            let mut depth = 1usize;
+            while z + depth < cells {
+                let next_left = ground_at(x, z + depth);
+                let next_right = ground_at(x + 1, z + depth);
+                let next_positive = next_left > next_right;
+                let next_material = material_at(if next_positive { x } else { x + 1 }, z + depth)?;
+                if next_left.min(next_right) != lower
+                    || next_left.max(next_right) != upper
                     || next_positive != positive
                     || next_material != material
                 {
@@ -1045,25 +1545,28 @@ fn push_virtual_microvoxel_ground(
                 depth += 1;
             }
             let plane_x = coordinate(page.bounds.min.x, x + 1)?;
-            let rectangle = [
-                [plane_x, lower, coordinate(page.bounds.min.z, z)?],
-                [plane_x, upper, coordinate(page.bounds.min.z, z)?],
-                [plane_x, upper, coordinate(page.bounds.min.z, z + depth)?],
-                [plane_x, lower, coordinate(page.bounds.min.z, z + depth)?],
-            ];
-            push_virtual_rectangle(vertices, rectangle, !positive, material, page.key)?;
+            push_virtual_conforming_rectangle(
+                vertices,
+                [
+                    [plane_x, lower, coordinate(page.bounds.min.z, z)?],
+                    [plane_x, upper, coordinate(page.bounds.min.z, z)?],
+                    [plane_x, upper, coordinate(page.bounds.min.z, z + depth)?],
+                    [plane_x, lower, coordinate(page.bounds.min.z, z + depth)?],
+                ],
+                !positive,
+                material,
+                page.key,
+            )?;
             z += depth;
         }
     }
 
-    // The same half-open ownership rule on positive Z edges.
+    // Apply the same single-owner rule to positive-Z steps.
     for z in 0..cells {
         let mut x = 0usize;
         while x < cells {
-            let near_sample = x + z * edge;
-            let far_sample = x + (z + 1) * edge;
-            let near = heightfield.ground[near_sample];
-            let far = heightfield.ground[far_sample];
+            let near = ground_at(x, z);
+            let far = ground_at(x, z + 1);
             if near == far {
                 x += 1;
                 continue;
@@ -1071,17 +1574,15 @@ fn push_virtual_microvoxel_ground(
             let positive = near > far;
             let lower = near.min(far);
             let upper = near.max(far);
-            let material = material_at(if positive { near_sample } else { far_sample })?;
+            let material = material_at(x, if positive { z } else { z + 1 })?;
             let mut width = 1usize;
             while x + width < cells {
-                let next_near = x + width + z * edge;
-                let next_far = x + width + (z + 1) * edge;
-                let next_near_height = heightfield.ground[next_near];
-                let next_far_height = heightfield.ground[next_far];
-                let next_positive = next_near_height > next_far_height;
-                let next_material = material_at(if next_positive { next_near } else { next_far })?;
-                if next_near_height.min(next_far_height) != lower
-                    || next_near_height.max(next_far_height) != upper
+                let next_near = ground_at(x + width, z);
+                let next_far = ground_at(x + width, z + 1);
+                let next_positive = next_near > next_far;
+                let next_material = material_at(x + width, if next_positive { z } else { z + 1 })?;
+                if next_near.min(next_far) != lower
+                    || next_near.max(next_far) != upper
                     || next_positive != positive
                     || next_material != material
                 {
@@ -1090,13 +1591,18 @@ fn push_virtual_microvoxel_ground(
                 width += 1;
             }
             let plane_z = coordinate(page.bounds.min.z, z + 1)?;
-            let rectangle = [
-                [coordinate(page.bounds.min.x, x)?, lower, plane_z],
-                [coordinate(page.bounds.min.x, x + width)?, lower, plane_z],
-                [coordinate(page.bounds.min.x, x + width)?, upper, plane_z],
-                [coordinate(page.bounds.min.x, x)?, upper, plane_z],
-            ];
-            push_virtual_rectangle(vertices, rectangle, !positive, material, page.key)?;
+            push_virtual_conforming_rectangle(
+                vertices,
+                [
+                    [coordinate(page.bounds.min.x, x)?, lower, plane_z],
+                    [coordinate(page.bounds.min.x, x + width)?, lower, plane_z],
+                    [coordinate(page.bounds.min.x, x + width)?, upper, plane_z],
+                    [coordinate(page.bounds.min.x, x)?, upper, plane_z],
+                ],
+                !positive,
+                material,
+                page.key,
+            )?;
             x += width;
         }
     }
@@ -1119,6 +1625,106 @@ fn push_virtual_rectangle(
         push_virtual_triangle(
             vertices,
             triangle.map(|corner| positions[corner]),
+            material,
+            key,
+        )?;
+    }
+    Ok(())
+}
+
+fn push_virtual_conforming_rectangle(
+    vertices: &mut Vec<GpuTerrainVertex>,
+    positions: [[f32; 3]; 4],
+    reverse_winding: bool,
+    material: Material,
+    key: TerrainPageKey,
+) -> Result<(), VirtualTerrainRendererError> {
+    let sides = [
+        [positions[0], positions[1]],
+        [positions[1], positions[2]],
+        [positions[2], positions[3]],
+        [positions[3], positions[0]],
+    ];
+    let mut segments = Vec::new();
+    let mut side_lengths = [0usize; 4];
+    for (side, [start, end]) in sides.into_iter().enumerate() {
+        let length = (0..3)
+            .map(|axis| (end[axis] - start[axis]).abs())
+            .fold(0.0f32, f32::max);
+        let subdivisions = usize::try_from(length as u32)
+            .ok()
+            .filter(|subdivisions| {
+                *subdivisions > 0 && (*subdivisions as f32 - length).abs() <= f32::EPSILON
+            })
+            .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(key))?;
+        side_lengths[side] = subdivisions;
+        for offset in 0..subdivisions {
+            let interpolate = |amount: f32| {
+                std::array::from_fn(|axis| start[axis] + (end[axis] - start[axis]) * amount)
+            };
+            segments.push([
+                interpolate(offset as f32 / subdivisions as f32),
+                interpolate((offset + 1) as f32 / subdivisions as f32),
+            ]);
+        }
+    }
+    if segments.len() == 4 {
+        return push_virtual_rectangle(vertices, positions, reverse_winding, material, key);
+    }
+
+    let width = side_lengths[0];
+    let height = side_lengths[1];
+    if width >= 2 && height >= 2 {
+        // An integer point one cell in from both sides is strictly inside the rectangle.
+        // Fanning every unit perimeter segment to that point keeps all vertices on the
+        // canonical voxel lattice, while avoiding the T-junctions produced by a single quad.
+        let anchor = std::array::from_fn(|axis| {
+            positions[0][axis]
+                + (positions[1][axis] - positions[0][axis]) / width as f32
+                + (positions[3][axis] - positions[0][axis]) / height as f32
+        });
+        for [start, end] in segments {
+            let triangle = if reverse_winding {
+                [start, anchor, end]
+            } else {
+                [start, end, anchor]
+            };
+            push_virtual_triangle(vertices, triangle, material, key)?;
+        }
+        return Ok(());
+    }
+
+    // A one-cell-wide rectangle has no strictly interior lattice point. Split only the long
+    // direction into unit quads; this preserves the same conforming boundary without a
+    // fractional center vertex.
+    let (first, second, strips) = if width >= height {
+        (
+            [positions[0], positions[1]],
+            [positions[3], positions[2]],
+            width,
+        )
+    } else {
+        (
+            [positions[0], positions[3]],
+            [positions[1], positions[2]],
+            height,
+        )
+    };
+    let interpolate = |edge: [[f32; 3]; 2], amount: f32| {
+        std::array::from_fn(|axis| edge[0][axis] + (edge[1][axis] - edge[0][axis]) * amount)
+    };
+    for offset in 0..strips {
+        let start = offset as f32 / strips as f32;
+        let end = (offset + 1) as f32 / strips as f32;
+        push_virtual_rectangle(
+            vertices,
+            [
+                interpolate(first, start),
+                interpolate(first, end),
+                interpolate(second, end),
+                interpolate(second, start),
+            ],
+            reverse_winding,
             material,
             key,
         )?;
@@ -1233,13 +1839,179 @@ fn unconstrained_virtual_heightfield_samples(
             .iter()
             .map(|height| (*height != i32::MIN).then_some(*height as f32))
             .collect(),
+        exact_neighbor_sides: [false; 4],
+        finer_neighbor_sides: [false; 4],
     }
 }
 
+fn cut_finer_neighbor_sides(selected: &BTreeSet<TerrainPageKey>, key: TerrainPageKey) -> [bool; 4] {
+    let Some(finer_level) = key.level.checked_sub(1) else {
+        return [false; 4];
+    };
+    if !key.is_surface() {
+        return [false; 4];
+    }
+    let x = key.coord[0].saturating_mul(2);
+    let z = key.coord[2].saturating_mul(2);
+    let sides = [
+        [
+            TerrainPageKey::surface(finer_level, x.saturating_sub(1), z),
+            TerrainPageKey::surface(finer_level, x.saturating_sub(1), z.saturating_add(1)),
+        ],
+        [
+            TerrainPageKey::surface(finer_level, x.saturating_add(2), z),
+            TerrainPageKey::surface(finer_level, x.saturating_add(2), z.saturating_add(1)),
+        ],
+        [
+            TerrainPageKey::surface(finer_level, x, z.saturating_sub(1)),
+            TerrainPageKey::surface(finer_level, x.saturating_add(1), z.saturating_sub(1)),
+        ],
+        [
+            TerrainPageKey::surface(finer_level, x, z.saturating_add(2)),
+            TerrainPageKey::surface(finer_level, x.saturating_add(1), z.saturating_add(2)),
+        ],
+    ];
+    sides.map(|neighbors| neighbors.into_iter().all(|key| selected.contains(&key)))
+}
+
+fn cut_exact_neighbor_sides(selected: &BTreeSet<TerrainPageKey>, key: TerrainPageKey) -> [bool; 4] {
+    if key.level != 0 || !key.is_surface() {
+        return [false; 4];
+    }
+    [(-1, 0), (1, 0), (0, -1), (0, 1)].map(|(offset_x, offset_z)| {
+        selected.contains(&TerrainPageKey::surface(
+            0,
+            key.coord[0].saturating_add(offset_x),
+            key.coord[2].saturating_add(offset_z),
+        ))
+    })
+}
+
+fn restore_exact_neighbor_heightfield_boundaries(
+    page: &TerrainPageV1,
+    grid: &voxels_world::TerrainHeightfieldGrid,
+    constrained: &VirtualHeightfieldSamples,
+    exact_sides: [bool; 4],
+) -> VirtualHeightfieldSamples {
+    let raw = unconstrained_virtual_heightfield_samples(grid);
+    let mut restored = constrained.clone();
+    let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+    let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+    debug_assert_eq!(page.key.level, 0);
+    restored.exact_neighbor_sides = exact_sides;
+    for offset in 0..edge {
+        let samples = [
+            offset * edge,
+            cells + offset * edge,
+            offset,
+            offset + cells * edge,
+        ];
+        for (exact, sample) in exact_sides.into_iter().zip(samples) {
+            if !exact {
+                continue;
+            }
+            restored.ground[sample] = raw.ground[sample];
+            restored.water[sample] = raw.water[sample];
+        }
+    }
+    // A corner belongs to both incident boundaries. Raw exact-neighbor restoration is valid only
+    // when both boundaries have exact owners; otherwise the parent-constrained value is the sole
+    // value shared with the adjacent coarse page. Letting either exact side win independently
+    // creates a raised corner and a vertical pinhole at four-page L0/L1 junctions.
+    for (sample, exact) in [
+        (0, exact_sides[0] && exact_sides[2]),
+        (cells, exact_sides[1] && exact_sides[2]),
+        (cells + cells * edge, exact_sides[1] && exact_sides[3]),
+        (cells * edge, exact_sides[0] && exact_sides[3]),
+    ] {
+        if !exact {
+            restored.ground[sample] = constrained.ground[sample];
+            restored.water[sample] = constrained.water[sample];
+        }
+    }
+    restored
+}
+
+#[cfg(test)]
 fn constrained_virtual_heightfield_samples(
     hierarchy: &VirtualTerrainHierarchy,
     page: &TerrainPageV1,
 ) -> Result<VirtualHeightfieldSamples, VirtualTerrainRendererError> {
+    let samples = parent_constrained_virtual_heightfield_samples(hierarchy, page)?;
+    let TerrainPageRepresentation::HeightfieldGrid(grid) = &page.representation else {
+        return Err(VirtualTerrainRendererError::UnsupportedRepresentation(
+            page.representation.kind(),
+        ));
+    };
+    if page.key.level == 0 {
+        let selected = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+            .into_iter()
+            .filter_map(|(offset_x, offset_z)| {
+                let key = TerrainPageKey::surface(
+                    0,
+                    page.key.coord[0].saturating_add(offset_x),
+                    page.key.coord[2].saturating_add(offset_z),
+                );
+                hierarchy.directory_node(key).map(|_| key)
+            })
+            .chain(std::iter::once(page.key))
+            .collect::<BTreeSet<_>>();
+        Ok(restore_exact_neighbor_heightfield_boundaries(
+            page,
+            grid,
+            &samples,
+            cut_exact_neighbor_sides(&selected, page.key),
+        ))
+    } else {
+        Ok(samples)
+    }
+}
+
+/// Returns only the recursively parent-constrained samples.
+///
+/// Exact-neighbor restoration depends on the current directory set and must be reapplied whenever
+/// a neighboring refinement arrives. Caching that restored edge made geometry depend on response
+/// order and left adjacent L0 pages with different values for the same boundary.
+fn heightfield_ancestor_fingerprint(
+    hierarchy: &VirtualTerrainHierarchy,
+    mut key: TerrainPageKey,
+) -> Option<u64> {
+    let mut fingerprint = FINGERPRINT_OFFSET;
+    loop {
+        let node = hierarchy.directory_node(key)?;
+        fingerprint = fingerprint_value(fingerprint, u64::from(key.level));
+        fingerprint = fingerprint_value(fingerprint, key.coord[0] as u64);
+        fingerprint = fingerprint_value(fingerprint, key.coord[2] as u64);
+        fingerprint = fingerprint_value(fingerprint, node.revision);
+        for chunk in node.content_fingerprint.chunks_exact(8) {
+            fingerprint =
+                fingerprint_value(fingerprint, u64::from_le_bytes(chunk.try_into().ok()?));
+        }
+        let Some(parent) = key.parent() else {
+            break;
+        };
+        if hierarchy.directory_node(parent).is_none() {
+            break;
+        }
+        key = parent;
+    }
+    Some(fingerprint)
+}
+
+#[cfg(test)]
+fn parent_constrained_virtual_heightfield_samples(
+    hierarchy: &VirtualTerrainHierarchy,
+    page: &TerrainPageV1,
+) -> Result<VirtualHeightfieldSamples, VirtualTerrainRendererError> {
+    parent_constrained_virtual_heightfield_samples_with_cache(hierarchy, &BTreeMap::new(), page)
+        .map(|(samples, _)| samples)
+}
+
+fn parent_constrained_virtual_heightfield_samples_with_cache(
+    hierarchy: &VirtualTerrainHierarchy,
+    cache: &BTreeMap<TerrainPageKey, CachedVirtualHeightfieldSamples>,
+    page: &TerrainPageV1,
+) -> Result<(VirtualHeightfieldSamples, bool), VirtualTerrainRendererError> {
     let TerrainPageRepresentation::HeightfieldGrid(grid) = &page.representation else {
         return Err(VirtualTerrainRendererError::UnsupportedRepresentation(
             page.representation.kind(),
@@ -1247,18 +2019,29 @@ fn constrained_virtual_heightfield_samples(
     };
     let mut samples = unconstrained_virtual_heightfield_samples(grid);
     let Some(parent_key) = page.key.parent() else {
-        return Ok(samples);
+        return Ok((samples, true));
     };
-    let Some(parent) = hierarchy.resident_page(parent_key) else {
-        return Ok(samples);
+    let expected_parent_ancestor_fingerprint =
+        heightfield_ancestor_fingerprint(hierarchy, parent_key);
+    let (parent_samples, complete) = if let Some(cached) = cache.get(&parent_key).filter(|cached| {
+        hierarchy.directory_node(parent_key).is_some_and(|node| {
+            node.revision == cached.revision
+                && node.content_fingerprint == cached.content_fingerprint
+                && expected_parent_ancestor_fingerprint == Some(cached.ancestor_fingerprint)
+        })
+    }) {
+        (cached.samples.clone(), true)
+    } else if let Some(parent) = hierarchy.resident_page(parent_key) {
+        if !matches!(
+            parent.representation,
+            TerrainPageRepresentation::HeightfieldGrid(_)
+        ) {
+            return Ok((samples, false));
+        }
+        parent_constrained_virtual_heightfield_samples_with_cache(hierarchy, cache, parent)?
+    } else {
+        return Ok((samples, false));
     };
-    if !matches!(
-        parent.representation,
-        TerrainPageRepresentation::HeightfieldGrid(_)
-    ) {
-        return Ok(samples);
-    }
-    let parent_samples = constrained_virtual_heightfield_samples(hierarchy, parent)?;
     let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
     let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
     if samples.ground.len() != edge * edge
@@ -1327,7 +2110,7 @@ fn constrained_virtual_heightfield_samples(
             samples.water[child] = interpolate_water(cells, combined, false);
         }
     }
-    Ok(samples)
+    Ok((samples, complete))
 }
 
 fn push_virtual_triangle_i32(
@@ -1371,7 +2154,7 @@ fn push_virtual_triangle(
     for position in positions {
         vertices.push(GpuTerrainVertex {
             position,
-            material: u32::from(material.id()),
+            material: pack_virtual_material(material, key.level),
             normal: [normal[0], normal[1], normal[2], 0],
         });
     }
@@ -1399,7 +2182,7 @@ fn virtual_terrain_surface_slice(
 fn partition_virtual_surface_geometry(quads: Vec<GpuQuad>) -> Option<(Vec<GpuQuad>, u32, u32)> {
     let (opaque, water): (Vec<_>, Vec<_>) = quads
         .into_iter()
-        .partition(|quad| quad.material_face & !GPU_FACE_MASK != u32::from(Material::Water.id()));
+        .partition(|quad| quad.material_face & 0xffff != u32::from(Material::Water.id()));
     let opaque_count = u32::try_from(opaque.len()).ok()?;
     let water_count = u32::try_from(water.len()).ok()?;
     Some((
@@ -1414,7 +2197,7 @@ fn partition_virtual_triangle_geometry(
 ) -> Option<(Vec<GpuTerrainVertex>, u32, u32)> {
     let (opaque, water): (Vec<_>, Vec<_>) = vertices
         .into_iter()
-        .partition(|vertex| vertex.material != u32::from(Material::Water.id()));
+        .partition(|vertex| vertex.material & 0xffff != u32::from(Material::Water.id()));
     let opaque_count = u32::try_from(opaque.len()).ok()?;
     let water_count = u32::try_from(water.len()).ok()?;
     Some((
@@ -1451,6 +2234,29 @@ fn canonical_quad_corners(quad: GpuQuad) -> [[i32; 3]; 4] {
         canonical_quad_point(quad, u, v),
         canonical_quad_point(quad, 0, v),
     ]
+}
+
+fn canonical_gpu_subrectangle(base: GpuQuad, u: i32, v: i32, extent_voxels: [u16; 2]) -> GpuQuad {
+    let face = ((base.material_face & GPU_FACE_MASK) >> GPU_FACE_SHIFT) as u8;
+    let mut origin = canonical_quad_point(base, u, v);
+    let positive_normal_axis = match face {
+        0 => Some(0),
+        2 => Some(1),
+        4 => Some(2),
+        _ => None,
+    };
+    if let Some(axis) = positive_normal_axis {
+        origin[axis] = origin[axis].saturating_sub(1);
+    }
+    GpuQuad {
+        origin,
+        extent_voxels,
+        ..base
+    }
+}
+
+fn canonical_gpu_subquad(base: GpuQuad, u: i32, v: i32) -> GpuQuad {
+    canonical_gpu_subrectangle(base, u, v, [1, 1])
 }
 
 fn axis_line_key(axis: usize, point: [i32; 3]) -> (u8, i32, i32) {
@@ -1538,6 +2344,18 @@ fn constrain_gpu_quad_t_junctions(
             _ => (None, None),
         };
         let extent = base.extent_voxels;
+        if anchor.is_none() && (extent[0] == 1 || extent[1] == 1) {
+            output.push(
+                (0..i32::from(extent[1]))
+                    .flat_map(|v| {
+                        (0..i32::from(extent[0])).map(move |u| canonical_gpu_subquad(base, u, v))
+                    })
+                    .collect(),
+            );
+            continue;
+        }
+        let lattice_anchor =
+            (anchor.is_none() && extent[0] >= 2 && extent[1] >= 2).then_some([1_u16, 1_u16]);
         let emitted_edges = if anchor.is_some() {
             constrained.into_iter().chain(fill_edge).collect::<Vec<_>>()
         } else {
@@ -1569,14 +2387,26 @@ fn constrain_gpu_quad_t_junctions(
                             | ((edge.index() as u16) << CANONICAL_TRIANGLE_EDGE_SHIFT)
                             | CANONICAL_TRIANGLE_FLAG,
                         end | pack_canonical_triangle_extent(extent[1])
-                            | ((anchor.map_or(0, |corner| corner + 1) as u16)
+                            | ((anchor.map_or_else(
+                                || {
+                                    if lattice_anchor.is_some() {
+                                        usize::from(CANONICAL_TRIANGLE_LATTICE_ANCHOR)
+                                    } else {
+                                        0
+                                    }
+                                },
+                                |corner| corner + 1,
+                            ) as u16)
                                 << CANONICAL_TRIANGLE_ANCHOR_SHIFT),
                     ],
-                    ao: if preserve_packed_ao {
+                    ao: (if preserve_packed_ao {
                         base.ao
                     } else {
                         canonical_triangle_ao(base.ao as u8, edge, [start, end], extent, anchor)
-                    },
+                    }) | lattice_anchor.map_or(0, |[u, v]| {
+                        (u32::from(u) << CANONICAL_TRIANGLE_ANCHOR_U_SHIFT)
+                            | (u32::from(v) << CANONICAL_TRIANGLE_ANCHOR_V_SHIFT)
+                    }),
                     ..base
                 });
             }
@@ -1603,8 +2433,8 @@ fn canonical_gpu_quads(world_origin: [i32; 3], quads: &[Quad]) -> Vec<GpuQuad> {
                 && quad.extent_voxels.into_iter().all(|extent| extent > 0)
         },
         |_, _, start, end| {
-            // Adjacent canonical chunks and the surface-LOD transition mesh are uploaded
-            // independently, so their boundary vertices are not present in `base_quads`.
+            // Adjacent canonical chunks are uploaded independently, so their boundary vertices
+            // are not present in `base_quads`.
             // Subdivide every chunk-boundary edge onto the authoritative 10 cm lattice. Both
             // owners then rasterize identical short edges instead of a greedy long edge meeting
             // several independently rounded segments at a T-junction.
@@ -1634,6 +2464,10 @@ struct VirtualTerrainGpuPage {
     revision: u64,
     content_fingerprint: [u8; 32],
     representation: TerrainPageRepresentationKind,
+    heightfield_exact_neighbor_sides: [bool; 4],
+    heightfield_finer_neighbor_sides: [bool; 4],
+    heightfield_ground_corner_bits: [u32; 4],
+    heightfield_ground_boundary_bits: [[u32; TERRAIN_PAGE_EDGE_SAMPLES as usize + 1]; 4],
     mesh: VirtualTerrainGpuMesh,
 }
 
@@ -2083,6 +2917,7 @@ pub struct RenderDiagnostics {
     pub virtual_terrain_published_exact_pages: u32,
     pub virtual_terrain_published_minimum_level: u32,
     pub virtual_terrain_published_maximum_level: u32,
+    pub virtual_terrain_published_exact_lod_discontinuities: u32,
     /// Stable identity of the complete virtual hierarchy cut selected for presentation.
     pub virtual_terrain_cut_fingerprint: u64,
     /// Stable identity of the world geometry selected for the latest presented viewport.
@@ -2654,12 +3489,16 @@ pub struct Renderer {
     virtual_terrain_initial_cut_certified: bool,
     virtual_terrain_cut: Option<VirtualTerrainCut>,
     virtual_terrain_oracle_cut: Option<VirtualTerrainCut>,
+    /// Capacity pressure may raise this high-water mark, but residency churn never lowers it.
+    /// This prevents the streamer from repeatedly requesting a cut it already proved cannot fit.
+    virtual_terrain_error_scale: f64,
     /// Unmodified camera/error request used to cache the CPU selection decision.
     virtual_terrain_requested_view: Option<VirtualTerrainView>,
     /// Capacity-adjusted view used by both the CPU oracle and GPU traversal.
     virtual_terrain_oracle_view: Option<VirtualTerrainView>,
     virtual_terrain_pages: BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
     virtual_terrain_retired_published_pages: BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
+    virtual_terrain_heightfield_samples: BTreeMap<TerrainPageKey, CachedVirtualHeightfieldSamples>,
     virtual_terrain_arena: ArenaAllocator,
     virtual_terrain_arena_buffers: Vec<Buffer>,
     canonical_ready_chunks: HashSet<(i32, i32, i32)>,
@@ -3487,10 +4326,12 @@ impl Renderer {
             virtual_terrain_initial_cut_certified: false,
             virtual_terrain_cut: None,
             virtual_terrain_oracle_cut: None,
+            virtual_terrain_error_scale: 1.0,
             virtual_terrain_requested_view: None,
             virtual_terrain_oracle_view: None,
             virtual_terrain_pages: BTreeMap::new(),
             virtual_terrain_retired_published_pages: BTreeMap::new(),
+            virtual_terrain_heightfield_samples: BTreeMap::new(),
             virtual_terrain_arena,
             virtual_terrain_arena_buffers: Vec::new(),
             canonical_ready_chunks: HashSet::new(),
@@ -4208,11 +5049,12 @@ impl Renderer {
         )
         .inverse()
         .to_cols_array();
-        let representation_kinds = r#"{"canonicalExact":1,"steppedSurfaceResidual":17,"sparseVoxelBrick":18,"surfaceCluster":19,"triangleCluster":20}"#;
+        let representation_kinds = r#"{"canonicalExact":1,"steppedSurfaceResidual":2,"sparseVoxelBrick":3,"surfaceCluster":4,"triangleCluster":5,"heightfieldGrid":6,"exactVolumeFrontier":8}"#;
         let attachment_manifest = format!(
             concat!(
                 r#"{{"terrainPixelOwnership":{{"chunkType":"vpDI","#,
                 r#""schema":"voxels.terrain-pixel-ownership.v1","compression":"deflate","#,
+                r#""populated":{},"#,
                 r#""format":"u32x5","byteOrder":"little-endian","rowOrder":"top-down","#,
                 r#""channels":["ownerIdHashLow","ownerIdHashHigh","primitiveFaceHash","packedRepresentationDepthFaceMaterial","reverseZDepthF32Bits"],"#,
                 r#""backgroundOwnerId":["0","0"],"ownerHash":{{"algorithm":"fnv1a32+jenkins-oaat32","#,
@@ -4222,7 +5064,7 @@ impl Renderer {
                 r#""worldPositionReconstruction":{{"pixelCenter":true,"depthConvention":"reverse-z-webgpu","#,
                 r#""inverseViewProjectionColumns":{:?}}}}}}}"#
             ),
-            representation_kinds, inverse_view_projection,
+            self.geometry_source_debug, representation_kinds, inverse_view_projection,
         );
         format!(
             concat!(
@@ -4416,18 +5258,138 @@ impl Renderer {
         &mut self,
         page: TerrainPageV1,
     ) -> Result<(), VirtualTerrainRendererError> {
+        let (exact_neighbor_sides, finer_neighbor_sides) = self
+            .virtual_terrain_pages
+            .get(&page.key)
+            .map_or(([false; 4], [false; 4]), |existing| {
+                (
+                    existing.heightfield_exact_neighbor_sides,
+                    existing.heightfield_finer_neighbor_sides,
+                )
+            });
+        self.upload_virtual_terrain_page_with_seams(
+            page,
+            exact_neighbor_sides,
+            finer_neighbor_sides,
+            true,
+        )
+        .map(|_| ())
+    }
+
+    fn upload_virtual_terrain_page_with_seams(
+        &mut self,
+        page: TerrainPageV1,
+        exact_neighbor_sides: [bool; 4],
+        finer_neighbor_sides: [bool; 4],
+        install_page: bool,
+    ) -> Result<bool, VirtualTerrainRendererError> {
         let page_key = page.key;
+        let (base_heightfield, heightfield_ancestors_complete) = if matches!(
+            page.representation,
+            TerrainPageRepresentation::HeightfieldGrid(_)
+        ) {
+            let (samples, complete) = parent_constrained_virtual_heightfield_samples_with_cache(
+                &self.virtual_terrain,
+                &self.virtual_terrain_heightfield_samples,
+                &page,
+            )?;
+            (Some(samples), complete)
+        } else {
+            (None, false)
+        };
+        if page.key.level > 0 && heightfield_ancestors_complete {
+            if let (Some(samples), Some(ancestor_fingerprint)) = (
+                base_heightfield.as_ref(),
+                heightfield_ancestor_fingerprint(&self.virtual_terrain, page.key),
+            ) {
+                self.virtual_terrain_heightfield_samples.insert(
+                    page.key,
+                    CachedVirtualHeightfieldSamples {
+                        revision: page.revision,
+                        content_fingerprint: page.content_fingerprint,
+                        ancestor_fingerprint,
+                        samples: samples.clone(),
+                    },
+                );
+            }
+        } else {
+            self.virtual_terrain_heightfield_samples.remove(&page.key);
+        }
+        let mut constrained_heightfield = match (&page.representation, base_heightfield) {
+            (TerrainPageRepresentation::HeightfieldGrid(grid), Some(samples))
+                if page.key.level == 0 =>
+            {
+                Some(restore_exact_neighbor_heightfield_boundaries(
+                    &page,
+                    grid,
+                    &samples,
+                    exact_neighbor_sides,
+                ))
+            }
+            (_, samples) => samples,
+        };
+        if let Some(heightfield) = constrained_heightfield.as_mut() {
+            heightfield.finer_neighbor_sides = finer_neighbor_sides;
+        }
+        let heightfield_exact_neighbor_sides = constrained_heightfield
+            .as_ref()
+            .map_or([false; 4], |heightfield| heightfield.exact_neighbor_sides);
+        let heightfield_finer_neighbor_sides = constrained_heightfield
+            .as_ref()
+            .map_or([false; 4], |heightfield| heightfield.finer_neighbor_sides);
+        let heightfield_ground_corner_bits =
+            constrained_heightfield
+                .as_ref()
+                .map_or([0; 4], |heightfield| {
+                    let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+                    let edge = cells + 1;
+                    [0, cells, cells + cells * edge, cells * edge]
+                        .map(|index| heightfield.ground[index].to_bits())
+                });
+        let heightfield_ground_boundary_bits = constrained_heightfield.as_ref().map_or(
+            [[0; TERRAIN_PAGE_EDGE_SAMPLES as usize + 1]; 4],
+            |heightfield| {
+                let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+                let edge = cells + 1;
+                std::array::from_fn(|side| {
+                    std::array::from_fn(|offset| {
+                        let index = match side {
+                            0 => offset * edge,
+                            1 => cells + offset * edge,
+                            2 => offset,
+                            _ => offset + cells * edge,
+                        };
+                        heightfield.ground[index].to_bits()
+                    })
+                })
+            },
+        );
         if let Some(existing) = self.virtual_terrain_pages.get(&page.key)
             && existing.revision == page.revision
             && existing.content_fingerprint == page.content_fingerprint
             && existing.representation == page.representation.kind()
+            && existing.heightfield_exact_neighbor_sides == heightfield_exact_neighbor_sides
+            && existing.heightfield_finer_neighbor_sides == heightfield_finer_neighbor_sides
+            && existing.heightfield_ground_corner_bits == heightfield_ground_corner_bits
+            && existing.heightfield_ground_boundary_bits == heightfield_ground_boundary_bits
         {
-            self.virtual_terrain.install_page(page)?;
-            self.virtual_terrain_gpu
-                .update_page_residency(&self.queue, &self.virtual_terrain, page_key)
-                .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
-            return Ok(());
+            if install_page {
+                self.virtual_terrain.install_page(page)?;
+                self.virtual_terrain_gpu
+                    .update_page_residency(&self.queue, &self.virtual_terrain, page_key)
+                    .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
+            }
+            return Ok(false);
         }
+        let exact_heightfield_quads = match (&page.representation, constrained_heightfield.as_ref())
+        {
+            (TerrainPageRepresentation::HeightfieldGrid(grid), Some(heightfield))
+                if page.key.level == 0 =>
+            {
+                virtual_microvoxel_gpu_quads(&page, grid, heightfield)?
+            }
+            _ => None,
+        };
         let minimum = glam::Vec3::from_array(
             page.bounds
                 .min
@@ -4440,12 +5402,6 @@ impl Renderer {
                 .as_array()
                 .map(|value| value as f32 * VOXEL_SIZE_METRES),
         );
-        let constrained_heightfield = matches!(
-            page.representation,
-            TerrainPageRepresentation::HeightfieldGrid(_)
-        )
-        .then(|| constrained_virtual_heightfield_samples(&self.virtual_terrain, &page))
-        .transpose()?;
         let mesh = match &page.representation {
             TerrainPageRepresentation::SteppedSurfaceResidual(_)
             | TerrainPageRepresentation::SparseVoxelBrick(_)
@@ -4505,6 +5461,67 @@ impl Renderer {
                             slices,
                             u8::MAX,
                             "bounded virtual terrain page pool",
+                        )
+                        .ok_or(VirtualTerrainRendererError::GpuPoolCapacity)?,
+                    )
+                }
+            }
+            TerrainPageRepresentation::HeightfieldGrid(_) if exact_heightfield_quads.is_some() => {
+                let gpu_quads = exact_heightfield_quads.unwrap_or_default();
+                let (gpu_quads, opaque_quad_count, water_quad_count) =
+                    partition_virtual_surface_geometry(gpu_quads)
+                        .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
+                let gpu_bytes = gpu_quads
+                    .len()
+                    .checked_mul(size_of::<GpuQuad>())
+                    .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
+                if gpu_bytes > ARENA_PAGE_BYTES as usize {
+                    return Err(VirtualTerrainRendererError::GpuPageTooLarge(page.key));
+                }
+                self.ensure_virtual_terrain_gpu_allocation(
+                    u32::try_from(gpu_bytes)
+                        .map_err(|_| VirtualTerrainRendererError::GpuPageTooLarge(page.key))?,
+                )?;
+                if gpu_quads.is_empty() {
+                    VirtualTerrainGpuMesh::Empty
+                } else {
+                    let opaque_size = opaque_quad_count
+                        .checked_mul(size_of::<GpuQuad>() as u32)
+                        .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
+                    let water_size = water_quad_count
+                        .checked_mul(size_of::<GpuQuad>() as u32)
+                        .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
+                    let mut slices = Vec::with_capacity(2);
+                    if opaque_quad_count > 0 {
+                        slices.push(virtual_terrain_surface_slice(
+                            0,
+                            opaque_size,
+                            opaque_quad_count,
+                            minimum,
+                            maximum,
+                            RenderLayer::Opaque,
+                        ));
+                    }
+                    if water_quad_count > 0 {
+                        slices.push(virtual_terrain_surface_slice(
+                            opaque_size,
+                            water_size,
+                            water_quad_count,
+                            minimum,
+                            maximum,
+                            RenderLayer::Translucent,
+                        ));
+                    }
+                    VirtualTerrainGpuMesh::Surface(
+                        prepare_mesh_sliced_into(
+                            &self.device,
+                            &self.queue,
+                            &mut self.virtual_terrain_arena,
+                            &mut self.virtual_terrain_arena_buffers,
+                            &gpu_quads,
+                            slices,
+                            u8::MAX,
+                            "bounded exact virtual terrain page pool",
                         )
                         .ok_or(VirtualTerrainRendererError::GpuPoolCapacity)?,
                     )
@@ -4573,27 +5590,32 @@ impl Renderer {
                 return Err(VirtualTerrainRendererError::GpuTraversal);
             }
         }
-        if let Err(error) = self.virtual_terrain.install_page(page.clone()) {
-            discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, mesh);
-            return Err(error.into());
+        if install_page {
+            if let Err(error) = self.virtual_terrain.install_page(page.clone()) {
+                discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, mesh);
+                return Err(error.into());
+            }
+            // Residency can make a complete child replacement selectable without changing the
+            // view. Invalidate the CPU demand oracle; GPU traversal sees the same flag update.
+            self.virtual_terrain_oracle_cut = None;
+            self.virtual_terrain_requested_view = None;
+            self.virtual_terrain_oracle_view = None;
         }
-        // Residency can make a complete child replacement selectable without changing the view.
-        // Invalidate the CPU demand oracle; GPU traversal sees the same flag update directly.
-        self.virtual_terrain_oracle_cut = None;
-        self.virtual_terrain_requested_view = None;
-        self.virtual_terrain_oracle_view = None;
-        if self
+        let geometry_update = self
             .virtual_terrain_gpu
             .update_page_geometry(&self.queue, page.key, geometry)
             .and_then(|()| {
-                self.virtual_terrain_gpu.update_page_residency(
-                    &self.queue,
-                    &self.virtual_terrain,
-                    page.key,
-                )
-            })
-            .is_err()
-        {
+                if install_page {
+                    self.virtual_terrain_gpu.update_page_residency(
+                        &self.queue,
+                        &self.virtual_terrain,
+                        page.key,
+                    )
+                } else {
+                    Ok(())
+                }
+            });
+        if geometry_update.is_err() {
             discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, mesh);
             return Err(VirtualTerrainRendererError::GpuTraversal);
         }
@@ -4601,12 +5623,16 @@ impl Renderer {
             revision: page.revision,
             content_fingerprint: page.content_fingerprint,
             representation: page.representation.kind(),
+            heightfield_exact_neighbor_sides,
+            heightfield_finer_neighbor_sides,
+            heightfield_ground_corner_bits,
+            heightfield_ground_boundary_bits,
             mesh,
         };
         if let Some(old) = self.virtual_terrain_pages.insert(page.key, resident) {
             discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, old.mesh);
         }
-        Ok(())
+        Ok(true)
     }
 
     pub fn select_virtual_terrain_cut(
@@ -4627,7 +5653,7 @@ impl Renderer {
         // has already streamed. Increase the screen-error threshold only as far as needed to keep
         // the selected cut publishable. Both the CPU oracle and GPU receive the same adjusted
         // view, so this remains one deterministic ownership decision rather than a fallback draw.
-        let mut error_scale = 1.0_f64;
+        let mut error_scale = self.virtual_terrain_error_scale.max(1.0);
         let (oracle_view, cut) = loop {
             let mut candidate_view = view;
             if !view.force_exact_leaves {
@@ -4637,7 +5663,7 @@ impl Renderer {
             let candidate = self.virtual_terrain.select_cut(candidate_view)?;
             match self.virtual_terrain_cut_fits_compaction(&candidate) {
                 Ok(()) => break (candidate_view, candidate),
-                Err(VirtualTerrainRendererError::SelectedCutCompactionCapacity)
+                Err(VirtualTerrainRendererError::SelectedCutCompactionCapacity { .. })
                     if !view.force_exact_leaves && error_scale < 64.0 =>
                 {
                     error_scale = (error_scale * 1.25).min(64.0);
@@ -4645,6 +5671,7 @@ impl Renderer {
                 Err(error) => return Err(error),
             }
         };
+        self.virtual_terrain_error_scale = self.virtual_terrain_error_scale.max(error_scale);
         self.virtual_terrain_requested_view = Some(view);
         self.virtual_terrain_oracle_view = Some(oracle_view);
         self.virtual_terrain_oracle_cut = Some(cut.clone());
@@ -4660,23 +5687,59 @@ impl Renderer {
         self.virtual_terrain_cut.as_ref()
     }
 
+    pub fn virtual_terrain_published_cut_is_current(&self) -> bool {
+        self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible
+            && self.virtual_terrain_cut.as_ref().is_some_and(|cut| {
+                cut.selected_pages
+                    .iter()
+                    .all(|key| self.virtual_terrain_pages.contains_key(key))
+                    && cut.fingerprint
+                        == self
+                            .virtual_terrain
+                            .selected_fingerprint(&cut.selected_pages)
+            })
+    }
+
+    fn synchronize_virtual_terrain_cut_seams(
+        &mut self,
+        cut: &VirtualTerrainCut,
+    ) -> Result<bool, VirtualTerrainRendererError> {
+        let selected = cut.selected_pages.iter().copied().collect::<BTreeSet<_>>();
+        let rebuilds = cut
+            .selected_pages
+            .iter()
+            .filter_map(|key| {
+                let page = self.virtual_terrain.resident_page(*key)?;
+                if !matches!(
+                    page.representation,
+                    TerrainPageRepresentation::HeightfieldGrid(_)
+                ) {
+                    return None;
+                }
+                let exact_sides = cut_exact_neighbor_sides(&selected, *key);
+                let finer_sides = cut_finer_neighbor_sides(&selected, *key);
+                Some((page.clone(), exact_sides, finer_sides))
+            })
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for (page, exact_sides, finer_sides) in rebuilds {
+            changed |=
+                self.upload_virtual_terrain_page_with_seams(page, exact_sides, finer_sides, false)?;
+        }
+        if !changed {
+            return Ok(false);
+        }
+        // The selected identities did not change, but their conforming triangulation did.
+        // Require compaction to copy the new arena ranges before this cut can publish.
+        self.virtual_terrain_gpu.invalidate_feedback();
+        Ok(true)
+    }
+
     pub fn set_virtual_terrain_render_mode(
         &mut self,
         mode: VirtualTerrainRenderMode,
     ) -> Result<(), VirtualTerrainRendererError> {
         if mode == VirtualTerrainRenderMode::Visible {
-            if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible
-                && self
-                    .virtual_terrain_cut
-                    .as_ref()
-                    .zip(self.virtual_terrain_oracle_cut.as_ref())
-                    .is_some_and(|(published, candidate)| {
-                        published.fingerprint == candidate.fingerprint
-                            && published.selected_pages == candidate.selected_pages
-                    })
-            {
-                return Ok(());
-            }
             let Some(cut) = self
                 .virtual_terrain_oracle_cut
                 .as_ref()
@@ -4694,6 +5757,7 @@ impl Renderer {
                     *missing,
                 ));
             }
+            self.synchronize_virtual_terrain_cut_seams(&cut)?;
             self.virtual_terrain_cut_fits_compaction(&cut)?;
             let certified = self
                 .virtual_terrain_gpu
@@ -4771,6 +5835,7 @@ impl Renderer {
             .map(|cut| cut.selected_pages.iter().copied().collect::<BTreeSet<_>>())
             .unwrap_or_default();
         for key in &removed_pages {
+            self.virtual_terrain_heightfield_samples.remove(key);
             let Some(page) = self.virtual_terrain_pages.remove(key) else {
                 continue;
             };
@@ -4861,6 +5926,19 @@ impl Renderer {
                 }
             }
         }
+        // Only the constrained ancestor samples are needed after a parent mesh stops owning the
+        // cut. Retaining those small CPU records avoids pinning invisible geometry in the bounded
+        // GPU arena, while dropping L0 and unrelated travel history.
+        let mut sample_keep = BTreeSet::new();
+        for key in keep.iter().copied() {
+            let mut ancestor = key.parent();
+            while let Some(parent) = ancestor {
+                sample_keep.insert(parent);
+                ancestor = parent.parent();
+            }
+        }
+        self.virtual_terrain_heightfield_samples
+            .retain(|key, _| key.level > 0 && sample_keep.contains(key));
         let remove = self
             .virtual_terrain_pages
             .keys()
@@ -4990,7 +6068,14 @@ impl Renderer {
             || water_surface_bytes > VIRTUAL_TERRAIN_COMPACT_WATER_SURFACE_BYTES
             || water_triangle_bytes > VIRTUAL_TERRAIN_COMPACT_WATER_TRIANGLE_BYTES
         {
-            return Err(VirtualTerrainRendererError::SelectedCutCompactionCapacity);
+            return Err(VirtualTerrainRendererError::SelectedCutCompactionCapacity {
+                required_bytes: [
+                    surface_bytes,
+                    triangle_bytes,
+                    water_surface_bytes,
+                    water_triangle_bytes,
+                ],
+            });
         }
         Ok(())
     }
@@ -5464,11 +6549,12 @@ impl Renderer {
                         .is_some_and(|feedback| gpu_feedback_matches_cut(feedback, Some(candidate)))
                 });
         let virtual_direct_draw = virtual_visible
-            && self.virtual_terrain_cut.as_ref().is_none_or(|published| {
-                !virtual_feedback
-                    .as_ref()
-                    .is_some_and(|feedback| gpu_feedback_matches_cut(feedback, Some(published)))
-            });
+            && (virtual_candidate_pending
+                || self.virtual_terrain_cut.as_ref().is_none_or(|published| {
+                    !virtual_feedback
+                        .as_ref()
+                        .is_some_and(|feedback| gpu_feedback_matches_cut(feedback, Some(published)))
+                }));
         let (shadow_draw_lists, world_draw_list) = collect_opaque_draw_lists(
             &mut self.chunks,
             shadows_active,
@@ -5750,7 +6836,7 @@ impl Renderer {
             self.ui_gpu.scene_view()
         };
         let (screenshot_opaque_owners, screenshot_virtual_opaque_owners, screenshot_water_owners) =
-            if self.screenshot_requested {
+            if self.screenshot_requested && self.geometry_source_debug {
                 let Some(opaque) = screenshot_diagnostic_owner_buffers(
                     &self.device,
                     &self.queue,
@@ -5785,6 +6871,15 @@ impl Renderer {
                     return false;
                 };
                 (Some(opaque), virtual_opaque, Some(water))
+            } else if self.screenshot_requested {
+                // Ordinary F2 captures retain the complete reproduction/cut metadata without
+                // allocating and uploading a second owner stream for every resident primitive.
+                // Geometry-source debug captures opt into that expensive pixel attachment.
+                (
+                    Some(Vec::new()),
+                    virtual_visible.then_some(Vec::new()),
+                    Some(Vec::new()),
+                )
             } else {
                 (None, None, None)
             };
@@ -5804,38 +6899,40 @@ impl Renderer {
                 view_formats: &[],
             })
         });
-        let screenshot_diagnostic_identity_target = self.screenshot_requested.then(|| {
-            self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("screenshot integer ownership target"),
-                size: wgpu::Extent3d {
-                    width: self.config.width,
-                    height: self.config.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: TextureFormat::Rgba32Uint,
-                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-                view_formats: &[],
-            })
-        });
-        let screenshot_diagnostic_depth_target = self.screenshot_requested.then(|| {
-            self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("screenshot exact reverse-z target"),
-                size: wgpu::Extent3d {
-                    width: self.config.width,
-                    height: self.config.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: TextureFormat::R32Uint,
-                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-                view_formats: &[],
-            })
-        });
+        let screenshot_diagnostic_identity_target =
+            (self.screenshot_requested && self.geometry_source_debug).then(|| {
+                self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("screenshot integer ownership target"),
+                    size: wgpu::Extent3d {
+                        width: self.config.width,
+                        height: self.config.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: TextureFormat::Rgba32Uint,
+                    usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                })
+            });
+        let screenshot_diagnostic_depth_target =
+            (self.screenshot_requested && self.geometry_source_debug).then(|| {
+                self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("screenshot exact reverse-z target"),
+                    size: wgpu::Extent3d {
+                        width: self.config.width,
+                        height: self.config.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: TextureFormat::R32Uint,
+                    usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                })
+            });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("opaque world pass"),
@@ -6146,17 +7243,14 @@ impl Renderer {
             .map(|key| key.level)
             .max()
             .unwrap_or(0);
-        let virtual_terrain_cut_fingerprint =
-            published_virtual_pages
-                .iter()
-                .fold(FINGERPRINT_OFFSET, |fingerprint, key| {
-                    let fingerprint = fingerprint_value(fingerprint, u64::from(key.level));
-                    key.coord
-                        .iter()
-                        .fold(fingerprint, |fingerprint, coordinate| {
-                            fingerprint_value(fingerprint, u64::from(*coordinate as u32))
-                        })
-                });
+        let published_virtual_exact_lod_discontinuities = virtual_visible
+            .then_some(self.virtual_terrain_cut.as_ref())
+            .flatten()
+            .map_or(0, |cut| cut.exact_surface_lod_discontinuities);
+        let virtual_terrain_cut_fingerprint = virtual_visible
+            .then_some(self.virtual_terrain_cut.as_ref())
+            .flatten()
+            .map_or(0, |cut| cut.fingerprint);
         self.diagnostics = RenderDiagnostics {
             resident_chunks: (self.chunks.len()
                 + usize::from(virtual_visible) * self.virtual_terrain_pages.len())
@@ -6216,6 +7310,8 @@ impl Renderer {
             virtual_terrain_published_exact_pages: published_virtual_exact_pages as u32,
             virtual_terrain_published_minimum_level: u32::from(published_virtual_minimum_level),
             virtual_terrain_published_maximum_level: u32::from(published_virtual_maximum_level),
+            virtual_terrain_published_exact_lod_discontinuities:
+                published_virtual_exact_lod_discontinuities as u32,
             virtual_terrain_cut_fingerprint,
             viewport_fingerprint,
             refraction_copy_bytes: refraction_copy_bytes(
@@ -6567,12 +7663,14 @@ impl Renderer {
             self.report_screenshot_result(false);
             return;
         };
-        let (Some(diagnostic_identity_texture), Some(diagnostic_depth_texture)) =
-            (diagnostic_identity_texture, diagnostic_depth_texture)
-        else {
-            (self.log_error)("screenshot capture failed: diagnostic targets were not created");
-            self.report_screenshot_result(false);
-            return;
+        let diagnostic_targets = match (diagnostic_identity_texture, diagnostic_depth_texture) {
+            (Some(identity), Some(depth)) => Some((identity, depth)),
+            (None, None) => None,
+            _ => {
+                (self.log_error)("screenshot capture failed: diagnostic targets disagree");
+                self.report_screenshot_result(false);
+                return;
+            }
         };
         let bgra = match self.config.format {
             TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb => true,
@@ -6595,19 +7693,25 @@ impl Renderer {
             .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let color_buffer_size = u64::from(padded_bytes_per_row) * u64::from(height);
-        let diagnostic_identity_unpadded_bytes_per_row = match width.checked_mul(16) {
-            Some(bytes) => bytes,
-            None => {
-                self.report_screenshot_result(false);
-                return;
+        let diagnostic_identity_unpadded_bytes_per_row = if diagnostic_targets.is_some() {
+            match width.checked_mul(16) {
+                Some(bytes) => bytes,
+                None => {
+                    self.report_screenshot_result(false);
+                    return;
+                }
             }
+        } else {
+            0
         };
         let diagnostic_identity_padded_bytes_per_row = diagnostic_identity_unpadded_bytes_per_row
             .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let diagnostic_identity_buffer_size =
-            u64::from(diagnostic_identity_padded_bytes_per_row) * u64::from(height);
-        let diagnostic_depth_padded_bytes_per_row = padded_bytes_per_row;
+        let diagnostic_identity_buffer_size = diagnostic_targets.map_or(0, |_| {
+            u64::from(diagnostic_identity_padded_bytes_per_row) * u64::from(height)
+        });
+        let diagnostic_depth_padded_bytes_per_row =
+            diagnostic_targets.map_or(0, |_| padded_bytes_per_row);
         let diagnostic_depth_buffer_size =
             u64::from(diagnostic_depth_padded_bytes_per_row) * u64::from(height);
         let Some(buffer_size) = color_buffer_size
@@ -6639,38 +7743,40 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        encoder.copy_texture_to_buffer(
-            diagnostic_identity_texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: color_buffer_size,
-                    bytes_per_row: Some(diagnostic_identity_padded_bytes_per_row),
-                    rows_per_image: Some(height),
+        if let Some((diagnostic_identity_texture, diagnostic_depth_texture)) = diagnostic_targets {
+            encoder.copy_texture_to_buffer(
+                diagnostic_identity_texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: color_buffer_size,
+                        bytes_per_row: Some(diagnostic_identity_padded_bytes_per_row),
+                        rows_per_image: Some(height),
+                    },
                 },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        encoder.copy_texture_to_buffer(
-            diagnostic_depth_texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: color_buffer_size + diagnostic_identity_buffer_size,
-                    bytes_per_row: Some(diagnostic_depth_padded_bytes_per_row),
-                    rows_per_image: Some(height),
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
                 },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
+            );
+            encoder.copy_texture_to_buffer(
+                diagnostic_depth_texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: color_buffer_size + diagnostic_identity_buffer_size,
+                        bytes_per_row: Some(diagnostic_depth_padded_bytes_per_row),
+                        rows_per_image: Some(height),
+                    },
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         let filename = self.ui.screenshot_filename();
         let metadata = self.screenshot_reproduction_metadata(frame_id, camera);
         let state = Arc::clone(&self.screenshot_readback);
@@ -6694,8 +7800,6 @@ impl Renderer {
                         let identity_end =
                             usize::try_from(color_buffer_size + diagnostic_identity_buffer_size)
                                 .ok()?;
-                        let diagnostic_identity = mapped.get(color_end..identity_end)?;
-                        let diagnostic_depth = mapped.get(identity_end..)?;
                         let rgba = unpack_screenshot_rgba(
                             mapped.get(..color_end)?,
                             width,
@@ -6703,26 +7807,36 @@ impl Renderer {
                             padded_bytes_per_row,
                             bgra,
                         )?;
-                        let diagnostic_identity = unpack_screenshot_diagnostic_rows(
-                            diagnostic_identity,
-                            width,
-                            height,
-                            16,
-                            diagnostic_identity_padded_bytes_per_row,
-                        )?;
-                        let diagnostic_depth = unpack_screenshot_diagnostic_rows(
-                            diagnostic_depth,
-                            width,
-                            height,
-                            4,
-                            diagnostic_depth_padded_bytes_per_row,
-                        )?;
-                        let terrain_diagnostic_u32x5 = interleave_screenshot_diagnostic(
-                            &diagnostic_identity,
-                            &diagnostic_depth,
-                            width,
-                            height,
-                        )?;
+                        let terrain_diagnostic_u32x5 = if diagnostic_identity_buffer_size == 0 {
+                            let bytes = usize::try_from(width)
+                                .ok()?
+                                .checked_mul(usize::try_from(height).ok()?)?
+                                .checked_mul(size_of::<[u32; 5]>())?;
+                            vec![0; bytes]
+                        } else {
+                            let diagnostic_identity = mapped.get(color_end..identity_end)?;
+                            let diagnostic_depth = mapped.get(identity_end..)?;
+                            let diagnostic_identity = unpack_screenshot_diagnostic_rows(
+                                diagnostic_identity,
+                                width,
+                                height,
+                                16,
+                                diagnostic_identity_padded_bytes_per_row,
+                            )?;
+                            let diagnostic_depth = unpack_screenshot_diagnostic_rows(
+                                diagnostic_depth,
+                                width,
+                                height,
+                                4,
+                                diagnostic_depth_padded_bytes_per_row,
+                            )?;
+                            interleave_screenshot_diagnostic(
+                                &diagnostic_identity,
+                                &diagnostic_depth,
+                                width,
+                                height,
+                            )?
+                        };
                         Some(ScreenshotCapture {
                             filename,
                             metadata,
@@ -6995,7 +8109,7 @@ fn draw_spans<'pass>(
 /// Builds a screenshot-only owner sidecar mirroring the resident arena slots.
 ///
 /// Ordinary frames retain the compact 24-byte terrain instance. On an explicit capture request,
-/// the directory's authoritative slice identities are expanded into an 8-byte transient vertex
+/// the directory's authoritative slice identities are expanded into a 16-byte transient vertex
 /// stream. This avoids permanently increasing terrain GPU memory merely to support diagnostics.
 fn screenshot_diagnostic_owner_buffers(
     device: &Device,
@@ -7005,38 +8119,56 @@ fn screenshot_diagnostic_owner_buffers(
     label: &'static str,
 ) -> Option<Vec<Buffer>> {
     let quad_bytes = size_of::<GpuQuad>() as u64;
-    let owner_bytes = size_of::<[u32; 2]>() as u64;
-    let buffers = arena_buffers
+    let owner_bytes = size_of::<[u32; 4]>() as u64;
+    let mut packed = arena_buffers
         .iter()
         .map(|base| {
             let slots = base.size().div_ceil(quad_bytes);
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: slots.saturating_mul(owner_bytes).max(owner_bytes),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
+            usize::try_from(slots)
+                .ok()
+                .map(|slots| vec![[0u32; 4]; slots])
         })
-        .collect::<Vec<_>>();
+        .collect::<Option<Vec<_>>>()?;
     for (key, chunk) in chunks {
-        let owner_buffer = buffers.get(chunk.allocation.page as usize)?;
+        let owners = packed.get_mut(chunk.allocation.page as usize)?;
         for slice in &chunk.slices {
             let base_offset =
                 u64::from(chunk.allocation.offset).checked_add(u64::from(slice.relative_offset))?;
             if !base_offset.is_multiple_of(quad_bytes) {
                 return None;
             }
-            let owner_offset = (base_offset / quad_bytes).checked_mul(owner_bytes)?;
-            let owner = diagnostic_owner_for_slice(*key);
-            let owners = vec![owner; slice.quad_count as usize];
-            let bytes = bytemuck::cast_slice(&owners);
-            if owner_offset.checked_add(bytes.len() as u64)? > owner_buffer.size() {
-                return None;
-            }
-            queue.write_buffer(owner_buffer, owner_offset, bytes);
+            let owner_offset = usize::try_from(base_offset / quad_bytes).ok()?;
+            let owner_id = diagnostic_owner_for_slice(*key);
+            let source = if key.0 == 0 {
+                DIAGNOSTIC_SOURCE_CANONICAL
+            } else {
+                DIAGNOSTIC_SOURCE_FRONTIER
+            };
+            let owner = [owner_id[0], owner_id[1], source, 0];
+            let end = owner_offset.checked_add(slice.quad_count as usize)?;
+            owners.get_mut(owner_offset..end)?.fill(owner);
         }
     }
-    Some(buffers)
+    Some(
+        arena_buffers
+            .iter()
+            .zip(packed)
+            .map(|(base, owners)| {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: base
+                        .size()
+                        .div_ceil(quad_bytes)
+                        .saturating_mul(owner_bytes)
+                        .max(owner_bytes),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&owners));
+                buffer
+            })
+            .collect(),
+    )
 }
 
 fn screenshot_virtual_terrain_owner_buffers(
@@ -7049,51 +8181,69 @@ fn screenshot_virtual_terrain_owner_buffers(
 ) -> Option<Vec<Buffer>> {
     let primitive_bytes = size_of::<GpuQuad>() as u64;
     debug_assert_eq!(primitive_bytes, size_of::<GpuTerrainVertex>() as u64);
-    let owner_bytes = size_of::<[u32; 2]>() as u64;
-    let buffers = arena_buffers
+    let owner_bytes = size_of::<[u32; 4]>() as u64;
+    let mut packed = arena_buffers
         .iter()
         .map(|base| {
             let slots = base.size().div_ceil(primitive_bytes);
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: slots.saturating_mul(owner_bytes).max(owner_bytes),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
+            usize::try_from(slots)
+                .ok()
+                .map(|slots| vec![[0u32; 4]; slots])
         })
-        .collect::<Vec<_>>();
+        .collect::<Option<Vec<_>>>()?;
     for (key, page) in pages.iter().chain(retired_published_pages) {
-        let owner = diagnostic_owner_id(
+        let owner_id = diagnostic_owner_id(
             DIAGNOSTIC_VIRTUAL_REPRESENTATION_BASE + u32::from(page.representation as u8),
             u32::from(key.level),
             key.coord[0],
             key.coord[1],
             key.coord[2],
         );
+        let owner = [
+            owner_id[0],
+            owner_id[1],
+            (u32::from(page.representation as u8) + 1) | (u32::from(key.level) << 4),
+            0,
+        ];
         let (allocation, count) = match &page.mesh {
             VirtualTerrainGpuMesh::Empty => continue,
             VirtualTerrainGpuMesh::Surface(mesh) => (mesh.allocation, mesh.quad_count),
             VirtualTerrainGpuMesh::Triangle(mesh) => (mesh.allocation, mesh.vertex_count),
         };
-        let owner_buffer = buffers.get(allocation.page as usize)?;
+        let owners = packed.get_mut(allocation.page as usize)?;
         let base_offset = u64::from(allocation.offset);
         if !base_offset.is_multiple_of(primitive_bytes) {
             return None;
         }
-        let owner_offset = (base_offset / primitive_bytes).checked_mul(owner_bytes)?;
-        let owners = vec![owner; count as usize];
-        let bytes = bytemuck::cast_slice(&owners);
-        if owner_offset.checked_add(bytes.len() as u64)? > owner_buffer.size() {
-            return None;
-        }
-        queue.write_buffer(owner_buffer, owner_offset, bytes);
+        let owner_offset = usize::try_from(base_offset / primitive_bytes).ok()?;
+        let end = owner_offset.checked_add(count as usize)?;
+        owners.get_mut(owner_offset..end)?.fill(owner);
     }
-    Some(buffers)
+    Some(
+        arena_buffers
+            .iter()
+            .zip(packed)
+            .map(|(base, owners)| {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: base
+                        .size()
+                        .div_ceil(primitive_bytes)
+                        .saturating_mul(owner_bytes)
+                        .max(owner_bytes),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&owners));
+                buffer
+            })
+            .collect(),
+    )
 }
 
 fn diagnostic_owner_range(span: &DrawSpan) -> Option<std::ops::Range<u64>> {
     let quad_bytes = size_of::<GpuQuad>() as u64;
-    let owner_bytes = size_of::<[u32; 2]>() as u64;
+    let owner_bytes = size_of::<[u32; 4]>() as u64;
     let base_offset = u64::from(span.offset);
     if !base_offset.is_multiple_of(quad_bytes) {
         return None;
@@ -7105,7 +8255,7 @@ fn diagnostic_owner_range(span: &DrawSpan) -> Option<std::ops::Range<u64>> {
 
 fn diagnostic_triangle_owner_range(span: &TerrainTriangleDrawSpan) -> Option<std::ops::Range<u64>> {
     let vertex_bytes = size_of::<GpuTerrainVertex>() as u64;
-    let owner_bytes = size_of::<[u32; 2]>() as u64;
+    let owner_bytes = size_of::<[u32; 4]>() as u64;
     let base_offset = u64::from(span.offset);
     if !base_offset.is_multiple_of(vertex_bytes) {
         return None;
@@ -7287,6 +8437,8 @@ fn fingerprint_value(fingerprint: u64, value: u64) -> u64 {
 const DIAGNOSTIC_FNV32_OFFSET: u32 = 2_166_136_261;
 const DIAGNOSTIC_FNV32_PRIME: u32 = 16_777_619;
 const DIAGNOSTIC_VIRTUAL_REPRESENTATION_BASE: u32 = 16;
+const DIAGNOSTIC_SOURCE_CANONICAL: u32 = 1;
+const DIAGNOSTIC_SOURCE_FRONTIER: u32 = 8;
 
 fn diagnostic_owner_id(
     representation_kind: u32,
@@ -8705,18 +9857,18 @@ fn terrain_triangle_layout() -> wgpu::VertexBufferLayout<'static> {
 }
 
 fn terrain_triangle_diagnostic_owner_layout() -> wgpu::VertexBufferLayout<'static> {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![3 => Uint32x2];
+    const ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![3 => Uint32x4];
     wgpu::VertexBufferLayout {
-        array_stride: size_of::<[u32; 2]>() as wgpu::BufferAddress,
+        array_stride: size_of::<[u32; 4]>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &ATTRIBUTES,
     }
 }
 
 fn diagnostic_owner_layout() -> wgpu::VertexBufferLayout<'static> {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![4 => Uint32x2];
+    const ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![4 => Uint32x4];
     wgpu::VertexBufferLayout {
-        array_stride: size_of::<[u32; 2]>() as wgpu::BufferAddress,
+        array_stride: size_of::<[u32; 4]>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &ATTRIBUTES,
     }
@@ -9042,7 +10194,9 @@ fn screenshot_virtual_terrain_manifest_json(
             encoded,
             concat!(
                 r#"{{"level":{},"coord":{:?},"revision":"{}","contentFingerprint":"{}","#,
-                r#""representation":"{}","representationKind":{}}}"#
+                r#""representation":"{}","representationKind":{},"heightfieldExactNeighborSides":{:?},"#,
+                r#""heightfieldFinerNeighborSides":{:?},"heightfieldGroundCornerBits":{:?},"#,
+                r#""heightfieldGroundBoundaryBits":{:?}}}"#
             ),
             key.level,
             key.coord,
@@ -9050,6 +10204,10 @@ fn screenshot_virtual_terrain_manifest_json(
             hex_bytes(&page.content_fingerprint),
             virtual_representation_label(page.representation),
             page.representation as u8,
+            page.heightfield_exact_neighbor_sides,
+            page.heightfield_finer_neighbor_sides,
+            page.heightfield_ground_corner_bits,
+            page.heightfield_ground_boundary_bits,
         );
     }
     encoded.push_str("],\"retiredPublishedPages\":[");
@@ -9061,7 +10219,9 @@ fn screenshot_virtual_terrain_manifest_json(
             encoded,
             concat!(
                 r#"{{"level":{},"coord":{:?},"revision":"{}","contentFingerprint":"{}","#,
-                r#""representation":"{}","representationKind":{}}}"#
+                r#""representation":"{}","representationKind":{},"heightfieldExactNeighborSides":{:?},"#,
+                r#""heightfieldFinerNeighborSides":{:?},"heightfieldGroundCornerBits":{:?},"#,
+                r#""heightfieldGroundBoundaryBits":{:?}}}"#
             ),
             key.level,
             key.coord,
@@ -9069,6 +10229,10 @@ fn screenshot_virtual_terrain_manifest_json(
             hex_bytes(&page.content_fingerprint),
             virtual_representation_label(page.representation),
             page.representation as u8,
+            page.heightfield_exact_neighbor_sides,
+            page.heightfield_finer_neighbor_sides,
+            page.heightfield_ground_corner_bits,
+            page.heightfield_ground_boundary_bits,
         );
     }
     encoded.push_str("],\"gpuFeedback\":");
@@ -9115,7 +10279,7 @@ fn screenshot_virtual_cut_json(cut: Option<&VirtualTerrainCut>) -> String {
         concat!(
             r#"{{"fingerprint":"{:016x}","renderable":{},"visitedNodes":{},"#,
             r#""selectedPrimitives":{},"selectedEncodedBytes":{},"feedbackOverflow":{},"#,
-            r#""selectionOverflow":{},"traversalOverflow":{},"incoherentReplacementGroups":{},"#,
+            r#""selectionOverflow":{},"traversalOverflow":{},"incoherentReplacementGroups":{},"exactSurfaceLodDiscontinuities":{},"#,
             r#""selectedPages":["#
         ),
         cut.fingerprint,
@@ -9127,6 +10291,7 @@ fn screenshot_virtual_cut_json(cut: Option<&VirtualTerrainCut>) -> String {
         cut.selection_overflow,
         cut.traversal_overflow,
         cut.incoherent_replacement_groups,
+        cut.exact_surface_lod_discontinuities,
     );
     write_virtual_page_keys(&mut encoded, &cut.selected_pages);
     encoded.push_str("],\"requestedPages\":[");
@@ -9143,6 +10308,8 @@ fn screenshot_virtual_cut_json(cut: Option<&VirtualTerrainCut>) -> String {
             hex_bytes(&request.content_fingerprint),
         );
     }
+    encoded.push_str("],\"refinementRoots\":[");
+    write_virtual_page_keys(&mut encoded, &cut.refinement_roots);
     encoded.push_str("],\"ownerlessRoots\":[");
     write_virtual_page_keys(&mut encoded, &cut.ownerless_roots);
     encoded.push_str("]}");
@@ -9238,6 +10405,10 @@ mod tests {
                 revision: 17,
                 content_fingerprint: [0xab; 32],
                 representation: TerrainPageRepresentationKind::SparseVoxelBrick,
+                heightfield_exact_neighbor_sides: [false; 4],
+                heightfield_finer_neighbor_sides: [false; 4],
+                heightfield_ground_corner_bits: [0; 4],
+                heightfield_ground_boundary_bits: [[0; TERRAIN_PAGE_EDGE_SAMPLES as usize + 1]; 4],
                 mesh: VirtualTerrainGpuMesh::Empty,
             },
         );
@@ -9254,6 +10425,7 @@ mod tests {
             selection_overflow: false,
             traversal_overflow: false,
             incoherent_replacement_groups: 0,
+            exact_surface_lod_discontinuities: 0,
         };
         let feedback = GpuVirtualTerrainFeedback {
             submission_id: 8,
@@ -9952,6 +11124,7 @@ mod tests {
             selection_overflow: false,
             traversal_overflow: false,
             incoherent_replacement_groups: 0,
+            exact_surface_lod_discontinuities: 0,
         };
         let certified = GpuVirtualTerrainFeedback {
             submission_id: 9,
@@ -10123,7 +11296,8 @@ mod tests {
         assert!(!stepped_gpu.is_empty());
         assert!(stepped_gpu.iter().all(|quad| {
             quad.extent_voxels.into_iter().all(|extent| extent > 0)
-                && quad.material_face & !GPU_FACE_MASK == u32::from(Material::Stone.id())
+                && quad.material_face & 0xffff == u32::from(Material::Stone.id())
+                && quad.material_face & (1 << 31) != 0
         }));
 
         let sparse = voxels_world::build_compact_exact_terrain_page(
@@ -10153,7 +11327,8 @@ mod tests {
         assert!(!sparse_gpu.is_empty());
         assert!(sparse_gpu.iter().all(|quad| {
             quad.extent_voxels.into_iter().all(|extent| extent > 0)
-                && quad.material_face & !GPU_FACE_MASK == u32::from(Material::Basalt.id())
+                && quad.material_face & 0xffff == u32::from(Material::Basalt.id())
+                && quad.material_face & (1 << 31) != 0
         }));
     }
 
@@ -10195,12 +11370,69 @@ mod tests {
     }
 
     #[test]
-    fn level_zero_heightfield_emits_axis_aligned_microvoxel_steps() {
-        let key = TerrainPageKey::surface(0, -1, 1);
+    fn exact_surface_heightfield_emits_only_axis_aligned_voxel_faces() {
+        let key = TerrainPageKey::surface(0, 3, -2);
         let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
-        let mut samples = vec![
+        let samples = (0..edge * edge)
+            .map(|index| {
+                let x = index % edge;
+                let z = index / edge;
+                voxels_world::SurfaceSample {
+                    height: i32::try_from((x / 3 + z / 5) % 7).unwrap(),
+                    material: if (x / 2 + z / 4).is_multiple_of(2) {
+                        Material::Grass
+                    } else {
+                        Material::Dirt
+                    },
+                    water_level: None,
+                    region: SurfaceRegion::VerdantForest,
+                    moisture: 0.5,
+                    temperature: 0.5,
+                    ridge: 0.0,
+                    route: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let page = voxels_world::build_sampled_heightfield_terrain_page(
+            voxels_world::WorldSourceIdentityHash::from_bytes([37; 32]),
+            key,
+            4,
+            &samples,
+            voxels_world::TerrainErrorBounds::EXACT,
+        )
+        .unwrap();
+
+        let vertices = virtual_triangle_gpu_vertices(&page, None).unwrap();
+
+        assert!(!vertices.is_empty());
+        assert!(vertices.iter().all(|vertex| {
+            vertex
+                .position
+                .iter()
+                .all(|coordinate| coordinate.fract() == 0.0)
+                && vertex
+                    .normal
+                    .iter()
+                    .take(3)
+                    .filter(|component| **component != 0)
+                    .count()
+                    == 1
+        }));
+        assert!(vertices.chunks_exact(3).all(|triangle| {
+            (0..3).any(|axis| {
+                triangle[0].position[axis] == triangle[1].position[axis]
+                    && triangle[1].position[axis] == triangle[2].position[axis]
+            })
+        }));
+    }
+
+    #[test]
+    fn exact_heightfield_uses_compact_integer_anchored_conforming_instances() {
+        let key = TerrainPageKey::surface(0, -3, 2);
+        let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+        let samples = vec![
             voxels_world::SurfaceSample {
-                height: 0,
+                height: 7,
                 material: Material::Grass,
                 water_level: None,
                 region: SurfaceRegion::VerdantForest,
@@ -10211,44 +11443,174 @@ mod tests {
             };
             edge * edge
         ];
-        samples[1].height = 2;
-        samples[1].material = Material::Dirt;
         let page = voxels_world::build_sampled_heightfield_terrain_page(
-            voxels_world::WorldSourceIdentityHash::from_bytes([37; 32]),
+            voxels_world::WorldSourceIdentityHash::from_bytes([41; 32]),
             key,
             5,
             &samples,
             voxels_world::TerrainErrorBounds::EXACT,
         )
         .unwrap();
-        let vertices = virtual_triangle_gpu_vertices(&page, None).unwrap();
+        let TerrainPageRepresentation::HeightfieldGrid(grid) = &page.representation else {
+            panic!("exact sampled surface must remain a heightfield");
+        };
+        let heightfield = unconstrained_virtual_heightfield_samples(grid);
+        let quads = virtual_microvoxel_gpu_quads(&page, grid, &heightfield)
+            .unwrap()
+            .expect("flat exact water-free heightfield is compactable");
+        let vertices = virtual_triangle_gpu_vertices(&page, Some(&heightfield)).unwrap();
+
+        assert_eq!(
+            quads.len(),
+            TERRAIN_PAGE_EDGE_SAMPLES as usize * 4,
+            "the flat page stores one instance per unit perimeter segment"
+        );
+        assert!(
+            quads
+                .iter()
+                .all(|quad| quad.extent_voxels[0] & CANONICAL_TRIANGLE_FLAG != 0)
+        );
+        assert!(quads.iter().all(|quad| {
+            (quad.extent_voxels[1] >> CANONICAL_TRIANGLE_ANCHOR_SHIFT) & 7
+                == CANONICAL_TRIANGLE_LATTICE_ANCHOR
+                && (quad.ao >> CANONICAL_TRIANGLE_ANCHOR_U_SHIFT) & 63 == 1
+                && (quad.ao >> CANONICAL_TRIANGLE_ANCHOR_V_SHIFT) & 63 == 1
+        }));
+        assert_eq!(
+            vertices.len(),
+            quads.len() * 3,
+            "compact instances retain the same conforming triangle count without triplicated vertices"
+        );
+
+        let mut parent_constrained = heightfield;
+        parent_constrained.ground[0] = 7.5;
+        assert!(
+            virtual_microvoxel_gpu_quads(&page, grid, &parent_constrained)
+                .unwrap()
+                .is_some(),
+            "the compact exact path must apply the same 10 cm rounding as the triangle fallback"
+        );
+    }
+
+    #[test]
+    fn level_one_boundary_cell_exposes_ten_centimetre_shared_vertices() {
+        let key = TerrainPageKey::surface(1, 1, -1);
+        let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+        let samples = (0..edge * edge)
+            .map(|index| {
+                let x = index % edge;
+                let z = index / edge;
+                voxels_world::SurfaceSample {
+                    height: i32::try_from(x * 2 + z).unwrap(),
+                    material: Material::Grass,
+                    water_level: None,
+                    region: SurfaceRegion::VerdantForest,
+                    moisture: 0.5,
+                    temperature: 0.5,
+                    ridge: 0.0,
+                    route: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let page = voxels_world::build_sampled_heightfield_terrain_page(
+            voxels_world::WorldSourceIdentityHash::from_bytes([38; 32]),
+            key,
+            4,
+            &samples,
+            voxels_world::TerrainErrorBounds::EXACT,
+        )
+        .unwrap();
+
+        let mut vertices = Vec::new();
+        push_virtual_heightfield_boundary_cell(
+            &mut vertices,
+            [
+                [page.bounds.min.x as f32, 0.0, page.bounds.min.z as f32],
+                [
+                    (page.bounds.min.x + 2) as f32,
+                    2.0,
+                    page.bounds.min.z as f32,
+                ],
+                [
+                    (page.bounds.min.x + 2) as f32,
+                    3.0,
+                    (page.bounds.min.z + 2) as f32,
+                ],
+                [
+                    page.bounds.min.x as f32,
+                    1.0,
+                    (page.bounds.min.z + 2) as f32,
+                ],
+            ],
+            [true, false, false, false],
+            true,
+            Material::Grass,
+            key,
+        )
+        .unwrap();
+
         assert!(!vertices.is_empty());
-        assert!(vertices.iter().all(|vertex| {
-            vertex
-                .position
-                .iter()
-                .all(|component| component.fract() == 0.0)
-        }));
-        assert!(vertices.iter().all(|vertex| {
-            vertex
-                .normal
-                .iter()
-                .take(3)
-                .filter(|component| **component != 0)
-                .count()
-                == 1
-        }));
         assert!(
             vertices
                 .iter()
-                .any(|vertex| vertex.normal[0] != 0 || vertex.normal[2] != 0),
-            "a two-voxel height discontinuity must emit a vertical riser"
+                .filter(|vertex| {
+                    vertex.position[0] == page.bounds.min.x as f32
+                        || vertex.position[0] == page.bounds.max.x as f32
+                        || vertex.position[2] == page.bounds.min.z as f32
+                        || vertex.position[2] == page.bounds.max.z as f32
+                })
+                .all(|vertex| vertex
+                    .position
+                    .iter()
+                    .all(|coordinate| coordinate.fract() == 0.0))
         );
         assert!(
             vertices
                 .iter()
-                .any(|vertex| vertex.material == u32::from(Material::Dirt.id())),
-            "the higher exact sample must own the riser material"
+                .any(|vertex| (vertex.position[0] as i32 - page.bounds.min.x).rem_euclid(2) == 1),
+            "L1 presentation must materialize the 10 cm points between transmitted samples"
+        );
+    }
+
+    #[test]
+    fn reverse_boundary_sides_keep_the_exact_lower_coordinate_height_owner() {
+        let key = TerrainPageKey::surface(1, 0, 0);
+        let mut vertices = Vec::new();
+        push_virtual_heightfield_boundary_cell(
+            &mut vertices,
+            [
+                [0.0, 0.0, 0.0],
+                [2.0, 2.0, 0.0],
+                [2.0, 4.0, 2.0],
+                [0.0, 0.0, 2.0],
+            ],
+            [false, false, true, false],
+            true,
+            Material::Grass,
+            key,
+        )
+        .unwrap();
+
+        let has_boundary_edge = |left_x: f32, right_x: f32, height: f32| {
+            vertices.chunks_exact(3).any(|triangle| {
+                let boundary = triangle
+                    .iter()
+                    .filter(|vertex| vertex.position[2] == 2.0)
+                    .map(|vertex| vertex.position)
+                    .collect::<Vec<_>>();
+                boundary
+                    .iter()
+                    .any(|vertex| vertex[0] == left_x && vertex[1] == height)
+                    && boundary
+                        .iter()
+                        .any(|vertex| vertex[0] == right_x && vertex[1] == height)
+            })
+        };
+        assert!(has_boundary_edge(2.0, 1.0, 2.0));
+        assert!(has_boundary_edge(1.0, 0.0, 0.0));
+        assert!(
+            !has_boundary_edge(2.0, 1.0, 4.0),
+            "positive-Z traversal must not shift the L0 staircase by one voxel"
         );
     }
 
@@ -10322,6 +11684,115 @@ mod tests {
             constrained_virtual_heightfield_samples(&hierarchy, &children[0]).unwrap();
         assert_eq!(constrained.ground[1], 1.5);
         assert_eq!(constrained.ground[1 + edge], 10.0);
+    }
+
+    #[test]
+    fn level_zero_heightfield_restores_only_the_boundary_owned_with_an_exact_neighbor() {
+        let source = voxels_world::WorldSourceIdentityHash::from_bytes([32; 32]);
+        let parent_key = TerrainPageKey::surface(1, 0, 0);
+        let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+        let sample = |height| voxels_world::SurfaceSample {
+            height,
+            material: Material::Grass,
+            water_level: None,
+            region: SurfaceRegion::VerdantForest,
+            moisture: 0.5,
+            temperature: 0.5,
+            ridge: 0.0,
+            route: None,
+        };
+        let parent = voxels_world::build_sampled_heightfield_terrain_page(
+            source,
+            parent_key,
+            1,
+            &vec![sample(2); edge * edge],
+            voxels_world::TerrainErrorBounds::EXACT,
+        )
+        .unwrap();
+        let child_keys = parent_key.refinement_children().unwrap();
+        let heightfield = voxels_world::build_sampled_heightfield_terrain_page(
+            source,
+            child_keys[0],
+            1,
+            &vec![sample(9); edge * edge],
+            voxels_world::TerrainErrorBounds::EXACT,
+        )
+        .unwrap();
+        let exact = voxels_world::build_exact_surface_terrain_page(
+            source,
+            child_keys[1],
+            1,
+            [-4, 12],
+            |coord| {
+                if coord.y <= 9 {
+                    Material::Grass
+                } else {
+                    Material::Air
+                }
+            },
+        )
+        .unwrap();
+        let other_children = child_keys[2..]
+            .iter()
+            .map(|key| {
+                voxels_world::build_sampled_heightfield_terrain_page(
+                    source,
+                    *key,
+                    1,
+                    &vec![sample(9); edge * edge],
+                    voxels_world::TerrainErrorBounds::EXACT,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let pages = [parent.clone(), heightfield.clone(), exact]
+            .into_iter()
+            .chain(other_children)
+            .collect::<Vec<_>>();
+        let directory = voxels_world::TerrainHierarchyDirectoryV1::from_surface_refinement_pages(
+            parent_key, &pages,
+        )
+        .unwrap();
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        hierarchy.register_region_directory(&directory).unwrap();
+        hierarchy.install_page(parent).unwrap();
+
+        let constrained =
+            constrained_virtual_heightfield_samples(&hierarchy, &heightfield).unwrap();
+        assert_eq!(constrained.exact_neighbor_sides, [false, true, false, true]);
+        assert_eq!(constrained.ground[edge - 1], 3.0);
+        for z in 1..edge {
+            assert_eq!(constrained.ground[(edge - 1) + z * edge], 10.0);
+        }
+        assert_eq!(constrained.ground[(edge - 1) * edge], 3.0);
+        for x in 1..edge {
+            assert_eq!(constrained.ground[x + (edge - 1) * edge], 10.0);
+        }
+        assert_eq!(constrained.ground[0], 3.0);
+
+        let TerrainPageRepresentation::HeightfieldGrid(grid) = &heightfield.representation else {
+            panic!("sampled child must be a heightfield");
+        };
+        let parent_edge = VirtualHeightfieldSamples {
+            ground: vec![3.0; edge * edge],
+            water: vec![None; edge * edge],
+            exact_neighbor_sides: [false; 4],
+            finer_neighbor_sides: [false; 4],
+        };
+        let mixed_corner = restore_exact_neighbor_heightfield_boundaries(
+            &heightfield,
+            grid,
+            &parent_edge,
+            [false, true, false, false],
+        );
+        assert_eq!(mixed_corner.ground[(edge - 1) + edge], 10.0);
+        assert_eq!(
+            mixed_corner.ground[edge - 1],
+            3.0,
+            "an exact X side must not overwrite the corner owned by a coarse Z transition"
+        );
+        assert_eq!(mixed_corner.ground[(edge - 1) + (edge - 1) * edge], 3.0);
     }
 
     #[test]
@@ -10430,11 +11901,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 3.0, 0.0]]
         );
-        assert!(
-            vertices
-                .iter()
-                .all(|vertex| vertex.material == u32::from(Material::Basalt.id()))
-        );
+        assert!(vertices.iter().all(|vertex| vertex.material & 0xffff
+            == u32::from(Material::Basalt.id())
+            && vertex.material & (1 << 31) != 0));
         assert!(
             vertices
                 .iter()
@@ -10456,6 +11925,7 @@ mod tests {
             selection_overflow: false,
             traversal_overflow: false,
             incoherent_replacement_groups: 0,
+            exact_surface_lod_discontinuities: 0,
         }
     }
 

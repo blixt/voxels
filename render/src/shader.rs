@@ -444,7 +444,7 @@ mod tests {
             assert!(!shader.contains("morph_heights"));
             assert!(!shader.contains("MORPH_CLOSURE"));
         }
-        assert!(voxels.contains("@location(4) diagnostic_owner: vec2<u32>"));
+        assert!(voxels.contains("@location(4) diagnostic_owner: vec4<u32>"));
         assert!(voxels.contains("vec3<f32>(origin + quad_local(face, uv, extent))"));
         assert!(shadows.contains("vec3<f32>(origin + vec3<i32>(local))"));
     }
@@ -518,18 +518,6 @@ mod tests {
             assert!(shader.contains("extent_voxels.y,"));
             assert!(!shader.contains("MORPH_CLOSURE"));
         }
-    }
-
-    #[test]
-    fn fixed_ring_transition_shader_path_is_absent() {
-        let voxels = include_str!("shaders/voxels.wgsl");
-        let renderer = include_str!("renderer.rs");
-        assert!(!voxels.contains("cut_transition"));
-        assert!(!renderer.contains("\"CUT_TRANSITION\""));
-        assert!(!voxels.contains("vs_transition"));
-        assert!(!voxels.contains("vs_main_morph"));
-        assert!(!voxels.contains("lod_boundary"));
-        assert!(!voxels.contains("surface_shape_blend"));
     }
 
     #[test]

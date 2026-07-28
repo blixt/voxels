@@ -27,7 +27,7 @@ const INVALID_NODE: u32 = u32::MAX;
 const GPU_TRAVERSAL_OVERFLOW_FEEDBACK: u32 = 1 << 1;
 const GPU_TRAVERSAL_READBACK_SLOTS: usize = 3;
 pub(crate) const VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES: u64 = 64 * 1_024 * 1_024;
-pub(crate) const VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES: u64 = 64 * 1_024 * 1_024;
+pub(crate) const VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES: u64 = 96 * 1_024 * 1_024;
 pub(crate) const VIRTUAL_TERRAIN_COMPACT_WATER_SURFACE_BYTES: u64 = 16 * 1_024 * 1_024;
 pub(crate) const VIRTUAL_TERRAIN_COMPACT_WATER_TRIANGLE_BYTES: u64 = 16 * 1_024 * 1_024;
 const VIRTUAL_TERRAIN_SURFACE_BUFFER_BYTES: u64 =
@@ -241,6 +241,7 @@ pub(crate) struct VirtualTerrainGpuControl {
     readback_slots: Vec<TraversalReadbackSlot>,
     next_readback_slot: usize,
     next_submission_id: u64,
+    minimum_feedback_submission_id: Arc<Mutex<u64>>,
     feedback: Arc<Mutex<Option<RawGpuVirtualTerrainFeedback>>>,
 }
 
@@ -516,6 +517,7 @@ impl VirtualTerrainGpuControl {
             readback_slots,
             next_readback_slot: 0,
             next_submission_id: 1,
+            minimum_feedback_submission_id: Arc::new(Mutex::new(1)),
             feedback: Arc::new(Mutex::new(None)),
         })
     }
@@ -666,9 +668,7 @@ impl VirtualTerrainGpuControl {
         self.root_indices = root_indices;
         self.prior_refined = prior_refined;
         self.geometry_pages = geometry_pages;
-        if let Ok(mut feedback) = self.feedback.lock() {
-            *feedback = None;
-        }
+        self.invalidate_feedback();
         Ok(())
     }
 
@@ -700,9 +700,7 @@ impl VirtualTerrainGpuControl {
                     .is_some_and(|root| key.ancestor_at(root.level) == Some(*root))
             })
         });
-        if let Ok(mut feedback) = self.feedback.lock() {
-            *feedback = None;
-        }
+        self.invalidate_feedback();
         Ok(())
     }
 
@@ -1038,11 +1036,15 @@ impl VirtualTerrainGpuControl {
         let callback_buffer = slot.buffer.clone();
         let available = Arc::clone(&slot.available);
         let feedback = Arc::clone(&self.feedback);
+        let minimum_feedback_submission_id = Arc::clone(&self.minimum_feedback_submission_id);
         let capacity = self.capacity;
         encoder.map_buffer_on_submit(&slot.buffer, wgpu::MapMode::Read, .., move |result| {
             if result.is_ok()
                 && let Ok(mapped) = callback_buffer.get_mapped_range(..)
                 && let Some(parsed) = parse_feedback(&mapped, capacity)
+                && minimum_feedback_submission_id
+                    .lock()
+                    .is_ok_and(|minimum| feedback_submission_id(&parsed) >= *minimum)
                 && let Ok(mut destination) = feedback.lock()
             {
                 let is_newer = destination.as_ref().is_none_or(|current| {
@@ -1059,6 +1061,10 @@ impl VirtualTerrainGpuControl {
 
     pub(crate) fn latest_feedback(&self) -> Option<GpuVirtualTerrainFeedback> {
         let raw = self.feedback.lock().ok()?.clone()?;
+        let minimum = *self.minimum_feedback_submission_id.lock().ok()?;
+        if feedback_submission_id(&raw) < minimum {
+            return None;
+        }
         Some(GpuVirtualTerrainFeedback {
             submission_id: feedback_submission_id(&raw),
             oracle_fingerprint: join_u64(raw.counters.oracle_fingerprint),
@@ -1083,6 +1089,15 @@ impl VirtualTerrainGpuControl {
             compacted_pages: raw.compaction.copied_pages,
             compaction_overflow_flags: raw.compaction.overflow_flags,
         })
+    }
+
+    pub(crate) fn invalidate_feedback(&mut self) {
+        if let Ok(mut minimum) = self.minimum_feedback_submission_id.lock() {
+            *minimum = self.next_submission_id;
+        }
+        if let Ok(mut feedback) = self.feedback.lock() {
+            *feedback = None;
+        }
     }
 }
 
@@ -1231,7 +1246,7 @@ fn pack_view(
             u32::from(view.force_exact_leaves),
             0,
             u32::try_from(node_count).map_err(|_| VirtualTerrainGpuError::InvalidView)?,
-            0,
+            (view.exact_surface_radius_metres as f32).to_bits(),
         ],
     })
 }
@@ -1534,6 +1549,7 @@ mod tests {
                 refine_above_pixels: 0.65,
                 coarsen_below_pixels: 0.35,
                 wet_specular_sensitivity: 1.0,
+                exact_surface_radius_metres: 12.8,
                 force_exact_leaves: false,
             },
             3,
@@ -1544,7 +1560,7 @@ mod tests {
         assert_eq!(packed.camera_near[0], -1961.5);
         assert_eq!(packed.camera_near[2], -1616.0);
         assert_eq!(packed.counts_flags, [3, 32, 7, 48]);
-        assert_eq!(packed.options, [0, 0, 64, 0]);
+        assert_eq!(packed.options, [0, 0, 64, 12.8_f32.to_bits()]);
         assert!(packed.projection_thresholds[0] > 0.0);
     }
 }

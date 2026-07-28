@@ -32,8 +32,8 @@ struct VertexOut {
   @location(5) @interpolate(flat) source: u32,
   @location(6) surface_weather: vec2<f32>,
   // Screenshot-only integer attachment identity. Keeping this as an ordinary flat varying lets
-  // the diagnostic pass execute the exact production vertex path, including morphs and cut
-  // transitions, without changing the visible color pass or maintaining a second geometry model.
+  // the diagnostic pass execute the exact production vertex path without changing the visible
+  // color pass or maintaining a second geometry model.
   @location(7) @interpolate(flat) terrain_identity: vec4<u32>,
 };
 
@@ -208,7 +208,11 @@ fn canonical_triangle_extent(encoded_extent: vec2<u32>) -> vec2<f32> {
   );
 }
 
-fn canonical_triangle_uv(corner: u32, encoded_extent: vec2<u32>) -> vec2<f32> {
+fn canonical_triangle_uv(
+  corner: u32,
+  encoded_extent: vec2<u32>,
+  packed_ao: u32,
+) -> vec2<f32> {
   let extent = canonical_triangle_extent(encoded_extent);
   let width = extent.x;
   let height = extent.y;
@@ -235,11 +239,17 @@ fn canonical_triangle_uv(corner: u32, encoded_extent: vec2<u32>) -> vec2<f32> {
     vec2<f32>(width, height),
     vec2<f32>(0.0, height),
   );
-  let anchor_uv = select(
+  var anchor_uv = select(
     corner_anchors[min(max(anchor_code, 1u), 4u) - 1u],
     extent * 0.5,
     anchor_code == 0u,
   );
+  if anchor_code == 5u {
+    anchor_uv = vec2<f32>(
+      f32((packed_ao >> 8u) & 63u),
+      f32((packed_ao >> 14u) & 63u),
+    );
+  }
   return select(boundary_uv, anchor_uv, corner == 0u);
 }
 
@@ -247,8 +257,9 @@ fn canonical_triangle_local(
   corner: u32,
   encoded_extent: vec2<u32>,
   face: u32,
+  packed_ao: u32,
 ) -> vec3<f32> {
-  let uv = canonical_triangle_uv(corner, encoded_extent);
+  let uv = canonical_triangle_uv(corner, encoded_extent, packed_ao);
   switch face {
     case 0u: { return vec3<f32>(1.0, uv.y, uv.x); }
     case 1u: { return vec3<f32>(0.0, uv.y, uv.x); }
@@ -268,10 +279,14 @@ fn quad_world(
   surface_shape: u32,
   canonical_triangle: bool,
   encoded_extent: vec2<u32>,
+  packed_ao: u32,
 ) -> vec3<f32> {
   var world = vec3<f32>(origin + quad_local(face, uv, extent)) * frame.viewport_voxel.z;
   if canonical_triangle {
-    world = (vec3<f32>(origin) + canonical_triangle_local(corner, encoded_extent, face))
+    world = (
+      vec3<f32>(origin)
+        + canonical_triangle_local(corner, encoded_extent, face, packed_ao)
+    )
       * frame.viewport_voxel.z;
   }
   if surface_shape != 0u && !canonical_triangle {
@@ -287,7 +302,7 @@ fn voxel_vertex(
   extent_voxels: vec2<u32>,
   material_face: u32,
   ao: u32,
-  encoded_owner_id: vec2<u32>,
+  diagnostic_owner: vec4<u32>,
 ) -> VertexOut {
   let face = (material_face >> 16u) & 7u;
   let encoded_source = (material_face >> GPU_SOURCE_SHIFT) & 7u;
@@ -322,6 +337,7 @@ fn voxel_vertex(
     surface_shape,
     canonical_triangle,
     extent_voxels,
+    ao,
   );
   let surface_macro_normal = (ao & 0x01000000u) != 0u;
   var terrain_lighting = vec2<f32>(1.0);
@@ -356,12 +372,19 @@ fn voxel_vertex(
   // Production entry points pass a literal zero owner. Keeping every diagnostic operation inside
   // this branch lets shader specialization eliminate it from ordinary frames; screenshot entry
   // points supply the transient sidecar's non-zero owner.
-  if any(encoded_owner_id != vec2<u32>(0u)) {
+  if any(diagnostic_owner.xy != vec2<u32>(0u)) {
+    let diagnostic_source = diagnostic_owner.z & 15u;
+    let diagnostic_depth = (diagnostic_owner.z >> 4u) & 15u;
+    let descriptor = diagnostic_descriptor(
+      material,
+      select(out.source, diagnostic_source, diagnostic_source != 0u),
+      face,
+    );
     out.terrain_identity = vec4<u32>(
-      encoded_owner_id.x,
-      encoded_owner_id.y,
+      diagnostic_owner.x,
+      diagnostic_owner.y,
       diagnostic_primitive_id(origin, extent_voxels, material_face, ao),
-      diagnostic_descriptor(material, out.source, face),
+      (descriptor & ~0xf0u) | (diagnostic_depth << 4u),
     );
   } else {
     out.terrain_identity = vec4<u32>(0u);
@@ -387,7 +410,7 @@ fn vs_main_fixed(
     extent_voxels,
     material_face,
     ao,
-    vec2<u32>(0u),
+    vec4<u32>(0u),
   );
 }
 
@@ -399,7 +422,7 @@ fn virtual_cluster_vertex(
   position_voxels: vec3<f32>,
   material: u32,
   packed_normal: vec4<f32>,
-  encoded_owner_id: vec2<u32>,
+  diagnostic_owner: vec4<u32>,
 ) -> VertexOut {
   let world = position_voxels * frame.viewport_voxel.z;
   var out: VertexOut;
@@ -411,17 +434,24 @@ fn virtual_cluster_vertex(
   out.terrain_lighting = vec2<f32>(1.0);
   out.source = 8u;
   out.terrain_identity = vec4<u32>(0u);
-  if any(encoded_owner_id != vec2<u32>(0u)) {
+  if any(diagnostic_owner.xy != vec2<u32>(0u)) {
     var primitive = 2166136261u;
     primitive = diagnostic_hash_step(primitive, bitcast<u32>(position_voxels.x));
     primitive = diagnostic_hash_step(primitive, bitcast<u32>(position_voxels.y));
     primitive = diagnostic_hash_step(primitive, bitcast<u32>(position_voxels.z));
     primitive = diagnostic_hash_step(primitive, material);
+    let diagnostic_source = diagnostic_owner.z & 15u;
+    let diagnostic_depth = (diagnostic_owner.z >> 4u) & 15u;
+    let descriptor = diagnostic_descriptor(
+      material,
+      select(8u, diagnostic_source, diagnostic_source != 0u),
+      7u,
+    );
     out.terrain_identity = vec4<u32>(
-      encoded_owner_id.x,
-      encoded_owner_id.y,
+      diagnostic_owner.x,
+      diagnostic_owner.y,
       select(primitive, 1u, primitive == 0u),
-      diagnostic_descriptor(material, 8u, 7u),
+      (descriptor & ~0xf0u) | (diagnostic_depth << 4u),
     );
   }
   out.surface_weather = virtual_cluster_surface_weather(world);
@@ -438,7 +468,7 @@ fn vs_virtual_cluster(
     position_voxels,
     material,
     packed_normal,
-    vec2<u32>(0u),
+    vec4<u32>(0u),
   );
 }
 
@@ -447,7 +477,7 @@ fn vs_virtual_cluster_diagnostic(
   @location(0) position_voxels: vec3<f32>,
   @location(1) material: u32,
   @location(2) packed_normal: vec4<f32>,
-  @location(3) diagnostic_owner: vec2<u32>,
+  @location(3) diagnostic_owner: vec4<u32>,
 ) -> VertexOut {
   return virtual_cluster_vertex(
     position_voxels,
@@ -464,7 +494,7 @@ fn vs_main_fixed_diagnostic(
   @location(1) extent_voxels: vec2<u32>,
   @location(2) material_face: u32,
   @location(3) ao: u32,
-  @location(4) diagnostic_owner: vec2<u32>,
+  @location(4) diagnostic_owner: vec4<u32>,
 ) -> VertexOut {
   return voxel_vertex(
     vertex_index,
