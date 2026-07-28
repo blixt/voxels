@@ -19,9 +19,6 @@ const COLLISION_READINESS_RESERVE_SECONDS: f32 = 1.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const INVENTORY_SWIPE_THRESHOLD_CSS_PIXELS: f32 = 34.0;
 #[cfg(any(target_arch = "wasm32", test))]
-const INTERACTIVE_SURFACE_LOD_LEVELS: usize = 4;
-
-#[cfg(any(target_arch = "wasm32", test))]
 fn presence_heartbeat_expired(
     local_time_ms: f64,
     unanswered_ping_since_ms: f64,
@@ -154,159 +151,6 @@ fn predictive_stream_position(
         horizontal
     };
     position + glam::Vec3::new(lead.x, 0.0, lead.y)
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn predictive_surface_position(
-    position: glam::Vec3,
-    velocity: glam::Vec3,
-    nominal_lookahead_seconds: f32,
-    maximum_lead_metres: f32,
-    fast_travel_threshold_metres_per_second: f32,
-) -> glam::Vec3 {
-    let horizontal = glam::Vec2::new(velocity.x, velocity.z);
-    if horizontal.length() < fast_travel_threshold_metres_per_second || maximum_lead_metres <= 0.0 {
-        return predictive_stream_position(
-            position,
-            velocity,
-            nominal_lookahead_seconds,
-            maximum_lead_metres,
-        );
-    }
-    let lead = horizontal.normalize_or_zero() * maximum_lead_metres;
-    position + glam::Vec3::new(lead.x, 0.0, lead.y)
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn adaptive_surface_cross_radii(
-    configured: [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
-    minimum: [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
-    full_rate_tiles_per_second: f32,
-    velocity: glam::Vec3,
-) -> [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT] {
-    let speed_metres_per_second = glam::Vec2::new(velocity.x, velocity.z).length();
-    std::array::from_fn(|index| {
-        let level = voxels_world::SurfaceLodLevel::ALL[index];
-        let tile_span_metres = level.tile_span_voxels() as f32 * voxels_world::VOXEL_SIZE_METRES;
-        let rate = speed_metres_per_second / tile_span_metres;
-        let blend = (rate / full_rate_tiles_per_second).clamp(0.0, 1.0);
-        (configured[index] as f32 - (configured[index] - minimum[index]) as f32 * blend).ceil()
-            as i32
-    })
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn surface_motion_axis(velocity: glam::Vec3) -> [i32; 2] {
-    let x = velocity.x;
-    let z = velocity.z;
-    if x * x + z * z < 0.25 {
-        return [0, 0];
-    }
-    let absolute_x = x.abs();
-    let absolute_z = z.abs();
-    if absolute_x > absolute_z * 2.0 {
-        [x.signum() as i32, 0]
-    } else if absolute_z > absolute_x * 2.0 {
-        [0, z.signum() as i32]
-    } else {
-        [x.signum() as i32, z.signum() as i32]
-    }
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn surface_offset_in_coverage(
-    dx: i32,
-    dz: i32,
-    longitudinal_radius: i32,
-    cross_radius: i32,
-    motion_axis: [i32; 2],
-) -> bool {
-    if motion_axis == [0, 0] || cross_radius >= longitudinal_radius {
-        return dx.abs().max(dz.abs()) <= longitudinal_radius;
-    }
-    let [axis_x, axis_z] = motion_axis;
-    let norm_squared = i64::from(axis_x * axis_x + axis_z * axis_z);
-    let dx = i64::from(dx);
-    let dz = i64::from(dz);
-    let axis_x = i64::from(axis_x);
-    let axis_z = i64::from(axis_z);
-    let along = dx * axis_x + dz * axis_z;
-    let cross = -dx * axis_z + dz * axis_x;
-    along * along <= i64::from(longitudinal_radius).pow(2) * norm_squared
-        && cross * cross <= i64::from(cross_radius).pow(2) * norm_squared
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SurfaceStreamFocus {
-    current: [voxels_world::SurfaceTileCoord; voxels_world::SURFACE_LOD_LEVEL_COUNT],
-    lead: [voxels_world::SurfaceTileCoord; voxels_world::SURFACE_LOD_LEVEL_COUNT],
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn surface_product_priority(
-    coord: voxels_world::SurfaceTileCoord,
-    focus: SurfaceStreamFocus,
-    interactive_level_count: usize,
-) -> voxels_world::WorldProductPriority {
-    // The full current ancestor chain is a bounded set of eight tiles. If any intermediate parent
-    // waits in prefetch, a fast camera can be forced to display a dramatically coarser ancestor
-    // even though the missing tile is directly under it. The current and predicted ancestor chains
-    // contain at most sixteen tiles together, so both may preempt obsolete breadth without turning
-    // the entire visible corridor into urgent work. Wider background cover stays throttled.
-    if focus.current.contains(&coord) || focus.lead.contains(&coord) {
-        voxels_world::WorldProductPriority::ImmediateSurface
-    } else if usize::from(coord.level.index()) < interactive_level_count {
-        voxels_world::WorldProductPriority::VisibleSurface
-    } else {
-        voxels_world::WorldProductPriority::Prefetch
-    }
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn initialized_surface_level_prefix(previous: usize, ready: usize) -> usize {
-    previous
-        .max(ready)
-        .min(voxels_world::SURFACE_LOD_LEVEL_COUNT)
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn surface_stream_level_order(
-    coord: voxels_world::SurfaceTileCoord,
-    priority: voxels_world::WorldProductPriority,
-    initialized_level_count: usize,
-) -> u8 {
-    let interactive_initialized = initialized_level_count >= INTERACTIVE_SURFACE_LOD_LEVELS;
-    if priority == voxels_world::WorldProductPriority::Prefetch || interactive_initialized {
-        coord.level.index()
-    } else {
-        u8::MAX - coord.level.index()
-    }
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn surface_tile_in_coverage(
-    coord: voxels_world::SurfaceTileCoord,
-    focus: Option<SurfaceStreamFocus>,
-    longitudinal_radii: [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
-    cross_radii: [i32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
-    motion_axis: [i32; 2],
-) -> bool {
-    let Some(focus) = focus else {
-        return false;
-    };
-    let index = coord.level.index() as usize;
-    [focus.current[index], focus.lead[index]]
-        .into_iter()
-        .any(|center| {
-            surface_offset_in_coverage(
-                coord.x - center.x,
-                coord.z - center.z,
-                longitudinal_radii[index],
-                cross_radii[index],
-                motion_axis,
-            )
-        })
 }
 
 /// Canonical chunks intersecting the current body/support, intended movement sweep, or view/edit
@@ -1396,17 +1240,13 @@ mod request_window;
 mod web {
     use crate::presence_remote::RemotePresenceClient;
     use crate::remote::{
-        RemoteChunkCompletion, RemoteEditEvent, RemoteRequestId, RemoteSurfaceCompletion,
-        RemoteSurfaceTicket, RemoteTerrainDirectoryCompletion, RemoteTerrainPageCompletion,
-        RemoteTerrainRegionColumnCompletion, RemoteWorldClient, RemoteWorldError,
+        RemoteChunkCompletion, RemoteEditEvent, RemoteRequestId, RemoteTerrainDirectoryCompletion,
+        RemoteTerrainPageCompletion, RemoteTerrainRegionColumnCompletion, RemoteWorldClient,
+        RemoteWorldError,
     };
     use crate::{
-        ChunkPortalMask, INTERACTIVE_SURFACE_LOD_LEVELS, SurfaceStreamFocus,
-        adaptive_surface_cross_radii, initialized_surface_level_prefix, predictive_stream_position,
-        predictive_surface_position, surface_motion_axis, surface_offset_in_coverage,
-        surface_product_priority, surface_stream_level_order, surface_tile_in_coverage,
-        virtual_terrain_column_corridor, virtual_terrain_column_working_set,
-        virtual_terrain_root_working_set, world_environment_at,
+        ChunkPortalMask, predictive_stream_position, virtual_terrain_column_corridor,
+        virtual_terrain_column_working_set, virtual_terrain_root_working_set, world_environment_at,
     };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
@@ -1435,8 +1275,7 @@ mod web {
     use voxels_render::virtual_terrain::{VirtualTerrainCut, VirtualTerrainView};
     use voxels_runtime::{
         AuthoritativeEditRevisions, ChunkState, CompletionStatus, DirectionalStreamPriority,
-        FrameBudget, StreamConfig, StreamScheduler, SurfaceFocusAction, SurfaceRevisionCache,
-        revision_satisfies,
+        FrameBudget, StreamConfig, StreamScheduler, revision_satisfies,
     };
     use voxels_world::protocol::{
         BrowserUserId, EDIT_CUBE_EDGE_VOXELS, EDIT_CUBE_VOLUME_VOXELS, EDIT_SPHERE_RADIUS_VOXELS,
@@ -1447,10 +1286,9 @@ mod web {
     use voxels_world::{
         AtmosphereSample, BinaryMeshScratch, CHUNK_EDGE, CHUNK_VOXEL_BYTES,
         CINDER_VAULT_PORTAL_COUNT, CaveStreamInterest, Chunk, ChunkCoord, EditMap, Material,
-        MeshedChunk, MeshingHalo, PortalState, SURFACE_LOD_LEVEL_COUNT, SurfaceLodLevel,
-        SurfaceRegion, SurfaceSample, SurfaceTileCoord, TERRAIN_COVERAGE_ROOT_LEVEL,
-        TerrainDemandGroup, TerrainHierarchyNode, TerrainPageDemand, TerrainPageKey,
-        TerrainPageMemoryCache, TerrainPageTransferIdentity, TerrainStreamConfig,
+        MeshedChunk, MeshingHalo, PortalState, SurfaceRegion, SurfaceSample, SurfaceTileCoord,
+        TERRAIN_COVERAGE_ROOT_LEVEL, TerrainDemandGroup, TerrainHierarchyNode, TerrainPageDemand,
+        TerrainPageKey, TerrainPageMemoryCache, TerrainPageTransferIdentity, TerrainStreamConfig,
         TerrainStreamScheduler, VOXEL_SIZE_METRES, VoxelCoord, WorldProductPriority,
         WorldSourceIdentityHash, decode_terrain_page, encode_terrain_page,
         mesh_chunk_binary_with_scratch,
@@ -1482,10 +1320,6 @@ mod web {
         "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,lodIncompleteTransitionEdges,lodCutTransitionActive,lodCutTransitionPhase,virtualTerrainMode,virtualTerrainRegisteredRegions,virtualTerrainDirectoryInFlight,virtualTerrainDirectoryNodes,virtualTerrainResidentPages,virtualTerrainResidentMiB,virtualTerrainResidentPrimitives,virtualTerrainSelectedPages,virtualTerrainRequestedPages,virtualTerrainOwnerlessRoots,virtualTerrainGpuMatchesCpuCut,virtualTerrainStreamPending,virtualTerrainStreamInFlight,virtualTerrainCancellationWasteMiB,virtualTerrainCachePages,virtualTerrainCacheMiB,virtualTerrainColumns,virtualTerrainColumnInFlight,virtualTerrainColumnRevisionFloors,virtualTerrainCurrentColumnKnown,virtualTerrainCurrentColumnRoots,virtualTerrainCurrentColumnRegisteredRoots,virtualTerrainNearestRegisteredRootMetres,virtualTerrainColumnAccepted,virtualTerrainColumnSubmitDeferred,virtualTerrainColumnPreempted,virtualTerrainColumnTimedOut,virtualTerrainColumnOtherFailed,virtualTerrainDirectoryAccepted,virtualTerrainDirectorySubmitDeferred,virtualTerrainDirectoryPreempted,virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,virtualTerrainPublishedPages,virtualTerrainPublishedExactPages,virtualTerrainPublishedMinimumLevel,virtualTerrainPublishedMaximumLevel,frameSequence,schemaVersion,sampleCount,",
         "droppedSamples",
     );
-    const SURFACE_HINT_VERTICAL_MARGIN_CHUNKS: i32 = 1;
-    const INTERACTIVE_SURFACE_BATCH: usize = 4;
-    const BACKGROUND_SURFACE_BATCH: usize = 2;
-    const BACKGROUND_SURFACE_BATCHES_IN_FLIGHT: usize = 4;
     const VIRTUAL_TERRAIN_MAX_COLUMNS: usize = 16;
     const VIRTUAL_TERRAIN_MAX_COLUMN_BATCHES_IN_FLIGHT: usize = 2;
     // Column discovery is CPU generation, not a transport-only lookup. Four columns amortize the
@@ -1516,18 +1350,11 @@ mod web {
         stream_view_cone_half_angle_degrees: f32,
         stream_enclosed_view_distance_metres: f32,
         view_distance_metres: f32,
-        surface_load_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
-        surface_fast_travel_min_cross_radius_tiles: [i32; SURFACE_LOD_LEVEL_COUNT],
-        surface_fast_travel_full_rate_tiles_per_second: f32,
-        surface_retain_margin_tiles: i32,
         enclosure_probe_interval_ms: f64,
         enclosure_probe_distance_metres: f32,
     }
 
     type FrameCallback = Closure<dyn FnMut(f64)>;
-    type SurfaceChunkColumnHints = BTreeMap<(i32, i32), BTreeSet<i32>>;
-    type SurfaceChunkHintIndex = BTreeMap<SurfaceTileCoord, SurfaceChunkColumnHints>;
-    type SurfaceExactDetailIndex = BTreeMap<SurfaceTileCoord, Vec<ChunkCoord>>;
 
     #[derive(Default)]
     struct VirtualTerrainRequestStats {
@@ -1827,16 +1654,9 @@ mod web {
         revision: u64,
     }
 
-    #[derive(Clone, Copy, Debug)]
-    struct SurfaceRequirement {
-        coord: SurfaceTileCoord,
-        revision: u64,
-    }
-
     #[derive(Default)]
     struct EditRequirements {
         canonical: Vec<CanonicalRequirement>,
-        surface: Vec<SurfaceRequirement>,
     }
 
     struct EditTracker {
@@ -2049,24 +1869,11 @@ mod web {
         pending_uploads: RefCell<BTreeMap<(i32, i32, i32), voxels_runtime::WorkTicket>>,
         canonical_publications: RefCell<VecDeque<CanonicalPublication>>,
         binary_mesh_scratch: RefCell<BinaryMeshScratch>,
-        surface_focus: Cell<Option<SurfaceStreamFocus>>,
-        surface_cross_radii: Cell<[i32; SURFACE_LOD_LEVEL_COUNT]>,
-        surface_motion_axis: Cell<[i32; 2]>,
-        surface_resident: RefCell<BTreeSet<SurfaceTileCoord>>,
-        surface_chunk_hints: RefCell<SurfaceChunkHintIndex>,
-        surface_exact_detail_chunks: RefCell<SurfaceExactDetailIndex>,
-        surface_revisions: RefCell<SurfaceRevisionCache>,
-        surface_accepted_edit_revisions: RefCell<BTreeMap<SurfaceTileCoord, u64>>,
-        surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
-        surface_in_flight: RefCell<BTreeSet<SurfaceTileCoord>>,
-        surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
-        surface_stream_suspended: Cell<bool>,
         virtual_terrain: RefCell<VirtualTerrainStreamingState>,
         virtual_terrain_scheduler: RefCell<TerrainStreamScheduler>,
         virtual_terrain_cache: RefCell<TerrainPageMemoryCache>,
         all_lods_ready: Cell<bool>,
         interactive_lods_ready: Cell<bool>,
-        initialized_surface_level_count: Cell<usize>,
         startup_ready: Cell<bool>,
         scope: DedicatedWorkerGlobalScope,
         callback: RefCell<Option<FrameCallback>>,
@@ -2142,26 +1949,7 @@ mod web {
         }
 
         fn screenshot_streaming_manifest(&self) -> ScreenshotStreamingManifest {
-            let resident = self.surface_resident.borrow();
-            let queue = self.surface_queue.borrow();
-            let in_flight = self.surface_in_flight.borrow();
-            let dirty = self.surface_dirty.borrow();
-            let mut surface_coords = resident.iter().copied().collect::<BTreeSet<_>>();
-            surface_coords.extend(queue.iter().copied());
-            surface_coords.extend(in_flight.iter().copied());
-            surface_coords.extend(dirty.iter().copied());
-            let revisions = self.surface_revisions.borrow();
-            let surface_pages = surface_coords
-                .into_iter()
-                .map(|coord| ScreenshotSurfacePageState {
-                    coord,
-                    resident_revision: revisions.resident_revision(coord),
-                    requested_revision: revisions.requested_revision(coord),
-                    queued: queue.contains(&coord),
-                    in_flight: in_flight.contains(&coord),
-                    dirty: dirty.contains(&coord),
-                })
-                .collect();
+            let surface_pages: Vec<ScreenshotSurfacePageState> = Vec::new();
             let canonical_pages = self
                 .scheduler
                 .borrow()
@@ -2234,7 +2022,7 @@ mod web {
                 (cache.len(), cache.resident_bytes())
             };
             ScreenshotStreamingManifest {
-                surface_epoch: revisions.epoch(),
+                surface_epoch: 0,
                 surface_pages,
                 canonical_pages,
                 virtual_columns,
@@ -2664,44 +2452,20 @@ mod web {
             renderer.set_route_status("NATIVE WORLD", 0);
             let stream = self.scheduler.borrow().diagnostics();
             let render = renderer.diagnostics();
-            let lod_tiles = self.surface_lod_counts();
-            let fine_coverage_ready = stream.generation.queued == 0
-                && stream.generation.in_flight == 0
-                && stream.meshing.queued == 0
-                && stream.meshing.in_flight == 0
-                && stream.upload.queued == 0
-                && stream.upload.in_flight == 0;
-            // Coverage controls how many surface levels may first enter the cut, not whether an
-            // already-established boundary may continue following the camera. The initialized
-            // prefix is monotonic: newly pending children independently keep their best resident
-            // parent instead of freezing the whole cut at an obsolete position.
-            let ready_surface_levels = self.ready_surface_level_prefix();
-            let interactive_lods_ready =
-                fine_coverage_ready && ready_surface_levels >= INTERACTIVE_SURFACE_LOD_LEVELS;
-            let all_lods_ready =
-                fine_coverage_ready && ready_surface_levels == SURFACE_LOD_LEVEL_COUNT;
+            let lod_tiles = [0; 8];
+            let virtual_stream = self.virtual_terrain_scheduler.borrow().stats();
+            let virtual_directories_in_flight =
+                self.virtual_terrain.borrow().directory_in_flight.len();
+            let all_lods_ready = renderer.virtual_terrain_render_mode()
+                == VirtualTerrainRenderMode::Visible
+                && render.virtual_terrain_gpu_requested_pages == 0
+                && render.virtual_terrain_gpu_ownerless_roots == 0
+                && virtual_stream.pending_pages == 0
+                && virtual_stream.in_flight_pages == 0
+                && virtual_directories_in_flight == 0;
+            let interactive_lods_ready = all_lods_ready;
             self.all_lods_ready.set(all_lods_ready);
             self.interactive_lods_ready.set(interactive_lods_ready);
-            debug_assert!(
-                !all_lods_ready || self.surface_coverage_current(),
-                "surface coverage became ready with missing or stale revisions"
-            );
-            let voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
-            let voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
-            let initialized_surface_level_count = initialized_surface_level_prefix(
-                self.initialized_surface_level_count.get(),
-                ready_surface_levels,
-            );
-            self.initialized_surface_level_count
-                .set(initialized_surface_level_count);
-            if initialized_surface_level_count > 0 {
-                renderer.advance_geometric_lod_focus(
-                    voxel_x,
-                    voxel_z,
-                    initialized_surface_level_count,
-                    initialized_surface_level_count,
-                );
-            }
             let render_start = performance_now(performance.as_ref());
             let chunks = self.chunks.borrow();
             let eye_voxel = VoxelCoord::new(
@@ -2734,9 +2498,7 @@ mod web {
                     cpu_ms: self.cpu_milliseconds.get(),
                     gpu_ms: render.gpu_total_ms,
                     gpu_ambient_occlusion_ms: render.gpu_ambient_occlusion_ms,
-                    resident_chunks: usize_to_u32(
-                        stream.resident + self.surface_resident.borrow().len(),
-                    ),
+                    resident_chunks: usize_to_u32(stream.resident),
                     visible_chunks: render.visible_chunks,
                     quads: render.quads,
                     water_quads: render.water_quads,
@@ -2752,11 +2514,7 @@ mod web {
                     edit_in_flight: usize_to_u32(self.edit_trackers.borrow().len()),
                     lod_tiles,
                     pending_jobs: usize_to_u32(
-                        stream.generation.queued
-                            + stream.meshing.queued
-                            + stream.upload.queued
-                            + self.surface_queue.borrow().len()
-                            + self.surface_dirty.borrow().len(),
+                        stream.generation.queued + stream.meshing.queued + stream.upload.queued,
                     ),
                     core_gpu_bytes: render.core_gpu_bytes,
                     water_immersion: camera.fluid_state().immersion,
@@ -2815,17 +2573,9 @@ mod web {
                     + stream.meshing.queued
                     + stream.meshing.in_flight
                     + stream.upload.queued
-                    + stream.upload.in_flight
-                    + self.surface_queue.borrow().len()
-                    + self.surface_in_flight.borrow().len()
-                    + self.surface_dirty.borrow().len();
+                    + stream.upload.in_flight;
                 self.profile_tracked_high
                     .set(self.profile_tracked_high.get().max(stream.tracked));
-                self.profile_surface_high.set(
-                    self.profile_surface_high
-                        .get()
-                        .max(self.surface_resident.borrow().len()),
-                );
                 self.profile_pending_high
                     .set(self.profile_pending_high.get().max(pending));
                 self.profile_pending_mesh_high.set(
@@ -2933,49 +2683,16 @@ mod web {
             let enclosed_interest_ms =
                 (performance_now(performance) - enclosed_interest_start) as f32;
             let surface_interest_start = performance_now(performance);
-            // The urgent collision set deliberately includes the short aim/edit corridor. That
-            // corridor may prioritize exact chunks, but it must never suppress the complete
-            // heightfield fallback: otherwise turning the camera changes canonical surface
-            // ownership and a large greedy parent quad disappears until the aimed-at chunk loads.
-            // Surface ownership follows support and intended movement only, so looking around is
-            // geometry-invariant while edits and collision still retain their urgent transport.
-            let movement_interest = self.movement_collision_interest(
-                camera,
-                exact_streaming_velocity,
-                self.config.stream_collision_lookahead_seconds,
-            );
-            let mut surface_interest = self.surface_stream_interest(focus, &movement_interest);
-            let exact_detail_interest = self.surface_exact_detail_stream_interest(camera);
-            if !exact_detail_interest.is_empty() {
-                let detail_columns = exact_detail_interest
-                    .iter()
-                    .map(|coord| (coord.x, coord.z))
-                    .collect::<BTreeSet<_>>();
-                surface_interest.extend(self.surface_hint_stream_interest(&detail_columns));
-                surface_interest.extend(exact_detail_interest);
-                surface_interest.sort_unstable();
-                surface_interest.dedup();
-            }
-            // A spectator has no collision body, but its configured cruise speed can cross the
-            // ordinary exact radius before one server round trip. Admit a thin, capacity-bounded
-            // visual corridor ahead as ordinary work so those chunks are ready when the camera
-            // reaches them without misclassifying the entire path as collision-critical.
-            let spectator_visual_interest = if camera.locomotion() == LocomotionMode::Spectator {
-                self.movement_collision_interest(
-                    camera,
-                    streaming_velocity,
-                    self.config.stream_velocity_lookahead_seconds,
-                )
-            } else {
-                Vec::new()
-            };
+            // Canonical chunks are simulation and collision data only. Visible terrain demand is
+            // owned entirely by the virtual page scheduler, so no camera-driven visual chunk
+            // corridor or fixed-ring height hint participates in this scheduler.
+            let surface_interest = Vec::new();
             let surface_interest_ms =
                 (performance_now(performance) - surface_interest_start) as f32;
             let mut urgent_interest = collision_interest.clone();
             urgent_interest.extend(enclosed_view_interest.iter().copied());
             let mut interest = urgent_interest.clone();
             interest.extend(surface_interest.iter().copied());
-            interest.extend(spectator_visual_interest);
             let priority_hint = directional_stream_priority(
                 camera,
                 streaming_velocity,
@@ -3112,13 +2829,6 @@ mod web {
             let publish_ms = (performance_now(performance) - publish_start) as f32;
             let surface_start = performance_now(performance);
             self.stream_virtual_terrain(camera, streaming_velocity);
-            let virtual_visible = self.renderer.borrow().virtual_terrain_render_mode()
-                == VirtualTerrainRenderMode::Visible;
-            if virtual_visible || self.surface_stream_suspended.get() {
-                self.suspend_legacy_surface_stream();
-            } else {
-                self.stream_surface_lods(camera, streaming_velocity);
-            }
             let surface_ms = (performance_now(performance) - surface_start) as f32;
             StreamFrameSample {
                 remote_ms,
@@ -3340,16 +3050,7 @@ mod web {
             streaming_velocity: Vec3,
             lookahead_seconds: f32,
         ) -> Vec<ChunkCoord> {
-            let mut interest =
-                crate::urgent_stream_interest(camera, streaming_velocity, lookahead_seconds)
-                    .into_iter()
-                    .collect::<BTreeSet<_>>();
-            let columns = interest
-                .iter()
-                .map(|coord| (coord.x, coord.z))
-                .collect::<BTreeSet<_>>();
-            interest.extend(self.surface_hint_stream_interest(&columns));
-            interest.into_iter().collect()
+            crate::urgent_stream_interest(camera, streaming_velocity, lookahead_seconds)
         }
 
         fn movement_collision_interest(
@@ -3358,19 +3059,9 @@ mod web {
             streaming_velocity: Vec3,
             lookahead_seconds: f32,
         ) -> Vec<ChunkCoord> {
-            let mut interest = crate::movement_stream_interest(
-                camera.position,
-                streaming_velocity,
-                lookahead_seconds,
-            )
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-            let columns = interest
-                .iter()
-                .map(|coord| (coord.x, coord.z))
-                .collect::<BTreeSet<_>>();
-            interest.extend(self.surface_hint_stream_interest(&columns));
-            interest.into_iter().collect()
+            crate::movement_stream_interest(camera.position, streaming_velocity, lookahead_seconds)
+                .into_iter()
+                .collect()
         }
 
         fn enclosed_view_stream_plan(&self, camera: &CameraState) -> crate::EnclosedViewStreamPlan {
@@ -3393,95 +3084,6 @@ mod web {
 
         fn enclosed_view_stream_interest(&self, camera: &CameraState) -> Vec<ChunkCoord> {
             self.enclosed_view_stream_plan(camera).chunks
-        }
-
-        fn surface_stream_interest(
-            &self,
-            focus: ChunkCoord,
-            collision_interest: &[ChunkCoord],
-        ) -> Vec<ChunkCoord> {
-            let mut columns = collision_interest
-                .iter()
-                .map(|coord| (coord.x, coord.z))
-                .collect::<BTreeSet<_>>();
-            let radius = self.config.startup_ready_radius_chunks;
-            for dz in -radius..=radius {
-                for dx in -radius..=radius {
-                    if i64::from(dx) * i64::from(dx) + i64::from(dz) * i64::from(dz)
-                        > i64::from(radius) * i64::from(radius)
-                    {
-                        continue;
-                    }
-                    if let (Some(x), Some(z)) = (focus.x.checked_add(dx), focus.z.checked_add(dz)) {
-                        columns.insert((x, z));
-                    }
-                }
-            }
-
-            self.surface_hint_stream_interest(&columns)
-        }
-
-        fn surface_hint_stream_interest(&self, columns: &BTreeSet<(i32, i32)>) -> Vec<ChunkCoord> {
-            let hints = self.surface_chunk_hints.borrow();
-            let mut interest = BTreeSet::new();
-            for &(chunk_x, chunk_z) in columns {
-                let tile = SurfaceTileCoord::new(
-                    SurfaceLodLevel::Stride2,
-                    chunk_x.div_euclid(2),
-                    chunk_z.div_euclid(2),
-                );
-                let Some(chunk_ys) = hints
-                    .get(&tile)
-                    .and_then(|tile_hints| tile_hints.get(&(chunk_x, chunk_z)))
-                else {
-                    continue;
-                };
-                interest.extend(
-                    chunk_ys
-                        .iter()
-                        .copied()
-                        .map(|chunk_y| ChunkCoord::new(chunk_x, chunk_y, chunk_z))
-                        .filter(|coord| coord.is_world_representable()),
-                );
-            }
-            interest.into_iter().collect()
-        }
-
-        fn surface_exact_detail_stream_interest(&self, camera: &CameraState) -> Vec<ChunkCoord> {
-            let maximum_distance_chunks = self.config.stream_enclosed_view_distance_metres
-                / (CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
-            let camera_chunk_x = camera.position.x / (CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
-            let camera_chunk_z = camera.position.z / (CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
-            let maximum_distance_squared = maximum_distance_chunks * maximum_distance_chunks;
-            let renderer = self.renderer.borrow();
-            let mut chunks = self
-                .surface_exact_detail_chunks
-                .borrow()
-                .values()
-                .flatten()
-                .copied()
-                .filter_map(|chunk| {
-                    if !renderer.supports_sparse_exact_surface_column(chunk.x, chunk.z) {
-                        return None;
-                    }
-                    let delta_x = chunk.x as f32 + 0.5 - camera_chunk_x;
-                    let delta_z = chunk.z as f32 + 0.5 - camera_chunk_z;
-                    let distance_squared = delta_x * delta_x + delta_z * delta_z;
-                    (distance_squared <= maximum_distance_squared)
-                        .then_some((distance_squared, chunk))
-                })
-                .collect::<Vec<_>>();
-            drop(renderer);
-            chunks.sort_by(|(left_distance, left), (right_distance, right)| {
-                left_distance
-                    .total_cmp(right_distance)
-                    .then_with(|| left.cmp(right))
-            });
-            chunks.dedup_by_key(|(_, chunk)| *chunk);
-            // Preserve the complete server-declared interest set here. The scheduler applies its
-            // own bounded request window, while readiness deliberately considers this full set so
-            // a truncated vertical column cannot replace its watertight surface fallback.
-            chunks.into_iter().map(|(_, chunk)| chunk).collect()
         }
 
         fn submit_generation_batch(
@@ -4674,15 +4276,6 @@ mod web {
             if let Some(completion) = self.remote.next_completion() {
                 self.accept_remote_completion(completion);
             }
-            // Surface batches arrive as ordered one-tile frames. Preserve the former four-tile
-            // publication ceiling while allowing the first useful tile to reach the renderer
-            // without waiting for its siblings to cross the wire.
-            for _ in 0..INTERACTIVE_SURFACE_BATCH {
-                let Some(completion) = self.remote.next_surface_completion() else {
-                    break;
-                };
-                self.accept_remote_surface_completion(completion);
-            }
             for _ in 0..VIRTUAL_TERRAIN_MAX_COLUMN_BATCHES_IN_FLIGHT {
                 let Some(completion) = self.remote.next_terrain_region_column_completion() else {
                     break;
@@ -4746,131 +4339,6 @@ mod web {
                     }
                 }
             }
-        }
-
-        fn accept_remote_surface_completion(&self, completion: RemoteSurfaceCompletion) {
-            for ticket in &completion.tickets {
-                self.surface_in_flight.borrow_mut().remove(&ticket.coord);
-            }
-            let Ok(result) = completion.result else {
-                for ticket in completion.tickets {
-                    self.enqueue_surface_front(ticket.coord);
-                }
-                return;
-            };
-            if result.source_identity_hash != self.source_identity_hash() {
-                log_gpu_error("world surface response identity changed");
-                return;
-            }
-            let mut items = result.items;
-            for ticket in completion.tickets {
-                let Some(index) = items.iter().position(|item| item.coord == ticket.coord) else {
-                    self.enqueue_surface_front(ticket.coord);
-                    continue;
-                };
-                let item = items.remove(index);
-                let edit_revision = item.edit_revision;
-                let snapshot = match item.result {
-                    Ok(snapshot) => snapshot,
-                    Err(voxels_world::WorldSourceError::SourceCoverageUnavailable) => continue,
-                    Err(error) => {
-                        log_gpu_error(&format!(
-                            "world service could not generate surface tile {:?}: {error}",
-                            ticket.coord
-                        ));
-                        self.enqueue_surface_front(ticket.coord);
-                        continue;
-                    }
-                };
-                let server_floor = self.edit_revisions.borrow().surface_floor(ticket.coord);
-                if !revision_satisfies(edit_revision, server_floor)
-                    || !self
-                        .surface_revisions
-                        .borrow()
-                        .accepts(ticket.coord, ticket.revision)
-                {
-                    self.enqueue_surface_front(ticket.coord);
-                    continue;
-                }
-                let canonical_hints = (ticket.coord.level == SurfaceLodLevel::Stride2).then(|| {
-                    snapshot
-                        .terrain
-                        .canonical_surface_chunk_hints(SURFACE_HINT_VERTICAL_MARGIN_CHUNKS)
-                });
-                let exact_detail_chunks = snapshot.exact_detail_chunks.clone();
-                if self
-                    .renderer
-                    .borrow_mut()
-                    .upload_surface_tile_meshes(&snapshot.terrain, &snapshot.water)
-                {
-                    self.surface_resident.borrow_mut().insert(ticket.coord);
-                    if let Some(hints) = canonical_hints {
-                        self.surface_chunk_hints
-                            .borrow_mut()
-                            .insert(ticket.coord, hints);
-                    }
-                    if exact_detail_chunks.is_empty() {
-                        self.surface_exact_detail_chunks
-                            .borrow_mut()
-                            .remove(&ticket.coord);
-                    } else {
-                        self.surface_exact_detail_chunks
-                            .borrow_mut()
-                            .insert(ticket.coord, exact_detail_chunks);
-                    }
-                    let committed = self
-                        .surface_revisions
-                        .borrow_mut()
-                        .commit(ticket.coord, ticket.revision);
-                    debug_assert!(committed, "uploaded remote surface revision became stale");
-                    self.surface_accepted_edit_revisions
-                        .borrow_mut()
-                        .insert(ticket.coord, edit_revision);
-                    self.surface_dirty.borrow_mut().remove(&ticket.coord);
-                } else {
-                    self.enqueue_surface_front(ticket.coord);
-                }
-            }
-        }
-
-        fn enqueue_surface_front(&self, coord: SurfaceTileCoord) {
-            if self.surface_stream_suspended.get() {
-                return;
-            }
-            let in_active_coverage = surface_tile_in_coverage(
-                coord,
-                self.surface_focus.get(),
-                self.config.surface_load_radius_tiles,
-                self.surface_cross_radii.get(),
-                self.surface_motion_axis.get(),
-            );
-            // Dirty retained tiles are limited below to desired or presented ownership. Let the
-            // latter finish even after it leaves the moving load window: it is still the visible
-            // fallback protecting the frame until the next cut is ready.
-            let presented_dirty_fallback = self.surface_dirty.borrow().contains(&coord)
-                && self.surface_resident.borrow().contains(&coord);
-            if !in_active_coverage && !presented_dirty_fallback {
-                return;
-            }
-            if self.surface_in_flight.borrow().contains(&coord)
-                || self.surface_queue.borrow().contains(&coord)
-            {
-                return;
-            }
-            if usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS {
-                self.surface_queue.borrow_mut().push_front(coord);
-            } else {
-                self.surface_queue.borrow_mut().push_back(coord);
-            }
-        }
-
-        fn suspend_legacy_surface_stream(&self) {
-            if self.surface_stream_suspended.replace(true) {
-                return;
-            }
-            self.remote.cancel_surface_batches_outside(|_| false);
-            self.surface_queue.borrow_mut().clear();
-            self.surface_dirty.borrow_mut().clear();
         }
 
         fn accept_generated_chunk(
@@ -5037,353 +4505,6 @@ mod web {
             }
             for (x, y, z) in added {
                 renderer.set_chunk_activation(ChunkCoord::new(x, y, z), reason, true);
-            }
-        }
-
-        fn surface_lod_counts(&self) -> [u32; SURFACE_LOD_LEVEL_COUNT] {
-            let mut counts = [0u32; SURFACE_LOD_LEVEL_COUNT];
-            for coord in self.surface_resident.borrow().iter() {
-                let count = &mut counts[coord.level.index() as usize];
-                *count = count.saturating_add(1);
-            }
-            counts
-        }
-
-        fn stream_surface_lods(&self, camera: &CameraState, streaming_velocity: glam::Vec3) {
-            let position = camera.position;
-            let longitudinal_radii = self.config.surface_load_radius_tiles;
-            let cross_radii = adaptive_surface_cross_radii(
-                longitudinal_radii,
-                self.config.surface_fast_travel_min_cross_radius_tiles,
-                self.config.surface_fast_travel_full_rate_tiles_per_second,
-                streaming_velocity,
-            );
-            let motion_axis = if cross_radii == longitudinal_radii {
-                [0, 0]
-            } else {
-                surface_motion_axis(streaming_velocity)
-            };
-            let current_focus = std::array::from_fn(|index| {
-                world_to_surface_tile(position, SurfaceLodLevel::ALL[index])
-            });
-            // Once travel outruns the finest tile budget, use the entire configured overlapping
-            // window as generation lead at every level. A fixed wall-clock prediction can be
-            // shorter than accumulated service latency and request a coarse parent only after the
-            // camera has nearly crossed into it.
-            let fast_travel_threshold_metres_per_second =
-                self.config.surface_fast_travel_full_rate_tiles_per_second
-                    * SurfaceLodLevel::Stride2.tile_span_voxels() as f32
-                    * VOXEL_SIZE_METRES;
-            let lead_focus = std::array::from_fn(|index| {
-                let level = SurfaceLodLevel::ALL[index];
-                let radius = longitudinal_radii[index];
-                let maximum_lead_metres = (radius - 1).max(0) as f32
-                    * level.tile_span_voxels() as f32
-                    * VOXEL_SIZE_METRES;
-                world_to_surface_tile(
-                    predictive_surface_position(
-                        position,
-                        streaming_velocity,
-                        self.config.stream_velocity_lookahead_seconds,
-                        maximum_lead_metres,
-                        fast_travel_threshold_metres_per_second,
-                    ),
-                    level,
-                )
-            });
-            let focus = SurfaceStreamFocus {
-                current: current_focus,
-                lead: lead_focus,
-            };
-            let directional_priorities: [DirectionalStreamPriority; SURFACE_LOD_LEVEL_COUNT] =
-                std::array::from_fn(|index| {
-                    let level = SurfaceLodLevel::ALL[index];
-                    directional_stream_priority(
-                        camera,
-                        streaming_velocity,
-                        level.tile_span_voxels() as f32 * VOXEL_SIZE_METRES,
-                        self.config.stream_velocity_lookahead_seconds,
-                        self.config.stream_view_cone_half_angle_degrees,
-                    )
-                });
-            let previous_radii = self.surface_cross_radii.replace(cross_radii);
-            let previous_axis = self.surface_motion_axis.replace(motion_axis);
-            if self.surface_focus.get() != Some(focus)
-                || previous_radii != cross_radii
-                || previous_axis != motion_axis
-            {
-                let previous_focus = self.surface_focus.replace(Some(focus));
-                let changed_levels: [bool; SURFACE_LOD_LEVEL_COUNT] =
-                    std::array::from_fn(|index| {
-                        previous_focus.is_none_or(|previous| {
-                            previous.current[index] != focus.current[index]
-                                || previous.lead[index] != focus.lead[index]
-                        }) || previous_radii[index] != cross_radii[index]
-                            || (previous_axis != motion_axis
-                                && cross_radii[index] < longitudinal_radii[index])
-                    });
-                let mut desired = BTreeSet::new();
-                for (index, level) in SurfaceLodLevel::ALL.into_iter().enumerate() {
-                    let longitudinal_radius = longitudinal_radii[index];
-                    let cross_radius = cross_radii[index];
-                    for level_focus in [focus.current[index], focus.lead[index]] {
-                        for dz in -longitudinal_radius..=longitudinal_radius {
-                            for dx in -longitudinal_radius..=longitudinal_radius {
-                                if !surface_offset_in_coverage(
-                                    dx,
-                                    dz,
-                                    longitudinal_radius,
-                                    cross_radius,
-                                    motion_axis,
-                                ) {
-                                    continue;
-                                }
-                                let coord = SurfaceTileCoord::new(
-                                    level,
-                                    level_focus.x + dx,
-                                    level_focus.z + dz,
-                                );
-                                if coord.is_world_representable() {
-                                    desired.insert(coord);
-                                }
-                            }
-                        }
-                    }
-                }
-                self.remote
-                    .cancel_surface_batches_outside(|coord| desired.contains(&coord));
-                let retain_longitudinal_radii = longitudinal_radii
-                    .map(|radius| radius + self.config.surface_retain_margin_tiles);
-                let retain_cross_radii =
-                    cross_radii.map(|radius| radius + self.config.surface_retain_margin_tiles);
-                let presented_tiles = self
-                    .renderer
-                    .borrow()
-                    .presented_surface_tiles()
-                    .into_iter()
-                    .collect::<BTreeSet<_>>();
-                let evicted: Vec<_> = self
-                    .surface_resident
-                    .borrow()
-                    .iter()
-                    .copied()
-                    .filter(|coord| {
-                        let index = coord.level.index() as usize;
-                        if !changed_levels[index] {
-                            return false;
-                        }
-                        !presented_tiles.contains(coord)
-                            && !surface_tile_in_coverage(
-                                *coord,
-                                Some(focus),
-                                retain_longitudinal_radii,
-                                retain_cross_radii,
-                                motion_axis,
-                            )
-                    })
-                    .collect();
-                if !evicted.is_empty() {
-                    let mut resident = self.surface_resident.borrow_mut();
-                    let mut revisions = self.surface_revisions.borrow_mut();
-                    let mut accepted = self.surface_accepted_edit_revisions.borrow_mut();
-                    let mut dirty = self.surface_dirty.borrow_mut();
-                    let mut renderer = self.renderer.borrow_mut();
-                    for &coord in &evicted {
-                        resident.remove(&coord);
-                        self.surface_chunk_hints.borrow_mut().remove(&coord);
-                        self.surface_exact_detail_chunks.borrow_mut().remove(&coord);
-                        revisions.evict(coord);
-                        accepted.remove(&coord);
-                        dirty.remove(&coord);
-                    }
-                    renderer.remove_surface_tiles(evicted);
-                }
-
-                // A retained tile remembers its requested revision in `surface_revisions`, but it
-                // is actionable replacement work only while desired or still presented by the
-                // outgoing cut. A future focus load samples the authoritative edit overlay.
-                {
-                    self.surface_dirty
-                        .borrow_mut()
-                        .retain(|coord| desired.contains(coord) || presented_tiles.contains(coord));
-                }
-
-                let resident = self.surface_resident.borrow();
-                let mut revisions = self.surface_revisions.borrow_mut();
-                let mut dirty = self.surface_dirty.borrow_mut();
-                revisions.retain(|coord| {
-                    let index = coord.level.index() as usize;
-                    !changed_levels[index] || resident.contains(&coord) || desired.contains(&coord)
-                });
-                let mut candidates = Vec::new();
-                for coord in desired {
-                    if !changed_levels[coord.level.index() as usize] {
-                        continue;
-                    }
-                    match revisions.prepare_focus(coord) {
-                        SurfaceFocusAction::Load { .. } => {
-                            debug_assert!(!resident.contains(&coord));
-                            candidates.push(coord);
-                        }
-                        SurfaceFocusAction::Replace { .. } => {
-                            debug_assert!(resident.contains(&coord));
-                            dirty.insert(coord);
-                        }
-                        SurfaceFocusAction::Current { .. } => {
-                            debug_assert!(resident.contains(&coord));
-                        }
-                    }
-                }
-                drop(dirty);
-                drop(revisions);
-                drop(resident);
-                let initialized_level_count = self.initialized_surface_level_count.get();
-                let mut queue = self.surface_queue.borrow_mut();
-                queue.retain(|coord| !changed_levels[coord.level.index() as usize]);
-                candidates.extend(queue.iter().copied());
-                candidates.sort_by_key(|coord| {
-                    let index = coord.level.index() as usize;
-                    let dx = i128::from(coord.x) - i128::from(focus.current[index].x);
-                    let dz = i128::from(coord.z) - i128::from(focus.current[index].z);
-                    let priority =
-                        surface_product_priority(*coord, focus, INTERACTIVE_SURFACE_LOD_LEVELS);
-                    let directional =
-                        directional_priorities[index].rank_offset(dx as i64, dz as i64);
-                    // Startup establishes broad parent cover before refining it. Once the
-                    // interactive prefix has been complete once, retained parents already provide
-                    // that cover and newly exposed visible replacements must stay finest-first.
-                    let level_order =
-                        surface_stream_level_order(*coord, priority, initialized_level_count);
-                    (
-                        priority,
-                        level_order,
-                        directional,
-                        dx * dx + dz * dz,
-                        coord.z,
-                        coord.x,
-                    )
-                });
-                queue.clear();
-                queue.extend(candidates);
-            }
-
-            self.submit_surface_lane(
-                WorldProductPriority::ImmediateSurface,
-                INTERACTIVE_SURFACE_LOD_LEVELS,
-            );
-            self.submit_surface_lane(
-                WorldProductPriority::VisibleSurface,
-                INTERACTIVE_SURFACE_BATCH,
-            );
-            let bootstrap_ready_for_background =
-                if self.initialized_surface_level_count.get() >= INTERACTIVE_SURFACE_LOD_LEVELS {
-                    true
-                } else {
-                    let diagnostics = self.scheduler.borrow().diagnostics();
-                    let fine_current = diagnostics.generation.queued == 0
-                        && diagnostics.generation.in_flight == 0
-                        && diagnostics.meshing.queued == 0
-                        && diagnostics.meshing.in_flight == 0
-                        && diagnostics.upload.queued == 0
-                        && diagnostics.upload.in_flight == 0;
-                    fine_current
-                        && self.surface_coverage_current_through(INTERACTIVE_SURFACE_LOD_LEVELS)
-                        && !self.surface_dirty.borrow().iter().any(|coord| {
-                            usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
-                        })
-                        && !self.surface_in_flight.borrow().iter().any(|coord| {
-                            usize::from(coord.level.index()) < INTERACTIVE_SURFACE_LOD_LEVELS
-                        })
-                };
-            if bootstrap_ready_for_background {
-                self.submit_surface_lane(WorldProductPriority::Prefetch, BACKGROUND_SURFACE_BATCH);
-            }
-        }
-
-        fn submit_surface_lane(&self, priority: WorldProductPriority, batch_limit: usize) {
-            let background = priority == WorldProductPriority::Prefetch;
-            if background
-                && self
-                    .surface_in_flight
-                    .borrow()
-                    .iter()
-                    .filter(|coord| {
-                        usize::from(coord.level.index()) >= INTERACTIVE_SURFACE_LOD_LEVELS
-                    })
-                    .count()
-                    >= BACKGROUND_SURFACE_BATCH * BACKGROUND_SURFACE_BATCHES_IN_FLIGHT
-            {
-                return;
-            }
-
-            let mut tickets = Vec::with_capacity(batch_limit);
-            let mut replacement_batch = None;
-            let focus = self.surface_focus.get();
-            while tickets.len() < batch_limit {
-                let position = self.surface_queue.borrow().iter().position(|coord| {
-                    focus.is_some_and(|focus| {
-                        surface_product_priority(*coord, focus, INTERACTIVE_SURFACE_LOD_LEVELS)
-                            == priority
-                    })
-                });
-                let Some(position) = position else {
-                    break;
-                };
-                let Some(coord) = self.surface_queue.borrow().get(position).copied() else {
-                    break;
-                };
-                let resident = self.surface_resident.borrow().contains(&coord);
-                let dirty = self.surface_dirty.borrow().contains(&coord);
-                if self.surface_in_flight.borrow().contains(&coord) || (resident && !dirty) {
-                    self.surface_queue.borrow_mut().remove(position);
-                    continue;
-                }
-                let replacement = resident && dirty;
-                if replacement_batch.is_some_and(|batch| batch != replacement) {
-                    break;
-                }
-                replacement_batch = Some(replacement);
-                self.surface_queue.borrow_mut().remove(position);
-                let revision = {
-                    let revisions = self.surface_revisions.borrow();
-                    revisions
-                        .requested_revision(coord)
-                        .unwrap_or_else(|| revisions.epoch())
-                };
-                tickets.push(RemoteSurfaceTicket { coord, revision });
-                // Replacing several visible tiles in one completion concentrates their GPU upload,
-                // profile reconciliation, and connector rebuild into a single long frame. New
-                // coverage still batches for startup throughput; edits publish one tile per frame.
-                if replacement {
-                    break;
-                }
-            }
-            if tickets.is_empty() {
-                return;
-            }
-            match self.remote.submit_surface_batch(priority, tickets.clone()) {
-                Ok(_) => {
-                    self.surface_in_flight
-                        .borrow_mut()
-                        .extend(tickets.into_iter().map(|ticket| ticket.coord));
-                }
-                Err(
-                    RemoteWorldError::Backpressured
-                    | RemoteWorldError::RequestWindowFull
-                    | RemoteWorldError::NotOpen,
-                ) => {
-                    let mut queue = self.surface_queue.borrow_mut();
-                    for ticket in tickets.into_iter().rev() {
-                        queue.push_front(ticket.coord);
-                    }
-                }
-                Err(error) => {
-                    let mut queue = self.surface_queue.borrow_mut();
-                    for ticket in tickets.into_iter().rev() {
-                        queue.push_front(ticket.coord);
-                    }
-                    log_gpu_error(&format!("submit remote surface batch: {error}"));
-                }
             }
         }
 
@@ -5789,45 +4910,9 @@ mod web {
                     .collect()
             };
             self.register_canonical_publication(server_revision, &canonical);
-            let mut surface = Vec::new();
-            if !self.surface_stream_suspended.get() {
-                let surface_revision = if affected_surface_tiles.is_empty() {
-                    self.surface_revisions.borrow().epoch()
-                } else {
-                    self.surface_revisions.borrow_mut().begin_edit()
-                };
-                let presented_surface_tiles = self
-                    .renderer
-                    .borrow()
-                    .presented_surface_tiles()
-                    .into_iter()
-                    .collect::<BTreeSet<_>>();
-                for &coord in affected_surface_tiles {
-                    let active = self.surface_tile_relevant(coord)
-                        || presented_surface_tiles.contains(&coord);
-                    let resident = self.surface_resident.borrow().contains(&coord);
-                    if !active && !resident {
-                        continue;
-                    }
-                    self.surface_revisions
-                        .borrow_mut()
-                        .request(coord, surface_revision);
-                    // Retained off-cut tiles stay revision-stale without masquerading as queued
-                    // work. `prepare_focus` turns them back into a replacement when desired.
-                    if !active {
-                        continue;
-                    }
-                    self.surface_dirty.borrow_mut().insert(coord);
-                    self.enqueue_surface_front(coord);
-                    surface.push(SurfaceRequirement {
-                        coord,
-                        revision: surface_revision,
-                    });
-                }
-            }
             let performance = self.scope.performance();
             let started_ms = performance_now(performance.as_ref());
-            let requirements = EditRequirements { canonical, surface };
+            let requirements = EditRequirements { canonical };
             let mut trackers = self.edit_trackers.borrow_mut();
             let target = mutations[0].coord;
             if let Some(index) = trackers.iter().position(|tracker| tracker.target == target) {
@@ -5841,7 +4926,6 @@ mod web {
                 started_ms,
                 requirements: EditRequirements {
                     canonical: requirements.canonical.clone(),
-                    surface: requirements.surface.clone(),
                 },
             });
             requirements
@@ -5853,112 +4937,11 @@ mod web {
             ));
             *self.edits.borrow_mut() = EditMap::default();
             self.edit_revisions.borrow_mut().clear();
-            self.surface_accepted_edit_revisions.borrow_mut().clear();
             self.pending_meshes.borrow_mut().clear();
             self.pending_uploads.borrow_mut().clear();
             self.canonical_publications.borrow_mut().clear();
             self.scheduler.borrow_mut().invalidate_all_generation();
             self.reset_virtual_terrain_streaming();
-            let replacement = self.surface_revisions.borrow_mut().begin_edit();
-            let retained = self
-                .surface_resident
-                .borrow()
-                .iter()
-                .copied()
-                .collect::<Vec<_>>();
-            let presented = self
-                .renderer
-                .borrow()
-                .presented_surface_tiles()
-                .into_iter()
-                .collect::<BTreeSet<_>>();
-            for coord in retained {
-                self.surface_revisions
-                    .borrow_mut()
-                    .request(coord, replacement);
-                if !self.surface_tile_relevant(coord) && !presented.contains(&coord) {
-                    continue;
-                }
-                self.surface_dirty.borrow_mut().insert(coord);
-                self.enqueue_surface_front(coord);
-            }
-        }
-
-        fn surface_tile_relevant(&self, coord: SurfaceTileCoord) -> bool {
-            coord.is_world_representable()
-                && surface_tile_in_coverage(
-                    coord,
-                    self.surface_focus.get(),
-                    self.config.surface_load_radius_tiles,
-                    self.surface_cross_radii.get(),
-                    self.surface_motion_axis.get(),
-                )
-        }
-
-        fn surface_coverage_current(&self) -> bool {
-            self.surface_coverage_current_through(SURFACE_LOD_LEVEL_COUNT)
-        }
-
-        fn ready_surface_level_prefix(&self) -> usize {
-            let queue = self.surface_queue.borrow();
-            let in_flight = self.surface_in_flight.borrow();
-            let dirty = self.surface_dirty.borrow();
-            (1..=SURFACE_LOD_LEVEL_COUNT)
-                .rev()
-                .find(|&level_count| {
-                    let work_pending = queue
-                        .iter()
-                        .chain(in_flight.iter())
-                        .chain(dirty.iter())
-                        .any(|coord| usize::from(coord.level.index()) < level_count);
-                    !work_pending && self.surface_coverage_current_through(level_count)
-                })
-                .unwrap_or(0)
-        }
-
-        fn surface_coverage_current_through(&self, level_count: usize) -> bool {
-            let Some(focus) = self.surface_focus.get() else {
-                return false;
-            };
-            let resident = self.surface_resident.borrow();
-            let revisions = self.surface_revisions.borrow();
-            let longitudinal_radii = self.config.surface_load_radius_tiles;
-            let cross_radii = self.surface_cross_radii.get();
-            let motion_axis = self.surface_motion_axis.get();
-            for (index, level) in SurfaceLodLevel::ALL
-                .into_iter()
-                .take(level_count)
-                .enumerate()
-            {
-                let longitudinal_radius = longitudinal_radii[index];
-                let mut required = BTreeSet::new();
-                for center in [focus.current[index], focus.lead[index]] {
-                    for dz in -longitudinal_radius..=longitudinal_radius {
-                        for dx in -longitudinal_radius..=longitudinal_radius {
-                            if !surface_offset_in_coverage(
-                                dx,
-                                dz,
-                                longitudinal_radius,
-                                cross_radii[index],
-                                motion_axis,
-                            ) {
-                                continue;
-                            }
-                            let coord = SurfaceTileCoord::new(level, center.x + dx, center.z + dz);
-                            if coord.is_world_representable() {
-                                required.insert(coord);
-                            }
-                        }
-                    }
-                }
-                if required
-                    .into_iter()
-                    .any(|coord| !resident.contains(&coord) || !revisions.is_current(coord))
-                {
-                    return false;
-                }
-            }
-            true
         }
 
         fn update_edit_convergence(&self, now_ms: f64, submitted: bool) {
@@ -5966,7 +4949,6 @@ mod web {
                 return;
             }
             let scheduler = self.scheduler.borrow();
-            let surface_revisions = self.surface_revisions.borrow();
             let mut trackers = self.edit_trackers.borrow_mut();
             let mut pending = VecDeque::with_capacity(trackers.len());
             while let Some(tracker) = trackers.pop_front() {
@@ -5977,13 +4959,7 @@ mod web {
                                 && revision_satisfies(status.revision, requirement.revision))
                     })
                 });
-                let surface_ready = tracker.requirements.surface.iter().all(|requirement| {
-                    surface_revisions
-                        .resident_revision(requirement.coord)
-                        .is_some_and(|revision| revision_satisfies(revision, requirement.revision))
-                        || !self.surface_tile_relevant(requirement.coord)
-                });
-                if canonical_ready && surface_ready {
+                if canonical_ready {
                     let full_ms = (now_ms - tracker.started_ms) as f32;
                     self.edit_last_ms.set(full_ms);
                 } else {
@@ -6340,48 +5316,6 @@ mod web {
                 .collect()
         }
 
-        /// Returns `[tile_x, tile_z, required_server_revision, accepted_server_revision,
-        /// resident, dirty, fingerprint_low32, fingerprint_high32, quad_count, activation_mask]`
-        /// for the tile containing one canonical voxel coordinate.
-        pub fn surface_edit_state(&self, stride: i32, x: i32, z: i32) -> Vec<f64> {
-            let Some(engine) = self.engine.as_ref() else {
-                return Vec::new();
-            };
-            let Some(level) = SurfaceLodLevel::from_stride_voxels(stride) else {
-                return Vec::new();
-            };
-            let coord = SurfaceTileCoord::containing(level, x, z);
-            let floor = engine.edit_revisions.borrow().surface_floor(coord);
-            let accepted = engine
-                .surface_accepted_edit_revisions
-                .borrow()
-                .get(&coord)
-                .copied()
-                .unwrap_or(0);
-            let diagnostics = engine.renderer.borrow().surface_tile_diagnostics(coord);
-            let fingerprint = diagnostics.map_or(0, |value| value.0);
-            vec![
-                f64::from(coord.x),
-                f64::from(coord.z),
-                floor as f64,
-                accepted as f64,
-                if engine.surface_resident.borrow().contains(&coord) {
-                    1.0
-                } else {
-                    0.0
-                },
-                if engine.surface_dirty.borrow().contains(&coord) {
-                    1.0
-                } else {
-                    0.0
-                },
-                f64::from(fingerprint as u32),
-                f64::from((fingerprint >> 32) as u32),
-                f64::from(diagnostics.map_or(0, |value| value.1)),
-                f64::from(diagnostics.map_or(0, |value| value.2)),
-            ]
-        }
-
         pub fn snapshot(&self) -> Vec<f32> {
             let mut values = Vec::new();
             if let Some(engine) = self.engine.as_ref() {
@@ -6486,7 +5420,7 @@ mod web {
                         i64::from(camera_voxel_z)
                             .abs_diff(i64::from(render.lod_boundary_centres[0][1])),
                     );
-                let lod_tiles = engine.surface_lod_counts();
+                let lod_tiles = [0_u32; 8];
                 let canonical_voxel_bytes = engine
                     .chunks
                     .borrow()
@@ -6628,11 +5562,8 @@ mod web {
                         + diagnostics.meshing.queued
                         + diagnostics.meshing.in_flight
                         + diagnostics.upload.queued
-                        + diagnostics.upload.in_flight
-                        + engine.surface_queue.borrow().len()
-                        + engine.surface_in_flight.borrow().len()
-                        + engine.surface_dirty.borrow().len()) as f32,
-                    engine.surface_resident.borrow().len() as f32,
+                        + diagnostics.upload.in_flight) as f32,
+                    0.0,
                     engine.frame_milliseconds.get(),
                     render.shadow_draw_calls as f32,
                     render.shadow_cascades as f32,
@@ -6747,7 +5678,7 @@ mod web {
                     } else {
                         0.0
                     },
-                    engine.surface_in_flight.borrow().len() as f32,
+                    0.0,
                     if engine.interactive_lods_ready.get() {
                         1.0
                     } else {
@@ -6835,8 +5766,8 @@ mod web {
                     diagnostics.meshing.in_flight as f32,
                     diagnostics.upload.queued as f32,
                     diagnostics.upload.in_flight as f32,
-                    engine.surface_queue.borrow().len() as f32,
-                    engine.surface_dirty.borrow().len() as f32,
+                    0.0,
+                    0.0,
                     diagnostics.initial_residency_latency.completed as f32,
                     diagnostics.initial_residency_latency.in_flight as f32,
                     diagnostics.accepted_completions as f32,
@@ -7013,18 +5944,6 @@ mod web {
             stream_view_cone_half_angle_degrees: streaming.priority.view_cone_half_angle_degrees,
             stream_enclosed_view_distance_metres: streaming.priority.enclosed_view_distance_metres,
             view_distance_metres: client_config.rendering.view_distance_metres,
-            surface_load_radius_tiles: streaming
-                .surface
-                .load_radius_tiles
-                .map(|radius| radius as i32),
-            surface_fast_travel_min_cross_radius_tiles: streaming
-                .surface
-                .fast_travel_min_cross_radius_tiles
-                .map(|radius| radius as i32),
-            surface_fast_travel_full_rate_tiles_per_second: streaming
-                .surface
-                .fast_travel_full_rate_tiles_per_second,
-            surface_retain_margin_tiles: streaming.surface.retention_margin_tiles as i32,
             enclosure_probe_interval_ms: f64::from(diagnostics.enclosure_probe_interval_ms),
             enclosure_probe_distance_metres: diagnostics.enclosure_probe_distance_metres,
         };
@@ -7184,21 +6103,6 @@ mod web {
             pending_uploads: RefCell::new(BTreeMap::new()),
             canonical_publications: RefCell::new(VecDeque::new()),
             binary_mesh_scratch: RefCell::new(BinaryMeshScratch::default()),
-            surface_focus: Cell::new(None),
-            surface_cross_radii: Cell::new(engine_config.surface_load_radius_tiles),
-            surface_motion_axis: Cell::new([0, 0]),
-            surface_resident: RefCell::new(BTreeSet::new()),
-            surface_chunk_hints: RefCell::new(BTreeMap::new()),
-            surface_exact_detail_chunks: RefCell::new(BTreeMap::new()),
-            surface_revisions: RefCell::new(SurfaceRevisionCache::new()),
-            surface_accepted_edit_revisions: RefCell::new(BTreeMap::new()),
-            surface_queue: RefCell::new(VecDeque::new()),
-            surface_in_flight: RefCell::new(BTreeSet::new()),
-            surface_dirty: RefCell::new(BTreeSet::new()),
-            // The fixed-ring surface producer is retired. Canonical chunks still stream for
-            // collision and simulation, but render ownership starts and remains in the virtual
-            // hierarchy; retained legacy fields exist only until the dead protocol is deleted.
-            surface_stream_suspended: Cell::new(true),
             virtual_terrain: RefCell::new(VirtualTerrainStreamingState::default()),
             virtual_terrain_scheduler: RefCell::new(
                 TerrainStreamScheduler::new(TerrainStreamConfig::INTERACTIVE_CLIENT)
@@ -7213,7 +6117,6 @@ mod web {
             ),
             all_lods_ready: Cell::new(false),
             interactive_lods_ready: Cell::new(false),
-            initialized_surface_level_count: Cell::new(0),
             startup_ready: Cell::new(false),
             scope,
             callback: RefCell::new(None),
@@ -7317,12 +6220,6 @@ mod web {
             lookahead_seconds,
             cone_half_angle_degrees,
         )
-    }
-
-    fn world_to_surface_tile(position: glam::Vec3, level: SurfaceLodLevel) -> SurfaceTileCoord {
-        let voxel_x = (position.x / VOXEL_SIZE_METRES).floor() as i32;
-        let voxel_z = (position.z / VOXEL_SIZE_METRES).floor() as i32;
-        SurfaceTileCoord::containing(level, voxel_x, voxel_z)
     }
 }
 
@@ -7499,163 +6396,6 @@ mod tests {
         assert_eq!(
             predictive_stream_position(camera.position, glam::Vec3::ZERO, 1.5, 12.8),
             camera.position
-        );
-    }
-
-    #[test]
-    fn fast_travel_reduces_only_surface_levels_crossed_faster_than_the_budget() {
-        let configured = [5, 5, 5, 5, 4, 5, 4, 4];
-        let minimum = [2, 2, 4, 5, 4, 5, 4, 4];
-        assert_eq!(
-            adaptive_surface_cross_radii(configured, minimum, 4.0, glam::Vec3::ZERO),
-            configured
-        );
-        assert_eq!(
-            adaptive_surface_cross_radii(configured, minimum, 4.0, glam::Vec3::new(8.0, 0.0, 0.0),),
-            configured,
-            "ordinary sprinting must retain the complete configured footprint"
-        );
-        assert_eq!(
-            adaptive_surface_cross_radii(
-                configured,
-                minimum,
-                4.0,
-                glam::Vec3::new(128.0, 0.0, 0.0),
-            ),
-            minimum
-        );
-    }
-
-    #[test]
-    fn fast_travel_surface_corridor_preserves_lead_while_narrowing_cross_track_work() {
-        assert_eq!(surface_motion_axis(glam::Vec3::ZERO), [0, 0]);
-        assert_eq!(surface_motion_axis(glam::Vec3::new(8.0, 0.0, 1.0)), [1, 0]);
-        assert_eq!(
-            surface_motion_axis(glam::Vec3::new(-3.0, 0.0, 5.0)),
-            [-1, 1]
-        );
-
-        assert!(surface_offset_in_coverage(5, 2, 5, 2, [1, 0]));
-        assert!(surface_offset_in_coverage(-5, 0, 5, 2, [1, 0]));
-        assert!(!surface_offset_in_coverage(0, 3, 5, 2, [1, 0]));
-
-        assert!(surface_offset_in_coverage(3, 3, 5, 2, [1, 1]));
-        assert!(!surface_offset_in_coverage(3, -3, 5, 2, [1, 1]));
-        assert!(surface_offset_in_coverage(5, 5, 5, 5, [0, 0]));
-    }
-
-    #[test]
-    fn fast_travel_uses_the_full_bounded_surface_lead() {
-        let position = glam::Vec3::new(10.0, 7.0, -4.0);
-        let ordinary =
-            predictive_surface_position(position, glam::Vec3::new(8.0, 0.0, 0.0), 1.5, 100.0, 25.6);
-        assert_eq!(ordinary, glam::Vec3::new(22.0, 7.0, -4.0));
-
-        let fast = predictive_surface_position(
-            position,
-            glam::Vec3::new(128.0, 0.0, 0.0),
-            1.5,
-            100.0,
-            25.6,
-        );
-        assert_eq!(fast, glam::Vec3::new(110.0, 7.0, -4.0));
-        assert_eq!(
-            predictive_surface_position(position, glam::Vec3::ZERO, 1.5, 100.0, 25.6,),
-            position
-        );
-    }
-
-    #[test]
-    fn fast_travel_surface_coverage_keeps_current_ground_and_forward_lead() {
-        let focus = SurfaceStreamFocus {
-            current: voxels_world::SurfaceLodLevel::ALL
-                .map(|level| voxels_world::SurfaceTileCoord::new(level, 0, 0)),
-            lead: voxels_world::SurfaceLodLevel::ALL
-                .map(|level| voxels_world::SurfaceTileCoord::new(level, 4, 0)),
-        };
-        let longitudinal = [5; voxels_world::SURFACE_LOD_LEVEL_COUNT];
-        let cross = [2; voxels_world::SURFACE_LOD_LEVEL_COUNT];
-        let tile = |x, z| {
-            voxels_world::SurfaceTileCoord::new(voxels_world::SurfaceLodLevel::Stride2, x, z)
-        };
-
-        assert!(surface_tile_in_coverage(
-            tile(-5, 0),
-            Some(focus),
-            longitudinal,
-            cross,
-            [1, 0],
-        ));
-        assert!(surface_tile_in_coverage(
-            tile(9, 0),
-            Some(focus),
-            longitudinal,
-            cross,
-            [1, 0],
-        ));
-        assert!(!surface_tile_in_coverage(
-            tile(0, 3),
-            Some(focus),
-            longitudinal,
-            cross,
-            [1, 0],
-        ));
-    }
-
-    #[test]
-    fn current_interactive_tiles_have_a_preemptive_surface_priority() {
-        let focus = SurfaceStreamFocus {
-            current: voxels_world::SurfaceLodLevel::ALL
-                .map(|level| voxels_world::SurfaceTileCoord::new(level, 7, -3)),
-            lead: voxels_world::SurfaceLodLevel::ALL
-                .map(|level| voxels_world::SurfaceTileCoord::new(level, 11, -3)),
-        };
-        assert_eq!(
-            surface_product_priority(focus.current[0], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
-            voxels_world::WorldProductPriority::ImmediateSurface
-        );
-        assert_eq!(
-            surface_product_priority(focus.lead[0], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
-            voxels_world::WorldProductPriority::ImmediateSurface
-        );
-        assert_eq!(
-            surface_product_priority(focus.current[4], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
-            voxels_world::WorldProductPriority::ImmediateSurface
-        );
-        assert_eq!(
-            surface_product_priority(focus.lead[4], focus, INTERACTIVE_SURFACE_LOD_LEVELS,),
-            voxels_world::WorldProductPriority::ImmediateSurface
-        );
-    }
-
-    #[test]
-    fn initialized_surface_prefix_never_regresses_while_traversing() {
-        assert_eq!(initialized_surface_level_prefix(0, 4), 4);
-        assert_eq!(
-            initialized_surface_level_prefix(4, 0),
-            4,
-            "newly pending children must not freeze an already-established cut"
-        );
-        assert_eq!(initialized_surface_level_prefix(4, 6), 6);
-    }
-
-    #[test]
-    fn surface_streaming_becomes_fine_first_after_interactive_bootstrap() {
-        let fine =
-            voxels_world::SurfaceTileCoord::new(voxels_world::SurfaceLodLevel::Stride2, 0, 0);
-        let coarse =
-            voxels_world::SurfaceTileCoord::new(voxels_world::SurfaceLodLevel::Stride256, 0, 0);
-        let immediate = voxels_world::WorldProductPriority::ImmediateSurface;
-
-        assert!(
-            surface_stream_level_order(coarse, immediate, 0)
-                < surface_stream_level_order(fine, immediate, 0),
-            "initial bootstrap must establish coarse parent cover first"
-        );
-        assert!(
-            surface_stream_level_order(fine, immediate, INTERACTIVE_SURFACE_LOD_LEVELS)
-                < surface_stream_level_order(coarse, immediate, INTERACTIVE_SURFACE_LOD_LEVELS),
-            "traversal must prioritize nearby fine replacements without waiting for every horizon ring"
         );
     }
 
