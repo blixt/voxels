@@ -932,6 +932,16 @@ fn virtual_triangle_gpu_vertices(
                         position[1] = grid.water_heights[sample_indices[index]];
                         position
                     });
+                    let flat_height = water_positions
+                        .iter()
+                        .map(|position| position[1])
+                        .reduce(|left, right| if left == right { left } else { i32::MIN });
+                    if flat_height.is_some_and(|height| height != i32::MIN) {
+                        // Coplanar wet cells are emitted as maximal rectangles after the ground
+                        // pass. Skipping them here prevents every source-grid cell from becoming
+                        // two duplicated water triangles.
+                        continue;
+                    }
                     for triangle in [[0, 2, 1], [0, 3, 2]] {
                         if triangle
                             .iter()
@@ -947,12 +957,102 @@ fn virtual_triangle_gpu_vertices(
                     }
                 }
             }
+            if let Some(water) = water {
+                push_virtual_flat_water_rectangles(&mut vertices, page, grid, water)?;
+            }
             Ok(vertices)
         }
         _ => Err(VirtualTerrainRendererError::UnsupportedRepresentation(
             page.representation.kind(),
         )),
     }
+}
+
+fn push_virtual_flat_water_rectangles(
+    vertices: &mut Vec<GpuTerrainVertex>,
+    page: &TerrainPageV1,
+    grid: &voxels_world::TerrainHeightfieldGrid,
+    material: Material,
+) -> Result<(), VirtualTerrainRendererError> {
+    let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+    let edge = cells + 1;
+    let mut flat_heights = vec![None; cells * cells];
+    for z in 0..cells {
+        for x in 0..cells {
+            let samples = [
+                x + z * edge,
+                x + 1 + z * edge,
+                x + 1 + (z + 1) * edge,
+                x + (z + 1) * edge,
+            ];
+            let heights = samples.map(|sample| grid.water_heights[sample]);
+            if heights[0] != i32::MIN && heights.into_iter().all(|height| height == heights[0]) {
+                flat_heights[x + z * cells] = Some(heights[0]);
+            }
+        }
+    }
+
+    let stride = i32::try_from(grid.sample_stride_voxels)
+        .map_err(|_| VirtualTerrainRendererError::InvalidTriangleCluster(page.key))?;
+    let mut emitted = vec![false; cells * cells];
+    for z in 0..cells {
+        for x in 0..cells {
+            let index = x + z * cells;
+            let Some(height) = flat_heights[index].filter(|_| !emitted[index]) else {
+                continue;
+            };
+            let mut width = 1usize;
+            while x + width < cells {
+                let candidate = x + width + z * cells;
+                if emitted[candidate] || flat_heights[candidate] != Some(height) {
+                    break;
+                }
+                width += 1;
+            }
+            let mut depth = 1usize;
+            'grow: while z + depth < cells {
+                for offset in 0..width {
+                    let candidate = x + offset + (z + depth) * cells;
+                    if emitted[candidate] || flat_heights[candidate] != Some(height) {
+                        break 'grow;
+                    }
+                }
+                depth += 1;
+            }
+            for row in z..z + depth {
+                emitted[row * cells + x..row * cells + x + width].fill(true);
+            }
+
+            let coordinate = |origin: i32, cell: usize| {
+                i32::try_from(cell)
+                    .ok()
+                    .and_then(|cell| cell.checked_mul(stride))
+                    .and_then(|offset| origin.checked_add(offset))
+                    .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(
+                        page.key,
+                    ))
+            };
+            let minimum_x = coordinate(page.bounds.min.x, x)?;
+            let maximum_x = coordinate(page.bounds.min.x, x + width)?;
+            let minimum_z = coordinate(page.bounds.min.z, z)?;
+            let maximum_z = coordinate(page.bounds.min.z, z + depth)?;
+            let rectangle = [
+                [minimum_x, height, minimum_z],
+                [maximum_x, height, minimum_z],
+                [maximum_x, height, maximum_z],
+                [minimum_x, height, maximum_z],
+            ];
+            for triangle in [[0, 2, 1], [0, 3, 2]] {
+                push_virtual_triangle(
+                    vertices,
+                    triangle.map(|corner| rectangle[corner]),
+                    material,
+                    page.key,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn push_virtual_triangle(
@@ -16447,7 +16547,7 @@ mod tests {
     }
 
     #[test]
-    fn sampled_heightfield_expands_to_small_upward_triangles_and_a_separate_water_stream() {
+    fn sampled_heightfield_merges_flat_water_without_changing_its_lattice_plane() {
         let key = TerrainPageKey {
             level: 2,
             coord: [-1, 0, -1],
@@ -16476,11 +16576,11 @@ mod tests {
         let vertices = virtual_triangle_gpu_vertices(&page).unwrap();
         let ground_vertices =
             TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize * 6;
-        assert_eq!(vertices.len(), ground_vertices * 2);
+        assert_eq!(vertices.len(), ground_vertices + 6);
         assert!(vertices.iter().all(|vertex| vertex.normal[1] > 0));
         let (_, opaque, water) = partition_virtual_triangle_geometry(vertices).unwrap();
         assert_eq!(opaque as usize, ground_vertices);
-        assert_eq!(water as usize, ground_vertices);
+        assert_eq!(water, 6);
     }
 
     #[test]
