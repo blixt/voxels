@@ -777,6 +777,7 @@ impl VirtualTerrainHierarchy {
             }
             builder.visit(root, true);
         }
+        builder.balance_surface_lod();
         builder.selected.sort_unstable();
         builder.ownerless_roots.sort_unstable();
         let exact_surface_lod_discontinuities =
@@ -804,11 +805,13 @@ impl VirtualTerrainHierarchy {
     }
 }
 
-/// Counts fine edge segments whose selected neighbor skips an intermediate surface level.
+/// Finds fine edge segments whose selected neighbor skips an intermediate surface level.
 ///
 /// Looking outward from the finer page makes the audit bounded by four directions times the
 /// hierarchy depth rather than comparing every selected page with every other page.
-fn exact_surface_lod_discontinuity_edges(selected: &[TerrainPageKey]) -> usize {
+fn surface_lod_discontinuity_pairs(
+    selected: &[TerrainPageKey],
+) -> Vec<(TerrainPageKey, TerrainPageKey)> {
     let selected = selected.iter().copied().collect::<BTreeSet<_>>();
     let maximum_level = selected
         .iter()
@@ -816,32 +819,31 @@ fn exact_surface_lod_discontinuity_edges(selected: &[TerrainPageKey]) -> usize {
         .map(|key| key.level)
         .max()
         .unwrap_or(0);
-    selected
-        .iter()
-        .copied()
-        // Levels 1 and 2 are the transition rings around the exact level-0 lattice. Letting either
-        // ring skip a level merely moves the same sharp step a few metres outward where a moving
-        // player can immediately catch it.
-        .filter(|key| key.is_surface() && key.level <= 2)
-        .map(|key| {
-            [
-                [key.coord[0].saturating_sub(1), key.coord[2]],
-                [key.coord[0].saturating_add(1), key.coord[2]],
-                [key.coord[0], key.coord[2].saturating_sub(1)],
-                [key.coord[0], key.coord[2].saturating_add(1)],
-            ]
-            .into_iter()
-            .filter(|neighbor| {
-                let same_level = TerrainPageKey::surface(key.level, neighbor[0], neighbor[1]);
-                ((key.level.saturating_add(2))..=maximum_level).any(|level| {
+    let mut discontinuities = Vec::new();
+    for key in selected.iter().copied().filter(|key| key.is_surface()) {
+        for neighbor in [
+            [key.coord[0].saturating_sub(1), key.coord[2]],
+            [key.coord[0].saturating_add(1), key.coord[2]],
+            [key.coord[0], key.coord[2].saturating_sub(1)],
+            [key.coord[0], key.coord[2].saturating_add(1)],
+        ] {
+            let same_level = TerrainPageKey::surface(key.level, neighbor[0], neighbor[1]);
+            if let Some(coarse) =
+                ((key.level.saturating_add(2))..=maximum_level).find_map(|level| {
                     same_level
                         .ancestor_at(level)
-                        .is_some_and(|ancestor| selected.contains(&ancestor))
+                        .filter(|ancestor| selected.contains(ancestor))
                 })
-            })
-            .count()
-        })
-        .sum()
+            {
+                discontinuities.push((key, coarse));
+            }
+        }
+    }
+    discontinuities
+}
+
+fn exact_surface_lod_discontinuity_edges(selected: &[TerrainPageKey]) -> usize {
+    surface_lod_discontinuity_pairs(selected).len()
 }
 
 fn terrain_page_keys_overlap(left: TerrainPageKey, right: TerrainPageKey) -> bool {
@@ -875,6 +877,116 @@ struct CutBuilder<'a> {
 }
 
 impl CutBuilder<'_> {
+    /// Refines only the coarser side of every skipped-level surface edge.
+    ///
+    /// Replacing a coarse page with its complete coherent child group preserves the complete
+    /// half-open partition and never sacrifices the exact 10 cm ownership already selected near
+    /// the player. Missing children are requested and leave the candidate non-renderable, so the
+    /// previously certified cut remains visible until the balanced replacement exists.
+    fn balance_surface_lod(&mut self) {
+        let mut passes = 0_u8;
+        loop {
+            let discontinuities = surface_lod_discontinuity_pairs(&self.selected);
+            if discontinuities.is_empty() {
+                break;
+            }
+            passes = passes.saturating_add(1);
+            let maximum_level = self
+                .selected
+                .iter()
+                .filter(|key| key.is_surface())
+                .map(|key| key.level)
+                .max()
+                .unwrap_or(0);
+            if passes > maximum_level.saturating_add(1) {
+                self.traversal_overflow = true;
+                break;
+            }
+
+            let coarse_pages = discontinuities
+                .into_iter()
+                .map(|(_, coarse)| coarse)
+                .collect::<BTreeSet<_>>();
+            let additional_pages = coarse_pages
+                .iter()
+                .map(|key| {
+                    key.refinement_children()
+                        .map_or(TERRAIN_PAGE_MAX_CHILDREN, |children| children.len())
+                        .saturating_sub(1)
+                })
+                .sum::<usize>();
+            if self.selected.len().saturating_add(additional_pages)
+                > self.hierarchy.capacity.max_selected_pages
+            {
+                self.selection_overflow = true;
+                break;
+            }
+
+            let mut replacements = Vec::with_capacity(coarse_pages.len());
+            let mut unavailable = false;
+            for coarse in coarse_pages {
+                let Some(children) = coarse.refinement_children() else {
+                    self.traversal_overflow = true;
+                    unavailable = true;
+                    continue;
+                };
+                if self.hierarchy.replacement_is_resident_and_coherent(coarse) {
+                    replacements.push((coarse, children));
+                    continue;
+                }
+                let node_has_children = self
+                    .hierarchy
+                    .nodes
+                    .get(&coarse)
+                    .is_some_and(|node| node.has_children);
+                if !node_has_children && coarse.level > 0 {
+                    if self.refinement_requests.len() < self.hierarchy.capacity.max_feedback_pages {
+                        self.refinement_requests.insert(coarse);
+                    } else {
+                        self.feedback_overflow = true;
+                    }
+                } else if children
+                    .iter()
+                    .all(|child| self.hierarchy.resident.contains_key(child))
+                {
+                    self.incoherent_replacement_groups =
+                        self.incoherent_replacement_groups.saturating_add(1);
+                } else {
+                    for child in children {
+                        if !self.hierarchy.resident.contains_key(&child) {
+                            self.request(child);
+                        }
+                    }
+                }
+                unavailable = true;
+            }
+            if unavailable {
+                break;
+            }
+            for (coarse, children) in replacements {
+                self.selected.retain(|key| *key != coarse);
+                self.selected.extend(children);
+                self.next_refined.insert(coarse);
+            }
+        }
+        self.selected.sort_unstable();
+        self.selected.dedup();
+        self.selected_primitives = 0;
+        self.selected_encoded_bytes = 0;
+        for key in &self.selected {
+            let Some(resident) = self.hierarchy.resident.get_mut(key) else {
+                continue;
+            };
+            resident.last_selected_frame = self.frame;
+            self.selected_primitives = self
+                .selected_primitives
+                .saturating_add(resident.primitive_count);
+            self.selected_encoded_bytes = self
+                .selected_encoded_bytes
+                .saturating_add(resident.encoded_bytes);
+        }
+    }
+
     fn visit(&mut self, key: TerrainPageKey, root: bool) {
         // Frustum-cull only complete region roots. Once a root becomes a visible owner, every
         // refinement remains a complete octree partition of that root. Culling individual
@@ -1343,6 +1455,114 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn insert_unregistered_resident(hierarchy: &mut VirtualTerrainHierarchy, page: TerrainPageV1) {
+        let encoded_bytes = encode_terrain_page(&page).unwrap().len();
+        let primitive_count = page_primitive_count(&page);
+        hierarchy.resident.insert(
+            page.key,
+            ResidentPage {
+                page,
+                encoded_bytes,
+                primitive_count,
+                last_selected_frame: 0,
+            },
+        );
+    }
+
+    fn cut_builder_for_selection<'a>(
+        hierarchy: &'a mut VirtualTerrainHierarchy,
+        prior_refined: &'a BTreeSet<TerrainPageKey>,
+        selected: Vec<TerrainPageKey>,
+    ) -> CutBuilder<'a> {
+        CutBuilder {
+            hierarchy,
+            view: view(false),
+            frame: 1,
+            prior_refined,
+            next_refined: prior_refined.clone(),
+            selected,
+            requests: BTreeSet::new(),
+            refinement_requests: BTreeSet::new(),
+            ownerless_roots: Vec::new(),
+            visited_nodes: 0,
+            selected_primitives: 0,
+            selected_encoded_bytes: 0,
+            feedback_overflow: false,
+            selection_overflow: false,
+            traversal_overflow: false,
+            incoherent_replacement_groups: 0,
+        }
+    }
+
+    #[test]
+    fn surface_balance_refines_the_coarse_side_without_sacrificing_exact_pages() {
+        let fine = TerrainPageKey::surface(0, 3, 0);
+        let coarse = TerrainPageKey::surface(2, 1, 0);
+        let children = coarse.refinement_children().unwrap();
+        let selected = vec![fine, coarse];
+        assert!(
+            exact_surface_lod_discontinuity_edges(&selected) > 0,
+            "the fixture must contain a skipped intermediate surface level"
+        );
+
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        for key in selected.iter().copied().chain(children.iter().copied()) {
+            insert_unregistered_resident(&mut hierarchy, surface_page(key));
+        }
+        hierarchy.coherent_replacements.insert(coarse);
+        let prior_refined = BTreeSet::new();
+        let mut builder = cut_builder_for_selection(&mut hierarchy, &prior_refined, selected);
+
+        builder.balance_surface_lod();
+
+        assert!(builder.selected.contains(&fine));
+        assert!(!builder.selected.contains(&coarse));
+        assert!(
+            children
+                .iter()
+                .all(|child| builder.selected.contains(child))
+        );
+        assert_eq!(exact_surface_lod_discontinuity_edges(&builder.selected), 0);
+        assert_eq!(builder.next_refined, BTreeSet::from([coarse]));
+        assert!(!builder.traversal_overflow);
+    }
+
+    #[test]
+    fn surface_balance_waits_for_a_complete_coarse_refinement_group() {
+        let fine = TerrainPageKey::surface(0, 3, 0);
+        let coarse = TerrainPageKey::surface(2, 1, 0);
+        let children = coarse.refinement_children().unwrap();
+        let coarse_page = surface_page(coarse);
+        let pages = std::iter::once(coarse_page.clone())
+            .chain(children.iter().copied().map(surface_page))
+            .collect::<Vec<_>>();
+        let directory =
+            TerrainHierarchyDirectoryV1::from_surface_refinement_pages(coarse, &pages).unwrap();
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        hierarchy.register_region_directory(&directory).unwrap();
+        hierarchy.install_page(coarse_page).unwrap();
+        let selected = vec![fine, coarse];
+        let prior_refined = BTreeSet::new();
+        let mut builder =
+            cut_builder_for_selection(&mut hierarchy, &prior_refined, selected.clone());
+
+        builder.balance_surface_lod();
+
+        assert_eq!(builder.selected, selected);
+        assert_eq!(
+            builder
+                .requests
+                .iter()
+                .map(|identity| identity.key)
+                .collect::<BTreeSet<_>>(),
+            children.into_iter().collect()
+        );
+        assert!(exact_surface_lod_discontinuity_edges(&builder.selected) > 0);
+        assert!(builder.next_refined.is_empty());
     }
 
     fn surface_segment(root: TerrainPageKey) -> (TerrainHierarchyDirectoryV1, Vec<TerrainPageV1>) {
