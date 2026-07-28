@@ -1471,6 +1471,7 @@ mod web {
     const VIRTUAL_TERRAIN_MAX_REGIONS: usize = 48;
     const VIRTUAL_TERRAIN_REGION_WORKING_SET: usize = 128;
     const VIRTUAL_TERRAIN_MAX_DIRECTORY_BATCHES_IN_FLIGHT: usize = 2;
+    const VIRTUAL_TERRAIN_MAX_REFINEMENT_DIRECTORY_BATCHES_IN_FLIGHT: usize = 1;
     const VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS: u64 = 1_000;
     const VIRTUAL_TERRAIN_PAGE_CACHE_BYTES: usize = 128 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_REFINE_ABOVE_PIXELS: f64 = 0.75;
@@ -2032,6 +2033,7 @@ mod web {
         surface_queue: RefCell<VecDeque<SurfaceTileCoord>>,
         surface_in_flight: RefCell<BTreeSet<SurfaceTileCoord>>,
         surface_dirty: RefCell<BTreeSet<SurfaceTileCoord>>,
+        surface_stream_suspended: Cell<bool>,
         virtual_terrain: RefCell<VirtualTerrainStreamingState>,
         virtual_terrain_scheduler: RefCell<TerrainStreamScheduler>,
         virtual_terrain_cache: RefCell<TerrainPageMemoryCache>,
@@ -3082,8 +3084,15 @@ mod web {
             }
             let publish_ms = (performance_now(performance) - publish_start) as f32;
             let surface_start = performance_now(performance);
-            self.stream_surface_lods(camera, streaming_velocity);
             self.stream_virtual_terrain(camera, streaming_velocity);
+            let virtual_visible = self.renderer.borrow().virtual_terrain_render_mode()
+                == VirtualTerrainRenderMode::Visible;
+            if virtual_visible {
+                self.suspend_legacy_surface_stream();
+            } else {
+                self.surface_stream_suspended.set(false);
+                self.stream_surface_lods(camera, streaming_velocity);
+            }
             let surface_ms = (performance_now(performance) - surface_start) as f32;
             StreamFrameSample {
                 remote_ms,
@@ -3714,7 +3723,11 @@ mod web {
                 }
             }
 
-            self.request_virtual_terrain_directories(&prioritized_roots, now_ms);
+            self.request_virtual_terrain_directories(
+                &prioritized_roots,
+                now_ms,
+                VIRTUAL_TERRAIN_MAX_DIRECTORY_BATCHES_IN_FLIGHT,
+            );
 
             let view = self.virtual_terrain_view(camera);
             let mut cut = match self.renderer.borrow_mut().select_virtual_terrain_cut(view) {
@@ -3734,7 +3747,21 @@ mod web {
                 }
             }
 
-            self.request_virtual_terrain_directories(&cut.refinement_roots, now_ms);
+            if self
+                .renderer
+                .borrow()
+                .virtual_terrain_candidate_is_gpu_certified()
+            {
+                // Install only one refinement-directory mutation at a time, and do not begin the
+                // next until the GPU has certified the current CPU cut. The fixed-ring streamer
+                // previously throttled this work accidentally through server contention; pacing
+                // it explicitly prevents unbounded refinement churn once that old path is gone.
+                self.request_virtual_terrain_directories(
+                    &cut.refinement_roots,
+                    now_ms,
+                    VIRTUAL_TERRAIN_MAX_REFINEMENT_DIRECTORY_BATCHES_IN_FLIGHT,
+                );
+            }
 
             let demands =
                 self.virtual_terrain_demand_groups(&cut, view, streaming_velocity.length());
@@ -3855,6 +3882,7 @@ mod web {
             &self,
             desired_roots: &[TerrainPageKey],
             now_ms: u64,
+            maximum_in_flight_batches: usize,
         ) {
             let roots = {
                 let state = self.virtual_terrain.borrow();
@@ -3864,8 +3892,7 @@ mod web {
                     .copied()
                     .collect::<BTreeSet<_>>()
                     .len();
-                let available = VIRTUAL_TERRAIN_MAX_DIRECTORY_BATCHES_IN_FLIGHT
-                    .saturating_sub(in_flight_batches);
+                let available = maximum_in_flight_batches.saturating_sub(in_flight_batches);
                 desired_roots
                     .iter()
                     .filter(|root| {
@@ -4652,6 +4679,9 @@ mod web {
         }
 
         fn enqueue_surface_front(&self, coord: SurfaceTileCoord) {
+            if self.surface_stream_suspended.get() {
+                return;
+            }
             let in_active_coverage = surface_tile_in_coverage(
                 coord,
                 self.surface_focus.get(),
@@ -4677,6 +4707,15 @@ mod web {
             } else {
                 self.surface_queue.borrow_mut().push_back(coord);
             }
+        }
+
+        fn suspend_legacy_surface_stream(&self) {
+            if self.surface_stream_suspended.replace(true) {
+                return;
+            }
+            self.remote.cancel_surface_batches_outside(|_| false);
+            self.surface_queue.borrow_mut().clear();
+            self.surface_dirty.borrow_mut().clear();
         }
 
         fn accept_generated_chunk(
@@ -6994,6 +7033,7 @@ mod web {
             surface_queue: RefCell::new(VecDeque::new()),
             surface_in_flight: RefCell::new(BTreeSet::new()),
             surface_dirty: RefCell::new(BTreeSet::new()),
+            surface_stream_suspended: Cell::new(false),
             virtual_terrain: RefCell::new(VirtualTerrainStreamingState::default()),
             virtual_terrain_scheduler: RefCell::new(
                 TerrainStreamScheduler::new(TerrainStreamConfig::DEVELOPMENT)

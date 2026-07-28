@@ -1127,9 +1127,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
           (snapshotValue(snapshot, "presentedLodStrideVoxels") === 1 &&
             snapshotValue(snapshot, "lodIncompleteTransitionEdges") === 0) ||
           (virtual.mode === 2 &&
-            virtual.selectedPages > 0 &&
-            virtual.ownerlessRoots === 0 &&
-            virtual.gpuMatchesCpuCut &&
+            virtual.publishedPages > 0 &&
             virtual.currentColumnKnown &&
             virtual.currentColumnRoots > 0 &&
             virtual.currentColumnRegisteredRoots === virtual.currentColumnRoots);
@@ -1215,6 +1213,12 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     if (uncoveredOwnerSamples > 0) {
       violations.push("sustained travel sampled a world point without an LOD owner");
     }
+    const visibleLegacyQueueSamples = samples.filter(
+      (sample) => sample.virtualTerrain.mode === 2 && sample.surfaceQueued > 0,
+    );
+    if (visibleLegacyQueueSamples.length > 0) {
+      violations.push("the fixed-ring surface queue regrew after virtual terrain took ownership");
+    }
     if (descentCoverage && travelFinishedPose[1] > descentStopHeight + 5) {
       violations.push("spectator descent did not reach the registered near-ground handoff");
     }
@@ -1268,6 +1272,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
           first: samples[0]?.surfaceQueued ?? 0,
           last: samples.at(-1)?.surfaceQueued ?? 0,
           maximum: Math.max(0, ...samples.map((sample) => sample.surfaceQueued)),
+          visibleSamplesWithQueuedWork: visibleLegacyQueueSamples.length,
         },
         virtualTerrain: {
           visibleSamples: samples.filter((sample) => sample.virtualTerrain.mode === 2).length,

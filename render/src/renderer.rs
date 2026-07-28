@@ -5608,6 +5608,20 @@ impl Renderer {
         self.virtual_terrain_mode
     }
 
+    /// Returns whether the latest GPU traversal certifies the current CPU candidate cut.
+    ///
+    /// Directory growth must be paced behind this fence. Extending the directory again while the
+    /// prior candidate is still being traversed can invalidate feedback faster than readback can
+    /// complete, preventing a valid published cut from ever converging to its replacement.
+    pub fn virtual_terrain_candidate_is_gpu_certified(&self) -> bool {
+        self.virtual_terrain_oracle_cut.as_ref().is_some_and(|cut| {
+            self.virtual_terrain_gpu
+                .latest_feedback()
+                .as_ref()
+                .is_some_and(|feedback| gpu_feedback_matches_cut(feedback, Some(cut)))
+        })
+    }
+
     pub fn virtual_terrain_region_roots(&self) -> Vec<TerrainPageKey> {
         self.virtual_terrain.roots().collect()
     }
