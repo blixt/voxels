@@ -3114,10 +3114,9 @@ mod web {
             self.stream_virtual_terrain(camera, streaming_velocity);
             let virtual_visible = self.renderer.borrow().virtual_terrain_render_mode()
                 == VirtualTerrainRenderMode::Visible;
-            if virtual_visible {
+            if virtual_visible || self.surface_stream_suspended.get() {
                 self.suspend_legacy_surface_stream();
             } else {
-                self.surface_stream_suspended.set(false);
                 self.stream_surface_lods(camera, streaming_velocity);
             }
             let surface_ms = (performance_now(performance) - surface_start) as f32;

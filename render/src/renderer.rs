@@ -3156,6 +3156,7 @@ pub struct Renderer {
     virtual_terrain_oracle_cut: Option<VirtualTerrainCut>,
     virtual_terrain_oracle_view: Option<VirtualTerrainView>,
     virtual_terrain_pages: BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
+    virtual_terrain_retired_published_pages: BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
     virtual_terrain_arena: ArenaAllocator,
     virtual_terrain_arena_buffers: Vec<Buffer>,
     surface_patch_profiles: HashMap<SurfacePatchId, SurfacePatchProfile>,
@@ -4238,6 +4239,7 @@ impl Renderer {
             virtual_terrain_oracle_cut: None,
             virtual_terrain_oracle_view: None,
             virtual_terrain_pages: BTreeMap::new(),
+            virtual_terrain_retired_published_pages: BTreeMap::new(),
             virtual_terrain_arena,
             virtual_terrain_arena_buffers: Vec::new(),
             surface_patch_profiles: HashMap::new(),
@@ -5115,6 +5117,7 @@ impl Renderer {
         let virtual_terrain_manifest = screenshot_virtual_terrain_manifest_json(
             self.virtual_terrain_mode,
             &self.virtual_terrain_pages,
+            &self.virtual_terrain_retired_published_pages,
             (self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible)
                 .then_some(self.virtual_terrain_cut.as_ref())
                 .flatten(),
@@ -5351,8 +5354,6 @@ impl Renderer {
                 .synchronize_active_roots(&self.queue, prior.iter().copied());
             return Err(VirtualTerrainRendererError::GpuTraversal);
         }
-        self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
-        self.virtual_terrain_cut = None;
         self.virtual_terrain_oracle_cut = None;
         self.virtual_terrain_oracle_view = None;
         Ok(())
@@ -5642,6 +5643,7 @@ impl Renderer {
             // correctness fallback while asynchronous GPU feedback catches up. Rendering that
             // cut through the bounded direct path is strictly safer than reviving stale fixed-ring
             // ownership after an edit or directory compaction.
+            self.discard_retired_virtual_terrain_pages();
             self.virtual_terrain_cut = Some(cut);
             self.virtual_terrain_legacy_handoff_certified = true;
         }
@@ -5707,9 +5709,9 @@ impl Renderer {
 
     /// Retires immutable region directories outside the current streaming working set.
     ///
-    /// Any directory compaction invalidates candidate traversal indices. A published cut survives
-    /// when none of its selected pages are retired because it draws directly from immutable page
-    /// allocations while the next GPU candidate is rebuilt and certified.
+    /// Any directory compaction invalidates candidate traversal indices. Pages belonging to the
+    /// published cut move into an immutable retirement set rather than disappearing; the old
+    /// virtual owner remains visible while its complete revised replacement is built beside it.
     pub fn retain_virtual_terrain_regions(
         &mut self,
         keep: impl IntoIterator<Item = TerrainPageKey>,
@@ -5729,18 +5731,25 @@ impl Renderer {
         for root in remove {
             removed_pages.extend(self.virtual_terrain.remove_region_directory(root));
         }
+        let published = self
+            .virtual_terrain_cut
+            .as_ref()
+            .map(|cut| cut.selected_pages.iter().copied().collect::<BTreeSet<_>>())
+            .unwrap_or_default();
         for key in &removed_pages {
-            if let Some(page) = self.virtual_terrain_pages.remove(key) {
+            let Some(page) = self.virtual_terrain_pages.remove(key) else {
+                continue;
+            };
+            if published.contains(key)
+                && !self
+                    .virtual_terrain_retired_published_pages
+                    .contains_key(key)
+            {
+                self.virtual_terrain_retired_published_pages
+                    .insert(*key, page);
+            } else {
                 discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
             }
-        }
-        if self.virtual_terrain_cut.as_ref().is_some_and(|cut| {
-            cut.selected_pages
-                .iter()
-                .any(|key| removed_pages.contains(key))
-        }) {
-            self.virtual_terrain_cut = None;
-            self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
         }
         self.virtual_terrain_gpu
             .synchronize_directory_set(&self.queue, &self.virtual_terrain)
@@ -5762,16 +5771,21 @@ impl Renderer {
         }
         self.virtual_terrain_oracle_cut = None;
         self.virtual_terrain_oracle_view = None;
-        if self
+        let published = self
             .virtual_terrain_cut
             .as_ref()
-            .is_some_and(|cut| cut.selected_pages.contains(&key))
-        {
-            self.virtual_terrain_cut = None;
-            self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
-        }
+            .is_some_and(|cut| cut.selected_pages.contains(&key));
         if let Some(page) = self.virtual_terrain_pages.remove(&key) {
-            discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
+            if published
+                && !self
+                    .virtual_terrain_retired_published_pages
+                    .contains_key(&key)
+            {
+                self.virtual_terrain_retired_published_pages
+                    .insert(key, page);
+            } else {
+                discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
+            }
         }
         self.virtual_terrain_gpu
             .update_page_geometry(&self.queue, key, VirtualTerrainGpuGeometry::default())
@@ -5837,6 +5851,13 @@ impl Renderer {
             }
         }
         Ok(remove.len())
+    }
+
+    fn discard_retired_virtual_terrain_pages(&mut self) {
+        let retired = std::mem::take(&mut self.virtual_terrain_retired_published_pages);
+        for (_, page) in retired {
+            discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
+        }
     }
 
     fn ensure_virtual_terrain_gpu_allocation(
@@ -7709,6 +7730,7 @@ impl Renderer {
                         &self.queue,
                         &self.virtual_terrain_arena_buffers,
                         &self.virtual_terrain_pages,
+                        &self.virtual_terrain_retired_published_pages,
                         "screenshot virtual terrain owner sidecar",
                     ) else {
                         return false;
@@ -8939,8 +8961,9 @@ impl Renderer {
         let mut water_selected_slices = 0u32;
         for key in &cut.selected_pages {
             let page = self
-                .virtual_terrain_pages
+                .virtual_terrain_retired_published_pages
                 .get(key)
+                .or_else(|| self.virtual_terrain_pages.get(key))
                 .ok_or(VirtualTerrainRendererError::SelectedPageMissingGpu(*key))?;
             fingerprint = fingerprint_value(fingerprint, u64::from(key.level));
             for component in key.coord {
@@ -9155,6 +9178,7 @@ fn screenshot_virtual_terrain_owner_buffers(
     queue: &Queue,
     arena_buffers: &[Buffer],
     pages: &BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
+    retired_published_pages: &BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
     label: &'static str,
 ) -> Option<Vec<Buffer>> {
     let primitive_bytes = size_of::<GpuQuad>() as u64;
@@ -9172,7 +9196,7 @@ fn screenshot_virtual_terrain_owner_buffers(
             })
         })
         .collect::<Vec<_>>();
-    for (key, page) in pages {
+    for (key, page) in pages.iter().chain(retired_published_pages) {
         let owner = diagnostic_owner_id(
             DIAGNOSTIC_VIRTUAL_REPRESENTATION_BASE + u32::from(page.representation as u8),
             u32::from(key.level),
@@ -13775,6 +13799,7 @@ fn screenshot_cut_manifest_json(
 fn screenshot_virtual_terrain_manifest_json(
     mode: VirtualTerrainRenderMode,
     resident: &BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
+    retired_published: &BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
     published_cut: Option<&VirtualTerrainCut>,
     oracle_cut: Option<&VirtualTerrainCut>,
     feedback: Option<&GpuVirtualTerrainFeedback>,
@@ -13790,6 +13815,25 @@ fn screenshot_virtual_terrain_manifest_json(
         r#"{{"mode":"{mode}","publishedCut":{published},"oracleCut":{oracle},"residentPages":["#
     );
     for (index, (key, page)) in resident.iter().enumerate() {
+        if index != 0 {
+            encoded.push(',');
+        }
+        let _ = write!(
+            encoded,
+            concat!(
+                r#"{{"level":{},"coord":{:?},"revision":"{}","contentFingerprint":"{}","#,
+                r#""representation":"{}","representationKind":{}}}"#
+            ),
+            key.level,
+            key.coord,
+            page.revision,
+            hex_bytes(&page.content_fingerprint),
+            virtual_representation_label(page.representation),
+            page.representation as u8,
+        );
+    }
+    encoded.push_str("],\"retiredPublishedPages\":[");
+    for (index, (key, page)) in retired_published.iter().enumerate() {
         if index != 0 {
             encoded.push(',');
         }
@@ -14139,6 +14183,7 @@ mod tests {
         let manifest = screenshot_virtual_terrain_manifest_json(
             VirtualTerrainRenderMode::Visible,
             &resident,
+            &BTreeMap::new(),
             Some(&cut),
             Some(&cut),
             Some(&feedback),
