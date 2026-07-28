@@ -650,6 +650,36 @@ impl EditAuthority {
         Some(terrain_region_revision(&self.lock(), &chunks))
     }
 
+    /// Captures the sparse vertical edit columns that can affect one surface-hierarchy segment.
+    ///
+    /// Surface pages include their positive boundary lattice samples, so the inclusive horizontal
+    /// interval deliberately reaches the page maximum. The revision is local to intersecting
+    /// canonical chunks; unrelated edits no longer invalidate every virtual terrain root.
+    pub(crate) fn snapshot_surface_terrain(
+        &self,
+        root: TerrainPageKey,
+    ) -> Option<TerrainEditSnapshot> {
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = root.horizontal_bounds()?;
+        let state = self.lock();
+        let edits = state
+            .edits
+            .snapshot_for_voxel_columns(minimum_x, maximum_x, minimum_z, maximum_z);
+        let revision =
+            surface_terrain_revision_in(&state, minimum_x, maximum_x, minimum_z, maximum_z);
+        Some(TerrainEditSnapshot { edits, revision })
+    }
+
+    pub(crate) fn surface_terrain_revision(&self, root: TerrainPageKey) -> Option<u64> {
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = root.horizontal_bounds()?;
+        Some(surface_terrain_revision_in(
+            &self.lock(),
+            minimum_x,
+            maximum_x,
+            minimum_z,
+            maximum_z,
+        ))
+    }
+
     pub(crate) fn apply(
         &self,
         source: &dyn WorldSourceEngine,
@@ -1324,6 +1354,27 @@ fn terrain_region_revision(state: &EditState, chunks: &[ChunkCoord]) -> u64 {
     chunks
         .iter()
         .filter_map(|coord| state.chunk_revisions.get(coord).copied())
+        .max()
+        .unwrap_or(INITIAL_REVISION)
+}
+
+fn surface_terrain_revision_in(
+    state: &EditState,
+    minimum_x: i32,
+    maximum_x: i32,
+    minimum_z: i32,
+    maximum_z: i32,
+) -> u64 {
+    let minimum_chunk = VoxelCoord::new(minimum_x, 0, minimum_z).chunk();
+    let maximum_chunk = VoxelCoord::new(maximum_x, 0, maximum_z).chunk();
+    state
+        .chunk_revisions
+        .iter()
+        .filter(|(coord, _)| {
+            (minimum_chunk.x..=maximum_chunk.x).contains(&coord.x)
+                && (minimum_chunk.z..=maximum_chunk.z).contains(&coord.z)
+        })
+        .map(|(_, revision)| *revision)
         .max()
         .unwrap_or(INITIAL_REVISION)
 }

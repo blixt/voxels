@@ -220,7 +220,7 @@ impl VirtualTerrainAuthority {
     pub(crate) fn current_revision(&self, root: TerrainPageKey) -> Option<u64> {
         match (root.level, root.is_surface()) {
             (TERRAIN_REGION_ROOT_LEVEL, false) => self.edits.terrain_region_revision(root),
-            (1..=TERRAIN_COVERAGE_ROOT_LEVEL, true) => Some(self.edits.revision()),
+            (1..=TERRAIN_COVERAGE_ROOT_LEVEL, true) => self.edits.surface_terrain_revision(root),
             _ => None,
         }
     }
@@ -284,15 +284,18 @@ impl VirtualTerrainAuthority {
     ) -> Result<Arc<PreparedTerrainRegion>, VirtualTerrainError> {
         if (1..=TERRAIN_COVERAGE_ROOT_LEVEL).contains(&root.level) && root.is_surface() {
             for _ in 0..REGION_BUILD_ATTEMPTS {
-                let revision = self.edits.revision();
+                let snapshot = self
+                    .edits
+                    .snapshot_surface_terrain(root)
+                    .ok_or(VirtualTerrainError::InvalidRoot)?;
                 let built = build_coverage_region(
                     self.source.as_ref(),
                     root,
-                    revision,
+                    snapshot.clone(),
                     self.source_identity_hash(),
                     priority,
                 )?;
-                if self.edits.revision() == revision {
+                if self.edits.surface_terrain_revision(root) == Some(snapshot.revision) {
                     return prepare_region(built);
                 }
             }
@@ -414,7 +417,7 @@ fn build_region_from_snapshot(
 fn build_coverage_region(
     source: &dyn WorldSourceEngine,
     root: TerrainPageKey,
-    revision: u64,
+    snapshot: TerrainEditSnapshot,
     source_identity_hash: WorldSourceIdentityHash,
     priority: WorldProductPriority,
 ) -> Result<TerrainRegionBuildV1, VirtualTerrainError> {
@@ -427,7 +430,7 @@ fn build_coverage_region(
     let stride = 1u32
         .checked_shl(u32::from(root.level.saturating_sub(1)))
         .ok_or(VirtualTerrainError::InvalidRoot)?;
-    let samples = source
+    let mut samples = source
         .surface_sample_lattice(
             priority,
             [minimum_x, minimum_z],
@@ -435,20 +438,196 @@ fn build_coverage_region(
             stride,
         )
         .map_err(|error| VirtualTerrainError::Source(error.to_string()))?;
+    let has_edits = !snapshot.edits.is_empty();
+    if root.level == 1 && has_edits {
+        apply_exact_surface_edits(
+            source,
+            [minimum_x, minimum_z],
+            &mut samples,
+            &snapshot,
+            priority,
+        )?;
+    }
     build_terrain_coverage_root(
         source_identity_hash,
         root,
-        revision,
+        snapshot.revision,
         &samples,
         TerrainErrorBounds {
             geometric_millivoxels: stride.saturating_mul(2_000),
             silhouette_millivoxels: stride.saturating_mul(2_000),
             material_boundary_millivoxels: 0,
             normal_milliradians: 0,
-            unresolved_topology: false,
+            // A heightfield cannot certify a cave, overhang, or floating edit. Infinite topology
+            // error forces refinement to the finest surface segment; difficult columns are then
+            // handed to the exact-volume path rather than silently averaged into a coarse parent.
+            unresolved_topology: has_edits,
         },
     )
     .map_err(|error| VirtualTerrainError::Build(error.to_string()))
+}
+
+fn apply_exact_surface_edits(
+    source: &dyn WorldSourceEngine,
+    minimum_xz: [i32; 2],
+    samples: &mut [voxels_world::SurfaceSample],
+    snapshot: &TerrainEditSnapshot,
+    priority: WorldProductPriority,
+) -> Result<(), VirtualTerrainError> {
+    const SAMPLE_EDGE: usize = (TERRAIN_PAGE_EDGE_SAMPLES as usize) * 2 + 1;
+    const REQUEST_BATCH: usize = 8;
+    if samples.len() != SAMPLE_EDGE * SAMPLE_EDGE {
+        return Err(VirtualTerrainError::Build(
+            "edited surface lattice has the wrong shape".to_owned(),
+        ));
+    }
+    let maximum_x = minimum_xz[0]
+        .checked_add(SAMPLE_EDGE as i32 - 1)
+        .ok_or(VirtualTerrainError::InvalidRoot)?;
+    let maximum_z = minimum_xz[1]
+        .checked_add(SAMPLE_EDGE as i32 - 1)
+        .ok_or(VirtualTerrainError::InvalidRoot)?;
+    let mut edited_columns = BTreeSet::new();
+    let mut minimum_y = samples
+        .iter()
+        .map(|sample| sample.height)
+        .min()
+        .ok_or_else(|| VirtualTerrainError::Build("edited surface lattice is empty".to_owned()))?;
+    let mut maximum_y = samples
+        .iter()
+        .map(|sample| sample.water_level.unwrap_or(sample.height))
+        .max()
+        .ok_or_else(|| VirtualTerrainError::Build("edited surface lattice is empty".to_owned()))?;
+    for chunk in snapshot.edits.edited_chunks() {
+        for (coord, _) in snapshot.edits.chunk_overrides(chunk) {
+            if (minimum_xz[0]..=maximum_x).contains(&coord.x)
+                && (minimum_xz[1]..=maximum_z).contains(&coord.z)
+            {
+                edited_columns.insert((coord.x, coord.z));
+                minimum_y = minimum_y.min(coord.y);
+                maximum_y = maximum_y.max(coord.y);
+            }
+        }
+    }
+    if edited_columns.is_empty() {
+        return Ok(());
+    }
+    minimum_y = minimum_y
+        .checked_sub(1)
+        .ok_or(VirtualTerrainError::InvalidRoot)?;
+    maximum_y = maximum_y
+        .checked_add(1)
+        .ok_or(VirtualTerrainError::InvalidRoot)?;
+
+    let mut requests = Vec::new();
+    let mut segment_minimum_y = minimum_y;
+    while segment_minimum_y < maximum_y {
+        let remaining = u32::try_from(i64::from(maximum_y) - i64::from(segment_minimum_y))
+            .map_err(|_| VirtualTerrainError::InvalidRoot)?;
+        let height = remaining.min(REGION_SAMPLE_YZ_SEGMENT_EDGE);
+        requests.push(VoxelBlockRequest {
+            min: VoxelCoord::new(minimum_xz[0], segment_minimum_y, minimum_xz[1]),
+            sample_shape: [SAMPLE_EDGE as u32, height, SAMPLE_EDGE as u32],
+        });
+        segment_minimum_y = segment_minimum_y
+            .checked_add(i32::try_from(height).map_err(|_| VirtualTerrainError::InvalidRoot)?)
+            .ok_or(VirtualTerrainError::InvalidRoot)?;
+    }
+
+    let mut ground = vec![None::<(i32, Material)>; samples.len()];
+    let mut water = vec![None::<i32>; samples.len()];
+    for batch in requests.chunks(REQUEST_BATCH) {
+        let requested = batch
+            .iter()
+            .copied()
+            .map(WorldProductRequest::VoxelBlock)
+            .collect::<Vec<_>>();
+        let result = source
+            .generate_batch(WorldProductBatch {
+                priority,
+                requests: requested.clone(),
+            })
+            .map_err(|error| VirtualTerrainError::Source(error.to_string()))?;
+        if result.source_identity_hash != source.identity().identity_hash()
+            || result.items.len() != requested.len()
+        {
+            return Err(VirtualTerrainError::Source(
+                "source returned a mismatched edited surface batch".to_owned(),
+            ));
+        }
+        for (expected, item) in requested.into_iter().zip(result.items) {
+            let WorldProductRequest::VoxelBlock(request) = expected else {
+                unreachable!("edited surface requests contain only voxel blocks");
+            };
+            let snapshot_block = match (item.request, item.result) {
+                (
+                    WorldProductRequest::VoxelBlock(returned),
+                    Ok(WorldProduct::VoxelBlock(block)),
+                ) if returned == request && block.request == request => block,
+                (_, Err(error)) => {
+                    return Err(VirtualTerrainError::Source(error.to_string()));
+                }
+                _ => {
+                    return Err(VirtualTerrainError::Source(
+                        "source returned a mismatched edited surface block".to_owned(),
+                    ));
+                }
+            };
+            let shape_x = request.sample_shape[0] as usize;
+            let shape_y = request.sample_shape[1] as usize;
+            for z in 0..SAMPLE_EDGE {
+                let world_z = request.min.z + z as i32;
+                for y in 0..shape_y {
+                    let world_y = request.min.y + y as i32;
+                    for x in 0..SAMPLE_EDGE {
+                        let world_x = request.min.x + x as i32;
+                        if !edited_columns.contains(&(world_x, world_z)) {
+                            continue;
+                        }
+                        let source_index = x + y * shape_x + z * shape_x * shape_y;
+                        let generated = snapshot_block
+                            .materials()
+                            .get(source_index)
+                            .copied()
+                            .ok_or_else(|| {
+                                VirtualTerrainError::Source(
+                                    "edited surface block omitted a sample".to_owned(),
+                                )
+                            })?;
+                        let material = snapshot.edits.resolve_generated(
+                            VoxelCoord::new(world_x, world_y, world_z),
+                            generated,
+                        );
+                        let sample_index = x + z * SAMPLE_EDGE;
+                        if material == Material::Water {
+                            water[sample_index] = Some(
+                                water[sample_index].map_or(world_y, |height| height.max(world_y)),
+                            );
+                        } else if material.is_renderable() {
+                            ground[sample_index] = Some((world_y, material));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (x, z) in edited_columns {
+        let local_x =
+            usize::try_from(x - minimum_xz[0]).map_err(|_| VirtualTerrainError::InvalidRoot)?;
+        let local_z =
+            usize::try_from(z - minimum_xz[1]).map_err(|_| VirtualTerrainError::InvalidRoot)?;
+        let index = local_x + local_z * SAMPLE_EDGE;
+        let Some((height, material)) = ground[index] else {
+            return Err(VirtualTerrainError::Build(
+                "edited surface scan did not find supporting terrain".to_owned(),
+            ));
+        };
+        samples[index].height = height;
+        samples[index].material = material;
+        samples[index].water_level = water[index].filter(|water| *water >= height);
+    }
+    Ok(())
 }
 
 fn prepare_region(
@@ -681,7 +860,10 @@ mod tests {
         let built = build_coverage_region(
             &source,
             root,
-            9,
+            TerrainEditSnapshot {
+                edits: voxels_world::EditMap::default(),
+                revision: 9,
+            },
             source.source_identity_hash(),
             WorldProductPriority::VirtualTerrain,
         )
@@ -696,5 +878,57 @@ mod tests {
         assert!(built.pages.iter().all(|page| {
             encode_terrain_page(page).unwrap().len() <= TERRAIN_PAGE_TARGET_COMPRESSED_BYTES
         }));
+    }
+
+    #[test]
+    fn finest_surface_segment_applies_the_local_edit_snapshot() {
+        let source = ProceduralWorldSource::new(17);
+        let root = TerrainPageKey::surface(1, 0, 0);
+        let [[minimum_x, minimum_z], _] = root.horizontal_bounds().unwrap();
+        let pristine = source
+            .surface_sample_lattice(
+                WorldProductPriority::VirtualTerrain,
+                [minimum_x, minimum_z],
+                [TERRAIN_PAGE_EDGE_SAMPLES * 2 + 1; 2],
+                1,
+            )
+            .unwrap();
+        let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize * 2 + 1;
+        let [local_x, local_z] = [3usize, 4usize];
+        let baseline = pristine[local_x + local_z * edge];
+        let edited_coord = VoxelCoord::new(
+            minimum_x + local_x as i32,
+            baseline.height + 5,
+            minimum_z + local_z as i32,
+        );
+        let mut edits = voxels_world::EditMap::default();
+        edits.insert_override(edited_coord, Material::Basalt);
+        let built = build_coverage_region(
+            &source,
+            root,
+            TerrainEditSnapshot {
+                edits,
+                revision: 11,
+            },
+            source.source_identity_hash(),
+            WorldProductPriority::VirtualTerrain,
+        )
+        .unwrap();
+        let child = built
+            .pages
+            .iter()
+            .find(|page| page.key == TerrainPageKey::surface(0, 0, 0))
+            .unwrap();
+        let voxels_world::TerrainPageRepresentation::HeightfieldGrid(grid) = &child.representation
+        else {
+            panic!("finest surface child is not a heightfield");
+        };
+        let sample = local_x + local_z * (TERRAIN_PAGE_EDGE_SAMPLES as usize + 1);
+        assert_eq!(grid.ground_heights[sample], edited_coord.y + 1);
+        assert_eq!(
+            child.materials[usize::from(grid.sample_material_indices[sample])].material,
+            Material::Basalt
+        );
+        assert!(child.errors.unresolved_topology);
     }
 }
