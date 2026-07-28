@@ -5451,11 +5451,7 @@ impl Renderer {
     fn rollback_virtual_terrain_replacement_geometry(&mut self, staged: &[TerrainPageKey]) {
         for key in staged.iter().rev() {
             self.virtual_terrain_heightfield_samples.remove(key);
-            let _ = self.virtual_terrain_gpu.update_page_geometry(
-                &self.queue,
-                *key,
-                VirtualTerrainGpuGeometry::default(),
-            );
+            self.virtual_terrain_gpu.remove_page_geometry(*key);
             if let Some(page) = self.virtual_terrain_pages.remove(key) {
                 discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
             }
@@ -5780,9 +5776,9 @@ impl Renderer {
             self.virtual_terrain_requested_view = None;
             self.virtual_terrain_oracle_view = None;
         }
-        let geometry_update =
-            self.virtual_terrain_gpu
-                .update_page_geometry(&self.queue, page.key, geometry);
+        let geometry_update = self
+            .virtual_terrain_gpu
+            .update_page_geometry(page.key, geometry);
         if geometry_update.is_err() {
             discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, mesh);
             return Err(VirtualTerrainRendererError::GpuSnapshot);
@@ -6006,26 +6002,20 @@ impl Renderer {
                 // Candidate-only geometry has no visible owner. Release it before rebuilding so
                 // startup/travel does not need a second full page allocation merely to change its
                 // conforming boundary. Published owners continue through the transactional path.
+                self.virtual_terrain_gpu.remove_page_geometry(page.key);
                 if let Some(old) = self.virtual_terrain_pages.remove(&page.key) {
                     discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, old.mesh);
                 }
                 let _ = self.virtual_terrain.remove_page(page.key);
-                match self.upload_virtual_terrain_page_with_seams(
+                let rebuilt = self.upload_virtual_terrain_page_with_seams(
                     page,
                     exact_sides,
                     finer_sides,
                     true,
-                ) {
-                    Ok(page_changed) => changed |= page_changed,
-                    Err(error) => {
-                        let _ = self.virtual_terrain_gpu.update_page_geometry(
-                            &self.queue,
-                            page_key,
-                            VirtualTerrainGpuGeometry::default(),
-                        );
-                        return Err(error);
-                    }
-                }
+                );
+                changed |= recover_candidate_only_seam_rebuild(rebuilt, || {
+                    self.recover_failed_candidate_only_seam_page(page_key)
+                })?;
             } else {
                 changed |= self.upload_virtual_terrain_page_with_seams(
                     page,
@@ -6037,6 +6027,20 @@ impl Renderer {
         }
         debug_assert!(changed);
         Ok(changed)
+    }
+
+    fn recover_failed_candidate_only_seam_page(&mut self, key: TerrainPageKey) {
+        self.virtual_terrain_heightfield_samples.remove(&key);
+        let _ = self.virtual_terrain.remove_page(key);
+        self.virtual_terrain_gpu.remove_page_geometry(key);
+        if let Some(page) = self.virtual_terrain_pages.remove(&key) {
+            discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
+        }
+        // The failed page was candidate-only: keep presenting the immutable published bank and
+        // force the oracle to choose a complete resident fallback on the next selection.
+        self.virtual_terrain_oracle_cut = None;
+        self.virtual_terrain_requested_view = None;
+        self.virtual_terrain_oracle_view = None;
     }
 
     pub fn set_virtual_terrain_render_mode(
@@ -6144,6 +6148,9 @@ impl Renderer {
             .unwrap_or_default();
         for key in &removed_pages {
             self.virtual_terrain_heightfield_samples.remove(key);
+            // Remove the candidate-directory handle before the backing allocation can be freed or
+            // reused. A published allocation is retained separately until a new bank promotes.
+            self.virtual_terrain_gpu.remove_page_geometry(*key);
             let Some(page) = self.virtual_terrain_pages.remove(key) else {
                 continue;
             };
@@ -6157,11 +6164,6 @@ impl Renderer {
             } else {
                 discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
             }
-        }
-        for (key, page) in &self.virtual_terrain_pages {
-            self.virtual_terrain_gpu
-                .update_page_geometry(&self.queue, *key, virtual_terrain_gpu_geometry(&page.mesh))
-                .map_err(|_| VirtualTerrainRendererError::GpuSnapshot)?;
         }
         Ok(removed_pages.len())
     }
@@ -6180,6 +6182,8 @@ impl Renderer {
             .virtual_terrain_cut
             .as_ref()
             .is_some_and(|cut| cut.selected_pages.contains(&key));
+        // Invalidate any pending absolute handles before this allocation can be released or reused.
+        self.virtual_terrain_gpu.remove_page_geometry(key);
         if let Some(page) = self.virtual_terrain_pages.remove(&key) {
             if published
                 && !self
@@ -6192,9 +6196,6 @@ impl Renderer {
                 discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
             }
         }
-        self.virtual_terrain_gpu
-            .update_page_geometry(&self.queue, key, VirtualTerrainGpuGeometry::default())
-            .map_err(|_| VirtualTerrainRendererError::GpuSnapshot)?;
         Ok(true)
     }
 
@@ -6261,9 +6262,7 @@ impl Renderer {
             if !self.virtual_terrain.remove_page(*key) {
                 continue;
             }
-            self.virtual_terrain_gpu
-                .update_page_geometry(&self.queue, *key, VirtualTerrainGpuGeometry::default())
-                .map_err(|_| VirtualTerrainRendererError::GpuSnapshot)?;
+            self.virtual_terrain_gpu.remove_page_geometry(*key);
             if let Some(page) = self.virtual_terrain_pages.remove(key) {
                 discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
             }
@@ -7029,6 +7028,7 @@ impl Renderer {
                 },
             )
         });
+        let mut virtual_candidate_encode_failed = false;
         if let Some((selected_pages, ownerless_roots, oracle_fingerprint)) = virtual_candidate {
             let timestamps = gpu_frame
                 .as_ref()
@@ -7052,7 +7052,10 @@ impl Renderer {
                 if let (Some(timer), Some(frame)) = (self.gpu_timer.as_ref(), gpu_frame.take()) {
                     timer.cancel_frame(frame);
                 }
-                return false;
+                virtual_candidate_encode_failed = true;
+                if !can_present_after_candidate_encode_failure(virtual_visible) {
+                    return false;
+                }
             }
         }
         let mut shadow_draw_calls = 0u32;
@@ -7532,6 +7535,7 @@ impl Renderer {
         let gpu_virtual_match_failure_flags = gpu_feedback_match_failure_flags(
             gpu_virtual_feedback.as_ref(),
             self.virtual_terrain_oracle_cut.as_ref(),
+            virtual_candidate_encode_failed,
         );
         let oracle_virtual_selected_pages = self
             .virtual_terrain_oracle_cut
@@ -8446,6 +8450,16 @@ fn install_virtual_terrain_replacement_pages(
         return Err(VirtualTerrainError::IncoherentRootReplacement(parent));
     }
     Ok(())
+}
+
+fn recover_candidate_only_seam_rebuild<T, E>(
+    result: Result<T, E>,
+    recover: impl FnOnce(),
+) -> Result<T, E> {
+    if result.is_err() {
+        recover();
+    }
+    result
 }
 
 fn draw_spans<'pass>(
@@ -9679,6 +9693,7 @@ fn gpu_feedback_matches_cut(
 fn gpu_feedback_match_failure_flags(
     feedback: Option<&GpuVirtualTerrainFeedback>,
     cut: Option<&VirtualTerrainCut>,
+    candidate_encode_failed: bool,
 ) -> u32 {
     const MISSING_FEEDBACK: u32 = 1 << 0;
     const MISSING_CUT: u32 = 1 << 1;
@@ -9689,12 +9704,13 @@ fn gpu_feedback_match_failure_flags(
     const ENCODED_COUNT_MISMATCH: u32 = 1 << 6;
     const CPU_OVERFLOW: u32 = 1 << 7;
     const SELECTED_PAGES_MISMATCH: u32 = 1 << 8;
+    const CANDIDATE_ENCODE_FAILED: u32 = 1 << 9;
 
     let Some(feedback) = feedback else {
-        return MISSING_FEEDBACK;
+        return MISSING_FEEDBACK | u32::from(candidate_encode_failed) * CANDIDATE_ENCODE_FAILED;
     };
     let Some(cut) = cut else {
-        return MISSING_CUT;
+        return MISSING_CUT | u32::from(candidate_encode_failed) * CANDIDATE_ENCODE_FAILED;
     };
     let mut failures = 0;
     failures |= u32::from(feedback.submission_id == 0) * INVALID_SUBMISSION;
@@ -9709,7 +9725,12 @@ fn gpu_feedback_match_failure_flags(
     selected.sort_unstable();
     selected.dedup();
     failures |= u32::from(selected != cut.selected_pages) * SELECTED_PAGES_MISMATCH;
+    failures |= u32::from(candidate_encode_failed) * CANDIDATE_ENCODE_FAILED;
     failures
+}
+
+const fn can_present_after_candidate_encode_failure(published_snapshot_is_valid: bool) -> bool {
+    published_snapshot_is_valid
 }
 
 /// Finite right-handed DirectX/WebGPU projection with near -> 1 and far -> 0.
@@ -11038,6 +11059,23 @@ mod tests {
         assert!(manifest.contains(r#""submissionId":"8""#));
         assert!(manifest.contains(r#""oracleFingerprint":"0000000000001234""#));
         assert!(manifest.contains(&"ab".repeat(32)));
+    }
+
+    #[test]
+    fn failed_candidate_encoding_keeps_a_valid_published_snapshot_visible() {
+        assert!(
+            can_present_after_candidate_encode_failure(true),
+            "a missing or invalid candidate must fail closed for promotion without blanking the immutable old bank"
+        );
+        assert!(
+            !can_present_after_candidate_encode_failure(false),
+            "without a certified published bank there is no virtual owner to present"
+        );
+        assert_ne!(
+            gpu_feedback_match_failure_flags(None, None, true) & (1 << 9),
+            0,
+            "the fail-open presentation path still surfaces the candidate encoding failure"
+        );
     }
 
     #[test]
@@ -12597,6 +12635,20 @@ mod tests {
         for child in &children[1..] {
             assert_eq!(hierarchy.resident_page(child.key), None);
         }
+    }
+
+    #[test]
+    fn candidate_only_seam_rebuild_failure_always_runs_oracle_recovery() {
+        let mut recovered = false;
+        let injected = recover_candidate_only_seam_rebuild::<(), _>(
+            Err(VirtualTerrainRendererError::GpuPoolCapacity),
+            || recovered = true,
+        );
+        assert_eq!(injected, Err(VirtualTerrainRendererError::GpuPoolCapacity));
+        assert!(
+            recovered,
+            "an allocation failure after releasing candidate-only geometry must invalidate that candidate"
+        );
     }
 
     fn virtual_cut_with_selected(selected_pages: Vec<TerrainPageKey>) -> VirtualTerrainCut {

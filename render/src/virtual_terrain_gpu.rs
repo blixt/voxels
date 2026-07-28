@@ -7,7 +7,7 @@
 
 use crate::virtual_terrain::VirtualTerrainCapacity;
 use bytemuck::{Pod, Zeroable};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::mem::size_of;
 #[cfg(test)]
 use std::ops::Range;
@@ -156,8 +156,16 @@ struct SnapshotMetadata {
     generation: u64,
     fingerprint: u64,
     selected_pages: Vec<TerrainPageKey>,
+    selected_page_set: BTreeSet<TerrainPageKey>,
     ownerless_roots: u32,
     expected_counts: [u32; STREAM_COUNT],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SnapshotReadbackState {
+    InFlight,
+    Succeeded,
+    Failed,
 }
 
 struct SnapshotBank {
@@ -191,6 +199,7 @@ pub(crate) struct VirtualTerrainGpuControl {
     next_generation: u64,
     latest_raw_feedback: Arc<Mutex<Option<GpuSnapshotCounters>>>,
     minimum_feedback_generation: Arc<Mutex<u64>>,
+    readback_states: Arc<Mutex<BTreeMap<u64, SnapshotReadbackState>>>,
     readback_slots: Vec<SnapshotReadbackSlot>,
     next_readback_slot: usize,
 }
@@ -331,6 +340,7 @@ impl VirtualTerrainGpuControl {
             next_generation: 1,
             latest_raw_feedback: Arc::new(Mutex::new(None)),
             minimum_feedback_generation: Arc::new(Mutex::new(1)),
+            readback_states: Arc::new(Mutex::new(BTreeMap::new())),
             readback_slots,
             next_readback_slot: 0,
         })
@@ -342,24 +352,6 @@ impl VirtualTerrainGpuControl {
 
     pub(crate) fn active_render_bind_group(&self) -> &wgpu::BindGroup {
         &self.banks[self.active_bank].render_bind_group
-    }
-
-    #[expect(
-        dead_code,
-        reason = "explicit active-bank buffer exposure is part of the renderer integration contract"
-    )]
-    pub(crate) fn active_handle_buffer(&self) -> &Buffer {
-        &self.banks[self.active_bank].handles
-    }
-
-    #[expect(
-        dead_code,
-        reason = "explicit active-bank stream slices are part of the renderer integration contract"
-    )]
-    pub(crate) fn active_handle_slice(&self, stream: usize) -> wgpu::BufferSlice<'_> {
-        let start = u64::from(VIRTUAL_TERRAIN_HANDLE_OFFSETS[stream]) * 4;
-        let end = start + u64::from(VIRTUAL_TERRAIN_HANDLE_CAPACITIES[stream]) * 4;
-        self.banks[self.active_bank].handles.slice(start..end)
     }
 
     pub(crate) fn active_indirect_buffer(&self) -> &Buffer {
@@ -423,17 +415,46 @@ impl VirtualTerrainGpuControl {
 
     pub(crate) fn update_page_geometry(
         &mut self,
-        _queue: &Queue,
         key: TerrainPageKey,
         geometry: VirtualTerrainGpuGeometry,
     ) -> Result<(), VirtualTerrainGpuError> {
         self.validate_geometry(geometry)?;
-        if geometry == VirtualTerrainGpuGeometry::default() {
-            self.geometries.remove(&key);
-        } else {
-            self.geometries.insert(key, geometry);
-        }
+        self.replace_page_geometry(key, Some(geometry));
         Ok(())
+    }
+
+    pub(crate) fn remove_page_geometry(&mut self, key: TerrainPageKey) {
+        self.replace_page_geometry(key, None);
+    }
+
+    fn replace_page_geometry(
+        &mut self,
+        key: TerrainPageKey,
+        replacement: Option<VirtualTerrainGpuGeometry>,
+    ) {
+        if !geometry_directory_entry_changes(&self.geometries, key, replacement) {
+            return;
+        }
+
+        let (active_changes, pending_changes) = geometry_mutation_impact(
+            self.banks[self.active_bank].metadata.as_ref(),
+            self.pending_bank
+                .and_then(|bank| self.banks[bank].metadata.as_ref()),
+            key,
+        );
+        if active_changes {
+            // The active handles remain safe to present because the renderer retains their
+            // allocation until another bank publishes. They are no longer a current encoding of
+            // the geometry directory, however, so a matching logical cut must be re-encoded.
+            self.active_geometry_dirty = true;
+        }
+        if pending_changes {
+            // A candidate bank contains absolute handles. Invalidate it before its allocation may
+            // be released or reused; stale feedback can then neither certify nor publish it.
+            self.discard_pending_candidate();
+        }
+
+        replace_geometry_directory_entry(&mut self.geometries, key, replacement);
     }
 
     fn validate_geometry(
@@ -487,10 +508,14 @@ impl VirtualTerrainGpuControl {
         let matches = |metadata: Option<&SnapshotMetadata>| {
             snapshot_metadata_matches(metadata, fingerprint, selected_pages)
         };
-        !(self.active_geometry_dirty || matches(self.banks[self.active_bank].metadata.as_ref()))
-            && !self
-                .pending_bank
-                .is_some_and(|bank| matches(self.banks[bank].metadata.as_ref()))
+        snapshot_requires_encoding(
+            self.active_geometry_dirty,
+            matches(self.banks[self.active_bank].metadata.as_ref()),
+            self.pending_bank
+                .is_some_and(|bank| matches(self.banks[bank].metadata.as_ref())),
+            self.pending_bank
+                .is_some_and(|bank| self.pending_feedback_is_observable_or_in_flight(bank)),
+        )
     }
 
     pub(crate) fn active_snapshot_matches(
@@ -536,12 +561,17 @@ impl VirtualTerrainGpuControl {
         if selected_pages.len() > self.capacity.max_selected_pages {
             return Err(VirtualTerrainGpuError::GeometryCapacity);
         }
-        if let Some(bank) = self.pending_bank
-            && let Some(metadata) = self.banks[bank].metadata.as_ref()
-            && metadata.fingerprint == fingerprint
-            && metadata.selected_pages == selected_pages
-        {
-            return Ok(metadata.generation);
+        if let Some(bank) = self.pending_bank {
+            let matching_generation = self.banks[bank].metadata.as_ref().and_then(|metadata| {
+                (metadata.fingerprint == fingerprint && metadata.selected_pages == selected_pages)
+                    .then_some(metadata.generation)
+            });
+            if let Some(generation) = matching_generation {
+                if !self.pending_feedback_is_observable_or_in_flight(bank) {
+                    self.schedule_readback(encoder, bank);
+                }
+                return Ok(generation);
+            }
         }
         let inactive = 1 - self.active_bank;
         let mut pages = Vec::with_capacity(selected_pages.len());
@@ -589,10 +619,14 @@ impl VirtualTerrainGpuControl {
             generation,
             fingerprint,
             selected_pages: selected_pages.to_vec(),
+            selected_page_set: selected_pages.iter().copied().collect(),
             ownerless_roots,
             expected_counts,
         });
         self.pending_bank = Some(inactive);
+        if let Ok(mut states) = self.readback_states.lock() {
+            states.remove(&generation);
+        }
         if let Ok(mut minimum) = self.minimum_feedback_generation.lock() {
             *minimum = generation;
         }
@@ -628,19 +662,57 @@ impl VirtualTerrainGpuControl {
         Ok(generation)
     }
 
+    fn pending_feedback_is_observable_or_in_flight(&self, bank: usize) -> bool {
+        let Some(generation) = self.banks[bank]
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.generation)
+        else {
+            return false;
+        };
+        let state = self
+            .readback_states
+            .lock()
+            .ok()
+            .and_then(|states| states.get(&generation).copied());
+        match state {
+            Some(SnapshotReadbackState::InFlight) => true,
+            Some(SnapshotReadbackState::Succeeded) => {
+                self.latest_raw_feedback.lock().is_ok_and(|feedback| {
+                    feedback
+                        .as_ref()
+                        .is_some_and(|feedback| join_u64(feedback.generation) == generation)
+                })
+            }
+            Some(SnapshotReadbackState::Failed) | None => false,
+        }
+    }
+
     fn schedule_readback(&mut self, encoder: &mut CommandEncoder, bank: usize) {
-        let Some((slot_index, slot)) = (0..self.readback_slots.len())
-            .map(|offset| (self.next_readback_slot + offset) % self.readback_slots.len())
-            .find_map(|index| {
+        let Some(generation) = self.banks[bank]
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.generation)
+        else {
+            return;
+        };
+        let Some(slot_index) = claim_readback_slot(
+            self.readback_slots.len(),
+            self.next_readback_slot,
+            |index| {
                 let slot = self.readback_slots.get(index)?;
                 slot.available
                     .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
                     .ok()
-                    .map(|_| (index, slot))
-            })
-        else {
+                    .map(|_| index)
+            },
+        ) else {
             return;
         };
+        let slot = &self.readback_slots[slot_index];
+        if let Ok(mut states) = self.readback_states.lock() {
+            states.insert(generation, SnapshotReadbackState::InFlight);
+        }
         self.next_readback_slot = (slot_index + 1) % self.readback_slots.len();
         encoder.copy_buffer_to_buffer(
             &self.banks[bank].counters,
@@ -653,21 +725,30 @@ impl VirtualTerrainGpuControl {
         let available = Arc::clone(&slot.available);
         let feedback = Arc::clone(&self.latest_raw_feedback);
         let minimum = Arc::clone(&self.minimum_feedback_generation);
+        let states = Arc::clone(&self.readback_states);
         encoder.map_buffer_on_submit(&slot.buffer, wgpu::MapMode::Read, .., move |result| {
-            if result.is_ok()
-                && let Ok(mapped) = callback_buffer.get_mapped_range(..)
-                && let Ok(parsed) = bytemuck::try_from_bytes::<GpuSnapshotCounters>(&mapped)
-                && minimum
-                    .lock()
-                    .is_ok_and(|minimum| join_u64(parsed.generation) >= *minimum)
-                && let Ok(mut destination) = feedback.lock()
-                && destination.as_ref().is_none_or(|current| {
-                    join_u64(parsed.generation) > join_u64(current.generation)
-                })
-            {
-                *destination = Some(*parsed);
-            }
+            let parsed = result.is_ok().then(|| {
+                let mapped = callback_buffer.get_mapped_range(..).ok()?;
+                bytemuck::try_from_bytes::<GpuSnapshotCounters>(&mapped)
+                    .ok()
+                    .copied()
+            });
+            let parsed = parsed.flatten();
+            let succeeded = parsed.is_some_and(|parsed| {
+                join_u64(parsed.generation) == generation
+                    && minimum.lock().is_ok_and(|minimum| generation >= *minimum)
+                    && feedback.lock().is_ok_and(|mut destination| {
+                        let is_newer = destination
+                            .as_ref()
+                            .is_none_or(|current| generation > join_u64(current.generation));
+                        if is_newer {
+                            *destination = Some(parsed);
+                        }
+                        is_newer
+                    })
+            });
             callback_buffer.unmap();
+            record_readback_completion(&states, generation, succeeded);
             available.store(true, Ordering::Release);
         });
     }
@@ -745,8 +826,21 @@ impl VirtualTerrainGpuControl {
 
     pub(crate) fn invalidate_candidate(&mut self) {
         self.active_geometry_dirty = true;
-        self.pending_bank = None;
-        self.banks[1 - self.active_bank].metadata = None;
+        self.discard_pending_candidate();
+    }
+
+    fn discard_pending_candidate(&mut self) {
+        if let Some(bank) = self.pending_bank.take() {
+            if let Some(generation) = self.banks[bank]
+                .metadata
+                .as_ref()
+                .map(|metadata| metadata.generation)
+                && let Ok(mut states) = self.readback_states.lock()
+            {
+                states.remove(&generation);
+            }
+            self.banks[bank].metadata = None;
+        }
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
         if let Ok(mut minimum) = self.minimum_feedback_generation.lock() {
@@ -785,6 +879,79 @@ fn snapshot_metadata_matches(
     metadata.is_some_and(|metadata| {
         metadata.fingerprint == fingerprint && metadata.selected_pages == selected_pages
     })
+}
+
+fn geometry_directory_entry_changes(
+    geometries: &BTreeMap<TerrainPageKey, VirtualTerrainGpuGeometry>,
+    key: TerrainPageKey,
+    replacement: Option<VirtualTerrainGpuGeometry>,
+) -> bool {
+    geometries.get(&key).copied() != replacement
+}
+
+fn replace_geometry_directory_entry(
+    geometries: &mut BTreeMap<TerrainPageKey, VirtualTerrainGpuGeometry>,
+    key: TerrainPageKey,
+    replacement: Option<VirtualTerrainGpuGeometry>,
+) {
+    match replacement {
+        Some(geometry) => {
+            // Default geometry is a valid resident empty page. It must remain in the directory so
+            // the GPU certifies the page owner with zero handles instead of reporting UnknownPage.
+            geometries.insert(key, geometry);
+        }
+        None => {
+            geometries.remove(&key);
+        }
+    }
+}
+
+fn geometry_mutation_impact(
+    active: Option<&SnapshotMetadata>,
+    pending: Option<&SnapshotMetadata>,
+    key: TerrainPageKey,
+) -> (bool, bool) {
+    let selects = |metadata: Option<&SnapshotMetadata>| {
+        metadata.is_some_and(|metadata| metadata.selected_page_set.contains(&key))
+    };
+    (selects(active), selects(pending))
+}
+
+const fn snapshot_requires_encoding(
+    active_geometry_dirty: bool,
+    active_matches: bool,
+    pending_matches: bool,
+    pending_feedback_observable_or_in_flight: bool,
+) -> bool {
+    (active_geometry_dirty || !active_matches)
+        && (!pending_matches || !pending_feedback_observable_or_in_flight)
+}
+
+fn claim_readback_slot(
+    slot_count: usize,
+    next_slot: usize,
+    mut try_claim: impl FnMut(usize) -> Option<usize>,
+) -> Option<usize> {
+    (0..slot_count)
+        .map(|offset| (next_slot + offset) % slot_count)
+        .find_map(&mut try_claim)
+}
+
+fn record_readback_completion(
+    states: &Mutex<BTreeMap<u64, SnapshotReadbackState>>,
+    generation: u64,
+    succeeded: bool,
+) {
+    if let Ok(mut states) = states.lock() {
+        states.insert(
+            generation,
+            if succeeded {
+                SnapshotReadbackState::Succeeded
+            } else {
+                SnapshotReadbackState::Failed
+            },
+        );
+    }
 }
 
 fn create_render_layout(device: &Device) -> wgpu::BindGroupLayout {
@@ -944,6 +1111,7 @@ mod tests {
             generation: 9,
             fingerprint: 42,
             selected_pages: vec![key],
+            selected_page_set: BTreeSet::from([key]),
             ownerless_roots: 0,
             expected_counts: [1, 0, 0, 0],
         };
@@ -958,6 +1126,157 @@ mod tests {
         assert!(
             snapshot_metadata_matches(Some(&metadata), 42, &[key]),
             "the immutable previously published allocation remains safe to present while a replacement is encoded"
+        );
+        assert!(
+            snapshot_requires_encoding(true, true, false, false),
+            "dirty same-key geometry must force a new inactive handle snapshot"
+        );
+        assert!(
+            !snapshot_requires_encoding(true, true, true, true),
+            "an already pending matching replacement must not be encoded twice"
+        );
+    }
+
+    #[test]
+    fn saturated_readback_ring_retries_matching_pending_feedback() {
+        let mut slots = [false; GPU_SNAPSHOT_READBACK_SLOTS];
+        assert_eq!(
+            claim_readback_slot(slots.len(), 0, |index| slots[index].then_some(index)),
+            None,
+            "a saturated ring cannot make the pending bank observable yet"
+        );
+        assert!(
+            snapshot_requires_encoding(false, false, true, false),
+            "a matching pending bank without an observable readback must be revisited"
+        );
+        slots[1] = true;
+        assert_eq!(
+            claim_readback_slot(slots.len(), 0, |index| {
+                slots[index].then(|| {
+                    slots[index] = false;
+                    index
+                })
+            }),
+            Some(1),
+            "the same pending bank claims the first slot released by an older generation"
+        );
+        assert!(
+            !snapshot_requires_encoding(false, false, true, true),
+            "once feedback is scheduled the immutable pending bank must not be re-encoded"
+        );
+    }
+
+    #[test]
+    fn failed_readback_callback_returns_pending_generation_to_retryable_state() {
+        let states = Mutex::new(BTreeMap::from([(44, SnapshotReadbackState::InFlight)]));
+        record_readback_completion(&states, 44, false);
+        assert_eq!(
+            states.lock().unwrap().get(&44),
+            Some(&SnapshotReadbackState::Failed)
+        );
+        assert!(
+            snapshot_requires_encoding(false, false, true, false),
+            "map or parse failure must retry feedback for the immutable pending bank"
+        );
+        record_readback_completion(&states, 44, true);
+        assert_eq!(
+            states.lock().unwrap().get(&44),
+            Some(&SnapshotReadbackState::Succeeded)
+        );
+    }
+
+    #[test]
+    fn resident_empty_geometry_remains_an_encodable_page_owner() {
+        let key = TerrainPageKey::surface(0, 4, -9);
+        let empty = VirtualTerrainGpuGeometry::default();
+        let mut geometries = BTreeMap::new();
+
+        assert!(geometry_directory_entry_changes(
+            &geometries,
+            key,
+            Some(empty)
+        ));
+        replace_geometry_directory_entry(&mut geometries, key, Some(empty));
+        assert_eq!(
+            geometries.get(&key),
+            Some(&empty),
+            "zero-handle terrain is resident data, not an absent directory record"
+        );
+        assert_eq!(
+            geometries[&key]
+                .ranges()
+                .into_iter()
+                .map(|range| range.element_count)
+                .sum::<u32>(),
+            0
+        );
+    }
+
+    #[test]
+    fn eviction_and_same_address_rehydration_invalidate_absolute_handle_snapshots() {
+        let key = TerrainPageKey::surface(2, -5, 11);
+        let reused = VirtualTerrainGpuGeometry {
+            opaque_surface: VirtualTerrainGpuGeometryRange {
+                source_segment: 1,
+                source_offset_bytes: GPU_GEOMETRY_ELEMENT_BYTES * 17,
+                element_count: 3,
+            },
+            ..VirtualTerrainGpuGeometry::default()
+        };
+        let metadata = SnapshotMetadata {
+            generation: 12,
+            fingerprint: 99,
+            selected_pages: vec![key],
+            selected_page_set: BTreeSet::from([key]),
+            ownerless_roots: 0,
+            expected_counts: [3, 0, 0, 0],
+        };
+        let mut geometries = BTreeMap::from([(key, reused)]);
+
+        assert_eq!(
+            geometry_mutation_impact(None, Some(&metadata), key),
+            (false, true),
+            "eviction must invalidate a pending bank before its allocation is reused"
+        );
+        assert!(geometry_directory_entry_changes(&geometries, key, None));
+        replace_geometry_directory_entry(&mut geometries, key, None);
+
+        assert!(
+            geometry_directory_entry_changes(&geometries, key, Some(reused)),
+            "rehydrating into the same numeric address is still a new allocation lifetime"
+        );
+        assert_eq!(
+            geometry_mutation_impact(Some(&metadata), Some(&metadata), key),
+            (true, true),
+            "active presentation becomes non-current and pending publication is discarded"
+        );
+        replace_geometry_directory_entry(&mut geometries, key, Some(reused));
+        assert_eq!(geometries.get(&key), Some(&reused));
+    }
+
+    #[test]
+    fn geometry_mutation_uses_an_indexed_selected_page_membership_set() {
+        let selected_pages = (0..16_384)
+            .map(|x| TerrainPageKey::surface(0, x, -7))
+            .collect::<Vec<_>>();
+        let selected_page_set = selected_pages.iter().copied().collect::<BTreeSet<_>>();
+        let metadata = SnapshotMetadata {
+            generation: 1,
+            fingerprint: 2,
+            selected_pages,
+            selected_page_set,
+            ownerless_roots: 0,
+            expected_counts: [0; STREAM_COUNT],
+        };
+        assert_eq!(metadata.selected_page_set.len(), 16_384);
+        assert_eq!(
+            geometry_mutation_impact(
+                Some(&metadata),
+                Some(&metadata),
+                TerrainPageKey::surface(0, 16_383, -7),
+            ),
+            (true, true),
+            "retention checks indexed membership instead of rescanning the full selected vector"
         );
     }
 }
