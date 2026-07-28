@@ -61,10 +61,10 @@ use voxels_world::protocol::{
 };
 use voxels_world::{
     CHUNK_EDGE, ChunkCoord, Material, MeshingHalo, SurfaceSampleBlockRequest,
-    TERRAIN_REGION_ROOT_LEVEL, TerrainPageBatchItemV1, TerrainPageBatchResultV1, TerrainPageKey,
-    TerrainPageTransferFailure, WORLD_SCHEMA_VERSION, WorldManifest, WorldManifestError,
-    WorldProduct, WorldProductBatch, WorldProductBatchItem, WorldProductPriority,
-    WorldProductRequest, WorldSourceEngine, WorldSourceError,
+    TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_REGION_ROOT_LEVEL, TerrainPageBatchItemV1,
+    TerrainPageBatchResultV1, TerrainPageKey, TerrainPageTransferFailure, WORLD_SCHEMA_VERSION,
+    WorldManifest, WorldManifestError, WorldProduct, WorldProductBatch, WorldProductBatchItem,
+    WorldProductPriority, WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
 pub const WORLD_WEBSOCKET_PATH: &str = "/v39/world";
@@ -2788,7 +2788,12 @@ async fn serve_virtual_terrain_pages(
     let mut failed_regions = BTreeMap::<TerrainPageKey, TerrainPageTransferFailure>::new();
     let mut items = Vec::with_capacity(request.batch.pages.len());
     for identity in request.batch.pages {
-        let Some(root) = identity.key.ancestor_at(TERRAIN_REGION_ROOT_LEVEL) else {
+        let root_level = if identity.key.is_surface() {
+            TERRAIN_COVERAGE_ROOT_LEVEL
+        } else {
+            TERRAIN_REGION_ROOT_LEVEL
+        };
+        let Some(root) = identity.key.ancestor_at(root_level) else {
             items.push(TerrainPageBatchItemV1 {
                 requested: identity,
                 result: Err(TerrainPageTransferFailure::Unavailable),
@@ -4503,6 +4508,74 @@ mod tests {
         let page = page_result.batch.items[0].result.as_ref().expect("page");
         assert!(identity.matches(page));
         page_frame.tracked.expect("terminal page request").finish();
+    }
+
+    #[tokio::test]
+    async fn virtual_terrain_page_handler_resolves_surface_child_to_coverage_root() {
+        let source: Arc<dyn WorldSourceEngine> = Arc::new(ProceduralWorldSource::new(19));
+        let edits = EditAuthority::in_memory(
+            voxels_world::WorldId::from_bytes([8; 16]),
+            source.as_ref(),
+            8,
+        )
+        .expect("edits");
+        let authority = VirtualTerrainAuthority::new(
+            Arc::clone(&source),
+            edits,
+            PriorityGenerationLimiter::new(1),
+            1,
+            128 * 1024 * 1024,
+        );
+        let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 1);
+        let region = authority
+            .ensure_region(root, WorldProductPriority::VirtualTerrain)
+            .await
+            .expect("coverage region");
+        let child = root.refinement_children().unwrap()[0];
+        let node = region.directory.node(child).expect("child node");
+        let identity = voxels_world::TerrainPageTransferIdentity {
+            key: node.key,
+            revision: node.revision,
+            content_fingerprint: node.content_fingerprint,
+        };
+        let request = VirtualTerrainPageBatchRequest {
+            request_id: 803,
+            priority: WorldProductPriority::VirtualTerrain,
+            batch: voxels_world::TerrainPageBatchRequestV1 {
+                source_identity_hash: authority.source_identity_hash(),
+                pages: vec![identity],
+            },
+        };
+        let session = Arc::new(SessionRequests::new(
+            4,
+            1,
+            1,
+            64 * 1024 * 1024,
+            Arc::new(Notify::new()),
+        ));
+        let tracked = admit_tracked_request(&session, request.request_id).expect("admitted");
+        let (outbound, mut responses) = mpsc::channel(1);
+        serve_virtual_terrain_pages(
+            request,
+            authority,
+            outbound,
+            tracked,
+            voxels_world::protocol::MAX_PROTOCOL_FRAME_BYTES,
+        )
+        .await;
+        let frame = responses.recv().await.expect("page response");
+        let result = voxels_world::protocol::decode_virtual_terrain_page_batch_result(
+            &frame.bytes,
+            source.identity().identity_hash(),
+        )
+        .expect("decode page response");
+        assert!(
+            result.batch.items[0]
+                .result
+                .as_ref()
+                .is_ok_and(|page| identity.matches(page))
+        );
+        frame.tracked.expect("terminal page request").finish();
     }
 
     #[test]
