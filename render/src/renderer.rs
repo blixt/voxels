@@ -4623,6 +4623,52 @@ impl Renderer {
         self.virtual_terrain_gpu
             .register_directory(&self.queue, directory)
             .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
+        self.virtual_terrain_gpu
+            .synchronize_active_roots(&self.queue, self.virtual_terrain.roots())
+            .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
+        Ok(())
+    }
+
+    /// Registers replacement data without making any of its roots visible.
+    pub fn register_virtual_terrain_staging_directory(
+        &mut self,
+        directory: &TerrainHierarchyDirectoryV1,
+    ) -> Result<(), VirtualTerrainRendererError> {
+        self.virtual_terrain.register_staging_directory(directory)?;
+        self.virtual_terrain_gpu
+            .register_directory(&self.queue, directory)
+            .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
+        self.virtual_terrain_gpu
+            .synchronize_active_roots(&self.queue, self.virtual_terrain.roots())
+            .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
+        Ok(())
+    }
+
+    /// Atomically transfers terrain ownership between complete registered root partitions.
+    pub fn set_virtual_terrain_active_roots(
+        &mut self,
+        roots: impl IntoIterator<Item = TerrainPageKey>,
+    ) -> Result<(), VirtualTerrainRendererError> {
+        let next = roots.into_iter().collect::<BTreeSet<_>>();
+        let prior = self.virtual_terrain.roots().collect::<BTreeSet<_>>();
+        self.virtual_terrain
+            .set_active_roots(next.iter().copied())?;
+        if self
+            .virtual_terrain_gpu
+            .synchronize_active_roots(&self.queue, next.iter().copied())
+            .is_err()
+        {
+            self.virtual_terrain
+                .set_active_roots(prior.iter().copied())?;
+            let _ = self
+                .virtual_terrain_gpu
+                .synchronize_active_roots(&self.queue, prior.iter().copied());
+            return Err(VirtualTerrainRendererError::GpuTraversal);
+        }
+        self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
+        self.virtual_terrain_cut = None;
+        self.virtual_terrain_oracle_cut = None;
+        self.virtual_terrain_oracle_view = None;
         Ok(())
     }
 
@@ -4930,6 +4976,10 @@ impl Renderer {
         self.virtual_terrain.roots().collect()
     }
 
+    pub fn registered_virtual_terrain_region_roots(&self) -> Vec<TerrainPageKey> {
+        self.virtual_terrain.registered_roots().collect()
+    }
+
     /// Retires immutable region directories outside the current streaming working set.
     ///
     /// Any directory compaction invalidates GPU node indices, so publication drops to shadow mode,
@@ -4942,7 +4992,7 @@ impl Renderer {
         let keep = keep.into_iter().collect::<BTreeSet<_>>();
         let remove = self
             .virtual_terrain
-            .roots()
+            .registered_roots()
             .filter(|root| !keep.contains(root))
             .collect::<Vec<_>>();
         if remove.is_empty() {

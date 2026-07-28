@@ -129,6 +129,10 @@ pub enum VirtualTerrainError {
     InvalidDirectory,
     DirectoryCapacity,
     DirectoryCollision(TerrainPageKey),
+    UnknownRoot(TerrainPageKey),
+    OverlappingRoots(TerrainPageKey, TerrainPageKey),
+    IncompleteRootReplacement(TerrainPageKey),
+    IncoherentRootReplacement(TerrainPageKey),
     SourceMismatch,
     UnknownPage(TerrainPageKey),
     InvalidPage(TerrainPageKey),
@@ -149,6 +153,25 @@ impl fmt::Display for VirtualTerrainError {
             }
             Self::DirectoryCollision(key) => {
                 write!(formatter, "virtual terrain directory collides at {key:?}")
+            }
+            Self::UnknownRoot(key) => {
+                write!(formatter, "unknown virtual terrain root {key:?}")
+            }
+            Self::OverlappingRoots(left, right) => write!(
+                formatter,
+                "virtual terrain roots overlap at {left:?} and {right:?}"
+            ),
+            Self::IncompleteRootReplacement(key) => {
+                write!(
+                    formatter,
+                    "virtual terrain root replacement is incomplete at {key:?}"
+                )
+            }
+            Self::IncoherentRootReplacement(key) => {
+                write!(
+                    formatter,
+                    "virtual terrain root replacement is incoherent at {key:?}"
+                )
             }
             Self::SourceMismatch => formatter.write_str("virtual terrain source mismatch"),
             Self::UnknownPage(key) => write!(formatter, "unknown virtual terrain page {key:?}"),
@@ -185,7 +208,7 @@ pub struct VirtualTerrainHierarchy {
     directory_nodes: BTreeMap<[u8; 32], Vec<TerrainPageKey>>,
     directory_roots: BTreeMap<TerrainPageKey, [u8; 32]>,
     nodes: BTreeMap<TerrainPageKey, TerrainHierarchyNode>,
-    roots: BTreeSet<TerrainPageKey>,
+    active_roots: BTreeSet<TerrainPageKey>,
     resident: BTreeMap<TerrainPageKey, ResidentPage>,
     resident_encoded_bytes: usize,
     resident_primitives: usize,
@@ -205,7 +228,7 @@ impl VirtualTerrainHierarchy {
             directory_nodes: BTreeMap::new(),
             directory_roots: BTreeMap::new(),
             nodes: BTreeMap::new(),
-            roots: BTreeSet::new(),
+            active_roots: BTreeSet::new(),
             resident: BTreeMap::new(),
             resident_encoded_bytes: 0,
             resident_primitives: 0,
@@ -235,7 +258,11 @@ impl VirtualTerrainHierarchy {
     }
 
     pub fn roots(&self) -> impl Iterator<Item = TerrainPageKey> + '_ {
-        self.roots.iter().copied()
+        self.active_roots.iter().copied()
+    }
+
+    pub fn registered_roots(&self) -> impl Iterator<Item = TerrainPageKey> + '_ {
+        self.directory_roots.keys().copied()
     }
 
     pub fn replacement_is_resident_and_coherent(&self, key: TerrainPageKey) -> bool {
@@ -261,13 +288,25 @@ impl VirtualTerrainHierarchy {
         &mut self,
         directory: &TerrainHierarchyDirectoryV1,
     ) -> Result<(), VirtualTerrainError> {
-        self.register_directory(directory, true)
+        self.register_directory(directory, true, true)
+    }
+
+    /// Registers a validated directory without granting any of its roots render ownership.
+    ///
+    /// This permits complete replacement roots and their pages to become resident before one
+    /// atomic [`Self::set_active_roots`] call transfers ownership to them.
+    pub fn register_staging_directory(
+        &mut self,
+        directory: &TerrainHierarchyDirectoryV1,
+    ) -> Result<(), VirtualTerrainError> {
+        self.register_directory(directory, false, false)
     }
 
     fn register_directory(
         &mut self,
         directory: &TerrainHierarchyDirectoryV1,
         require_fixed_regions: bool,
+        activate_roots: bool,
     ) -> Result<(), VirtualTerrainError> {
         if !directory.validates_identity()
             || (require_fixed_regions && !directory.validates_region_partition())
@@ -289,10 +328,10 @@ impl VirtualTerrainHierarchy {
         if self.directory_fingerprints.len() >= self.capacity.max_directories
             || self.nodes.len().saturating_add(directory.nodes.len())
                 > self.capacity.max_directory_nodes
-            || self.roots.len().saturating_add(
+            || self.directory_roots.len().saturating_add(
                 directory
                     .roots()
-                    .filter(|node| !self.roots.contains(&node.key))
+                    .filter(|node| !self.directory_roots.contains_key(&node.key))
                     .count(),
             ) > self.capacity.max_roots
         {
@@ -317,9 +356,100 @@ impl VirtualTerrainHierarchy {
         for node in &directory.nodes {
             self.nodes.entry(node.key).or_insert(*node);
             if node.is_root {
-                self.roots.insert(node.key);
+                if activate_roots {
+                    self.active_roots.insert(node.key);
+                }
                 self.directory_roots
                     .insert(node.key, directory.content_fingerprint);
+            }
+        }
+        Ok(())
+    }
+
+    /// Atomically selects the non-overlapping directory roots that own the next global cut.
+    ///
+    /// Registered but inactive roots remain resident staging data. This is the seam-free
+    /// replacement primitive for progressively swapping a coarse regional root for its complete
+    /// child group without ever drawing both ownership levels.
+    pub fn set_active_roots(
+        &mut self,
+        roots: impl IntoIterator<Item = TerrainPageKey>,
+    ) -> Result<(), VirtualTerrainError> {
+        let roots = roots.into_iter().collect::<BTreeSet<_>>();
+        if roots.len() > self.capacity.max_roots {
+            return Err(VirtualTerrainError::DirectoryCapacity);
+        }
+        if let Some(unknown) = roots.iter().find(|root| !self.nodes.contains_key(root)) {
+            return Err(VirtualTerrainError::UnknownRoot(*unknown));
+        }
+        for (index, left) in roots.iter().enumerate() {
+            if let Some(right) = roots
+                .iter()
+                .skip(index + 1)
+                .find(|right| terrain_page_keys_overlap(*left, **right))
+            {
+                return Err(VirtualTerrainError::OverlappingRoots(*left, *right));
+            }
+        }
+        self.validate_root_transition(&roots)?;
+        self.active_roots = roots;
+        self.refined_last_cut.retain(|key| {
+            self.active_roots
+                .iter()
+                .any(|root| key.ancestor_at(root.level) == Some(*root))
+        });
+        Ok(())
+    }
+
+    fn validate_root_transition(
+        &self,
+        next_roots: &BTreeSet<TerrainPageKey>,
+    ) -> Result<(), VirtualTerrainError> {
+        for parent in &self.active_roots {
+            let replacements = next_roots
+                .iter()
+                .filter(|candidate| {
+                    candidate.level < parent.level
+                        && candidate.ancestor_at(parent.level) == Some(*parent)
+                })
+                .copied()
+                .collect::<BTreeSet<_>>();
+            if replacements.is_empty() {
+                continue;
+            }
+            let expected = parent
+                .children()
+                .map(BTreeSet::from)
+                .ok_or(VirtualTerrainError::IncompleteRootReplacement(*parent))?;
+            if replacements != expected {
+                return Err(VirtualTerrainError::IncompleteRootReplacement(*parent));
+            }
+            if !self.replacement_is_resident_and_coherent(*parent) {
+                return Err(VirtualTerrainError::IncoherentRootReplacement(*parent));
+            }
+        }
+        for parent in next_roots {
+            let replacements = self
+                .active_roots
+                .iter()
+                .filter(|candidate| {
+                    candidate.level < parent.level
+                        && candidate.ancestor_at(parent.level) == Some(*parent)
+                })
+                .copied()
+                .collect::<BTreeSet<_>>();
+            if replacements.is_empty() {
+                continue;
+            }
+            let expected = parent
+                .children()
+                .map(BTreeSet::from)
+                .ok_or(VirtualTerrainError::IncompleteRootReplacement(*parent))?;
+            if replacements != expected {
+                return Err(VirtualTerrainError::IncompleteRootReplacement(*parent));
+            }
+            if !self.replacement_is_resident_and_coherent(*parent) {
+                return Err(VirtualTerrainError::IncoherentRootReplacement(*parent));
             }
         }
         Ok(())
@@ -432,7 +562,7 @@ impl VirtualTerrainHierarchy {
         let key_set = keys.iter().copied().collect::<BTreeSet<_>>();
         self.directory_roots
             .retain(|_, owner| *owner != fingerprint);
-        self.roots.retain(|key| !key_set.contains(key));
+        self.active_roots.retain(|key| !key_set.contains(key));
         for key in &keys {
             self.remove_page(*key);
             self.nodes.remove(key);
@@ -473,7 +603,7 @@ impl VirtualTerrainHierarchy {
         };
         let roots = builder
             .hierarchy
-            .roots
+            .active_roots
             .iter()
             .copied()
             .filter(|key| page_is_visible(*key, view))
@@ -506,6 +636,17 @@ impl VirtualTerrainHierarchy {
             traversal_overflow: builder.traversal_overflow,
             incoherent_replacement_groups: builder.incoherent_replacement_groups,
         })
+    }
+}
+
+fn terrain_page_keys_overlap(left: TerrainPageKey, right: TerrainPageKey) -> bool {
+    if left.level == right.level {
+        return left == right;
+    }
+    if left.level > right.level {
+        right.ancestor_at(left.level) == Some(left)
+    } else {
+        left.ancestor_at(right.level) == Some(right)
     }
 }
 
@@ -862,8 +1003,96 @@ mod tests {
         let directory = TerrainHierarchyDirectoryV1::from_pages(&pages).unwrap();
         let mut hierarchy =
             VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
-        hierarchy.register_directory(&directory, false).unwrap();
+        hierarchy
+            .register_directory(&directory, false, true)
+            .unwrap();
         (hierarchy, pages)
+    }
+
+    #[test]
+    fn staged_child_roots_atomically_replace_their_registered_parent() {
+        let pages = hierarchy_pages();
+        let parent = pages
+            .iter()
+            .find(|page| page.key.level == 1)
+            .unwrap()
+            .clone();
+        let children = pages
+            .iter()
+            .filter(|page| page.key.level == 0)
+            .cloned()
+            .collect::<Vec<_>>();
+        let directory = TerrainHierarchyDirectoryV1::from_pages(&pages).unwrap();
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        hierarchy
+            .register_directory(&directory, false, true)
+            .unwrap();
+        for page in &pages {
+            hierarchy.install_page(page.clone()).unwrap();
+        }
+
+        assert_eq!(hierarchy.roots().collect::<Vec<_>>(), vec![parent.key]);
+        assert_eq!(hierarchy.registered_roots().count(), 1);
+
+        hierarchy
+            .set_active_roots(children.iter().map(|page| page.key))
+            .unwrap();
+        assert_eq!(
+            hierarchy.roots().collect::<BTreeSet<_>>(),
+            children.iter().map(|page| page.key).collect()
+        );
+        assert!(hierarchy.registered_roots().any(|key| key == parent.key));
+    }
+
+    #[test]
+    fn active_root_cut_rejects_unknown_and_overlapping_owners() {
+        let pages = hierarchy_pages();
+        let parent = pages
+            .iter()
+            .find(|page| page.key.level == 1)
+            .unwrap()
+            .clone();
+        let child = pages
+            .iter()
+            .find(|page| page.key.level == 0)
+            .unwrap()
+            .clone();
+        let directory = TerrainHierarchyDirectoryV1::from_pages(&pages).unwrap();
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        hierarchy
+            .register_directory(&directory, false, false)
+            .unwrap();
+
+        assert!(matches!(
+            hierarchy.set_active_roots([parent.key, child.key]),
+            Err(VirtualTerrainError::OverlappingRoots(_, _))
+        ));
+        let unknown = TerrainPageKey {
+            level: 0,
+            coord: [999, 999, 999],
+        };
+        assert_eq!(
+            hierarchy.set_active_roots([unknown]),
+            Err(VirtualTerrainError::UnknownRoot(unknown))
+        );
+        assert!(hierarchy.roots().next().is_none());
+    }
+
+    #[test]
+    fn active_root_cut_rejects_partial_child_coverage() {
+        let (mut hierarchy, pages) = hierarchy();
+        for page in &pages {
+            hierarchy.install_page(page.clone()).unwrap();
+        }
+        let child = pages.iter().find(|page| page.key.level == 0).unwrap().key;
+        let parent = child.parent().unwrap();
+        assert_eq!(
+            hierarchy.set_active_roots([child]),
+            Err(VirtualTerrainError::IncompleteRootReplacement(parent))
+        );
+        assert_eq!(hierarchy.roots().collect::<Vec<_>>(), vec![parent]);
     }
 
     #[test]

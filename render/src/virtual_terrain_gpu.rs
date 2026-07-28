@@ -630,7 +630,7 @@ impl VirtualTerrainGpuControl {
                 flags |= NODE_PRIOR_REFINED;
             }
             packed.maximum_flags[3] = flags as i32;
-            if node.is_root {
+            if roots.contains(&node.key) {
                 root_indices.push(
                     *node_indices
                         .get(&node.key)
@@ -659,6 +659,40 @@ impl VirtualTerrainGpuControl {
         self.root_indices = root_indices;
         self.prior_refined = prior_refined;
         self.geometry_pages = geometry_pages;
+        if let Ok(mut feedback) = self.feedback.lock() {
+            *feedback = None;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn synchronize_active_roots(
+        &mut self,
+        queue: &Queue,
+        roots: impl IntoIterator<Item = TerrainPageKey>,
+    ) -> Result<(), VirtualTerrainGpuError> {
+        let root_indices = roots
+            .into_iter()
+            .map(|root| {
+                self.node_indices
+                    .get(&root)
+                    .copied()
+                    .ok_or(VirtualTerrainGpuError::UnknownPage(root))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if root_indices.len() > self.capacity.max_roots {
+            return Err(VirtualTerrainGpuError::RootCapacity);
+        }
+        if !root_indices.is_empty() {
+            queue.write_buffer(&self.root_buffer, 0, bytemuck::cast_slice(&root_indices));
+        }
+        self.root_indices = root_indices;
+        self.prior_refined.retain(|key| {
+            self.root_indices.iter().any(|root_index| {
+                self.node_keys
+                    .get(*root_index as usize)
+                    .is_some_and(|root| key.ancestor_at(root.level) == Some(*root))
+            })
+        });
         if let Ok(mut feedback) = self.feedback.lock() {
             *feedback = None;
         }
