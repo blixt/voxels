@@ -4765,8 +4765,6 @@ impl Renderer {
     ) -> Result<(), VirtualTerrainRendererError> {
         self.virtual_terrain
             .register_refinement_directory(directory)?;
-        self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
-        self.virtual_terrain_cut = None;
         self.virtual_terrain_oracle_cut = None;
         self.virtual_terrain_oracle_view = None;
         self.virtual_terrain_gpu
@@ -5002,35 +5000,11 @@ impl Renderer {
         let cut = self.virtual_terrain.select_cut(view)?;
         self.virtual_terrain_oracle_view = Some(view);
         self.virtual_terrain_oracle_cut = Some(cut.clone());
-        let renderable =
-            cut.is_renderable() && self.virtual_terrain_cut_fits_compaction(&cut).is_ok();
-        let preserves_visible_cut = self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible
-            && renderable
-            && self
-                .virtual_terrain_cut
-                .as_ref()
-                .is_some_and(|visible| visible.fingerprint == cut.fingerprint);
-        match self.virtual_terrain_mode {
-            VirtualTerrainRenderMode::Disabled => {
-                // GPU certification is produced only by the shadow traversal pass. Enter shadow
-                // as soon as the first candidate exists; otherwise a fresh renderer waits for
-                // feedback from a pass that Disabled mode never schedules.
-                self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
-                self.virtual_terrain_cut = Some(cut.clone());
-            }
-            VirtualTerrainRenderMode::Shadow => {
-                self.virtual_terrain_cut = Some(cut.clone());
-            }
-            VirtualTerrainRenderMode::Visible if preserves_visible_cut => {
-                self.virtual_terrain_cut = Some(cut.clone());
-            }
-            VirtualTerrainRenderMode::Visible => {
-                // A changed candidate must traverse, compact, and round-trip through the bounded
-                // GPU feedback oracle before it can replace the currently visible owner. Shadow
-                // mode keeps the migration path visible while that candidate is being certified.
-                self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
-                self.virtual_terrain_cut = Some(cut.clone());
-            }
+        if self.virtual_terrain_mode == VirtualTerrainRenderMode::Disabled {
+            // A fresh renderer has no published virtual owner yet. Shadow mode runs the candidate
+            // traversal while legacy coverage remains visible. Once a cut has been published,
+            // later candidates are certified beside that prior virtual owner instead.
+            self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
         }
         Ok(cut)
     }
@@ -5045,9 +5019,10 @@ impl Renderer {
     ) -> Result<(), VirtualTerrainRendererError> {
         if mode == VirtualTerrainRenderMode::Visible {
             let Some(cut) = self
-                .virtual_terrain_cut
+                .virtual_terrain_oracle_cut
                 .as_ref()
                 .filter(|cut| cut.is_renderable())
+                .cloned()
             else {
                 return Err(VirtualTerrainRendererError::NoRenderableCut);
             };
@@ -5060,16 +5035,17 @@ impl Renderer {
                     *missing,
                 ));
             }
-            let ownership = VirtualTerrainOwnership::from_cut(cut)?;
+            let ownership = VirtualTerrainOwnership::from_cut(&cut)?;
             self.validate_virtual_terrain_handoff(&ownership)?;
-            self.virtual_terrain_cut_fits_compaction(cut)?;
+            self.virtual_terrain_cut_fits_compaction(&cut)?;
             let certified = self
                 .virtual_terrain_gpu
                 .latest_feedback()
-                .is_some_and(|feedback| gpu_feedback_matches_cut(&feedback, Some(cut)));
+                .is_some_and(|feedback| gpu_feedback_matches_cut(&feedback, Some(&cut)));
             if !certified {
                 return Err(VirtualTerrainRendererError::GpuCutNotCertified);
             }
+            self.virtual_terrain_cut = Some(cut);
         }
         self.virtual_terrain_mode = mode;
         Ok(())
@@ -5119,9 +5095,9 @@ impl Renderer {
 
     /// Retires immutable region directories outside the current streaming working set.
     ///
-    /// Any directory compaction invalidates GPU node indices, so publication drops to shadow mode,
-    /// resident geometry records are rebound under their new indices, and a later certified cut
-    /// performs the next visible handoff.
+    /// Any directory compaction invalidates candidate traversal indices. A published cut survives
+    /// when none of its selected pages are retired because it draws directly from immutable page
+    /// allocations while the next GPU candidate is rebuilt and certified.
     pub fn retain_virtual_terrain_regions(
         &mut self,
         keep: impl IntoIterator<Item = TerrainPageKey>,
@@ -5135,8 +5111,6 @@ impl Renderer {
         if remove.is_empty() {
             return Ok(0);
         }
-        self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
-        self.virtual_terrain_cut = None;
         self.virtual_terrain_oracle_cut = None;
         self.virtual_terrain_oracle_view = None;
         let mut removed_pages = BTreeSet::new();
@@ -5147,6 +5121,14 @@ impl Renderer {
             if let Some(page) = self.virtual_terrain_pages.remove(key) {
                 discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
             }
+        }
+        if self.virtual_terrain_cut.as_ref().is_some_and(|cut| {
+            cut.selected_pages
+                .iter()
+                .any(|key| removed_pages.contains(key))
+        }) {
+            self.virtual_terrain_cut = None;
+            self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
         }
         self.virtual_terrain_gpu
             .synchronize_directory_set(&self.queue, &self.virtual_terrain)
@@ -5166,10 +5148,16 @@ impl Renderer {
         if !self.virtual_terrain.remove_page(key) {
             return Ok(false);
         }
-        self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
-        self.virtual_terrain_cut = None;
         self.virtual_terrain_oracle_cut = None;
         self.virtual_terrain_oracle_view = None;
+        if self
+            .virtual_terrain_cut
+            .as_ref()
+            .is_some_and(|cut| cut.selected_pages.contains(&key))
+        {
+            self.virtual_terrain_cut = None;
+            self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
+        }
         if let Some(page) = self.virtual_terrain_pages.remove(&key) {
             discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
         }
@@ -6639,7 +6627,21 @@ impl Renderer {
             } else {
                 (false, VirtualTerrainOwnership::default())
             };
-        let virtual_shadow = self.virtual_terrain_mode == VirtualTerrainRenderMode::Shadow;
+        let virtual_feedback = self.virtual_terrain_gpu.latest_feedback();
+        let virtual_candidate_pending =
+            self.virtual_terrain_oracle_cut
+                .as_ref()
+                .is_some_and(|candidate| {
+                    !virtual_feedback
+                        .as_ref()
+                        .is_some_and(|feedback| gpu_feedback_matches_cut(feedback, Some(candidate)))
+                });
+        let virtual_direct_draw = virtual_visible
+            && self.virtual_terrain_cut.as_ref().is_none_or(|published| {
+                !virtual_feedback
+                    .as_ref()
+                    .is_some_and(|feedback| gpu_feedback_matches_cut(feedback, Some(published)))
+            });
         // Queue readiness is not a proof that every fixed geometric owner is resident. Canonical
         // columns can still replace atomically and retained surface tiles can be incomplete. Keep
         // the cached resident hierarchy authoritative after settling as well as while streaming.
@@ -6752,7 +6754,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
-        let virtual_candidate = if virtual_shadow {
+        let virtual_candidate = if virtual_candidate_pending {
             let (Some(oracle_view), Some(oracle_cut)) = (
                 self.virtual_terrain_oracle_view,
                 self.virtual_terrain_oracle_cut.as_ref(),
@@ -6772,7 +6774,7 @@ impl Renderer {
                     ambient_occlusion: self.options.screen_space_ambient_occlusion,
                     clouds: clouds_active,
                     weather: weather_active,
-                    virtual_terrain: virtual_shadow,
+                    virtual_terrain: virtual_candidate_pending,
                 },
             )
         });
@@ -6836,25 +6838,40 @@ impl Renderer {
                     &draw_list.morphing,
                 ));
                 if virtual_visible {
-                    pass.set_pipeline(&self.shadow_gpu.fixed_pipeline);
-                    pass.set_vertex_buffer(
-                        0,
-                        self.virtual_terrain_gpu.compact_surface_buffer().slice(..),
-                    );
-                    pass.draw_indirect(
-                        self.virtual_terrain_gpu.indirect_buffer(),
-                        VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET,
-                    );
-                    pass.set_pipeline(&self.shadow_gpu.virtual_triangle_pipeline);
-                    pass.set_vertex_buffer(
-                        0,
-                        self.virtual_terrain_gpu.compact_triangle_buffer().slice(..),
-                    );
-                    pass.draw_indirect(
-                        self.virtual_terrain_gpu.indirect_buffer(),
-                        VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET,
-                    );
-                    shadow_draw_calls = shadow_draw_calls.saturating_add(2);
+                    if virtual_direct_draw {
+                        pass.set_pipeline(&self.shadow_gpu.fixed_pipeline);
+                        shadow_draw_calls = shadow_draw_calls.saturating_add(draw_spans(
+                            &mut pass,
+                            &self.virtual_terrain_arena_buffers,
+                            &virtual_world_draw_lists.surfaces,
+                        ));
+                        pass.set_pipeline(&self.shadow_gpu.virtual_triangle_pipeline);
+                        shadow_draw_calls = shadow_draw_calls.saturating_add(draw_triangle_spans(
+                            &mut pass,
+                            &self.virtual_terrain_arena_buffers,
+                            &virtual_world_draw_lists.triangles,
+                        ));
+                    } else {
+                        pass.set_pipeline(&self.shadow_gpu.fixed_pipeline);
+                        pass.set_vertex_buffer(
+                            0,
+                            self.virtual_terrain_gpu.compact_surface_buffer().slice(..),
+                        );
+                        pass.draw_indirect(
+                            self.virtual_terrain_gpu.indirect_buffer(),
+                            VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET,
+                        );
+                        pass.set_pipeline(&self.shadow_gpu.virtual_triangle_pipeline);
+                        pass.set_vertex_buffer(
+                            0,
+                            self.virtual_terrain_gpu.compact_triangle_buffer().slice(..),
+                        );
+                        pass.draw_indirect(
+                            self.virtual_terrain_gpu.indirect_buffer(),
+                            VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET,
+                        );
+                        shadow_draw_calls = shadow_draw_calls.saturating_add(2);
+                    }
                 }
                 if has_avatars {
                     self.avatar_gpu.draw_shadow(&mut pass);
@@ -6882,25 +6899,42 @@ impl Renderer {
                 });
                 pass.set_bind_group(0, &self.frame_bind_group, &[]);
                 if virtual_visible {
-                    pass.set_pipeline(&self.depth_prepass_fast_pipeline);
-                    pass.set_vertex_buffer(
-                        0,
-                        self.virtual_terrain_gpu.compact_surface_buffer().slice(..),
-                    );
-                    pass.draw_indirect(
-                        self.virtual_terrain_gpu.indirect_buffer(),
-                        VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET,
-                    );
-                    pass.set_pipeline(&self.virtual_triangle_depth_pipeline);
-                    pass.set_vertex_buffer(
-                        0,
-                        self.virtual_terrain_gpu.compact_triangle_buffer().slice(..),
-                    );
-                    pass.draw_indirect(
-                        self.virtual_terrain_gpu.indirect_buffer(),
-                        VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET,
-                    );
-                    depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(2);
+                    if virtual_direct_draw {
+                        pass.set_pipeline(&self.depth_prepass_fast_pipeline);
+                        depth_prepass_draw_calls =
+                            depth_prepass_draw_calls.saturating_add(draw_spans(
+                                &mut pass,
+                                &self.virtual_terrain_arena_buffers,
+                                &virtual_world_draw_lists.surfaces,
+                            ));
+                        pass.set_pipeline(&self.virtual_triangle_depth_pipeline);
+                        depth_prepass_draw_calls =
+                            depth_prepass_draw_calls.saturating_add(draw_triangle_spans(
+                                &mut pass,
+                                &self.virtual_terrain_arena_buffers,
+                                &virtual_world_draw_lists.triangles,
+                            ));
+                    } else {
+                        pass.set_pipeline(&self.depth_prepass_fast_pipeline);
+                        pass.set_vertex_buffer(
+                            0,
+                            self.virtual_terrain_gpu.compact_surface_buffer().slice(..),
+                        );
+                        pass.draw_indirect(
+                            self.virtual_terrain_gpu.indirect_buffer(),
+                            VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET,
+                        );
+                        pass.set_pipeline(&self.virtual_triangle_depth_pipeline);
+                        pass.set_vertex_buffer(
+                            0,
+                            self.virtual_terrain_gpu.compact_triangle_buffer().slice(..),
+                        );
+                        pass.draw_indirect(
+                            self.virtual_terrain_gpu.indirect_buffer(),
+                            VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET,
+                        );
+                        depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(2);
+                    }
                 }
                 pass.set_pipeline(&self.depth_prepass_fast_pipeline);
                 depth_prepass_draw_calls = depth_prepass_draw_calls.saturating_add(draw_spans(
@@ -7131,24 +7165,39 @@ impl Renderer {
                 } else {
                     &self.virtual_triangle_flat_pipeline
                 };
-                pass.set_pipeline(fixed_pipeline);
-                pass.set_vertex_buffer(
-                    0,
-                    self.virtual_terrain_gpu.compact_surface_buffer().slice(..),
-                );
-                pass.draw_indirect(
-                    self.virtual_terrain_gpu.indirect_buffer(),
-                    VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET,
-                );
-                pass.set_pipeline(virtual_triangle_pipeline);
-                pass.set_vertex_buffer(
-                    0,
-                    self.virtual_terrain_gpu.compact_triangle_buffer().slice(..),
-                );
-                pass.draw_indirect(
-                    self.virtual_terrain_gpu.indirect_buffer(),
-                    VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET,
-                );
+                if virtual_direct_draw {
+                    pass.set_pipeline(fixed_pipeline);
+                    draw_spans(
+                        &mut pass,
+                        &self.virtual_terrain_arena_buffers,
+                        &virtual_world_draw_lists.surfaces,
+                    );
+                    pass.set_pipeline(virtual_triangle_pipeline);
+                    draw_triangle_spans(
+                        &mut pass,
+                        &self.virtual_terrain_arena_buffers,
+                        &virtual_world_draw_lists.triangles,
+                    );
+                } else {
+                    pass.set_pipeline(fixed_pipeline);
+                    pass.set_vertex_buffer(
+                        0,
+                        self.virtual_terrain_gpu.compact_surface_buffer().slice(..),
+                    );
+                    pass.draw_indirect(
+                        self.virtual_terrain_gpu.indirect_buffer(),
+                        VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET,
+                    );
+                    pass.set_pipeline(virtual_triangle_pipeline);
+                    pass.set_vertex_buffer(
+                        0,
+                        self.virtual_terrain_gpu.compact_triangle_buffer().slice(..),
+                    );
+                    pass.draw_indirect(
+                        self.virtual_terrain_gpu.indirect_buffer(),
+                        VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET,
+                    );
+                }
             }
             pass.set_pipeline(fixed_pipeline);
             draw_spans(&mut pass, &self.arena_buffers, &world_draw_list.fixed);
@@ -7242,18 +7291,39 @@ impl Renderer {
             pass.set_bind_group(1, &self.water_scene_bind_group, &[]);
             pass.set_bind_group(3, &self.cut_transition_bind_groups[0], &[]);
             if virtual_visible {
-                pass.set_pipeline(&self.water_pipeline);
-                pass.set_vertex_buffer(0, self.virtual_terrain_gpu.compact_water_surface_slice());
-                pass.draw_indirect(
-                    self.virtual_terrain_gpu.indirect_buffer(),
-                    VIRTUAL_TERRAIN_WATER_SURFACE_INDIRECT_OFFSET,
-                );
-                pass.set_pipeline(&self.virtual_triangle_water_pipeline);
-                pass.set_vertex_buffer(0, self.virtual_terrain_gpu.compact_water_triangle_slice());
-                pass.draw_indirect(
-                    self.virtual_terrain_gpu.indirect_buffer(),
-                    VIRTUAL_TERRAIN_WATER_TRIANGLE_INDIRECT_OFFSET,
-                );
+                if virtual_direct_draw {
+                    pass.set_pipeline(&self.water_pipeline);
+                    draw_spans(
+                        &mut pass,
+                        &self.virtual_terrain_arena_buffers,
+                        &virtual_world_draw_lists.water_surfaces,
+                    );
+                    pass.set_pipeline(&self.virtual_triangle_water_pipeline);
+                    draw_triangle_spans(
+                        &mut pass,
+                        &self.virtual_terrain_arena_buffers,
+                        &virtual_world_draw_lists.water_triangles,
+                    );
+                } else {
+                    pass.set_pipeline(&self.water_pipeline);
+                    pass.set_vertex_buffer(
+                        0,
+                        self.virtual_terrain_gpu.compact_water_surface_slice(),
+                    );
+                    pass.draw_indirect(
+                        self.virtual_terrain_gpu.indirect_buffer(),
+                        VIRTUAL_TERRAIN_WATER_SURFACE_INDIRECT_OFFSET,
+                    );
+                    pass.set_pipeline(&self.virtual_triangle_water_pipeline);
+                    pass.set_vertex_buffer(
+                        0,
+                        self.virtual_terrain_gpu.compact_water_triangle_slice(),
+                    );
+                    pass.draw_indirect(
+                        self.virtual_terrain_gpu.indirect_buffer(),
+                        VIRTUAL_TERRAIN_WATER_TRIANGLE_INDIRECT_OFFSET,
+                    );
+                }
             }
             pass.set_pipeline(&self.water_pipeline);
             for span in &water_draw_list.spans {
@@ -8464,6 +8534,25 @@ fn draw_diagnostic_spans<'pass>(
         pass.set_vertex_buffer(0, base_buffer.slice(base_start..base_end));
         pass.set_vertex_buffer(1, owner_buffer.slice(owner_range));
         pass.draw(0..QUAD_VERTEX_COUNT, 0..span.quad_count);
+        draws = draws.saturating_add(1);
+    }
+    draws
+}
+
+fn draw_triangle_spans<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    arena_buffers: &'pass [Buffer],
+    draw_list: &TerrainTriangleDrawList,
+) -> u32 {
+    let mut draws = 0u32;
+    for span in &draw_list.spans {
+        let Some(buffer) = arena_buffers.get(span.page as usize) else {
+            continue;
+        };
+        let start = u64::from(span.offset);
+        let end = start + u64::from(span.size);
+        pass.set_vertex_buffer(0, buffer.slice(start..end));
+        pass.draw(0..span.vertex_count, 0..1);
         draws = draws.saturating_add(1);
     }
     draws
