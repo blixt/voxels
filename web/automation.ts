@@ -1,9 +1,9 @@
 import type { BrowserPlayerSession } from "./local-player.ts";
 
-export const AUTOMATION_CONTRACT_VERSION = 7;
+export const AUTOMATION_CONTRACT_VERSION = 8;
 export const SNAPSHOT_SCHEMA_VERSION = 45;
 export const FRAME_SAMPLE_WIDTH = 26;
-export const GPU_SAMPLE_WIDTH = 13;
+export const GPU_SAMPLE_WIDTH = 15;
 
 // This map is the compact Rust snapshot ABI. Scenario code imports it from the typed engine
 // capability; it must not maintain private numeric indices.

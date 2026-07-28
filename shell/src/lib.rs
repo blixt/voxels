@@ -1435,10 +1435,10 @@ mod web {
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
-    const AUTOMATION_CONTRACT_VERSION: u32 = 7;
+    const AUTOMATION_CONTRACT_VERSION: u32 = 8;
     const SNAPSHOT_SCHEMA_VERSION: u32 = 45;
     const FRAME_SAMPLE_WIDTH: u32 = 26;
-    const GPU_SAMPLE_WIDTH: u32 = 13;
+    const GPU_SAMPLE_WIDTH: u32 = 15;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
         "cameraX,cameraY,cameraZ,yaw,pitch,grounded,quads,edits,residentChunks,trackedChunks,visibleChunks,drawCalls,",
         "arenaPages,arenaAllocatedMiB,arenaCapacityMiB,pendingJobs,surfaceTiles,frameMs,shadowDrawCalls,shadowCascades,loadP95Frames,loadMaxFrames,remeshP95Frames,remeshMaxFrames,",
@@ -6721,6 +6721,8 @@ mod web {
                         sample.cloud_ms,
                         sample.weather_ms,
                         sample.ui_ms,
+                        sample.virtual_terrain_traversal_ms,
+                        sample.virtual_terrain_compaction_ms,
                     ]);
                 }
             }

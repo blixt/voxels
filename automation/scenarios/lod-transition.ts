@@ -22,7 +22,15 @@ type BoundaryCentres = readonly Vector2[];
 
 interface LodTimings {
   readonly frameIntervals: number[];
-  readonly gpu: Map<number, { readonly total: number; readonly world: number }>;
+  readonly gpu: Map<
+    number,
+    {
+      readonly total: number;
+      readonly world: number;
+      readonly virtualTerrainTraversal: number;
+      readonly virtualTerrainCompaction: number;
+    }
+  >;
   readonly incompleteTransitionEdges: number[];
 }
 
@@ -270,6 +278,8 @@ function collectTiming(snapshot: readonly number[], timings: LodTimings): void {
     timings.gpu.set(sample.frameId, {
       total: sample.total,
       world: sample.world,
+      virtualTerrainTraversal: sample.virtualTerrainTraversal,
+      virtualTerrainCompaction: sample.virtualTerrainCompaction,
     });
   }
 }
@@ -794,6 +804,18 @@ function summarizePerformance(timings: LodTimings) {
     ),
     totalGpuP95Ms: percentile(
       gpu.map((sample) => sample.total),
+      0.95,
+    ),
+    virtualTerrainTraversalGpuP95Ms: percentile(
+      gpu.map((sample) => sample.virtualTerrainTraversal),
+      0.95,
+    ),
+    virtualTerrainCompactionGpuP95Ms: percentile(
+      gpu.map((sample) => sample.virtualTerrainCompaction),
+      0.95,
+    ),
+    virtualTerrainGpuP95Ms: percentile(
+      gpu.map((sample) => sample.virtualTerrainTraversal + sample.virtualTerrainCompaction),
       0.95,
     ),
     maximumIncompleteTransitionEdges: Math.max(0, ...timings.incompleteTransitionEdges),

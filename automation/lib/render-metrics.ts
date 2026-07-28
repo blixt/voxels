@@ -53,6 +53,8 @@ export interface GpuFrameSample {
   readonly cloud: number;
   readonly weather: number;
   readonly ui: number;
+  readonly virtualTerrainTraversal: number;
+  readonly virtualTerrainCompaction: number;
 }
 
 export interface RenderSnapshotCapture {
@@ -148,6 +150,8 @@ export function gpuFrameSamples(snapshot: readonly number[]): {
       cloud: required(values, 10, "GPU sample"),
       weather: required(values, 11, "GPU sample"),
       ui: required(values, 12, "GPU sample"),
+      virtualTerrainTraversal: required(values, 13, "GPU sample"),
+      virtualTerrainCompaction: required(values, 14, "GPU sample"),
     });
   }
   return { samples: gpuSamples, dropped: gpuDropped };
@@ -401,6 +405,8 @@ export function summarizeRenderPhase(captures: readonly RenderSnapshotCapture[])
       cloudMs: gpuSummary("cloud"),
       weatherMs: gpuSummary("weather"),
       uiMs: gpuSummary("ui"),
+      virtualTerrainTraversalMs: gpuSummary("virtualTerrainTraversal"),
+      virtualTerrainCompactionMs: gpuSummary("virtualTerrainCompaction"),
     },
     residentChunks: snapshotValue(latest, "residentChunks"),
     surfaceTiles: snapshotValue(latest, "surfaceTiles"),
