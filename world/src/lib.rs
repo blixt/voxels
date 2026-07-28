@@ -97,29 +97,33 @@ pub use source::{
     procedural_world_source,
 };
 pub use terrain_directory::{
-    TERRAIN_DIRECTORY_MAX_NODES, TERRAIN_DIRECTORY_MAX_ROOTS, TERRAIN_DIRECTORY_SCHEMA_VERSION,
-    TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError, TerrainHierarchyDirectoryV1,
-    TerrainHierarchyNode, decode_region_terrain_directory, decode_terrain_directory,
-    encode_terrain_directory,
+    TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_DIRECTORY_MAX_NODES, TERRAIN_DIRECTORY_MAX_ROOTS,
+    TERRAIN_DIRECTORY_SCHEMA_VERSION, TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError,
+    TerrainHierarchyDirectoryV1, TerrainHierarchyNode, decode_region_terrain_directory,
+    decode_terrain_directory, encode_terrain_directory,
 };
 pub use terrain_page::{
     SparseVoxelBrickPayload, SteppedSurfaceResidual, TERRAIN_PAGE_EDGE_SAMPLES,
     TERRAIN_PAGE_MAX_CHILDREN, TERRAIN_PAGE_MAX_COMPRESSED_BYTES, TERRAIN_PAGE_MAX_LEVEL,
     TERRAIN_PAGE_MAX_PAYLOAD_BYTES, TERRAIN_PAGE_SCHEMA_VERSION,
     TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TerrainClusterTriangle, TerrainClusterVertex,
-    TerrainColumn, TerrainErrorBounds, TerrainMaterialCoverage, TerrainMaterialRun,
-    TerrainPageBuildError, TerrainPageChild, TerrainPageCodecError, TerrainPageKey,
-    TerrainPageReconstructionError, TerrainPageRepresentation, TerrainPageRepresentationKind,
-    TerrainPageV1, TerrainReplacementError, TerrainSimplificationBudget, TerrainSparseBrick,
-    TerrainSurfaceQuad, TerrainTopologyClass, TerrainTriangleCluster, assemble_terrain_parent,
-    build_compact_exact_terrain_page, build_exact_cluster_terrain_parent, build_exact_terrain_page,
-    decode_terrain_page, encode_terrain_page, reconstruct_exact_terrain_surface,
-    validate_terrain_replacement,
+    TerrainColumn, TerrainErrorBounds, TerrainHeightfieldGrid, TerrainMaterialCoverage,
+    TerrainMaterialRun, TerrainPageBuildError, TerrainPageChild, TerrainPageCodecError,
+    TerrainPageKey, TerrainPageReconstructionError, TerrainPageRepresentation,
+    TerrainPageRepresentationKind, TerrainPageV1, TerrainReplacementError,
+    TerrainSimplificationBudget, TerrainSparseBrick, TerrainSurfaceQuad, TerrainTopologyClass,
+    TerrainTriangleCluster, assemble_terrain_parent, build_compact_exact_terrain_page,
+    build_exact_cluster_terrain_parent, build_exact_terrain_page,
+    build_sampled_heightfield_terrain_page, decode_terrain_page, encode_terrain_page,
+    reconstruct_exact_terrain_surface, validate_terrain_replacement,
 };
 #[cfg(feature = "terrain-page-builder")]
 pub use terrain_page::{build_budgeted_terrain_parent, build_simplified_triangle_terrain_parent};
 #[cfg(feature = "terrain-page-builder")]
-pub use terrain_region::{TerrainRegionBuildError, TerrainRegionBuildV1, build_terrain_region};
+pub use terrain_region::{
+    TerrainRegionBuildError, TerrainRegionBuildV1, build_terrain_coverage_root,
+    build_terrain_region,
+};
 pub use terrain_stream::{
     TerrainDemandGroup, TerrainPageCacheError, TerrainPageDemand, TerrainPageMemoryCache,
     TerrainRequestBatch, TerrainStreamConfig, TerrainStreamError, TerrainStreamScheduler,

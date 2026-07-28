@@ -9,22 +9,22 @@ use crate::{
     SURFACE_PARENT_HORIZON_CELL_COUNT, SURFACE_PARENT_SHADING_EDGE_SAMPLES,
     SURFACE_SHADING_EDGE_SAMPLES, SourceDeviceRequirement, SurfaceBounds, SurfaceLodLevel,
     SurfaceMorphClosure, SurfacePatch, SurfaceQuad, SurfaceRegion, SurfaceShading,
-    SurfaceTileCoord, SurfaceTileMesh, SurfaceTileSnapshot, TERRAIN_REGION_ROOT_LEVEL,
-    TerrainDirectoryError, TerrainHierarchyDirectoryV1, TerrainPageBatchRequestV1,
-    TerrainPageBatchResultV1, TerrainPageCodecError, TerrainPageKey, TerrainPageTransferCodecError,
-    TerrainPageV1, VOXEL_SIZE_METRES, VoxelCoord, WaterPatch, WaterTileMesh, WorldId,
-    WorldManifest, WorldProductPriority, WorldSourceError, WorldSourceIdentity,
-    WorldSourceIdentityHash, WorldSourceKind, codec, decode_region_terrain_directory,
-    decode_terrain_page, decode_terrain_page_batch_request, decode_terrain_page_batch_result,
-    encode_terrain_directory, encode_terrain_page, encode_terrain_page_batch_request,
-    encode_terrain_page_batch_result,
+    SurfaceTileCoord, SurfaceTileMesh, SurfaceTileSnapshot, TERRAIN_COVERAGE_ROOT_LEVEL,
+    TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError, TerrainHierarchyDirectoryV1,
+    TerrainPageBatchRequestV1, TerrainPageBatchResultV1, TerrainPageCodecError, TerrainPageKey,
+    TerrainPageTransferCodecError, TerrainPageV1, VOXEL_SIZE_METRES, VoxelCoord, WaterPatch,
+    WaterTileMesh, WorldId, WorldManifest, WorldProductPriority, WorldSourceError,
+    WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind, codec,
+    decode_region_terrain_directory, decode_terrain_page, decode_terrain_page_batch_request,
+    decode_terrain_page_batch_result, encode_terrain_directory, encode_terrain_page,
+    encode_terrain_page_batch_request, encode_terrain_page_batch_result,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 37;
+pub const PROTOCOL_VERSION: u16 = 38;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -1971,7 +1971,7 @@ pub fn decode_terrain_region_column_batch_result(
         let mut roots = Vec::with_capacity(root_count);
         for _ in 0..root_count {
             roots.push(TerrainPageKey {
-                level: TERRAIN_REGION_ROOT_LEVEL,
+                level: TERRAIN_COVERAGE_ROOT_LEVEL,
                 coord: [column[0], cursor.i32()?, column[1]],
             });
         }
@@ -2096,9 +2096,12 @@ fn validate_terrain_directory_roots(
         || roots.is_empty()
         || roots.len() > MAX_TERRAIN_DIRECTORIES_PER_BATCH
         || !roots.windows(2).all(|pair| pair[0] < pair[1])
-        || roots
-            .iter()
-            .any(|root| root.level != TERRAIN_REGION_ROOT_LEVEL || root.bounds().is_none())
+        || roots.iter().any(|root| {
+            !matches!(
+                root.level,
+                TERRAIN_REGION_ROOT_LEVEL | TERRAIN_COVERAGE_ROOT_LEVEL
+            ) || root.bounds().is_none()
+        })
     {
         return Err(ProtocolError::InvalidPayload(
             "invalid terrain directory roots",
@@ -2152,7 +2155,7 @@ fn validate_terrain_region_columns(
         || !columns.windows(2).all(|pair| pair[0] < pair[1])
         || columns.iter().any(|[x, z]| {
             TerrainPageKey {
-                level: TERRAIN_REGION_ROOT_LEVEL,
+                level: TERRAIN_COVERAGE_ROOT_LEVEL,
                 coord: [*x, 0, *z],
             }
             .bounds()
@@ -2182,7 +2185,7 @@ fn validate_terrain_region_column_result(
                 || column.roots.is_empty()
                 || !column.roots.windows(2).all(|pair| pair[0] < pair[1])
                 || column.roots.iter().any(|root| {
-                    root.level != TERRAIN_REGION_ROOT_LEVEL
+                    root.level != TERRAIN_COVERAGE_ROOT_LEVEL
                         || [root.coord[0], root.coord[2]] != item.column
                         || root.bounds().is_none()
                 }))
@@ -6283,7 +6286,7 @@ mod tests {
     }
 
     #[test]
-    fn virtual_terrain_region_columns_round_trip_exact_vertical_roots() {
+    fn virtual_terrain_region_columns_round_trip_coverage_roots() {
         let request = TerrainRegionColumnBatchRequest {
             request_id: 73,
             priority: WorldProductPriority::VirtualTerrain,
@@ -6308,11 +6311,11 @@ mod tests {
                         revision: 17,
                         roots: vec![
                             TerrainPageKey {
-                                level: TERRAIN_REGION_ROOT_LEVEL,
+                                level: TERRAIN_COVERAGE_ROOT_LEVEL,
                                 coord: [-8, -2, 2],
                             },
                             TerrainPageKey {
-                                level: TERRAIN_REGION_ROOT_LEVEL,
+                                level: TERRAIN_COVERAGE_ROOT_LEVEL,
                                 coord: [-8, -1, 2],
                             },
                         ],

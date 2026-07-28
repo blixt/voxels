@@ -8,10 +8,11 @@ use crate::terrain_page::{
     assemble_exact_cluster_terrain_parent_from_surfaces, select_budgeted_exact_terrain_parent,
 };
 use crate::{
-    Material, TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TERRAIN_REGION_ROOT_LEVEL,
-    TerrainDirectoryError, TerrainHierarchyDirectoryV1, TerrainPageBuildError,
-    TerrainPageCodecError, TerrainPageKey, TerrainPageV1, TerrainSimplificationBudget, VoxelCoord,
-    WorldSourceIdentityHash, build_exact_terrain_page, encode_terrain_page,
+    Material, SurfaceSample, TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_TARGET_COMPRESSED_BYTES,
+    TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError, TerrainErrorBounds,
+    TerrainHierarchyDirectoryV1, TerrainPageBuildError, TerrainPageCodecError, TerrainPageKey,
+    TerrainPageV1, TerrainSimplificationBudget, VoxelCoord, WorldSourceIdentityHash,
+    build_exact_terrain_page, build_sampled_heightfield_terrain_page, encode_terrain_page,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -135,6 +136,34 @@ pub fn build_terrain_region(
 
     let pages = published.into_values().collect::<Vec<_>>();
     let directory = TerrainHierarchyDirectoryV1::from_region_pages(&pages)?;
+    Ok(TerrainRegionBuildV1 {
+        root,
+        pages,
+        directory,
+    })
+}
+
+/// Builds one cheap, independently usable large-area fallback root.
+pub fn build_terrain_coverage_root(
+    source_identity_hash: WorldSourceIdentityHash,
+    root: TerrainPageKey,
+    revision: u64,
+    samples: &[SurfaceSample],
+    errors: TerrainErrorBounds,
+) -> Result<TerrainRegionBuildV1, TerrainRegionBuildError> {
+    if root.level != TERRAIN_COVERAGE_ROOT_LEVEL || root.bounds().is_none() {
+        return Err(TerrainRegionBuildError::InvalidRoot);
+    }
+    let page = build_sampled_heightfield_terrain_page(
+        source_identity_hash,
+        root,
+        revision,
+        samples,
+        errors,
+    )?;
+    ensure_publication_budget(&page)?;
+    let pages = vec![page];
+    let directory = TerrainHierarchyDirectoryV1::from_pages(&pages)?;
     Ok(TerrainRegionBuildV1 {
         root,
         pages,

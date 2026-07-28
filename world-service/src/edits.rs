@@ -650,44 +650,6 @@ impl EditAuthority {
         Some(terrain_region_revision(&self.lock(), &chunks))
     }
 
-    /// Returns the local edit revision and every edited canonical chunk in one fixed X/Z region
-    /// column. This is the edit-owned half of virtual terrain root discovery: generated terrain
-    /// supplies the normal surface band, while arbitrary floating/cave edits contribute their
-    /// exact vertical roots without consulting the old surface-LOD products.
-    pub(crate) fn terrain_region_column_edits(
-        &self,
-        column: [i32; 2],
-    ) -> Option<(u64, Vec<ChunkCoord>)> {
-        let bounds = TerrainPageKey {
-            level: TERRAIN_REGION_ROOT_LEVEL,
-            coord: [column[0], 0, column[1]],
-        }
-        .bounds()?;
-        let maximum = VoxelCoord::new(
-            bounds.max.x.checked_sub(1)?,
-            0,
-            bounds.max.z.checked_sub(1)?,
-        );
-        let minimum_chunk = bounds.min.chunk();
-        let maximum_chunk = maximum.chunk();
-        let state = self.lock();
-        let chunks = state
-            .edits
-            .edited_chunks()
-            .into_iter()
-            .filter(|chunk| {
-                (minimum_chunk.x..=maximum_chunk.x).contains(&chunk.x)
-                    && (minimum_chunk.z..=maximum_chunk.z).contains(&chunk.z)
-            })
-            .collect::<Vec<_>>();
-        let revision = chunks
-            .iter()
-            .filter_map(|chunk| state.chunk_revisions.get(chunk).copied())
-            .max()
-            .unwrap_or(INITIAL_REVISION);
-        Some((revision, chunks))
-    }
-
     pub(crate) fn apply(
         &self,
         source: &dyn WorldSourceEngine,

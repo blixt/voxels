@@ -45,10 +45,10 @@ use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, FaceAxis, Material,
     MeshedChunk, Quad, RenderLayer, SURFACE_PATCHES_PER_TILE_EDGE, SurfaceLodLevel, SurfacePatch,
     SurfacePatchEdge, SurfacePatchId, SurfaceQuad, SurfaceRegion, SurfaceTileCoord,
-    SurfaceTileMesh, TERRAIN_REGION_ROOT_LEVEL, TerrainHierarchyDirectoryV1, TerrainPageKey,
-    TerrainPageRepresentation, TerrainPageRepresentationKind, TerrainPageV1, VOXEL_SIZE_METRES,
-    WaterTileMesh, WorldManifest, fallback_surface_wall_material,
-    reconstruct_exact_terrain_surface,
+    SurfaceTileMesh, TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_REGION_ROOT_LEVEL,
+    TerrainHierarchyDirectoryV1, TerrainPageKey, TerrainPageRepresentation,
+    TerrainPageRepresentationKind, TerrainPageV1, VOXEL_SIZE_METRES, WaterTileMesh, WorldManifest,
+    fallback_surface_wall_material, reconstruct_exact_terrain_surface,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -766,6 +766,11 @@ fn virtual_surface_gpu_quads(
                 page.representation.kind(),
             ));
         }
+        TerrainPageRepresentation::HeightfieldGrid(_) => {
+            return Err(VirtualTerrainRendererError::UnsupportedRepresentation(
+                page.representation.kind(),
+            ));
+        }
     };
     let mut gpu_quads = Vec::with_capacity(quads.len());
     for quad in quads {
@@ -818,71 +823,169 @@ fn virtual_surface_gpu_quads(
 fn virtual_triangle_gpu_vertices(
     page: &TerrainPageV1,
 ) -> Result<Vec<GpuTerrainVertex>, VirtualTerrainRendererError> {
-    let TerrainPageRepresentation::TriangleCluster(cluster) = &page.representation else {
-        return Err(VirtualTerrainRendererError::UnsupportedRepresentation(
+    match &page.representation {
+        TerrainPageRepresentation::TriangleCluster(cluster) => {
+            let vertex_count = cluster
+                .triangles
+                .len()
+                .checked_mul(3)
+                .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
+            let mut vertices = Vec::with_capacity(vertex_count);
+            for triangle in &cluster.triangles {
+                let material = page
+                    .materials
+                    .get(usize::from(triangle.material_index))
+                    .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(
+                        page.key,
+                    ))?
+                    .material;
+                let source_vertices = triangle
+                    .vertices
+                    .map(|index| cluster.vertices.get(index as usize));
+                let [Some(left), Some(middle), Some(right)] = source_vertices else {
+                    return Err(VirtualTerrainRendererError::InvalidTriangleCluster(
+                        page.key,
+                    ));
+                };
+                if [left, middle, right]
+                    .iter()
+                    .any(|vertex| vertex.material_index != triangle.material_index)
+                {
+                    return Err(VirtualTerrainRendererError::InvalidTriangleCluster(
+                        page.key,
+                    ));
+                }
+                push_virtual_triangle(
+                    &mut vertices,
+                    [left.position, middle.position, right.position],
+                    material,
+                    page.key,
+                )?;
+            }
+            Ok(vertices)
+        }
+        TerrainPageRepresentation::HeightfieldGrid(grid) => {
+            let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+            let cell_count =
+                TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize;
+            let mut vertices = Vec::with_capacity(cell_count.saturating_mul(12));
+            let water = page
+                .materials
+                .iter()
+                .find(|coverage| coverage.material == Material::Water)
+                .map(|coverage| coverage.material);
+            for z in 0..TERRAIN_PAGE_EDGE_SAMPLES as usize {
+                for x in 0..TERRAIN_PAGE_EDGE_SAMPLES as usize {
+                    let cell = x + z * TERRAIN_PAGE_EDGE_SAMPLES as usize;
+                    let material = page
+                        .materials
+                        .get(usize::from(grid.cell_material_indices[cell]))
+                        .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(
+                            page.key,
+                        ))?
+                        .material;
+                    let sample_indices = [
+                        x + z * edge,
+                        x + 1 + z * edge,
+                        x + 1 + (z + 1) * edge,
+                        x + (z + 1) * edge,
+                    ];
+                    let stride = i32::try_from(grid.sample_stride_voxels).map_err(|_| {
+                        VirtualTerrainRendererError::InvalidTriangleCluster(page.key)
+                    })?;
+                    let positions = [
+                        [
+                            page.bounds.min.x + x as i32 * stride,
+                            grid.ground_heights[sample_indices[0]],
+                            page.bounds.min.z + z as i32 * stride,
+                        ],
+                        [
+                            page.bounds.min.x + (x as i32 + 1) * stride,
+                            grid.ground_heights[sample_indices[1]],
+                            page.bounds.min.z + z as i32 * stride,
+                        ],
+                        [
+                            page.bounds.min.x + (x as i32 + 1) * stride,
+                            grid.ground_heights[sample_indices[2]],
+                            page.bounds.min.z + (z as i32 + 1) * stride,
+                        ],
+                        [
+                            page.bounds.min.x + x as i32 * stride,
+                            grid.ground_heights[sample_indices[3]],
+                            page.bounds.min.z + (z as i32 + 1) * stride,
+                        ],
+                    ];
+                    for triangle in [[0, 2, 1], [0, 3, 2]] {
+                        push_virtual_triangle(
+                            &mut vertices,
+                            triangle.map(|index| positions[index]),
+                            material,
+                            page.key,
+                        )?;
+                    }
+                    let Some(water) = water else {
+                        continue;
+                    };
+                    let water_positions = std::array::from_fn::<_, 4, _>(|index| {
+                        let mut position = positions[index];
+                        position[1] = grid.water_heights[sample_indices[index]];
+                        position
+                    });
+                    for triangle in [[0, 2, 1], [0, 3, 2]] {
+                        if triangle
+                            .iter()
+                            .all(|index| water_positions[*index][1] != i32::MIN)
+                        {
+                            push_virtual_triangle(
+                                &mut vertices,
+                                triangle.map(|index| water_positions[index]),
+                                water,
+                                page.key,
+                            )?;
+                        }
+                    }
+                }
+            }
+            Ok(vertices)
+        }
+        _ => Err(VirtualTerrainRendererError::UnsupportedRepresentation(
             page.representation.kind(),
-        ));
-    };
-    let vertex_count = cluster
-        .triangles
-        .len()
-        .checked_mul(3)
-        .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
-    let mut vertices = Vec::with_capacity(vertex_count);
-    for triangle in &cluster.triangles {
-        let material = page
-            .materials
-            .get(usize::from(triangle.material_index))
-            .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(
-                page.key,
-            ))?
-            .material;
-        let source_vertices = triangle
-            .vertices
-            .map(|index| cluster.vertices.get(index as usize));
-        let [Some(left), Some(middle), Some(right)] = source_vertices else {
-            return Err(VirtualTerrainRendererError::InvalidTriangleCluster(
-                page.key,
-            ));
-        };
-        if [left, middle, right]
-            .iter()
-            .any(|vertex| vertex.material_index != triangle.material_index)
-        {
-            return Err(VirtualTerrainRendererError::InvalidTriangleCluster(
-                page.key,
-            ));
-        }
-        let edge_a = std::array::from_fn::<_, 3, _>(|axis| {
-            f64::from(middle.position[axis]) - f64::from(left.position[axis])
-        });
-        let edge_b = std::array::from_fn::<_, 3, _>(|axis| {
-            f64::from(right.position[axis]) - f64::from(left.position[axis])
-        });
-        let cross = [
-            edge_a[1] * edge_b[2] - edge_a[2] * edge_b[1],
-            edge_a[2] * edge_b[0] - edge_a[0] * edge_b[2],
-            edge_a[0] * edge_b[1] - edge_a[1] * edge_b[0],
-        ];
-        let length = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
-        if !length.is_finite() || length <= f64::EPSILON {
-            return Err(VirtualTerrainRendererError::InvalidTriangleCluster(
-                page.key,
-            ));
-        }
-        let normal = std::array::from_fn::<_, 3, _>(|axis| {
-            let value = (cross[axis] / length * f64::from(i16::MAX)).round();
-            value.clamp(f64::from(i16::MIN + 1), f64::from(i16::MAX)) as i16
-        });
-        for vertex in [left, middle, right] {
-            vertices.push(GpuTerrainVertex {
-                position: vertex.position,
-                material: u32::from(material.id()),
-                normal: [normal[0], normal[1], normal[2], 0],
-            });
-        }
+        )),
     }
-    Ok(vertices)
+}
+
+fn push_virtual_triangle(
+    vertices: &mut Vec<GpuTerrainVertex>,
+    positions: [[i32; 3]; 3],
+    material: Material,
+    key: TerrainPageKey,
+) -> Result<(), VirtualTerrainRendererError> {
+    let [left, middle, right] = positions;
+    let edge_a =
+        std::array::from_fn::<_, 3, _>(|axis| f64::from(middle[axis]) - f64::from(left[axis]));
+    let edge_b =
+        std::array::from_fn::<_, 3, _>(|axis| f64::from(right[axis]) - f64::from(left[axis]));
+    let cross = [
+        edge_a[1] * edge_b[2] - edge_a[2] * edge_b[1],
+        edge_a[2] * edge_b[0] - edge_a[0] * edge_b[2],
+        edge_a[0] * edge_b[1] - edge_a[1] * edge_b[0],
+    ];
+    let length = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+    if !length.is_finite() || length <= f64::EPSILON {
+        return Err(VirtualTerrainRendererError::InvalidTriangleCluster(key));
+    }
+    let normal = std::array::from_fn::<_, 3, _>(|axis| {
+        let value = (cross[axis] / length * f64::from(i16::MAX)).round();
+        value.clamp(f64::from(i16::MIN + 1), f64::from(i16::MAX)) as i16
+    });
+    for position in positions {
+        vertices.push(GpuTerrainVertex {
+            position,
+            material: u32::from(material.id()),
+            normal: [normal[0], normal[1], normal[2], 0],
+        });
+    }
+    Ok(())
 }
 
 fn virtual_terrain_surface_slice(
@@ -4767,7 +4870,8 @@ impl Renderer {
                     )
                 }
             }
-            TerrainPageRepresentation::TriangleCluster(_) => {
+            TerrainPageRepresentation::TriangleCluster(_)
+            | TerrainPageRepresentation::HeightfieldGrid(_) => {
                 let vertices = virtual_triangle_gpu_vertices(&page)?;
                 let (vertices, opaque_vertex_count, water_vertex_count) =
                     partition_virtual_triangle_geometry(vertices)
@@ -12979,6 +13083,7 @@ const fn virtual_representation_label(kind: TerrainPageRepresentationKind) -> &'
         TerrainPageRepresentationKind::SparseVoxelBrick => "sparseVoxelBrick",
         TerrainPageRepresentationKind::SurfaceCluster => "surfaceCluster",
         TerrainPageRepresentationKind::TriangleCluster => "triangleCluster",
+        TerrainPageRepresentationKind::HeightfieldGrid => "heightfieldGrid",
     }
 }
 
@@ -16215,6 +16320,43 @@ mod tests {
             quad.extent_voxels.into_iter().all(|extent| extent > 0)
                 && quad.material_face & !GPU_FACE_MASK == u32::from(Material::Basalt.id())
         }));
+    }
+
+    #[test]
+    fn sampled_heightfield_expands_to_small_upward_triangles_and_a_separate_water_stream() {
+        let key = TerrainPageKey {
+            level: 2,
+            coord: [-1, 0, -1],
+        };
+        let samples = vec![
+            voxels_world::SurfaceSample {
+                height: 10,
+                material: Material::Grass,
+                water_level: Some(15),
+                region: SurfaceRegion::VerdantForest,
+                moisture: 0.5,
+                temperature: 0.5,
+                ridge: 0.0,
+                route: None,
+            };
+            (TERRAIN_PAGE_EDGE_SAMPLES as usize + 1).pow(2)
+        ];
+        let page = voxels_world::build_sampled_heightfield_terrain_page(
+            voxels_world::WorldSourceIdentityHash::from_bytes([29; 32]),
+            key,
+            3,
+            &samples,
+            voxels_world::TerrainErrorBounds::EXACT,
+        )
+        .unwrap();
+        let vertices = virtual_triangle_gpu_vertices(&page).unwrap();
+        let ground_vertices =
+            TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize * 6;
+        assert_eq!(vertices.len(), ground_vertices * 2);
+        assert!(vertices.iter().all(|vertex| vertex.normal[1] > 0));
+        let (_, opaque, water) = partition_virtual_triangle_geometry(vertices).unwrap();
+        assert_eq!(opaque as usize, ground_vertices);
+        assert_eq!(water as usize, ground_vertices);
     }
 
     #[test]

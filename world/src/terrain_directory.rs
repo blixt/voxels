@@ -12,9 +12,14 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-pub const TERRAIN_DIRECTORY_SCHEMA_VERSION: u16 = 1;
+pub const TERRAIN_DIRECTORY_SCHEMA_VERSION: u16 = 2;
 pub const TERRAIN_DIRECTORY_MAX_NODES: usize = 131_072;
 pub const TERRAIN_DIRECTORY_MAX_ROOTS: usize = 4_096;
+/// Initial always-resident coverage spans 3.2768 km per root at 10 cm canonical scale.
+///
+/// Refinement is independent of this level; the large root exists only so cold start, teleport,
+/// and stalled streaming retain a complete surface instead of exposing sky or macro cubes.
+pub const TERRAIN_COVERAGE_ROOT_LEVEL: u8 = 10;
 /// Production region roots cover a fixed 12.8 m cube (128 canonical 10 cm voxels per edge).
 ///
 /// A complete region contains 64 exact 32³ leaves plus their 8 parents and one root. This keeps the
@@ -25,7 +30,7 @@ pub const TERRAIN_REGION_ROOT_LEVEL: u8 = 2;
 const DIRECTORY_MAGIC: &[u8; 4] = b"VXTD";
 const DIRECTORY_HEADER_BYTES: usize = 80;
 const DIRECTORY_NODE_BYTES: usize = 80;
-const DIRECTORY_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-directory-v1\0";
+const DIRECTORY_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-directory-v2\0";
 const NODE_FLAG_HAS_CHILDREN: u8 = 1 << 0;
 const NODE_FLAG_ROOT: u8 = 1 << 1;
 const NODE_FLAG_UNRESOLVED_TOPOLOGY: u8 = 1 << 2;
@@ -398,6 +403,7 @@ pub fn decode_terrain_directory(
             2 => TerrainPageRepresentationKind::SparseVoxelBrick,
             3 => TerrainPageRepresentationKind::SurfaceCluster,
             4 => TerrainPageRepresentationKind::TriangleCluster,
+            5 => TerrainPageRepresentationKind::HeightfieldGrid,
             value => return Err(TerrainDirectoryError::UnknownRepresentation(value)),
         };
         let key = TerrainPageKey {

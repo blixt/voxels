@@ -5,8 +5,8 @@
 //! every payload reconstructs only that owner's certified surface.
 
 use crate::{
-    BoundaryCertificate, BoundarySide, CanonicalFaceKey, FaceAxis, Material, VoxelBounds,
-    VoxelCoord, WorldSourceIdentityHash, canonical_exposed_faces,
+    BoundaryCertificate, BoundarySide, CanonicalFaceKey, FaceAxis, Material, SurfaceSample,
+    VoxelBounds, VoxelCoord, WorldSourceIdentityHash, canonical_exposed_faces,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -15,7 +15,7 @@ use std::io::Read;
 #[cfg(feature = "terrain-page-builder")]
 use crate::terrain_error::certify_bidirectional_surface_error;
 
-pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 2;
+pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 3;
 pub const TERRAIN_PAGE_EDGE_SAMPLES: u32 = 32;
 pub const TERRAIN_PAGE_MAX_LEVEL: u8 = 20;
 pub const TERRAIN_PAGE_MAX_CHILDREN: usize = 8;
@@ -28,8 +28,9 @@ pub const TERRAIN_PAGE_TARGET_COMPRESSED_BYTES: usize = 65_536;
 pub const TERRAIN_PAGE_MAX_COMPRESSED_BYTES: usize = 262_144;
 pub const TERRAIN_PAGE_MAX_PAYLOAD_BYTES: usize = 2_097_152;
 const SPARSE_BRICK_EDGE: u8 = 8;
-const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v2\0";
+const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v3\0";
 const PARENT_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-parent-boundary-v1\0";
+const HEIGHTFIELD_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-heightfield-boundary-v1\0";
 const PAGE_MAGIC: &[u8; 4] = b"VXTP";
 const PAGE_HEADER_LEN: u16 = 344;
 const PAGE_COMPRESSION_BROTLI: u8 = 1;
@@ -179,6 +180,22 @@ pub struct TerrainTriangleCluster {
     pub triangles: Vec<TerrainClusterTriangle>,
 }
 
+/// Compact, independently renderable single-valued terrain reconstruction.
+///
+/// The payload stores only 33x33 source samples for a 32-cell page. Rendering interpolates between
+/// signed canonical 10 cm lattice positions, so coarse source data never appears as macro cubes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerrainHeightfieldGrid {
+    pub sample_stride_voxels: u32,
+    pub shape_xz: [u16; 2],
+    /// Canonical Y plane coordinates (`solid surface height + 1`), X fastest then Z.
+    pub ground_heights: Vec<i32>,
+    /// One material palette index per 32x32 cell, X fastest then Z.
+    pub cell_material_indices: Vec<u8>,
+    /// Canonical water top plane coordinates, or `i32::MIN` for a dry lattice vertex.
+    pub water_heights: Vec<i32>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerrainColumn {
     pub first_run: u32,
@@ -231,6 +248,7 @@ pub enum TerrainPageRepresentation {
     SparseVoxelBrick(SparseVoxelBrickPayload),
     SurfaceCluster(Vec<TerrainSurfaceQuad>),
     TriangleCluster(TerrainTriangleCluster),
+    HeightfieldGrid(TerrainHeightfieldGrid),
 }
 
 impl TerrainPageRepresentation {
@@ -242,6 +260,7 @@ impl TerrainPageRepresentation {
             Self::SparseVoxelBrick(_) => TerrainPageRepresentationKind::SparseVoxelBrick,
             Self::SurfaceCluster(_) => TerrainPageRepresentationKind::SurfaceCluster,
             Self::TriangleCluster(_) => TerrainPageRepresentationKind::TriangleCluster,
+            Self::HeightfieldGrid(_) => TerrainPageRepresentationKind::HeightfieldGrid,
         }
     }
 }
@@ -253,6 +272,7 @@ pub enum TerrainPageRepresentationKind {
     SparseVoxelBrick = 2,
     SurfaceCluster = 3,
     TriangleCluster = 4,
+    HeightfieldGrid = 5,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -293,6 +313,7 @@ impl TerrainPageV1 {
 pub enum TerrainPageBuildError {
     NotExactLeaf,
     InvalidPageKey,
+    InvalidSurfaceLattice,
     InvalidChildGroup(TerrainReplacementError),
     UnsupportedChildRepresentation,
     NoSurfaceToSimplify,
@@ -311,6 +332,9 @@ impl fmt::Display for TerrainPageBuildError {
         match self {
             Self::NotExactLeaf => formatter.write_str("exact page builder requires a level-0 key"),
             Self::InvalidPageKey => formatter.write_str("terrain page key has no valid bounds"),
+            Self::InvalidSurfaceLattice => {
+                formatter.write_str("terrain heightfield lattice is invalid for its page")
+            }
             Self::InvalidChildGroup(error) => {
                 write!(formatter, "terrain parent child group is invalid: {error}")
             }
@@ -638,6 +662,187 @@ fn build_exact_terrain_page_with_policy(
     };
     page.content_fingerprint = terrain_page_fingerprint(&page);
     Ok(page)
+}
+
+/// Builds a compact coarse surface page from a 33x33 regular source lattice.
+///
+/// This is a graceful-degradation owner, not an exact occupancy page. It remains a heightfield
+/// only when the source has already certified single-valued topology; caves and overhangs use the
+/// sparse/cluster path instead.
+pub fn build_sampled_heightfield_terrain_page(
+    source_identity_hash: WorldSourceIdentityHash,
+    key: TerrainPageKey,
+    revision: u64,
+    samples: &[SurfaceSample],
+    mut errors: TerrainErrorBounds,
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    let bounds = key.bounds().ok_or(TerrainPageBuildError::InvalidPageKey)?;
+    let stride = 1u32
+        .checked_shl(u32::from(key.level))
+        .ok_or(TerrainPageBuildError::InvalidPageKey)?;
+    let shape = TERRAIN_PAGE_EDGE_SAMPLES + 1;
+    let sample_count = usize::try_from(shape)
+        .ok()
+        .and_then(|edge| edge.checked_mul(edge))
+        .ok_or(TerrainPageBuildError::InvalidSurfaceLattice)?;
+    if samples.len() != sample_count {
+        return Err(TerrainPageBuildError::InvalidSurfaceLattice);
+    }
+
+    let mut ground_heights = Vec::with_capacity(sample_count);
+    let mut water_heights = Vec::with_capacity(sample_count);
+    for sample in samples {
+        if !sample.material.is_renderable() {
+            return Err(TerrainPageBuildError::InvalidSurfaceLattice);
+        }
+        let ground = sample
+            .height
+            .checked_add(1)
+            .ok_or(TerrainPageBuildError::InvalidSurfaceLattice)?;
+        if !(bounds.min.y..=bounds.max.y).contains(&ground) {
+            return Err(TerrainPageBuildError::InvalidSurfaceLattice);
+        }
+        let water = sample
+            .water_level
+            .map(|height| {
+                height
+                    .checked_add(1)
+                    .filter(|height| {
+                        *height >= ground && (bounds.min.y..=bounds.max.y).contains(height)
+                    })
+                    .ok_or(TerrainPageBuildError::InvalidSurfaceLattice)
+            })
+            .transpose()?
+            .unwrap_or(i32::MIN);
+        ground_heights.push(ground);
+        water_heights.push(water);
+    }
+
+    let mut materials_by_id = samples
+        .iter()
+        .map(|sample| (sample.material.id(), sample.material))
+        .collect::<BTreeMap<_, _>>();
+    if samples.iter().any(|sample| sample.water_level.is_some()) {
+        materials_by_id.insert(Material::Water.id(), Material::Water);
+    }
+    let palette_indices = materials_by_id
+        .keys()
+        .enumerate()
+        .map(|(index, id)| {
+            u8::try_from(index)
+                .map(|index| (*id, index))
+                .map_err(|_| TerrainPageBuildError::MaterialPaletteOverflow)
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+
+    let edge = shape as usize;
+    let mut cell_material_indices =
+        Vec::with_capacity(TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize);
+    let mut cell_counts = BTreeMap::<u16, u32>::new();
+    for z in 0..TERRAIN_PAGE_EDGE_SAMPLES as usize {
+        for x in 0..TERRAIN_PAGE_EDGE_SAMPLES as usize {
+            let corners = [
+                samples[x + z * edge].material,
+                samples[x + 1 + z * edge].material,
+                samples[x + (z + 1) * edge].material,
+                samples[x + 1 + (z + 1) * edge].material,
+            ];
+            let mut counts = BTreeMap::<u16, u8>::new();
+            for material in corners {
+                *counts.entry(material.id()).or_default() += 1;
+            }
+            let material_id = counts
+                .into_iter()
+                .max_by_key(|(id, count)| (*count, std::cmp::Reverse(*id)))
+                .map(|(id, _)| id)
+                .ok_or(TerrainPageBuildError::InvalidSurfaceLattice)?;
+            cell_material_indices.push(
+                *palette_indices
+                    .get(&material_id)
+                    .ok_or(TerrainPageBuildError::MaterialPaletteOverflow)?,
+            );
+            *cell_counts.entry(material_id).or_default() += 1;
+        }
+    }
+
+    let cell_area = stride.saturating_mul(stride);
+    let materials = materials_by_id
+        .into_iter()
+        .map(|(id, material)| {
+            let cells = cell_counts.get(&id).copied().unwrap_or(0);
+            TerrainMaterialCoverage {
+                material,
+                occupied_voxels: cells.saturating_mul(cell_area),
+                exposed_unit_faces: cells.saturating_mul(cell_area),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    // A source sample cannot constrain an unsampled material boundary more tightly than one cell.
+    let sampling_error = stride.saturating_mul(1_000);
+    errors.geometric_millivoxels = errors.geometric_millivoxels.max(sampling_error);
+    errors.silhouette_millivoxels = errors.silhouette_millivoxels.max(sampling_error);
+    errors.material_boundary_millivoxels = errors.material_boundary_millivoxels.max(sampling_error);
+    errors.normal_milliradians = errors.normal_milliradians.max(3_142);
+
+    let grid = TerrainHeightfieldGrid {
+        sample_stride_voxels: stride,
+        shape_xz: [shape as u16; 2],
+        ground_heights,
+        cell_material_indices,
+        water_heights,
+    };
+    let boundary_fingerprints = heightfield_boundary_fingerprints(bounds, &grid);
+    let mut page = TerrainPageV1 {
+        source_identity_hash,
+        key,
+        revision,
+        bounds,
+        children: Vec::new(),
+        errors,
+        topology: TerrainTopologyClass::SingleRunColumns,
+        boundary_fingerprints,
+        materials,
+        representation: TerrainPageRepresentation::HeightfieldGrid(grid),
+        content_fingerprint: [0; 32],
+    };
+    page.content_fingerprint = terrain_page_fingerprint(&page);
+    encode_terrain_page(&page).map_err(|_| TerrainPageBuildError::PayloadOverflow)?;
+    Ok(page)
+}
+
+fn heightfield_boundary_fingerprints(
+    bounds: VoxelBounds,
+    grid: &TerrainHeightfieldGrid,
+) -> [[u8; 32]; 6] {
+    let edge = usize::from(grid.shape_xz[0]);
+    std::array::from_fn(|index| {
+        let side = BoundarySide::ALL[index];
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(HEIGHTFIELD_BOUNDARY_DOMAIN);
+        hasher.update(&[side.axis() as u8]);
+        hasher.update(&boundary_plane(bounds, side).to_le_bytes());
+        match side {
+            BoundarySide::NegativeX | BoundarySide::PositiveX => {
+                let x = usize::from(side == BoundarySide::PositiveX) * (edge - 1);
+                for z in 0..edge {
+                    let sample = x + z * edge;
+                    hasher.update(&grid.ground_heights[sample].to_le_bytes());
+                    hasher.update(&grid.water_heights[sample].to_le_bytes());
+                }
+            }
+            BoundarySide::NegativeZ | BoundarySide::PositiveZ => {
+                let z = usize::from(side == BoundarySide::PositiveZ) * (edge - 1);
+                for x in 0..edge {
+                    let sample = x + z * edge;
+                    hasher.update(&grid.ground_heights[sample].to_le_bytes());
+                    hasher.update(&grid.water_heights[sample].to_le_bytes());
+                }
+            }
+            BoundarySide::NegativeY | BoundarySide::PositiveY => {}
+        }
+        *hasher.finalize().as_bytes()
+    })
 }
 
 /// Assembles a parent from an already-built representation and an exact complete child group.
@@ -1058,6 +1263,9 @@ impl TerrainPageRepresentation {
     fn triangle_count(&self) -> Option<usize> {
         match self {
             Self::TriangleCluster(cluster) => Some(cluster.triangles.len()),
+            Self::HeightfieldGrid(_) => {
+                Some(TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize * 2)
+            }
             _ => None,
         }
     }
@@ -2048,6 +2256,22 @@ fn representation_bytes(representation: &TerrainPageRepresentation) -> Vec<u8> {
                 bytes.push(triangle.material_index);
             }
         }
+        TerrainPageRepresentation::HeightfieldGrid(grid) => {
+            push_u32(&mut bytes, grid.sample_stride_voxels);
+            for component in grid.shape_xz {
+                push_u16(&mut bytes, component);
+            }
+            push_u32(&mut bytes, grid.ground_heights.len() as u32);
+            push_u32(&mut bytes, grid.cell_material_indices.len() as u32);
+            push_u32(&mut bytes, grid.water_heights.len() as u32);
+            for height in &grid.ground_heights {
+                push_i32(&mut bytes, *height);
+            }
+            bytes.extend_from_slice(&grid.cell_material_indices);
+            for height in &grid.water_heights {
+                push_i32(&mut bytes, *height);
+            }
+        }
     }
     bytes
 }
@@ -2146,6 +2370,38 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
         }),
         TerrainPageRepresentation::TriangleCluster(cluster) => {
             triangle_cluster_validation_error(cluster, page.bounds, palette_len).is_ok()
+        }
+        TerrainPageRepresentation::HeightfieldGrid(grid) => {
+            let expected_stride = 1u32.checked_shl(u32::from(page.key.level)).unwrap_or(0);
+            let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+            let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize;
+            page.topology == TerrainTopologyClass::SingleRunColumns
+                && grid.sample_stride_voxels == expected_stride
+                && grid.shape_xz
+                    == [
+                        (TERRAIN_PAGE_EDGE_SAMPLES + 1) as u16,
+                        (TERRAIN_PAGE_EDGE_SAMPLES + 1) as u16,
+                    ]
+                && grid.ground_heights.len() == edge * edge
+                && grid.water_heights.len() == edge * edge
+                && grid.cell_material_indices.len() == cells
+                && grid
+                    .ground_heights
+                    .iter()
+                    .all(|height| (page.bounds.min.y..=page.bounds.max.y).contains(height))
+                && grid
+                    .water_heights
+                    .iter()
+                    .zip(&grid.ground_heights)
+                    .all(|(water, ground)| {
+                        *water == i32::MIN
+                            || (*water >= *ground
+                                && (page.bounds.min.y..=page.bounds.max.y).contains(water))
+                    })
+                && grid
+                    .cell_material_indices
+                    .iter()
+                    .all(|index| usize::from(*index) < palette_len)
         }
     }
 }
@@ -2470,6 +2726,7 @@ pub fn decode_terrain_page(
         2 => TerrainPageRepresentationKind::SparseVoxelBrick,
         3 => TerrainPageRepresentationKind::SurfaceCluster,
         4 => TerrainPageRepresentationKind::TriangleCluster,
+        5 => TerrainPageRepresentationKind::HeightfieldGrid,
         _ => {
             return Err(TerrainPageCodecError::InvalidHeader(
                 "unknown representation",
@@ -2734,6 +2991,41 @@ fn decode_representation(
                 triangles,
             })
         }
+        TerrainPageRepresentationKind::HeightfieldGrid => {
+            let sample_stride_voxels = cursor.u32()?;
+            let shape_xz = [cursor.u16()?, cursor.u16()?];
+            let ground_count = cursor.u32()? as usize;
+            let material_count = cursor.u32()? as usize;
+            let water_count = cursor.u32()? as usize;
+            let expected_edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+            let expected_samples = expected_edge * expected_edge;
+            let expected_materials =
+                TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize;
+            if ground_count != expected_samples
+                || material_count != expected_materials
+                || water_count != expected_samples
+            {
+                return Err(TerrainPageCodecError::InvalidRepresentation(
+                    "heightfield grid counts",
+                ));
+            }
+            let mut ground_heights = Vec::with_capacity(ground_count);
+            for _ in 0..ground_count {
+                ground_heights.push(cursor.i32()?);
+            }
+            let cell_material_indices = cursor.bytes(material_count)?.to_vec();
+            let mut water_heights = Vec::with_capacity(water_count);
+            for _ in 0..water_count {
+                water_heights.push(cursor.i32()?);
+            }
+            TerrainPageRepresentation::HeightfieldGrid(TerrainHeightfieldGrid {
+                sample_stride_voxels,
+                shape_xz,
+                ground_heights,
+                cell_material_indices,
+                water_heights,
+            })
+        }
     };
     if cursor.position != payload.len() {
         return Err(TerrainPageCodecError::InvalidRepresentation(
@@ -2853,9 +3145,107 @@ fn push_u64(bytes: &mut Vec<u8>, value: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SurfaceRegion;
 
     fn identity() -> WorldSourceIdentityHash {
         WorldSourceIdentityHash::from_bytes([0x5a; 32])
+    }
+
+    fn sampled_surface(height: i32, material: Material, water_level: Option<i32>) -> SurfaceSample {
+        SurfaceSample {
+            height,
+            material,
+            water_level,
+            region: SurfaceRegion::VerdantForest,
+            moisture: 0.5,
+            temperature: 0.5,
+            ridge: 0.0,
+            route: None,
+        }
+    }
+
+    fn heightfield_samples(key: TerrainPageKey) -> Vec<SurfaceSample> {
+        let bounds = key.bounds().unwrap();
+        let stride = 1i32 << key.level;
+        (0..=TERRAIN_PAGE_EDGE_SAMPLES as i32)
+            .flat_map(|z| {
+                (0..=TERRAIN_PAGE_EDGE_SAMPLES as i32).map(move |x| {
+                    let world_x = bounds.min.x + x * stride;
+                    let world_z = bounds.min.z + z * stride;
+                    let height = 24 + world_x.div_euclid(32) + world_z.div_euclid(48);
+                    let material =
+                        if (world_x.div_euclid(16) + world_z.div_euclid(16)).rem_euclid(3) == 0 {
+                            Material::Dirt
+                        } else {
+                            Material::Grass
+                        };
+                    sampled_surface(height, material, (height < 20).then_some(20))
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sampled_heightfield_round_trips_and_adjacent_negative_pages_share_their_edge() {
+        let left_key = TerrainPageKey {
+            level: 2,
+            coord: [-1, 0, -1],
+        };
+        let right_key = TerrainPageKey {
+            level: 2,
+            coord: [0, 0, -1],
+        };
+        let left = build_sampled_heightfield_terrain_page(
+            identity(),
+            left_key,
+            17,
+            &heightfield_samples(left_key),
+            TerrainErrorBounds::EXACT,
+        )
+        .unwrap();
+        let right = build_sampled_heightfield_terrain_page(
+            identity(),
+            right_key,
+            17,
+            &heightfield_samples(right_key),
+            TerrainErrorBounds::EXACT,
+        )
+        .unwrap();
+
+        assert_eq!(
+            left.boundary_fingerprints[BoundarySide::PositiveX as usize],
+            right.boundary_fingerprints[BoundarySide::NegativeX as usize]
+        );
+        assert!(left.errors.geometric_millivoxels >= 4_000);
+        assert!(matches!(
+            left.representation,
+            TerrainPageRepresentation::HeightfieldGrid(_)
+        ));
+        let encoded = encode_terrain_page(&left).unwrap();
+        assert!(encoded.len() <= TERRAIN_PAGE_TARGET_COMPRESSED_BYTES);
+        assert_eq!(decode_terrain_page(&encoded, identity()).unwrap(), left);
+    }
+
+    #[test]
+    fn sampled_heightfield_rejects_surface_outside_its_vertical_owner() {
+        let key = TerrainPageKey {
+            level: 1,
+            coord: [0, 0, 0],
+        };
+        let samples = vec![
+            sampled_surface(key.bounds().unwrap().max.y, Material::Grass, None);
+            (TERRAIN_PAGE_EDGE_SAMPLES as usize + 1).pow(2)
+        ];
+        assert_eq!(
+            build_sampled_heightfield_terrain_page(
+                identity(),
+                key,
+                1,
+                &samples,
+                TerrainErrorBounds::EXACT,
+            ),
+            Err(TerrainPageBuildError::InvalidSurfaceLattice)
+        );
     }
 
     fn terrain(coord: VoxelCoord) -> Material {
@@ -2919,7 +3309,8 @@ mod tests {
                 palette[usize::from(brick.material_indices[rank])].material
             }
             TerrainPageRepresentation::SurfaceCluster(_)
-            | TerrainPageRepresentation::TriangleCluster(_) => Material::Air,
+            | TerrainPageRepresentation::TriangleCluster(_)
+            | TerrainPageRepresentation::HeightfieldGrid(_) => Material::Air,
         }
     }
 

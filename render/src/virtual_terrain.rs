@@ -7,9 +7,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use voxels_world::{
-    TERRAIN_PAGE_MAX_CHILDREN, TerrainHierarchyDirectoryV1, TerrainHierarchyNode, TerrainPageKey,
-    TerrainPageRepresentation, TerrainPageTransferIdentity, TerrainPageV1, WorldSourceIdentityHash,
-    encode_terrain_page, reconstruct_exact_terrain_surface, validate_terrain_replacement,
+    TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_PAGE_MAX_CHILDREN, TerrainHierarchyDirectoryV1,
+    TerrainHierarchyNode, TerrainPageKey, TerrainPageRepresentation, TerrainPageTransferIdentity,
+    TerrainPageV1, WorldSourceIdentityHash, encode_terrain_page, reconstruct_exact_terrain_surface,
+    validate_terrain_replacement,
 };
 
 const FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -288,7 +289,7 @@ impl VirtualTerrainHierarchy {
         &mut self,
         directory: &TerrainHierarchyDirectoryV1,
     ) -> Result<(), VirtualTerrainError> {
-        self.register_directory(directory, true, true)
+        self.register_directory(directory, true)
     }
 
     /// Registers a validated directory without granting any of its roots render ownership.
@@ -299,18 +300,15 @@ impl VirtualTerrainHierarchy {
         &mut self,
         directory: &TerrainHierarchyDirectoryV1,
     ) -> Result<(), VirtualTerrainError> {
-        self.register_directory(directory, false, false)
+        self.register_directory(directory, false)
     }
 
     fn register_directory(
         &mut self,
         directory: &TerrainHierarchyDirectoryV1,
-        require_fixed_regions: bool,
         activate_roots: bool,
     ) -> Result<(), VirtualTerrainError> {
-        if !directory.validates_identity()
-            || (require_fixed_regions && !directory.validates_region_partition())
-        {
+        if !directory.validates_identity() {
             return Err(VirtualTerrainError::InvalidDirectory);
         }
         if self
@@ -805,6 +803,33 @@ fn page_primitive_count(page: &TerrainPageV1) -> usize {
         }
         TerrainPageRepresentation::SurfaceCluster(quads) => quads.len(),
         TerrainPageRepresentation::TriangleCluster(cluster) => cluster.triangles.len(),
+        TerrainPageRepresentation::HeightfieldGrid(grid) => {
+            let ground =
+                TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize * 2;
+            let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+            let water = (0..TERRAIN_PAGE_EDGE_SAMPLES as usize)
+                .flat_map(|z| {
+                    (0..TERRAIN_PAGE_EDGE_SAMPLES as usize).map(move |x| {
+                        let samples = [
+                            x + z * edge,
+                            x + 1 + z * edge,
+                            x + 1 + (z + 1) * edge,
+                            x + (z + 1) * edge,
+                        ];
+                        usize::from(
+                            [samples[0], samples[2], samples[1]]
+                                .into_iter()
+                                .all(|index| grid.water_heights[index] != i32::MIN),
+                        ) + usize::from(
+                            [samples[0], samples[3], samples[2]]
+                                .into_iter()
+                                .all(|index| grid.water_heights[index] != i32::MIN),
+                        )
+                    })
+                })
+                .sum::<usize>();
+            ground + water
+        }
     }
 }
 
@@ -1003,9 +1028,7 @@ mod tests {
         let directory = TerrainHierarchyDirectoryV1::from_pages(&pages).unwrap();
         let mut hierarchy =
             VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
-        hierarchy
-            .register_directory(&directory, false, true)
-            .unwrap();
+        hierarchy.register_directory(&directory, true).unwrap();
         (hierarchy, pages)
     }
 
@@ -1025,9 +1048,7 @@ mod tests {
         let directory = TerrainHierarchyDirectoryV1::from_pages(&pages).unwrap();
         let mut hierarchy =
             VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
-        hierarchy
-            .register_directory(&directory, false, true)
-            .unwrap();
+        hierarchy.register_directory(&directory, true).unwrap();
         for page in &pages {
             hierarchy.install_page(page.clone()).unwrap();
         }
@@ -1061,9 +1082,7 @@ mod tests {
         let directory = TerrainHierarchyDirectoryV1::from_pages(&pages).unwrap();
         let mut hierarchy =
             VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
-        hierarchy
-            .register_directory(&directory, false, false)
-            .unwrap();
+        hierarchy.register_directory(&directory, false).unwrap();
 
         assert!(matches!(
             hierarchy.set_active_roots([parent.key, child.key]),

@@ -12,18 +12,17 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use voxels_world::{
-    Material, TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_PAGE_TARGET_COMPRESSED_BYTES,
-    TERRAIN_REGION_ROOT_LEVEL, TerrainHierarchyDirectoryV1, TerrainPageKey,
-    TerrainPageTransferIdentity, TerrainPageV1, TerrainRegionBuildV1, TerrainSimplificationBudget,
-    VoxelBlockRequest, VoxelCoord, WorldProduct, WorldProductBatch, WorldProductPriority,
-    WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash, build_terrain_region,
+    Material, TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_EDGE_SAMPLES,
+    TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TERRAIN_REGION_ROOT_LEVEL, TerrainErrorBounds,
+    TerrainHierarchyDirectoryV1, TerrainPageKey, TerrainPageTransferIdentity, TerrainPageV1,
+    TerrainRegionBuildV1, TerrainSimplificationBudget, VoxelBlockRequest, VoxelCoord, WorldProduct,
+    WorldProductBatch, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
+    WorldSourceIdentityHash, build_terrain_coverage_root, build_terrain_region,
     decode_terrain_page, encode_terrain_directory, encode_terrain_page,
 };
 
 const REGION_SAMPLE_EDGE: u32 = (TERRAIN_PAGE_EDGE_SAMPLES << TERRAIN_REGION_ROOT_LEVEL) + 2;
 const REGION_SAMPLE_YZ_SEGMENT_EDGE: u32 = 65;
-const REGION_COLUMN_FEATURE_MARGIN_VOXELS: i32 = 18;
-const MAX_REGION_ROOTS_PER_COLUMN: usize = 64;
 const REGION_BUILD_ATTEMPTS: usize = 3;
 const REGION_TARGET_TRIANGLES: u32 = 8_192;
 const REGION_MAX_ERROR_MILLIVOXELS: u32 = 4_000;
@@ -219,7 +218,11 @@ impl VirtualTerrainAuthority {
     }
 
     pub(crate) fn current_revision(&self, root: TerrainPageKey) -> Option<u64> {
-        self.edits.terrain_region_revision(root)
+        match root.level {
+            TERRAIN_REGION_ROOT_LEVEL => self.edits.terrain_region_revision(root),
+            TERRAIN_COVERAGE_ROOT_LEVEL => Some(self.edits.revision()),
+            _ => None,
+        }
     }
 
     pub(crate) async fn ensure_region(
@@ -279,6 +282,22 @@ impl VirtualTerrainAuthority {
         root: TerrainPageKey,
         priority: WorldProductPriority,
     ) -> Result<Arc<PreparedTerrainRegion>, VirtualTerrainError> {
+        if root.level == TERRAIN_COVERAGE_ROOT_LEVEL {
+            for _ in 0..REGION_BUILD_ATTEMPTS {
+                let revision = self.edits.revision();
+                let built = build_coverage_region(
+                    self.source.as_ref(),
+                    root,
+                    revision,
+                    self.source_identity_hash(),
+                    priority,
+                )?;
+                if self.edits.revision() == revision {
+                    return prepare_region(built);
+                }
+            }
+            return Err(VirtualTerrainError::ChangedDuringBuild);
+        }
         for _ in 0..REGION_BUILD_ATTEMPTS {
             let snapshot = self
                 .edits
@@ -308,7 +327,7 @@ impl VirtualTerrainAuthority {
         priority: WorldProductPriority,
     ) -> Result<PreparedTerrainRegionColumn, VirtualTerrainError> {
         let horizontal_root = TerrainPageKey {
-            level: TERRAIN_REGION_ROOT_LEVEL,
+            level: TERRAIN_COVERAGE_ROOT_LEVEL,
             coord: [column[0], 0, column[1]],
         };
         let bounds = horizontal_root
@@ -340,83 +359,24 @@ impl VirtualTerrainAuthority {
                     .ok_or(VirtualTerrainError::InvalidRoot)?,
             ],
         ];
-        let [mut minimum_y, mut maximum_y] = self
+        let [_minimum_y, mut maximum_y] = self
             .source
             .conservative_surface_height_bounds(priority, surface_bounds)
             .map_err(|error| VirtualTerrainError::Source(error.to_string()))?;
 
-        let feature_minimum = [
-            bounds
-                .min
-                .x
-                .checked_sub(REGION_COLUMN_FEATURE_MARGIN_VOXELS)
-                .ok_or(VirtualTerrainError::InvalidRoot)?,
-            bounds
-                .min
-                .z
-                .checked_sub(REGION_COLUMN_FEATURE_MARGIN_VOXELS)
-                .ok_or(VirtualTerrainError::InvalidRoot)?,
-        ];
-        let feature_maximum = [
-            bounds
-                .max
-                .x
-                .checked_add(REGION_COLUMN_FEATURE_MARGIN_VOXELS)
-                .ok_or(VirtualTerrainError::InvalidRoot)?,
-            bounds
-                .max
-                .z
-                .checked_add(REGION_COLUMN_FEATURE_MARGIN_VOXELS)
-                .ok_or(VirtualTerrainError::InvalidRoot)?,
-        ];
-        for feature in self
-            .source
-            .skyline_features_anchored_in([feature_minimum, feature_maximum])
-        {
-            let [minimum, maximum] = feature.bounds();
-            if minimum[0] < bounds.max.x
-                && maximum[0] > bounds.min.x
-                && minimum[2] < bounds.max.z
-                && maximum[2] > bounds.min.z
-            {
-                minimum_y = minimum_y.min(minimum[1]);
-                maximum_y = maximum_y.max(maximum[1].saturating_sub(1));
-            }
-        }
-
-        let (revision, edited_chunks) = self
-            .edits
-            .terrain_region_column_edits(column)
-            .ok_or(VirtualTerrainError::InvalidRoot)?;
+        // Ecology and arbitrary voxel edits refine through sparse child pages. The large root is
+        // deliberately a cheap terrain/water fallback and never invents a macro-volume owner.
+        let revision = self.edits.revision();
         let root_span = i32::try_from(TERRAIN_PAGE_EDGE_SAMPLES)
             .map_err(|_| VirtualTerrainError::InvalidRoot)?
-            .checked_shl(u32::from(TERRAIN_REGION_ROOT_LEVEL))
+            .checked_shl(u32::from(TERRAIN_COVERAGE_ROOT_LEVEL))
             .ok_or(VirtualTerrainError::InvalidRoot)?;
-        let mut root_ys = (minimum_y.div_euclid(root_span)..=maximum_y.div_euclid(root_span))
-            .collect::<BTreeSet<_>>();
-        for chunk in edited_chunks {
-            let leaf = TerrainPageKey {
-                level: 0,
-                coord: [chunk.x, chunk.y, chunk.z],
-            };
-            if let Some(root) = leaf.ancestor_at(TERRAIN_REGION_ROOT_LEVEL)
-                && [root.coord[0], root.coord[2]] == column
-            {
-                root_ys.insert(root.coord[1]);
-            }
-        }
-        if root_ys.is_empty() || root_ys.len() > MAX_REGION_ROOTS_PER_COLUMN {
-            return Err(VirtualTerrainError::Build(
-                "terrain region column root count exceeds its fixed bound".to_owned(),
-            ));
-        }
-        let roots = root_ys
-            .into_iter()
-            .map(|y| TerrainPageKey {
-                level: TERRAIN_REGION_ROOT_LEVEL,
-                coord: [column[0], y, column[1]],
-            })
-            .collect::<Vec<_>>();
+        maximum_y = maximum_y.saturating_add(1);
+        let y = maximum_y.div_euclid(root_span);
+        let roots = vec![TerrainPageKey {
+            level: TERRAIN_COVERAGE_ROOT_LEVEL,
+            coord: [column[0], y, column[1]],
+        }];
         if roots.iter().any(|root| root.bounds().is_none()) {
             return Err(VirtualTerrainError::InvalidRoot);
         }
@@ -496,6 +456,58 @@ fn build_region_from_snapshot(
         ));
     }
     Ok(built)
+}
+
+fn build_coverage_region(
+    source: &dyn WorldSourceEngine,
+    root: TerrainPageKey,
+    revision: u64,
+    source_identity_hash: WorldSourceIdentityHash,
+    priority: WorldProductPriority,
+) -> Result<TerrainRegionBuildV1, VirtualTerrainError> {
+    if root.level != TERRAIN_COVERAGE_ROOT_LEVEL {
+        return Err(VirtualTerrainError::InvalidRoot);
+    }
+    let bounds = root.bounds().ok_or(VirtualTerrainError::InvalidRoot)?;
+    let stride = 1u32
+        .checked_shl(u32::from(root.level))
+        .ok_or(VirtualTerrainError::InvalidRoot)?;
+    let mut samples = source
+        .surface_sample_lattice(
+            priority,
+            [bounds.min.x, bounds.min.z],
+            [TERRAIN_PAGE_EDGE_SAMPLES + 1; 2],
+            stride,
+        )
+        .map_err(|error| VirtualTerrainError::Source(error.to_string()))?;
+    let mut clamp_error_voxels = 0u32;
+    for sample in &mut samples {
+        let original_ground = sample.height.saturating_add(1);
+        let ground = original_ground.clamp(bounds.min.y, bounds.max.y);
+        clamp_error_voxels = clamp_error_voxels.max(original_ground.abs_diff(ground));
+        sample.height = ground.saturating_sub(1);
+        if let Some(water_level) = sample.water_level {
+            let original_water = water_level.saturating_add(1);
+            let water = original_water.clamp(ground, bounds.max.y);
+            clamp_error_voxels = clamp_error_voxels.max(original_water.abs_diff(water));
+            sample.water_level = Some(water.saturating_sub(1));
+        }
+    }
+    let clamp_error_millivoxels = clamp_error_voxels.saturating_mul(1_000);
+    build_terrain_coverage_root(
+        source_identity_hash,
+        root,
+        revision,
+        &samples,
+        TerrainErrorBounds {
+            geometric_millivoxels: clamp_error_millivoxels,
+            silhouette_millivoxels: clamp_error_millivoxels,
+            material_boundary_millivoxels: 0,
+            normal_milliradians: 0,
+            unresolved_topology: false,
+        },
+    )
+    .map_err(|error| VirtualTerrainError::Build(error.to_string()))
 }
 
 fn prepare_region(
@@ -718,6 +730,34 @@ mod tests {
                     bounds.max.z
                 ))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn coverage_root_is_a_small_independent_heightfield_page() {
+        let source = ProceduralWorldSource::new(17);
+        let root = TerrainPageKey {
+            level: TERRAIN_COVERAGE_ROOT_LEVEL,
+            coord: [-1, 0, 1],
+        };
+        let built = build_coverage_region(
+            &source,
+            root,
+            9,
+            source.source_identity_hash(),
+            WorldProductPriority::VirtualTerrain,
+        )
+        .expect("coverage");
+        assert_eq!(built.pages.len(), 1);
+        assert_eq!(built.directory.nodes.len(), 1);
+        assert_eq!(built.directory.roots().next().unwrap().key, root);
+        assert!(matches!(
+            built.pages[0].representation,
+            voxels_world::TerrainPageRepresentation::HeightfieldGrid(_)
+        ));
+        assert!(
+            encode_terrain_page(&built.pages[0]).unwrap().len()
+                <= TERRAIN_PAGE_TARGET_COMPRESSED_BYTES
         );
     }
 }

@@ -1399,6 +1399,21 @@ impl WorldSourceEngine for ProceduralWorldSource {
         })
     }
 
+    fn conservative_surface_height_bounds(
+        &self,
+        _priority: WorldProductPriority,
+        bounds: [[i32; 2]; 2],
+    ) -> Result<[i32; 2], WorldSourceError> {
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = bounds;
+        if minimum_x >= maximum_x || minimum_z >= maximum_z {
+            return Err(WorldSourceError::InvalidBlockCoordinate);
+        }
+        // Every normalized noise channel is in [0, 1]. These deliberately loose analytical
+        // limits also enclose authored route displacement and sea level, avoiding a dense scan of
+        // multi-kilometre coverage roots.
+        Ok([-256, 512])
+    }
+
     fn surface_sample_lattice(
         &self,
         _priority: WorldProductPriority,
