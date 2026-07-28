@@ -24,6 +24,7 @@ const NODE_REPLACEMENT_COHERENT: u32 = 1 << 3;
 const NODE_PRIOR_REFINED: u32 = 1 << 4;
 const NODE_SURFACE: u32 = 1 << 5;
 const INVALID_NODE: u32 = u32::MAX;
+const GPU_TRAVERSAL_OVERFLOW_FEEDBACK: u32 = 1 << 1;
 const GPU_TRAVERSAL_READBACK_SLOTS: usize = 3;
 const GPU_TRAVERSAL_WORKGROUP_SIZE: u32 = 64;
 pub(crate) const VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES: u64 = 64 * 1_024 * 1_024;
@@ -172,8 +173,14 @@ pub(crate) struct GpuVirtualTerrainFeedback {
 }
 
 impl GpuVirtualTerrainFeedback {
-    pub const fn overflowed(&self) -> bool {
-        self.overflow_flags != 0 || self.compaction_overflow_flags != 0
+    /// Returns whether the GPU could not prove the selected geometry cut.
+    ///
+    /// Missing-page feedback is deliberately lossy and independently bounded. Saturating that
+    /// queue delays refinement but does not invalidate the selected resident owners or their
+    /// compacted geometry.
+    pub const fn ownership_overflowed(&self) -> bool {
+        self.overflow_flags & !GPU_TRAVERSAL_OVERFLOW_FEEDBACK != 0
+            || self.compaction_overflow_flags != 0
     }
 }
 

@@ -11992,16 +11992,14 @@ fn gpu_feedback_matches_cut(
 ) -> bool {
     let Some(cut) = cut else {
         return feedback.selected_pages.is_empty()
-            && feedback.requested_pages.is_empty()
             && feedback.ownerless_roots == 0
-            && !feedback.overflowed();
+            && !feedback.ownership_overflowed();
     };
     if feedback.submission_id == 0
-        || feedback.overflowed()
+        || feedback.ownership_overflowed()
         || feedback.oracle_fingerprint != cut.fingerprint
         || feedback.ownerless_roots != cut.ownerless_roots.len() as u32
         || feedback.compacted_pages != cut.selected_pages.len() as u32
-        || cut.feedback_overflow
         || cut.selection_overflow
         || cut.traversal_overflow
     {
@@ -12010,17 +12008,7 @@ fn gpu_feedback_matches_cut(
     let mut selected = feedback.selected_pages.clone();
     selected.sort_unstable();
     selected.dedup();
-    let mut requested = feedback.requested_pages.clone();
-    requested.sort_unstable();
-    requested.dedup();
-    let mut expected_requests = cut
-        .requested_pages
-        .iter()
-        .map(|identity| identity.key)
-        .collect::<Vec<_>>();
-    expected_requests.sort_unstable();
-    expected_requests.dedup();
-    selected == cut.selected_pages && requested == expected_requests
+    selected == cut.selected_pages
 }
 
 /// Finite right-handed DirectX/WebGPU projection with near -> 1 and far -> 0.
@@ -15696,6 +15684,18 @@ mod tests {
             ..GpuVirtualTerrainFeedback::default()
         };
         assert!(gpu_feedback_matches_cut(&certified, Some(&cut)));
+
+        let mut saturated_demand = certified.clone();
+        saturated_demand.overflow_flags = 1 << 1;
+        saturated_demand.requested_pages = vec![TerrainPageKey {
+            level: 1,
+            coord: [7, 0, -9],
+        }];
+        assert!(gpu_feedback_matches_cut(&saturated_demand, Some(&cut)));
+
+        let mut ownership_overflow = certified.clone();
+        ownership_overflow.overflow_flags = 1;
+        assert!(!gpu_feedback_matches_cut(&ownership_overflow, Some(&cut)));
 
         let mut stale = certified.clone();
         stale.oracle_fingerprint ^= 1;
