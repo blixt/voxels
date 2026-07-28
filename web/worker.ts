@@ -23,8 +23,9 @@ let screenshotDeadline = 0;
 let screenshotEncoding = false;
 let disposal: Promise<void> | null = null;
 const pending: Exclude<ToWorker, InitMessage>[] = [];
-const STARTUP_PROGRESS_VERSION = 1;
-const STARTUP_PROGRESS_WORDS = 44;
+const STARTUP_PROGRESS_VERSION = 2;
+const STARTUP_PROGRESS_WORDS = 54;
+const STARTUP_SCHEMA_MISMATCH_TIMEOUT_MS = 5_000;
 
 function bitmaskLabels(flags: number, labels: ReadonlyArray<readonly [number, string]>): string {
   if (flags === 0) return "none";
@@ -70,6 +71,10 @@ function uploadFailureLabel(kind: number): string {
   );
 }
 
+function pageFailureLabel(kind: number): string {
+  return ["none", "unavailable", "stale-revision", "generation"][kind] ?? `unknown-${kind}`;
+}
+
 function stopReadinessMonitor(): void {
   if (readinessTimer !== undefined) clearInterval(readinessTimer);
   readinessTimer = undefined;
@@ -84,6 +89,7 @@ function monitorReadiness(engine: EngineHandle): void {
   let previous = "";
   let lastDetailedPost = Number.NEGATIVE_INFINITY;
   let schemaMismatch = "";
+  let schemaMismatchSince: number | undefined;
   const update = (): void => {
     if (disposed) return;
     const progress = Array.from(engine.startup_progress());
@@ -95,6 +101,7 @@ function monitorReadiness(engine: EngineHandle): void {
       const mismatch = `Engine update in progress (startup schema v${progress[0] ?? "missing"}/${progress.length}, expected v${STARTUP_PROGRESS_VERSION}/${STARTUP_PROGRESS_WORDS}).`;
       if (mismatch !== schemaMismatch) {
         schemaMismatch = mismatch;
+        schemaMismatchSince ??= performance.now();
         scope.postMessage({
           kind: "loading",
           stage: "vicinity",
@@ -103,9 +110,20 @@ function monitorReadiness(engine: EngineHandle): void {
           detail: mismatch,
         });
       }
+      if (
+        schemaMismatchSince !== undefined &&
+        performance.now() - schemaMismatchSince >= STARTUP_SCHEMA_MISMATCH_TIMEOUT_MS
+      ) {
+        stopReadinessMonitor();
+        scope.postMessage({
+          kind: "error",
+          message: `${mismatch} Reload the page after the engine rebuild completes.`,
+        });
+      }
       return;
     }
     schemaMismatch = "";
+    schemaMismatchSince = undefined;
     const [
       ,
       ,
@@ -129,6 +147,16 @@ function monitorReadiness(engine: EngineHandle): void {
       streamInFlight = 0,
       streamFailed = 0,
       directoryInFlight = 0,
+      columnAccepted = 0,
+      columnSubmitDeferred = 0,
+      columnPreempted = 0,
+      columnTimedOut = 0,
+      columnOtherFailed = 0,
+      directoryAccepted = 0,
+      directorySubmitDeferred = 0,
+      directoryPreempted = 0,
+      directoryTimedOut = 0,
+      directoryOtherFailed = 0,
       pageSubmitDeferred = 0,
       pagePreempted = 0,
       pageTimedOut = 0,
@@ -173,6 +201,16 @@ function monitorReadiness(engine: EngineHandle): void {
       streamInFlight,
       streamFailed,
       directoryInFlight,
+      columnAccepted,
+      columnSubmitDeferred,
+      columnPreempted,
+      columnTimedOut,
+      columnOtherFailed,
+      directoryAccepted,
+      directorySubmitDeferred,
+      directoryPreempted,
+      directoryTimedOut,
+      directoryOtherFailed,
       pageSubmitDeferred,
       pagePreempted,
       pageTimedOut,
@@ -203,7 +241,7 @@ function monitorReadiness(engine: EngineHandle): void {
       previous = key;
       if (detailed) lastDetailedPost = now;
       const detail = detailed
-        ? `Terrain cut: CPU ${cpuSelected} pages/${cpuRequested} requested/${cpuRefinementRoots} refinement roots/${cpuOwnerless} ownerless/${cpuDiscontinuities} skipped-level edges; GPU ${gpuSelected} pages/${gpuCompacted} compacted/${gpuRequested} requested/${gpuOwnerless} ownerless/overflow ${gpuOverflow}; match ${gpuMatchesCpu === 1 ? "yes" : `no (${gpuMatchFailureLabels(gpuMatchFailures)})`}; stream ${streamPending} pending/${streamInFlight} in flight/${streamFailed} failed/${streamUsefulKiB} KiB useful, cache ${cachePages}, resident ${residentPages}, GPU ${gpuAllocatedMiB}/${gpuCapacityMiB} MiB, ${directoryInFlight} directories in flight; flow ${pageSubmitDeferred} deferred/${pagePreempted} preempted/${pageTimedOut} timed out/${pageOtherFailed} transport errors; products ${pageUnavailable} unavailable/${pageStaleRevision} stale/${pageGenerationFailed} generation/${pageUploadFailed} upload (last ${uploadFailureLabel(lastPageUploadFailureKind)})${lastPageFailureKind === 0 ? "" : `, last product ${lastPageFailureKind}@L${lastPageFailureLevel}(${lastPageFailureX | 0},${lastPageFailureY | 0},${lastPageFailureZ | 0})`}; published ${publishedPages} pages (${publishedExactPages} exact, ${publishedDiscontinuities} skipped-level edges), terrain ${terrainReady === 1 ? "ready" : "pending"}.`
+        ? `Terrain cut: CPU ${cpuSelected} pages/${cpuRequested} requested/${cpuRefinementRoots} refinement roots/${cpuOwnerless} ownerless/${cpuDiscontinuities} skipped-level edges; GPU ${gpuSelected} pages/${gpuCompacted} compacted/${gpuRequested} requested/${gpuOwnerless} ownerless/overflow ${gpuOverflow}; match ${gpuMatchesCpu === 1 ? "yes" : `no (${gpuMatchFailureLabels(gpuMatchFailures)})`}; discovery columns ${columnAccepted} accepted/${columnSubmitDeferred} deferred/${columnPreempted} preempted/${columnTimedOut} timed out/${columnOtherFailed} errors, directories ${directoryAccepted} accepted/${directorySubmitDeferred} deferred/${directoryPreempted} preempted/${directoryTimedOut} timed out/${directoryOtherFailed} errors/${directoryInFlight} in flight; stream ${streamPending} pending/${streamInFlight} in flight/${streamFailed} failed/${streamUsefulKiB} KiB useful, cache ${cachePages}, resident ${residentPages}, GPU ${gpuAllocatedMiB}/${gpuCapacityMiB} MiB; page flow ${pageSubmitDeferred} deferred/${pagePreempted} preempted/${pageTimedOut} timed out/${pageOtherFailed} transport errors; products ${pageUnavailable} unavailable/${pageStaleRevision} stale/${pageGenerationFailed} generation/${pageUploadFailed} upload (last ${uploadFailureLabel(lastPageUploadFailureKind)})${lastPageFailureKind === 0 ? "" : `, last product ${pageFailureLabel(lastPageFailureKind)}@L${lastPageFailureLevel}(${lastPageFailureX | 0},${lastPageFailureY | 0},${lastPageFailureZ | 0})`}; published ${publishedPages} pages (${publishedExactPages} exact, ${publishedDiscontinuities} skipped-level edges), terrain ${terrainReady === 1 ? "ready" : "pending"}.`
         : undefined;
       scope.postMessage({ kind: "loading", stage: "vicinity", resident, required, detail });
     }

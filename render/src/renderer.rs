@@ -39,9 +39,10 @@ use voxels_world::protocol::{EditShape, EditVolume};
 use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, FaceAxis, Material,
     MeshedChunk, Quad, RenderLayer, SurfaceRegion, TERRAIN_COVERAGE_ROOT_LEVEL,
-    TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_REGION_ROOT_LEVEL, TerrainHierarchyDirectoryV1,
-    TerrainPageKey, TerrainPageRepresentation, TerrainPageRepresentationKind, TerrainPageV1,
-    VOXEL_SIZE_METRES, WorldManifest, reconstruct_exact_terrain_surface,
+    TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_PAGE_MAX_SOURCE_GEOMETRY_BYTES, TERRAIN_REGION_ROOT_LEVEL,
+    TerrainHierarchyDirectoryV1, TerrainPageKey, TerrainPageRepresentation,
+    TerrainPageRepresentationKind, TerrainPageTransferIdentity, TerrainPageV1, VOXEL_SIZE_METRES,
+    WorldManifest, reconstruct_exact_terrain_surface,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -77,8 +78,6 @@ const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 const VIRTUAL_TERRAIN_GPU_POOL_BYTES: u64 = 128 * 1024 * 1024;
 const VIRTUAL_TERRAIN_GPU_POOL_PAGES: usize = 1;
 const VIRTUAL_TERRAIN_GPU_ARENA_PAGE_BYTES: u32 = VIRTUAL_TERRAIN_GPU_POOL_BYTES as u32;
-const VIRTUAL_TERRAIN_GPU_WORKING_SET_BYTES: u64 = 112 * 1024 * 1024;
-const VIRTUAL_TERRAIN_ENCODED_EXPANSION_RESERVE: u64 = 64;
 const GPU_FACE_SHIFT: u32 = 16;
 const GPU_FACE_MASK: u32 = 0b111 << GPU_FACE_SHIFT;
 const GPU_SOURCE_SHIFT: u32 = 5;
@@ -295,7 +294,7 @@ impl std::fmt::Display for VirtualTerrainRendererError {
                     formatter,
                     "selected virtual terrain cut and its next complete replacements require {:.1} MiB of the {:.1} MiB GPU source working set",
                     *required_bytes as f64 / (1024.0 * 1024.0),
-                    VIRTUAL_TERRAIN_GPU_WORKING_SET_BYTES as f64 / (1024.0 * 1024.0),
+                    VIRTUAL_TERRAIN_GPU_POOL_BYTES as f64 / (1024.0 * 1024.0),
                 )
             }
             Self::NoRenderableCut => {
@@ -5688,8 +5687,10 @@ impl Renderer {
             .virtual_terrain_gpu
             .synchronize_refinement_state(&self.queue, &self.virtual_terrain)
             .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
+        let known_fitting_scale = self.virtual_terrain_error_scale.max(1.0);
+        let mut recovery_probe = false;
         if !refinement_changed && self.virtual_terrain_requested_view == Some(view) {
-            let sustained_headroom = self.virtual_terrain_error_scale > 1.0
+            let sustained_headroom = known_fitting_scale > 1.0
                 && self
                     .virtual_terrain_oracle_cut
                     .as_ref()
@@ -5706,6 +5707,13 @@ impl Renderer {
                             .all(|(used, capacity)| {
                                 used.saturating_mul(4) <= capacity.saturating_mul(3)
                             })
+                    })
+                && self
+                    .virtual_terrain_oracle_cut
+                    .as_ref()
+                    .and_then(|cut| self.virtual_terrain_source_working_set_bytes(cut).ok())
+                    .is_some_and(|used| {
+                        used.saturating_mul(4) <= VIRTUAL_TERRAIN_GPU_POOL_BYTES.saturating_mul(3)
                     });
             if sustained_headroom {
                 self.virtual_terrain_headroom_frames =
@@ -5714,10 +5722,9 @@ impl Renderer {
                 self.virtual_terrain_headroom_frames = 0;
             }
             if self.virtual_terrain_headroom_frames >= 120 {
-                // Recover quality only after a stationary headroom dwell. The lower threshold is
-                // still validated by the capacity loop below, so marginal views do not oscillate.
-                self.virtual_terrain_error_scale =
-                    (self.virtual_terrain_error_scale / 1.1).max(1.0);
+                // Probe one finer setting only after both source and compact pools have sustained
+                // headroom. A failed probe below restores this known-fitting scale exactly.
+                recovery_probe = true;
                 self.virtual_terrain_headroom_frames = 0;
                 self.virtual_terrain_requested_view = None;
             } else if let Some(cut) = self.virtual_terrain_oracle_cut.as_ref() {
@@ -5728,7 +5735,11 @@ impl Renderer {
         // has already streamed. Increase the screen-error threshold only as far as needed to keep
         // the selected cut publishable. Both the CPU oracle and GPU receive the same adjusted
         // view, so this remains one deterministic ownership decision rather than a fallback draw.
-        let mut error_scale = self.virtual_terrain_error_scale.max(1.0);
+        let mut error_scale = if recovery_probe {
+            (known_fitting_scale / 1.1).max(1.0)
+        } else {
+            known_fitting_scale
+        };
         let (oracle_view, cut) = loop {
             let mut candidate_view = view;
             if !view.force_exact_leaves {
@@ -5741,6 +5752,13 @@ impl Renderer {
                 .and_then(|()| self.virtual_terrain_cut_fits_source_working_set(&candidate));
             match capacity {
                 Ok(()) => break (candidate_view, candidate),
+                Err(
+                    VirtualTerrainRendererError::SelectedCutCompactionCapacity { .. }
+                    | VirtualTerrainRendererError::SelectedCutSourceCapacity { .. },
+                ) if recovery_probe && error_scale < known_fitting_scale => {
+                    error_scale = known_fitting_scale;
+                    recovery_probe = false;
+                }
                 Err(
                     VirtualTerrainRendererError::SelectedCutCompactionCapacity { .. }
                     | VirtualTerrainRendererError::SelectedCutSourceCapacity { .. },
@@ -5787,6 +5805,12 @@ impl Renderer {
         cut: &VirtualTerrainCut,
     ) -> Result<bool, VirtualTerrainRendererError> {
         let selected = cut.selected_pages.iter().copied().collect::<BTreeSet<_>>();
+        let published = self
+            .virtual_terrain_cut
+            .as_ref()
+            .filter(|_| self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible)
+            .map(|cut| cut.selected_pages.iter().copied().collect::<BTreeSet<_>>())
+            .unwrap_or_default();
         let rebuilds = cut
             .selected_pages
             .iter()
@@ -5805,8 +5829,52 @@ impl Renderer {
             .collect::<Vec<_>>();
         let mut changed = false;
         for (page, exact_sides, finer_sides) in rebuilds {
-            changed |=
-                self.upload_virtual_terrain_page_with_seams(page, exact_sides, finer_sides, false)?;
+            let page_key = page.key;
+            let can_replace_in_place = !published.contains(&page.key)
+                && self
+                    .virtual_terrain_pages
+                    .get(&page.key)
+                    .is_some_and(|resident| {
+                        resident.heightfield_exact_neighbor_sides != exact_sides
+                            || resident.heightfield_finer_neighbor_sides != finer_sides
+                    });
+            if can_replace_in_place {
+                // Candidate-only geometry has no visible owner. Release it before rebuilding so
+                // startup/travel does not need a second full page allocation merely to change its
+                // conforming boundary. Published owners continue through the transactional path.
+                if let Some(old) = self.virtual_terrain_pages.remove(&page.key) {
+                    discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, old.mesh);
+                }
+                let _ = self.virtual_terrain.remove_page(page.key);
+                match self.upload_virtual_terrain_page_with_seams(
+                    page,
+                    exact_sides,
+                    finer_sides,
+                    true,
+                ) {
+                    Ok(page_changed) => changed |= page_changed,
+                    Err(error) => {
+                        let _ = self.virtual_terrain_gpu.update_page_geometry(
+                            &self.queue,
+                            page_key,
+                            VirtualTerrainGpuGeometry::default(),
+                        );
+                        let _ = self.virtual_terrain_gpu.update_page_residency(
+                            &self.queue,
+                            &self.virtual_terrain,
+                            page_key,
+                        );
+                        return Err(error);
+                    }
+                }
+            } else {
+                changed |= self.upload_virtual_terrain_page_with_seams(
+                    page,
+                    exact_sides,
+                    finer_sides,
+                    false,
+                )?;
+            }
         }
         if !changed {
             return Ok(false);
@@ -6303,16 +6371,30 @@ impl Renderer {
         Ok(())
     }
 
-    fn virtual_terrain_cut_fits_source_working_set(
+    fn virtual_terrain_source_working_set_bytes(
         &self,
         cut: &VirtualTerrainCut,
-    ) -> Result<(), VirtualTerrainRendererError> {
+    ) -> Result<u64, VirtualTerrainRendererError> {
+        let keep = virtual_terrain_transition_keep_keys(
+            &cut.selected_pages,
+            &cut.requested_pages,
+            self.virtual_terrain_cut
+                .as_ref()
+                .map_or(&[], |published| published.selected_pages.as_slice()),
+            |key| self.virtual_terrain_pages.contains_key(&key),
+        );
+
         let mut required_bytes = 0u64;
-        for key in &cut.selected_pages {
-            let page = self
-                .virtual_terrain_pages
-                .get(key)
-                .ok_or(VirtualTerrainRendererError::SelectedPageMissingGpu(*key))?;
+        for key in keep {
+            if let Some(page) = self.virtual_terrain_pages.get(&key) {
+                required_bytes = required_bytes.saturating_add(
+                    page.mesh
+                        .allocation()
+                        .map_or(0, |allocation| u64::from(allocation.size)),
+                );
+            }
+        }
+        for page in self.virtual_terrain_retired_published_pages.values() {
             required_bytes = required_bytes.saturating_add(
                 page.mesh
                     .allocation()
@@ -6323,12 +6405,36 @@ impl Renderer {
             let node = self.virtual_terrain.directory_node(identity.key).ok_or(
                 VirtualTerrainRendererError::SelectedPageMissingGpu(identity.key),
             )?;
-            let reserve = u64::from(node.encoded_bytes)
-                .saturating_mul(VIRTUAL_TERRAIN_ENCODED_EXPANSION_RESERVE)
-                .min(u64::from(ARENA_PAGE_BYTES));
-            required_bytes = required_bytes.saturating_add(reserve);
+            debug_assert!(node.source_geometry_bytes <= TERRAIN_PAGE_MAX_SOURCE_GEOMETRY_BYTES);
+            required_bytes = required_bytes.saturating_add(u64::from(node.source_geometry_bytes));
         }
-        if required_bytes > VIRTUAL_TERRAIN_GPU_WORKING_SET_BYTES {
+
+        // Publishing a cut may rebuild one selected heightfield with conforming edge samples.
+        // Candidate-only meshes are released before rebuilding. A currently published owner must
+        // stay live until its conforming replacement is fully installed.
+        let published = self
+            .virtual_terrain_cut
+            .as_ref()
+            .map(|cut| cut.selected_pages.iter().copied().collect::<BTreeSet<_>>())
+            .unwrap_or_default();
+        let seam_rebuild_reserve = cut
+            .selected_pages
+            .iter()
+            .filter(|key| published.contains(key))
+            .filter_map(|key| self.virtual_terrain.directory_node(*key))
+            .filter(|node| node.representation == TerrainPageRepresentationKind::HeightfieldGrid)
+            .map(|node| u64::from(node.source_geometry_bytes))
+            .max()
+            .unwrap_or(0);
+        Ok(required_bytes.saturating_add(seam_rebuild_reserve))
+    }
+
+    fn virtual_terrain_cut_fits_source_working_set(
+        &self,
+        cut: &VirtualTerrainCut,
+    ) -> Result<(), VirtualTerrainRendererError> {
+        let required_bytes = self.virtual_terrain_source_working_set_bytes(cut)?;
+        if required_bytes > VIRTUAL_TERRAIN_GPU_POOL_BYTES {
             return Err(VirtualTerrainRendererError::SelectedCutSourceCapacity { required_bytes });
         }
         Ok(())
@@ -10544,6 +10650,41 @@ fn json_optional_u64(value: Option<u64>) -> String {
     value.map_or_else(|| "null".to_owned(), |value| format!(r#""{value}""#))
 }
 
+fn virtual_terrain_transition_keep_keys(
+    candidate_selected: &[TerrainPageKey],
+    requested: &[TerrainPageTransferIdentity],
+    published_selected: &[TerrainPageKey],
+    mut is_resident: impl FnMut(TerrainPageKey) -> bool,
+) -> BTreeSet<TerrainPageKey> {
+    let mut keep = candidate_selected
+        .iter()
+        .chain(published_selected)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for identity in requested {
+        keep.insert(identity.key);
+        if let Some(siblings) = identity
+            .key
+            .parent()
+            .and_then(TerrainPageKey::refinement_children)
+        {
+            keep.extend(siblings);
+        }
+    }
+    let ancestry_sources = keep.iter().copied().collect::<Vec<_>>();
+    for key in ancestry_sources {
+        let mut ancestor = key.parent();
+        while let Some(parent) = ancestor {
+            if is_resident(parent) {
+                keep.insert(parent);
+                break;
+            }
+            ancestor = parent.parent();
+        }
+    }
+    keep
+}
+
 fn screenshot_virtual_terrain_manifest_json(
     mode: VirtualTerrainRenderMode,
     resident: &BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
@@ -10718,6 +10859,42 @@ const fn virtual_representation_label(kind: TerrainPageRepresentationKind) -> &'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transition_working_set_keeps_outgoing_owner_complete_siblings_and_nearest_ancestor() {
+        let outgoing = TerrainPageKey::surface(1, -2, 0);
+        let incoming_parent = TerrainPageKey::surface(1, 3, -1);
+        let incoming_children = incoming_parent.refinement_children().unwrap();
+        let requested = incoming_children
+            .iter()
+            .enumerate()
+            .map(|(index, key)| TerrainPageTransferIdentity {
+                key: *key,
+                revision: 9,
+                content_fingerprint: [index as u8 + 1; 32],
+            })
+            .collect::<Vec<_>>();
+        let grandparent = incoming_parent.parent().unwrap();
+        let resident = [outgoing, incoming_parent, grandparent]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let keep = virtual_terrain_transition_keep_keys(
+            &[incoming_children[0]],
+            &requested,
+            &[outgoing],
+            |key| resident.contains(&key),
+        );
+        assert!(keep.contains(&outgoing), "outgoing published ownership");
+        assert!(
+            incoming_children.iter().all(|key| keep.contains(key)),
+            "complete incoming replacement"
+        );
+        assert!(keep.contains(&incoming_parent), "nearest real fallback");
+        assert!(
+            !keep.contains(&grandparent),
+            "only the nearest resident ancestor is retained"
+        );
+    }
 
     #[test]
     fn screenshot_json_escaping_preserves_adapter_text_as_data() {

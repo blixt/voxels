@@ -4,17 +4,19 @@ import { type EngineClient, snapshotValue } from "../lib/engine.ts";
 import { analyzeDiagnosticSky } from "../lib/image.ts";
 import { summarizeSurfaceCutAdjacency, takePlayerScreenshot } from "../lib/player-screenshot.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
-import { startWorldStack } from "../lib/world.ts";
+import { startDevelopmentWorldStack } from "../lib/world.ts";
 
 const VIEWPORT = { width: 960, height: 540 };
-const STABLE_CUT_DURATION_MS = 4_000;
+const COLD_START_BUDGET_MS = 60_000;
+const STABLE_CUT_DURATION_MS = 10_000;
 const STABILITY_POLL_MS = 200;
-const STABILITY_TIMEOUT_MS = 45_000;
+const STABILITY_TIMEOUT_MS = 60_000;
 
 interface AuditedCapture {
   readonly exactPages: number;
   readonly cutFingerprint: string;
   readonly largestEnclosedSkyComponent: number;
+  readonly settleMs: number;
 }
 
 async function auditCapture(
@@ -23,13 +25,39 @@ async function auditCapture(
   engine: EngineClient,
   label: string,
   frame: readonly number[],
+  settleMs: number,
 ): Promise<AuditedCapture> {
   const png = await page.screenshot({ type: "png" });
   await context.artifacts.write(label, `${label}.png`, png, "image/png");
   const sky = await analyzeDiagnosticSky(page, png);
+  await engine.setGeometrySourceDebug(true);
+  let diagnostic;
+  try {
+    diagnostic = await takePlayerScreenshot(page);
+    await context.artifacts.write(
+      `${label} source and LOD ownership`,
+      `${label}-source-ownership.png`,
+      diagnostic.png,
+      "image/png",
+    );
+  } finally {
+    await engine.setGeometrySourceDebug(false);
+  }
+  const nearby = diagnostic.ownership?.summarizeNearby(diagnostic.metadata.camera.eyeMetres, 12.8);
+  if (nearby === undefined || nearby.nearbyOwnedPixels === 0) {
+    throw new Error(`${label} produced no machine-readable nearby terrain ownership`);
+  }
+  if (nearby.nearbyCoarsePixels > 0) {
+    throw new Error(
+      `${label} exposed ${nearby.nearbyCoarsePixels}/${nearby.nearbyOwnedPixels} coarse terrain pixels inside the exact 12.8m player vicinity; ${JSON.stringify(nearby)}`,
+    );
+  }
   const exactPages = snapshotValue(frame, "virtualTerrainPublishedExactPages");
   if (
     snapshotValue(frame, "terrainReady") !== 1 ||
+    snapshotValue(frame, "virtualTerrainGpuMatchesCpuCut") !== 1 ||
+    snapshotValue(frame, "virtualTerrainGpuOverflowFlags") !== 0 ||
+    snapshotValue(frame, "virtualTerrainRequestedPages") !== 0 ||
     exactPages === 0 ||
     snapshotValue(frame, "virtualTerrainPublishedMinimumLevel") !== 0
   ) {
@@ -41,19 +69,6 @@ async function auditCapture(
     );
   }
   if (sky.largestEnclosedComponentPixels > 0) {
-    await engine.setGeometrySourceDebug(true);
-    let diagnostic;
-    try {
-      diagnostic = await takePlayerScreenshot(page);
-      await context.artifacts.write(
-        `${label} source and LOD ownership`,
-        `${label}-source-ownership.png`,
-        diagnostic.png,
-        "image/png",
-      );
-    } finally {
-      await engine.setGeometrySourceDebug(false);
-    }
     const cut = diagnostic.metadata.presentation.selectedCut.cut;
     const firstHole = sky.enclosedSampleCoordinates[0];
     const machineEvidence = {
@@ -65,10 +80,7 @@ async function auditCapture(
         diagnostic.metadata.camera.eyeMetres,
         12.8,
       ),
-      nearbyPixels: diagnostic.ownership?.summarizeNearby(
-        diagnostic.metadata.camera.eyeMetres,
-        12.8,
-      ),
+      nearbyPixels: nearby,
       holeNeighborhood:
         firstHole === undefined
           ? []
@@ -82,6 +94,7 @@ async function auditCapture(
     exactPages,
     cutFingerprint: `${snapshotValue(frame, "virtualTerrainCutFingerprintHigh24")}:${snapshotValue(frame, "virtualTerrainCutFingerprintLow24")}`,
     largestEnclosedSkyComponent: sky.largestEnclosedComponentPixels,
+    settleMs,
   };
 }
 
@@ -106,23 +119,69 @@ async function shortPlayerStep(
 }
 
 async function walkBeyondProtectedPedestal(
+  context: ScenarioContext,
   page: Page,
-  capturePosition: () => Promise<readonly number[]>,
+  engine: EngineClient,
+  assertHealthy: () => void,
   targetMetres: number,
 ): Promise<number> {
-  const before = await capturePosition();
+  const before = await engine.snapshot();
   await page.keyboard.down("ShiftLeft");
   await page.keyboard.down("KeyW");
   let distance = 0;
+  let nextPixelAudit = 0;
   try {
     const deadline = performance.now() + 20_000;
     while (performance.now() < deadline) {
       await page.waitForTimeout(50);
-      const current = await capturePosition();
+      const current = await engine.snapshot();
+      assertHealthy();
       distance = Math.hypot(
         snapshotValue(current, "cameraX") - snapshotValue(before, "cameraX"),
         snapshotValue(current, "cameraZ") - snapshotValue(before, "cameraZ"),
       );
+      const presentationInvalid =
+        snapshotValue(current, "terrainReady") !== 1 ||
+        snapshotValue(current, "virtualTerrainPublishedExactPages") === 0 ||
+        snapshotValue(current, "virtualTerrainPublishedMinimumLevel") !== 0 ||
+        snapshotValue(current, "virtualTerrainPublishedExactLodDiscontinuities") !== 0 ||
+        snapshotValue(current, "virtualTerrainGpuOverflowFlags") !== 0;
+      if (presentationInvalid) {
+        const png = await page.screenshot({ type: "png" });
+        await context.artifacts.write(
+          "invalid terrain presentation during sprint",
+          "during-sprint-invalid-presentation.png",
+          png,
+          "image/png",
+        );
+        throw new Error(
+          `terrain lost its exact playable presentation after ${distance.toFixed(2)}m of sprinting`,
+        );
+      }
+      if (performance.now() >= nextPixelAudit) {
+        const png = await page.screenshot({ type: "png" });
+        const [magenta, black] = await Promise.all([
+          analyzeDiagnosticSky(page, png),
+          analyzeDiagnosticSky(page, png, { x0: 0.05, x1: 0.95, y0: 0.08, y1: 0.58 }, "black"),
+        ]);
+        if (
+          magenta.largestEnclosedComponentPixels > 0 ||
+          black.largestEnclosedComponentPixels >= 16
+        ) {
+          await context.artifacts.write(
+            "transient terrain hole during sprint",
+            "during-sprint-transient-hole.png",
+            png,
+            "image/png",
+          );
+          throw new Error(
+            `terrain exposed a transient hole after ${distance.toFixed(2)}m of sprinting: ` +
+              `${magenta.largestEnclosedComponentPixels} enclosed magenta pixels, ` +
+              `${black.largestEnclosedComponentPixels} enclosed black pixels`,
+          );
+        }
+        nextPixelAudit = performance.now() + 250;
+      }
       if (distance >= targetMetres) break;
     }
   } finally {
@@ -145,23 +204,21 @@ async function stablePhaseCapture(
   assertHealthy: () => void,
 ): Promise<AuditedCapture> {
   const started = performance.now();
-  let stableSince = started;
+  let stableSince: number | undefined;
   let lastLog = 0;
   let previousFingerprint = "";
+  let previousFlow = "";
   while (performance.now() - started < STABILITY_TIMEOUT_MS) {
     const current = await engine.snapshot();
     assertHealthy();
     const exactPages = snapshotValue(current, "virtualTerrainPublishedExactPages");
     const fingerprint = `${snapshotValue(current, "virtualTerrainCutFingerprintHigh24")}:${snapshotValue(current, "virtualTerrainCutFingerprintLow24")}`;
-    if (fingerprint !== previousFingerprint) {
-      previousFingerprint = fingerprint;
-      stableSince = performance.now();
-    }
     const state = {
       frameSequence: snapshotValue(current, "frameSequence"),
       terrainReady: snapshotValue(current, "terrainReady"),
       renderMode: snapshotValue(current, "virtualTerrainMode"),
       registeredRegions: snapshotValue(current, "virtualTerrainRegisteredRegions"),
+      directoryInFlight: snapshotValue(current, "virtualTerrainDirectoryInFlight"),
       directoryNodes: snapshotValue(current, "virtualTerrainDirectoryNodes"),
       residentPages: snapshotValue(current, "virtualTerrainResidentPages"),
       residentMiB: snapshotValue(current, "virtualTerrainResidentMiB"),
@@ -187,26 +244,63 @@ async function stablePhaseCapture(
         "virtualTerrainNearestRegisteredRootMetres",
       ),
       gpuMatchesCpu: snapshotValue(current, "virtualTerrainGpuMatchesCpuCut"),
+      gpuOverflow: snapshotValue(current, "virtualTerrainGpuOverflowFlags"),
+      pageSubmitDeferred: snapshotValue(current, "virtualTerrainPageSubmitDeferred"),
+      pagePreempted: snapshotValue(current, "virtualTerrainPagePreempted"),
+      pageTimedOut: snapshotValue(current, "virtualTerrainPageTimedOut"),
+      pageOtherFailed: snapshotValue(current, "virtualTerrainPageOtherFailed"),
+      pageUnavailable: snapshotValue(current, "virtualTerrainPageUnavailable"),
+      pageStaleRevision: snapshotValue(current, "virtualTerrainPageStaleRevision"),
+      pageGenerationFailed: snapshotValue(current, "virtualTerrainPageGenerationFailed"),
+      pageUploadFailed: snapshotValue(current, "virtualTerrainPageUploadFailed"),
       arenaAllocatedMiB: snapshotValue(current, "arenaAllocatedMiB"),
       arenaCapacityMiB: snapshotValue(current, "arenaCapacityMiB"),
       editCanonicalRequired: snapshotValue(current, "editCanonicalRequired"),
       editCanonicalRenderable: snapshotValue(current, "editCanonicalRenderable"),
       editCanonicalOwned: snapshotValue(current, "editCanonicalOwned"),
     };
+    const flow = [
+      state.pageSubmitDeferred,
+      state.pagePreempted,
+      state.pageTimedOut,
+      state.pageOtherFailed,
+      state.pageUnavailable,
+      state.pageStaleRevision,
+      state.pageGenerationFailed,
+      state.pageUploadFailed,
+    ].join(":");
     if (performance.now() - lastLog >= 5_000) {
       context.log(`${phase} convergence ${JSON.stringify(state)}`);
       lastLog = performance.now();
     }
-    if (
+    const quiescent =
       state.terrainReady === 1 &&
       state.exactPages > 0 &&
+      state.requestedPages === 0 &&
+      state.pendingPages === 0 &&
+      state.inFlightPages === 0 &&
+      state.columnInFlight === 0 &&
+      state.directoryInFlight === 0 &&
+      state.gpuMatchesCpu === 1 &&
+      state.gpuOverflow === 0 &&
       state.columnRevisionFloors === 0 &&
       state.currentColumnRegisteredRoots > 0 &&
       state.editCanonicalRenderable >= state.editCanonicalRequired &&
-      state.editCanonicalOwned >= state.editCanonicalRequired &&
-      performance.now() - stableSince >= STABLE_CUT_DURATION_MS
+      state.editCanonicalOwned >= state.editCanonicalRequired;
+    if (
+      !quiescent ||
+      fingerprint !== previousFingerprint ||
+      (previousFlow !== "" && flow !== previousFlow)
     ) {
-      const capture = await auditCapture(context, page, engine, phase, current);
+      stableSince = undefined;
+    } else {
+      stableSince ??= performance.now();
+    }
+    previousFingerprint = fingerprint;
+    previousFlow = flow;
+    if (stableSince !== undefined && performance.now() - stableSince >= STABLE_CUT_DURATION_MS) {
+      const settleMs = performance.now() - started;
+      const capture = await auditCapture(context, page, engine, phase, current, settleMs);
       assertHealthy();
       return capture;
     }
@@ -221,7 +315,7 @@ async function stablePhaseCapture(
   );
   const cut = failure.metadata.presentation.selectedCut.cut;
   throw new Error(
-    `${phase} did not reach a quiescent published cut within 45 seconds; ` +
+    `${phase} did not reach a quiescent published cut within ${STABILITY_TIMEOUT_MS / 1_000} seconds; ` +
       `published adjacency ${JSON.stringify(summarizeSurfaceCutAdjacency(cut?.selectedPages ?? []))}`,
   );
 }
@@ -230,7 +324,7 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
   if (arguments_.length > 0) {
     throw new Error(`player-rendering takes no arguments; received ${arguments_.join(" ")}`);
   }
-  const world = await startWorldStack(context, {
+  const world = await startDevelopmentWorldStack(context, {
     fixture: {
       prefix: "voxels-player-rendering-",
       source: "terrain-diffusion-30m",
@@ -240,8 +334,8 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
       weatherCycleSeconds: 0,
       weatherFractionAtUnixEpoch: 0.08,
     },
-    service: { metal: true, profile: "worldgen-dev" },
-    web: { buildProfile: "wasm-dev" },
+    serviceProfile: "worldgen-dev",
+    browserProfile: "wasm-dev",
   });
   const browser = await BrowserCapability.start(context);
   const viewport = await browser.open({
@@ -251,6 +345,7 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
     ...world.clientRoute,
   });
   const { engine, page } = viewport;
+  const coldStartStarted = performance.now();
   let lastProgressLog = 0;
   const ready = await engine.waitForSnapshot(
     (snapshot) =>
@@ -262,7 +357,7 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
       snapshotValue(snapshot, "pendingJobs") === 0 &&
       snapshotValue(snapshot, "frameSequence") > 0,
     {
-      timeoutMs: 120_000,
+      timeoutMs: COLD_START_BUDGET_MS,
       description: "default player never received a playable terrain presentation",
       onSnapshot: (snapshot) => {
         browser.assertHealthy();
@@ -283,6 +378,7 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
       },
     },
   );
+  const coldStartMs = performance.now() - coldStartStarted;
   await engine.setCameraLook(snapshotValue(ready, "yaw"), -0.48);
   const pedestalStepMetres = await shortPlayerStep(page, () => engine.snapshot());
   const pedestal = await stablePhaseCapture(context, page, "default-pedestal", engine, () =>
@@ -290,7 +386,13 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
   );
 
   await engine.setCameraLook(0, -0.22);
-  const distanceMetres = await walkBeyondProtectedPedestal(page, () => engine.snapshot(), 32);
+  const distanceMetres = await walkBeyondProtectedPedestal(
+    context,
+    page,
+    engine,
+    () => browser.assertHealthy(),
+    32,
+  );
   await engine.waitForSnapshot((snapshot) => snapshotValue(snapshot, "grounded") === 1, {
     timeoutMs: 15_000,
     description: "player did not land after leaving the spawn pedestal",
@@ -349,6 +451,10 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
       ),
       exactLodDiscontinuities: 0,
       reproductionScreenshotBytes: reproductionCapture.png.byteLength,
+      coldStartMs,
+      pedestalSettleMs: pedestal.settleMs,
+      travelSettleMs: travel.settleMs,
+      editSettleMs: edited.settleMs,
     },
   };
 }

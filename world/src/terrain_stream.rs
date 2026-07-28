@@ -36,13 +36,13 @@ impl TerrainStreamConfig {
 
     /// Browser-facing pacing that keeps decode and GPU publication inside a 120 Hz frame budget.
     ///
-    /// Four pages are also the atomic replacement-group width, so reducing the batch does not
-    /// split a sibling handoff. The larger portable development profile remains available for
-    /// native throughput benchmarks.
+    /// Eight pages cover the widest atomic replacement group: volumetric octree children. Surface
+    /// quadtree replacements remain four pages, but the interactive scheduler must not admit a
+    /// valid group it can never dispatch.
     pub const INTERACTIVE_CLIENT: Self = Self {
         max_pending_pages: 2_048,
         max_in_flight_pages: 64,
-        max_batch_items: 4,
+        max_batch_items: TERRAIN_PAGE_MAX_CHILDREN,
         max_batch_bytes: 2 * 1_024 * 1_024,
         retry_base_ms: 100,
         retry_max_ms: 5_000,
@@ -88,6 +88,34 @@ pub struct TerrainDemandGroup {
     /// `Some(parent)` means all eight exact children form one atomic replacement unit.
     pub replacement_parent: Option<TerrainPageKey>,
     pub pages: Vec<TerrainPageDemand>,
+}
+
+/// Returns every complete refinement replacement represented by `identities`.
+///
+/// This is shared by admission, cache hydration, and GPU publication so all three stages use the
+/// same atomicity boundary. An incomplete sibling set is deliberately omitted: callers may cache
+/// its pages, but must not expose them as a partial hierarchy replacement.
+pub fn terrain_page_replacement_groups(
+    identities: &[TerrainPageTransferIdentity],
+) -> Vec<(TerrainPageKey, Vec<TerrainPageTransferIdentity>)> {
+    let requested = identities
+        .iter()
+        .map(|identity| (identity.key, *identity))
+        .collect::<BTreeMap<_, _>>();
+    requested
+        .keys()
+        .filter_map(|key| key.parent())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|parent| {
+            let children = parent.refinement_children()?;
+            let group = children
+                .iter()
+                .map(|child| requested.get(child).copied())
+                .collect::<Option<Vec<_>>>()?;
+            Some((parent, group))
+        })
+        .collect()
 }
 
 impl TerrainDemandGroup {
@@ -700,18 +728,56 @@ mod tests {
     }
 
     #[test]
-    fn interactive_client_pacing_preserves_one_atomic_replacement_batch() {
+    fn interactive_client_pacing_supports_the_widest_atomic_replacement_batch() {
         let config = TerrainStreamConfig::INTERACTIVE_CLIENT;
         assert!(config.validates());
-        let surface_parent = TerrainPageKey::surface(1, 0, 0);
+        let volume_parent = TerrainPageKey {
+            level: 1,
+            coord: [0, 0, 0],
+        };
         assert_eq!(
             config.max_batch_items,
-            surface_parent
+            volume_parent
                 .refinement_children()
-                .expect("surface parent children")
+                .expect("volume parent children")
                 .len()
         );
         assert!(config.max_in_flight_pages >= config.max_batch_items);
+    }
+
+    #[test]
+    fn interactive_client_dispatches_a_complete_volume_replacement() {
+        let parent = TerrainPageKey {
+            level: 1,
+            coord: [0, 0, 0],
+        };
+        let pages = parent
+            .refinement_children()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| {
+                demand(
+                    TerrainPageTransferIdentity {
+                        key,
+                        revision: 1,
+                        content_fingerprint: [index as u8 + 1; 32],
+                    },
+                    100,
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected = pages
+            .iter()
+            .map(|page| page.identity)
+            .collect::<BTreeSet<_>>();
+        let mut scheduler =
+            TerrainStreamScheduler::new(TerrainStreamConfig::INTERACTIVE_CLIENT).unwrap();
+        scheduler
+            .reconcile([TerrainDemandGroup::replacement(parent, pages).unwrap()])
+            .unwrap();
+        let batch = scheduler.peek_batch(0).unwrap();
+        assert_eq!(batch.pages.into_iter().collect::<BTreeSet<_>>(), expected);
     }
 
     #[test]
@@ -741,8 +807,11 @@ mod tests {
             .iter()
             .map(|page| page.identity.key)
             .collect::<BTreeSet<_>>();
-        let mut scheduler =
-            TerrainStreamScheduler::new(TerrainStreamConfig::INTERACTIVE_CLIENT).unwrap();
+        let mut scheduler = TerrainStreamScheduler::new(TerrainStreamConfig {
+            max_batch_items: 4,
+            ..TerrainStreamConfig::INTERACTIVE_CLIENT
+        })
+        .unwrap();
         scheduler
             .reconcile([
                 TerrainDemandGroup::replacement(first_parent, first).unwrap(),

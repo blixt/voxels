@@ -6,8 +6,8 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { connect } from "node:net";
 import { promisify } from "node:util";
-import { build, preview } from "vite-plus";
-import type { PreviewServer } from "vite-plus";
+import { build, createServer, preview } from "vite-plus";
+import type { PreviewServer, ViteDevServer } from "vite-plus";
 import type { BrowserContext, Page } from "playwright";
 import { reserveEphemeralPort } from "./browser.ts";
 import { runProcess, startProcess } from "./process.ts";
@@ -126,6 +126,14 @@ export interface WebPreview {
   readonly port: number;
   readonly url: string;
   readonly server: PreviewServer;
+}
+
+export interface DevelopmentWorldStack {
+  readonly port: number;
+  readonly url: string;
+  readonly server: ViteDevServer;
+  readonly fixture: WorldFixture;
+  readonly clientRoute: WorldClientRoute;
 }
 
 export interface WorldClientRoute {
@@ -538,5 +546,78 @@ export async function startWorldStack(
     fixture,
     service,
     clientRoute: routeWorldClient(fixture),
+  };
+}
+
+/// Starts the same serve-mode Vite configuration as ordinary `vp dev`, including its paired
+/// native-daemon build, launch, supervision, and browser-WASM lifecycle, but points both halves at
+/// an isolated temporary world.
+export async function startDevelopmentWorldStack(
+  context: ScenarioContext,
+  options: {
+    readonly fixture?: Omit<WorldFixtureOptions, "originPort">;
+    readonly serviceProfile?: WorldServiceCargoProfile;
+    readonly browserProfile?: WasmBuildProfile;
+  } = {},
+): Promise<DevelopmentWorldStack> {
+  if (!context.definition.uses.world || context.definition.uses.viewport !== "browser") {
+    throw new Error(
+      `scenario ${context.definition.id} must declare a browser viewport and world service`,
+    );
+  }
+  const port = await reserveEphemeralPort();
+  const fixture = await prepareWorldFixture({
+    ...options.fixture,
+    originPort: port,
+  });
+  context.defer("development world fixture", () => fixture.cleanup());
+
+  const environment = {
+    VOXELS_CLIENT_CONFIG_PATH: fixture.clientConfigPath,
+    VOXELS_WORLD_SERVICE_CONFIG_PATH: fixture.serviceConfigPath,
+    VOXELS_WORLD_SERVICE_PROFILE: options.serviceProfile ?? "worldgen-dev",
+    VOXELS_BROWSER_BUILD_PROFILE: options.browserProfile ?? "wasm-dev",
+  } as const;
+  const environmentKeys = [...Object.keys(environment), "VOXELS_EXTERNAL_WORLD_SERVICE"] as const;
+  const previous = Object.fromEntries(
+    environmentKeys.map((key) => [key, process.env[key]]),
+  ) as Record<(typeof environmentKeys)[number], string | undefined>;
+  Object.assign(process.env, environment);
+  // The scenario is specifically a contract test for the ordinary paired dev daemon. A caller's
+  // external-service override must not silently turn it into a different stack.
+  delete process.env.VOXELS_EXTERNAL_WORLD_SERVICE;
+  let server: ViteDevServer | undefined;
+  try {
+    server = await createServer({
+      logLevel: "info",
+      server: { host: "127.0.0.1", port, strictPort: true },
+    });
+    await server.listen();
+  } catch (error) {
+    await server?.close();
+    throw error;
+  } finally {
+    for (const key of environmentKeys) {
+      const value = previous[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+  if (server === undefined) {
+    throw new Error("development Vite server was not created");
+  }
+  context.defer("development web and native world stack", () => server.close());
+  return {
+    port,
+    url: `http://127.0.0.1:${port}`,
+    server,
+    fixture,
+    // Exercise Vite's real client-config middleware instead of masking it with a Playwright route.
+    clientRoute: Object.freeze({
+      async beforeNavigate(): Promise<void> {},
+    }),
   };
 }

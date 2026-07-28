@@ -82,9 +82,10 @@ pub use source::{
 };
 pub use terrain_directory::{
     TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_DIRECTORY_MAX_NODES, TERRAIN_DIRECTORY_MAX_ROOTS,
-    TERRAIN_DIRECTORY_SCHEMA_VERSION, TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError,
-    TerrainHierarchyDirectoryV1, TerrainHierarchyNode, decode_region_terrain_directory,
-    decode_terrain_directory, encode_terrain_directory,
+    TERRAIN_DIRECTORY_SCHEMA_VERSION, TERRAIN_PAGE_MAX_SOURCE_GEOMETRY_BYTES,
+    TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError, TerrainHierarchyDirectoryV1,
+    TerrainHierarchyNode, decode_region_terrain_directory, decode_terrain_directory,
+    encode_terrain_directory,
 };
 pub use terrain_page::{
     SparseVoxelBrickPayload, SteppedSurfaceResidual, TERRAIN_PAGE_EDGE_SAMPLES,

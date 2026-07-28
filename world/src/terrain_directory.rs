@@ -4,17 +4,23 @@
 //! select a valid ancestor while individual payloads move through memory and persistent caches.
 
 use crate::{
-    TERRAIN_PAGE_MAX_COMPRESSED_BYTES, TERRAIN_PAGE_MAX_LEVEL,
+    TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_PAGE_MAX_COMPRESSED_BYTES, TERRAIN_PAGE_MAX_LEVEL,
     TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TerrainErrorBounds, TerrainPageCodecError,
-    TerrainPageKey, TerrainPageRepresentationKind, TerrainPageV1, TerrainTopologyClass,
-    WorldSourceIdentityHash, encode_terrain_page,
+    TerrainPageKey, TerrainPageRepresentation, TerrainPageRepresentationKind, TerrainPageV1,
+    TerrainTopologyClass, WorldSourceIdentityHash, encode_terrain_page,
+    reconstruct_exact_terrain_surface,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-pub const TERRAIN_DIRECTORY_SCHEMA_VERSION: u16 = 3;
+pub const TERRAIN_DIRECTORY_SCHEMA_VERSION: u16 = 4;
 pub const TERRAIN_DIRECTORY_MAX_NODES: usize = 131_072;
 pub const TERRAIN_DIRECTORY_MAX_ROOTS: usize = 4_096;
+/// Maximum expanded source geometry carried by one independently uploadable terrain page.
+///
+/// The directory records a page-specific upper bound so admission can prove that an entire
+/// replacement transition fits before downloading or allocating any of it.
+pub const TERRAIN_PAGE_MAX_SOURCE_GEOMETRY_BYTES: u32 = 4 * 1_024 * 1_024;
 /// Initial always-resident coverage spans 3.2768 km per root at 10 cm canonical scale.
 ///
 /// Refinement is independent of this level; the large root exists only so cold start, teleport,
@@ -30,7 +36,8 @@ pub const TERRAIN_REGION_ROOT_LEVEL: u8 = 2;
 const DIRECTORY_MAGIC: &[u8; 4] = b"VXTD";
 const DIRECTORY_HEADER_BYTES: usize = 80;
 const DIRECTORY_NODE_BYTES: usize = 104;
-const DIRECTORY_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-directory-v3\0";
+const DIRECTORY_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-directory-v4\0";
+const SOURCE_GEOMETRY_ELEMENT_BYTES: u64 = 24;
 const NODE_FLAG_HAS_CHILDREN: u8 = 1 << 0;
 const NODE_FLAG_ROOT: u8 = 1 << 1;
 const NODE_FLAG_UNRESOLVED_TOPOLOGY: u8 = 1 << 2;
@@ -47,6 +54,8 @@ pub struct TerrainHierarchyNode {
     pub topology: TerrainTopologyClass,
     pub representation: TerrainPageRepresentationKind,
     pub encoded_bytes: u32,
+    /// Conservative expanded GPU-source bytes, including representation reconstruction.
+    pub source_geometry_bytes: u32,
     pub has_children: bool,
     pub is_root: bool,
 }
@@ -101,6 +110,7 @@ impl TerrainHierarchyDirectoryV1 {
         for page in page_by_key.values() {
             let encoded_bytes = u32::try_from(encode_terrain_page(page)?.len())
                 .map_err(|_| TerrainDirectoryError::LimitExceeded("encoded page bytes"))?;
+            let source_geometry_bytes = terrain_page_source_geometry_bytes(page)?;
             nodes.push(TerrainHierarchyNode {
                 key: page.key,
                 bounds: page.bounds,
@@ -110,6 +120,7 @@ impl TerrainHierarchyDirectoryV1 {
                 topology: page.topology,
                 representation: page.representation.kind(),
                 encoded_bytes,
+                source_geometry_bytes,
                 has_children: !page.children.is_empty(),
                 is_root: !referenced.contains(&page.key),
             });
@@ -166,6 +177,7 @@ impl TerrainHierarchyDirectoryV1 {
         for page in page_by_key.values() {
             let encoded_bytes = u32::try_from(encode_terrain_page(page)?.len())
                 .map_err(|_| TerrainDirectoryError::LimitExceeded("encoded page bytes"))?;
+            let source_geometry_bytes = terrain_page_source_geometry_bytes(page)?;
             nodes.push(TerrainHierarchyNode {
                 key: page.key,
                 bounds: page.bounds,
@@ -175,6 +187,7 @@ impl TerrainHierarchyDirectoryV1 {
                 topology: page.topology,
                 representation: page.representation.kind(),
                 encoded_bytes,
+                source_geometry_bytes,
                 has_children: page.key == root,
                 is_root: page.key == root,
             });
@@ -227,6 +240,7 @@ impl TerrainHierarchyDirectoryV1 {
                 || node.encoded_bytes == 0
                 || usize::try_from(node.encoded_bytes).unwrap_or(usize::MAX)
                     > TERRAIN_PAGE_MAX_COMPRESSED_BYTES + 4_096
+                || node.source_geometry_bytes > TERRAIN_PAGE_MAX_SOURCE_GEOMETRY_BYTES
             {
                 return false;
             }
@@ -296,6 +310,98 @@ impl TerrainHierarchyDirectoryV1 {
             .ok()
             .and_then(|index| self.nodes.get(index))
     }
+}
+
+fn terrain_page_source_geometry_bytes(page: &TerrainPageV1) -> Result<u32, TerrainDirectoryError> {
+    let elements = match &page.representation {
+        TerrainPageRepresentation::SurfaceCluster(quads) => quads.len() as u64,
+        TerrainPageRepresentation::SteppedSurfaceResidual(_)
+        | TerrainPageRepresentation::SparseVoxelBrick(_) => reconstruct_exact_terrain_surface(page)
+            .map_err(|_| TerrainDirectoryError::InvalidPage)?
+            .len() as u64,
+        TerrainPageRepresentation::TriangleCluster(cluster) => {
+            (cluster.triangles.len() as u64).saturating_mul(3)
+        }
+        TerrainPageRepresentation::HeightfieldGrid(_) if page.key.level > 0 => {
+            // A coarse cell emits at most eight conforming ground triangles when every side meets
+            // a finer neighbor, plus two water triangles. Triangle clusters are unindexed.
+            let cells = u64::from(TERRAIN_PAGE_EDGE_SAMPLES)
+                .saturating_mul(u64::from(TERRAIN_PAGE_EDGE_SAMPLES));
+            cells.saturating_mul(10).saturating_mul(3)
+        }
+        TerrainPageRepresentation::HeightfieldGrid(grid) => {
+            // Exact heightfields can choose compact quads or a triangle fallback. Interior risers
+            // are fixed by this page's lattice. Only edges touching the outer sample ring can be
+            // changed by ancestor/neighbor constraints, so bound those by the full owned vertical
+            // span instead of charging that worst case to every one of the 2,048 sample pairs.
+            let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+            let edge = cells + 1;
+            if grid.ground_heights.len() != edge * edge || grid.water_heights.len() != edge * edge {
+                return Err(TerrainDirectoryError::InvalidPage);
+            }
+            let vertical_span = u64::try_from(
+                i64::from(page.bounds.max.y)
+                    .saturating_sub(i64::from(page.bounds.min.y))
+                    .max(1),
+            )
+            .map_err(|_| TerrainDirectoryError::LimitExceeded("source geometry bytes"))?;
+            let mut vertical_faces = 0u64;
+            for z in 0..cells {
+                for x in 0..cells {
+                    let x_boundary = x == 0 || x + 1 == cells || z == 0 || z + 1 == cells;
+                    vertical_faces = vertical_faces.saturating_add(if x_boundary {
+                        vertical_span
+                    } else {
+                        u64::from(
+                            grid.ground_heights[x + z * edge]
+                                .abs_diff(grid.ground_heights[x + 1 + z * edge]),
+                        )
+                    });
+                    let z_boundary = z == 0 || z + 1 == cells || x == 0 || x + 1 == cells;
+                    vertical_faces = vertical_faces.saturating_add(if z_boundary {
+                        vertical_span
+                    } else {
+                        u64::from(
+                            grid.ground_heights[x + z * edge]
+                                .abs_diff(grid.ground_heights[x + (z + 1) * edge]),
+                        )
+                    });
+                }
+            }
+            let horizontal_faces = (cells as u64)
+                .saturating_mul(cells as u64)
+                .saturating_mul(2);
+            let non_flat_water = (0..cells).any(|z| {
+                (0..cells).any(|x| {
+                    let samples = [
+                        x + z * edge,
+                        x + 1 + z * edge,
+                        x + 1 + (z + 1) * edge,
+                        x + (z + 1) * edge,
+                    ];
+                    let heights = samples.map(|sample| grid.water_heights[sample]);
+                    heights.into_iter().all(|height| height != i32::MIN)
+                        && heights.into_iter().any(|height| height != heights[0])
+                })
+            });
+            // Flat/dry water uses compact quads, at most one per exposed unit face after
+            // T-junction splitting. Only genuinely non-flat water selects the unindexed triangle
+            // fallback, which can require six vertices per face.
+            let elements_per_face = if non_flat_water { 6 } else { 1 };
+            horizontal_faces
+                .saturating_add(vertical_faces)
+                .saturating_mul(elements_per_face)
+        }
+    };
+    let bytes = elements.saturating_mul(SOURCE_GEOMETRY_ELEMENT_BYTES);
+    let bytes = u32::try_from(bytes)
+        .map_err(|_| TerrainDirectoryError::LimitExceeded("source geometry bytes"))?;
+    if bytes > TERRAIN_PAGE_MAX_SOURCE_GEOMETRY_BYTES {
+        return Err(TerrainDirectoryError::LimitExceeded(
+            "source geometry bytes",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn directory_node_bounds_match_key(node: &TerrainHierarchyNode) -> bool {
@@ -426,7 +532,7 @@ pub fn encode_terrain_directory(
         push_u32(&mut encoded, node.errors.material_boundary_millivoxels);
         push_u32(&mut encoded, node.errors.normal_milliradians);
         push_u32(&mut encoded, node.encoded_bytes);
-        push_u32(&mut encoded, 0);
+        push_u32(&mut encoded, node.source_geometry_bytes);
     }
     Ok(encoded)
 }
@@ -517,9 +623,7 @@ pub fn decode_terrain_directory(
             unresolved_topology: flags & NODE_FLAG_UNRESOLVED_TOPOLOGY != 0,
         };
         let encoded_bytes = cursor.u32()?;
-        if cursor.u32()? != 0 {
-            return Err(TerrainDirectoryError::InvalidHeader("node reserved bytes"));
-        }
+        let source_geometry_bytes = cursor.u32()?;
         nodes.push(TerrainHierarchyNode {
             key,
             bounds,
@@ -529,6 +633,7 @@ pub fn decode_terrain_directory(
             topology,
             representation,
             encoded_bytes,
+            source_geometry_bytes,
             has_children: flags & NODE_FLAG_HAS_CHILDREN != 0,
             is_root: flags & NODE_FLAG_ROOT != 0,
         });
@@ -596,6 +701,7 @@ fn directory_fingerprint(directory: &TerrainHierarchyDirectoryV1) -> [u8; 32] {
             u8::from(node.is_root),
         ]);
         hasher.update(&node.encoded_bytes.to_le_bytes());
+        hasher.update(&node.source_geometry_bytes.to_le_bytes());
     }
     *hasher.finalize().as_bytes()
 }
@@ -734,6 +840,7 @@ mod tests {
                 topology: TerrainTopologyClass::Volumetric,
                 representation: TerrainPageRepresentationKind::SurfaceCluster,
                 encoded_bytes: 1_024,
+                source_geometry_bytes: 24_576,
                 has_children: key.level > 0,
                 is_root: root_keys.contains(&key),
             })
@@ -801,6 +908,7 @@ mod tests {
                     topology: TerrainTopologyClass::SingleRunColumns,
                     representation: TerrainPageRepresentationKind::HeightfieldGrid,
                     encoded_bytes: 1_024,
+                    source_geometry_bytes: 737_280,
                     has_children: key == root,
                     is_root: key == root,
                 }
@@ -859,7 +967,7 @@ mod tests {
         corrupted[last] ^= 0x40;
         assert_eq!(
             decode_terrain_directory(&corrupted, identity()),
-            Err(TerrainDirectoryError::InvalidHeader("node reserved bytes"))
+            Err(TerrainDirectoryError::CorruptHash)
         );
         let mut trailing = encoded;
         trailing.push(0);
@@ -880,10 +988,13 @@ mod tests {
                 usize::try_from(node.encoded_bytes).unwrap(),
                 encode_terrain_page(page).unwrap().len()
             );
-            assert!(matches!(
-                page.representation,
-                TerrainPageRepresentation::SurfaceCluster(_)
-            ));
+            let TerrainPageRepresentation::SurfaceCluster(quads) = &page.representation else {
+                panic!("fixture must remain a directly renderable surface cluster");
+            };
+            assert_eq!(
+                node.source_geometry_bytes as usize,
+                quads.len() * SOURCE_GEOMETRY_ELEMENT_BYTES as usize
+            );
         }
     }
 
@@ -935,6 +1046,7 @@ mod tests {
                 topology: TerrainTopologyClass::Volumetric,
                 representation: TerrainPageRepresentationKind::SurfaceCluster,
                 encoded_bytes: 1_024,
+                source_geometry_bytes: 24_576,
                 has_children: false,
                 is_root: true,
             }],

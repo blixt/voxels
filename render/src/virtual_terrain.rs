@@ -2004,6 +2004,7 @@ mod tests {
             topology: voxels_world::TerrainTopologyClass::SingleRunColumns,
             representation: voxels_world::TerrainPageRepresentationKind::SurfaceCluster,
             encoded_bytes: 1,
+            source_geometry_bytes: 24,
             has_children: false,
             is_root: true,
         };

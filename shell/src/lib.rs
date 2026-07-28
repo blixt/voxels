@@ -1310,7 +1310,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 8;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 49;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 50;
     const FRAME_SAMPLE_WIDTH: u32 = 22;
     const GPU_SAMPLE_WIDTH: u32 = 15;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -1339,7 +1339,7 @@ mod web {
         "virtualTerrainSelectedPages,virtualTerrainRequestedPages,virtualTerrainOwnerlessRoots,virtualTerrainGpuMatchesCpuCut,virtualTerrainGpuOverflowFlags,virtualTerrainGpuStackPeak,virtualTerrainGpuOwnerlessRoots,virtualTerrainStreamPending,virtualTerrainStreamInFlight,virtualTerrainCancellationWasteMiB,virtualTerrainCachePages,",
         "virtualTerrainCacheMiB,virtualTerrainColumns,virtualTerrainColumnInFlight,virtualTerrainColumnRevisionFloors,virtualTerrainCurrentColumnKnown,virtualTerrainCurrentColumnRoots,virtualTerrainCurrentColumnRegisteredRoots,virtualTerrainNearestRegisteredRootMetres,",
         "virtualTerrainColumnAccepted,virtualTerrainColumnSubmitDeferred,virtualTerrainColumnPreempted,virtualTerrainColumnTimedOut,virtualTerrainColumnOtherFailed,virtualTerrainDirectoryAccepted,virtualTerrainDirectorySubmitDeferred,virtualTerrainDirectoryPreempted,",
-        "virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,virtualTerrainPublishedPages,virtualTerrainPublishedExactPages,virtualTerrainPublishedMinimumLevel,virtualTerrainPublishedMaximumLevel,virtualTerrainPublishedExactLodDiscontinuities,virtualTerrainCutFingerprintLow24,virtualTerrainCutFingerprintHigh24,",
+        "virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,virtualTerrainPageSubmitDeferred,virtualTerrainPagePreempted,virtualTerrainPageTimedOut,virtualTerrainPageOtherFailed,virtualTerrainPageUnavailable,virtualTerrainPageStaleRevision,virtualTerrainPageGenerationFailed,virtualTerrainPageUploadFailed,virtualTerrainPublishedPages,virtualTerrainPublishedExactPages,virtualTerrainPublishedMinimumLevel,virtualTerrainPublishedMaximumLevel,virtualTerrainPublishedExactLodDiscontinuities,virtualTerrainCutFingerprintLow24,virtualTerrainCutFingerprintHigh24,",
         "frameSequence,schemaVersion,",
         "sampleCount,droppedSamples",
     );
@@ -1430,8 +1430,8 @@ mod web {
         last_page_failure_key: Option<TerrainPageKey>,
     }
 
-    const STARTUP_PROGRESS_VERSION: u32 = 1;
-    const STARTUP_PROGRESS_PAYLOAD_WORDS: usize = 42;
+    const STARTUP_PROGRESS_VERSION: u32 = 2;
+    const STARTUP_PROGRESS_PAYLOAD_WORDS: usize = 52;
     const STARTUP_PROGRESS_WORDS: usize = STARTUP_PROGRESS_PAYLOAD_WORDS + 2;
 
     #[derive(Default)]
@@ -1444,6 +1444,7 @@ mod web {
         registered_refinements: BTreeSet<TerrainPageKey>,
         directory_in_flight: BTreeMap<TerrainPageKey, RemoteRequestId>,
         directory_retry_after_ms: BTreeMap<TerrainPageKey, u64>,
+        page_upload_retry_after_ms: BTreeMap<TerrainPageTransferIdentity, u64>,
         minimum_region_revisions: BTreeMap<TerrainPageKey, u64>,
         nodes: BTreeMap<TerrainPageKey, TerrainHierarchyNode>,
         stats: VirtualTerrainRequestStats,
@@ -3469,7 +3470,7 @@ mod web {
                     return;
                 }
             };
-            if self.hydrate_virtual_terrain_from_cache(&cut) {
+            if self.hydrate_virtual_terrain_from_cache(&cut, now_ms) {
                 match self.renderer.borrow_mut().select_virtual_terrain_cut(view) {
                     Ok(reselected) => cut = reselected,
                     Err(error) => {
@@ -3486,7 +3487,10 @@ mod web {
                         camera.position.to_array().map(f64::from),
                         view.exact_surface_radius_metres,
                     );
-                candidate_needs_directories || renderer.virtual_terrain_candidate_is_gpu_certified()
+                let before_first_publication =
+                    renderer.virtual_terrain_render_mode() != VirtualTerrainRenderMode::Visible;
+                (before_first_publication && candidate_needs_directories)
+                    || renderer.virtual_terrain_candidate_is_gpu_certified()
             };
             if self
                 .virtual_terrain
@@ -3809,13 +3813,27 @@ mod web {
             }
         }
 
-        fn hydrate_virtual_terrain_from_cache(&self, cut: &VirtualTerrainCut) -> bool {
+        fn hydrate_virtual_terrain_from_cache(&self, cut: &VirtualTerrainCut, now_ms: u64) -> bool {
+            let requested = cut.requested_pages.iter().copied().collect::<BTreeSet<_>>();
+            self.virtual_terrain
+                .borrow_mut()
+                .page_upload_retry_after_ms
+                .retain(|identity, _| requested.contains(identity));
             let mut uploaded = false;
-            for identity in cut
-                .requested_pages
-                .iter()
-                .take(VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME)
-            {
+            let mut attempted_cache_hits = 0;
+            for identity in &cut.requested_pages {
+                if attempted_cache_hits >= VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME {
+                    break;
+                }
+                if self
+                    .virtual_terrain
+                    .borrow()
+                    .page_upload_retry_after_ms
+                    .get(identity)
+                    .is_some_and(|retry_at| *retry_at > now_ms)
+                {
+                    continue;
+                }
                 let encoded = self
                     .virtual_terrain_cache
                     .borrow_mut()
@@ -3823,17 +3841,28 @@ mod web {
                 let Some(encoded) = encoded else {
                     continue;
                 };
+                attempted_cache_hits += 1;
                 let Ok(page) = decode_terrain_page(&encoded, self.source_identity_hash()) else {
                     continue;
                 };
                 match self.renderer.borrow_mut().upload_virtual_terrain_page(page) {
-                    Ok(()) => uploaded = true,
+                    Ok(()) => {
+                        self.virtual_terrain
+                            .borrow_mut()
+                            .page_upload_retry_after_ms
+                            .remove(identity);
+                        uploaded = true;
+                    }
                     Err(error) => {
                         let mut state = self.virtual_terrain.borrow_mut();
                         state.stats.page_upload_failed =
                             state.stats.page_upload_failed.saturating_add(1);
                         state.stats.last_page_upload_failure_kind =
                             virtual_terrain_upload_failure_kind(&error);
+                        state.page_upload_retry_after_ms.insert(
+                            *identity,
+                            now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
+                        );
                         drop(state);
                         log_gpu_error(&format!("upload cached virtual terrain page: {error}"));
                     }
@@ -5485,6 +5514,16 @@ mod web {
             let virtual_cache_pages = engine.virtual_terrain_cache.borrow().len();
             let virtual_state = engine.virtual_terrain.borrow();
             let virtual_directory_in_flight = virtual_state.directory_in_flight.len();
+            let column_accepted = virtual_state.stats.column_accepted;
+            let column_submit_deferred = virtual_state.stats.column_submit_deferred;
+            let column_preempted = virtual_state.stats.column_preempted;
+            let column_timed_out = virtual_state.stats.column_timed_out;
+            let column_other_failed = virtual_state.stats.column_other_failed;
+            let directory_accepted = virtual_state.stats.directory_accepted;
+            let directory_submit_deferred = virtual_state.stats.directory_submit_deferred;
+            let directory_preempted = virtual_state.stats.directory_preempted;
+            let directory_timed_out = virtual_state.stats.directory_timed_out;
+            let directory_other_failed = virtual_state.stats.directory_other_failed;
             let page_submit_deferred = virtual_state.stats.page_submit_deferred;
             let page_preempted = virtual_state.stats.page_preempted;
             let page_timed_out = virtual_state.stats.page_timed_out;
@@ -5519,6 +5558,16 @@ mod web {
                 usize_to_u32(virtual_stream.in_flight_pages),
                 u32::try_from(virtual_stream.failed_pages).unwrap_or(u32::MAX),
                 usize_to_u32(virtual_directory_in_flight),
+                u32::try_from(column_accepted).unwrap_or(u32::MAX),
+                u32::try_from(column_submit_deferred).unwrap_or(u32::MAX),
+                u32::try_from(column_preempted).unwrap_or(u32::MAX),
+                u32::try_from(column_timed_out).unwrap_or(u32::MAX),
+                u32::try_from(column_other_failed).unwrap_or(u32::MAX),
+                u32::try_from(directory_accepted).unwrap_or(u32::MAX),
+                u32::try_from(directory_submit_deferred).unwrap_or(u32::MAX),
+                u32::try_from(directory_preempted).unwrap_or(u32::MAX),
+                u32::try_from(directory_timed_out).unwrap_or(u32::MAX),
+                u32::try_from(directory_other_failed).unwrap_or(u32::MAX),
                 u32::try_from(page_submit_deferred).unwrap_or(u32::MAX),
                 u32::try_from(page_preempted).unwrap_or(u32::MAX),
                 u32::try_from(page_timed_out).unwrap_or(u32::MAX),
@@ -5761,6 +5810,14 @@ mod web {
                     virtual_terrain_directory_preempted,
                     virtual_terrain_directory_timed_out,
                     virtual_terrain_directory_other_failed,
+                    virtual_terrain_page_submit_deferred,
+                    virtual_terrain_page_preempted,
+                    virtual_terrain_page_timed_out,
+                    virtual_terrain_page_other_failed,
+                    virtual_terrain_page_unavailable,
+                    virtual_terrain_page_stale_revision,
+                    virtual_terrain_page_generation_failed,
+                    virtual_terrain_page_upload_failed,
                 ) = {
                     let state = engine.virtual_terrain.borrow();
                     let camera_chunk = world_to_chunk(camera.position);
@@ -5804,6 +5861,14 @@ mod web {
                         state.stats.directory_preempted,
                         state.stats.directory_timed_out,
                         state.stats.directory_other_failed,
+                        state.stats.page_submit_deferred,
+                        state.stats.page_preempted,
+                        state.stats.page_timed_out,
+                        state.stats.page_other_failed,
+                        state.stats.page_unavailable,
+                        state.stats.page_stale_revision,
+                        state.stats.page_generation_failed,
+                        state.stats.page_upload_failed,
                     )
                 };
                 let virtual_terrain_stream = engine.virtual_terrain_scheduler.borrow().stats();
@@ -6057,6 +6122,14 @@ mod web {
                     virtual_terrain_directory_preempted as f32,
                     virtual_terrain_directory_timed_out as f32,
                     virtual_terrain_directory_other_failed as f32,
+                    virtual_terrain_page_submit_deferred as f32,
+                    virtual_terrain_page_preempted as f32,
+                    virtual_terrain_page_timed_out as f32,
+                    virtual_terrain_page_other_failed as f32,
+                    virtual_terrain_page_unavailable as f32,
+                    virtual_terrain_page_stale_revision as f32,
+                    virtual_terrain_page_generation_failed as f32,
+                    virtual_terrain_page_upload_failed as f32,
                     render.virtual_terrain_published_pages as f32,
                     render.virtual_terrain_published_exact_pages as f32,
                     render.virtual_terrain_published_minimum_level as f32,
