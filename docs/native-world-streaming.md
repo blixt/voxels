@@ -131,12 +131,23 @@ The required capability set is
 routes and fully server-simulated movement inputs still need separate versioned products;
 the client never substitutes procedural answers for a remote learned world.
 
-This is progressive at the product level, not an image-style byte-prefix codec: every coarser tile
-is a complete useful view and a finer tile is an independently cached replacement. A future `VXSP`
-surface-page codec can remove repeated bytes with a lossless parent-predicted height residual,
-palette material deltas, and water bitsets. That follows the residual pyramid in
-[Geometry Clipmaps][geometry-clipmaps] without making exact chunks depend on earlier layers or
-exposing unstable intermediate diffusion states.
+This is progressive at the product level, not an image-style byte-prefix codec: every coarser
+surface tile remains a complete useful view and every finer tile is an independently cached
+replacement.
+
+When the server advertises `VIRTUAL_TERRAIN`, the browser also discovers bounded horizontal region
+columns and fetches each region's hierarchy directory plus its independently renderable root page.
+Further `VXTP` v5 pages are requested by key, revision, and semantic content fingerprint. They may
+encode stepped surfaces, sparse voxel bricks, quad or triangle clusters, or 33x33 sampled
+heightfields, but representation never changes half-open spatial ownership. Source identity,
+boundary certificates, error bounds, material coverage, child identities, payload limits, and the
+semantic content hash are checked before residency. Complete four-child surface groups replace
+their parent atomically; the renderer keeps the parent visible until the CPU ownership oracle and
+bounded GPU traversal publish the same complete cut. Projected screen error with separate refine
+and coarsen thresholds drives demand without making exact chunks depend on earlier page delivery.
+This is the current page-based application of the residual-pyramid and view-dependent refinement
+ideas from [Geometry Clipmaps][geometry-clipmaps], [smooth view-dependent LOD][smooth-lod], and
+[Nanite][nanite].
 
 ## Backpressure and security bounds
 
@@ -286,7 +297,7 @@ metrics/screenshots under
 `target/automation/multiplayer/latest.json` pointer identifies the newest run. It never opens or
 resets a user's normal browser profile or world.
 
-## Far-LOD transition policy and next step
+## Far-LOD transition and virtualized refinement
 
 The streamed surface scheduler requests the coarsest levels first, retains old coverage through
 focus movement, and only activates a complete replacement set. The nearest geometric ownership snap
@@ -294,12 +305,12 @@ is one 32-voxel chunk (3.2 m), reduced from the former 96-voxel jump that replac
 strips. Exact resident connectors close height disagreement at active coarse/fine boundaries, while
 hysteretic ownership and shared parent normals reduce the remaining lighting and replacement pop.
 
-The next renderer format should carry conservative parent error and use projected screen-space error,
-hysteresis, dual-resident parent/child transition bands, and parent-compatible geomorphing. Those are
-the directly applicable parts of [Geometry Clipmaps][geometry-clipmaps], Hoppe's
-[smooth view-dependent LOD][smooth-lod], and Epic's hierarchical, demand-streamed
-[Nanite geometry model][nanite]. Exact 10 cm voxels should remain gameplay authority while these
-cluster/page products remain disposable rendering caches.
+The optional virtual-terrain path now carries conservative geometric, silhouette, material-boundary,
+normal, and unresolved-topology error. It selects pages by projected screen-space error with
+hysteresis, keeps a complete parent cut while children stream, and constrains sampled child edges to
+the recursively evaluated parent edge during the atomic handoff. Exact 10 cm voxels remain gameplay
+authority while every hierarchy directory, cluster, and heightfield stays a disposable rendering
+cache.
 
 Terrain Diffusion currently yields one finite 512x512 height tile at 30 m native resolution. The
 checked-in `horizontal_scale = 1` preserves that spacing, making the tile 15.36 km square,
