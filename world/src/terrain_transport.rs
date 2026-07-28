@@ -10,7 +10,7 @@ use crate::{
 };
 use std::fmt;
 
-pub const TERRAIN_PAGE_TRANSFER_SCHEMA_VERSION: u16 = 1;
+pub const TERRAIN_PAGE_TRANSFER_SCHEMA_VERSION: u16 = 2;
 pub const TERRAIN_PAGE_TRANSFER_MAX_ITEMS: usize = 256;
 pub const TERRAIN_PAGE_TRANSFER_MAX_BYTES: usize =
     TERRAIN_PAGE_TRANSFER_MAX_ITEMS * TERRAIN_PAGE_TARGET_COMPRESSED_BYTES + 32_768;
@@ -19,8 +19,8 @@ const RESULT_MAGIC: &[u8; 4] = b"VXPS";
 const HEADER_BYTES: usize = 80;
 const REQUEST_ITEM_BYTES: usize = 56;
 const RESULT_ITEM_HEADER_BYTES: usize = 64;
-const REQUEST_HASH_DOMAIN: &[u8] = b"voxels-terrain-page-request-v1\0";
-const RESULT_HASH_DOMAIN: &[u8] = b"voxels-terrain-page-result-v1\0";
+const REQUEST_HASH_DOMAIN: &[u8] = b"voxels-terrain-page-request-v2\0";
+const RESULT_HASH_DOMAIN: &[u8] = b"voxels-terrain-page-result-v2\0";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TerrainPageTransferIdentity {
@@ -37,7 +37,11 @@ impl TerrainPageTransferIdentity {
     }
 
     fn validates(self) -> bool {
-        self.key.bounds().is_some() && self.content_fingerprint != [0; 32]
+        (if self.key.is_surface() {
+            self.key.horizontal_bounds().is_some()
+        } else {
+            self.key.bounds().is_some()
+        }) && self.content_fingerprint != [0; 32]
     }
 }
 
@@ -605,6 +609,23 @@ mod tests {
         assert_eq!(
             decode_terrain_page_batch_result(&encoded_result, source()).unwrap(),
             result
+        );
+    }
+
+    #[test]
+    fn request_round_trips_signed_surface_page_identity() {
+        let request = TerrainPageBatchRequestV1 {
+            source_identity_hash: source(),
+            pages: vec![TerrainPageTransferIdentity {
+                key: TerrainPageKey::surface(7, -3, 5),
+                revision: 29,
+                content_fingerprint: [0x6d; 32],
+            }],
+        };
+        let encoded = encode_terrain_page_batch_request(&request).unwrap();
+        assert_eq!(
+            decode_terrain_page_batch_request(&encoded, source()).unwrap(),
+            request
         );
     }
 
