@@ -11,11 +11,12 @@ use crate::{
     SurfaceMorphClosure, SurfacePatch, SurfaceQuad, SurfaceRegion, SurfaceShading,
     SurfaceTileCoord, SurfaceTileMesh, SurfaceTileSnapshot, TERRAIN_REGION_ROOT_LEVEL,
     TerrainDirectoryError, TerrainHierarchyDirectoryV1, TerrainPageBatchRequestV1,
-    TerrainPageBatchResultV1, TerrainPageKey, TerrainPageTransferCodecError, VOXEL_SIZE_METRES,
-    VoxelCoord, WaterPatch, WaterTileMesh, WorldId, WorldManifest, WorldProductPriority,
-    WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind, codec,
-    decode_region_terrain_directory, decode_terrain_page_batch_request,
-    decode_terrain_page_batch_result, encode_terrain_directory, encode_terrain_page_batch_request,
+    TerrainPageBatchResultV1, TerrainPageCodecError, TerrainPageKey, TerrainPageTransferCodecError,
+    TerrainPageV1, VOXEL_SIZE_METRES, VoxelCoord, WaterPatch, WaterTileMesh, WorldId,
+    WorldManifest, WorldProductPriority, WorldSourceError, WorldSourceIdentity,
+    WorldSourceIdentityHash, WorldSourceKind, codec, decode_region_terrain_directory,
+    decode_terrain_page, decode_terrain_page_batch_request, decode_terrain_page_batch_result,
+    encode_terrain_directory, encode_terrain_page, encode_terrain_page_batch_request,
     encode_terrain_page_batch_result,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,12 +24,13 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 35;
+pub const PROTOCOL_VERSION: u16 = 36;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
 pub const MAX_SURFACE_TILES_PER_BATCH: usize = 32;
 pub const MAX_TERRAIN_DIRECTORIES_PER_BATCH: usize = 64;
+pub const MAX_TERRAIN_REGION_COLUMNS_PER_BATCH: usize = 64;
 pub const MAX_PLAYERS_PER_PRESENCE_DELTA: usize = 1_024;
 pub const MAX_PLAYER_NAME_BYTES: usize = 32;
 pub const MAX_EDIT_MUTATIONS: usize = EDIT_MAX_VOLUME_VOXELS;
@@ -70,6 +72,8 @@ const KIND_TERRAIN_DIRECTORY_BATCH: u16 = 20;
 const KIND_TERRAIN_DIRECTORY_BATCH_RESULT: u16 = 21;
 const KIND_TERRAIN_PAGE_BATCH: u16 = 22;
 const KIND_TERRAIN_PAGE_BATCH_RESULT: u16 = 23;
+const KIND_TERRAIN_REGION_COLUMN_BATCH: u16 = 24;
+const KIND_TERRAIN_REGION_COLUMN_BATCH_RESULT: u16 = 25;
 const FLAG_NONE: u16 = 0;
 const RESERVED: u16 = 0;
 const RESULT_CODEC_BROTLI: u8 = 1;
@@ -506,9 +510,16 @@ pub enum TerrainDirectoryFailure {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerrainDirectoryBootstrap {
+    pub directory: TerrainHierarchyDirectoryV1,
+    /// Mandatory last-resident owner for this directory's fixed root.
+    pub root_page: TerrainPageV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TerrainDirectoryBatchItem {
     pub root: TerrainPageKey,
-    pub result: Result<TerrainHierarchyDirectoryV1, TerrainDirectoryFailure>,
+    pub result: Result<TerrainDirectoryBootstrap, TerrainDirectoryFailure>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -516,6 +527,43 @@ pub struct TerrainDirectoryBatchResult {
     pub request_id: u64,
     pub source_identity_hash: WorldSourceIdentityHash,
     pub items: Vec<TerrainDirectoryBatchItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerrainRegionColumnBatchRequest {
+    pub request_id: u64,
+    pub priority: WorldProductPriority,
+    /// Fixed-region X/Z coordinates, sorted lexicographically and unique.
+    pub columns: Vec<[i32; 2]>,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerrainRegionColumnFailure {
+    Unavailable = 1,
+    GenerationFailed = 2,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerrainRegionColumn {
+    pub column: [i32; 2],
+    /// Monotonic maximum edit revision in this horizontal region column.
+    pub revision: u64,
+    /// Fixed production roots containing generated, authored, water, or edited geometry.
+    pub roots: Vec<TerrainPageKey>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerrainRegionColumnBatchItem {
+    pub column: [i32; 2],
+    pub result: Result<TerrainRegionColumn, TerrainRegionColumnFailure>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerrainRegionColumnBatchResult {
+    pub request_id: u64,
+    pub source_identity_hash: WorldSourceIdentityHash,
+    pub items: Vec<TerrainRegionColumnBatchItem>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -807,6 +855,7 @@ pub enum ProtocolError {
     Compression(&'static str),
     ChunkCodec(codec::CodecError),
     TerrainDirectory(TerrainDirectoryError),
+    TerrainPage(TerrainPageCodecError),
     TerrainPageTransfer(TerrainPageTransferCodecError),
 }
 
@@ -829,6 +878,7 @@ impl fmt::Display for ProtocolError {
             Self::Compression(reason) => write!(formatter, "VXWP compression: {reason}"),
             Self::ChunkCodec(error) => write!(formatter, "VXWP chunk payload: {error}"),
             Self::TerrainDirectory(error) => write!(formatter, "VXWP terrain directory: {error}"),
+            Self::TerrainPage(error) => write!(formatter, "VXWP terrain page: {error}"),
             Self::TerrainPageTransfer(error) => {
                 write!(formatter, "VXWP terrain page transfer: {error}")
             }
@@ -847,6 +897,12 @@ impl From<codec::CodecError> for ProtocolError {
 impl From<TerrainDirectoryError> for ProtocolError {
     fn from(error: TerrainDirectoryError) -> Self {
         Self::TerrainDirectory(error)
+    }
+}
+
+impl From<TerrainPageCodecError> for ProtocolError {
+    fn from(error: TerrainPageCodecError) -> Self {
+        Self::TerrainPage(error)
     }
 }
 
@@ -1686,16 +1742,20 @@ pub fn encode_terrain_directory_batch_result(
     for item in &result.items {
         encode_terrain_page_key(&mut payload, item.root);
         match &item.result {
-            Ok(directory) => {
-                let encoded = encode_terrain_directory(directory)?;
+            Ok(bootstrap) => {
+                let encoded_directory = encode_terrain_directory(&bootstrap.directory)?;
+                let encoded_root = encode_terrain_page(&bootstrap.root_page)?;
                 payload.push(0);
                 payload.extend_from_slice(&[0; 3]);
-                push_u32(&mut payload, encoded.len() as u32);
-                payload.extend_from_slice(&encoded);
+                push_u32(&mut payload, encoded_directory.len() as u32);
+                push_u32(&mut payload, encoded_root.len() as u32);
+                payload.extend_from_slice(&encoded_directory);
+                payload.extend_from_slice(&encoded_root);
             }
             Err(failure) => {
                 payload.push(*failure as u8);
                 payload.extend_from_slice(&[0; 3]);
+                push_u32(&mut payload, 0);
                 push_u32(&mut payload, 0);
             }
         }
@@ -1737,22 +1797,33 @@ pub fn decode_terrain_directory_batch_result(
                 "reserved terrain directory result bytes are nonzero",
             ));
         }
-        let len = cursor.u32()? as usize;
-        let body = cursor.bytes(len)?;
+        let directory_len = cursor.u32()? as usize;
+        let root_len = cursor.u32()? as usize;
+        let directory_body = cursor.bytes(directory_len)?;
+        let root_body = cursor.bytes(root_len)?;
         let result = match status {
             0 => {
-                let directory = decode_region_terrain_directory(body, source_identity_hash)?;
+                let directory =
+                    decode_region_terrain_directory(directory_body, source_identity_hash)?;
                 if directory.roots().map(|node| node.key).collect::<Vec<_>>() != [root] {
                     return Err(ProtocolError::InvalidPayload(
                         "terrain directory root mismatch",
                     ));
                 }
-                Ok(directory)
+                let root_page = decode_terrain_page(root_body, source_identity_hash)?;
+                Ok(TerrainDirectoryBootstrap {
+                    directory,
+                    root_page,
+                })
             }
-            1 if body.is_empty() => Err(TerrainDirectoryFailure::Unavailable),
-            2 if body.is_empty() => Err(TerrainDirectoryFailure::GenerationFailed),
+            1 if directory_body.is_empty() && root_body.is_empty() => {
+                Err(TerrainDirectoryFailure::Unavailable)
+            }
+            2 if directory_body.is_empty() && root_body.is_empty() => {
+                Err(TerrainDirectoryFailure::GenerationFailed)
+            }
             value => {
-                return Err(if body.is_empty() {
+                return Err(if directory_body.is_empty() && root_body.is_empty() {
                     ProtocolError::UnknownEnum("terrain directory failure", u64::from(value))
                 } else {
                     ProtocolError::InvalidPayload("terrain directory failure carries a payload")
@@ -1768,6 +1839,169 @@ pub fn decode_terrain_directory_batch_result(
         items,
     };
     validate_terrain_directory_result(&result)?;
+    Ok(result)
+}
+
+pub fn encode_terrain_region_column_batch(
+    request: &TerrainRegionColumnBatchRequest,
+) -> Result<Vec<u8>, ProtocolError> {
+    validate_terrain_region_columns(request.request_id, &request.columns)?;
+    let mut payload = Vec::with_capacity(8 + request.columns.len() * 8);
+    payload.push(request.priority as u8);
+    payload.extend_from_slice(&[0; 3]);
+    push_u16(&mut payload, request.columns.len() as u16);
+    push_u16(&mut payload, 0);
+    for [x, z] in &request.columns {
+        push_i32(&mut payload, *x);
+        push_i32(&mut payload, *z);
+    }
+    Ok(encode_frame(
+        KIND_TERRAIN_REGION_COLUMN_BATCH,
+        request.request_id,
+        &payload,
+    ))
+}
+
+pub fn decode_terrain_region_column_batch(
+    bytes: &[u8],
+) -> Result<TerrainRegionColumnBatchRequest, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_kind(&frame, KIND_TERRAIN_REGION_COLUMN_BATCH)?;
+    let mut cursor = Cursor::new(frame.payload);
+    let priority = decode_priority(cursor.u8()?)?;
+    if cursor.bytes(3)? != [0; 3] {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved terrain region column request bytes are nonzero",
+        ));
+    }
+    let count = usize::from(cursor.u16()?);
+    if cursor.u16()? != 0 {
+        return Err(ProtocolError::InvalidPayload(
+            "reserved terrain region column request field is nonzero",
+        ));
+    }
+    let mut columns = Vec::with_capacity(count);
+    for _ in 0..count {
+        columns.push([cursor.i32()?, cursor.i32()?]);
+    }
+    cursor.finish()?;
+    validate_terrain_region_columns(frame.request_id, &columns)?;
+    Ok(TerrainRegionColumnBatchRequest {
+        request_id: frame.request_id,
+        priority,
+        columns,
+    })
+}
+
+pub fn encode_terrain_region_column_batch_result(
+    result: &TerrainRegionColumnBatchResult,
+) -> Result<Vec<u8>, ProtocolError> {
+    validate_terrain_region_column_result(result)?;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(result.source_identity_hash.as_bytes());
+    push_u16(&mut payload, result.items.len() as u16);
+    push_u16(&mut payload, 0);
+    for item in &result.items {
+        push_i32(&mut payload, item.column[0]);
+        push_i32(&mut payload, item.column[1]);
+        match &item.result {
+            Ok(column) => {
+                payload.push(0);
+                payload.extend_from_slice(&[0; 3]);
+                push_u64(&mut payload, column.revision);
+                push_u16(&mut payload, column.roots.len() as u16);
+                push_u16(&mut payload, 0);
+                for root in &column.roots {
+                    push_i32(&mut payload, root.coord[1]);
+                }
+            }
+            Err(failure) => {
+                payload.push(*failure as u8);
+                payload.extend_from_slice(&[0; 3]);
+                push_u64(&mut payload, 0);
+                push_u16(&mut payload, 0);
+                push_u16(&mut payload, 0);
+            }
+        }
+    }
+    if payload.len().saturating_add(FRAME_HEADER_BYTES) > MAX_PROTOCOL_FRAME_BYTES {
+        return Err(ProtocolError::LimitExceeded(
+            "terrain region column result frame bytes",
+        ));
+    }
+    Ok(encode_frame(
+        KIND_TERRAIN_REGION_COLUMN_BATCH_RESULT,
+        result.request_id,
+        &payload,
+    ))
+}
+
+pub fn decode_terrain_region_column_batch_result(
+    bytes: &[u8],
+) -> Result<TerrainRegionColumnBatchResult, ProtocolError> {
+    let frame = decode_frame(bytes)?;
+    expect_kind(&frame, KIND_TERRAIN_REGION_COLUMN_BATCH_RESULT)?;
+    if frame.request_id == 0 {
+        return Err(ProtocolError::InvalidPayload("request id must be nonzero"));
+    }
+    let mut cursor = Cursor::new(frame.payload);
+    let source_identity_hash = WorldSourceIdentityHash::from_bytes(cursor.array()?);
+    let count = usize::from(cursor.u16()?);
+    if count == 0 || count > MAX_TERRAIN_REGION_COLUMNS_PER_BATCH || cursor.u16()? != 0 {
+        return Err(ProtocolError::LimitExceeded(
+            "terrain region column result batch",
+        ));
+    }
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        let column = [cursor.i32()?, cursor.i32()?];
+        let status = cursor.u8()?;
+        if cursor.bytes(3)? != [0; 3] {
+            return Err(ProtocolError::InvalidPayload(
+                "reserved terrain region column result bytes are nonzero",
+            ));
+        }
+        let revision = cursor.u64()?;
+        let root_count = usize::from(cursor.u16()?);
+        if cursor.u16()? != 0 {
+            return Err(ProtocolError::InvalidPayload(
+                "reserved terrain region column root field is nonzero",
+            ));
+        }
+        let mut roots = Vec::with_capacity(root_count);
+        for _ in 0..root_count {
+            roots.push(TerrainPageKey {
+                level: TERRAIN_REGION_ROOT_LEVEL,
+                coord: [column[0], cursor.i32()?, column[1]],
+            });
+        }
+        let result = match status {
+            0 => Ok(TerrainRegionColumn {
+                column,
+                revision,
+                roots,
+            }),
+            1 if revision == 0 && roots.is_empty() => Err(TerrainRegionColumnFailure::Unavailable),
+            2 if revision == 0 && roots.is_empty() => {
+                Err(TerrainRegionColumnFailure::GenerationFailed)
+            }
+            value => {
+                return Err(if revision == 0 && roots.is_empty() {
+                    ProtocolError::UnknownEnum("terrain region column failure", u64::from(value))
+                } else {
+                    ProtocolError::InvalidPayload("terrain region column failure carries a payload")
+                });
+            }
+        };
+        items.push(TerrainRegionColumnBatchItem { column, result });
+    }
+    cursor.finish()?;
+    let result = TerrainRegionColumnBatchResult {
+        request_id: frame.request_id,
+        source_identity_hash,
+        items,
+    };
+    validate_terrain_region_column_result(&result)?;
     Ok(result)
 }
 
@@ -1883,12 +2117,78 @@ fn validate_terrain_directory_result(
         .collect::<Vec<_>>();
     validate_terrain_directory_roots(result.request_id, &roots)?;
     for item in &result.items {
-        if let Ok(directory) = &item.result
-            && (directory.source_identity_hash != result.source_identity_hash
-                || directory.roots().map(|node| node.key).collect::<Vec<_>>() != [item.root])
+        if let Ok(bootstrap) = &item.result {
+            let root_node = bootstrap.directory.node(item.root);
+            if bootstrap.directory.source_identity_hash != result.source_identity_hash
+                || bootstrap
+                    .directory
+                    .roots()
+                    .map(|node| node.key)
+                    .collect::<Vec<_>>()
+                    != [item.root]
+                || bootstrap.root_page.source_identity_hash != result.source_identity_hash
+                || bootstrap.root_page.key != item.root
+                || root_node.is_none_or(|node| {
+                    node.revision != bootstrap.root_page.revision
+                        || node.content_fingerprint != bootstrap.root_page.content_fingerprint
+                })
+            {
+                return Err(ProtocolError::InvalidPayload(
+                    "terrain directory bootstrap identity mismatch",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_terrain_region_columns(
+    request_id: u64,
+    columns: &[[i32; 2]],
+) -> Result<(), ProtocolError> {
+    if request_id == 0
+        || columns.is_empty()
+        || columns.len() > MAX_TERRAIN_REGION_COLUMNS_PER_BATCH
+        || !columns.windows(2).all(|pair| pair[0] < pair[1])
+        || columns.iter().any(|[x, z]| {
+            TerrainPageKey {
+                level: TERRAIN_REGION_ROOT_LEVEL,
+                coord: [*x, 0, *z],
+            }
+            .bounds()
+            .is_none()
+        })
+    {
+        return Err(ProtocolError::InvalidPayload(
+            "invalid terrain region columns",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_terrain_region_column_result(
+    result: &TerrainRegionColumnBatchResult,
+) -> Result<(), ProtocolError> {
+    let columns = result
+        .items
+        .iter()
+        .map(|item| item.column)
+        .collect::<Vec<_>>();
+    validate_terrain_region_columns(result.request_id, &columns)?;
+    for item in &result.items {
+        if let Ok(column) = &item.result
+            && (column.column != item.column
+                || column.revision == 0
+                || column.roots.is_empty()
+                || !column.roots.windows(2).all(|pair| pair[0] < pair[1])
+                || column.roots.iter().any(|root| {
+                    root.level != TERRAIN_REGION_ROOT_LEVEL
+                        || [root.coord[0], root.coord[2]] != item.column
+                        || root.bounds().is_none()
+                }))
         {
             return Err(ProtocolError::InvalidPayload(
-                "terrain directory result identity mismatch",
+                "terrain region column result identity mismatch",
             ));
         }
     }
@@ -2898,6 +3198,14 @@ pub const fn virtual_terrain_page_batch_kind() -> u16 {
 
 pub const fn virtual_terrain_page_batch_result_kind() -> u16 {
     KIND_TERRAIN_PAGE_BATCH_RESULT
+}
+
+pub const fn terrain_region_column_batch_kind() -> u16 {
+    KIND_TERRAIN_REGION_COLUMN_BATCH
+}
+
+pub const fn terrain_region_column_batch_result_kind() -> u16 {
+    KIND_TERRAIN_REGION_COLUMN_BATCH_RESULT
 }
 
 fn encode_player_pose_body(output: &mut Vec<u8>, pose: PlayerPoseUpdate) {
@@ -5910,15 +6218,53 @@ mod tests {
             level: TERRAIN_REGION_ROOT_LEVEL,
             coord: [3, -5, 8],
         };
+        fn exact_subtree(
+            source: WorldSourceIdentityHash,
+            key: TerrainPageKey,
+        ) -> Vec<TerrainPageV1> {
+            if key.level == 0 {
+                let split_y = key
+                    .ancestor_at(TERRAIN_REGION_ROOT_LEVEL)
+                    .and_then(TerrainPageKey::bounds)
+                    .map(|bounds| bounds.min.y + (bounds.max.y - bounds.min.y) / 2)
+                    .expect("root bounds");
+                return vec![
+                    crate::build_exact_terrain_page(source, key, 9, |coord| {
+                        if coord.y < split_y {
+                            Material::Stone
+                        } else {
+                            Material::Air
+                        }
+                    })
+                    .expect("exact leaf"),
+                ];
+            }
+            let mut pages = Vec::new();
+            let mut children = Vec::new();
+            for child in key.children().expect("children") {
+                let subtree = exact_subtree(source, child);
+                children.push(subtree.last().cloned().expect("child root"));
+                pages.extend(subtree);
+            }
+            pages.push(
+                crate::build_exact_cluster_terrain_parent(key, 9, &children).expect("exact parent"),
+            );
+            pages
+        }
+        let pages = exact_subtree(source, ready_root);
+        let directory =
+            TerrainHierarchyDirectoryV1::from_region_pages(&pages).expect("bootstrap directory");
+        let root_page = pages.last().cloned().expect("root page");
         let result = TerrainDirectoryBatchResult {
             request_id: 72,
             source_identity_hash: source,
             items: vec![
                 TerrainDirectoryBatchItem {
                     root: ready_root,
-                    result: Ok(crate::terrain_directory::test_structural_region_directory(
-                        source, ready_root,
-                    )),
+                    result: Ok(TerrainDirectoryBootstrap {
+                        directory,
+                        root_page,
+                    }),
                 },
                 TerrainDirectoryBatchItem {
                     root: missing_root,
@@ -5932,6 +6278,65 @@ mod tests {
                 &encode_terrain_directory_batch_result(&result).expect("encode directory result")
             ),
             Ok(result)
+        );
+    }
+
+    #[test]
+    fn virtual_terrain_region_columns_round_trip_exact_vertical_roots() {
+        let request = TerrainRegionColumnBatchRequest {
+            request_id: 73,
+            priority: WorldProductPriority::Prefetch,
+            columns: vec![[-8, 2], [3, 11]],
+        };
+        assert_eq!(
+            decode_terrain_region_column_batch(
+                &encode_terrain_region_column_batch(&request).expect("encode column request")
+            ),
+            Ok(request.clone())
+        );
+
+        let source = WorldSourceIdentityHash::from_bytes([43; 32]);
+        let result = TerrainRegionColumnBatchResult {
+            request_id: request.request_id,
+            source_identity_hash: source,
+            items: vec![
+                TerrainRegionColumnBatchItem {
+                    column: [-8, 2],
+                    result: Ok(TerrainRegionColumn {
+                        column: [-8, 2],
+                        revision: 17,
+                        roots: vec![
+                            TerrainPageKey {
+                                level: TERRAIN_REGION_ROOT_LEVEL,
+                                coord: [-8, -2, 2],
+                            },
+                            TerrainPageKey {
+                                level: TERRAIN_REGION_ROOT_LEVEL,
+                                coord: [-8, -1, 2],
+                            },
+                        ],
+                    }),
+                },
+                TerrainRegionColumnBatchItem {
+                    column: [3, 11],
+                    result: Err(TerrainRegionColumnFailure::Unavailable),
+                },
+            ],
+        };
+        assert_eq!(
+            decode_terrain_region_column_batch_result(
+                &encode_terrain_region_column_batch_result(&result).expect("encode column result")
+            ),
+            Ok(result)
+        );
+
+        let mut duplicate = request;
+        duplicate.columns[1] = duplicate.columns[0];
+        assert_eq!(
+            encode_terrain_region_column_batch(&duplicate),
+            Err(ProtocolError::InvalidPayload(
+                "invalid terrain region columns"
+            ))
         );
     }
 

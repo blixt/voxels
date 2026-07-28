@@ -402,12 +402,21 @@ pub struct ScreenshotVirtualRegionState {
     pub in_flight: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScreenshotVirtualColumnState {
+    pub column: [i32; 2],
+    pub resolved_revision: Option<u64>,
+    pub minimum_revision: u64,
+    pub in_flight: bool,
+}
+
 /// Exact host-side residency/request state captured on the frame that owns screenshot readback.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ScreenshotStreamingManifest {
     pub surface_epoch: u64,
     pub surface_pages: Vec<ScreenshotSurfacePageState>,
     pub canonical_pages: Vec<ScreenshotCanonicalPageState>,
+    pub virtual_columns: Vec<ScreenshotVirtualColumnState>,
     pub virtual_regions: Vec<ScreenshotVirtualRegionState>,
     pub virtual_pending_pages: usize,
     pub virtual_in_flight_pages: usize,
@@ -12642,6 +12651,8 @@ fn screenshot_streaming_manifest_json(manifest: &ScreenshotStreamingManifest) ->
     });
     let mut virtual_regions = manifest.virtual_regions.clone();
     virtual_regions.sort_unstable_by_key(|region| region.root);
+    let mut virtual_columns = manifest.virtual_columns.clone();
+    virtual_columns.sort_unstable_by_key(|column| column.column);
     let mut encoded = format!(
         r#"{{"surfaceEpoch":"{}","surfacePages":["#,
         manifest.surface_epoch
@@ -12690,6 +12701,26 @@ fn screenshot_streaming_manifest_json(manifest: &ScreenshotStreamingManifest) ->
             page.revision,
             page.phase,
             page.desired,
+        );
+    }
+    encoded.push_str("],\"virtualColumns\":[");
+    for (index, column) in virtual_columns.iter().enumerate() {
+        if index != 0 {
+            encoded.push(',');
+        }
+        let _ = write!(
+            encoded,
+            concat!(
+                r#"{{"key":"virtual-column:{}:{}","x":{},"z":{},"resolvedRevision":{},"#,
+                r#""minimumRevision":"{}","inFlight":{}}}"#
+            ),
+            column.column[0],
+            column.column[1],
+            column.column[0],
+            column.column[1],
+            json_optional_u64(column.resolved_revision),
+            column.minimum_revision,
+            column.in_flight,
         );
     }
     encoded.push_str("],\"virtualRegions\":[");
@@ -13018,6 +13049,12 @@ mod tests {
     #[test]
     fn screenshot_streaming_manifest_includes_virtual_transport_state() {
         let manifest = ScreenshotStreamingManifest {
+            virtual_columns: vec![ScreenshotVirtualColumnState {
+                column: [-2, 4],
+                resolved_revision: Some(16),
+                minimum_revision: 15,
+                in_flight: true,
+            }],
             virtual_regions: vec![ScreenshotVirtualRegionState {
                 root: TerrainPageKey {
                     level: TERRAIN_REGION_ROOT_LEVEL,
@@ -13041,8 +13078,9 @@ mod tests {
         assert_eq!(
             screenshot_streaming_manifest_json(&manifest),
             concat!(
-                r#"{"surfaceEpoch":"0","surfacePages":[],"canonicalPages":[],"virtualRegions":["#,
-                r#"{"key":"virtual:3:-2:3:4","level":3,"x":-2,"y":3,"z":4,"minimumRevision":"17","registered":true,"inFlight":false}],"#,
+                r#"{"surfaceEpoch":"0","surfacePages":[],"canonicalPages":[],"virtualColumns":["#,
+                r#"{"key":"virtual-column:-2:4","x":-2,"z":4,"resolvedRevision":"16","minimumRevision":"15","inFlight":true}],"virtualRegions":["#,
+                r#"{"key":"virtual:2:-2:3:4","level":2,"x":-2,"y":3,"z":4,"minimumRevision":"17","registered":true,"inFlight":false}],"#,
                 r#""virtualStream":{"pendingPages":5,"inFlightPages":6,"obsoleteInFlightPages":2,"cancelledPendingPages":"7","usefulBytes":"8","#,
                 r#""cancellationWasteBytes":"9","failedPages":"10","cachePages":11,"cacheBytes":"12"}}"#
             )

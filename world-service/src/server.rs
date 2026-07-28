@@ -41,20 +41,23 @@ use voxels_world::protocol::{
     EncodedChunkBatchItem, EncodedSurfaceTileBatchItem, FRAME_FRAGMENT_OVERHEAD_BYTES, PlayerId,
     PlayerIdentity, PlayerResume, PresenceOpened, PresencePong, ResyncRequired, SpawnPoint,
     SurfaceTileBatchItem, SurfaceTileBatchRequest, TerrainDirectoryBatchItem,
-    TerrainDirectoryBatchRequest, TerrainDirectoryBatchResult, TerrainDirectoryFailure,
+    TerrainDirectoryBatchRequest, TerrainDirectoryBatchResult, TerrainDirectoryBootstrap,
+    TerrainDirectoryFailure, TerrainRegionColumn, TerrainRegionColumnBatchItem,
+    TerrainRegionColumnBatchRequest, TerrainRegionColumnBatchResult, TerrainRegionColumnFailure,
     VirtualTerrainPageBatchRequest, VirtualTerrainPageBatchResult, VoxelMutation,
     WorldCapabilities, WorldEnvironmentSnapshot, WorldOpened, cancel_kind, chunk_batch_kind,
     clone_message_with_request_id, decode_cancel, decode_chunk_batch, decode_edit_command,
     decode_open_presence, decode_open_world, decode_player_pose, decode_presence_ping,
-    decode_surface_tile_batch, decode_terrain_directory_batch, decode_virtual_terrain_page_batch,
-    edit_command_kind, encode_chunk_batch_item, encode_chunk_batch_result_from_items,
-    encode_edit_commit, encode_error, encode_frame_fragment, encode_frame_fragment_abort,
-    encode_presence_opened, encode_presence_pong, encode_resync_required,
-    encode_surface_tile_batch_item, encode_surface_tile_batch_result_from_items,
-    encode_terrain_directory_batch_result, encode_virtual_terrain_page_batch_result,
+    decode_surface_tile_batch, decode_terrain_directory_batch, decode_terrain_region_column_batch,
+    decode_virtual_terrain_page_batch, edit_command_kind, encode_chunk_batch_item,
+    encode_chunk_batch_result_from_items, encode_edit_commit, encode_error, encode_frame_fragment,
+    encode_frame_fragment_abort, encode_presence_opened, encode_presence_pong,
+    encode_resync_required, encode_surface_tile_batch_item,
+    encode_surface_tile_batch_result_from_items, encode_terrain_directory_batch_result,
+    encode_terrain_region_column_batch_result, encode_virtual_terrain_page_batch_result,
     encode_world_opened, message_kind, message_request_id, open_presence_kind, open_world_kind,
     player_pose_kind, presence_ping_kind, surface_tile_batch_kind, terrain_directory_batch_kind,
-    virtual_terrain_page_batch_kind,
+    terrain_region_column_batch_kind, virtual_terrain_page_batch_kind,
 };
 use voxels_world::{
     CHUNK_EDGE, ChunkCoord, Material, MeshingHalo, SurfaceSampleBlockRequest,
@@ -64,9 +67,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v35/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v35/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v35";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v36/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v36/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v36";
 pub const HEALTH_PATH: &str = "/healthz";
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const RESPONSE_ASSEMBLY_WORKER_DIVISOR: usize = 2;
@@ -1990,6 +1993,28 @@ async fn run_session(
                     break;
                 }
             }
+        } else if kind == terrain_region_column_batch_kind() {
+            let request = match decode_terrain_region_column_batch(&bytes) {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = send_control_error(&outbound, 0, &error.to_string()).await;
+                    break;
+                }
+            };
+            let tracked = match admit_tracked_request(&session, request.request_id) {
+                Ok(tracked) => tracked,
+                Err(message) => {
+                    let _ = send_control_error(&outbound, request.request_id, message).await;
+                    continue;
+                }
+            };
+            tokio::spawn(serve_virtual_terrain_region_columns(
+                request,
+                Arc::clone(&state.virtual_terrain),
+                outbound.clone(),
+                tracked,
+                state.max_frame_bytes,
+            ));
         } else if kind == terrain_directory_batch_kind() {
             let request = match decode_terrain_directory_batch(&bytes) {
                 Ok(request) => request,
@@ -2612,6 +2637,61 @@ async fn send_frame(
         .await
 }
 
+async fn serve_virtual_terrain_region_columns(
+    request: TerrainRegionColumnBatchRequest,
+    authority: Arc<VirtualTerrainAuthority>,
+    outbound: mpsc::Sender<OutboundFrame>,
+    tracked: TrackedRequest,
+    max_frame_bytes: usize,
+) {
+    let session = Arc::clone(&tracked.session);
+    let cancellation = Arc::clone(&tracked.cancelled);
+    let mut delivery = GenerationFrameDelivery::from_tracked(
+        request.request_id,
+        request.priority,
+        outbound,
+        tracked,
+    );
+    let session_permit = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => None,
+        permit = session.acquire_generation(request.priority) => permit,
+    };
+    let Some(_session_permit) = session_permit else {
+        delivery.finish();
+        return;
+    };
+    let mut items = Vec::with_capacity(request.columns.len());
+    for column in request.columns {
+        let generated = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                delivery.finish();
+                return;
+            }
+            generated = authority.discover_region_column(column, request.priority) => generated,
+        };
+        let result = match generated {
+            Ok(discovered) => Ok(TerrainRegionColumn {
+                column: discovered.column,
+                revision: discovered.revision,
+                roots: discovered.roots,
+            }),
+            Err(VirtualTerrainError::InvalidRoot) => Err(TerrainRegionColumnFailure::Unavailable),
+            Err(_) => Err(TerrainRegionColumnFailure::GenerationFailed),
+        };
+        items.push(TerrainRegionColumnBatchItem { column, result });
+    }
+    let response = TerrainRegionColumnBatchResult {
+        request_id: request.request_id,
+        source_identity_hash: authority.source_identity_hash(),
+        items,
+    };
+    let bytes = encode_terrain_region_column_batch_result(&response)
+        .unwrap_or_else(|error| encode_error(request.request_id, &error.to_string()));
+    delivery.send(bytes, true, max_frame_bytes).await;
+}
+
 async fn serve_virtual_terrain_directories(
     request: TerrainDirectoryBatchRequest,
     authority: Arc<VirtualTerrainAuthority>,
@@ -2647,7 +2727,13 @@ async fn serve_virtual_terrain_directories(
             generated = authority.ensure_region(root, request.priority) => generated,
         };
         let result = match generated {
-            Ok(region) => Ok(region.directory.clone()),
+            Ok(region) => region
+                .root_page()
+                .map(|root_page| TerrainDirectoryBootstrap {
+                    directory: region.directory.clone(),
+                    root_page,
+                })
+                .map_err(|_| TerrainDirectoryFailure::GenerationFailed),
             Err(VirtualTerrainError::InvalidRoot) => Err(TerrainDirectoryFailure::Unavailable),
             Err(_) => Err(TerrainDirectoryFailure::GenerationFailed),
         };
@@ -4296,6 +4382,39 @@ mod tests {
             Arc::new(Notify::new()),
         ));
         let (outbound, mut responses) = mpsc::channel(2);
+        let column_request = TerrainRegionColumnBatchRequest {
+            request_id: 800,
+            priority: WorldProductPriority::Prefetch,
+            columns: vec![[-1, 1]],
+        };
+        let tracked = admit_tracked_request(&session, column_request.request_id).expect("admitted");
+        serve_virtual_terrain_region_columns(
+            column_request,
+            Arc::clone(&authority),
+            outbound.clone(),
+            tracked,
+            voxels_world::protocol::MAX_PROTOCOL_FRAME_BYTES,
+        )
+        .await;
+        let column_frame = responses.recv().await.expect("column response");
+        let column_result =
+            voxels_world::protocol::decode_terrain_region_column_batch_result(&column_frame.bytes)
+                .expect("decode column response");
+        let column = column_result.items[0].result.as_ref().expect("column");
+        assert_eq!(column.column, [-1, 1]);
+        assert!(column.revision > 0);
+        assert!(!column.roots.is_empty());
+        assert!(
+            column
+                .roots
+                .iter()
+                .all(|root| [root.coord[0], root.coord[2]] == column.column)
+        );
+        column_frame
+            .tracked
+            .expect("terminal column request")
+            .finish();
+
         let directory_request = TerrainDirectoryBatchRequest {
             request_id: 801,
             priority: WorldProductPriority::VisibleSurface,
@@ -4316,17 +4435,32 @@ mod tests {
             voxels_world::protocol::decode_terrain_directory_batch_result(&directory_frame.bytes)
                 .expect("decode directory response");
         assert_eq!(directory_result.items.len(), 1);
-        let directory = directory_result.items[0]
+        let bootstrap = directory_result.items[0]
             .result
             .as_ref()
             .expect("directory");
-        assert_eq!(directory, &built.directory);
+        assert_eq!(bootstrap.directory, built.directory);
+        let built_root_page = built
+            .page(
+                built
+                    .directory
+                    .node(root)
+                    .map(|node| voxels_world::TerrainPageTransferIdentity {
+                        key: node.key,
+                        revision: node.revision,
+                        content_fingerprint: node.content_fingerprint,
+                    })
+                    .expect("built root identity"),
+            )
+            .expect("decode built root")
+            .expect("built root page");
+        assert_eq!(bootstrap.root_page, built_root_page);
         directory_frame
             .tracked
             .expect("terminal directory request")
             .finish();
 
-        let node = directory.node(root).expect("root node");
+        let node = bootstrap.directory.node(root).expect("root node");
         let identity = voxels_world::TerrainPageTransferIdentity {
             key: node.key,
             revision: node.revision,
@@ -5542,7 +5676,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v35, test-local-token"),
+            HeaderValue::from_static("voxels.world.v36, test-local-token"),
         );
         let (socket, response) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -6580,7 +6714,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v35, test-local-token"),
+            HeaderValue::from_static("voxels.world.v36, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -6614,7 +6748,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v35, test-local-token"),
+            HeaderValue::from_static("voxels.world.v36, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);

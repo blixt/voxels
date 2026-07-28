@@ -115,7 +115,10 @@ pub struct VirtualTerrainCut {
 
 impl VirtualTerrainCut {
     pub fn is_renderable(&self) -> bool {
-        self.ownerless_roots.is_empty() && !self.selection_overflow && !self.traversal_overflow
+        !self.selected_pages.is_empty()
+            && self.ownerless_roots.is_empty()
+            && !self.selection_overflow
+            && !self.traversal_overflow
     }
 }
 
@@ -928,6 +931,16 @@ mod tests {
         assert!(!cut.is_renderable());
         assert_eq!(cut.ownerless_roots.len(), 1);
         assert_eq!(cut.requested_pages.len(), 1);
+    }
+
+    #[test]
+    fn empty_hierarchy_is_not_a_renderable_owner() {
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        let cut = hierarchy.select_cut(view(false)).unwrap();
+        assert!(cut.selected_pages.is_empty());
+        assert!(cut.ownerless_roots.is_empty());
+        assert!(!cut.is_renderable());
     }
 
     #[test]

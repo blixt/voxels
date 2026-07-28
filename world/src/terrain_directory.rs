@@ -15,12 +15,13 @@ use std::fmt;
 pub const TERRAIN_DIRECTORY_SCHEMA_VERSION: u16 = 1;
 pub const TERRAIN_DIRECTORY_MAX_NODES: usize = 131_072;
 pub const TERRAIN_DIRECTORY_MAX_ROOTS: usize = 4_096;
-/// Production region roots cover a fixed 25.6 m cube (256 canonical 10 cm voxels per edge).
+/// Production region roots cover a fixed 12.8 m cube (128 canonical 10 cm voxels per edge).
 ///
-/// Fixed roots cap hierarchy build fanout and keep regional directories independently cacheable.
-/// The world is a forest of these roots; it is deliberately not one octree that grows until it
-/// encloses arbitrary coordinates.
-pub const TERRAIN_REGION_ROOT_LEVEL: u8 = 3;
+/// A complete region contains 64 exact 32³ leaves plus their 8 parents and one root. This keeps the
+/// first usable parent cheap enough to build inside the browser's request deadline while retaining
+/// independently cacheable fixed roots. The world is a forest of these roots; it is deliberately
+/// not one octree that grows until it encloses arbitrary coordinates.
+pub const TERRAIN_REGION_ROOT_LEVEL: u8 = 2;
 const DIRECTORY_MAGIC: &[u8; 4] = b"VXTD";
 const DIRECTORY_HEADER_BYTES: usize = 80;
 const DIRECTORY_NODE_BYTES: usize = 80;
@@ -549,45 +550,6 @@ impl<'a> Cursor<'a> {
     fn u64(&mut self) -> Result<u64, TerrainDirectoryError> {
         Ok(u64::from_le_bytes(self.array()?))
     }
-}
-
-#[cfg(test)]
-pub(crate) fn test_structural_region_directory(
-    source_identity_hash: WorldSourceIdentityHash,
-    root: TerrainPageKey,
-) -> TerrainHierarchyDirectoryV1 {
-    let mut pending = vec![root];
-    let mut keys = BTreeSet::new();
-    while let Some(key) = pending.pop() {
-        if !keys.insert(key) {
-            continue;
-        }
-        if let Some(children) = key.children() {
-            pending.extend(children);
-        }
-    }
-    let nodes = keys
-        .into_iter()
-        .map(|key| TerrainHierarchyNode {
-            key,
-            revision: 9,
-            content_fingerprint: *blake3::hash(format!("{key:?}").as_bytes()).as_bytes(),
-            errors: TerrainErrorBounds::EXACT,
-            topology: TerrainTopologyClass::Volumetric,
-            representation: TerrainPageRepresentationKind::SurfaceCluster,
-            encoded_bytes: 1_024,
-            has_children: key.level > 0,
-            is_root: key == root,
-        })
-        .collect();
-    let mut directory = TerrainHierarchyDirectoryV1 {
-        source_identity_hash,
-        nodes,
-        content_fingerprint: [0; 32],
-    };
-    directory.content_fingerprint = directory_fingerprint(&directory);
-    debug_assert!(directory.validates_region_partition());
-    directory
 }
 
 #[cfg(test)]

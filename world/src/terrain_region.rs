@@ -74,7 +74,7 @@ impl From<TerrainDirectoryError> for TerrainRegionBuildError {
     }
 }
 
-/// Builds one complete 25.6 m region hierarchy from canonical occupancy and material.
+/// Builds one complete 12.8 m region hierarchy from canonical occupancy and material.
 ///
 /// Every published page is independently decodable and at most 64 KiB. The returned directory
 /// contains the complete tree down to exact 32³ leaves, while the fixed root is immediately usable

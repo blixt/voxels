@@ -9,9 +9,9 @@ controls_enabled = false
 # The client knows only where canonical world products come from. The service chooses the
 # procedural or Terrain Diffusion provider in config/world-service.toml.
 [world]
-endpoint = "wss://voxels-world-blixt.fly.dev/v35/world"
-presence_endpoint = "wss://voxels-world-blixt.fly.dev/v35/presence"
-subprotocol = "voxels.world.v35"
+endpoint = "wss://voxels-world-blixt.fly.dev/v36/world"
+presence_endpoint = "wss://voxels-world-blixt.fly.dev/v36/presence"
+subprotocol = "voxels.world.v36"
 # The browser replaces this reserved marker with a short-lived credential from the same-origin
 # Cloudflare session endpoint before the TOML enters the Rust engine.
 auth_subprotocol_token = "session:/api/session"

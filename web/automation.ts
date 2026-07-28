@@ -1,7 +1,7 @@
 import type { BrowserPlayerSession } from "./local-player.ts";
 
 export const AUTOMATION_CONTRACT_VERSION = 7;
-export const SNAPSHOT_SCHEMA_VERSION = 41;
+export const SNAPSHOT_SCHEMA_VERSION = 42;
 export const FRAME_SAMPLE_WIDTH = 26;
 export const GPU_SAMPLE_WIDTH = 13;
 
@@ -228,10 +228,13 @@ export const SNAPSHOT = Object.freeze({
   virtualTerrainCancellationWasteMiB: 217,
   virtualTerrainCachePages: 218,
   virtualTerrainCacheMiB: 219,
-  frameSequence: 220,
-  schemaVersion: 221,
-  sampleCount: 222,
-  droppedSamples: 223,
+  virtualTerrainColumns: 220,
+  virtualTerrainColumnInFlight: 221,
+  virtualTerrainColumnRevisionFloors: 222,
+  frameSequence: 223,
+  schemaVersion: 224,
+  sampleCount: 225,
+  droppedSamples: 226,
 } as const);
 
 export type SnapshotField = keyof typeof SNAPSHOT;

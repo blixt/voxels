@@ -1125,6 +1125,34 @@ fn camera_from_resume_values(values: [f32; 5]) -> CameraState {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn virtual_terrain_column_corridor(start: [i32; 2], end: [i32; 2]) -> Vec<[i32; 2]> {
+    let [mut x, mut z] = start.map(i64::from);
+    let [end_x, end_z] = end.map(i64::from);
+    let delta_x = (end_x - x).abs();
+    let step_x = (end_x - x).signum();
+    let delta_z = -(end_z - z).abs();
+    let step_z = (end_z - z).signum();
+    let mut error = delta_x + delta_z;
+    let mut columns = Vec::new();
+    loop {
+        columns.push([x as i32, z as i32]);
+        if x == end_x && z == end_z {
+            break;
+        }
+        let doubled = error.saturating_mul(2);
+        if doubled >= delta_z {
+            error += delta_z;
+            x += step_x;
+        }
+        if doubled <= delta_x {
+            error += delta_x;
+            z += step_z;
+        }
+    }
+    columns
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const ATMOSPHERE_MOTION_PERIOD_SECONDS: f64 = 4_096.0;
@@ -1257,14 +1285,14 @@ mod web {
     use crate::remote::{
         RemoteChunkCompletion, RemoteEditEvent, RemoteRequestId, RemoteSurfaceCompletion,
         RemoteSurfaceTicket, RemoteTerrainDirectoryCompletion, RemoteTerrainPageCompletion,
-        RemoteWorldClient, RemoteWorldError,
+        RemoteTerrainRegionColumnCompletion, RemoteWorldClient, RemoteWorldError,
     };
     use crate::{
         ChunkPortalMask, INTERACTIVE_SURFACE_LOD_LEVELS, SurfaceStreamFocus,
         adaptive_surface_cross_radii, initialized_surface_level_prefix, predictive_stream_position,
         predictive_surface_position, surface_motion_axis, surface_offset_in_coverage,
         surface_product_priority, surface_stream_level_order, surface_tile_in_coverage,
-        world_environment_at,
+        virtual_terrain_column_corridor, world_environment_at,
     };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
@@ -1284,8 +1312,9 @@ mod web {
         ChunkActivationReason, HostUiAction, LocalLightVisibility, MissionControlConfig, Renderer,
         RendererConfig, RendererFeatureConfig, ScreenshotCanonicalPageState, ScreenshotCapture,
         ScreenshotFeatureState, ScreenshotMutableRenderState, ScreenshotReproductionIdentity,
-        ScreenshotStreamingManifest, ScreenshotSurfacePageState, ScreenshotVirtualRegionState,
-        VirtualTerrainRenderMode, VirtualTerrainRendererError, VolumetricCloudConfig,
+        ScreenshotStreamingManifest, ScreenshotSurfacePageState, ScreenshotVirtualColumnState,
+        ScreenshotVirtualRegionState, VirtualTerrainRenderMode, VirtualTerrainRendererError,
+        VolumetricCloudConfig,
     };
     use voxels_render::shadow::DirectionalShadowConfig;
     use voxels_render::ui::{LiveStats, NavigationTelemetry};
@@ -1298,7 +1327,8 @@ mod web {
     use voxels_world::protocol::{
         BrowserUserId, EDIT_CUBE_EDGE_VOXELS, EDIT_CUBE_VOLUME_VOXELS, EDIT_SPHERE_RADIUS_VOXELS,
         EDIT_SPHERE_VOLUME_VOXELS, EditAction, EditShape, EditVolume, MaterialInventory, PlayerId,
-        PlayerIdentity, VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
+        PlayerIdentity, TerrainRegionColumn, VoxelMutation, WorldCapabilities,
+        WorldEnvironmentSnapshot,
     };
     use voxels_world::{
         AtmosphereSample, BinaryMeshScratch, CHUNK_EDGE, CHUNK_VOXEL_BYTES,
@@ -1317,7 +1347,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 7;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 41;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 42;
     const FRAME_SAMPLE_WIDTH: u32 = 26;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -1335,15 +1365,21 @@ mod web {
         "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
         "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
         "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,canonicalSurfaceCellsResident,canonicalSurfaceCellsRequired,",
-        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,lodIncompleteTransitionEdges,lodCutTransitionActive,lodCutTransitionPhase,virtualTerrainMode,virtualTerrainRegisteredRegions,virtualTerrainDirectoryInFlight,virtualTerrainDirectoryNodes,virtualTerrainResidentPages,virtualTerrainResidentMiB,virtualTerrainResidentPrimitives,virtualTerrainSelectedPages,virtualTerrainRequestedPages,virtualTerrainOwnerlessRoots,virtualTerrainGpuMatchesCpuCut,virtualTerrainStreamPending,virtualTerrainStreamInFlight,virtualTerrainCancellationWasteMiB,virtualTerrainCachePages,virtualTerrainCacheMiB,frameSequence,schemaVersion,sampleCount,",
+        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,lodIncompleteTransitionEdges,lodCutTransitionActive,lodCutTransitionPhase,virtualTerrainMode,virtualTerrainRegisteredRegions,virtualTerrainDirectoryInFlight,virtualTerrainDirectoryNodes,virtualTerrainResidentPages,virtualTerrainResidentMiB,virtualTerrainResidentPrimitives,virtualTerrainSelectedPages,virtualTerrainRequestedPages,virtualTerrainOwnerlessRoots,virtualTerrainGpuMatchesCpuCut,virtualTerrainStreamPending,virtualTerrainStreamInFlight,virtualTerrainCancellationWasteMiB,virtualTerrainCachePages,virtualTerrainCacheMiB,virtualTerrainColumns,virtualTerrainColumnInFlight,virtualTerrainColumnRevisionFloors,frameSequence,schemaVersion,sampleCount,",
         "droppedSamples",
     );
     const SURFACE_HINT_VERTICAL_MARGIN_CHUNKS: i32 = 1;
     const INTERACTIVE_SURFACE_BATCH: usize = 4;
     const BACKGROUND_SURFACE_BATCH: usize = 2;
     const BACKGROUND_SURFACE_BATCHES_IN_FLIGHT: usize = 4;
+    const VIRTUAL_TERRAIN_MAX_COLUMNS: usize = 16;
+    const VIRTUAL_TERRAIN_MAX_COLUMN_BATCHES_IN_FLIGHT: usize = 2;
+    // Column discovery is CPU generation, not a transport-only lookup. Four columns amortize the
+    // socket round trip without serializing the entire 1.5 s lookahead corridor into one stale
+    // request; two such batches can use both negotiated per-client generation lanes.
+    const VIRTUAL_TERRAIN_COLUMN_BATCH_SIZE: usize = 4;
     const VIRTUAL_TERRAIN_MAX_REGIONS: usize = 48;
-    const VIRTUAL_TERRAIN_MAX_DIRECTORY_IN_FLIGHT: usize = 1;
+    const VIRTUAL_TERRAIN_MAX_DIRECTORY_BATCHES_IN_FLIGHT: usize = 2;
     const VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS: u64 = 1_000;
     const VIRTUAL_TERRAIN_PAGE_CACHE_BYTES: usize = 128 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_REFINE_ABOVE_PIXELS: f64 = 0.75;
@@ -1376,6 +1412,10 @@ mod web {
 
     #[derive(Default)]
     struct VirtualTerrainStreamingState {
+        columns: BTreeMap<[i32; 2], TerrainRegionColumn>,
+        column_in_flight: BTreeMap<[i32; 2], RemoteRequestId>,
+        column_retry_after_ms: BTreeMap<[i32; 2], u64>,
+        minimum_column_revisions: BTreeMap<[i32; 2], u64>,
         registered_roots: BTreeSet<TerrainPageKey>,
         directory_in_flight: BTreeMap<TerrainPageKey, RemoteRequestId>,
         directory_retry_after_ms: BTreeMap<TerrainPageKey, u64>,
@@ -1979,8 +2019,30 @@ mod web {
                     desired: status.desired,
                 })
                 .collect();
-            let virtual_regions = {
+            let (virtual_columns, virtual_regions) = {
                 let state = self.virtual_terrain.borrow();
+                let columns = state
+                    .columns
+                    .keys()
+                    .chain(state.column_in_flight.keys())
+                    .chain(state.minimum_column_revisions.keys())
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .map(|column| ScreenshotVirtualColumnState {
+                        column,
+                        resolved_revision: state
+                            .columns
+                            .get(&column)
+                            .map(|resolved| resolved.revision),
+                        minimum_revision: state
+                            .minimum_column_revisions
+                            .get(&column)
+                            .copied()
+                            .unwrap_or(0),
+                        in_flight: state.column_in_flight.contains_key(&column),
+                    })
+                    .collect();
                 let roots = state
                     .registered_roots
                     .iter()
@@ -1988,7 +2050,7 @@ mod web {
                     .chain(state.minimum_region_revisions.keys())
                     .copied()
                     .collect::<BTreeSet<_>>();
-                roots
+                let regions = roots
                     .into_iter()
                     .map(|root| ScreenshotVirtualRegionState {
                         root,
@@ -2000,7 +2062,8 @@ mod web {
                         registered: state.registered_roots.contains(&root),
                         in_flight: state.directory_in_flight.contains_key(&root),
                     })
-                    .collect()
+                    .collect();
+                (columns, regions)
             };
             let virtual_stream = self.virtual_terrain_scheduler.borrow().stats();
             let (virtual_cache_pages, virtual_cache_bytes) = {
@@ -2011,6 +2074,7 @@ mod web {
                 surface_epoch: revisions.epoch(),
                 surface_pages,
                 canonical_pages,
+                virtual_columns,
                 virtual_regions,
                 virtual_pending_pages: virtual_stream.pending_pages,
                 virtual_in_flight_pages: virtual_stream.in_flight_pages,
@@ -3303,79 +3367,158 @@ mod web {
             }
         }
 
-        fn desired_virtual_terrain_roots(&self, camera: &CameraState) -> Vec<TerrainPageKey> {
-            let mut roots = BTreeSet::new();
-            for columns in self.surface_chunk_hints.borrow().values() {
-                for (&(chunk_x, chunk_z), chunk_ys) in columns {
-                    for &chunk_y in chunk_ys {
-                        let leaf = TerrainPageKey {
-                            level: 0,
-                            coord: [chunk_x, chunk_y, chunk_z],
-                        };
-                        if let Some(root) = leaf.ancestor_at(TERRAIN_REGION_ROOT_LEVEL) {
-                            roots.insert(root);
-                        }
-                    }
-                }
-            }
-
-            // Bootstrap the containing region before the first transitional surface hint arrives.
+        fn desired_virtual_terrain_columns(
+            &self,
+            camera: &CameraState,
+            streaming_velocity: Vec3,
+        ) -> Vec<[i32; 2]> {
             let camera_chunk = world_to_chunk(camera.position);
             let camera_leaf = TerrainPageKey {
                 level: 0,
                 coord: [camera_chunk.x, camera_chunk.y, camera_chunk.z],
             };
-            if let Some(root) = camera_leaf.ancestor_at(TERRAIN_REGION_ROOT_LEVEL) {
-                for offset_y in -1..=1 {
-                    let mut adjacent = root;
-                    adjacent.coord[1] = adjacent.coord[1].saturating_add(offset_y);
-                    if adjacent.bounds().is_some() {
-                        roots.insert(adjacent);
+            let Some(camera_root) = camera_leaf.ancestor_at(TERRAIN_REGION_ROOT_LEVEL) else {
+                return Vec::new();
+            };
+            let predicted_position = camera.position
+                + streaming_velocity * self.config.stream_velocity_lookahead_seconds.max(0.0);
+            let predicted_chunk = world_to_chunk(predicted_position);
+            let predicted_root = TerrainPageKey {
+                level: 0,
+                coord: [predicted_chunk.x, predicted_chunk.y, predicted_chunk.z],
+            }
+            .ancestor_at(TERRAIN_REGION_ROOT_LEVEL)
+            .unwrap_or(camera_root);
+            let camera_position = camera.position.to_array().map(f64::from);
+            let predicted_position = predicted_position.to_array().map(f64::from);
+            let forward = camera.forward().to_array().map(f64::from);
+            let root_span_metres =
+                f64::from(CHUNK_EDGE as u32 * (1_u32 << TERRAIN_REGION_ROOT_LEVEL)) * 0.1;
+            let radius = (f64::from(self.config.view_distance_metres) / root_span_metres)
+                .ceil()
+                .clamp(1.0, 64.0) as i32;
+            let mut ranked = BTreeMap::new();
+            for offset_z in -radius..=radius {
+                for offset_x in -radius..=radius {
+                    let column = [
+                        camera_root.coord[0].saturating_add(offset_x),
+                        camera_root.coord[2].saturating_add(offset_z),
+                    ];
+                    let probe = TerrainPageKey {
+                        level: TERRAIN_REGION_ROOT_LEVEL,
+                        coord: [column[0], camera_root.coord[1], column[1]],
+                    };
+                    if probe.bounds().is_none() {
+                        continue;
                     }
+                    let center = terrain_page_center_metres(probe);
+                    let delta_x = center[0] - camera_position[0];
+                    let delta_z = center[2] - camera_position[2];
+                    let current_distance_squared = delta_x * delta_x + delta_z * delta_z;
+                    let predicted_delta_x = center[0] - predicted_position[0];
+                    let predicted_delta_z = center[2] - predicted_position[2];
+                    let predicted_distance_squared = predicted_delta_x * predicted_delta_x
+                        + predicted_delta_z * predicted_delta_z;
+                    let distance_squared = current_distance_squared.min(predicted_distance_squared);
+                    if distance_squared
+                        > f64::from(self.config.view_distance_metres).powi(2)
+                            + root_span_metres.powi(2)
+                    {
+                        continue;
+                    }
+                    let forward_distance = delta_x * forward[0] + delta_z * forward[2];
+                    // A two-column directional lead keeps fast travel supplied while the squared
+                    // distance term guarantees that the camera-containing column ranks first.
+                    let score =
+                        distance_squared - forward_distance.max(0.0) * root_span_metres * 2.0;
+                    ranked.insert(column, score);
                 }
             }
-
-            let camera_position = camera.position.to_array().map(f64::from);
-            let forward = camera.forward().to_array().map(f64::from);
-            let mut ranked = roots
-                .into_iter()
-                .map(|root| {
-                    let center = terrain_page_center_metres(root);
-                    let offset =
-                        std::array::from_fn::<_, 3, _>(|axis| center[axis] - camera_position[axis]);
-                    let distance_squared =
-                        offset.into_iter().map(|value| value * value).sum::<f64>();
-                    let forward_distance = offset
-                        .into_iter()
-                        .zip(forward)
-                        .map(|(value, direction)| value * direction)
-                        .sum::<f64>();
-                    // Give approaching regions one region-width of lead without letting far
-                    // forward work displace the camera's immediate ownership.
-                    let score = distance_squared - forward_distance.max(0.0) * 25.6;
-                    (root, score)
-                })
-                .collect::<Vec<_>>();
+            let mut ranked = ranked.into_iter().collect::<Vec<_>>();
             ranked.sort_by(|left, right| {
                 left.1
                     .total_cmp(&right.1)
                     .then_with(|| left.0.cmp(&right.0))
             });
-            ranked
-                .into_iter()
-                .take(VIRTUAL_TERRAIN_MAX_REGIONS)
-                .map(|(root, _)| root)
-                .collect()
+            let current_column = [camera_root.coord[0], camera_root.coord[2]];
+            let predicted_column = [predicted_root.coord[0], predicted_root.coord[2]];
+            let mut prioritized = Vec::with_capacity(VIRTUAL_TERRAIN_MAX_COLUMNS);
+            let mut included = BTreeSet::new();
+            // Current ownership is needed immediately. The predicted endpoint follows so the
+            // slowest build starts against its deadline, then every crossed fixed column is
+            // enumerated explicitly. Pure endpoint ranking skipped the intervening 12.8 m roots
+            // at flight speed and made successful lookahead useless.
+            for column in std::iter::once(current_column)
+                .chain(std::iter::once(predicted_column))
+                .chain(virtual_terrain_column_corridor(
+                    current_column,
+                    predicted_column,
+                ))
+                .chain(ranked.into_iter().map(|(column, _)| column))
+            {
+                if included.insert(column) {
+                    prioritized.push(column);
+                    if prioritized.len() == VIRTUAL_TERRAIN_MAX_COLUMNS {
+                        break;
+                    }
+                }
+            }
+            prioritized
+        }
+
+        fn desired_virtual_terrain_roots(
+            &self,
+            prioritized_columns: &[[i32; 2]],
+            camera: &CameraState,
+        ) -> Vec<TerrainPageKey> {
+            let state = self.virtual_terrain.borrow();
+            let camera_position = camera.position.to_array().map(f64::from);
+            let mut roots = Vec::new();
+            for column in prioritized_columns
+                .iter()
+                .filter_map(|column| state.columns.get(column))
+            {
+                let mut column_roots = column.roots.to_vec();
+                column_roots.sort_by(|left, right| {
+                    terrain_page_distance_metres(*left, camera_position)
+                        .total_cmp(&terrain_page_distance_metres(*right, camera_position))
+                        .then_with(|| left.cmp(right))
+                });
+                roots.extend(column_roots);
+                if roots.len() >= VIRTUAL_TERRAIN_MAX_REGIONS {
+                    roots.truncate(VIRTUAL_TERRAIN_MAX_REGIONS);
+                    break;
+                }
+            }
+            roots
         }
 
         fn stream_virtual_terrain(&self, camera: &CameraState, streaming_velocity: Vec3) {
             if !self.virtual_terrain_supported()
-                || self.initialized_surface_level_count.get() < INTERACTIVE_SURFACE_LOD_LEVELS
+                // Migration-only scheduling fence: do not let expensive virtual-region builds
+                // occupy the old renderer's request/generation capacity before its startup cut is
+                // complete. This disappears with the surface-ring renderer at hard cutover.
+                || self.initialized_surface_level_count.get() < SURFACE_LOD_LEVEL_COUNT
             {
                 return;
             }
             let now_ms = self.last_time.get().max(0.0) as u64;
-            let prioritized_roots = self.desired_virtual_terrain_roots(camera);
+            let prioritized_columns =
+                self.desired_virtual_terrain_columns(camera, streaming_velocity);
+            let desired_columns = prioritized_columns.iter().copied().collect::<BTreeSet<_>>();
+            {
+                let mut state = self.virtual_terrain.borrow_mut();
+                state
+                    .columns
+                    .retain(|column, _| desired_columns.contains(column));
+                state
+                    .column_retry_after_ms
+                    .retain(|column, _| desired_columns.contains(column));
+            }
+            self.request_virtual_terrain_columns(&prioritized_columns, now_ms);
+
+            let prioritized_roots =
+                self.desired_virtual_terrain_roots(&prioritized_columns, camera);
             let desired_roots = prioritized_roots.iter().copied().collect::<BTreeSet<_>>();
 
             let removed_roots = {
@@ -3441,7 +3584,7 @@ mod web {
                 .next_batch(now_ms);
             if let Some(batch) = batch
                 && let Err(error) = self.remote.submit_terrain_page_batch(
-                    WorldProductPriority::VisibleSurface,
+                    WorldProductPriority::ImmediateSurface,
                     batch.pages.clone(),
                 )
             {
@@ -3479,6 +3622,65 @@ mod web {
             }
         }
 
+        fn request_virtual_terrain_columns(&self, desired_columns: &[[i32; 2]], now_ms: u64) {
+            let columns = {
+                let state = self.virtual_terrain.borrow();
+                let in_flight_batches = state
+                    .column_in_flight
+                    .values()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .len();
+                if in_flight_batches >= VIRTUAL_TERRAIN_MAX_COLUMN_BATCHES_IN_FLIGHT {
+                    return;
+                }
+                desired_columns
+                    .iter()
+                    .filter(|column| {
+                        !state.columns.contains_key(*column)
+                            && !state.column_in_flight.contains_key(*column)
+                            && state
+                                .column_retry_after_ms
+                                .get(*column)
+                                .is_none_or(|retry_at| *retry_at <= now_ms)
+                    })
+                    .take(VIRTUAL_TERRAIN_COLUMN_BATCH_SIZE)
+                    .copied()
+                    .collect::<Vec<_>>()
+            };
+            if columns.is_empty() {
+                return;
+            }
+            match self.remote.submit_terrain_region_column_batch(
+                WorldProductPriority::ImmediateSurface,
+                columns.clone(),
+            ) {
+                Ok(request_id) => {
+                    self.virtual_terrain
+                        .borrow_mut()
+                        .column_in_flight
+                        .extend(columns.into_iter().map(|column| (column, request_id)));
+                }
+                Err(error) => {
+                    let mut state = self.virtual_terrain.borrow_mut();
+                    for column in columns {
+                        state.column_retry_after_ms.insert(
+                            column,
+                            now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
+                        );
+                    }
+                    if !matches!(
+                        error,
+                        RemoteWorldError::Backpressured
+                            | RemoteWorldError::RequestWindowFull
+                            | RemoteWorldError::NotOpen
+                    ) {
+                        log_gpu_error(&format!("request virtual terrain columns: {error}"));
+                    }
+                }
+            }
+        }
+
         fn request_virtual_terrain_directories(
             &self,
             desired_roots: &[TerrainPageKey],
@@ -3486,8 +3688,14 @@ mod web {
         ) {
             let roots = {
                 let state = self.virtual_terrain.borrow();
-                let available = VIRTUAL_TERRAIN_MAX_DIRECTORY_IN_FLIGHT
-                    .saturating_sub(state.directory_in_flight.len());
+                let in_flight_batches = state
+                    .directory_in_flight
+                    .values()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .len();
+                let available = VIRTUAL_TERRAIN_MAX_DIRECTORY_BATCHES_IN_FLIGHT
+                    .saturating_sub(in_flight_batches);
                 desired_roots
                     .iter()
                     .filter(|root| {
@@ -3505,31 +3713,46 @@ mod web {
             if roots.is_empty() {
                 return;
             }
-            match self
-                .remote
-                .submit_terrain_directory_batch(WorldProductPriority::Prefetch, roots.clone())
-            {
-                Ok(request_id) => {
-                    self.virtual_terrain
-                        .borrow_mut()
-                        .directory_in_flight
-                        .extend(roots.into_iter().map(|root| (root, request_id)));
-                }
-                Err(error) => {
-                    let mut state = self.virtual_terrain.borrow_mut();
-                    for root in roots {
-                        state.directory_retry_after_ms.insert(
-                            root,
-                            now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
-                        );
+            // One root per request lets the service's per-client generation lanes build distinct
+            // deadlines concurrently. Putting two roots in one ordered batch serialized them
+            // inside a single worker and made the second root miss fast-travel handoff.
+            for root in roots {
+                match self.remote.submit_terrain_directory_batch(
+                    WorldProductPriority::ImmediateSurface,
+                    vec![root],
+                ) {
+                    Ok(request_id) => {
+                        self.virtual_terrain
+                            .borrow_mut()
+                            .directory_in_flight
+                            .insert(root, request_id);
                     }
-                    if !matches!(
-                        error,
-                        RemoteWorldError::Backpressured
-                            | RemoteWorldError::RequestWindowFull
-                            | RemoteWorldError::NotOpen
-                    ) {
-                        log_gpu_error(&format!("request virtual terrain directories: {error}"));
+                    Err(error) => {
+                        self.virtual_terrain
+                            .borrow_mut()
+                            .directory_retry_after_ms
+                            .insert(
+                                root,
+                                now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
+                            );
+                        if !matches!(
+                            error,
+                            RemoteWorldError::Backpressured
+                                | RemoteWorldError::RequestWindowFull
+                                | RemoteWorldError::NotOpen
+                        ) {
+                            log_gpu_error(&format!(
+                                "request virtual terrain directory {root:?}: {error}"
+                            ));
+                        }
+                        if matches!(
+                            error,
+                            RemoteWorldError::Backpressured
+                                | RemoteWorldError::RequestWindowFull
+                                | RemoteWorldError::NotOpen
+                        ) {
+                            break;
+                        }
                     }
                 }
             }
@@ -3620,6 +3843,66 @@ mod web {
             groups
         }
 
+        fn accept_remote_terrain_region_column_completion(
+            &self,
+            completion: RemoteTerrainRegionColumnCompletion,
+        ) {
+            let now_ms = self.last_time.get().max(0.0) as u64;
+            let accepted = {
+                let mut state = self.virtual_terrain.borrow_mut();
+                let accepted = completion
+                    .columns
+                    .iter()
+                    .copied()
+                    .filter(|column| {
+                        state.column_in_flight.get(column) == Some(&completion.request_id)
+                    })
+                    .collect::<BTreeSet<_>>();
+                state.column_in_flight.retain(|column, request_id| {
+                    *request_id != completion.request_id || !accepted.contains(column)
+                });
+                accepted
+            };
+            if accepted.is_empty() {
+                return;
+            }
+            let Ok(result) = completion.result else {
+                let mut state = self.virtual_terrain.borrow_mut();
+                for column in accepted {
+                    state.column_retry_after_ms.insert(
+                        column,
+                        now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
+                    );
+                }
+                return;
+            };
+            let mut state = self.virtual_terrain.borrow_mut();
+            for item in result.items {
+                if !accepted.contains(&item.column) {
+                    continue;
+                }
+                let Ok(column) = item.result else {
+                    state.column_retry_after_ms.insert(
+                        item.column,
+                        now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
+                    );
+                    continue;
+                };
+                let minimum_revision = state
+                    .minimum_column_revisions
+                    .get(&item.column)
+                    .copied()
+                    .unwrap_or(0);
+                if column.revision < minimum_revision {
+                    state.column_retry_after_ms.insert(item.column, now_ms);
+                    continue;
+                }
+                state.minimum_column_revisions.remove(&item.column);
+                state.column_retry_after_ms.remove(&item.column);
+                state.columns.insert(item.column, column);
+            }
+        }
+
         fn accept_remote_terrain_directory_completion(
             &self,
             completion: RemoteTerrainDirectoryCompletion,
@@ -3647,7 +3930,7 @@ mod web {
             }
             for item in result.items {
                 let root = item.root;
-                let Ok(directory) = item.result else {
+                let Ok(bootstrap) = item.result else {
                     self.virtual_terrain
                         .borrow_mut()
                         .directory_retry_after_ms
@@ -3664,7 +3947,8 @@ mod web {
                     .get(&root)
                     .copied()
                     .unwrap_or(0);
-                let directory_revision = directory
+                let directory_revision = bootstrap
+                    .directory
                     .nodes
                     .iter()
                     .find(|node| node.key == root && node.is_root)
@@ -3687,20 +3971,61 @@ mod web {
                 {
                     continue;
                 }
-                match self
-                    .renderer
-                    .borrow_mut()
-                    .register_virtual_terrain_directory(&directory)
-                {
+                let existing_roots = self
+                    .virtual_terrain
+                    .borrow()
+                    .registered_roots
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>();
+                let publication = {
+                    let mut renderer = self.renderer.borrow_mut();
+                    match renderer.register_virtual_terrain_directory(&bootstrap.directory) {
+                        Ok(()) => match renderer
+                            .upload_virtual_terrain_page(bootstrap.root_page.clone())
+                        {
+                            Ok(()) => Ok(()),
+                            Err(error) => {
+                                let rollback = renderer
+                                    .retain_virtual_terrain_regions(existing_roots.iter().copied());
+                                Err((error, rollback.err()))
+                            }
+                        },
+                        Err(error) => Err((error, None)),
+                    }
+                };
+                match publication {
                     Ok(()) => {
+                        match encode_terrain_page(&bootstrap.root_page) {
+                            Ok(encoded) => {
+                                if let Err(error) = self
+                                    .virtual_terrain_cache
+                                    .borrow_mut()
+                                    .insert(encoded, false)
+                                {
+                                    log_gpu_error(&format!(
+                                        "cache virtual terrain bootstrap root: {error}"
+                                    ));
+                                }
+                            }
+                            Err(error) => {
+                                log_gpu_error(&format!(
+                                    "encode virtual terrain bootstrap root: {error}"
+                                ));
+                            }
+                        }
                         let mut state = self.virtual_terrain.borrow_mut();
                         state.registered_roots.insert(root);
                         state.directory_retry_after_ms.remove(&root);
-                        state
-                            .nodes
-                            .extend(directory.nodes.into_iter().map(|node| (node.key, node)));
+                        state.nodes.extend(
+                            bootstrap
+                                .directory
+                                .nodes
+                                .into_iter()
+                                .map(|node| (node.key, node)),
+                        );
                     }
-                    Err(error) => {
+                    Err((error, rollback_error)) => {
                         self.virtual_terrain
                             .borrow_mut()
                             .directory_retry_after_ms
@@ -3709,6 +4034,11 @@ mod web {
                                 now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
                             );
                         log_gpu_error(&format!("register virtual terrain directory: {error}"));
+                        if let Some(rollback_error) = rollback_error {
+                            log_gpu_error(&format!(
+                                "rollback virtual terrain bootstrap: {rollback_error}"
+                            ));
+                        }
                     }
                 }
             }
@@ -3732,6 +4062,10 @@ mod web {
             if invalid.is_empty() {
                 return;
             }
+            let invalid_columns = invalid
+                .iter()
+                .map(|root| [root.coord[0], root.coord[2]])
+                .collect::<BTreeSet<_>>();
             let keep = {
                 let state = self.virtual_terrain.borrow();
                 state
@@ -3745,6 +4079,11 @@ mod web {
                 let request_ids = invalid
                     .iter()
                     .filter_map(|root| state.directory_in_flight.get(root).copied())
+                    .chain(
+                        invalid_columns
+                            .iter()
+                            .filter_map(|column| state.column_in_flight.get(column).copied()),
+                    )
                     .collect::<BTreeSet<_>>();
                 if !request_ids.is_empty() {
                     let canceled_roots = state
@@ -3756,6 +4095,16 @@ mod web {
                     for root in canceled_roots {
                         state.directory_in_flight.remove(&root);
                         state.directory_retry_after_ms.remove(&root);
+                    }
+                    let canceled_columns = state
+                        .column_in_flight
+                        .iter()
+                        .filter(|(_, request_id)| request_ids.contains(request_id))
+                        .map(|(column, _)| *column)
+                        .collect::<Vec<_>>();
+                    for column in canceled_columns {
+                        state.column_in_flight.remove(&column);
+                        state.column_retry_after_ms.remove(&column);
                     }
                 }
                 request_ids
@@ -3774,6 +4123,17 @@ mod web {
                 return;
             }
             let mut state = self.virtual_terrain.borrow_mut();
+            for column in invalid_columns {
+                state.columns.remove(&column);
+                state.column_retry_after_ms.remove(&column);
+                if let Some(revision) = minimum_revision {
+                    state
+                        .minimum_column_revisions
+                        .entry(column)
+                        .and_modify(|minimum| *minimum = (*minimum).max(revision))
+                        .or_insert(revision);
+                }
+            }
             state
                 .registered_roots
                 .retain(|root| !invalid.contains(root));
@@ -3794,13 +4154,15 @@ mod web {
         }
 
         fn reset_virtual_terrain_streaming(&self) {
-            let request_ids = self
-                .virtual_terrain
-                .borrow()
-                .directory_in_flight
-                .values()
-                .copied()
-                .collect::<BTreeSet<_>>();
+            let request_ids = {
+                let state = self.virtual_terrain.borrow();
+                state
+                    .directory_in_flight
+                    .values()
+                    .chain(state.column_in_flight.values())
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+            };
             for request_id in request_ids {
                 self.remote.cancel(request_id);
             }
@@ -3896,7 +4258,13 @@ mod web {
                 };
                 self.accept_remote_surface_completion(completion);
             }
-            for _ in 0..VIRTUAL_TERRAIN_MAX_DIRECTORY_IN_FLIGHT {
+            for _ in 0..VIRTUAL_TERRAIN_MAX_COLUMN_BATCHES_IN_FLIGHT {
+                let Some(completion) = self.remote.next_terrain_region_column_completion() else {
+                    break;
+                };
+                self.accept_remote_terrain_region_column_completion(completion);
+            }
+            for _ in 0..VIRTUAL_TERRAIN_MAX_DIRECTORY_BATCHES_IN_FLIGHT {
                 let Some(completion) = self.remote.next_terrain_directory_completion() else {
                     break;
                 };
@@ -5725,12 +6093,18 @@ mod web {
                     (mode, pages, bytes, primitives)
                 };
                 let (
+                    virtual_terrain_columns,
+                    virtual_terrain_column_in_flight,
+                    virtual_terrain_column_revision_floors,
                     virtual_terrain_registered_regions,
                     virtual_terrain_directory_in_flight,
                     virtual_terrain_directory_nodes,
                 ) = {
                     let state = engine.virtual_terrain.borrow();
                     (
+                        state.columns.len(),
+                        state.column_in_flight.len(),
+                        state.minimum_column_revisions.len(),
                         state.registered_roots.len(),
                         state.directory_in_flight.len(),
                         state.nodes.len(),
@@ -6013,6 +6387,9 @@ mod web {
                     virtual_terrain_stream.cancellation_waste_bytes as f32 / (1024.0 * 1024.0),
                     virtual_terrain_cache_pages as f32,
                     virtual_terrain_cache_bytes as f32 / (1024.0 * 1024.0),
+                    virtual_terrain_columns as f32,
+                    virtual_terrain_column_in_flight as f32,
+                    virtual_terrain_column_revision_floors as f32,
                     engine.frame_sequence.get() as f32,
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);
@@ -7185,6 +7562,19 @@ mod tests {
                 .into_iter()
                 .all(|coord| { !ready.contains(&(coord.x, coord.y, coord.z)) })
         );
+    }
+
+    #[test]
+    fn virtual_terrain_column_corridor_covers_every_crossed_deadline() {
+        let columns = virtual_terrain_column_corridor([10, -4], [16, -1]);
+        assert_eq!(columns.first(), Some(&[10, -4]));
+        assert_eq!(columns.last(), Some(&[16, -1]));
+        assert_eq!(columns.len(), 7);
+        assert!(columns.windows(2).all(|pair| {
+            let delta_x = (pair[1][0] - pair[0][0]).abs();
+            let delta_z = (pair[1][1] - pair[0][1]).abs();
+            delta_x <= 1 && delta_z <= 1 && delta_x + delta_z > 0
+        }));
     }
 
     #[test]

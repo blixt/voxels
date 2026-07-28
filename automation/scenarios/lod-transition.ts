@@ -148,6 +148,30 @@ function cameraPosition(snapshot: readonly number[]): Vector3 {
   ];
 }
 
+function virtualTerrainState(snapshot: readonly number[]) {
+  return {
+    mode: snapshotValue(snapshot, "virtualTerrainMode"),
+    registeredRegions: snapshotValue(snapshot, "virtualTerrainRegisteredRegions"),
+    directoryInFlight: snapshotValue(snapshot, "virtualTerrainDirectoryInFlight"),
+    directoryNodes: snapshotValue(snapshot, "virtualTerrainDirectoryNodes"),
+    residentPages: snapshotValue(snapshot, "virtualTerrainResidentPages"),
+    residentMiB: snapshotValue(snapshot, "virtualTerrainResidentMiB"),
+    residentPrimitives: snapshotValue(snapshot, "virtualTerrainResidentPrimitives"),
+    selectedPages: snapshotValue(snapshot, "virtualTerrainSelectedPages"),
+    requestedPages: snapshotValue(snapshot, "virtualTerrainRequestedPages"),
+    ownerlessRoots: snapshotValue(snapshot, "virtualTerrainOwnerlessRoots"),
+    gpuMatchesCpuCut: snapshotValue(snapshot, "virtualTerrainGpuMatchesCpuCut") === 1,
+    streamPending: snapshotValue(snapshot, "virtualTerrainStreamPending"),
+    streamInFlight: snapshotValue(snapshot, "virtualTerrainStreamInFlight"),
+    cancellationWasteMiB: snapshotValue(snapshot, "virtualTerrainCancellationWasteMiB"),
+    cachePages: snapshotValue(snapshot, "virtualTerrainCachePages"),
+    cacheMiB: snapshotValue(snapshot, "virtualTerrainCacheMiB"),
+    columns: snapshotValue(snapshot, "virtualTerrainColumns"),
+    columnInFlight: snapshotValue(snapshot, "virtualTerrainColumnInFlight"),
+    columnRevisionFloors: snapshotValue(snapshot, "virtualTerrainColumnRevisionFloors"),
+  };
+}
+
 function planarDistance(left: Vector3, right: Vector3): number {
   return Math.hypot(left[0] - right[0], left[2] - right[2]);
 }
@@ -936,6 +960,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       readonly cutTransitionActive: boolean;
       readonly cutTransitionPhase: number;
       readonly surfaceQueued: number;
+      readonly virtualTerrain: ReturnType<typeof virtualTerrainState>;
     }> = [];
     let worstScreenshot = options.geometrySourceTravel ? await page.screenshot() : before;
     let worst = await analyzeWatertightTerrain(page, worstScreenshot, diagnosticTarget);
@@ -960,6 +985,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
           cutTransitionActive: snapshotValue(snapshot, "lodCutTransitionActive") === 1,
           cutTransitionPhase: snapshotValue(snapshot, "lodCutTransitionPhase"),
           surfaceQueued: snapshotValue(snapshot, "surfaceQueued"),
+          virtualTerrain: virtualTerrainState(snapshot),
         });
         if (
           analysis.enclosedPixels > worst.enclosedPixels ||
@@ -1080,6 +1106,15 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     if (uncoveredOwnerSamples > 0) {
       violations.push("sustained travel sampled a world point without an LOD owner");
     }
+    if (
+      samples.some(
+        (sample) =>
+          sample.virtualTerrain.mode === 2 &&
+          (sample.virtualTerrain.ownerlessRoots > 0 || !sample.virtualTerrain.gpuMatchesCpuCut),
+      )
+    ) {
+      violations.push("visible virtual terrain lost exact CPU/GPU cut ownership");
+    }
     if (descentCoverage && travelFinishedPose[1] > descentStopHeight + 5) {
       violations.push("spectator descent did not reach the registered near-ground handoff");
     }
@@ -1118,6 +1153,32 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
           last: samples.at(-1)?.surfaceQueued ?? 0,
           maximum: Math.max(0, ...samples.map((sample) => sample.surfaceQueued)),
         },
+        virtualTerrain: {
+          visibleSamples: samples.filter((sample) => sample.virtualTerrain.mode === 2).length,
+          maximumRegisteredRegions: Math.max(
+            0,
+            ...samples.map((sample) => sample.virtualTerrain.registeredRegions),
+          ),
+          maximumResidentPages: Math.max(
+            0,
+            ...samples.map((sample) => sample.virtualTerrain.residentPages),
+          ),
+          maximumSelectedPages: Math.max(
+            0,
+            ...samples.map((sample) => sample.virtualTerrain.selectedPages),
+          ),
+          maximumRequestedPages: Math.max(
+            0,
+            ...samples.map((sample) => sample.virtualTerrain.requestedPages),
+          ),
+          maximumOwnerlessRoots: Math.max(
+            0,
+            ...samples.map((sample) => sample.virtualTerrain.ownerlessRoots),
+          ),
+          gpuMismatchSamples: samples.filter(
+            (sample) => sample.virtualTerrain.mode === 2 && !sample.virtualTerrain.gpuMatchesCpuCut,
+          ).length,
+        },
         lodQuality: summarizeTravelLodQuality(samples),
       },
       worst,
@@ -1133,6 +1194,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
             "lodIncompleteTransitionEdges",
           ),
           surfaceQueued: snapshotValue(stoppedImmediateSnapshot, "surfaceQueued"),
+          virtualTerrain: virtualTerrainState(stoppedImmediateSnapshot),
         },
         settled: {
           image: stoppedSettled,
@@ -1142,6 +1204,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
             "lodIncompleteTransitionEdges",
           ),
           surfaceQueued: snapshotValue(stoppedSettledSnapshot, "surfaceQueued"),
+          virtualTerrain: virtualTerrainState(stoppedSettledSnapshot),
         },
       },
       samples,

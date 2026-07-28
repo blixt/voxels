@@ -16,8 +16,9 @@ use voxels_runtime::{WorkStage, WorkTicket};
 use voxels_world::protocol::{
     self, ChunkBatchRequest, ChunkBatchResult, EditAction, EditCommand, EditCommit,
     FrameReassembler, OpenWorld, PlayerIdentity, SurfaceTileBatchRequest, SurfaceTileBatchResult,
-    TerrainDirectoryBatchRequest, TerrainDirectoryBatchResult, VirtualTerrainPageBatchRequest,
-    VirtualTerrainPageBatchResult, WorldCapabilities, WorldOpened,
+    TerrainDirectoryBatchRequest, TerrainDirectoryBatchResult, TerrainRegionColumnBatchRequest,
+    TerrainRegionColumnBatchResult, VirtualTerrainPageBatchRequest, VirtualTerrainPageBatchResult,
+    WorldCapabilities, WorldOpened,
 };
 use voxels_world::{
     ChunkCoord, SurfaceTileCoord, TerrainPageBatchRequestV1, TerrainPageTransferIdentity,
@@ -119,6 +120,13 @@ pub struct RemoteTerrainDirectoryCompletion {
     pub request_id: RemoteRequestId,
     pub roots: Vec<voxels_world::TerrainPageKey>,
     pub result: Result<TerrainDirectoryBatchResult, RemoteWorldError>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RemoteTerrainRegionColumnCompletion {
+    pub request_id: RemoteRequestId,
+    pub columns: Vec<[i32; 2]>,
+    pub result: Result<TerrainRegionColumnBatchResult, RemoteWorldError>,
 }
 
 #[derive(Clone, Debug)]
@@ -269,6 +277,24 @@ impl RemoteWorldClient {
             .pop_front()
     }
 
+    pub fn submit_terrain_region_column_batch(
+        &self,
+        priority: WorldProductPriority,
+        columns: Vec<[i32; 2]>,
+    ) -> Result<RemoteRequestId, RemoteWorldError> {
+        self.inner
+            .send_terrain_region_column_request(priority, columns)
+    }
+
+    pub fn next_terrain_region_column_completion(
+        &self,
+    ) -> Option<RemoteTerrainRegionColumnCompletion> {
+        self.inner
+            .terrain_region_column_completions
+            .borrow_mut()
+            .pop_front()
+    }
+
     pub fn submit_terrain_page_batch(
         &self,
         priority: WorldProductPriority,
@@ -323,6 +349,7 @@ struct RemoteInner {
     pending: RefCell<BTreeMap<RemoteRequestId, PendingBatch>>,
     completions: RefCell<VecDeque<RemoteChunkCompletion>>,
     surface_completions: RefCell<VecDeque<RemoteSurfaceCompletion>>,
+    terrain_region_column_completions: RefCell<VecDeque<RemoteTerrainRegionColumnCompletion>>,
     terrain_directory_completions: RefCell<VecDeque<RemoteTerrainDirectoryCompletion>>,
     terrain_page_completions: RefCell<VecDeque<RemoteTerrainPageCompletion>>,
     pending_edits: RefCell<BTreeMap<u64, EditCommand>>,
@@ -347,6 +374,10 @@ enum PendingBatch {
         priority: WorldProductPriority,
         roots: Vec<voxels_world::TerrainPageKey>,
     },
+    TerrainRegionColumns {
+        priority: WorldProductPriority,
+        columns: Vec<[i32; 2]>,
+    },
     TerrainPages {
         priority: WorldProductPriority,
         requested: Vec<TerrainPageTransferIdentity>,
@@ -357,6 +388,7 @@ enum PendingBatch {
 enum PendingBatchKind {
     Chunks,
     Surface,
+    TerrainRegionColumns,
     TerrainDirectories,
     TerrainPages,
 }
@@ -366,6 +398,7 @@ impl PendingBatch {
         match self {
             Self::Chunks { priority, .. }
             | Self::Surface { priority, .. }
+            | Self::TerrainRegionColumns { priority, .. }
             | Self::TerrainDirectories { priority, .. }
             | Self::TerrainPages { priority, .. } => *priority,
         }
@@ -375,6 +408,7 @@ impl PendingBatch {
         match self {
             Self::Chunks { .. } => PendingBatchKind::Chunks,
             Self::Surface { .. } => PendingBatchKind::Surface,
+            Self::TerrainRegionColumns { .. } => PendingBatchKind::TerrainRegionColumns,
             Self::TerrainDirectories { .. } => PendingBatchKind::TerrainDirectories,
             Self::TerrainPages { .. } => PendingBatchKind::TerrainPages,
         }
@@ -409,6 +443,7 @@ impl RemoteInner {
             pending: RefCell::new(BTreeMap::new()),
             completions: RefCell::new(VecDeque::new()),
             surface_completions: RefCell::new(VecDeque::new()),
+            terrain_region_column_completions: RefCell::new(VecDeque::new()),
             terrain_directory_completions: RefCell::new(VecDeque::new()),
             terrain_page_completions: RefCell::new(VecDeque::new()),
             pending_edits: RefCell::new(BTreeMap::new()),
@@ -594,6 +629,8 @@ impl RemoteInner {
             self.handle_chunk_result(generation, &bytes);
         } else if kind == protocol::surface_tile_batch_result_kind() {
             self.handle_surface_result(generation, &bytes);
+        } else if kind == protocol::terrain_region_column_batch_result_kind() {
+            self.handle_terrain_region_column_result(generation, &bytes);
         } else if kind == protocol::terrain_directory_batch_result_kind() {
             self.handle_terrain_directory_result(generation, &bytes);
         } else if kind == protocol::virtual_terrain_page_batch_result_kind() {
@@ -839,6 +876,44 @@ impl RemoteInner {
             .map(|opened| opened.manifest.source_identity_hash());
         let validation = validate_terrain_directory_result(&result, &expected, expected_identity);
         self.finish_terrain_directory_request(result.request_id, validation.map(|()| result));
+    }
+
+    fn handle_terrain_region_column_result(self: &Rc<Self>, generation: u64, bytes: &[u8]) {
+        if self.state.get() != RemoteConnectionState::Open {
+            self.disconnect(
+                generation,
+                RemoteWorldError::Protocol(
+                    "terrain region column result arrived before WorldOpened".to_owned(),
+                ),
+            );
+            return;
+        }
+        let result = match protocol::decode_terrain_region_column_batch_result(bytes) {
+            Ok(result) => result,
+            Err(error) => {
+                self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()));
+                return;
+            }
+        };
+        let expected = self
+            .pending
+            .borrow()
+            .get(&result.request_id)
+            .and_then(|pending| match pending {
+                PendingBatch::TerrainRegionColumns { columns, .. } => Some(columns.clone()),
+                _ => None,
+            });
+        let Some(expected) = expected else {
+            return;
+        };
+        let expected_identity = self
+            .opened
+            .borrow()
+            .as_ref()
+            .map(|opened| opened.manifest.source_identity_hash());
+        let validation =
+            validate_terrain_region_column_result(&result, &expected, expected_identity);
+        self.finish_terrain_region_column_request(result.request_id, validation.map(|()| result));
     }
 
     fn handle_terrain_page_result(self: &Rc<Self>, generation: u64, bytes: &[u8]) {
@@ -1175,6 +1250,50 @@ impl RemoteInner {
         Ok(request_id)
     }
 
+    fn send_terrain_region_column_request(
+        self: &Rc<Self>,
+        priority: WorldProductPriority,
+        mut columns: Vec<[i32; 2]>,
+    ) -> Result<RemoteRequestId, RemoteWorldError> {
+        if self.state.get() != RemoteConnectionState::Open {
+            return Err(self.terminal_error().unwrap_or(RemoteWorldError::NotOpen));
+        }
+        columns.sort_unstable();
+        protocol::encode_terrain_region_column_batch(&TerrainRegionColumnBatchRequest {
+            request_id: 1,
+            priority,
+            columns: columns.clone(),
+        })
+        .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
+        let server_window = self.opened.borrow().as_ref().map_or(1, |opened| {
+            usize::from(opened.recommended_in_flight_batches)
+        });
+        if !self.ensure_request_window(
+            priority,
+            server_window.min(self.config.max_in_flight_batches as usize),
+        ) {
+            return Err(RemoteWorldError::RequestWindowFull);
+        }
+        let socket = self.request_socket()?;
+        let request_id = self.allocate_request_id()?;
+        let frame =
+            protocol::encode_terrain_region_column_batch(&TerrainRegionColumnBatchRequest {
+                request_id,
+                priority,
+                columns: columns.clone(),
+            })
+            .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
+        socket
+            .send_with_u8_array(&frame)
+            .map_err(|error| RemoteWorldError::Socket(js_reason(error)))?;
+        self.pending.borrow_mut().insert(
+            request_id,
+            PendingBatch::TerrainRegionColumns { priority, columns },
+        );
+        self.schedule_request_timeout(request_id)?;
+        Ok(request_id)
+    }
+
     fn send_terrain_directory_request(
         self: &Rc<Self>,
         priority: WorldProductPriority,
@@ -1404,6 +1523,7 @@ impl RemoteInner {
                     ..
                 }
                 | PendingBatch::Surface { .. }
+                | PendingBatch::TerrainRegionColumns { .. }
                 | PendingBatch::TerrainDirectories { .. }
                 | PendingBatch::TerrainPages { .. }
                 | PendingBatch::Chunks { .. } => None,
@@ -1513,6 +1633,26 @@ impl RemoteInner {
         );
     }
 
+    fn finish_terrain_region_column_request(
+        &self,
+        request_id: u64,
+        result: Result<TerrainRegionColumnBatchResult, RemoteWorldError>,
+    ) {
+        let Some(pending) = self.pending.borrow_mut().remove(&request_id) else {
+            return;
+        };
+        let PendingBatch::TerrainRegionColumns { columns, .. } = pending else {
+            return;
+        };
+        self.terrain_region_column_completions
+            .borrow_mut()
+            .push_back(RemoteTerrainRegionColumnCompletion {
+                request_id,
+                columns,
+                result,
+            });
+    }
+
     fn finish_terrain_page_request(
         &self,
         request_id: u64,
@@ -1542,6 +1682,9 @@ impl RemoteInner {
         match kind {
             Some(PendingBatchKind::Chunks) => self.finish_request(request_id, Err(error)),
             Some(PendingBatchKind::Surface) => self.finish_surface_request(request_id, Err(error)),
+            Some(PendingBatchKind::TerrainRegionColumns) => {
+                self.finish_terrain_region_column_request(request_id, Err(error))
+            }
             Some(PendingBatchKind::TerrainDirectories) => {
                 self.finish_terrain_directory_request(request_id, Err(error))
             }
@@ -1755,6 +1898,30 @@ fn validate_terrain_directory_result(
     {
         return Err(RemoteWorldError::ResponseMismatch(
             "terrain directory roots differ from request",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_terrain_region_column_result(
+    result: &TerrainRegionColumnBatchResult,
+    expected_columns: &[[i32; 2]],
+    expected_identity: Option<WorldSourceIdentityHash>,
+) -> Result<(), RemoteWorldError> {
+    if Some(result.source_identity_hash) != expected_identity {
+        return Err(RemoteWorldError::ResponseMismatch(
+            "terrain region column source identity changed",
+        ));
+    }
+    if result.items.len() != expected_columns.len()
+        || !result
+            .items
+            .iter()
+            .zip(expected_columns)
+            .all(|(item, expected)| item.column == *expected)
+    {
+        return Err(RemoteWorldError::ResponseMismatch(
+            "terrain region columns differ from request",
         ));
     }
     Ok(())
