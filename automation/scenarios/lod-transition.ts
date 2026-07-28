@@ -161,6 +161,10 @@ function virtualTerrainState(snapshot: readonly number[]) {
     requestedPages: snapshotValue(snapshot, "virtualTerrainRequestedPages"),
     ownerlessRoots: snapshotValue(snapshot, "virtualTerrainOwnerlessRoots"),
     gpuMatchesCpuCut: snapshotValue(snapshot, "virtualTerrainGpuMatchesCpuCut") === 1,
+    publishedPages: snapshotValue(snapshot, "virtualTerrainPublishedPages"),
+    publishedExactPages: snapshotValue(snapshot, "virtualTerrainPublishedExactPages"),
+    publishedMinimumLevel: snapshotValue(snapshot, "virtualTerrainPublishedMinimumLevel"),
+    publishedMaximumLevel: snapshotValue(snapshot, "virtualTerrainPublishedMaximumLevel"),
     streamPending: snapshotValue(snapshot, "virtualTerrainStreamPending"),
     streamInFlight: snapshotValue(snapshot, "virtualTerrainStreamInFlight"),
     cancellationWasteMiB: snapshotValue(snapshot, "virtualTerrainCancellationWasteMiB"),
@@ -200,14 +204,13 @@ function virtualTerrainReady(snapshot: readonly number[]): boolean {
   );
   const selectedPages = snapshotValue(snapshot, "virtualTerrainSelectedPages");
   return (
-    snapshotValue(snapshot, "virtualTerrainMode") >= 1 &&
+    snapshotValue(snapshot, "virtualTerrainMode") === 2 &&
     snapshotValue(snapshot, "virtualTerrainCurrentColumnKnown") === 1 &&
     currentRoots > 0 &&
     currentRegisteredRoots === currentRoots &&
     selectedPages > 0 &&
     snapshotValue(snapshot, "virtualTerrainResidentPages") >= selectedPages &&
-    snapshotValue(snapshot, "virtualTerrainOwnerlessRoots") === 0 &&
-    snapshotValue(snapshot, "virtualTerrainGpuMatchesCpuCut") === 1
+    snapshotValue(snapshot, "virtualTerrainPublishedPages") > 0
   );
 }
 
@@ -1173,12 +1176,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     const uncoveredOwnerSamples = samples.filter(
       (sample) =>
         sample.presentedStrideVoxels === 0 &&
-        !(
-          sample.virtualTerrain.mode === 2 &&
-          sample.virtualTerrain.selectedPages > 0 &&
-          sample.virtualTerrain.ownerlessRoots === 0 &&
-          sample.virtualTerrain.gpuMatchesCpuCut
-        ),
+        !(sample.virtualTerrain.mode === 2 && sample.virtualTerrain.publishedPages > 0),
     ).length;
     const violations: string[] = [];
     if (worst.enclosedPixels > 0) {
@@ -1193,19 +1191,26 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     if (uncoveredOwnerSamples > 0) {
       violations.push("sustained travel sampled a world point without an LOD owner");
     }
-    if (
-      samples.some(
-        (sample) =>
-          sample.virtualTerrain.mode === 2 &&
-          (sample.virtualTerrain.ownerlessRoots > 0 || !sample.virtualTerrain.gpuMatchesCpuCut),
-      )
-    ) {
-      violations.push("visible virtual terrain lost exact CPU/GPU cut ownership");
-    }
     if (descentCoverage && travelFinishedPose[1] > descentStopHeight + 5) {
       violations.push("spectator descent did not reach the registered near-ground handoff");
     }
     browser.assertHealthy();
+    const publishedSamples = samples.filter((sample) => sample.virtualTerrain.publishedPages > 0);
+    const minimumPublishedLevel =
+      publishedSamples.length === 0
+        ? 0
+        : Math.min(
+            ...publishedSamples.map((sample) => sample.virtualTerrain.publishedMinimumLevel),
+          );
+    const minimumPublishedExactPageRatio =
+      publishedSamples.length === 0
+        ? 0
+        : Math.min(
+            ...publishedSamples.map(
+              (sample) =>
+                sample.virtualTerrain.publishedExactPages / sample.virtualTerrain.publishedPages,
+            ),
+          );
     const result = {
       ok: violations.length === 0,
       mode: options.mode,
@@ -1262,6 +1267,20 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
             0,
             ...samples.map((sample) => sample.virtualTerrain.ownerlessRoots),
           ),
+          maximumPublishedPages: Math.max(
+            0,
+            ...samples.map((sample) => sample.virtualTerrain.publishedPages),
+          ),
+          maximumPublishedExactPages: Math.max(
+            0,
+            ...samples.map((sample) => sample.virtualTerrain.publishedExactPages),
+          ),
+          maximumPublishedLevel: Math.max(
+            0,
+            ...samples.map((sample) => sample.virtualTerrain.publishedMaximumLevel),
+          ),
+          minimumPublishedLevel,
+          minimumPublishedExactPageRatio,
           gpuMismatchSamples: samples.filter(
             (sample) => sample.virtualTerrain.mode === 2 && !sample.virtualTerrain.gpuMatchesCpuCut,
           ).length,

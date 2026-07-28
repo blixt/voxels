@@ -2134,6 +2134,10 @@ pub struct RenderDiagnostics {
     pub virtual_terrain_gpu_compacted_pages: u32,
     pub virtual_terrain_gpu_compaction_overflow_flags: u32,
     pub virtual_terrain_gpu_matches_cpu_cut: bool,
+    pub virtual_terrain_published_pages: u32,
+    pub virtual_terrain_published_exact_pages: u32,
+    pub virtual_terrain_published_minimum_level: u32,
+    pub virtual_terrain_published_maximum_level: u32,
     /// Stable identity of the world geometry selected for the latest presented viewport.
     pub viewport_fingerprint: u64,
     pub refraction_copy_bytes: u64,
@@ -7590,6 +7594,25 @@ impl Renderer {
         let gpu_virtual_matches_cpu = gpu_virtual_feedback.as_ref().is_some_and(|feedback| {
             gpu_feedback_matches_cut(feedback, self.virtual_terrain_oracle_cut.as_ref())
         });
+        let published_virtual_pages = virtual_visible
+            .then_some(self.virtual_terrain_cut.as_ref())
+            .flatten()
+            .map(|cut| cut.selected_pages.as_slice())
+            .unwrap_or_default();
+        let published_virtual_exact_pages = published_virtual_pages
+            .iter()
+            .filter(|key| key.level == 0)
+            .count();
+        let published_virtual_minimum_level = published_virtual_pages
+            .iter()
+            .map(|key| key.level)
+            .min()
+            .unwrap_or(0);
+        let published_virtual_maximum_level = published_virtual_pages
+            .iter()
+            .map(|key| key.level)
+            .max()
+            .unwrap_or(0);
         self.diagnostics = RenderDiagnostics {
             resident_chunks: (self.chunks.len()
                 + usize::from(virtual_visible) * self.virtual_terrain_pages.len())
@@ -7644,6 +7667,10 @@ impl Renderer {
                 .as_ref()
                 .map_or(0, |feedback| feedback.compaction_overflow_flags),
             virtual_terrain_gpu_matches_cpu_cut: gpu_virtual_matches_cpu,
+            virtual_terrain_published_pages: published_virtual_pages.len() as u32,
+            virtual_terrain_published_exact_pages: published_virtual_exact_pages as u32,
+            virtual_terrain_published_minimum_level: u32::from(published_virtual_minimum_level),
+            virtual_terrain_published_maximum_level: u32::from(published_virtual_maximum_level),
             viewport_fingerprint,
             refraction_copy_bytes: refraction_copy_bytes(
                 self.config.width,
