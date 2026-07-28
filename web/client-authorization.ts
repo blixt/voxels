@@ -29,7 +29,11 @@ export async function authorizeClientBootstrap(
   if (configuredToken === undefined || !configuredToken.startsWith(SESSION_TOKEN_PREFIX)) {
     return { configToml, player: localPlayer };
   }
-  const endpoint = new URL(configuredToken.slice(SESSION_TOKEN_PREFIX.length), baseUrl);
+  const base = new URL(baseUrl);
+  const endpoint = new URL(configuredToken.slice(SESSION_TOKEN_PREFIX.length), base);
+  if (endpoint.origin !== base.origin) {
+    throw new Error("session authorization endpoint must be same-origin");
+  }
   const storageKey = `voxels.public-identity.v1.${localPlayer.playerName}`;
   const identityCredential = storage.getItem(storageKey) ?? undefined;
   let response = await requestSession(

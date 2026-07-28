@@ -38,6 +38,25 @@ describe("public client authorization", () => {
     expect(result).toEqual({ configToml, player: LOCAL_PLAYER });
   });
 
+  it("rejects a cross-origin session marker without sending stored identity", async () => {
+    const storage = new MemoryStorage();
+    storage.setItem("voxels.public-identity.v1.default", "vxi1.private-credential");
+    let fetched = false;
+    await expect(
+      authorizeClientBootstrap(
+        'auth_subprotocol_token = "session:https://attacker.test/api/session"\n',
+        LOCAL_PLAYER,
+        "https://voxels.lol/play",
+        storage,
+        async () => {
+          fetched = true;
+          return new Response();
+        },
+      ),
+    ).rejects.toThrow("session authorization endpoint must be same-origin");
+    expect(fetched).toBe(false);
+  });
+
   it("exchanges the deployment marker for a signed token and server-owned identity", async () => {
     const storage = new MemoryStorage();
     const configToml = 'auth_subprotocol_token = "session:/api/session" # deployment\n';
