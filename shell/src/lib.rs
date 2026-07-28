@@ -1093,7 +1093,19 @@ fn virtual_terrain_edit_revision_keys(
 ) {
     let leaves = affected_chunks
         .iter()
-        .map(|coord| voxels_world::TerrainPageKey::surface(0, coord.x, coord.z))
+        .flat_map(|coord| {
+            // Surface pages own a positive boundary lattice sample. An edit in chunk (x, z)
+            // therefore changes not only that page, but also the positive edge/corner of the
+            // three pages immediately negative of it. Retaining those old directories gives two
+            // sides of the same 10 cm boundary different revisions.
+            [(0, 0), (-1, 0), (0, -1), (-1, -1)].map(|(offset_x, offset_z)| {
+                voxels_world::TerrainPageKey::surface(
+                    0,
+                    coord.x.saturating_add(offset_x),
+                    coord.z.saturating_add(offset_z),
+                )
+            })
+        })
         .collect::<std::collections::BTreeSet<_>>();
     let roots = leaves
         .iter()
@@ -1298,7 +1310,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 8;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 48;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 49;
     const FRAME_SAMPLE_WIDTH: u32 = 22;
     const GPU_SAMPLE_WIDTH: u32 = 15;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -1327,7 +1339,7 @@ mod web {
         "virtualTerrainSelectedPages,virtualTerrainRequestedPages,virtualTerrainOwnerlessRoots,virtualTerrainGpuMatchesCpuCut,virtualTerrainGpuOverflowFlags,virtualTerrainGpuStackPeak,virtualTerrainGpuOwnerlessRoots,virtualTerrainStreamPending,virtualTerrainStreamInFlight,virtualTerrainCancellationWasteMiB,virtualTerrainCachePages,",
         "virtualTerrainCacheMiB,virtualTerrainColumns,virtualTerrainColumnInFlight,virtualTerrainColumnRevisionFloors,virtualTerrainCurrentColumnKnown,virtualTerrainCurrentColumnRoots,virtualTerrainCurrentColumnRegisteredRoots,virtualTerrainNearestRegisteredRootMetres,",
         "virtualTerrainColumnAccepted,virtualTerrainColumnSubmitDeferred,virtualTerrainColumnPreempted,virtualTerrainColumnTimedOut,virtualTerrainColumnOtherFailed,virtualTerrainDirectoryAccepted,virtualTerrainDirectorySubmitDeferred,virtualTerrainDirectoryPreempted,",
-        "virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,virtualTerrainPublishedPages,virtualTerrainPublishedExactPages,virtualTerrainPublishedMinimumLevel,virtualTerrainPublishedMaximumLevel,virtualTerrainCutFingerprintLow24,virtualTerrainCutFingerprintHigh24,",
+        "virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,virtualTerrainPublishedPages,virtualTerrainPublishedExactPages,virtualTerrainPublishedMinimumLevel,virtualTerrainPublishedMaximumLevel,virtualTerrainPublishedExactLodDiscontinuities,virtualTerrainCutFingerprintLow24,virtualTerrainCutFingerprintHigh24,",
         "frameSequence,schemaVersion,",
         "sampleCount,droppedSamples",
     );
@@ -1341,13 +1353,39 @@ mod web {
     const VIRTUAL_TERRAIN_MAX_REGIONS: usize = 48;
     const VIRTUAL_TERRAIN_REGION_WORKING_SET: usize = 128;
     const VIRTUAL_TERRAIN_MAX_DIRECTORY_BATCHES_IN_FLIGHT: usize = 2;
-    const VIRTUAL_TERRAIN_MAX_REFINEMENT_DIRECTORY_BATCHES_IN_FLIGHT: usize = 1;
+    const VIRTUAL_TERRAIN_MAX_REFINEMENT_DIRECTORY_BATCHES_IN_FLIGHT: usize = 2;
     const VIRTUAL_TERRAIN_PAGE_COMPLETIONS_PER_FRAME: usize = 1;
     const VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME: usize = 4;
     const VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS: u64 = 1_000;
     const VIRTUAL_TERRAIN_PAGE_CACHE_BYTES: usize = 128 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_REFINE_ABOVE_PIXELS: f64 = 0.75;
     const VIRTUAL_TERRAIN_COARSEN_BELOW_PIXELS: f64 = 0.35;
+
+    fn surface_page_horizontal_distance_squared(
+        key: TerrainPageKey,
+        camera_position_metres: [f32; 3],
+    ) -> Option<f64> {
+        let [minimum, maximum] = key.horizontal_bounds()?;
+        Some(
+            [0, 1]
+                .into_iter()
+                .map(|axis| {
+                    let point = f64::from(camera_position_metres[axis * 2]);
+                    let minimum = f64::from(minimum[axis]) * f64::from(VOXEL_SIZE_METRES);
+                    let maximum = f64::from(maximum[axis]) * f64::from(VOXEL_SIZE_METRES);
+                    let distance = if point < minimum {
+                        minimum - point
+                    } else if point > maximum {
+                        point - maximum
+                    } else {
+                        0.0
+                    };
+                    distance * distance
+                })
+                .sum(),
+        )
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct EngineConfig {
         developer_controls_enabled: bool,
@@ -2435,15 +2473,31 @@ mod web {
             renderer.set_route_status("NATIVE WORLD", 0);
             let stream = self.scheduler.borrow().diagnostics();
             let render = renderer.diagnostics();
-            // Readiness means the frame has one complete visible terrain owner. Progressive
-            // refinement may remain queued indefinitely as the error target improves; treating
-            // an empty refinement queue as presentation readiness would make healthy terrain
-            // appear unready while it is already covered by a valid parent cut.
+            let virtual_terrain_revision_ready = {
+                let state = self.virtual_terrain.borrow();
+                let current_root_registered = {
+                    let camera_chunk = world_to_chunk(camera.position);
+                    TerrainPageKey::surface(0, camera_chunk.x, camera_chunk.z)
+                        .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                        .is_some_and(|root| state.registered_roots.contains(&root))
+                };
+                current_root_registered && state.minimum_region_revisions.is_empty()
+            };
+            // A player is not ready merely because one coarse parent covers the viewport. The
+            // initial frame must already own the complete 10 cm surface vicinity that walking,
+            // targeting, and the spawn pedestal expose; distance-error refinement may continue
+            // outside that invariant.
             let terrain_ready = renderer.virtual_terrain_render_mode()
                 == VirtualTerrainRenderMode::Visible
-                && renderer
-                    .virtual_terrain_cut()
-                    .is_some_and(VirtualTerrainCut::is_renderable);
+                && virtual_terrain_revision_ready
+                && renderer.virtual_terrain_published_cut_is_current()
+                && renderer.virtual_terrain_cut().is_some_and(|cut| {
+                    cut.is_renderable()
+                        && cut.has_exact_surface_vicinity(
+                            camera.position.to_array().map(f64::from),
+                            self.virtual_terrain_exact_surface_radius_metres(),
+                        )
+                });
             self.terrain_ready.set(terrain_ready);
             let render_start = performance_now(performance.as_ref());
             let chunks = self.chunks.borrow();
@@ -2533,6 +2587,7 @@ mod web {
                 || performance_now(performance.as_ref()),
             );
             if submitted
+                && terrain_ready
                 && self
                     .scheduler
                     .borrow()
@@ -3085,10 +3140,31 @@ mod web {
             })
         }
 
+        fn virtual_terrain_exact_surface_radius_metres(&self) -> f64 {
+            f64::from((self.scheduler.borrow().config().load_radius_chunks - 1).max(0))
+                * CHUNK_EDGE as f64
+                * f64::from(VOXEL_SIZE_METRES)
+        }
+
         fn virtual_terrain_view(&self, camera: &CameraState) -> VirtualTerrainView {
             let [width, height] = self.viewport_size.get();
             let height = height.max(1);
             let forward = camera.forward();
+            let exact_surface_radius_metres = self.virtual_terrain_exact_surface_radius_metres();
+            let (refine_above_pixels, coarsen_below_pixels) =
+                if self.startup_ready.get() && self.terrain_ready.get() {
+                    (
+                        VIRTUAL_TERRAIN_REFINE_ABOVE_PIXELS,
+                        VIRTUAL_TERRAIN_COARSEN_BELOW_PIXELS,
+                    )
+                } else {
+                    // Do not spend bandwidth refining ordinary distant screen error while startup or
+                    // travel has left the player's mandatory exact vicinity incomplete. Exact-radius,
+                    // graded-transition, and topology-unknown pages bypass these finite thresholds,
+                    // so correctness converges before disposable distant detail can fill the source
+                    // pool and evict its own replacement groups.
+                    (1_000_000_000.0, 500_000_000.0)
+                };
             VirtualTerrainView {
                 camera_position_metres: camera.position.to_array().map(f64::from),
                 camera_forward: forward.to_array().map(f64::from),
@@ -3097,11 +3173,12 @@ mod web {
                 viewport_height_pixels: height,
                 near_metres: 0.05,
                 far_metres: f64::from(self.config.view_distance_metres),
-                refine_above_pixels: VIRTUAL_TERRAIN_REFINE_ABOVE_PIXELS,
-                coarsen_below_pixels: VIRTUAL_TERRAIN_COARSEN_BELOW_PIXELS,
+                refine_above_pixels,
+                coarsen_below_pixels,
                 // Normal error is most visible on wet terrain. Always selecting against the
                 // conservative wet bound prevents rain from changing geometry ownership.
                 wet_specular_sensitivity: 1.0,
+                exact_surface_radius_metres,
                 force_exact_leaves: false,
             }
         }
@@ -3374,10 +3451,22 @@ mod web {
                     .virtual_terrain_candidate_is_gpu_certified()
             {
                 // Install only one refinement-directory mutation at a time, and do not begin the
-                // next until the GPU has certified the current CPU cut. Explicit pacing prevents
-                // unbounded refinement churn without relying on transport contention.
+                // next wave until the GPU has certified the current CPU cut. Within that wave,
+                // spend both negotiated generation lanes on the nearest surface owners before
+                // screen-error refinement in the distance.
+                let mut refinement_roots = cut.refinement_roots.clone();
+                refinement_roots.sort_unstable_by(|left, right| {
+                    surface_page_horizontal_distance_squared(*left, camera.position.to_array())
+                        .partial_cmp(&surface_page_horizontal_distance_squared(
+                            *right,
+                            camera.position.to_array(),
+                        ))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| right.level.cmp(&left.level))
+                        .then_with(|| left.cmp(right))
+                });
                 self.request_virtual_terrain_directories(
-                    &cut.refinement_roots,
+                    &refinement_roots,
                     now_ms,
                     VIRTUAL_TERRAIN_MAX_REFINEMENT_DIRECTORY_BATCHES_IN_FLIGHT,
                 );
@@ -3417,7 +3506,12 @@ mod web {
                 }
             }
 
-            if cut.is_renderable() {
+            if cut.is_renderable()
+                && cut.has_exact_surface_vicinity(
+                    camera.position.to_array().map(f64::from),
+                    view.exact_surface_radius_metres,
+                )
+            {
                 match self
                     .renderer
                     .borrow_mut()
@@ -3530,8 +3624,8 @@ mod web {
                 return;
             }
             // One root per request lets the service's per-client generation lanes build distinct
-            // deadlines concurrently. Putting two roots in one ordered batch serialized them
-            // inside a single worker and made the second root miss fast-travel handoff.
+            // deadlines concurrently. Putting two roots in one ordered batch serializes them
+            // inside a single worker and can starve terrain-page delivery.
             for root in roots {
                 match self.remote.submit_terrain_directory_batch(
                     WorldProductPriority::VirtualTerrain,
@@ -3687,6 +3781,19 @@ mod web {
                 .iter()
                 .map(|identity| (identity.key, *identity))
                 .collect::<BTreeMap<_, _>>();
+            let missing_nodes = requested
+                .keys()
+                .filter(|key| !state.nodes.contains_key(*key))
+                .copied()
+                .collect::<Vec<_>>();
+            if !missing_nodes.is_empty() {
+                log_gpu_error(&format!(
+                    "virtual terrain demand lost {} of {} renderer directory nodes; first missing key: {:?}",
+                    missing_nodes.len(),
+                    requested.len(),
+                    missing_nodes.first()
+                ));
+            }
             let mut grouped = BTreeSet::new();
             let mut groups = Vec::new();
             let parents = requested
@@ -5742,6 +5849,7 @@ mod web {
                     render.virtual_terrain_published_exact_pages as f32,
                     render.virtual_terrain_published_minimum_level as f32,
                     render.virtual_terrain_published_maximum_level as f32,
+                    render.virtual_terrain_published_exact_lod_discontinuities as f32,
                     (render.virtual_terrain_cut_fingerprint & 0x00ff_ffff) as f32,
                     ((render.virtual_terrain_cut_fingerprint >> 24) & 0x00ff_ffff) as f32,
                     engine.frame_sequence.get() as f32,
@@ -6799,6 +6907,17 @@ mod tests {
             (1..=TERRAIN_COVERAGE_ROOT_LEVEL)
                 .all(|level| revision_keys.contains(&first_leaf.ancestor_at(level).unwrap()))
         );
+        for neighbor in [
+            TerrainPageKey::surface(0, 12, -7),
+            TerrainPageKey::surface(0, 13, -8),
+            TerrainPageKey::surface(0, 12, -8),
+        ] {
+            assert!(
+                (1..=TERRAIN_COVERAGE_ROOT_LEVEL)
+                    .all(|level| revision_keys.contains(&neighbor.ancestor_at(level).unwrap())),
+                "every page that owns the edited chunk's positive boundary sample must advance"
+            );
+        }
         assert!(
             (1..=TERRAIN_COVERAGE_ROOT_LEVEL)
                 .all(|level| revision_keys.contains(&second_leaf.ancestor_at(level).unwrap()))

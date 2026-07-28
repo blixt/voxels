@@ -10,7 +10,6 @@ members = [
   "shell",
   "world-terrain-diffusion",
   "world-service",
-  "experiments/virtual-surface-bakeoff",
 ]
 resolver = "2"
 

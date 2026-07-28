@@ -72,25 +72,13 @@ Opening the bare development URL reuses the browser's default local player and l
 same daemon; see [Local players](docs/native-world-streaming.md#local-players-and-two-browser-testing).
 Each client renders the others as unique saturated-color articulated voxel figures with distance-
 driven gait, independent head look, body-follow hysteresis, shadows, depth, and contact AO.
-`vp run automation -- run render-profile` builds release WASM, serves it from an isolated origin,
-and records raw frame/CPU phase distributions for steady and traversal scenarios in system Chrome.
-Provider-specific coast, route, landmark, and cave tours remain unavailable until the world protocol
-advertises those queries and authored locations.
-`vp run automation -- run render-profile --trace` runs the same isolated headless Chromium workload
-and also writes a CDP performance trace into its artifact directory. A reproducible fixed pose can be
-expressed entirely in the scenario file or CLI:
-
-```sh
-vp run automation -- run render-profile --mode=stationary --build=wasm-dev \
-  --source=terrain-diffusion-30m --dpr=2 --spawn=-12800,25600 --look=2.07,-0.37 \
-  --shadows=off --ssao=off --screenshot
-```
-
-`render-profile` also has `sustained`, `materials`, `atmosphere`, and `weather` modes for the warmed
-1.08 km traversal, material A/B, celestial anchors, and synchronized weather budgets respectively.
+`vp run automation -- run player-rendering` starts the ordinary Terrain Diffusion world and browser,
+waits for the real player spawn, takes a normal step from the pedestal, sprints into cold terrain,
+and digs through the ordinary pointer-lock input path. It fails unless the near field is exact 10 cm
+voxel geometry, the published cut remains revision-current and stable, edited boundaries remain
+watertight, and screenshots contain the expected real-world changes.
 `vp run automation -- run weather-motion` verifies that projected rain moves downward and that cloud
 lighting/density remain stable when the camera rotates away and returns.
-Recorded decision baselines and their test hardware live in [docs/performance.md](docs/performance.md).
 
 ## Architecture
 

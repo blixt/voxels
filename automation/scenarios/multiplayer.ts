@@ -11,7 +11,7 @@ import {
   SNAPSHOT_SCHEMA_VERSION,
   snapshotValue,
 } from "../lib/engine.ts";
-import { frameSamples } from "../lib/render-metrics.ts";
+import { frameSamples } from "../lib/frame-samples.ts";
 import { createShapedLink, type LinkStats, type ShapedLink } from "../lib/network.ts";
 import { percentileOrNull as percentile, rounded } from "../lib/metrics.ts";
 import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "../lib/protocol.ts";

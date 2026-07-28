@@ -352,8 +352,8 @@ The portal probe voxel API is canonical world data rather than a browser fixture
 place and revert the 25 mouth-plane overrides through ordinary edit-map operations, verify unrelated
 edits leave topology unchanged, and reconstruct the mask without a separately persisted topology
 cache. There is currently no dedicated portal browser benchmark; use `multiplayer` for remote edit
-convergence and `render-profile` for integrated rendering performance rather than treating the host
-tests as browser evidence.
+convergence and `player-rendering` for the integrated player/rendering path rather than treating the
+host tests as browser evidence.
 
 Portal-directed streaming remains secondary to the proven radial cylinder. Near Cinder Vault, the
 world crate derives conservative chunk AABBs (including a meshing halo) for every reachable node and

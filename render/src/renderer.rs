@@ -7808,11 +7808,7 @@ impl Renderer {
                             bgra,
                         )?;
                         let terrain_diagnostic_u32x5 = if diagnostic_identity_buffer_size == 0 {
-                            let bytes = usize::try_from(width)
-                                .ok()?
-                                .checked_mul(usize::try_from(height).ok()?)?
-                                .checked_mul(size_of::<[u32; 5]>())?;
-                            vec![0; bytes]
+                            Vec::new()
                         } else {
                             let diagnostic_identity = mapped.get(color_end..identity_end)?;
                             let diagnostic_depth = mapped.get(identity_end..)?;

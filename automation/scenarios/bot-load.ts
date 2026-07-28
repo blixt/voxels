@@ -11,7 +11,7 @@ import {
 import { BrowserCapability, type BrowserViewport, reserveEphemeralPort } from "../lib/browser.ts";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import { snapshotValue } from "../lib/engine.ts";
-import { frameSamples } from "../lib/render-metrics.ts";
+import { frameSamples } from "../lib/frame-samples.ts";
 import {
   numericSummary,
   sampleProcess,

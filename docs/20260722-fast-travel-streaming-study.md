@@ -215,9 +215,8 @@ vp run automation -- run network-benchmark --runs=1 --source=procedural-v16 \
 vp run automation -- run network-benchmark --runs=1 --source=procedural-v16 \
   --flight-seconds=15 --flight-only --generation-workers-per-client=7
 
-# Strict moving geometry-coverage gate (fails on one diagnostic-sky pixel)
-vp run automation -- run lod-transition --mode=travel-coverage \
-  --source=procedural-v16 --travel-seconds=30
+# Current real-player geometry-coverage gate
+vp run automation -- run player-rendering
 ```
 
 The retained mixed-route artifact is
@@ -225,8 +224,8 @@ The retained mixed-route artifact is
 The baseline is
 `target/automation/network-benchmark/2026-07-22T14-30-47-533Z-024e62a8/report.json`.
 The sustained-flight artifact is
-`target/automation/network-benchmark/2026-07-22T21-40-54-499Z-851b940a/report.json`; the strict
-long-distance diagnostic-sky artifact is
-`target/automation/lod-transition/2026-07-22T21-38-25-759Z-b3204eed/report.json`.
+`target/automation/network-benchmark/2026-07-22T21-40-54-499Z-851b940a/report.json`. The former
+synthetic LOD-transition artifact and gate were retired after they failed to reproduce broken
+player-spawn, travel, and edit behavior.
 Artifacts are intentionally ignored and use isolated temporary worlds; the measurements above are
 recorded here so the design evidence survives artifact cleanup.

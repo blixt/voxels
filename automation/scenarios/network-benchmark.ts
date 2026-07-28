@@ -4,7 +4,7 @@ import type { Page } from "playwright";
 import { BrowserCapability, type BrowserFailure, reserveEphemeralPort } from "../lib/browser.ts";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import { type EngineClient, SNAPSHOT_SCHEMA_VERSION, snapshotValue } from "../lib/engine.ts";
-import { frameSamples, type FrameSample } from "../lib/render-metrics.ts";
+import { frameSamples, type FrameSample } from "../lib/frame-samples.ts";
 import { createShapedLink, type LinkStats, type ShapedLink } from "../lib/network.ts";
 import { percentileOrNull as percentile, rounded } from "../lib/metrics.ts";
 import { PRESENCE_PATH, VXWP_VERSION, WORLD_PATH } from "../lib/protocol.ts";

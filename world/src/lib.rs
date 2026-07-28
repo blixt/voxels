@@ -25,9 +25,6 @@ pub mod terrain_region;
 pub mod terrain_stream;
 pub mod terrain_transport;
 pub mod virtual_surface;
-#[cfg(any(test, feature = "virtual-surface-bakeoff"))]
-#[doc(hidden)]
-pub mod virtual_surface_bakeoff;
 pub mod visibility;
 
 pub use cave::{
@@ -128,13 +125,6 @@ pub use terrain_transport::{
 pub use virtual_surface::{
     BoundaryCertificate, BoundarySide, BoundarySideCertificate, CanonicalBoundarySample,
     CanonicalFaceKey, FaceAxis, VoxelBounds, canonical_exposed_faces,
-};
-#[cfg(any(test, feature = "virtual-surface-bakeoff"))]
-#[doc(hidden)]
-pub use virtual_surface_bakeoff::{
-    BakeoffCamera, BakeoffCandidate, BakeoffCandidateKind, BakeoffClusterEditMetrics,
-    BakeoffComparison, BakeoffError, BakeoffGpuQuad, BakeoffHit, BakeoffVolume,
-    benchmark_clustered_page_rebuild, run_virtual_surface_bakeoff,
 };
 pub use visibility::{
     MAX_VISIBILITY_CELLS, MAX_VISIBILITY_PORTALS, PortalState, VisibilityCellId, VisibilityGraph,

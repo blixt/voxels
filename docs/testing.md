@@ -1,4 +1,4 @@
-# Testing and performance map
+# Testing map
 
 This is the canonical index for Voxels verification. Use the smallest row that covers a change, then
 move down to a real-browser or multi-client gate when the change crosses that boundary. All
@@ -23,22 +23,11 @@ vp run automation -- run bot-load
 # Streaming, scheduling, compression, or remote-link change
 vp run automation -- run network-benchmark
 
-# One player sprinting into cold terrain for two minutes
-vp run automation -- run render-profile --mode=directional --explore-seconds=120 \
-  --source=terrain-diffusion-30m --build=wasm-dev --screenshot
+# Renderer, streaming, movement, exact ownership, seams, and editing
+vp run automation -- run player-rendering
 
 # Durable edit layout, write latency, checkpointing, or restart change
 vp run automation -- run storage-benchmark
-
-# Edit continuity, underground rendering, or tunnel LOD coverage
-vp run automation -- run digging
-
-# Edited standalone structures and branched virtual-terrain geometry
-vp run automation -- run arbitrary-geometry
-
-# Virtual hierarchy cut continuity, watertightness, and sustained travel
-vp run automation -- run lod-transition --viewport=1500x1000 --dpr=2
-vp run automation -- run lod-transition --mode=travel-coverage --travel-seconds=30
 ```
 
 `vp run verify` is the complete static and build gate: TypeScript checks, TypeScript tests, host Rust
@@ -47,65 +36,39 @@ behavioral, visual, resource, or transport evidence that the general gate cannot
 
 ## Test surfaces
 
-| Area                | Scenario command                                                                                        | Evidence boundary                                                                                |
-| ------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| TypeScript          | `vp check`, `vp test`                                                                                   | Formatting, lint, types, and isolated unit contracts                                             |
-| Rust and WASM       | `vp run check:rust`                                                                                     | Workspace tests plus host and WASM Clippy; no browser timing                                     |
-| Production build    | `vp build`                                                                                              | Optimized WASM, shaders, and web assets compile; no runtime claim                                |
-| Native bot smoke    | `vp run automation -- run bot-load --counts=4 --duration=3 --service-profile=worldgen-dev --no-browser` | Four real VXWP clients and the actual daemon; no renderer or browser-input claim                 |
-| Bot population/load | `vp run automation -- run bot-load`                                                                     | Mixed real-protocol bots plus a real browser observer, process resources, disk, and wire         |
-| Six browser users   | `vp run automation -- run multiplayer`                                                                  | Six isolated Chrome contexts, shaped links, avatars, authority edits, and hierarchy convergence  |
-| Remote streaming    | `vp run automation -- run network-benchmark`                                                            | Real Chrome and daemon over a shaped socket: spawn, short/long walks, turns, bytes, and queues   |
-| Directional explore | `vp run automation -- run render-profile --mode=directional --explore-seconds=120`                      | Two-minute cold frontier: exact visual/collision readiness, queue drain, frame pacing, host load |
-| Network comparison  | `vp run automation -- run network-compare before.json after.json`                                       | Only schema-, fixture-, source-, protocol-, link-, repetition-, and environment-equal runs       |
-| Durable world store | `vp run automation -- run storage-benchmark`                                                            | Production planner/SQLite authority, ordered latency, checkpoint, retry, and restart; no sockets |
-| Cut continuity      | `vp run automation -- run lod-transition`                                                               | Same-pose real-browser hierarchy handoff and image evidence                                      |
-| Watertight terrain  | `vp run automation -- run lod-transition --mode=watertight`                                             | Strict seam and ownership regression path                                                        |
-| Terrain boundary    | `vp run automation -- run lod-transition --mode=boundary-coverage`                                      | Multi-heading sky exposure, ownership, and exact browser scale                                   |
-| Travel coverage     | `vp run automation -- run lod-transition --mode=travel-coverage --travel-seconds=30`                    | Sustained spectator motion, ownerless roots, cut identity, and magenta-sky exposure              |
-| Cut video           | `vp run automation -- run lod-transition --video`                                                       | The same validated hierarchy traversal captured as raw WebM                                      |
-| Digging             | `vp run automation -- run digging`                                                                      | Edit replacement continuity, enclosed performance, and tunnel ownership coverage                 |
-| Arbitrary geometry  | `vp run automation -- run arbitrary-geometry`                                                           | Standalone edits and branched tunnels across canonical and virtual ownership                     |
-| World Lab/UI        | `vp run automation -- run world-lab`                                                                    | Rust UI interaction and synchronized world diagnostics                                           |
-| Spectator feed      | `vp run automation -- run spectator-feed`                                                               | Bodyless read-only camera, movement, body restore, screenshots, and video                        |
-| Weather motion      | `vp run automation -- run weather-motion`                                                               | World-anchored clouds and downward precipitation                                                 |
-| Renderer profile    | `vp run automation -- run render-profile`                                                               | Release Chrome frame/CPU/GPU distributions with exact measured-frame correlation                 |
-| Chromium trace      | `vp run automation -- run render-profile --trace`                                                       | Renderer profile plus a standalone CDP trace                                                     |
-| Sustained traversal | `vp run automation -- run render-profile --mode=sustained`                                              | Warmed rail, allocation plateau, streaming, and frame pacing                                     |
-| Material cost       | `vp run automation -- run render-profile --mode=materials`                                              | Geometry-invariant material-detail A/B                                                           |
-| Day/night cost      | `vp run automation -- run render-profile --mode=atmosphere`                                             | Synchronized celestial anchors and lighting budgets                                              |
-| Weather cost        | `vp run automation -- run render-profile --mode=weather`                                                | Weather anchors, geometry invariants, clouds, rain, and GPU budgets                              |
-| Lighting comparison | `vp run automation -- run terrain-lighting-compare REFERENCE.png CANDIDATE.png`                         | Equal-size image contrast and coarse terrain-gradient ratios                                     |
-| Portable world      | `vp run automation -- run bench-world`                                                                  | Focused generation, stream-codec, meshing, and far-surface Criterion baselines                   |
-| Portable simulation | `vp run automation -- run bench-core`                                                                   | Focused dry/submerged fixed-step simulation baselines                                            |
-| Streaming runtime   | `vp run automation -- run bench-runtime`                                                                | Focused portable scheduler baselines using current client streaming limits                       |
+| Area                | Scenario command                                                                                        | Evidence boundary                                                                                     |
+| ------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| TypeScript          | `vp check`, `vp test`                                                                                   | Formatting, lint, types, and isolated unit contracts                                                  |
+| Rust and WASM       | `vp run check:rust`                                                                                     | Workspace tests plus host and WASM Clippy; no browser-runtime claim                                   |
+| Production build    | `vp build`                                                                                              | Optimized WASM, shaders, and web assets compile; no runtime claim                                     |
+| Player rendering    | `vp run automation -- run player-rendering`                                                             | Real spawn, input, travel, exact 10 cm ownership, edit revision, screenshots, and diagnostic-sky gaps |
+| Native bot smoke    | `vp run automation -- run bot-load --counts=4 --duration=3 --service-profile=worldgen-dev --no-browser` | Four real VXWP clients and the actual daemon; no renderer or browser-input claim                      |
+| Bot population/load | `vp run automation -- run bot-load`                                                                     | Mixed real-protocol bots plus a real browser observer, process resources, disk, and wire              |
+| Six browser users   | `vp run automation -- run multiplayer`                                                                  | Six isolated Chrome contexts, shaped links, avatars, authority edits, and hierarchy convergence       |
+| Remote streaming    | `vp run automation -- run network-benchmark`                                                            | Real Chrome and daemon over a shaped socket: spawn, short/long walks, turns, bytes, and queues        |
+| Network comparison  | `vp run automation -- run network-compare before.json after.json`                                       | Only schema-, fixture-, source-, protocol-, link-, repetition-, and environment-equal runs            |
+| Durable world store | `vp run automation -- run storage-benchmark`                                                            | Production planner/SQLite authority, ordered latency, checkpoint, retry, and restart; no sockets      |
+| World Lab/UI        | `vp run automation -- run world-lab`                                                                    | Rust UI interaction, F2 capture metadata, and synchronized world diagnostics                          |
+| Screenshot replay   | `vp run automation -- run replay-screenshot FILE.png`                                                   | Reapplies embedded camera, world, environment, render, streaming, and cut metadata                    |
+| Spectator feed      | `vp run automation -- run spectator-feed`                                                               | Bodyless read-only camera, movement, body restore, screenshots, and video                             |
+| Weather motion      | `vp run automation -- run weather-motion`                                                               | World-anchored clouds and downward precipitation                                                      |
+| Portable world      | `vp run automation -- run bench-world`                                                                  | Focused generation, stream-codec, meshing, and far-surface Criterion baselines                        |
+| Portable simulation | `vp run automation -- run bench-core`                                                                   | Focused dry/submerged fixed-step simulation baselines                                                 |
+| Streaming runtime   | `vp run automation -- run bench-runtime`                                                                | Focused portable scheduler baselines using current client streaming limits                            |
 
 Every scenario writes to `target/automation/<scenario>/<run-id>/`; its
 `target/automation/<scenario>/latest.json` points to the last completed run.
 
-`lod-transition` records the exact virtual-cut fingerprint, captures every compositor frame around a
-real hierarchy replacement, and rejects diagnostic-sky holes, ownerless roots, CPU/GPU cut
-disagreement, or an image discontinuity outside ordinary motion. Its travel mode keeps moving through
-cold terrain and measures the same invariants while page requests remain active. A CSS viewport of
-`1500x1000` with `--dpr=2` is a 3000x2000 framebuffer, not a lower-resolution proxy.
+`player-rendering` deliberately uses the ordinary player entry point rather than a fixed camera or
+synthetic hierarchy transition. It waits for a revision-current published cut, requires exact L0
+coverage around the player, moves through the real keyboard path, digs through pointer lock, and
+requires the edited published fingerprint to differ. Its PNG analysis rejects a diagnostic-sky
+component larger than four pixels and its renderer metadata rejects skipped LOD levels inside the
+exact near-field frontier.
 
-The directional renderer profile locks noon and clear weather and follows a straight 8 m/s route for
-the requested duration. The first 30-second epoch is the profile warm-up; every epoch is still
-reported and gated, with explicit 60-second and final checkpoints. Terrain must retain one owner and
-remain presented on the canonical 10 cm lattice while the current swept player body/support stays
-fully resident at every sample. The default client requests collision data 2.5 seconds ahead; the
-benchmark requires a fully resident 1.5-second corridor at least 97% of the time, with no predictive
-gap longer than one second.
-This leaves one second for generation, transport, meshing, and upload before a missing frontier can
-affect movement.
-
-Renderer timing is accepted only when unrelated process-tree CPU stays below 30% of total host
-capacity at p95. A busy machine still produces an artifact, but its timing conclusions are rejected.
-Visual and residency failures remain failures even when host load invalidates timing.
-
-[Remote world streaming benchmarks](network-benchmark.md), [multiplayer scaling](multiplayer-scaling.md),
-and [recorded renderer baselines](performance.md) explain the corresponding metrics and historical
-results. Terrain Diffusion has additional provider-specific smoke and survey commands in
+[Remote world streaming benchmarks](network-benchmark.md) and
+[multiplayer scaling](multiplayer-scaling.md) explain those non-renderer-specific metrics. Terrain
+Diffusion has additional provider-specific smoke and survey commands in
 [the native Metal provider notes](terrain-diffusion-metal.md).
 
 ## Native multiplayer bots

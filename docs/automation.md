@@ -8,11 +8,11 @@ browser, world-service, network, artifact, and cleanup details.
 
 ```sh
 vp run automation -- list
-vp run automation -- run lod-transition
+vp run automation -- run player-rendering
 vp run automation -- run bot-load --counts=64 --no-browser
 vp run automation -- run bot-load --counts=16 --duration=10 --video
 vp run automation -- run spectator-feed --url=http://127.0.0.1:5173 --duration=30
-vp run automation -- describe render-profile
+vp run automation -- describe player-rendering
 ```
 
 `list` and `describe` expose each scenario's kind and declared mechanisms. `run` creates an isolated
@@ -46,7 +46,7 @@ automation/
     engine.ts             typed Rust automation API and snapshot decoding
     world.ts              isolated service/client configs and daemon lifecycle
     metrics.ts            summaries and process sampling
-    render-metrics.ts     frame, CPU, and GPU snapshot collection
+    frame-samples.ts      renderer frame sampling used by live-world scenarios
     network.ts            deterministic shaped loopback links and accounting
     protocol.ts           versioned VXWP constants used by automation
 ```

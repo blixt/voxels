@@ -81,7 +81,6 @@ generation = 2
 meshing = 1
 upload = 3
 
-# One radius for each surface LOD level: stride 2 through 256. The four background rings use
 [rendering]
 view_distance_metres = 3200.0
 

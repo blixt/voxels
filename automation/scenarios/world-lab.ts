@@ -3,7 +3,6 @@ import { BrowserCapability } from "../lib/browser.ts";
 import { type EngineClient, snapshotValue } from "../lib/engine.ts";
 import { analyzeDiagnosticSky } from "../lib/image.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
-import { auditTerrainDiagnosticAttachment } from "../lib/terrain-diagnostic.ts";
 import { startWorldStack } from "../lib/world.ts";
 import { readPngText } from "../../web/png-metadata.ts";
 
@@ -120,17 +119,6 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     downloadedCapture,
     "image/png",
   );
-  const downloadedDiagnostic = auditTerrainDiagnosticAttachment(downloadedCapture);
-  if (
-    downloadedDiagnostic.ownedPixels === 0 ||
-    downloadedDiagnostic.ownerIds === 0 ||
-    downloadedDiagnostic.unmappedOwnerIds.length !== 0 ||
-    downloadedDiagnostic.impossiblePrimitiveGapPixels !== 0
-  ) {
-    throw new Error(
-      `downloaded screenshot terrain ownership is not attributable: ${JSON.stringify(downloadedDiagnostic)}`,
-    );
-  }
   const downloadedSky = await analyzeDiagnosticSky(page, downloadedCapture, {
     x0: 0.02,
     x1: 0.7,
@@ -184,17 +172,6 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     );
   }
   const keyCapture = await readFile(keyDownloadPath);
-  const keyDiagnostic = auditTerrainDiagnosticAttachment(keyCapture);
-  if (
-    keyDiagnostic.ownedPixels === 0 ||
-    keyDiagnostic.ownerIds === 0 ||
-    keyDiagnostic.unmappedOwnerIds.length !== 0 ||
-    keyDiagnostic.impossiblePrimitiveGapPixels !== 0
-  ) {
-    throw new Error(
-      `F2 screenshot terrain ownership is not attributable: ${JSON.stringify(keyDiagnostic)}`,
-    );
-  }
   const reproductionText = readPngText(keyCapture, "voxels.reproduction");
   if (reproductionText === undefined) {
     throw new Error("F2 screenshot omitted its embedded voxels.reproduction PNG metadata");
@@ -345,8 +322,6 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
       residentChunks: snapshotValue(settled, "residentChunks"),
       ascentMetres: snapshotValue(ascended, "cameraY") - bodyPosition[1],
       downloadedScreenshotBytes: downloadedCapture.byteLength,
-      diagnosticOwnedPixels: keyDiagnostic.ownedPixels,
-      diagnosticOwnerIds: keyDiagnostic.ownerIds,
       enclosedOwnerlessPixels: downloadedCoverage.enclosedPixels,
     },
     details: {

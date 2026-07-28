@@ -88,7 +88,15 @@ async function encodeScreenshot(capture: MissionControlScreenshot): Promise<void
       throw new Error("renderer returned an invalid RGBA screenshot");
     }
     const terrainDiagnostic = capture.terrain_diagnostic_u32x5();
-    if (terrainDiagnostic.byteLength !== width * height * 20) {
+    const metadata = JSON.parse(capture.metadata) as {
+      attachments?: { terrainPixelOwnership?: { populated?: boolean } };
+    };
+    const diagnosticPopulated =
+      metadata.attachments?.terrainPixelOwnership?.populated === true;
+    if (
+      terrainDiagnostic.byteLength !==
+      (diagnosticPopulated ? width * height * 20 : 0)
+    ) {
       throw new Error("renderer returned an invalid u32x5 terrain diagnostic attachment");
     }
     const canvas = new OffscreenCanvas(width, height);
@@ -105,28 +113,31 @@ async function encodeScreenshot(capture: MissionControlScreenshot): Promise<void
       "voxels.reproduction",
       capture.metadata,
     );
-    const compressor = new CompressionStream("deflate");
-    const compressedDiagnostic = new Uint8Array(
-      await new Response(
-        new Blob([terrainDiagnostic.slice().buffer as ArrayBuffer])
-          .stream()
-          .pipeThrough(compressor),
-      ).arrayBuffer(),
-    );
-    // Big-endian framing makes the attachment self-describing without relying on JS typed-array
-    // host endianness. The compressed payload itself expands to the little-endian RGBA32Uint rows
-    // described by voxels.reproduction.v2.
-    const headerBytes = 20;
-    const diagnosticPayload = new Uint8Array(headerBytes + compressedDiagnostic.byteLength);
-    diagnosticPayload.set([0x56, 0x54, 0x50, 0x31], 0); // "VTP1"
-    const header = new DataView(diagnosticPayload.buffer);
-    header.setUint16(4, 1);
-    header.setUint16(6, 5);
-    header.setUint32(8, width);
-    header.setUint32(12, height);
-    header.setUint32(16, terrainDiagnostic.byteLength);
-    diagnosticPayload.set(compressedDiagnostic, headerBytes);
-    const png = embedPngBinary(metadataPng, "vpDI", diagnosticPayload);
+    let png = metadataPng;
+    if (diagnosticPopulated) {
+      const compressor = new CompressionStream("deflate");
+      const compressedDiagnostic = new Uint8Array(
+        await new Response(
+          new Blob([terrainDiagnostic.slice().buffer as ArrayBuffer])
+            .stream()
+            .pipeThrough(compressor),
+        ).arrayBuffer(),
+      );
+      // Big-endian framing makes the attachment self-describing without relying on JS typed-array
+      // host endianness. The compressed payload itself expands to the little-endian RGBA32Uint
+      // rows described by voxels.reproduction.v2.
+      const headerBytes = 20;
+      const diagnosticPayload = new Uint8Array(headerBytes + compressedDiagnostic.byteLength);
+      diagnosticPayload.set([0x56, 0x54, 0x50, 0x31], 0); // "VTP1"
+      const header = new DataView(diagnosticPayload.buffer);
+      header.setUint16(4, 1);
+      header.setUint16(6, 5);
+      header.setUint32(8, width);
+      header.setUint32(12, height);
+      header.setUint32(16, terrainDiagnostic.byteLength);
+      diagnosticPayload.set(compressedDiagnostic, headerBytes);
+      png = embedPngBinary(metadataPng, "vpDI", diagnosticPayload);
+    }
     const blob = new Blob([png.slice().buffer as ArrayBuffer], { type: "image/png" });
     scope.postMessage({
       kind: "downloadMissionControlScreenshot",
@@ -139,12 +150,20 @@ async function encodeScreenshot(capture: MissionControlScreenshot): Promise<void
   } finally {
     capture.free();
     screenshotEncoding = false;
+    // A second F2 press can arrive while the prior PNG is still being compressed. The renderer
+    // accepts that next GPU capture, but `monitorScreenshot` deliberately does not start two
+    // encoders at once. Resume it here so the accepted capture cannot remain pending forever
+    // merely because no unrelated input event follows the key press.
+    if (handle?.mission_control_screenshot_pending()) monitorScreenshot();
   }
 }
 
 function monitorScreenshot(): void {
   if (disposed || screenshotTimer !== undefined || screenshotEncoding) return;
-  screenshotDeadline = performance.now() + 10_000;
+  // Full-resolution diagnostic captures copy five integer/depth channels in addition to color.
+  // Slow adapters and software WebGPU can legitimately take minutes without the readback being
+  // stuck; retain a finite bound while allowing the requested full-resolution capture to finish.
+  screenshotDeadline = performance.now() + 180_000;
   const update = (): void => {
     if (disposed) {
       stopScreenshotMonitor();

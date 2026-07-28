@@ -8,8 +8,7 @@ describe("automation scenario discovery", () => {
     expect(ids).toEqual(ids.toSorted());
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).toContain("bot-load");
-    expect(ids).toContain("lod-transition");
-    expect(ids).toContain("render-profile");
+    expect(ids).toContain("player-rendering");
     expect(await scenarioById("world-lab")).toBeDefined();
   });
 });
