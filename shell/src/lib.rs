@@ -7195,7 +7195,10 @@ mod web {
             surface_queue: RefCell::new(VecDeque::new()),
             surface_in_flight: RefCell::new(BTreeSet::new()),
             surface_dirty: RefCell::new(BTreeSet::new()),
-            surface_stream_suspended: Cell::new(false),
+            // The fixed-ring surface producer is retired. Canonical chunks still stream for
+            // collision and simulation, but render ownership starts and remains in the virtual
+            // hierarchy; retained legacy fields exist only until the dead protocol is deleted.
+            surface_stream_suspended: Cell::new(true),
             virtual_terrain: RefCell::new(VirtualTerrainStreamingState::default()),
             virtual_terrain_scheduler: RefCell::new(
                 TerrainStreamScheduler::new(TerrainStreamConfig::INTERACTIVE_CLIENT)
