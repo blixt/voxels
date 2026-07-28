@@ -229,6 +229,7 @@ fn unpack_indices(
 ) -> Result<Vec<Material>, CodecError> {
     let mask = (1u64 << bits) - 1;
     let mut voxels = Vec::with_capacity(CHUNK_VOLUME);
+    let mut referenced = vec![false; palette.len()];
     let mut accumulator = 0u64;
     let mut held = 0u32;
     let mut cursor = 0usize;
@@ -240,6 +241,10 @@ fn unpack_indices(
             cursor += 1;
         }
         let index = (accumulator & mask) as usize;
+        let Some(referenced) = referenced.get_mut(index) else {
+            return Err(CodecError::InvalidHeader("palette index out of range"));
+        };
+        *referenced = true;
         voxels.push(
             *palette
                 .get(index)
@@ -247,6 +252,11 @@ fn unpack_indices(
         );
         accumulator >>= bits;
         held -= u32::from(bits);
+    }
+    if referenced.contains(&false) {
+        return Err(CodecError::InvalidHeader(
+            "palette contains an unused material",
+        ));
     }
     Ok(voxels)
 }
@@ -402,6 +412,29 @@ mod tests {
             decode_chunk(&encoded, identity),
             Err(CodecError::InvalidHeader(
                 "palette material ids must be strictly increasing"
+            ))
+        );
+    }
+
+    #[test]
+    fn unused_palette_entries_are_rejected() {
+        let chunk = Chunk::empty(ChunkCoord::new(0, 0, 0));
+        let identity = identity(7);
+        let canonical = encode_chunk(&chunk, identity);
+        let payload_len = CHUNK_VOLUME.div_ceil(8);
+        let mut encoded = canonical[..usize::from(HEADER_LEN)].to_vec();
+        encoded[9] = ENCODING_PALETTE;
+        encoded[64..66].copy_from_slice(&2_u16.to_le_bytes());
+        encoded[66] = 1;
+        encoded[68..72].copy_from_slice(&(payload_len as u32).to_le_bytes());
+        encoded.extend_from_slice(&Material::Air.id().to_le_bytes());
+        encoded.extend_from_slice(&Material::Stone.id().to_le_bytes());
+        encoded.resize(encoded.len() + payload_len, 0);
+
+        assert_eq!(
+            decode_chunk(&encoded, identity),
+            Err(CodecError::InvalidHeader(
+                "palette contains an unused material"
             ))
         );
     }
