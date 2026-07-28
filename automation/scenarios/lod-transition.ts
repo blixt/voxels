@@ -1,12 +1,17 @@
 import { execFileSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import type { Page } from "playwright";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import { BrowserCapability, chromeWebGpuLaunchOptions } from "../lib/browser.ts";
-import { type EngineClient, SNAPSHOT, snapshotValue } from "../lib/engine.ts";
+import { type EngineClient, snapshotValue } from "../lib/engine.ts";
 import { analyzeDiagnosticSky } from "../lib/image.ts";
 import { frameSamples, gpuFrameSamples } from "../lib/render-metrics.ts";
 import { percentile } from "../lib/metrics.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
+import {
+  readTerrainDiagnosticAttachment,
+  type TerrainDiagnosticPixel,
+} from "../lib/terrain-diagnostic.ts";
 import { startWorldStack } from "../lib/world.ts";
 import type { WorldSource } from "../lib/world.ts";
 
@@ -16,9 +21,9 @@ const FAILURE =
 // and 7.5 ms total-GPU gates remain authoritative; 5 ms still catches a world-pass regression
 // without rejecting the established 4.2-4.8 ms cost of this denser correctness scene.
 const WORLD_GPU_P95_BUDGET_MS = 5;
-type Vector2 = readonly [number, number];
+const GPU_FEEDBACK_OVERFLOW_FLAG = 1 << 1;
 type Vector3 = readonly [number, number, number];
-type BoundaryCentres = readonly Vector2[];
+type TerrainCutSignature = readonly [number, number, number, number, number, number];
 
 interface LodTimings {
   readonly frameIntervals: number[];
@@ -31,7 +36,7 @@ interface LodTimings {
       readonly virtualTerrainCompaction: number;
     }
   >;
-  readonly incompleteTransitionEdges: number[];
+  readonly ownerlessRoots: number[];
 }
 
 interface PresentedFrameCapture {
@@ -47,20 +52,13 @@ interface PresentedFrameCaptureControl {
   readonly observedFrames: () => number;
 }
 
-interface CentreChangeCapture {
+interface CutChangeCapture {
   readonly crossed: readonly number[];
-  readonly snapshots: readonly (readonly number[])[];
   readonly observedEngineFrames: number;
   readonly skippedEngineFrames: number;
 }
 
 const MAX_PRESENTED_FRAME_CAPTURES = 300;
-
-function required(values: ArrayLike<number>, index: number, label: string): number {
-  const value = values[index];
-  if (value === undefined) throw new Error(`${label} omitted value ${index}`);
-  return value;
-}
 
 async function capturePresentedFrames(
   page: Page,
@@ -127,25 +125,19 @@ async function capturePresentedFrames(
   };
 }
 
-function boundaryCentres(snapshot: readonly number[]): BoundaryCentres {
-  return Array.from(
-    { length: 8 },
-    (_, index) =>
-      [
-        required(snapshot, SNAPSHOT.lodBoundary0X + index * 2, "LOD boundary"),
-        required(snapshot, SNAPSHOT.lodBoundary0Z + index * 2, "LOD boundary"),
-      ] as const,
-  );
+function terrainCutSignature(snapshot: readonly number[]): TerrainCutSignature {
+  return [
+    snapshotValue(snapshot, "virtualTerrainCutFingerprintLow24"),
+    snapshotValue(snapshot, "virtualTerrainCutFingerprintHigh24"),
+    snapshotValue(snapshot, "virtualTerrainPublishedPages"),
+    snapshotValue(snapshot, "virtualTerrainPublishedExactPages"),
+    snapshotValue(snapshot, "virtualTerrainPublishedMinimumLevel"),
+    snapshotValue(snapshot, "virtualTerrainPublishedMaximumLevel"),
+  ];
 }
 
-function sameCentres(left: BoundaryCentres, right: BoundaryCentres): boolean {
-  return (
-    left.length === right.length &&
-    left.every((centre, index) => {
-      const candidate = right[index];
-      return candidate !== undefined && centre[0] === candidate[0] && centre[1] === candidate[1];
-    })
-  );
+function sameTerrainCut(left: TerrainCutSignature, right: TerrainCutSignature): boolean {
+  return left.every((value, index) => value === right[index]);
 }
 
 function cameraPosition(snapshot: readonly number[]): Vector3 {
@@ -169,10 +161,19 @@ function virtualTerrainState(snapshot: readonly number[]) {
     requestedPages: snapshotValue(snapshot, "virtualTerrainRequestedPages"),
     ownerlessRoots: snapshotValue(snapshot, "virtualTerrainOwnerlessRoots"),
     gpuMatchesCpuCut: snapshotValue(snapshot, "virtualTerrainGpuMatchesCpuCut") === 1,
+    gpuOverflowFlags: snapshotValue(snapshot, "virtualTerrainGpuOverflowFlags"),
+    gpuOwnershipOverflowFlags:
+      snapshotValue(snapshot, "virtualTerrainGpuOverflowFlags") & ~GPU_FEEDBACK_OVERFLOW_FLAG,
+    gpuStackPeak: snapshotValue(snapshot, "virtualTerrainGpuStackPeak"),
+    gpuOwnerlessRoots: snapshotValue(snapshot, "virtualTerrainGpuOwnerlessRoots"),
     publishedPages: snapshotValue(snapshot, "virtualTerrainPublishedPages"),
     publishedExactPages: snapshotValue(snapshot, "virtualTerrainPublishedExactPages"),
     publishedMinimumLevel: snapshotValue(snapshot, "virtualTerrainPublishedMinimumLevel"),
     publishedMaximumLevel: snapshotValue(snapshot, "virtualTerrainPublishedMaximumLevel"),
+    cutFingerprint: [
+      snapshotValue(snapshot, "virtualTerrainCutFingerprintLow24"),
+      snapshotValue(snapshot, "virtualTerrainCutFingerprintHigh24"),
+    ] as const,
     streamPending: snapshotValue(snapshot, "virtualTerrainStreamPending"),
     streamInFlight: snapshotValue(snapshot, "virtualTerrainStreamInFlight"),
     cancellationWasteMiB: snapshotValue(snapshot, "virtualTerrainCancellationWasteMiB"),
@@ -217,18 +218,13 @@ function virtualTerrainReady(snapshot: readonly number[]): boolean {
     currentRoots > 0 &&
     currentRegisteredRoots === currentRoots &&
     publishedPages > 0 &&
-    snapshotValue(snapshot, "virtualTerrainResidentPages") >= publishedPages
+    snapshotValue(snapshot, "virtualTerrainResidentPages") >= publishedPages &&
+    snapshotValue(snapshot, "virtualTerrainOwnerlessRoots") === 0
   );
 }
 
 function terrainPresentationReady(snapshot: readonly number[]): boolean {
-  return (
-    (snapshotValue(snapshot, "pendingJobs") === 0 &&
-      snapshotValue(snapshot, "surfaceInFlight") === 0 &&
-      snapshotValue(snapshot, "allLodsReady") === 1 &&
-      snapshotValue(snapshot, "lodTransitionQuads") > 0) ||
-    virtualTerrainReady(snapshot)
-  );
+  return snapshotValue(snapshot, "terrainReady") === 1 && virtualTerrainReady(snapshot);
 }
 
 function planarDistance(left: Vector3, right: Vector3): number {
@@ -239,40 +235,34 @@ function spatialDistance(left: Vector3, right: Vector3): number {
   return Math.hypot(left[0] - right[0], left[1] - right[1], left[2] - right[2]);
 }
 
-function summarizePresentedStrides(samples: readonly { readonly presentedStrideVoxels: number }[]) {
-  const strides = samples.map((sample) => sample.presentedStrideVoxels);
-  const sorted = [...strides].sort((left, right) => left - right);
-  const count = strides.length;
-  const histogram = [...new Set(sorted)].map((stride) => ({
-    stride,
-    samples: strides.filter((candidate) => candidate === stride).length,
-  }));
+function summarizeCanonicalLatticePresentation(
+  samples: readonly { readonly canonicalLatticePresented: boolean }[],
+) {
+  const count = samples.length;
+  const presented = samples.filter((sample) => sample.canonicalLatticePresented).length;
   return {
     samples: count,
-    histogram,
-    canonicalFraction: strides.filter((stride) => stride === 1).length / Math.max(count, 1),
-    strideAtMost8Fraction: strides.filter((stride) => stride <= 8).length / Math.max(count, 1),
-    stride128PlusFraction: strides.filter((stride) => stride >= 128).length / Math.max(count, 1),
-    medianStride: sorted[Math.floor(count * 0.5)] ?? 0,
-    p90Stride: sorted[Math.min(Math.floor(count * 0.9), count - 1)] ?? 0,
-    meanLodExponent:
-      strides.reduce((sum, stride) => sum + Math.log2(Math.max(stride, 1)), 0) / Math.max(count, 1),
+    presented,
+    unowned: count - presented,
+    canonicalLatticeFraction: presented / Math.max(count, 1),
   };
 }
 
-function summarizeTravelLodQuality(samples: readonly { readonly presentedStrideVoxels: number }[]) {
+function summarizeTravelTerrainQuality(
+  samples: readonly { readonly canonicalLatticePresented: boolean }[],
+) {
   const third = Math.ceil(samples.length / 3);
   return {
-    overall: summarizePresentedStrides(samples),
-    early: summarizePresentedStrides(samples.slice(0, third)),
-    middle: summarizePresentedStrides(samples.slice(third, third * 2)),
-    late: summarizePresentedStrides(samples.slice(third * 2)),
+    overall: summarizeCanonicalLatticePresentation(samples),
+    early: summarizeCanonicalLatticePresentation(samples.slice(0, third)),
+    middle: summarizeCanonicalLatticePresentation(samples.slice(third, third * 2)),
+    late: summarizeCanonicalLatticePresentation(samples.slice(third * 2)),
   };
 }
 
 function collectTiming(snapshot: readonly number[], timings: LodTimings): void {
   timings.frameIntervals.push(...frameSamples(snapshot).map((sample) => sample.intervalMs));
-  timings.incompleteTransitionEdges.push(snapshotValue(snapshot, "lodIncompleteTransitionEdges"));
+  timings.ownerlessRoots.push(snapshotValue(snapshot, "virtualTerrainOwnerlessRoots"));
   for (const sample of gpuFrameSamples(snapshot).samples) {
     timings.gpu.set(sample.frameId, {
       total: sample.total,
@@ -286,7 +276,7 @@ function collectTiming(snapshot: readonly number[], timings: LodTimings): void {
 function resetTimings(timings: LodTimings): void {
   timings.frameIntervals.length = 0;
   timings.gpu.clear();
-  timings.incompleteTransitionEdges.length = 0;
+  timings.ownerlessRoots.length = 0;
 }
 
 async function sampleStablePerformance(
@@ -332,9 +322,8 @@ async function waitForEngine(
     `LOD browser fixture did not settle; blockers ${JSON.stringify({
       quads: snapshotValue(latest, "quads"),
       pendingJobs: snapshotValue(latest, "pendingJobs"),
-      surfaceInFlight: snapshotValue(latest, "surfaceInFlight"),
-      allLodsReady: snapshotValue(latest, "allLodsReady"),
-      lodTransitionQuads: snapshotValue(latest, "lodTransitionQuads"),
+      virtualTerrainStreamInFlight: snapshotValue(latest, "virtualTerrainStreamInFlight"),
+      terrainReady: snapshotValue(latest, "terrainReady"),
       virtualTerrain: virtualTerrainState(latest),
     })}\n\nBrowser failures:\n${
       browserFailures
@@ -357,46 +346,48 @@ async function setCameraLook(
   });
 }
 
-async function waitForCentreChange(
+async function waitForCutChange(
   page: Page,
   engine: EngineClient,
-  initialCentres: BoundaryCentres,
+  initialCut: TerrainCutSignature,
+  initialPosition: Vector3,
   outboundKey: string,
   timings: LodTimings,
-  afterCentreChangeFrames: number,
-  onCentreChange: () => void,
-): Promise<CentreChangeCapture> {
-  const deadline = Date.now() + 4_000;
+  afterCutChangeFrames: number,
+  onCutChange: () => void,
+): Promise<CutChangeCapture> {
+  const deadline = Date.now() + 10_000;
   let previousFrame = snapshotValue(await readSnapshot(engine, timings), "frameSequence");
   let crossed: readonly number[] | undefined;
   let framesAfterCrossing = 0;
   let observedEngineFrames = 0;
   let skippedEngineFrames = 0;
-  const snapshots: Array<readonly number[]> = [];
   await page.keyboard.down(outboundKey);
   try {
     while (Date.now() < deadline) {
       const snapshot = await engine.waitForFrameAfter(previousFrame, {
         timeoutMs: 2_000,
         intervalMs: 1,
-        description: "renderer stopped while walking toward an LOD snap boundary",
+        description: "renderer stopped while traveling toward a virtual hierarchy cut change",
         onSnapshot: (sample) => collectTiming(sample, timings),
       });
       const frame = snapshotValue(snapshot, "frameSequence");
       skippedEngineFrames += Math.max(0, frame - previousFrame - 1);
       previousFrame = frame;
       observedEngineFrames += 1;
-      snapshots.push(snapshot);
-      if (crossed === undefined && !sameCentres(boundaryCentres(snapshot), initialCentres)) {
+      if (
+        crossed === undefined &&
+        planarDistance(cameraPosition(snapshot), initialPosition) > 0.01 &&
+        !sameTerrainCut(terrainCutSignature(snapshot), initialCut)
+      ) {
         crossed = snapshot;
-        onCentreChange();
+        onCutChange();
       } else if (crossed !== undefined) {
         framesAfterCrossing += 1;
       }
-      if (crossed !== undefined && framesAfterCrossing >= afterCentreChangeFrames) {
+      if (crossed !== undefined && framesAfterCrossing >= afterCutChangeFrames) {
         return {
           crossed,
-          snapshots,
           observedEngineFrames,
           skippedEngineFrames,
         };
@@ -406,50 +397,52 @@ async function waitForCentreChange(
     await page.keyboard.up(outboundKey);
   }
   if (crossed === undefined) {
-    throw new Error("walking forward did not cross an LOD snap boundary");
+    throw new Error("forward travel did not change the virtual hierarchy cut");
   }
   throw new Error(
-    `renderer produced only ${framesAfterCrossing}/${afterCentreChangeFrames} requested frames after the LOD boundary`,
+    `renderer produced only ${framesAfterCrossing}/${afterCutChangeFrames} requested frames after the hierarchy cut changed`,
   );
 }
 
 async function waitForStableFrame(
   page: Page,
   engine: EngineClient,
-  expectedCentres: BoundaryCentres,
   timings: LodTimings,
 ): Promise<readonly number[]> {
   let latest: readonly number[] = [];
   let previousPosition: Vector3 | undefined;
   let stable = 0;
-  const deadline = Date.now() + 10_000;
-  while (stable < 12 && Date.now() < deadline) {
+  const deadline = Date.now() + 60_000;
+  while (stable < 1 && Date.now() < deadline) {
     latest = await readSnapshot(engine, timings);
     const position = cameraPosition(latest);
     const settled =
-      sameCentres(boundaryCentres(latest), expectedCentres) &&
       snapshotValue(latest, "grounded") === 1 &&
       previousPosition !== undefined &&
-      spatialDistance(position, previousPosition) < 0.0015 &&
-      terrainPresentationReady(latest);
+      planarDistance(position, previousPosition) < 0.0015 &&
+      terrainPresentationReady(latest) &&
+      (snapshotValue(latest, "virtualTerrainGpuOverflowFlags") & ~GPU_FEEDBACK_OVERFLOW_FLAG) ===
+        0 &&
+      snapshotValue(latest, "virtualTerrainGpuMatchesCpuCut") === 1;
     stable = settled ? stable + 1 : 0;
     previousPosition = position;
     await page.waitForTimeout(16);
   }
-  if (stable < 12) {
+  if (stable < 1) {
     const blockers = {
       grounded: snapshotValue(latest, "grounded"),
       pendingJobs: snapshotValue(latest, "pendingJobs"),
-      surfaceInFlight: snapshotValue(latest, "surfaceInFlight"),
-      allLodsReady: snapshotValue(latest, "allLodsReady"),
-      lodTransitionQuads: snapshotValue(latest, "lodTransitionQuads"),
+      virtualTerrainStreamInFlight: snapshotValue(latest, "virtualTerrainStreamInFlight"),
+      terrainReady: snapshotValue(latest, "terrainReady"),
       virtualTerrainRegisteredRegions: snapshotValue(latest, "virtualTerrainRegisteredRegions"),
       virtualTerrainDirectoryInFlight: snapshotValue(latest, "virtualTerrainDirectoryInFlight"),
       virtualTerrainResidentPages: snapshotValue(latest, "virtualTerrainResidentPages"),
       virtualTerrainOwnerlessRoots: snapshotValue(latest, "virtualTerrainOwnerlessRoots"),
+      virtualTerrainGpuOverflowFlags: snapshotValue(latest, "virtualTerrainGpuOverflowFlags"),
+      virtualTerrainGpuMatchesCpuCut: snapshotValue(latest, "virtualTerrainGpuMatchesCpuCut"),
     };
     throw new Error(
-      `LOD frame did not stabilize at ${JSON.stringify(expectedCentres)}; latest ${JSON.stringify(boundaryCentres(latest))}; blockers ${JSON.stringify(blockers)}`,
+      `terrain presentation did not stabilize; latest cut ${JSON.stringify(terrainCutSignature(latest))}; blockers ${JSON.stringify(blockers)}`,
     );
   }
   return latest;
@@ -458,39 +451,46 @@ async function waitForStableFrame(
 async function waitForStableChangedFrame(
   page: Page,
   engine: EngineClient,
-  initialCentres: BoundaryCentres,
   timings: LodTimings,
 ): Promise<readonly number[]> {
   let latest: readonly number[] = [];
-  let latestCentres: BoundaryCentres = [];
-  let previousCentres: BoundaryCentres | undefined;
+  let latestCut: TerrainCutSignature = [0, 0, 0, 0, 0, 0];
   let previousPosition: Vector3 | undefined;
   let stable = 0;
-  const deadline = Date.now() + 10_000;
-  while (stable < 12 && Date.now() < deadline) {
+  const deadline = Date.now() + 60_000;
+  while (stable < 1 && Date.now() < deadline) {
     latest = await readSnapshot(engine, timings);
-    latestCentres = boundaryCentres(latest);
+    latestCut = terrainCutSignature(latest);
     const position = cameraPosition(latest);
     const settled =
-      !sameCentres(latestCentres, initialCentres) &&
       snapshotValue(latest, "grounded") === 1 &&
       previousPosition !== undefined &&
-      spatialDistance(position, previousPosition) < 0.0015 &&
-      snapshotValue(latest, "pendingJobs") === 0 &&
-      snapshotValue(latest, "surfaceInFlight") === 0 &&
-      snapshotValue(latest, "allLodsReady") === 1 &&
-      snapshotValue(latest, "lodTransitionQuads") > 0;
-    stable =
-      settled && previousCentres !== undefined && sameCentres(latestCentres, previousCentres)
-        ? stable + 1
-        : 0;
-    previousCentres = latestCentres;
+      planarDistance(position, previousPosition) < 0.0015 &&
+      terrainPresentationReady(latest) &&
+      (snapshotValue(latest, "virtualTerrainGpuOverflowFlags") & ~GPU_FEEDBACK_OVERFLOW_FLAG) ===
+        0 &&
+      snapshotValue(latest, "virtualTerrainGpuMatchesCpuCut") === 1;
+    stable = settled ? stable + 1 : 0;
     previousPosition = position;
     await page.waitForTimeout(16);
   }
-  if (stable < 12) {
+  if (stable < 1) {
+    const blockers = {
+      grounded: snapshotValue(latest, "grounded"),
+      pendingJobs: snapshotValue(latest, "pendingJobs"),
+      virtualTerrainStreamPending: snapshotValue(latest, "virtualTerrainStreamPending"),
+      virtualTerrainStreamInFlight: snapshotValue(latest, "virtualTerrainStreamInFlight"),
+      terrainReady: snapshotValue(latest, "terrainReady"),
+      virtualTerrainRegisteredRegions: snapshotValue(latest, "virtualTerrainRegisteredRegions"),
+      virtualTerrainDirectoryInFlight: snapshotValue(latest, "virtualTerrainDirectoryInFlight"),
+      virtualTerrainResidentPages: snapshotValue(latest, "virtualTerrainResidentPages"),
+      virtualTerrainOwnerlessRoots: snapshotValue(latest, "virtualTerrainOwnerlessRoots"),
+      virtualTerrainGpuOwnerlessRoots: snapshotValue(latest, "virtualTerrainGpuOwnerlessRoots"),
+      virtualTerrainGpuOverflowFlags: snapshotValue(latest, "virtualTerrainGpuOverflowFlags"),
+      virtualTerrainGpuMatchesCpuCut: snapshotValue(latest, "virtualTerrainGpuMatchesCpuCut"),
+    };
     throw new Error(
-      `changed LOD frame did not stabilize; initial ${JSON.stringify(initialCentres)}, latest ${JSON.stringify(latestCentres)}`,
+      `virtual terrain frame did not stabilize at ${JSON.stringify(latestCut)}; blockers ${JSON.stringify(blockers)}`,
     );
   }
   return latest;
@@ -744,10 +744,14 @@ async function analyzePresentedFrameContinuity(
     },
   );
   const deltas = pairs.map((pair) => pair.normalizedMeanAbsoluteLinearLumaDelta);
+  // CDP screencasts can repeat the same compositor image while the engine advances. Those exact
+  // duplicates are not motion samples and would collapse the motion median toward zero, making a
+  // small ordinary delta look like an arbitrarily large ratio.
+  const motionDeltas = deltas.filter((delta) => delta > 0.000_001);
   const catastrophic = pairs.map((pair) => pair.catastrophicDarkFraction);
   const maximum = Math.max(...deltas);
   const maximumPair = pairs.find((pair) => pair.normalizedMeanAbsoluteLinearLumaDelta === maximum);
-  const median = percentile(deltas, 0.5);
+  const median = percentile(motionDeltas.length > 0 ? motionDeltas : deltas, 0.5);
   return {
     pairs,
     samples: pairs.length,
@@ -817,7 +821,7 @@ function summarizePerformance(timings: LodTimings) {
       gpu.map((sample) => sample.virtualTerrainTraversal + sample.virtualTerrainCompaction),
       0.95,
     ),
-    maximumIncompleteTransitionEdges: Math.max(0, ...timings.incompleteTransitionEdges),
+    maximumOwnerlessRoots: Math.max(0, ...timings.ownerlessRoots),
   };
 }
 
@@ -962,7 +966,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
   const timings: LodTimings = {
     frameIntervals: [],
     gpu: new Map(),
-    incompleteTransitionEdges: [],
+    ownerlessRoots: [],
   };
   const world = await startWorldStack(context, {
     fixture: {
@@ -1007,12 +1011,19 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     await page.keyboard.down("KeyD");
     await page.waitForTimeout(160);
     await page.keyboard.up("KeyD");
+    beforeSnapshot = await waitForEngine(engine, timings, world.service.logs, viewport.failures);
   }
-  const initialCentres = boundaryCentres(beforeSnapshot);
-  beforeSnapshot = await waitForStableFrame(page, engine, initialCentres, timings);
+  await page.waitForFunction(() => document.body.getAttribute("aria-busy") === "false", undefined, {
+    timeout: 30_000,
+  });
+  // The loading pseudo-elements fade for 180 ms after `aria-busy` clears. Keep them out of the
+  // terrain image oracle instead of measuring a transient HTML overlay as an LOD luminance delta.
+  await page.waitForTimeout(250);
+  beforeSnapshot = await waitForStableFrame(page, engine, timings);
+  const initialCut = terrainCutSignature(beforeSnapshot);
   if (options.openWorldLab) {
     await page.keyboard.press("F3");
-    beforeSnapshot = await waitForStableFrame(page, engine, initialCentres, timings);
+    beforeSnapshot = await waitForStableFrame(page, engine, timings);
   }
   await engine.setDiagnosticSky([255, 0, 255]);
   const beforePose = cameraPosition(beforeSnapshot);
@@ -1051,16 +1062,19 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       readonly enclosedSkyPixels: number;
       readonly largestComponentPixels: number;
       readonly largestEnclosedComponentPixels: number;
-      readonly presentedStrideVoxels: number;
-      readonly incompleteTransitionEdges: number;
-      readonly cutTransitionActive: boolean;
-      readonly cutTransitionPhase: number;
-      readonly surfaceQueued: number;
+      readonly canonicalLatticePresented: boolean;
+      readonly ownerlessRoots: number;
+      readonly virtualTerrainStreamPending: number;
       readonly virtualTerrain: ReturnType<typeof virtualTerrainState>;
     }> = [];
     let worstScreenshot = options.geometrySourceTravel ? await page.screenshot() : before;
     let worst = await analyzeWatertightTerrain(page, worstScreenshot, diagnosticTarget);
     let failureGeometrySources: Buffer | undefined;
+    let failureOwnershipSamples: readonly {
+      readonly x: number;
+      readonly y: number;
+      readonly pixel: TerrainDiagnosticPixel;
+    }[] = [];
     resetTimings(timings);
     await page.keyboard.down("KeyW");
     if (descentCoverage) await page.keyboard.down("ShiftLeft");
@@ -1077,11 +1091,9 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
           enclosedSkyPixels: analysis.enclosedPixels,
           largestComponentPixels: analysis.largestComponentPixels,
           largestEnclosedComponentPixels: analysis.largestEnclosedComponentPixels,
-          presentedStrideVoxels: snapshotValue(snapshot, "presentedLodStrideVoxels"),
-          incompleteTransitionEdges: snapshotValue(snapshot, "lodIncompleteTransitionEdges"),
-          cutTransitionActive: snapshotValue(snapshot, "lodCutTransitionActive") === 1,
-          cutTransitionPhase: snapshotValue(snapshot, "lodCutTransitionPhase"),
-          surfaceQueued: snapshotValue(snapshot, "surfaceQueued"),
+          canonicalLatticePresented: snapshotValue(snapshot, "canonicalLatticePresented") === 1,
+          ownerlessRoots: snapshotValue(snapshot, "virtualTerrainOwnerlessRoots"),
+          virtualTerrainStreamPending: snapshotValue(snapshot, "virtualTerrainStreamPending"),
           virtualTerrain: virtualTerrainState(snapshot),
         });
         if (
@@ -1097,9 +1109,48 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
           failureGeometrySources === undefined &&
           !options.geometrySourceTravel
         ) {
+          // Freeze the camera before changing the diagnostic pass. Otherwise high-speed travel
+          // advances hundreds of metres while the toggle is acknowledged, and the source image
+          // no longer describes the pixel that triggered the failure.
+          await page.keyboard.up("KeyW");
+          if (descentCoverage) await page.keyboard.up("ShiftLeft");
+          await page.waitForTimeout(50);
+          const pendingDownload = page.waitForEvent("download", { timeout: 10_000 });
+          await page.keyboard.press("F2");
+          const download = await pendingDownload;
+          const downloadPath = await download.path();
+          const downloadFailure = await download.failure();
+          if (downloadPath === null || downloadFailure !== null) {
+            throw new Error(
+              `terrain failure reproduction download failed: ${
+                downloadFailure ?? "missing temporary file"
+              }`,
+            );
+          }
+          const reproduction = await readFile(downloadPath);
+          await context.artifacts.write(
+            "Sustained travel failure reproduction",
+            "travel-failure-reproduction.png",
+            reproduction,
+            "image/png",
+          );
+          const attachment = readTerrainDiagnosticAttachment(reproduction);
+          const failureCoordinate = analysis.enclosedSampleCoordinates[0];
+          if (failureCoordinate !== undefined) {
+            const [failureX, failureY] = failureCoordinate;
+            failureOwnershipSamples = [-1, 0, 1].flatMap((dy) =>
+              [-1, 0, 1].map((dx) => {
+                const x = Math.max(0, Math.min(attachment.width - 1, failureX + dx));
+                const y = Math.max(0, Math.min(attachment.height - 1, failureY + dy));
+                return { x, y, pixel: attachment.pixel(x, y) };
+              }),
+            );
+          }
           await engine.setGeometrySourceDebug(true);
           failureGeometrySources = await page.screenshot();
           await engine.setGeometrySourceDebug(false);
+          await page.keyboard.down("KeyW");
+          if (descentCoverage) await page.keyboard.down("ShiftLeft");
         }
         if (descentCoverage && cameraPosition(snapshot)[1] <= descentStopHeight) break;
       }
@@ -1117,31 +1168,29 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       stoppedImmediateScreenshot,
       diagnosticTarget,
     );
-    let settledSamples = 0;
-    await engine.waitForSnapshot(
+    const stoppedSettledSnapshot = await engine.waitForSnapshot(
       (snapshot) => {
         collectTiming(snapshot, timings);
         const virtual = virtualTerrainState(snapshot);
-        const settled =
-          (snapshotValue(snapshot, "presentedLodStrideVoxels") === 1 &&
-            snapshotValue(snapshot, "lodIncompleteTransitionEdges") === 0) ||
-          (virtual.mode === 2 &&
-            virtual.publishedPages > 0 &&
-            virtual.currentColumnKnown &&
-            virtual.currentColumnRoots > 0 &&
-            virtual.currentColumnRegisteredRoots === virtual.currentColumnRoots);
-        settledSamples = settled ? settledSamples + 1 : 0;
-        return settledSamples >= 3;
+        return (
+          snapshotValue(snapshot, "canonicalLatticePresented") === 1 &&
+          snapshotValue(snapshot, "virtualTerrainOwnerlessRoots") === 0 &&
+          virtual.mode === 2 &&
+          virtual.publishedPages > 0 &&
+          virtual.gpuOwnershipOverflowFlags === 0 &&
+          virtual.gpuMatchesCpuCut &&
+          virtual.currentColumnKnown &&
+          virtual.currentColumnRoots > 0 &&
+          virtual.currentColumnRegisteredRoots === virtual.currentColumnRoots
+        );
       },
       {
-        timeoutMs: 10_000,
+        timeoutMs: 60_000,
         intervalMs: 50,
-        description: "terrain did not return to three stable owned samples",
+        description: "terrain did not return to a certified owned sample",
       },
     );
-    // Let any subpixel cut transition retire after ownership has stabilized.
-    await page.waitForTimeout(250);
-    const stoppedSettledSnapshot = await readSnapshot(engine, timings);
+    // Capture immediately after the complete owner cut has been GPU-certified.
     const stoppedSettledScreenshot = await page.screenshot();
     const stoppedSettled = await analyzeWatertightTerrain(
       page,
@@ -1181,23 +1230,21 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       "image/png",
     );
     await context.artifacts.write(
-      "Coverage after the LOD handoff window",
+      "Coverage after virtual terrain settlement",
       "travel-stopped-settled.png",
       stoppedSettledScreenshot,
       "image/png",
     );
     if (stoppedSettledGeometrySources !== undefined) {
       await context.artifacts.write(
-        "Geometry sources after the LOD handoff window",
+        "Geometry sources after virtual terrain settlement",
         "travel-stopped-settled-geometry-sources.png",
         stoppedSettledGeometrySources,
         "image/png",
       );
     }
     const uncoveredOwnerSamples = samples.filter(
-      (sample) =>
-        sample.presentedStrideVoxels === 0 &&
-        !(sample.virtualTerrain.mode === 2 && sample.virtualTerrain.publishedPages > 0),
+      (sample) => !sample.canonicalLatticePresented || sample.virtualTerrain.ownerlessRoots > 0,
     ).length;
     const violations: string[] = [];
     if (worst.enclosedPixels > 0) {
@@ -1209,14 +1256,18 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     if (stoppedSettled.enclosedPixels > 0) {
       violations.push("settled nearby terrain retained enclosed diagnostic sky");
     }
-    if (uncoveredOwnerSamples > 0) {
-      violations.push("sustained travel sampled a world point without an LOD owner");
+    const settledVirtualTerrain = virtualTerrainState(stoppedSettledSnapshot);
+    if (settledVirtualTerrain.gpuOwnershipOverflowFlags !== 0) {
+      violations.push("settled GPU hierarchy ownership traversal overflowed");
     }
-    const visibleLegacyQueueSamples = samples.filter(
-      (sample) => sample.virtualTerrain.mode === 2 && sample.surfaceQueued > 0,
-    );
-    if (visibleLegacyQueueSamples.length > 0) {
-      violations.push("the fixed-ring surface queue regrew after virtual terrain took ownership");
+    if (!settledVirtualTerrain.gpuMatchesCpuCut) {
+      violations.push("settled GPU hierarchy traversal disagreed with the CPU ownership oracle");
+    }
+    if (uncoveredOwnerSamples > 0) {
+      violations.push("sustained travel sampled a world point without a terrain owner");
+    }
+    if (samples.some((sample) => sample.virtualTerrain.gpuOwnershipOverflowFlags !== 0)) {
+      violations.push("sustained travel overflowed a bounded GPU ownership buffer");
     }
     if (descentCoverage && travelFinishedPose[1] > descentStopHeight + 5) {
       violations.push("spectator descent did not reach the registered near-ground handoff");
@@ -1259,19 +1310,13 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
           verticalDropMetres: Math.max(0, travelStartedPose[1] - travelFinishedPose[1]),
         },
         uncoveredOwnerSamples,
-        maximumPresentedStrideVoxels: Math.max(
-          0,
-          ...samples.map((sample) => sample.presentedStrideVoxels),
-        ),
-        maximumIncompleteTransitionEdges: Math.max(
-          0,
-          ...samples.map((sample) => sample.incompleteTransitionEdges),
-        ),
-        surfaceQueue: {
-          first: samples[0]?.surfaceQueued ?? 0,
-          last: samples.at(-1)?.surfaceQueued ?? 0,
-          maximum: Math.max(0, ...samples.map((sample) => sample.surfaceQueued)),
-          visibleSamplesWithQueuedWork: visibleLegacyQueueSamples.length,
+        maximumOwnerlessRoots: Math.max(0, ...samples.map((sample) => sample.ownerlessRoots)),
+        virtualTerrainQueue: {
+          first: samples[0]?.virtualTerrainStreamPending ?? 0,
+          last: samples.at(-1)?.virtualTerrainStreamPending ?? 0,
+          maximum: Math.max(0, ...samples.map((sample) => sample.virtualTerrainStreamPending)),
+          samplesWithQueuedWork: samples.filter((sample) => sample.virtualTerrainStreamPending > 0)
+            .length,
         },
         virtualTerrain: {
           visibleSamples: samples.filter((sample) => sample.virtualTerrain.mode === 2).length,
@@ -1295,6 +1340,10 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
             0,
             ...samples.map((sample) => sample.virtualTerrain.ownerlessRoots),
           ),
+          maximumGpuOwnerlessRoots: Math.max(
+            0,
+            ...samples.map((sample) => sample.virtualTerrain.gpuOwnerlessRoots),
+          ),
           maximumPublishedPages: Math.max(
             0,
             ...samples.map((sample) => sample.virtualTerrain.publishedPages),
@@ -1312,37 +1361,52 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
           gpuMismatchSamples: samples.filter(
             (sample) => sample.virtualTerrain.mode === 2 && !sample.virtualTerrain.gpuMatchesCpuCut,
           ).length,
+          maximumGpuOverflowFlags: Math.max(
+            0,
+            ...samples.map((sample) => sample.virtualTerrain.gpuOverflowFlags),
+          ),
+          maximumGpuOwnershipOverflowFlags: Math.max(
+            0,
+            ...samples.map((sample) => sample.virtualTerrain.gpuOwnershipOverflowFlags),
+          ),
+          samplesWithFeedbackSaturation: samples.filter(
+            (sample) => (sample.virtualTerrain.gpuOverflowFlags & GPU_FEEDBACK_OVERFLOW_FLAG) !== 0,
+          ).length,
+          maximumGpuStackPeak: Math.max(
+            0,
+            ...samples.map((sample) => sample.virtualTerrain.gpuStackPeak),
+          ),
         },
         performance: travelPerformance,
-        lodQuality: summarizeTravelLodQuality(samples),
+        terrainQuality: summarizeTravelTerrainQuality(samples),
       },
       worst,
       stopped: {
         immediate: {
           image: stoppedImmediate,
-          presentedStrideVoxels: snapshotValue(
+          canonicalLatticePresented:
+            snapshotValue(stoppedImmediateSnapshot, "canonicalLatticePresented") === 1,
+          ownerlessRoots: snapshotValue(stoppedImmediateSnapshot, "virtualTerrainOwnerlessRoots"),
+          virtualTerrainStreamPending: snapshotValue(
             stoppedImmediateSnapshot,
-            "presentedLodStrideVoxels",
+            "virtualTerrainStreamPending",
           ),
-          incompleteTransitionEdges: snapshotValue(
-            stoppedImmediateSnapshot,
-            "lodIncompleteTransitionEdges",
-          ),
-          surfaceQueued: snapshotValue(stoppedImmediateSnapshot, "surfaceQueued"),
           virtualTerrain: virtualTerrainState(stoppedImmediateSnapshot),
         },
         settled: {
           image: stoppedSettled,
-          presentedStrideVoxels: snapshotValue(stoppedSettledSnapshot, "presentedLodStrideVoxels"),
-          incompleteTransitionEdges: snapshotValue(
+          canonicalLatticePresented:
+            snapshotValue(stoppedSettledSnapshot, "canonicalLatticePresented") === 1,
+          ownerlessRoots: snapshotValue(stoppedSettledSnapshot, "virtualTerrainOwnerlessRoots"),
+          virtualTerrainStreamPending: snapshotValue(
             stoppedSettledSnapshot,
-            "lodIncompleteTransitionEdges",
+            "virtualTerrainStreamPending",
           ),
-          surfaceQueued: snapshotValue(stoppedSettledSnapshot, "surfaceQueued"),
           virtualTerrain: virtualTerrainState(stoppedSettledSnapshot),
         },
       },
       samples,
+      failureOwnershipSamples,
       violations,
     };
     await context.artifacts.writeJson("LOD report", "report.json", result);
@@ -1371,10 +1435,10 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
         options.look[1],
         timings,
       );
-      beforeSnapshot = await waitForStableFrame(page, engine, initialCentres, timings);
+      beforeSnapshot = await waitForStableFrame(page, engine, timings);
       if (boundaryCoverage && options.openWorldLab) {
         await page.keyboard.press("F3");
-        beforeSnapshot = await waitForStableFrame(page, engine, initialCentres, timings);
+        beforeSnapshot = await waitForStableFrame(page, engine, timings);
       }
       const screenshot = await page.screenshot();
       await context.artifacts.write(
@@ -1417,9 +1481,14 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       headingSamples[0]?.image ?? (await analyzeWatertightTerrain(page, before)),
     );
     const performance = summarizePerformance(timings);
+    const virtualTerrain = virtualTerrainState(beforeSnapshot);
     const violations: string[] = [];
     if (image.diagnosticSkyPixels > 0)
       violations.push("terrain-only ROI exposes the diagnostic magenta sky");
+    if (virtualTerrain.gpuOwnershipOverflowFlags !== 0)
+      violations.push("settled GPU hierarchy ownership traversal overflowed");
+    if (!virtualTerrain.gpuMatchesCpuCut)
+      violations.push("settled GPU hierarchy traversal disagreed with the CPU ownership oracle");
     if (performance.frameP95Ms > 12) violations.push("frame p95 exceeded 12ms");
     if (performance.fractionAbove16_67Ms > 0.01)
       violations.push("over 1% of measured frames exceeded 16.67ms");
@@ -1439,11 +1508,11 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       look: options.look,
       browser: browser.version,
       pose: beforePose,
-      lod: {
-        centres: initialCentres,
+      terrain: {
+        cut: initialCut,
         worldQuads: snapshotValue(beforeSnapshot, "quads"),
         drawCalls: snapshotValue(beforeSnapshot, "drawCalls"),
-        transitionQuads: snapshotValue(beforeSnapshot, "lodTransitionQuads"),
+        virtualTerrain,
         viewportFingerprint: [
           snapshotValue(beforeSnapshot, "viewportFingerprintLow24"),
           snapshotValue(beforeSnapshot, "viewportFingerprintHigh24"),
@@ -1469,26 +1538,20 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       worst: await analyzeWatertightTerrain(page, before),
       worstScreenshot: before,
     };
-    const cameraVoxelX = beforePose[0] / 0.1;
-    const firstCentre = initialCentres[0];
-    if (firstCentre === undefined) throw new Error("LOD fixture has no boundary centre");
-    const desiredXDirection = Math.sign(cameraVoxelX - firstCentre[0]) || 1;
-    const forwardXDirection = Math.sign(Math.sin(snapshotValue(beforeSnapshot, "yaw"))) || 1;
-    const outboundKey = desiredXDirection === forwardXDirection ? "KeyW" : "KeyS";
+    const outboundKey = "KeyW";
     let crossedSnapshot: readonly number[] | undefined;
     let capturedEngineFrames = 0;
     let skippedEngineFrames = 0;
     let crossingPresentedFrame = 0;
-    let movementSnapshots: readonly (readonly number[])[] = [];
-    // Spectator flight drives the same moving-camera LOD focus and cut renderer, then restores the
-    // saved body pose exactly when disabled. The old keyboard braking loop varied by centimetres
-    // and introduced enough parallax to hide the cut comparison behind a positioning error.
+    // Spectator flight drives the virtual hierarchy cut, then restores the saved body pose exactly
+    // when disabled so image comparison is not hidden by positioning error.
     await engine.setSpectator(true);
     const presentedFrames = await capturePresentedFrames(page, async (capture) => {
-      const movement = await waitForCentreChange(
+      const movement = await waitForCutChange(
         page,
         engine,
-        initialCentres,
+        initialCut,
+        beforePose,
         outboundKey,
         timings,
         12,
@@ -1499,10 +1562,9 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       crossedSnapshot = movement.crossed;
       capturedEngineFrames = movement.observedEngineFrames;
       skippedEngineFrames = movement.skippedEngineFrames;
-      movementSnapshots = movement.snapshots;
     });
     if (crossedSnapshot === undefined) {
-      throw new Error("presented-frame capture completed without crossing an LOD boundary");
+      throw new Error("presented-frame capture completed without a hierarchy cut change");
     }
     for (const screenshot of presentedFrames.frames) {
       const analysis = await analyzeWatertightTerrain(page, screenshot);
@@ -1520,7 +1582,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
         : (presentedFrames.lastTimestamp - presentedFrames.firstTimestamp) * 1_000;
     const crossedPose = cameraPosition(crossedSnapshot);
     if (planarDistance(crossedPose, beforePose) <= 0) {
-      throw new Error("LOD focus changed without measurable player movement");
+      throw new Error("terrain cut changed without measurable camera movement");
     }
     if (presentedFrames.overflowFrames > 0) {
       throw new Error(
@@ -1532,10 +1594,6 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
         `presented-frame capture observed only ${movingCoverage.samples} compositor frames`,
       );
     }
-    const transitionActiveFrames = movementSnapshots.filter(
-      (snapshot) => snapshotValue(snapshot, "lodCutTransitionActive") === 1,
-    ).length;
-    const transitionActiveObserved = transitionActiveFrames > 0;
     const continuityStart = Math.max(
       0,
       Math.min(crossingPresentedFrame - 1, presentedFrames.frames.length - 2),
@@ -1549,7 +1607,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     );
     const crossingPair = continuityAnalysis.pairs[0];
     if (crossingPair === undefined) {
-      throw new Error("LOD continuity capture omitted the ownership crossing pair");
+      throw new Error("terrain continuity capture omitted the ownership crossing pair");
     }
     const continuity = {
       ...continuityAnalysis,
@@ -1574,8 +1632,8 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       "image/png",
     );
     await engine.setSpectator(false);
-    const afterSnapshot = await waitForStableChangedFrame(page, engine, initialCentres, timings);
-    const afterCentres = boundaryCentres(afterSnapshot);
+    const afterSnapshot = await waitForStableChangedFrame(page, engine, timings);
+    const afterCut = terrainCutSignature(afterSnapshot);
     const afterPose = cameraPosition(afterSnapshot);
     const after = await page.screenshot();
     await context.artifacts.write("LOD after", "after.png", after, "image/png");
@@ -1605,11 +1663,6 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
         capturedEngineFrames,
         skippedEngineFrames,
         captureDurationMs: capturedPresentationDurationMs,
-        cutTransition: {
-          activeObserved: transitionActiveObserved,
-          activeEngineFrames: transitionActiveFrames,
-          expectedInactive: true,
-        },
         continuity,
         worst: movingCoverage.worst,
       },
@@ -1621,6 +1674,8 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     const performance = summarizePerformance(timings);
     const planarPoseErrorMetres = planarDistance(beforePose, afterPose);
     const poseErrorMetres = spatialDistance(beforePose, afterPose);
+    const beforeVirtualTerrain = virtualTerrainState(beforeSnapshot);
+    const afterVirtualTerrain = virtualTerrainState(afterSnapshot);
     const violations: string[] = [];
     // Ground height follows the returned X/Z position. A few centimetres on a steep voxel slope
     // can legitimately move Y farther, while the screenshots remain horizontally registered.
@@ -1643,22 +1698,27 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     }
     if (image.movingCoverage.framesWithHoles !== 0)
       violations.push(
-        `moving LOD transition exposed diagnostic sky in ${image.movingCoverage.framesWithHoles} presented frames`,
+        `moving hierarchy cut exposed diagnostic sky in ${image.movingCoverage.framesWithHoles} presented frames`,
       );
-    if (image.movingCoverage.cutTransition.activeObserved)
-      violations.push("legacy dual-cut transition overlay became active");
     if (image.movingCoverage.continuity.normalizedMeanAbsoluteLinearLumaDelta.maximum > 0.05) {
-      violations.push("moving LOD continuity delta exceeded 0.05 linear luminance");
+      violations.push("moving terrain continuity delta exceeded 0.05 linear luminance");
     }
     if (
       image.movingCoverage.continuity.normalizedMeanAbsoluteLinearLumaDelta.maximumOverMedian > 3
     ) {
-      violations.push("moving LOD continuity produced a delta over 3x the motion median");
+      violations.push("moving terrain continuity produced a delta over 3x the motion median");
     }
     if (image.movingCoverage.continuity.crossing.normalizedDeltaOverMotionMedian > 3) {
-      violations.push("LOD ownership crossing produced a delta over 3x the motion median");
+      violations.push("terrain ownership crossing produced a delta over 3x the motion median");
     }
     if (image.ssim < 0.97) violations.push("valley SSIM fell below 0.97");
+    if (
+      beforeVirtualTerrain.gpuOwnershipOverflowFlags !== 0 ||
+      afterVirtualTerrain.gpuOwnershipOverflowFlags !== 0
+    )
+      violations.push("settled GPU hierarchy ownership traversal overflowed");
+    if (!beforeVirtualTerrain.gpuMatchesCpuCut || !afterVirtualTerrain.gpuMatchesCpuCut)
+      violations.push("settled GPU hierarchy traversal disagreed with the CPU ownership oracle");
     if (performance.frameP95Ms > 12) violations.push("frame p95 exceeded 12ms");
     if (performance.fractionAbove16_67Ms > 0.01)
       violations.push("over 1% of measured frames exceeded 16.67ms");
@@ -1685,11 +1745,11 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
         planarErrorMetres: planarPoseErrorMetres,
         errorMetres: poseErrorMetres,
       },
-      lod: {
-        centresBefore: initialCentres,
-        centresAfter: afterCentres,
-        transitionQuadsBefore: snapshotValue(beforeSnapshot, "lodTransitionQuads"),
-        transitionQuadsAfter: snapshotValue(afterSnapshot, "lodTransitionQuads"),
+      terrain: {
+        cutBefore: initialCut,
+        cutAfter: afterCut,
+        gpuBefore: beforeVirtualTerrain,
+        gpuAfter: afterVirtualTerrain,
         viewportFingerprintBefore: [
           snapshotValue(beforeSnapshot, "viewportFingerprintLow24"),
           snapshotValue(beforeSnapshot, "viewportFingerprintHigh24"),

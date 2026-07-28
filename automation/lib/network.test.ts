@@ -164,16 +164,16 @@ describe("network benchmark link", () => {
     inspector.path = "/v40/world";
     const chunks = vxwpFrame(3, 25, 0, 41n);
     chunks[24] = 2;
-    const surface = vxwpFrame(7, 25, 0, 42n);
-    surface[24] = 3;
+    const terrainPage = vxwpFrame(22, 25, 0, 42n);
+    terrainPage[24] = 3;
     inspector.onMessage("upstream", 0x2, chunks, chunks.length, 1);
-    inspector.onMessage("upstream", 0x2, surface, surface.length, 1);
+    inspector.onMessage("upstream", 0x2, terrainPage, terrainPage.length, 1);
     inspector.onMessage("upstream", 0x2, vxwpFrame(5, 24, 0, 41n), 24, 1);
     inspector.onMessage("upstream", 0x2, vxwpFrame(5, 24, 0, 42n), 24, 1);
 
     expect(testInternals.clonedStats(stats).messages["upstream:cancel"]?.cancelTargets).toEqual({
       chunk_batch: 1,
-      surface_tile_batch: 1,
+      terrain_page_batch: 1,
     });
   });
 

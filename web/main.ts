@@ -147,19 +147,11 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     number,
     { resolve: (active: boolean) => void; reject: (reason: Error) => void }
   >();
-  const lodBoundaryResolvers = new Map<
-    number,
-    { resolve: (accepted: boolean) => void; reject: (reason: Error) => void }
-  >();
   const exactVolumeResolvers = new Map<
     number,
     { resolve: (presented: boolean) => void; reject: (reason: Error) => void }
   >();
   const inventoryResolvers = new Map<
-    number,
-    { resolve: (values: number[]) => void; reject: (reason: Error) => void }
-  >();
-  const surfaceEditStateResolvers = new Map<
     number,
     { resolve: (values: number[]) => void; reject: (reason: Error) => void }
   >();
@@ -184,14 +176,10 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     geometrySourceDebugResolvers.clear();
     for (const { reject } of materialDetailResolvers.values()) reject(error);
     materialDetailResolvers.clear();
-    for (const { reject } of lodBoundaryResolvers.values()) reject(error);
-    lodBoundaryResolvers.clear();
     for (const { reject } of exactVolumeResolvers.values()) reject(error);
     exactVolumeResolvers.clear();
     for (const { reject } of inventoryResolvers.values()) reject(error);
     inventoryResolvers.clear();
-    for (const { reject } of surfaceEditStateResolvers.values()) reject(error);
-    surfaceEditStateResolvers.clear();
   };
   const shutdownWorker = (timeoutMs = 1_000): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
@@ -269,17 +257,6 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
         materialDetailResolvers.set(requestId, { resolve, reject });
         worker.postMessage({ kind: "materialDetail", requestId, enabled });
       }),
-    lodBoundaries: (halfExtentsVoxels) =>
-      new Promise<boolean>((resolve, reject) => {
-        const requestId = nextSnapshotRequest;
-        nextSnapshotRequest += 1;
-        lodBoundaryResolvers.set(requestId, { resolve, reject });
-        worker.postMessage({
-          kind: "lodBoundaries",
-          requestId,
-          halfExtentsVoxels: [...halfExtentsVoxels],
-        });
-      }),
     exactVolumePresented: (x, y, z) =>
       new Promise<boolean>((resolve, reject) => {
         const requestId = nextSnapshotRequest;
@@ -337,13 +314,6 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
         nextSnapshotRequest += 1;
         inventoryResolvers.set(requestId, { resolve, reject });
         worker.postMessage({ kind: "inventory", requestId });
-      }),
-    surfaceEditState: (stride, x, z) =>
-      new Promise<number[]>((resolve, reject) => {
-        const requestId = nextSnapshotRequest;
-        nextSnapshotRequest += 1;
-        surfaceEditStateResolvers.set(requestId, { resolve, reject });
-        worker.postMessage({ kind: "surfaceEditState", requestId, stride, x, z });
       }),
     player,
     playerUrl: (name) => namedPlayerUrl(name).href,
@@ -421,9 +391,6 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     } else if (event.data.kind === "materialDetail") {
       materialDetailResolvers.get(event.data.requestId)?.resolve(event.data.accepted);
       materialDetailResolvers.delete(event.data.requestId);
-    } else if (event.data.kind === "lodBoundaries") {
-      lodBoundaryResolvers.get(event.data.requestId)?.resolve(event.data.accepted);
-      lodBoundaryResolvers.delete(event.data.requestId);
     } else if (event.data.kind === "exactVolumePresented") {
       exactVolumeResolvers.get(event.data.requestId)?.resolve(event.data.presented);
       exactVolumeResolvers.delete(event.data.requestId);
@@ -436,9 +403,6 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     } else if (event.data.kind === "inventory") {
       inventoryResolvers.get(event.data.requestId)?.resolve(event.data.values);
       inventoryResolvers.delete(event.data.requestId);
-    } else if (event.data.kind === "surfaceEditState") {
-      surfaceEditStateResolvers.get(event.data.requestId)?.resolve(event.data.values);
-      surfaceEditStateResolvers.delete(event.data.requestId);
     }
   };
   worker.onerror = (event) => {

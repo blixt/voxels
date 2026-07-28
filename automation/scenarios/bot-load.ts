@@ -126,9 +126,8 @@ interface ObserverSample {
   readonly visibleChunks: number;
   readonly drawCalls: number;
   readonly pendingJobs: number;
-  readonly surfaceInFlight: number;
-  readonly interactiveLodsReady: boolean;
-  readonly allLodsReady: boolean;
+  readonly virtualTerrainStreamInFlight: number;
+  readonly terrainReady: boolean;
 }
 
 function parseArguments(values: readonly string[]): BotLoadOptions {
@@ -280,7 +279,9 @@ function summarizeTrafficBudget(report: BotHarnessReport, fixture: WorldFixture)
         (sum, client) =>
           sum +
           messageBytes(client, VXWP_KIND.chunkBatchResult) +
-          messageBytes(client, VXWP_KIND.surfaceTileBatchResult) +
+          messageBytes(client, VXWP_KIND.terrainDirectoryBatchResult) +
+          messageBytes(client, VXWP_KIND.terrainPageBatchResult) +
+          messageBytes(client, VXWP_KIND.terrainRegionColumnBatchResult) +
           messageBytes(client, VXWP_KIND.frameFragment),
         0,
       ),
@@ -326,8 +327,8 @@ async function collectObserverSamples(
   const samples: ObserverSample[] = [];
   const frameMilliseconds: number[] = [];
   let rosterReadyMs: number | null = null;
-  let interactiveWorldReadyMs: number | null = null;
-  let fullWorldReadyMs: number | null = null;
+  let terrainReadyMs: number | null = null;
+  let terrainSettledMs: number | null = null;
   while (!done.value) {
     const values = await observer.viewport.engine.snapshot();
     const remoteAvatars = snapshotValue(values, "remoteAvatars");
@@ -335,16 +336,16 @@ async function collectObserverSamples(
     if (rosterReadyMs === null && remoteAvatars === expectedBots) {
       rosterReadyMs = elapsedMs;
     }
-    if (interactiveWorldReadyMs === null && snapshotValue(values, "interactiveLodsReady") === 1) {
-      interactiveWorldReadyMs = elapsedMs;
+    if (terrainReadyMs === null && snapshotValue(values, "terrainReady") === 1) {
+      terrainReadyMs = elapsedMs;
     }
     if (
-      fullWorldReadyMs === null &&
-      snapshotValue(values, "allLodsReady") === 1 &&
-      snapshotValue(values, "surfaceInFlight") === 0 &&
+      terrainSettledMs === null &&
+      snapshotValue(values, "terrainReady") === 1 &&
+      snapshotValue(values, "virtualTerrainStreamInFlight") === 0 &&
       snapshotValue(values, "pendingJobs") === 0
     ) {
-      fullWorldReadyMs = elapsedMs;
+      terrainSettledMs = elapsedMs;
     }
     frameMilliseconds.push(...frameSamples(values).map((sample) => sample.intervalMs));
     samples.push({
@@ -361,17 +362,16 @@ async function collectObserverSamples(
       visibleChunks: snapshotValue(values, "visibleChunks"),
       drawCalls: snapshotValue(values, "drawCalls"),
       pendingJobs: snapshotValue(values, "pendingJobs"),
-      surfaceInFlight: snapshotValue(values, "surfaceInFlight"),
-      interactiveLodsReady: snapshotValue(values, "interactiveLodsReady") === 1,
-      allLodsReady: snapshotValue(values, "allLodsReady") === 1,
+      virtualTerrainStreamInFlight: snapshotValue(values, "virtualTerrainStreamInFlight"),
+      terrainReady: snapshotValue(values, "terrainReady") === 1,
     });
     await observer.viewport.page.waitForTimeout(OBSERVER_SAMPLE_INTERVAL_MS);
   }
   const final = samples.at(-1);
   return {
     rosterReadyMs,
-    interactiveWorldReadyMs,
-    fullWorldReadyMs,
+    terrainReadyMs,
+    terrainSettledMs,
     maxRemoteAvatars: Math.max(0, ...samples.map((sample) => sample.remoteAvatars)),
     frameMs: numericSummary(frameMilliseconds),
     cpuMs: numericSummary(samples.map((sample) => sample.cpuMs)),
@@ -387,9 +387,8 @@ async function collectObserverSamples(
             residentChunks: final.residentChunks,
             visibleChunks: final.visibleChunks,
             pendingJobs: final.pendingJobs,
-            surfaceInFlight: final.surfaceInFlight,
-            interactiveLodsReady: final.interactiveLodsReady,
-            allLodsReady: final.allLodsReady,
+            virtualTerrainStreamInFlight: final.virtualTerrainStreamInFlight,
+            terrainReady: final.terrainReady,
           },
     samples,
     errors: observer.viewport.failures.map((failure) => `${failure.source}: ${failure.message}`),
@@ -570,10 +569,10 @@ function markdownReport(result: BotLoadResult): string {
     const observerLod =
       stage.observer === null
         ? "off"
-        : stage.observer.fullWorldReadyMs !== null
-          ? `full ${stage.observer.fullWorldReadyMs.toFixed(0)} ms`
-          : stage.observer.interactiveWorldReadyMs !== null
-            ? `interactive ${stage.observer.interactiveWorldReadyMs.toFixed(0)} ms`
+        : stage.observer.terrainSettledMs !== null
+          ? `settled ${stage.observer.terrainSettledMs.toFixed(0)} ms`
+          : stage.observer.terrainReadyMs !== null
+            ? `ready ${stage.observer.terrainReadyMs.toFixed(0)} ms`
             : `partial ${stage.observer.finalWorld?.residentChunks ?? 0} resident`;
     lines.push(
       `| ${stage.count} | ${stage.generationWorkers} | ${stage.process.service.cpuPercent.p95.toFixed(1)}% | ${stage.process.service.rssMiB.max.toFixed(1)} MiB | ${stage.process.bots.cpuPercent.p95.toFixed(1)}% | ${(stage.network.downstream.streamBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.streamBytes / 1_048_576).toFixed(2)} MiB | ${(stage.network.downstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} MiB | ${(stage.database.deltaBytes / 1_024).toFixed(1)} KiB | ${bot.editsAccepted}/${bot.editConflicts}/${bot.editAuthorityRejections} | ${bot.mutationsCommitted} | ${chunkP95.toFixed(1)} ms | ${editP95.toFixed(1)} ms | ${bot.maxVisiblePlayers} | ${rosterReady} | ${observerLod} | ${observerFrame} |`,

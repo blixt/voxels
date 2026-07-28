@@ -28,7 +28,6 @@ export class EngineHandle {
     resize(css_width: number, css_height: number, dpr: number): void;
     set_diagnostic_sky(enabled: boolean, red: number, green: number, blue: number): boolean;
     set_geometry_source_debug(enabled: boolean): boolean;
-    set_lod_boundary_half_extents(extents: Int32Array): boolean;
     set_material_detail(enabled: boolean): boolean;
     set_reduced_motion(reduced_motion: boolean): void;
     /**
@@ -53,12 +52,6 @@ export class EngineHandle {
      * path as pointer input. It does not mutate local world state optimistically.
      */
     submit_place(x: number, y: number, z: number, material_id: number, shape_id: number): boolean;
-    /**
-     * Returns `[tile_x, tile_z, required_server_revision, accepted_server_revision,
-     * resident, dirty, fingerprint_low32, fingerprint_high32, quad_count, activation_mask]`
-     * for the tile containing one canonical voxel coordinate.
-     */
-    surface_edit_state(stride: number, x: number, z: number): Float64Array;
     take_mission_control_copy(): string | undefined;
     take_mission_control_screenshot(): MissionControlScreenshot | undefined;
     ui_open(): boolean;
@@ -105,7 +98,6 @@ export interface InitOutput {
     readonly enginehandle_resize: (a: number, b: number, c: number, d: number) => void;
     readonly enginehandle_set_diagnostic_sky: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly enginehandle_set_geometry_source_debug: (a: number, b: number) => number;
-    readonly enginehandle_set_lod_boundary_half_extents: (a: number, b: number, c: number) => number;
     readonly enginehandle_set_material_detail: (a: number, b: number) => number;
     readonly enginehandle_set_reduced_motion: (a: number, b: number) => void;
     readonly enginehandle_set_spectator: (a: number, b: number) => number;
@@ -114,7 +106,6 @@ export interface InitOutput {
     readonly enginehandle_startup_progress: (a: number) => [number, number];
     readonly enginehandle_submit_dig: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly enginehandle_submit_place: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
-    readonly enginehandle_surface_edit_state: (a: number, b: number, c: number, d: number) => [number, number];
     readonly enginehandle_take_mission_control_copy: (a: number) => [number, number];
     readonly enginehandle_take_mission_control_screenshot: (a: number) => number;
     readonly enginehandle_ui_open: (a: number) => number;

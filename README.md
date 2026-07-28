@@ -16,7 +16,8 @@ and streaming while the native Rust world service owns generation and durable wo
 6. Run host Rust tests and host/WASM Clippy with `vp run check:rust`.
 7. Build production WASM and assets with `vp build`; inspect them with `vp preview`.
 8. Launch six isolated release clients with shaped links and verify avatars plus a five-builder
-   far-LOD tower in real Chrome with `vp run automation -- run multiplayer`.
+   tower across canonical and virtual-terrain ownership in real Chrome with
+   `vp run automation -- run multiplayer`.
 
 `vp run verify` runs the complete TypeScript, Rust, test, lint, and production-build gate.
 The production deployment serves the browser and session Worker at <https://voxels.lol> and runs
@@ -26,7 +27,7 @@ release commands, smoke tests, persistence, and rollback notes.
 screenshots, traces, video, and provider setup. Every run is isolated under `target/automation/`;
 see [Automation scenarios](docs/automation.md) for the authoring API and composition model.
 `vp run automation -- run bench-world` runs native Criterion baselines for chunk generation,
-stream codecs, meshing, and far surfaces. Each ignored
+stream codecs, meshing, and virtual hierarchy pages. Each ignored
 `target/automation/bench-world/<run-id>/criterion/` directory retains the full report.
 `vp run automation -- run bench-core` compares 120 dry and submerged fixed simulation steps.
 `vp run automation -- run storage-benchmark` measures production edit latency, compact overlay RAM,
@@ -97,7 +98,8 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
   bot, browser-validation, video, screenshot, trace, and analysis scenarios.
 - `client-config/`: strict, versioned, host-testable client TOML schema and validation.
 - `core/`: portable player, input, physics, and game simulation.
-- `world/`: deterministic chunks, generation, versioned transport codecs, surface LODs, and meshing.
+- `world/`: deterministic chunks, generation, versioned terrain-page codecs and hierarchy data, and
+  meshing.
 - `runtime/`: deterministic streaming priorities, budgets, revision tickets, eviction, and diagnostics.
 - `render/`: web-free WGPU resources, pipelines, shaders, and frame rendering.
 - `shell/`: WASM/browser worker leaf, packed input decoding, display clock, and remote clients.
@@ -106,26 +108,29 @@ Recorded decision baselines and their test hardware live in [docs/performance.md
 - `web/`: the single body canvas, normalized input transport, pointer lock, and worker boot only. All
   visible HUD, status, crosshair, controls, menus, and text are composed by Rust/WGPU.
 
-The canonical world is generator identity plus sparse edits. Near meshes and eight streamed surface
-LOD rings are derived caches; the rings sample at 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, and 25.6 m
-while the editable near field retains authoritative 10 cm voxels. The four horizon-only rings are
-capped background prefetches and extend default coverage to 2.4 km without delaying the four
-interactive rings. The current generator shares one regional surface sample across canonical
-chunks and every LOD, blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
-Grid-aligned Rust draw ownership selects whole surface patches, closes resolution boundaries with
-exact connectors built from the resident coarse and fine height profiles, and activates a newly
-streamed coverage set only when it is complete.
+The canonical world is generator identity plus sparse edits. Visible terrain has one virtual
+hierarchy of versioned, independently streamable pages; it does not maintain a parallel family of
+fixed-distance rings. Pages may contain exact stepped surfaces, sparse voxel bricks, sampled
+heightfields, or bounded triangle clusters, but every representation shares one half-open ownership
+grid and canonical 10 cm coordinate lattice. A complete parent remains authoritative until all four
+children are resident and the GPU traversal certifies the same cut, so refinement never creates
+overlap or a temporary hole. Exact editable/collision chunks replace covered virtual pages through
+the same ownership rule. Projected screen error and hysteresis choose refinement incrementally while
+deadline-aware page scheduling prioritizes the camera path.
+
+The current generator shares one regional surface source across canonical chunks and hierarchy pages,
+blending forest, moor, alpine, badlands, dune, and volcanic terrain influences.
 Analytic landmark identities add ordinary regional forms plus elder canopies, tor circles, needle
 gates, buried ribs, colonnades, and basalt crowns as ordinary editable voxels. An 8x8-cell composition
 director arranges backgrounds and companions into clusters, rings, clearings, and procession lines,
-then gives each macro cell one distinct semantic hero. Bounded edit-aware proxies preserve every form
-across the surface rings. A deterministic Rust-generated
+then gives each macro cell one distinct semantic hero. The same virtual hierarchy carries these forms
+without a separate proxy-ring authority. A deterministic Rust-generated
 material atlas adds world-anchored pixel albedo, micro-normal, and roughness structure quantized to an
 exact 3x3 grid on every 10 cm voxel face (one block per 3.33 cm), with nearest sampling and a
 distance-stable mip chain, without changing geometry, draw ownership, or durable voxel data.
 The 753 m First Pilgrim Road is a stable Rust polyline graded through those same canonical columns.
 Its 10 cm paving, shoulders, 26 cairns/waystones/arches, five named chapters, and alpine Needle Gate
-destination remain editable, collidable, and continuous through every interactive LOD rather than
+destination remain editable, collidable, and continuous through hierarchy refinement rather than
 becoming renderer-only decals. World Lab derives chapter and progress status from the Rust atlas.
 See [docs/architecture.md](docs/architecture.md) for format, authority, and research decisions.
 
@@ -161,9 +166,9 @@ repeating spherical observer frame while the editable terrain itself remains inf
 `window.__VOXELS__.snapshot()` returns a versioned numeric telemetry stream for browser automation.
 It contains camera, renderer, streaming, memory, water, GPU, sustained-profile, frame-history, and
 edit-convergence records. It is intentionally an automation hook rather than a second JavaScript game
-model; the browser owns no simulation or UI state. `submitPlace(...)`, `submitDig(...)`, and
-`surfaceEditState(...)` exercise the production server-edit path and expose only bounded convergence
-state for multiplayer regression tests.
+model; the browser owns no simulation or UI state. `submitPlace(...)` and `submitDig(...)` exercise
+the production server-edit path, while virtual hierarchy, canonical ownership, and revision telemetry
+expose bounded convergence state for multiplayer regression tests.
 
 The same typed boundary can operate a product-facing observer without granting edit authority:
 

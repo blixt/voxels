@@ -257,14 +257,6 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
         accepted: handle?.set_material_detail(message.enabled) ?? false,
       });
       break;
-    case "lodBoundaries":
-      scope.postMessage({
-        kind: "lodBoundaries",
-        requestId: message.requestId,
-        accepted:
-          handle?.set_lod_boundary_half_extents(new Int32Array(message.halfExtentsVoxels)) ?? false,
-      });
-      break;
     case "exactVolumePresented":
       scope.postMessage({
         kind: "exactVolumePresented",
@@ -305,13 +297,6 @@ function dispatch(message: Exclude<ToWorker, InitMessage>): void {
         kind: "inventory",
         requestId: message.requestId,
         values: Array.from(handle?.inventory() ?? []),
-      });
-      break;
-    case "surfaceEditState":
-      scope.postMessage({
-        kind: "surfaceEditState",
-        requestId: message.requestId,
-        values: Array.from(handle?.surface_edit_state(message.stride, message.x, message.z) ?? []),
       });
       break;
     case "destroy":

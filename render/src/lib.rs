@@ -5,7 +5,6 @@ mod arena;
 mod avatar;
 pub mod clouds;
 pub mod environment;
-pub mod lod;
 mod material_detail;
 pub mod reference;
 pub mod renderer;

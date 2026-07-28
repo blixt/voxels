@@ -1426,6 +1426,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn traversal_storage_is_bounded_by_depth_not_selected_leaf_count() {
+        let shader = include_str!("shaders/virtual_terrain.wgsl");
+        assert!(shader.contains("const STACK_CAPACITY: u32 = 256u"));
+        assert!(shader.contains("@compute @workgroup_size(1)"));
+        assert!(shader.contains("var<workgroup> traversal_stack: array<u32, 256>"));
+        assert!(!shader.contains("FRONTIER_CAPACITY"));
+        assert!(!shader.contains("frontier_a"));
+        assert!(!shader.contains("frontier_b"));
+    }
+
+    #[test]
     fn feedback_parser_clamps_untrusted_gpu_counts_to_fixed_regions() {
         let capacity = VirtualTerrainCapacity {
             max_directories: 1,

@@ -24,25 +24,21 @@ describe("render metrics", () => {
           renderSubmissionMs: 1,
           frameId: 42,
           renderCullMs: 0.2,
-          renderLodPlanMs: 0.05,
-          lodPlanRebuildReason: 2,
           renderEncodeMs: 0.3,
           renderSubmitMs: 0.1,
-          lodOwnershipRefreshes: 2,
           testedSlices: 20,
           selectedSlices: 10,
           streamRemoteMs: 0.1,
           streamPlanMs: 0.2,
           streamMeshMs: 0.3,
           streamPublishMs: 0.1,
-          streamSurfaceMs: 0.2,
+          streamVirtualTerrainMs: 0.2,
           streamPresenceMs: 0.1,
           streamInterestMs: 0.1,
           streamSchedulerUpdateMs: 0.1,
           streamSchedulerAdmitMs: 0.1,
           streamCollisionInterestMs: 0.1,
           streamEnclosedInterestMs: 0.1,
-          streamSurfaceInterestMs: 0.1,
         },
       ],
       dropped: 0,
@@ -92,25 +88,21 @@ describe("render metrics", () => {
           renderSubmissionMs: 0.5,
           frameId: 8,
           renderCullMs: 0.1,
-          renderLodPlanMs: 0,
-          lodPlanRebuildReason: 0,
           renderEncodeMs: 0.2,
           renderSubmitMs: 0.1,
-          lodOwnershipRefreshes: 0,
           testedSlices: 20,
           selectedSlices: 10,
           streamRemoteMs: 0.05,
           streamPlanMs: 0.05,
           streamMeshMs: 0.05,
           streamPublishMs: 0.05,
-          streamSurfaceMs: 0.05,
+          streamVirtualTerrainMs: 0.05,
           streamPresenceMs: 0.05,
           streamInterestMs: 0.05,
           streamSchedulerUpdateMs: 0.05,
           streamSchedulerAdmitMs: 0.05,
           streamCollisionInterestMs: 0.05,
           streamEnclosedInterestMs: 0.05,
-          streamSurfaceInterestMs: 0.05,
         },
       ],
       dropped: 0,
@@ -176,7 +168,7 @@ describe("render metrics", () => {
     snapshot[SNAPSHOT.pendingJobs] = 7;
     snapshot[SNAPSHOT.generationQueued] = 3;
     snapshot[SNAPSHOT.generationInFlight] = 2;
-    snapshot[SNAPSHOT.surfaceInFlight] = 2;
+    snapshot[SNAPSHOT.virtualTerrainStreamInFlight] = 2;
     snapshot[SNAPSHOT.loadCompleted] = 10;
     snapshot[SNAPSHOT.acceptedCompletions] = 20;
     snapshot[SNAPSHOT.canonicalImmediateRequired] = 15;
@@ -185,19 +177,19 @@ describe("render metrics", () => {
     snapshot[SNAPSHOT.collisionImmediateResident] = 8;
     snapshot[SNAPSHOT.collisionLookaheadRequired] = 20;
     snapshot[SNAPSHOT.collisionLookaheadResident] = 19;
-    snapshot[SNAPSHOT.canonicalSurfaceCellsRequired] = 1_024;
-    snapshot[SNAPSHOT.canonicalSurfaceCellsResident] = 1_024;
-    snapshot[SNAPSHOT.presentedLodStrideVoxels] = 2;
+    snapshot[SNAPSHOT.terrainColumnCellsRequired] = 1_024;
+    snapshot[SNAPSHOT.terrainColumnCellsOwned] = 1_024;
+    snapshot[SNAPSHOT.canonicalLatticePresented] = 0;
     const settled = [...snapshot];
     settled[SNAPSHOT.pendingJobs] = 0;
     settled[SNAPSHOT.generationQueued] = 0;
     settled[SNAPSHOT.generationInFlight] = 0;
-    settled[SNAPSHOT.surfaceInFlight] = 0;
+    settled[SNAPSHOT.virtualTerrainStreamInFlight] = 0;
     settled[SNAPSHOT.loadCompleted] = 13;
     settled[SNAPSHOT.acceptedCompletions] = 25;
     settled[SNAPSHOT.canonicalImmediateResident] = 15;
     settled[SNAPSHOT.collisionLookaheadResident] = 20;
-    settled[SNAPSHOT.presentedLodStrideVoxels] = 1;
+    settled[SNAPSHOT.canonicalLatticePresented] = 1;
     const capture = (capturedAtMs: number, values: readonly number[]): RenderSnapshotCapture => ({
       capturedAtMs,
       snapshot: values,
@@ -214,14 +206,14 @@ describe("render metrics", () => {
     ]);
     expect(pressure.pendingJobs.max).toBe(7);
     expect(pressure.generation.queued.max).toBe(3);
-    expect(pressure.surface.inFlight.max).toBe(2);
+    expect(pressure.virtualTerrain.inFlight.max).toBe(2);
     expect(pressure.completions.initialLoads).toBe(3);
     expect(pressure.completions.accepted).toBe(5);
     expect(pressure.readiness.canonicalImmediateRatio).toBeCloseTo(1 / 3);
-    expect(pressure.readiness.canonicalPresentationRatio).toBeCloseTo(1 / 3);
+    expect(pressure.readiness.canonicalLatticePresentationRatio).toBeCloseTo(1 / 3);
     expect(pressure.readiness.collisionImmediateRatio).toBe(1);
     expect(pressure.readiness.collisionLookaheadRatio).toBeCloseTo(1 / 3);
-    expect(pressure.readiness.longestDegradedPresentationMs).toBe(500);
+    expect(pressure.readiness.longestUnownedPresentationMs).toBe(500);
     expect(pressure.readiness.longestCollisionImmediateGapMs).toBe(0);
     expect(pressure.readiness.longestCollisionLookaheadGapMs).toBe(500);
   });

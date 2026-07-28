@@ -1,5 +1,5 @@
 # Versioned client-owned configuration. World seed and provider selection belong to the server.
-schema_version = 33
+schema_version = 34
 
 [developer]
 # Enables local-only time/weather visualization overrides and server-authorized spectator mode.
@@ -82,23 +82,8 @@ meshing = 1
 upload = 3
 
 # One radius for each surface LOD level: stride 2 through 256. The four background rings use
-# 3.2–25.6 m cells; each fixed-size tile doubles linear coverage without increasing its mesh cost.
-[streaming.surface]
-load_radius_tiles = [4, 4, 4, 5, 4, 5, 4, 3]
-# Sustained flight narrows the cross-track width of fine replacement corridors whose tile-boundary
-# rate outruns useful completion. Their forward/backward lead and coarser parent coverage remain
-# intact; slowing down restores the complete square footprints above.
-fast_travel_min_cross_radius_tiles = [2, 2, 3, 5, 4, 5, 4, 3]
-fast_travel_full_rate_tiles_per_second = 4.0
-retention_margin_tiles = 1
-
 [rendering]
 view_distance_metres = 2400.0
-
-[rendering.geometry_lod]
-# Keep the evidence-backed geometric fidelity policy used by the release profiles. The outer
-# boundary remains inside the production view distance while every handoff stays patch-grid aligned.
-boundary_half_extents_voxels = [192, 480, 960, 1920, 3840, 6144, 12288, 24576]
 
 [rendering.shadows]
 vertical_fov_radians = 1.1868238 # 68 degrees

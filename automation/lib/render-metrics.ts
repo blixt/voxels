@@ -18,25 +18,21 @@ export interface FrameSample {
   readonly renderSubmissionMs: number;
   readonly frameId: number;
   readonly renderCullMs: number;
-  readonly renderLodPlanMs: number;
-  readonly lodPlanRebuildReason: number;
   readonly renderEncodeMs: number;
   readonly renderSubmitMs: number;
-  readonly lodOwnershipRefreshes: number;
   readonly testedSlices: number;
   readonly selectedSlices: number;
   readonly streamRemoteMs: number;
   readonly streamPlanMs: number;
   readonly streamMeshMs: number;
   readonly streamPublishMs: number;
-  readonly streamSurfaceMs: number;
+  readonly streamVirtualTerrainMs: number;
   readonly streamPresenceMs: number;
   readonly streamInterestMs: number;
   readonly streamSchedulerUpdateMs: number;
   readonly streamSchedulerAdmitMs: number;
   readonly streamCollisionInterestMs: number;
   readonly streamEnclosedInterestMs: number;
-  readonly streamSurfaceInterestMs: number;
 }
 
 export interface GpuFrameSample {
@@ -101,25 +97,21 @@ export function frameSamples(snapshot: readonly number[]): FrameSample[] {
       renderSubmissionMs: required(snapshot, start + 4, "frame sample"),
       frameId: required(snapshot, start + 5, "frame sample"),
       renderCullMs: required(snapshot, start + 6, "frame sample"),
-      renderLodPlanMs: required(snapshot, start + 7, "frame sample"),
-      lodPlanRebuildReason: required(snapshot, start + 8, "frame sample"),
-      renderEncodeMs: required(snapshot, start + 9, "frame sample"),
-      renderSubmitMs: required(snapshot, start + 10, "frame sample"),
-      lodOwnershipRefreshes: required(snapshot, start + 11, "frame sample"),
-      testedSlices: required(snapshot, start + 12, "frame sample"),
-      selectedSlices: required(snapshot, start + 13, "frame sample"),
-      streamRemoteMs: required(snapshot, start + 14, "frame sample"),
-      streamPlanMs: required(snapshot, start + 15, "frame sample"),
-      streamMeshMs: required(snapshot, start + 16, "frame sample"),
-      streamPublishMs: required(snapshot, start + 17, "frame sample"),
-      streamSurfaceMs: required(snapshot, start + 18, "frame sample"),
-      streamPresenceMs: required(snapshot, start + 19, "frame sample"),
-      streamInterestMs: required(snapshot, start + 20, "frame sample"),
-      streamSchedulerUpdateMs: required(snapshot, start + 21, "frame sample"),
-      streamSchedulerAdmitMs: required(snapshot, start + 22, "frame sample"),
-      streamCollisionInterestMs: required(snapshot, start + 23, "frame sample"),
-      streamEnclosedInterestMs: required(snapshot, start + 24, "frame sample"),
-      streamSurfaceInterestMs: required(snapshot, start + 25, "frame sample"),
+      renderEncodeMs: required(snapshot, start + 7, "frame sample"),
+      renderSubmitMs: required(snapshot, start + 8, "frame sample"),
+      testedSlices: required(snapshot, start + 9, "frame sample"),
+      selectedSlices: required(snapshot, start + 10, "frame sample"),
+      streamRemoteMs: required(snapshot, start + 11, "frame sample"),
+      streamPlanMs: required(snapshot, start + 12, "frame sample"),
+      streamMeshMs: required(snapshot, start + 13, "frame sample"),
+      streamPublishMs: required(snapshot, start + 14, "frame sample"),
+      streamVirtualTerrainMs: required(snapshot, start + 15, "frame sample"),
+      streamPresenceMs: required(snapshot, start + 16, "frame sample"),
+      streamInterestMs: required(snapshot, start + 17, "frame sample"),
+      streamSchedulerUpdateMs: required(snapshot, start + 18, "frame sample"),
+      streamSchedulerAdmitMs: required(snapshot, start + 19, "frame sample"),
+      streamCollisionInterestMs: required(snapshot, start + 20, "frame sample"),
+      streamEnclosedInterestMs: required(snapshot, start + 21, "frame sample"),
     });
   }
   return samples;
@@ -220,10 +212,10 @@ export function summarizeStreamingPressure(captures: readonly RenderSnapshotCapt
     generation: stages("generationQueued", "generationInFlight"),
     meshing: stages("meshingQueued", "meshingInFlight"),
     upload: stages("uploadQueued", "uploadInFlight"),
-    surface: {
-      queued: summary(values("surfaceQueued")),
-      inFlight: summary(values("surfaceInFlight")),
-      dirty: summary(values("surfaceDirty")),
+    virtualTerrain: {
+      pending: summary(values("virtualTerrainStreamPending")),
+      inFlight: summary(values("virtualTerrainStreamInFlight")),
+      directoriesInFlight: summary(values("virtualTerrainDirectoryInFlight")),
     },
     completions: {
       accepted:
@@ -241,16 +233,16 @@ export function summarizeStreamingPressure(captures: readonly RenderSnapshotCapt
           snapshotValue(snapshot, "canonicalImmediateResident") ===
             snapshotValue(snapshot, "canonicalImmediateRequired"),
       ),
-      canonicalSurfaceRatio: readinessRatio(
+      terrainColumnOwnershipRatio: readinessRatio(
         captures,
         (snapshot) =>
-          snapshotValue(snapshot, "canonicalSurfaceCellsRequired") > 0 &&
-          snapshotValue(snapshot, "canonicalSurfaceCellsResident") ===
-            snapshotValue(snapshot, "canonicalSurfaceCellsRequired"),
+          snapshotValue(snapshot, "terrainColumnCellsRequired") > 0 &&
+          snapshotValue(snapshot, "terrainColumnCellsOwned") ===
+            snapshotValue(snapshot, "terrainColumnCellsRequired"),
       ),
-      canonicalPresentationRatio: readinessRatio(
+      canonicalLatticePresentationRatio: readinessRatio(
         captures,
-        (snapshot) => snapshotValue(snapshot, "presentedLodStrideVoxels") === 1,
+        (snapshot) => snapshotValue(snapshot, "canonicalLatticePresented") === 1,
       ),
       collisionImmediateRatio: readinessRatio(
         captures,
@@ -266,9 +258,9 @@ export function summarizeStreamingPressure(captures: readonly RenderSnapshotCapt
           snapshotValue(snapshot, "collisionLookaheadResident") ===
             snapshotValue(snapshot, "collisionLookaheadRequired"),
       ),
-      longestDegradedPresentationMs: maximumContinuousMilliseconds(
+      longestUnownedPresentationMs: maximumContinuousMilliseconds(
         captures,
-        (snapshot) => snapshotValue(snapshot, "presentedLodStrideVoxels") !== 1,
+        (snapshot) => snapshotValue(snapshot, "canonicalLatticePresented") !== 1,
       ),
       longestCollisionImmediateGapMs: maximumContinuousMilliseconds(
         captures,
@@ -284,13 +276,9 @@ export function summarizeStreamingPressure(captures: readonly RenderSnapshotCapt
           snapshotValue(snapshot, "collisionLookaheadResident") !==
             snapshotValue(snapshot, "collisionLookaheadRequired"),
       ),
-      interactiveLodsRatio: readinessRatio(
+      terrainReadyRatio: readinessRatio(
         captures,
-        (snapshot) => snapshotValue(snapshot, "interactiveLodsReady") === 1,
-      ),
-      allLodsRatio: readinessRatio(
-        captures,
-        (snapshot) => snapshotValue(snapshot, "allLodsReady") === 1,
+        (snapshot) => snapshotValue(snapshot, "terrainReady") === 1,
       ),
     },
   };
@@ -348,38 +336,20 @@ export function summarizeRenderPhase(captures: readonly RenderSnapshotCapture[])
       planMs: summary(samples.map((sample) => sample.streamPlanMs)),
       meshMs: summary(samples.map((sample) => sample.streamMeshMs)),
       publishMs: summary(samples.map((sample) => sample.streamPublishMs)),
-      surfaceMs: summary(samples.map((sample) => sample.streamSurfaceMs)),
+      virtualTerrainMs: summary(samples.map((sample) => sample.streamVirtualTerrainMs)),
       presenceMs: summary(samples.map((sample) => sample.streamPresenceMs)),
       interestMs: summary(samples.map((sample) => sample.streamInterestMs)),
       schedulerUpdateMs: summary(samples.map((sample) => sample.streamSchedulerUpdateMs)),
       schedulerAdmitMs: summary(samples.map((sample) => sample.streamSchedulerAdmitMs)),
       collisionInterestMs: summary(samples.map((sample) => sample.streamCollisionInterestMs)),
       enclosedInterestMs: summary(samples.map((sample) => sample.streamEnclosedInterestMs)),
-      surfaceInterestMs: summary(samples.map((sample) => sample.streamSurfaceInterestMs)),
     },
     renderSubmissionMs: summary(samples.map((sample) => sample.renderSubmissionMs)),
     unattributedCpuMs: summary(unattributedCpu),
     renderCpu: {
       cullMs: summary(samples.map((sample) => sample.renderCullMs)),
-      lodPlanMs: summary(samples.map((sample) => sample.renderLodPlanMs)),
-      lodPlanRebuilds: {
-        frames: samples.filter((sample) => sample.lodPlanRebuildReason !== 0).length,
-        focus: samples.filter((sample) => (sample.lodPlanRebuildReason & 1) !== 0).length,
-        canonicalColumns: samples.filter((sample) => (sample.lodPlanRebuildReason & 2) !== 0)
-          .length,
-        canonicalProfiles: samples.filter((sample) => (sample.lodPlanRebuildReason & 4) !== 0)
-          .length,
-        surfaceResidency: samples.filter((sample) => (sample.lodPlanRebuildReason & 8) !== 0)
-          .length,
-        surfaceProfiles: samples.filter((sample) => (sample.lodPlanRebuildReason & 16) !== 0)
-          .length,
-        enclosedView: samples.filter((sample) => (sample.lodPlanRebuildReason & 32) !== 0).length,
-        canonicalVolume: samples.filter((sample) => (sample.lodPlanRebuildReason & 64) !== 0)
-          .length,
-      },
       encodeMs: summary(samples.map((sample) => sample.renderEncodeMs)),
       submitMs: summary(samples.map((sample) => sample.renderSubmitMs)),
-      lodOwnershipRefreshes: summary(samples.map((sample) => sample.lodOwnershipRefreshes)),
       testedSlices: summary(samples.map((sample) => sample.testedSlices)),
       selectedSlices: summary(samples.map((sample) => sample.selectedSlices)),
     },
@@ -409,13 +379,14 @@ export function summarizeRenderPhase(captures: readonly RenderSnapshotCapture[])
       virtualTerrainCompactionMs: gpuSummary("virtualTerrainCompaction"),
     },
     residentChunks: snapshotValue(latest, "residentChunks"),
-    surfaceTiles: snapshotValue(latest, "surfaceTiles"),
-    horizonTiles: {
-      stride32: snapshotValue(latest, "stride32Tiles"),
-      stride64: snapshotValue(latest, "stride64Tiles"),
+    terrainReady: snapshotValue(latest, "terrainReady") === 1,
+    virtualTerrain: {
+      residentPages: snapshotValue(latest, "virtualTerrainResidentPages"),
+      residentMiB: snapshotValue(latest, "virtualTerrainResidentMiB"),
+      selectedPages: snapshotValue(latest, "virtualTerrainSelectedPages"),
+      requestedPages: snapshotValue(latest, "virtualTerrainRequestedPages"),
+      ownerlessRoots: snapshotValue(latest, "virtualTerrainOwnerlessRoots"),
     },
-    interactiveLodsReady: snapshotValue(latest, "interactiveLodsReady") === 1,
-    allLodsReady: snapshotValue(latest, "allLodsReady") === 1,
     visibleChunks: snapshotValue(latest, "visibleChunks"),
     pendingJobs: snapshotValue(latest, "pendingJobs"),
     quads: snapshotValue(latest, "quads"),

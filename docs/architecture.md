@@ -137,15 +137,15 @@ Generator v9 adds the First Pilgrim Road as a versioned six-node polyline in can
 coordinates. A single projection returns the nearest segment, tangent, signed lateral offset,
 cumulative distance, core coverage, and shoulder blend. The column generator first produces natural
 terrain and then applies that route exactly once, so canonical chunks, collision, edits, water,
-surface LOD, and random-access sampling cannot disagree. The 3.6 m bed is fully graded while a smooth
+virtual-terrain pages, and random-access sampling cannot disagree. The 3.6 m bed is fully graded while a smooth
 shoulder reaches 5.4 m from center; host invariants limit longitudinal cuts to 30 cm, below the
-player's 35 cm step height, and preserve a dry cardinal-connected sampled core at all four LOD
-strides.
+player's 35 cm step height, and preserve a dry cardinal-connected sampled core in every hierarchy
+ancestor.
 
 Generator v10 gives the route five stable `(route id, ordinal)` landmarks at 28.8 m cadence. Route
 cells take precedence over ambient placement and alternate sides while cycling editable cairns,
 waystones, and ruined arches. Their canonical analytic shapes use ordinary material voxels, and their
-bounded LOD proxies use the same pristine-edit suppression and anchor ownership as regional
+bounded hierarchy proxies use the same pristine-edit suppression and anchor ownership as regional
 landmarks. The final segment deliberately retains a nearby badlands hoodoo as a destination
 silhouette. Route and landmark identities remain world data; no route, teleport, or UI semantics
 cross into TypeScript.
@@ -154,7 +154,7 @@ Generator v11 replaces the composition layer's generic 50%-taller heroes with si
 semantic identities: elder canopy, tor circle, needle gate, buried ribs, buried colonnade, and basalt
 crown. Each is an analytic ordinary-voxel form with an exact kind-specific bound. The one hero cell in
 each 76.8 m composition area may use an 18-voxel radius, while established background, companion, and
-route identities retain their previous anchors and smaller bounds. Disposable LOD representations use
+route identities retain their previous anchors and smaller bounds. Disposable hierarchy representations use
 at most four boxes (24 quads), stay anchor-owned, and disappear when any canonical feature voxel is
 edited; restoring the generated material removes the sparse override and recreates the exact proxy.
 Ordinary candidates reject water before computing composition identity, so rare hero work does not
@@ -172,8 +172,9 @@ does not rebuild or linearly scan every station.
 Generator v13 gives the atlas-defined Cinder Vault a final analytic CSG pass: seven ellipsoidal
 nodes and six anisotropic conduits form one dry, enterable route with a sealed Basalt shell. The pass
 runs after ambient features in chunk and cached-column generation, so unrelated procedural content
-cannot puncture or fill the authored void. Deep edits invalidate canonical chunks without rebuilding
-heightfield LODs. A portable nine-ray enclosure probe reads edited resident chunks first, then falls back to
+cannot puncture or fill the authored void. Deep edits invalidate exact leaves and their
+virtual-terrain ancestors without rebuilding unrelated pages. A portable nine-ray enclosure probe
+reads edited resident chunks first, then falls back to
 canonical generation; Rust/WGPU uses the result for asymmetric eye adaptation, cave air,
 outdoor-light rejection, and an optional bounded headlamp.
 
@@ -183,15 +184,16 @@ round trips; material schema v3 and the derived material atlas grow from 14 to 1
 
 Generator v15 reserves one append-only skyline identity for the Cinder Vault mouth. Four canonical
 Basalt volumes form two tapered sentinels around the diagonal entrance, and the identical 24-quad
-positive proxy is emitted at every surface LOD. This keeps the coarse heightfield watertight while
-making the entrance readable outside the 9.6 m canonical ring. Anchor ownership, patch packing, and
-the existing pristine-feature test ensure the tell appears once; editing any canonical sentinel voxel
-suppresses its derived proxy at all levels, and restoring the generated material recreates it exactly.
-The protected entrance itself remains canonical Air and is never approximated as a negative LOD hole.
+positive proxy is emitted in every virtual-terrain ancestor that needs the silhouette. This keeps
+coarse heightfield pages watertight while making the entrance readable until exact leaves resolve.
+Half-open ownership and the existing pristine-feature test ensure the tell appears once; editing any
+canonical sentinel voxel invalidates the affected subtree, and restoring the generated material
+recreates it exactly. The protected entrance itself remains canonical Air and is never approximated
+as a negative virtual-terrain hole.
 
 Generator v16 expands the conservative Elder Canopy and Needle Gate bounds to contain their complete
-analytic forms. Canonical chunk/region generation, random-access sampling, edit invalidation, and LOD
-proxy ownership therefore agree on every voxel those heroes can produce.
+analytic forms. Canonical chunk/region generation, random-access sampling, edit invalidation, and
+virtual-terrain proxy ownership therefore agree on every voxel those heroes can produce.
 
 Atlas schema v1 adds append-only Rust discriminants for six destinations and five route chapters;
 schema v2 appends the Cinder Vault cave-system identity and its authored atlas definition.

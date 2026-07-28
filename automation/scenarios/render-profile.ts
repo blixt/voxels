@@ -442,12 +442,12 @@ async function sustainedProfile(
                   snapshotValue(snapshot, "cameraZ") -
                     snapshotValue(movementOrigin.snapshot, "cameraZ"),
                 ),
-          presentedStrideVoxels: snapshotValue(snapshot, "presentedLodStrideVoxels"),
-          focusLagVoxels: snapshotValue(snapshot, "lodFocusLagVoxels"),
+          canonicalLatticePresented: snapshotValue(snapshot, "canonicalLatticePresented") === 1,
+          virtualTerrainOwnerlessRoots: snapshotValue(snapshot, "virtualTerrainOwnerlessRoots"),
           canonicalImmediateResident: snapshotValue(snapshot, "canonicalImmediateResident"),
           canonicalImmediateRequired: snapshotValue(snapshot, "canonicalImmediateRequired"),
-          canonicalSurfaceCellsResident: snapshotValue(snapshot, "canonicalSurfaceCellsResident"),
-          canonicalSurfaceCellsRequired: snapshotValue(snapshot, "canonicalSurfaceCellsRequired"),
+          terrainColumnCellsOwned: snapshotValue(snapshot, "terrainColumnCellsOwned"),
+          terrainColumnCellsRequired: snapshotValue(snapshot, "terrainColumnCellsRequired"),
           collisionImmediateResident: snapshotValue(snapshot, "collisionImmediateResident"),
           collisionImmediateRequired: snapshotValue(snapshot, "collisionImmediateRequired"),
           collisionLookaheadResident: snapshotValue(snapshot, "collisionLookaheadResident"),
@@ -500,7 +500,10 @@ async function sustainedProfile(
     evictions: snapshotValue(latest, "profileEvictions"),
     highWater: {
       trackedChunks: snapshotValue(latest, "profileTrackedHigh"),
-      surfaceTiles: snapshotValue(latest, "profileSurfaceHigh"),
+      virtualTerrainResidentPages: Math.max(
+        0,
+        ...moving.map((capture) => snapshotValue(capture.snapshot, "virtualTerrainResidentPages")),
+      ),
       pendingJobs: snapshotValue(latest, "profilePendingHigh"),
       pendingMeshes: snapshotValue(latest, "profilePendingMeshHigh"),
       arenaCapacityMiB: snapshotValue(latest, "profileArenaCapacityHighMiB"),
@@ -514,21 +517,14 @@ async function sustainedProfile(
         finalTwenty.map((capture) => snapshotValue(capture.snapshot, "arenaCapacityMiB")),
       ),
     },
-    lod: {
+    terrain: {
       samples: moving.length,
-      degradedSamples: moving.filter(
-        (capture) => snapshotValue(capture.snapshot, "presentedLodStrideVoxels") > 1,
+      unownedSamples: moving.filter(
+        (capture) => snapshotValue(capture.snapshot, "canonicalLatticePresented") === 0,
       ).length,
-      missingSamples: moving.filter(
-        (capture) => snapshotValue(capture.snapshot, "presentedLodStrideVoxels") === 0,
-      ).length,
-      maximumStrideVoxels: Math.max(
+      maximumOwnerlessRoots: Math.max(
         0,
-        ...moving.map((capture) => snapshotValue(capture.snapshot, "presentedLodStrideVoxels")),
-      ),
-      maximumFocusLagVoxels: Math.max(
-        0,
-        ...moving.map((capture) => snapshotValue(capture.snapshot, "lodFocusLagVoxels")),
+        ...moving.map((capture) => snapshotValue(capture.snapshot, "virtualTerrainOwnerlessRoots")),
       ),
       canonicalImmediateReadySamples: moving.filter(
         (capture) =>
@@ -588,7 +584,9 @@ async function sustainedProfile(
     violations.push("fewer than 500 canonical evictions");
   }
   if (result.highWater.trackedChunks > 320) violations.push("tracked chunk bound exceeded");
-  if (result.highWater.surfaceTiles > 896) violations.push("surface residency bound exceeded");
+  if (result.highWater.virtualTerrainResidentPages > 4_096) {
+    violations.push("virtual terrain residency bound exceeded");
+  }
   if (result.highWater.pendingMeshes > 3) violations.push("pending mesh bound exceeded");
   if (result.final.pendingJobs !== 0) violations.push("queues did not drain");
   if (result.final.pendingMeshMiB !== 0) violations.push("pending mesh payload did not drain");
@@ -611,20 +609,20 @@ async function sustainedProfile(
     violations.push("mesh arena capacity did not plateau");
   }
   if (route === "directional") {
-    if (result.lod.missingSamples > 0) violations.push("moving camera crossed missing terrain");
-    if (result.lod.degradedSamples > 0) {
-      violations.push("moving camera fell back from canonical terrain");
+    if (result.terrain.unownedSamples > 0) {
+      violations.push("moving camera crossed terrain without a canonical-lattice owner");
     }
-    if (result.lod.maximumFocusLagVoxels > 20) {
-      violations.push("near LOD focus lag exceeded its 16-voxel snap plus hysteresis");
+    if (result.terrain.maximumOwnerlessRoots > 0) {
+      violations.push("virtual terrain cut reported ownerless roots");
     }
     for (const [label, checkpoint] of Object.entries(result.checkpoints)) {
       if (
         checkpoint === null ||
         Math.abs(checkpoint.elapsedSeconds - Number.parseInt(label, 10)) > 0.5 ||
         checkpoint.actualDisplacementMetres < checkpoint.distanceMetres - 2 ||
-        checkpoint.presentedStrideVoxels !== 1 ||
-        checkpoint.canonicalSurfaceCellsResident !== checkpoint.canonicalSurfaceCellsRequired ||
+        !checkpoint.canonicalLatticePresented ||
+        checkpoint.virtualTerrainOwnerlessRoots !== 0 ||
+        checkpoint.terrainColumnCellsOwned !== checkpoint.terrainColumnCellsRequired ||
         checkpoint.collisionImmediateResident !== checkpoint.collisionImmediateRequired
       ) {
         violations.push(`${label} immediate terrain was not fully canonical`);
@@ -647,7 +645,7 @@ async function sustainedProfile(
           violations.push(`${label} streaming p95 above 4.5ms`);
         }
       }
-      if (epoch.streaming.readiness.canonicalPresentationRatio !== 1) {
+      if (epoch.streaming.readiness.canonicalLatticePresentationRatio !== 1) {
         violations.push(`${label} did not present canonical terrain continuously`);
       }
       if (epoch.streaming.readiness.collisionImmediateRatio !== 1) {

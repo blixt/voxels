@@ -11,6 +11,7 @@ function requiredMatch(source: string, pattern: RegExp, description: string): st
 describe("VXWP script contract", () => {
   it("matches the Rust protocol, server routes, and checked-in client config", () => {
     const protocolSource = readFileSync("world/src/protocol.rs", "utf8");
+    const terrainPageSource = readFileSync("world/src/terrain_page.rs", "utf8");
     const serverSource = readFileSync("world-service/src/server.rs", "utf8");
     const clientConfig = readFileSync("config/client.toml", "utf8");
     const streamingDocs = readFileSync("docs/native-world-streaming.md", "utf8");
@@ -65,16 +66,16 @@ describe("VXWP script contract", () => {
       Number(
         requiredMatch(
           streamingDocs,
-          /Surface meshes use a separate `VXST` v(\d+) payload/u,
-          "documented surface snapshot version",
+          /Further `VXTP` v(\d+) pages/u,
+          "documented terrain page schema version",
         ),
       ),
     ).toBe(
       Number(
         requiredMatch(
-          protocolSource,
-          /const SURFACE_SNAPSHOT_VERSION: u16 = (\d+);/u,
-          "Rust surface snapshot version",
+          terrainPageSource,
+          /pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = (\d+);/u,
+          "Rust terrain page schema version",
         ),
       ),
     );

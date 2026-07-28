@@ -72,26 +72,22 @@ interface ViewportSample {
   readonly visibleChunks: number;
   readonly quads: number;
   readonly pendingJobs: number;
-  readonly surfaceInFlight: number;
-  readonly interactiveLodsReady: boolean;
-  readonly stride32Tiles: number;
-  readonly stride64Tiles: number;
-  readonly allLodsReady: boolean;
-  readonly presentedLodStrideVoxels: number;
-  readonly lodFocusLagVoxels: number;
-  readonly lodIncompleteTransitionEdges: number;
+  readonly virtualTerrainStreamInFlight: number;
+  readonly terrainReady: boolean;
+  readonly canonicalLatticePresented: boolean;
+  readonly virtualTerrainOwnerlessRoots: number;
   readonly canonicalImmediateResident: number;
   readonly canonicalImmediateRequired: number;
-  readonly canonicalSurfaceCellsResident: number;
-  readonly canonicalSurfaceCellsRequired: number;
-  readonly surfaceQueued: number;
+  readonly terrainColumnCellsOwned: number;
+  readonly terrainColumnCellsRequired: number;
+  readonly virtualTerrainStreamPending: number;
   readonly generationQueued: number;
   readonly generationInFlight: number;
   readonly acceptedCompletions: number;
   readonly staleCompletions: number;
   readonly totalEvictions: number;
   readonly canceledChunkRequests: number;
-  readonly canceledSurfaceRequests: number;
+  readonly canceledTerrainPageRequests: number;
   readonly bytes: ByteSummary;
 }
 
@@ -180,23 +176,22 @@ function cruiseWindow(samples: readonly ViewportSample[]) {
     samples: samples.length,
     distanceMetres: rounded(distanceMetres, 3),
     meanSpeedMetresPerSecond: rounded(distanceMetres / durationSeconds, 3),
-    strideOnePresentationRatio: ratio(samples, (sample) => sample.presentedLodStrideVoxels === 1),
-    maximumPresentedStrideVoxels: Math.max(
-      0,
-      ...samples.map((sample) => sample.presentedLodStrideVoxels),
+    canonicalLatticePresentationRatio: ratio(samples, (sample) => sample.canonicalLatticePresented),
+    ownerlessRoots: numericSummary(samples.map((sample) => sample.virtualTerrainOwnerlessRoots)),
+    virtualTerrainPending: numericSummary(
+      samples.map((sample) => sample.virtualTerrainStreamPending),
     ),
-    incompleteTransitionEdges: numericSummary(
-      samples.map((sample) => sample.lodIncompleteTransitionEdges),
+    virtualTerrainStreamInFlight: numericSummary(
+      samples.map((sample) => sample.virtualTerrainStreamInFlight),
     ),
-    surfaceQueue: numericSummary(samples.map((sample) => sample.surfaceQueued)),
-    surfaceInFlight: numericSummary(samples.map((sample) => sample.surfaceInFlight)),
     generationQueue: numericSummary(samples.map((sample) => sample.generationQueued)),
     generationInFlight: numericSummary(samples.map((sample) => sample.generationInFlight)),
     acceptedCompletions: last.acceptedCompletions - first.acceptedCompletions,
     staleCompletions: last.staleCompletions - first.staleCompletions,
     evictions: last.totalEvictions - first.totalEvictions,
     canceledChunkRequests: last.canceledChunkRequests - first.canceledChunkRequests,
-    canceledSurfaceRequests: last.canceledSurfaceRequests - first.canceledSurfaceRequests,
+    canceledTerrainPageRequests:
+      last.canceledTerrainPageRequests - first.canceledTerrainPageRequests,
     worldDownstreamBytes: last.bytes.worldDownstream - first.bytes.worldDownstream,
     worldDownstreamBytesPerSecond: rounded(
       (last.bytes.worldDownstream - first.bytes.worldDownstream) / durationSeconds,
@@ -238,25 +233,25 @@ function cruiseQuality(
   const exactReady = (sample: ViewportSample) =>
     sample.canonicalImmediateRequired > 0 &&
     sample.canonicalImmediateResident === sample.canonicalImmediateRequired;
-  const surfaceReady = (sample: ViewportSample) =>
-    sample.canonicalSurfaceCellsRequired > 0 &&
-    sample.canonicalSurfaceCellsResident === sample.canonicalSurfaceCellsRequired;
-  let longestDegradedPresentationMs = 0;
+  const terrainColumnReady = (sample: ViewportSample) =>
+    sample.terrainColumnCellsRequired > 0 &&
+    sample.terrainColumnCellsOwned === sample.terrainColumnCellsRequired;
+  let longestUnownedPresentationMs = 0;
   let degradedStartedMs: number | null = null;
   for (const sample of measured) {
-    if (sample.presentedLodStrideVoxels !== 1) {
+    if (!sample.canonicalLatticePresented) {
       degradedStartedMs ??= sample.elapsedMs;
     } else if (degradedStartedMs !== null) {
-      longestDegradedPresentationMs = Math.max(
-        longestDegradedPresentationMs,
+      longestUnownedPresentationMs = Math.max(
+        longestUnownedPresentationMs,
         sample.elapsedMs - degradedStartedMs,
       );
       degradedStartedMs = null;
     }
   }
   if (degradedStartedMs !== null) {
-    longestDegradedPresentationMs = Math.max(
-      longestDegradedPresentationMs,
+    longestUnownedPresentationMs = Math.max(
+      longestUnownedPresentationMs,
       last.elapsedMs - degradedStartedMs,
     );
   }
@@ -270,16 +265,16 @@ function cruiseQuality(
     meanSpeedMetresPerSecond: rounded(distanceMetres / durationSeconds, 3),
     readiness: {
       exactNearRatio: ratio(measured, exactReady),
-      canonicalSurfaceRatio: ratio(measured, surfaceReady),
-      strideOnePresentationRatio: ratio(
+      terrainColumnRatio: ratio(measured, terrainColumnReady),
+      canonicalLatticePresentationRatio: ratio(
         measured,
-        (sample) => sample.presentedLodStrideVoxels === 1,
+        (sample) => sample.canonicalLatticePresented,
       ),
-      interactiveLodsRatio: ratio(measured, (sample) => sample.interactiveLodsReady),
-      fullyHighDetailRatio: ratio(
+      terrainReadyRatio: ratio(measured, (sample) => sample.terrainReady),
+      fullyOwnedRatio: ratio(
         measured,
         (sample) =>
-          exactReady(sample) && surfaceReady(sample) && sample.presentedLodStrideVoxels === 1,
+          exactReady(sample) && terrainColumnReady(sample) && sample.canonicalLatticePresented,
       ),
     },
     coverage: {
@@ -288,32 +283,31 @@ function cruiseQuality(
           coverage(sample.canonicalImmediateResident, sample.canonicalImmediateRequired),
         ),
       ),
-      canonicalSurface: numericSummary(
+      terrainColumn: numericSummary(
         measured.map((sample) =>
-          coverage(sample.canonicalSurfaceCellsResident, sample.canonicalSurfaceCellsRequired),
+          coverage(sample.terrainColumnCellsOwned, sample.terrainColumnCellsRequired),
         ),
       ),
-      presentedStrideVoxels: numericSummary(
-        measured.map((sample) => sample.presentedLodStrideVoxels),
+      canonicalLatticePresentation: numericSummary(
+        measured.map((sample) => Number(sample.canonicalLatticePresented)),
       ),
     },
-    maximumPresentedStrideVoxels: Math.max(
+    maximumOwnerlessRoots: Math.max(
       0,
-      ...measured.map((sample) => sample.presentedLodStrideVoxels),
+      ...measured.map((sample) => sample.virtualTerrainOwnerlessRoots),
     ),
-    maximumFocusLagVoxels: Math.max(0, ...measured.map((sample) => sample.lodFocusLagVoxels)),
-    maximumIncompleteTransitionEdges: Math.max(
-      0,
-      ...measured.map((sample) => sample.lodIncompleteTransitionEdges),
+    longestUnownedPresentationMs: rounded(longestUnownedPresentationMs),
+    virtualTerrainPending: numericSummary(
+      measured.map((sample) => sample.virtualTerrainStreamPending),
     ),
-    longestDegradedPresentationMs: rounded(longestDegradedPresentationMs),
-    surfaceQueue: numericSummary(measured.map((sample) => sample.surfaceQueued)),
-    surfaceInFlight: numericSummary(measured.map((sample) => sample.surfaceInFlight)),
+    virtualTerrainStreamInFlight: numericSummary(
+      measured.map((sample) => sample.virtualTerrainStreamInFlight),
+    ),
     generationQueue: numericSummary(measured.map((sample) => sample.generationQueued)),
     generationInFlight: numericSummary(measured.map((sample) => sample.generationInFlight)),
     cancellations: {
       chunks: last.canceledChunkRequests - first.canceledChunkRequests,
-      surfaces: last.canceledSurfaceRequests - first.canceledSurfaceRequests,
+      terrainPages: last.canceledTerrainPageRequests - first.canceledTerrainPageRequests,
     },
     staleCompletions: last.staleCompletions - first.staleCompletions,
     acceptedCompletions: last.acceptedCompletions - first.acceptedCompletions,
@@ -323,8 +317,9 @@ function cruiseQuality(
       firstWindow === undefined || lastWindow === undefined
         ? null
         : {
-            surfaceQueueMedianDelta:
-              (lastWindow.surfaceQueue.median ?? 0) - (firstWindow.surfaceQueue.median ?? 0),
+            virtualTerrainPendingMedianDelta:
+              (lastWindow.virtualTerrainPending.median ?? 0) -
+              (firstWindow.virtualTerrainPending.median ?? 0),
             generationQueueMedianDelta:
               (lastWindow.generationQueue.median ?? 0) - (firstWindow.generationQueue.median ?? 0),
             worldDownstreamBytesPerSecondRatio:
@@ -587,32 +582,28 @@ async function runScenario({
       visibleChunks: snapshotValue(current, "visibleChunks"),
       quads: snapshotValue(current, "quads"),
       pendingJobs: snapshotValue(current, "pendingJobs"),
-      surfaceInFlight: snapshotValue(current, "surfaceInFlight"),
-      interactiveLodsReady: snapshotValue(current, "interactiveLodsReady") === 1,
-      stride32Tiles: snapshotValue(current, "stride32Tiles"),
-      stride64Tiles: snapshotValue(current, "stride64Tiles"),
-      allLodsReady: snapshotValue(current, "allLodsReady") === 1,
-      presentedLodStrideVoxels: snapshotValue(current, "presentedLodStrideVoxels"),
-      lodFocusLagVoxels: snapshotValue(current, "lodFocusLagVoxels"),
-      lodIncompleteTransitionEdges: snapshotValue(current, "lodIncompleteTransitionEdges"),
+      virtualTerrainStreamInFlight: snapshotValue(current, "virtualTerrainStreamInFlight"),
+      terrainReady: snapshotValue(current, "terrainReady") === 1,
+      canonicalLatticePresented: snapshotValue(current, "canonicalLatticePresented") === 1,
+      virtualTerrainOwnerlessRoots: snapshotValue(current, "virtualTerrainOwnerlessRoots"),
       canonicalImmediateResident: snapshotValue(current, "canonicalImmediateResident"),
       canonicalImmediateRequired: snapshotValue(current, "canonicalImmediateRequired"),
-      canonicalSurfaceCellsResident: snapshotValue(current, "canonicalSurfaceCellsResident"),
-      canonicalSurfaceCellsRequired: snapshotValue(current, "canonicalSurfaceCellsRequired"),
-      surfaceQueued: snapshotValue(current, "surfaceQueued"),
+      terrainColumnCellsOwned: snapshotValue(current, "terrainColumnCellsOwned"),
+      terrainColumnCellsRequired: snapshotValue(current, "terrainColumnCellsRequired"),
+      virtualTerrainStreamPending: snapshotValue(current, "virtualTerrainStreamPending"),
       generationQueued: snapshotValue(current, "generationQueued"),
       generationInFlight: snapshotValue(current, "generationInFlight"),
       acceptedCompletions: snapshotValue(current, "acceptedCompletions"),
       staleCompletions: snapshotValue(current, "staleCompletions"),
       totalEvictions: snapshotValue(current, "totalEvictions"),
       canceledChunkRequests: canceledRequestFrames(linkStats, "chunk_batch"),
-      canceledSurfaceRequests: canceledRequestFrames(linkStats, "surface_tile_batch"),
+      canceledTerrainPageRequests: canceledRequestFrames(linkStats, "terrain_page_batch"),
       bytes: wire,
     });
     const measurementStartedMs = markedMeasurementStartedMs ?? actionFinishedMs;
     const ready =
       measurementStartedMs !== null &&
-      snapshotValue(current, "allLodsReady") === 1 &&
+      snapshotValue(current, "terrainReady") === 1 &&
       snapshotValue(current, "visibleChunks") > 0 &&
       snapshotValue(current, "quads") > 0;
     consecutiveReady = ready
@@ -648,9 +639,8 @@ async function runScenario({
     ? firstPermanentlyFinalSample(samples, measurementStartedMs)
     : samples.at(-1);
   const interactive =
-    samples.find(
-      (sample) => sample.elapsedMs >= measurementStartedMs && sample.interactiveLodsReady,
-    ) ?? (waitForSettlement ? undefined : samples.at(-1));
+    samples.find((sample) => sample.elapsedMs >= measurementStartedMs && sample.terrainReady) ??
+    (waitForSettlement ? undefined : samples.at(-1));
   const firstUseful = samples.find((sample) => sample.visibleChunks > 0 && sample.quads > 0);
   if (
     final === undefined ||
@@ -684,7 +674,7 @@ async function runScenario({
     ),
     canceledRequestFrames: stats.messages["upstream:cancel"]?.frames ?? 0,
     canceledChunkRequestFrames: canceledRequestFrames(stats, "chunk_batch"),
-    canceledSurfaceRequestFrames: canceledRequestFrames(stats, "surface_tile_batch"),
+    canceledTerrainPageRequestFrames: canceledRequestFrames(stats, "terrain_page_batch"),
     worldProductPriorityFrames: priorities,
   };
   return {
@@ -883,32 +873,31 @@ function aggregateRuns(runs: readonly NetworkRun[]) {
                   exactNearRatio: numericSummary(
                     cruise.map((quality) => quality.readiness.exactNearRatio),
                   ),
-                  canonicalSurfaceRatio: numericSummary(
-                    cruise.map((quality) => quality.readiness.canonicalSurfaceRatio),
+                  terrainColumnRatio: numericSummary(
+                    cruise.map((quality) => quality.readiness.terrainColumnRatio),
                   ),
                   exactNearCoverage: numericSummary(
                     cruise.map((quality) => quality.coverage.exactNear.median ?? 0),
                   ),
-                  canonicalSurfaceCoverage: numericSummary(
-                    cruise.map((quality) => quality.coverage.canonicalSurface.median ?? 0),
+                  terrainColumnCoverage: numericSummary(
+                    cruise.map((quality) => quality.coverage.terrainColumn.median ?? 0),
                   ),
-                  presentedStrideVoxels: numericSummary(
-                    cruise.map((quality) => quality.coverage.presentedStrideVoxels.median ?? 0),
+                  canonicalLatticePresentation: numericSummary(
+                    cruise.map(
+                      (quality) => quality.coverage.canonicalLatticePresentation.median ?? 0,
+                    ),
                   ),
-                  strideOnePresentationRatio: numericSummary(
-                    cruise.map((quality) => quality.readiness.strideOnePresentationRatio),
+                  canonicalLatticePresentationRatio: numericSummary(
+                    cruise.map((quality) => quality.readiness.canonicalLatticePresentationRatio),
                   ),
-                  fullyHighDetailRatio: numericSummary(
-                    cruise.map((quality) => quality.readiness.fullyHighDetailRatio),
+                  fullyOwnedRatio: numericSummary(
+                    cruise.map((quality) => quality.readiness.fullyOwnedRatio),
                   ),
-                  maximumPresentedStrideVoxels: Math.max(
-                    ...cruise.map((quality) => quality.maximumPresentedStrideVoxels),
+                  maximumOwnerlessRoots: Math.max(
+                    ...cruise.map((quality) => quality.maximumOwnerlessRoots),
                   ),
-                  maximumFocusLagVoxels: Math.max(
-                    ...cruise.map((quality) => quality.maximumFocusLagVoxels),
-                  ),
-                  longestDegradedPresentationMs: Math.max(
-                    ...cruise.map((quality) => quality.longestDegradedPresentationMs),
+                  longestUnownedPresentationMs: Math.max(
+                    ...cruise.map((quality) => quality.longestUnownedPresentationMs),
                   ),
                   medianWorldDownstreamBytes:
                     percentile(
@@ -1035,13 +1024,13 @@ function markdownReport(result: NetworkMarkdownReport): string {
     const cruise = summary.cruise;
     if (cruise === null) return [];
     return [
-      `| ${name} | ${cruise.meanSpeedMetresPerSecond.median?.toFixed(1) ?? "n/a"} | ${((cruise.exactNearCoverage.median ?? 0) * 100).toFixed(1)}% | ${((cruise.canonicalSurfaceCoverage.median ?? 0) * 100).toFixed(1)}% | ${cruise.presentedStrideVoxels.median?.toFixed(1) ?? "n/a"} | ${((cruise.exactNearRatio.median ?? 0) * 100).toFixed(1)}% | ${((cruise.canonicalSurfaceRatio.median ?? 0) * 100).toFixed(1)}% | ${((cruise.strideOnePresentationRatio.median ?? 0) * 100).toFixed(1)}% | ${((cruise.fullyHighDetailRatio.median ?? 0) * 100).toFixed(1)}% | ${cruise.maximumPresentedStrideVoxels} | ${cruise.maximumFocusLagVoxels.toFixed(1)} | ${cruise.longestDegradedPresentationMs.toFixed(1)} | ${cruise.medianWorldDownstreamBytes.toLocaleString("en-US")} |`,
+      `| ${name} | ${cruise.meanSpeedMetresPerSecond.median?.toFixed(1) ?? "n/a"} | ${((cruise.exactNearCoverage.median ?? 0) * 100).toFixed(1)}% | ${((cruise.terrainColumnCoverage.median ?? 0) * 100).toFixed(1)}% | ${((cruise.canonicalLatticePresentationRatio.median ?? 0) * 100).toFixed(1)}% | ${((cruise.fullyOwnedRatio.median ?? 0) * 100).toFixed(1)}% | ${cruise.maximumOwnerlessRoots} | ${cruise.longestUnownedPresentationMs.toFixed(1)} | ${cruise.medianWorldDownstreamBytes.toLocaleString("en-US")} |`,
     ];
   });
   const guardSummary = result.guards.passed
     ? "Passed."
     : `Failed:\n${result.guards.violations.map((violation) => `- ${violation}`).join("\n")}`;
-  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nWorld source: \`${result.world.source}\`; repetitions: ${result.repetitions}; environment: ${result.environment.cpu}, ${result.environment.platform}, Chrome ${result.environment.chrome}, Node ${result.environment.node}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\nStreaming guards: ${guardSummary}\n\n| Scenario | Interactive ready median (ms) | Viewport informed median (ms) | max (ms) | Full coverage median (ms) | World bytes at interactive | World bytes at viewport | Total bytes at full coverage |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Interactive ready” is when canonical terrain and the original four surface rings are complete; kilometre horizon prefetch starts only afterward. “Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final fully settled viewport and stays equal. “Full coverage” is the first of three consecutive matching samples where every canonical and surface LOD queue and in-flight stage is settled. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Full-speed spectator fidelity\n\n| Scenario | Speed (m/s) | Exact coverage median | Surface coverage median | Presented stride median | Exact near ready | Surface ready | Stride-1 presented | Fully high detail | Max stride | Max focus lag (voxels) | Longest degraded (ms) | World bytes |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${cruiseRows.join("\n")}\n\nThe cruise measurement begins after spectator acceleration reaches its configured maximum. Coverage medians preserve partial progress instead of reducing every imperfect sample to zero. “Fully high detail” still requires exact immediate chunks, canonical surface coverage, and a stride-1 presentation in the same sample; the benchmark continues sampling until the stopped viewport settles.\n\n## Movement continuity\n\n| Scenario | Longest no-progress median (ms) | max (ms) |\n| --- | ---: | ---: |\n${movementRows.join("\n")}\n\nA movement sample counts as progress after at least ${MOVEMENT_PROGRESS_EPSILON_METRES} metres of horizontal displacement. Long no-progress intervals while movement input remains held expose collision stalls caused by missing canonical chunks; the fixed route fails at more than ${MAX_MOVEMENT_NO_PROGRESS_MS} ms.\n\n## Realtime control and collision priority\n\n| Scenario | Mean pose interval (ms) | Proxy p95 RTT (ms) | Client max RTT (ms) | Presence upload queue max (ms) | Collision / ordinary requests | Canceled requests |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n${realtimeRows.join("\n")}\n\nPose traffic uses a dedicated WebSocket and coalesces stale samples instead of queueing them. Proxy RTT measures ping-to-pong across the shaped link and server without client scheduling after delivery. Collision requests identify the current support volume and intended movement corridor; canceled requests show collision-critical work preempting an already-full ordinary request window.\n\n## Link pressure\n\n| Scenario | Downstream peak queue delay median/max (ms) | Downstream peak queued median/max (bytes) | Source pauses |\n| --- | ---: | ---: | ---: |\n${pressureRows.join("\n")}\n\nQueue delay excludes configured propagation and each pacing quantum's own serialization. A source pause means the proxy's bounded queue applied TCP backpressure.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
+  return `# Remote world streaming benchmark\n\nGenerated ${result.generatedAt} at commit \`${result.git.commit}\`${result.git.dirty ? " (dirty)" : ""}.\n\nWorld source: \`${result.world.source}\`; repetitions: ${result.repetitions}; environment: ${result.environment.cpu}, ${result.environment.platform}, Chrome ${result.environment.chrome}, Node ${result.environment.node}.\n\nLink profile: ${result.link.roundTripLatencyMs} ms RTT, ${result.link.downstreamMegabitsPerSecond} Mbit/s down, ${result.link.upstreamMegabitsPerSecond} Mbit/s up, no jitter or loss. Both WebSockets share one bandwidth clock per direction. Counts are TCP stream bytes delivered by the user-space proxy; they include HTTP/WebSocket framing but exclude TCP/IP/TLS overhead.\n\nStreaming guards: ${guardSummary}\n\n| Scenario | Terrain ready median (ms) | Viewport informed median (ms) | max (ms) | Settled median (ms) | World bytes at ready | World bytes at viewport | Total bytes at settlement |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows.join("\n")}\n\n“Terrain ready” means the virtual hierarchy has one complete owner cut and no requested, ownerless, pending, or in-flight pages. “Viewport informed” is the earliest post-action sample whose presented-geometry fingerprint equals the final settled viewport and stays equal. “Settled” is the first of three consecutive matching samples with the virtual hierarchy and canonical collision work drained. Turn timing starts when look input is issued; walking covers a fixed distance.\n\n## Full-speed spectator fidelity\n\n| Scenario | Speed (m/s) | Exact coverage median | Terrain-column coverage median | Canonical-lattice presentation | Fully owned | Max ownerless roots | Longest unowned (ms) | World bytes |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${cruiseRows.join("\n")}\n\nThe cruise measurement begins after spectator acceleration reaches its configured maximum. Coverage medians preserve partial progress instead of reducing every imperfect sample to zero. “Fully owned” requires exact immediate chunks, complete terrain-column ownership, and a canonical-lattice presentation in the same sample; the benchmark continues sampling until the stopped viewport settles.\n\n## Movement continuity\n\n| Scenario | Longest no-progress median (ms) | max (ms) |\n| --- | ---: | ---: |\n${movementRows.join("\n")}\n\nA movement sample counts as progress after at least ${MOVEMENT_PROGRESS_EPSILON_METRES} metres of horizontal displacement. Long no-progress intervals while movement input remains held expose collision stalls caused by missing canonical chunks; the fixed route fails at more than ${MAX_MOVEMENT_NO_PROGRESS_MS} ms.\n\n## Realtime control and collision priority\n\n| Scenario | Mean pose interval (ms) | Proxy p95 RTT (ms) | Client max RTT (ms) | Presence upload queue max (ms) | Collision / ordinary requests | Canceled requests |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n${realtimeRows.join("\n")}\n\nPose traffic uses a dedicated WebSocket and coalesces stale samples instead of queueing them. Proxy RTT measures ping-to-pong across the shaped link and server without client scheduling after delivery. Collision requests identify the current support volume and intended movement corridor; canceled requests show collision-critical work preempting an already-full ordinary request window.\n\n## Link pressure\n\n| Scenario | Downstream peak queue delay median/max (ms) | Downstream peak queued median/max (bytes) | Source pauses |\n| --- | ---: | ---: | ---: |\n${pressureRows.join("\n")}\n\nQueue delay excludes configured propagation and each pacing quantum's own serialization. A source pause means the proxy's bounded queue applied TCP backpressure.\n\n## Main-thread frame timing\n\n| Scenario | Median run p95 (ms) | Worst frame (ms) | Frames >33.33 ms | Streaming p95 (ms) | Dropped samples |\n| --- | ---: | ---: | ---: | ---: | ---: |\n${frameRows.join("\n")}\n`;
 }
 
 async function main(context: ScenarioContext, arguments_: readonly string[]) {
@@ -1213,7 +1202,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
               if (
                 snapshotValue(current, "visibleChunks") > 0 &&
                 snapshotValue(current, "quads") > 0 &&
-                snapshotValue(current, "allLodsReady") === 0
+                snapshotValue(current, "terrainReady") === 0
               ) {
                 return turn(pivotEngine, TURN_RADIANS, context);
               }

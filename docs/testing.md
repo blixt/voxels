@@ -33,12 +33,12 @@ vp run automation -- run storage-benchmark
 # Edit continuity, underground rendering, or tunnel LOD coverage
 vp run automation -- run digging
 
-# Edited standalone structures and branched exact-to-far geometry
+# Edited standalone structures and branched virtual-terrain geometry
 vp run automation -- run arbitrary-geometry
 
-# Registered forest/valley LOD fidelity, first-view completeness, and 120 Hz cost
-vp run automation -- run lod-fidelity --arena=forest --viewport=1500x1000 --dpr=2
-vp run automation -- run lod-fidelity --arena=valley --viewport=1500x1000 --dpr=2
+# Virtual hierarchy cut continuity, watertightness, and sustained travel
+vp run automation -- run lod-transition --viewport=1500x1000 --dpr=2
+vp run automation -- run lod-transition --mode=travel-coverage --travel-seconds=30
 ```
 
 `vp run verify` is the complete static and build gate: TypeScript checks, TypeScript tests, host Rust
@@ -54,19 +54,18 @@ behavioral, visual, resource, or transport evidence that the general gate cannot
 | Production build    | `vp build`                                                                                              | Optimized WASM, shaders, and web assets compile; no runtime claim                                |
 | Native bot smoke    | `vp run automation -- run bot-load --counts=4 --duration=3 --service-profile=worldgen-dev --no-browser` | Four real VXWP clients and the actual daemon; no renderer or browser-input claim                 |
 | Bot population/load | `vp run automation -- run bot-load`                                                                     | Mixed real-protocol bots plus a real browser observer, process resources, disk, and wire         |
-| Six browser users   | `vp run automation -- run multiplayer`                                                                  | Six isolated Chrome contexts, shaped links, avatars, authority edits, and far-LOD convergence    |
+| Six browser users   | `vp run automation -- run multiplayer`                                                                  | Six isolated Chrome contexts, shaped links, avatars, authority edits, and hierarchy convergence  |
 | Remote streaming    | `vp run automation -- run network-benchmark`                                                            | Real Chrome and daemon over a shaped socket: spawn, short/long walks, turns, bytes, and queues   |
 | Directional explore | `vp run automation -- run render-profile --mode=directional --explore-seconds=120`                      | Two-minute cold frontier: exact visual/collision readiness, queue drain, frame pacing, host load |
 | Network comparison  | `vp run automation -- run network-compare before.json after.json`                                       | Only schema-, fixture-, source-, protocol-, link-, repetition-, and environment-equal runs       |
 | Durable world store | `vp run automation -- run storage-benchmark`                                                            | Production planner/SQLite authority, ordered latency, checkpoint, retry, and restart; no sockets |
-| LOD transition      | `vp run automation -- run lod-transition`                                                               | Same-pose real-browser handoff and image evidence                                                |
-| LOD fidelity        | `vp run automation -- run lod-fidelity --arena=forest`                                                  | Registered LOD sweep, asymmetric missing geometry, first-view completeness, and frame/GPU cost   |
-| Watertight LOD      | `vp run automation -- run lod-transition --mode=watertight`                                             | Strict seam/coverage regression path                                                             |
-| Terrain boundary    | `vp run automation -- run lod-transition --mode=boundary-coverage`                                      | Reported vertical boundary pose, sky exposure, and exact browser scale                           |
-| Travel coverage     | `vp run automation -- run lod-transition --mode=travel-coverage --travel-seconds=30`                    | Sustained spectator motion, missing-owner samples, connector state, and magenta-sky exposure     |
-| LOD video           | `vp run automation -- run lod-transition --video`                                                       | The same validated traversal captured as raw WebM                                                |
-| Digging             | `vp run automation -- run digging`                                                                      | Edit replacement continuity, enclosed performance, and tunnel LOD coverage                       |
-| Arbitrary geometry  | `vp run automation -- run arbitrary-geometry`                                                           | Standalone edits and branched tunnels across the exact-to-far handoff                            |
+| Cut continuity      | `vp run automation -- run lod-transition`                                                               | Same-pose real-browser hierarchy handoff and image evidence                                      |
+| Watertight terrain  | `vp run automation -- run lod-transition --mode=watertight`                                             | Strict seam and ownership regression path                                                        |
+| Terrain boundary    | `vp run automation -- run lod-transition --mode=boundary-coverage`                                      | Multi-heading sky exposure, ownership, and exact browser scale                                   |
+| Travel coverage     | `vp run automation -- run lod-transition --mode=travel-coverage --travel-seconds=30`                    | Sustained spectator motion, ownerless roots, cut identity, and magenta-sky exposure              |
+| Cut video           | `vp run automation -- run lod-transition --video`                                                       | The same validated hierarchy traversal captured as raw WebM                                      |
+| Digging             | `vp run automation -- run digging`                                                                      | Edit replacement continuity, enclosed performance, and tunnel ownership coverage                 |
+| Arbitrary geometry  | `vp run automation -- run arbitrary-geometry`                                                           | Standalone edits and branched tunnels across canonical and virtual ownership                     |
 | World Lab/UI        | `vp run automation -- run world-lab`                                                                    | Rust UI interaction and synchronized world diagnostics                                           |
 | Spectator feed      | `vp run automation -- run spectator-feed`                                                               | Bodyless read-only camera, movement, body restore, screenshots, and video                        |
 | Weather motion      | `vp run automation -- run weather-motion`                                                               | World-anchored clouds and downward precipitation                                                 |
@@ -84,26 +83,19 @@ behavioral, visual, resource, or transport evidence that the general gate cannot
 Every scenario writes to `target/automation/<scenario>/<run-id>/`; its
 `target/automation/<scenario>/latest.json` points to the last completed run.
 
-`lod-fidelity` captures the most detailed measured policy first, then compares every cheaper policy
-at three exactly registered headings in both ordinary rendering and diagnostic-magenta geometry
-masks. It reports symmetric silhouette disagreement separately from geometry that exists in the
-reference but disappeared from the candidate. The latter catches a missing tree crown, wall, or
-overhang even when a global similarity score remains high. It then turns more than a full peripheral
-field away and back at each heading, waits for a typed Rust renderer-frame sequence, and requires the
-first presented target view to contain every geometry pixel in the settled view. Aim/edit prefetch
-may remain busy during that check; it is not allowed to change the surface LOD cut.
-
-Use `--arena=forest` for dense skyline features and `--arena=valley` for the terrain case that has
-proved most sensitive to distant LOD boundaries. Production changes to geometric LOD thresholds must
-pass both at the actual target framebuffer. A CSS viewport of `1500x1000` with `--dpr=2` is a
-3000x2000 framebuffer, not a lower-resolution proxy.
+`lod-transition` records the exact virtual-cut fingerprint, captures every compositor frame around a
+real hierarchy replacement, and rejects diagnostic-sky holes, ownerless roots, CPU/GPU cut
+disagreement, or an image discontinuity outside ordinary motion. Its travel mode keeps moving through
+cold terrain and measures the same invariants while page requests remain active. A CSS viewport of
+`1500x1000` with `--dpr=2` is a 3000x2000 framebuffer, not a lower-resolution proxy.
 
 The directional renderer profile locks noon and clear weather and follows a straight 8 m/s route for
 the requested duration. The first 30-second epoch is the profile warm-up; every epoch is still
-reported and gated, with explicit 60-second and final checkpoints. Canonical terrain must remain
-presented at stride 1 and the current swept player body/support must be fully resident at every
-sample. The default client requests collision data 2.5 seconds ahead; the benchmark requires a fully
-resident 1.5-second corridor, at least 97% of the time, with no predictive gap longer than one second.
+reported and gated, with explicit 60-second and final checkpoints. Terrain must retain one owner and
+remain presented on the canonical 10 cm lattice while the current swept player body/support stays
+fully resident at every sample. The default client requests collision data 2.5 seconds ahead; the
+benchmark requires a fully resident 1.5-second corridor at least 97% of the time, with no predictive
+gap longer than one second.
 This leaves one second for generation, transport, meshing, and upload before a missing frontier can
 affect movement.
 
@@ -166,11 +158,11 @@ Each stage records:
 - delivered TCP stream bytes, WebSocket frame bytes, exact VXWP payloads, paths, and message kinds;
 - per-client adaptive floor/ceiling and burst payload envelopes, p95/max rates, ceiling violations,
   queue-delay targets, and bandwidth split among presence, edits, and visible world products;
-- ping, chunk, surface, and edit latency distributions;
+- ping, chunk, terrain-directory/page, and edit latency distributions;
 - connected/visible players, pose traffic, edit acceptance, mutations, copies, resyncs, and errors;
 - SQLite main/WAL/SHM bytes over time plus players, inventories, live edits, operation history,
   affected chunks, and affected surfaces;
-- browser avatar readiness, interactive/full LOD readiness, final terrain coverage, frame history,
+- browser avatar readiness, virtual-cut readiness, final terrain ownership, frame history,
   CPU/GPU timing, WASM memory, GPU memory, and console/WebGPU failures.
 
 The harness fails on missing clients or avatars, unexpected edit rejection, resyncs, protocol

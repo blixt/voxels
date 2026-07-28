@@ -52,9 +52,7 @@ mod tests {
                 "target_voxel",
                 "target_voxel_max",
                 "render_options",
-                "lod_options",
-                "lod_boundary_centres",
-                "lod_boundary_half_extents",
+                "debug_options",
                 "camera_forward",
                 "shadow_splits",
                 "shadow_texel_sizes",
@@ -432,10 +430,7 @@ mod tests {
         for shader in [voxels, shadows] {
             assert!(shader.contains("@location(0) origin: vec3<i32>"));
             assert!(shader.contains("@location(3) ao: u32"));
-            assert!(shader.contains("@location(4) morph_heights: vec4<i32>"));
             assert!(shader.contains("unpack_signed_i3(surface_shape >> (corner * 3u))"));
-            assert!(shader.contains("f32(morph_heights[corner]) * 0.5"));
-            assert!(shader.contains("vec4<i32>(0)"));
             assert!(shader.contains("surface_quad_flip(face, surface_shape, ao)"));
             assert!(
                 shader.contains("select(STANDARD_STRIP[vertex_index], FLIPPED_STRIP[vertex_index]")
@@ -446,16 +441,12 @@ mod tests {
                 )
             );
             assert!(!shader.contains("let world = origin + local"));
+            assert!(!shader.contains("morph_heights"));
+            assert!(!shader.contains("MORPH_CLOSURE"));
         }
         assert!(voxels.contains("@location(4) diagnostic_owner: vec2<u32>"));
-        assert!(voxels.contains("@location(5) morph_heights: vec4<i32>"));
-        assert!(voxels.contains("vec3<f32>(origin + local)"));
+        assert!(voxels.contains("vec3<f32>(origin + quad_local(face, uv, extent))"));
         assert!(shadows.contains("vec3<f32>(origin + vec3<i32>(local))"));
-        assert!(shadows.contains("surface_parent_blend(world, material)"));
-        for shader in [voxels, shadows] {
-            assert!(shader.contains("const MORPH_CLOSURE_EXTENT_FLAG: u32 = 0x8000u"));
-            assert!(shader.contains("select(parent_blend, 1.0 - parent_blend, morph_closure)"));
-        }
     }
 
     #[test]
@@ -509,12 +500,12 @@ mod tests {
         assert!(voxels.contains("out.world = world"));
         assert!(!voxels.contains("let bayer = array<u32, 16>"));
         assert!(!voxels.contains("cut_transition_visible"));
-        assert!(voxels.contains("return mix(spatial_blend, 1.0, phase)"));
-        assert!(voxels.contains("return mix(1.0, spatial_blend, phase)"));
+        assert!(!voxels.contains("cut_transition"));
+        assert!(!voxels.contains("spatial_blend"));
     }
 
     #[test]
-    fn geometry_source_debug_uses_real_mesh_tags_and_lod_sampling_lattices() {
+    fn geometry_source_debug_uses_real_mesh_tags_and_virtual_sampling_lattices() {
         let voxels = include_str!("shaders/voxels.wgsl");
         let shadow = include_str!("shaders/shadow.wgsl");
         assert!(voxels.contains("fn geometry_source_debug_color(input: VertexOut)"));
@@ -522,24 +513,22 @@ mod tests {
         assert!(voxels.contains("switch input.source"));
         assert!(voxels.contains("let encoded_source = (material_face >> GPU_SOURCE_SHIFT) & 7u"));
         assert!(voxels.contains("let stride_voxels = select("));
-        assert!(voxels.contains("if frame.lod_options.x > 0.5"));
+        assert!(voxels.contains("if frame.debug_options.x > 0.5"));
         for shader in [voxels, shadow] {
-            assert!(shader.contains("extent_voxels.x & ~MORPH_CLOSURE_EXTENT_FLAG"));
             assert!(shader.contains("extent_voxels.y,"));
+            assert!(!shader.contains("MORPH_CLOSURE"));
         }
     }
 
     #[test]
-    fn cut_handoff_uses_frozen_outgoing_and_current_incoming_lod_coordinates() {
+    fn fixed_ring_transition_shader_path_is_absent() {
         let voxels = include_str!("shaders/voxels.wgsl");
-        assert!(voxels.contains("cut_transition.lod_boundary_centres"));
-        assert!(voxels.contains("cut_transition.lod_boundary_half_extents"));
-        assert!(voxels.contains("fn vs_transition_fixed("));
-        assert!(voxels.contains("fn vs_transition_morph("));
-        assert!(voxels.contains("if cut_transition.phase_role.y == 1.0"));
-        assert!(voxels.contains("cut_transition.phase_role.y == 2.0"));
-        assert!(voxels.contains("fn cut_transition_parent_blend("));
-        assert!(!voxels.contains("cut_transition_shape_blend"));
+        let renderer = include_str!("renderer.rs");
+        assert!(!voxels.contains("cut_transition"));
+        assert!(!renderer.contains("\"CUT_TRANSITION\""));
+        assert!(!voxels.contains("vs_transition"));
+        assert!(!voxels.contains("vs_main_morph"));
+        assert!(!voxels.contains("lod_boundary"));
         assert!(!voxels.contains("surface_shape_blend"));
     }
 

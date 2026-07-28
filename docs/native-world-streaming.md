@@ -52,30 +52,22 @@ Rust enum layout and Serde output are not wire formats.
    pose, per-material inventory, and a random edit-session ID. The client
    rejects an identity mismatch and does not inspect the provider type to choose generation behavior.
 3. The browser gives the current player body/support, intended movement sweep, and view/edit corridor
-   hard urgency through every canonical pipeline stage. It preserves the complete immediate 3x3
-   vicinity, then reorders ordinary queued chunks every frame by the configured camera cone and
-   velocity-predicted focus. Surface work stays spatially ordered because each level activates
-   atomically; it starts with stride-16, stride-8, stride-4, then stride-2 coverage. Once that complete
-   set and exact near chunks are ready, stride-32, stride-64, stride-128, and stride-256 horizon
-   batches run as `Prefetch` work. The server caps global prefetch workers, so kilometre silhouettes
-   cannot consume all generation capacity.
-4. The browser concurrently submits exact chunk-coordinate batches in that priority order. VXWP
-   preserves the ordered coordinates, request ID, and coordinate keys; every decoded product is
-   checked against the negotiated source identity. Directional priority changes no cache key,
-   residency bound, quality level, or bandwidth ceiling.
-5. Each successful near item carries the existing palette/bit-packed VXCH chunk plus an exact,
-   palette/bit-packed meshing halo. Both are integrity checked before meshing.
-6. Surface meshes use a separate `VXST` v11 payload containing bounded terrain, water, patch
-   boundary-face ranges, exact-chunk-tagged vertical fallback spans, explicit parent-height morph
-   closures, child/parent shading-height grids, compact cardinal landscape-horizon profiles, and
-   bounded sparse exact-detail chunk hints for edited topology that a heightfield cannot preserve.
-   A surface request may still prioritize multiple coordinates, but each result frame publishes
-   exactly one independently useful item. Its mandatory final-item flag marks the request's terminal
-   result so the client can consume earlier tiles without waiting for the whole request.
-   Interactive and horizon ownership activate at their own complete-level boundaries; the coarse
-   parent remains resident until its replacement is complete, and tagged vertical fallback remains
-   resident until its one exact 3D chunk is renderable. The renderer derives exact height-matched
-   connectors and lighting morphs from the two resident profiles.
+   hard urgency through every canonical pipeline stage. It requests bounded horizontal region
+   columns around the current and predicted camera path. Every discovered column identifies
+   independently renderable virtual-terrain roots; no distance ring or stride tier becomes a second
+   terrain owner.
+4. The browser fetches compact hierarchy directories for those roots, then evaluates projected
+   geometric, silhouette, material, and topology error against the current viewport. It requests
+   complete child replacement groups by expected error reduction per byte and time to exposure.
+   Missing refinement never invalidates an already renderable parent.
+5. Virtual-terrain page batches carry `VXTP` v6 pages identified by source, spatial key, revision, and
+   semantic content fingerprint. Every decoded page is checked against the negotiated world identity,
+   half-open bounds, boundary certificates, payload bounds, and directory declaration before it can
+   enter residency. A complete group replaces its parent atomically in the one selected cut.
+6. Exact `VXCH` chunk batches remain the authoritative collision, interaction, and edit products.
+   Their palette-packed occupancy and meshing halos are integrity checked independently, then exposed
+   to the same virtual hierarchy as exact leaves. They do not activate a parallel near-terrain draw
+   path, and page refinement cannot change gameplay authority.
 7. Every chunk or surface result body is independently Brotli-compressed at quality 2 with a 20-bit
    window. Its mandatory v40 envelope declares the exact uncompressed length; the decoder rejects
    unknown codecs, nonzero reserved bytes, outputs above the 16 MiB frame bound, truncated streams,
@@ -295,20 +287,19 @@ metrics/screenshots under
 `target/automation/multiplayer/latest.json` pointer identifies the newest run. It never opens or
 resets a user's normal browser profile or world.
 
-## Far-LOD transition and virtualized refinement
+## Virtualized refinement
 
-The streamed surface scheduler requests the coarsest levels first, retains old coverage through
-focus movement, and only activates a complete replacement set. The nearest geometric ownership snap
-is one 32-voxel chunk (3.2 m), reduced from the former 96-voxel jump that replaced conspicuous 9.6 m
-strips. Exact resident connectors close height disagreement at active coarse/fine boundaries, while
-hysteretic ownership and shared parent normals reduce the remaining lighting and replacement pop.
+The virtual-terrain scheduler starts from independently renderable roots, retains that coverage
+through focus movement, and activates a finer replacement only when its complete child group is
+resident and boundary-certified. Projected screen-space error and hysteresis make refinement
+incremental without fixed distance rings. The renderer selects exactly one owner at every visible
+point; it does not draw parent/child overlaps, connector patches, morph closures, or synthetic walls.
 
-The optional virtual-terrain path now carries conservative geometric, silhouette, material-boundary,
-normal, and unresolved-topology error. It selects pages by projected screen-space error with
-hysteresis, keeps a complete parent cut while children stream, and constrains sampled child edges to
-the recursively evaluated parent edge during the atomic handoff. Exact 10 cm voxels remain gameplay
-authority while every hierarchy directory, cluster, and heightfield stays a disposable rendering
-cache.
+The hierarchy carries conservative geometric, silhouette, material-boundary, normal, and
+unresolved-topology error. Sampled child edges use the recursively evaluated parent edge during an
+atomic cut replacement, while volumetric exceptions remain sparse voxel or exact cluster pages.
+Exact 10 cm voxels remain gameplay authority; every directory, cluster, and heightfield is a
+disposable rendering cache and can be rebuilt from canonical source identity plus sparse edits.
 
 Terrain Diffusion currently yields one finite 512x512 height tile at 30 m native resolution. The
 checked-in `horizontal_scale = 1` preserves that spacing, making the tile 15.36 km square,

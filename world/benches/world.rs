@@ -12,13 +12,11 @@ use voxels_world::protocol::{
     encode_chunk_batch_result,
 };
 use voxels_world::{
-    BinaryMeshScratch, CHUNK_EDGE, CINDER_VAULT, CINDER_VAULT_MOUTH_ANCHOR_XZ, ChunkCoord, EditMap,
-    Generator, Material, MeshingHalo, ProceduralWorldSource, SkylineFeatureKind, SurfaceLodLevel,
-    SurfaceTileCoord, VoxelCoord, WorldProduct, WorldProductBatch, WorldProductPriority,
-    WorldProductRequest, WorldSourceEngine, first_pilgrim_road_length_voxels,
+    BinaryMeshScratch, CHUNK_EDGE, CINDER_VAULT, ChunkCoord, Generator, MeshingHalo,
+    ProceduralWorldSource, SkylineFeatureKind, VoxelCoord, WorldProduct, WorldProductBatch,
+    WorldProductPriority, WorldProductRequest, WorldSourceEngine, first_pilgrim_road_length_voxels,
     first_pilgrim_road_point_at_distance, first_pilgrim_route_anchor,
-    first_pilgrim_route_anchor_for_feature_cell, generate_edited_surface_tile_mesh,
-    generate_edited_water_tile_mesh, generate_surface_tile_mesh, mesh_chunk_binary_with_scratch,
+    first_pilgrim_route_anchor_for_feature_cell, mesh_chunk_binary_with_scratch,
     sample_first_pilgrim_road,
 };
 
@@ -83,26 +81,6 @@ fn source_products(criterion: &mut Criterion) {
     });
 }
 
-fn route_surface_lod(criterion: &mut Criterion) {
-    let generator = Generator::new(SEED);
-    let edits = EditMap::default();
-    let road_length = first_pilgrim_road_length_voxels();
-    let (road, _) = first_pilgrim_road_point_at_distance(road_length * 0.5)
-        .expect("the fixed pilgrim-road benchmark distance must remain valid");
-    let road = [road[0].round() as i32, road[1].round() as i32];
-    let mut group = criterion.benchmark_group("pilgrim-road surface LOD");
-    for level in [SurfaceLodLevel::Stride2, SurfaceLodLevel::Stride16] {
-        let coord = SurfaceTileCoord::containing(level, road[0], road[1]);
-        group.bench_function(
-            format!("stride-{} tile", level.stride_voxels()),
-            |bencher| {
-                bencher.iter(|| generate_edited_surface_tile_mesh(generator, &edits, coord));
-            },
-        );
-    }
-    group.finish();
-}
-
 fn semantic_hero_generation(criterion: &mut Criterion) {
     let generator = Generator::new(SEED);
     let hero = generator
@@ -112,36 +90,6 @@ fn semantic_hero_generation(criterion: &mut Criterion) {
     criterion.bench_function("generate 32^3 elder-canopy hero chunk", |bencher| {
         bencher.iter(|| generator.generate_chunk(hero_chunk));
     });
-
-    let edits = EditMap::default();
-    let mut group = criterion.benchmark_group("semantic-hero surface LOD");
-    for level in [SurfaceLodLevel::Stride2, SurfaceLodLevel::Stride16] {
-        let coord = SurfaceTileCoord::containing(level, hero.anchor[0], hero.anchor[2]);
-        group.bench_function(
-            format!("stride-{} elder-canopy tile", level.stride_voxels()),
-            |bencher| {
-                bencher.iter(|| generate_edited_surface_tile_mesh(generator, &edits, coord));
-            },
-        );
-    }
-    group.finish();
-}
-
-fn cave_mouth_surface_lod(criterion: &mut Criterion) {
-    let generator = Generator::new(SEED);
-    let edits = EditMap::default();
-    let [x, z] = CINDER_VAULT_MOUTH_ANCHOR_XZ;
-    let mut group = criterion.benchmark_group("Cinder Vault mouth surface LOD");
-    for level in [SurfaceLodLevel::Stride2, SurfaceLodLevel::Stride16] {
-        let coord = SurfaceTileCoord::containing(level, x, z);
-        group.bench_function(
-            format!("stride-{} tile", level.stride_voxels()),
-            |bencher| {
-                bencher.iter(|| generate_edited_surface_tile_mesh(generator, &edits, coord));
-            },
-        );
-    }
-    group.finish();
 }
 
 fn route_queries(criterion: &mut Criterion) {
@@ -371,71 +319,15 @@ fn water_meshing(criterion: &mut Criterion) {
     });
 }
 
-fn water_surface_lod(criterion: &mut Criterion) {
-    let generator = Generator::new(SEED);
-    let edits = EditMap::default();
-    let coord =
-        SurfaceTileCoord::containing(SurfaceLodLevel::Stride8, OCEAN_VOXEL.x, OCEAN_VOXEL.z);
-    criterion.bench_function("generate edit-aware stride-8 water tile", |bencher| {
-        bencher.iter(|| generate_edited_water_tile_mesh(generator, &edits, coord));
-    });
-}
-
-fn far_surface(criterion: &mut Criterion) {
-    let generator = Generator::new(SEED);
-    let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride8, 2, -3);
-    criterion.bench_function("generate 25.6m far surface tile", |bencher| {
-        bencher.iter(|| generate_surface_tile_mesh(generator, coord));
-    });
-}
-
-fn edited_far_surface(criterion: &mut Criterion) {
-    let generator = Generator::new(SEED);
-    let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride8, 2, -3);
-    let mut edits = EditMap::default();
-    for index in 0..10_000 {
-        edits.insert_override(
-            VoxelCoord::new(1_000_000 + index, 80, 1_000_000 - index),
-            Material::Stone,
-        );
-    }
-    criterion.bench_function(
-        "generate surface tile with 10k unrelated edits",
-        |bencher| {
-            bencher.iter(|| generate_edited_surface_tile_mesh(generator, &edits, coord));
-        },
-    );
-
-    let mut same_x_edits = EditMap::default();
-    for index in 0..10_000 {
-        same_x_edits.insert_override(
-            VoxelCoord::new(0, 80, 1_000_000 + index * CHUNK_EDGE as i32),
-            Material::Stone,
-        );
-    }
-    let local = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0);
-    criterion.bench_function(
-        "snapshot surface tile with 10k same-X distant edits",
-        |bencher| {
-            bencher.iter(|| same_x_edits.snapshot_for_surface_tiles(black_box(&[local])));
-        },
-    );
-}
-
 criterion_group!(
     world_benches,
     generation,
     source_products,
-    route_surface_lod,
     semantic_hero_generation,
-    cave_mouth_surface_lod,
     route_queries,
     codec,
     streaming_codec,
     meshing,
     water_meshing,
-    water_surface_lod,
-    far_surface,
-    edited_far_surface
 );
 criterion_main!(world_benches);

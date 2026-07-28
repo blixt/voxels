@@ -73,7 +73,6 @@ export type ToWorker =
     }
   | { kind: "geometrySourceDebug"; requestId: number; enabled: boolean }
   | { kind: "materialDetail"; requestId: number; enabled: boolean }
-  | { kind: "lodBoundaries"; requestId: number; halfExtentsVoxels: number[] }
   | { kind: "exactVolumePresented"; requestId: number; x: number; y: number; z: number }
   | { kind: "snapshot"; requestId: number }
   | {
@@ -87,7 +86,6 @@ export type ToWorker =
     }
   | { kind: "submitDig"; requestId: number; x: number; y: number; z: number; shapeId: number }
   | { kind: "inventory"; requestId: number }
-  | { kind: "surfaceEditState"; requestId: number; stride: number; x: number; z: number }
   | { kind: "destroy" };
 
 export type FromWorker =
@@ -110,9 +108,7 @@ export type FromWorker =
   | { kind: "diagnosticSky"; requestId: number; active: boolean }
   | { kind: "geometrySourceDebug"; requestId: number; accepted: boolean }
   | { kind: "materialDetail"; requestId: number; accepted: boolean }
-  | { kind: "lodBoundaries"; requestId: number; accepted: boolean }
   | { kind: "exactVolumePresented"; requestId: number; presented: boolean }
   | { kind: "submitPlace"; requestId: number; submitted: boolean }
   | { kind: "submitDig"; requestId: number; submitted: boolean }
-  | { kind: "inventory"; requestId: number; values: number[] }
-  | { kind: "surfaceEditState"; requestId: number; values: number[] };
+  | { kind: "inventory"; requestId: number; values: number[] };

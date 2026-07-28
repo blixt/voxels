@@ -20,17 +20,7 @@ struct LocalLightUniform {
 @group(1) @binding(2) var opaque_depth: texture_depth_2d;
 @group(2) @binding(0) var filtered_spatial_ao: texture_2d<f32>;
 
-struct CutTransitionUniform {
-  // x is normalized phase; y is 0 stable, 1 outgoing, or 2 incoming.
-  phase_role: vec4<f32>,
-  lod_boundary_centres: array<vec4<f32>, 4>,
-  lod_boundary_half_extents: array<vec4<f32>, 2>,
-};
-
-@group(3) @binding(0) var<uniform> cut_transition: CutTransitionUniform;
-
 override MATERIAL_DETAIL: u32 = 1u;
-override CUT_TRANSITION: u32 = 0u;
 
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
@@ -56,9 +46,6 @@ const CORNERS = array<vec2<i32>, 4>(
 const STANDARD_STRIP = array<u32, 4>(1u, 2u, 0u, 3u);
 const FLIPPED_STRIP = array<u32, 4>(0u, 1u, 3u, 2u);
 const TRIANGLE_STRIP = array<u32, 4>(1u, 2u, 0u, 0u);
-const MORPH_CLOSURE_EXTENT_FLAG: u32 = 0x8000u;
-const TRANSITION_TRIANGLE_FLAG: u32 = 0x4000u;
-const TRANSITION_TRIANGLE_OFFSET_MASK: u32 = 0x01ffu;
 const CANONICAL_TRIANGLE_FLAG: u32 = 0x2000u;
 const CANONICAL_TRIANGLE_OFFSET_MASK: u32 = 0x003fu;
 const GPU_SOURCE_SHIFT: u32 = 5u;
@@ -115,36 +102,6 @@ fn surface_quad_flip(_face: u32, surface_shape: u32, packed_ao: u32) -> bool {
   }
   return corner_ao(packed_ao, 0u) + corner_ao(packed_ao, 2u)
     > corner_ao(packed_ao, 1u) + corner_ao(packed_ao, 3u);
-}
-
-fn surface_morph_corner(morph_heights: vec4<i32>, corner: u32) -> f32 {
-  return f32(morph_heights[corner]) * 0.5;
-}
-
-fn interpolated_quad_value(
-  values: vec4<f32>,
-  uv: vec2<f32>,
-  flipped: bool,
-) -> f32 {
-  let point = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
-  if flipped {
-    if point.x + point.y <= 1.0 {
-      return values.x * (1.0 - point.x - point.y)
-        + values.y * point.x
-        + values.w * point.y;
-    }
-    return values.y * (1.0 - point.y)
-      + values.z * (point.x + point.y - 1.0)
-      + values.w * (1.0 - point.x);
-  }
-  if point.y <= point.x {
-    return values.x * (1.0 - point.x)
-      + values.y * (point.x - point.y)
-      + values.z * point.y;
-  }
-  return values.x * (1.0 - point.y)
-    + values.z * point.x
-    + values.w * (point.y - point.x);
 }
 
 fn unpack_surface_macro_normal(packed: u32, parent: bool) -> vec3<f32> {
@@ -224,67 +181,6 @@ fn terrain_horizon_lighting(
   );
 }
 
-fn lod_boundary_center(
-  boundary: u32,
-  boundary_centres: array<vec4<f32>, 4>,
-) -> vec2<f32> {
-  let packed = boundary_centres[boundary / 2u];
-  return select(packed.xy, packed.zw, (boundary & 1u) != 0u);
-}
-
-fn lod_boundary_half_extent(
-  boundary: u32,
-  boundary_half_extents: array<vec4<f32>, 2>,
-) -> f32 {
-  return boundary_half_extents[boundary / 4u][boundary & 3u];
-}
-
-fn cut_transition_parent_blend(spatial_blend: f32, phase_role: vec2<f32>) -> f32 {
-  let phase = clamp(phase_role.x, 0.0, 1.0);
-  let role = u32(round(phase_role.y));
-  if role == 1u {
-    // A departing fine patch converges into the current coarse owner.
-    return mix(spatial_blend, 1.0, phase);
-  }
-  if role == 2u {
-    // An arriving fine patch unfolds from the previous coarse owner.
-    return mix(1.0, spatial_blend, phase);
-  }
-  return spatial_blend;
-}
-
-fn surface_parent_normal_blend(
-  world: vec3<f32>,
-  material: u32,
-  boundary_centres: array<vec4<f32>, 4>,
-  boundary_half_extents: array<vec4<f32>, 2>,
-  transition_phase_role: vec2<f32>,
-) -> f32 {
-  if frame.lod_options.w < 0.5 || (material & 0x80000000u) == 0u {
-    return 0.0;
-  }
-  let level = (material >> 27u) & 7u;
-  if level >= 7u {
-    return 0.0;
-  }
-  let boundary = level + 1u;
-  let half_extent = lod_boundary_half_extent(boundary, boundary_half_extents);
-  // Ownership remains on the exact snapped lattice, but its geometry field follows the camera
-  // continuously. Hysteresis can hold a cut 5/8 of one snap step behind the camera; finishing the
-  // morph before that envelope guarantees every newly owned fine patch is already identical to
-  // its parent when the atomic cut moves.
-  let snap_step = 3.2 * exp2(f32(max(i32(boundary) - 1, 0)));
-  let maximum_snap_lag = snap_step * 0.625;
-  let delta = abs(world.xz - frame.camera_time.xz);
-  let inside = half_extent - maximum_snap_lag - max(delta.x, delta.y);
-  // At sprint speed the nearest 1.6m ramp lasts roughly 200ms.
-  let width = max(1.6, half_extent * 0.02);
-  return cut_transition_parent_blend(
-    1.0 - smoothstep(0.0, width, inside),
-    transition_phase_role,
-  );
-}
-
 fn surface_wall_macro_blend(world: vec3<f32>) -> f32 {
   // The canonical square reaches 12.8m along its axes and 18.1m at its corners. Start close enough
   // that every first coarse wall still uses almost exactly its voxel-face normal, then converge
@@ -303,41 +199,6 @@ fn quad_local(face: u32, uv: vec2<i32>, extent: vec2<i32>) -> vec3<i32> {
     case 4u: { return vec3<i32>(uv.x * extent.x, uv.y * extent.y, 1); }
     default: { return vec3<i32>(uv.x * extent.x, uv.y * extent.y, 0); }
   }
-}
-
-fn transition_triangle_local(
-  corner: u32,
-  encoded_extent: vec2<u32>,
-  material: u32,
-) -> vec3<i32> {
-  let anchor = (encoded_extent.x >> 9u) & 3u;
-  let edge = (encoded_extent.x >> 11u) & 3u;
-  let level = (material >> 27u) & 7u;
-  let stride = i32(2u << level);
-  let anchor_xz = array<vec2<i32>, 4>(
-    vec2<i32>(0, 0),
-    vec2<i32>(stride, 0),
-    vec2<i32>(stride, stride),
-    vec2<i32>(0, stride),
-  )[anchor];
-  let raw_start = i32(encoded_extent.x & TRANSITION_TRIANGLE_OFFSET_MASK);
-  let raw_end = i32(encoded_extent.y);
-  // Negative-X and positive-Z run opposite the A-B-C-D polygon winding.
-  let reverse = edge == 0u || edge == 3u;
-  let tangent = select(
-    select(raw_start, raw_end, corner == 2u),
-    select(raw_end, raw_start, corner == 2u),
-    reverse,
-  );
-  var boundary_xz = vec2<i32>(0);
-  switch edge {
-    case 0u: { boundary_xz = vec2<i32>(0, tangent); }
-    case 1u: { boundary_xz = vec2<i32>(stride, tangent); }
-    case 2u: { boundary_xz = vec2<i32>(tangent, 0); }
-    default: { boundary_xz = vec2<i32>(tangent, stride); }
-  }
-  let xz = select(boundary_xz, anchor_xz, corner == 0u);
-  return vec3<i32>(xz.x, 1, xz.y);
 }
 
 fn canonical_triangle_extent(encoded_extent: vec2<u32>) -> vec2<f32> {
@@ -398,36 +259,17 @@ fn canonical_triangle_local(
   }
 }
 
-struct MorphedQuadPosition {
-  world: vec3<f32>,
-  parent_blend: f32,
-};
-
 fn quad_world(
   origin: vec3<i32>,
   face: u32,
   corner: u32,
   uv: vec2<i32>,
   extent: vec2<i32>,
-  material: u32,
-  ao: u32,
   surface_shape: u32,
-  morph_heights: vec4<i32>,
-  morph_closure: bool,
-  morph_geometry: bool,
-  transition_triangle: bool,
   canonical_triangle: bool,
   encoded_extent: vec2<u32>,
-  boundary_centres: array<vec4<f32>, 4>,
-  boundary_half_extents: array<vec4<f32>, 2>,
-  transition_phase_role: vec2<f32>,
-) -> MorphedQuadPosition {
-  let local = select(
-    quad_local(face, uv, extent),
-    transition_triangle_local(corner, encoded_extent, material),
-    transition_triangle,
-  );
-  var world = vec3<f32>(origin + local) * frame.viewport_voxel.z;
+) -> vec3<f32> {
+  var world = vec3<f32>(origin + quad_local(face, uv, extent)) * frame.viewport_voxel.z;
   if canonical_triangle {
     world = (vec3<f32>(origin) + canonical_triangle_local(corner, encoded_extent, face))
       * frame.viewport_voxel.z;
@@ -436,36 +278,7 @@ fn quad_world(
     world.y += unpack_signed_i3(surface_shape >> (corner * 3u))
       * frame.viewport_voxel.z;
   }
-  var parent_blend = 0.0;
-  if morph_geometry && (ao & 0x01000000u) != 0u {
-    parent_blend = surface_parent_normal_blend(
-      world,
-      material,
-      boundary_centres,
-      boundary_half_extents,
-      transition_phase_role,
-    );
-    let morph_blend = select(parent_blend, 1.0 - parent_blend, morph_closure);
-    var morph_delta = surface_morph_corner(morph_heights, corner);
-    if canonical_triangle {
-      let values = vec4<f32>(
-        surface_morph_corner(morph_heights, 0u),
-        surface_morph_corner(morph_heights, 1u),
-        surface_morph_corner(morph_heights, 2u),
-        surface_morph_corner(morph_heights, 3u),
-      );
-      let source_extent = canonical_triangle_extent(encoded_extent);
-      morph_delta = interpolated_quad_value(
-        values,
-        canonical_triangle_uv(corner, encoded_extent) / source_extent,
-        surface_quad_flip(face, surface_shape, ao),
-      );
-    }
-    world.y += morph_delta
-      * frame.viewport_voxel.z
-      * morph_blend;
-  }
-  return MorphedQuadPosition(world, parent_blend);
+  return world;
 }
 
 fn voxel_vertex(
@@ -475,28 +288,16 @@ fn voxel_vertex(
   material_face: u32,
   ao: u32,
   encoded_owner_id: vec2<u32>,
-  morph_heights: vec4<i32>,
-  morph_geometry: bool,
-  boundary_centres: array<vec4<f32>, 4>,
-  boundary_half_extents: array<vec4<f32>, 2>,
-  transition_phase_role: vec2<f32>,
 ) -> VertexOut {
   let face = (material_face >> 16u) & 7u;
   let encoded_source = (material_face >> GPU_SOURCE_SHIFT) & 7u;
   let packed_material = material_face & 0xfff8ff1fu;
   let surface_shape = ((packed_material >> 8u) & 255u) | (((ao >> 20u) & 15u) << 8u);
   let material = packed_material & 0xffff00ffu;
-  let transition_triangle = (extent_voxels.x & TRANSITION_TRIANGLE_FLAG) != 0u;
   let canonical_triangle = (extent_voxels.x & CANONICAL_TRIANGLE_FLAG) != 0u;
-  let morph_closure =
-    (extent_voxels.x & MORPH_CLOSURE_EXTENT_FLAG) != 0u && !canonical_triangle;
-  let custom_triangle = transition_triangle || canonical_triangle;
+  let custom_triangle = canonical_triangle;
   let extent = vec2<i32>(vec2<u32>(
-    select(
-      extent_voxels.x & ~MORPH_CLOSURE_EXTENT_FLAG,
-      0u,
-      custom_triangle,
-    ),
+    select(extent_voxels.x, 0u, custom_triangle),
     extent_voxels.y,
   ));
   let flip = !custom_triangle && surface_quad_flip(face, surface_shape, ao);
@@ -512,35 +313,21 @@ fn voxel_vertex(
     case 4u: { normal.z = 1.0; }
     default: { normal.z = -1.0; }
   }
-  let morphed_position = quad_world(
+  let world = quad_world(
     origin,
     face,
     corner,
     uv,
     extent,
-    material,
-    ao,
     surface_shape,
-    morph_heights,
-    morph_closure,
-    morph_geometry,
-    transition_triangle,
     canonical_triangle,
     extent_voxels,
-    boundary_centres,
-    boundary_half_extents,
-    transition_phase_role,
   );
-  let world = morphed_position.world;
   let surface_macro_normal = (ao & 0x01000000u) != 0u;
   var terrain_lighting = vec2<f32>(1.0);
   if surface_macro_normal {
     let own_normal = unpack_surface_macro_normal(ao, false);
-    let parent_normal = unpack_surface_macro_normal(ao, true);
-    let parent_blend = morphed_position.parent_blend;
-    let terrain_normal = normalize(
-      mix(own_normal, parent_normal, parent_blend),
-    );
+    let terrain_normal = own_normal;
     normal = select(
       normalize(mix(normal, terrain_normal, surface_wall_macro_blend(world))),
       terrain_normal,
@@ -548,13 +335,13 @@ fn voxel_vertex(
     );
     let resolved_horizon_lighting = terrain_horizon_lighting(
       unpack_surface_horizon_profile(material, ao),
-      parent_blend,
+      0.0,
       terrain_normal,
       normalize(frame.key_light_direction.xyz),
     );
-    // Canonical 10cm chunks do not carry a streamed horizon profile. Fade the macro term in over
-    // a broad world-distance band so their handoff to Stride2 cannot move a dark contour with the
-    // ownership ring. Beyond 32m every coarse level receives the full landscape lighting cue.
+    // Some canonical 10cm pages do not carry a streamed horizon profile. Fade the macro term in
+    // over a broad world-distance band so refinement cannot move a dark contour with the page
+    // boundary. Beyond 32m every hierarchy level receives the full landscape lighting cue.
     let horizon_strength = smoothstep(8.0, 32.0, distance(world.xz, frame.camera_time.xz));
     terrain_lighting = mix(vec2<f32>(1.0), resolved_horizon_lighting, horizon_strength);
   }
@@ -565,9 +352,7 @@ fn voxel_vertex(
   out.material = material;
   out.ao = select(corner_ao(ao, corner), 1.0, surface_macro_normal);
   out.terrain_lighting = terrain_lighting;
-  // Morph closures are ordinary streamed products in storage but a distinct draw source on the
-  // active cut. Keep them visually separable without consuming another packed extent category.
-  out.source = select(encoded_source, 5u, morph_closure);
+  out.source = encoded_source;
   // Production entry points pass a literal zero owner. Keeping every diagnostic operation inside
   // this branch lets shader specialization eliminate it from ordinary frames; screenshot entry
   // points supply the transient sidecar's non-zero owner.
@@ -603,11 +388,6 @@ fn vs_main_fixed(
     material_face,
     ao,
     vec2<u32>(0u),
-    vec4<i32>(0),
-    false,
-    frame.lod_boundary_centres,
-    frame.lod_boundary_half_extents,
-    vec2<f32>(0.0),
   );
 }
 
@@ -693,170 +473,6 @@ fn vs_main_fixed_diagnostic(
     material_face,
     ao,
     diagnostic_owner,
-    vec4<i32>(0),
-    false,
-    frame.lod_boundary_centres,
-    frame.lod_boundary_half_extents,
-    vec2<f32>(0.0),
-  );
-}
-
-@vertex
-fn vs_main_morph(
-  @builtin(vertex_index) vertex_index: u32,
-  @location(0) origin: vec3<i32>,
-  @location(1) extent_voxels: vec2<u32>,
-  @location(2) material_face: u32,
-  @location(3) ao: u32,
-  @location(4) morph_heights: vec4<i32>,
-) -> VertexOut {
-  return voxel_vertex(
-    vertex_index,
-    origin,
-    extent_voxels,
-    material_face,
-    ao,
-    vec2<u32>(0u),
-    morph_heights,
-    true,
-    frame.lod_boundary_centres,
-    frame.lod_boundary_half_extents,
-    vec2<f32>(0.0),
-  );
-}
-
-@vertex
-fn vs_main_morph_diagnostic(
-  @builtin(vertex_index) vertex_index: u32,
-  @location(0) origin: vec3<i32>,
-  @location(1) extent_voxels: vec2<u32>,
-  @location(2) material_face: u32,
-  @location(3) ao: u32,
-  @location(4) diagnostic_owner: vec2<u32>,
-  @location(5) morph_heights: vec4<i32>,
-) -> VertexOut {
-  return voxel_vertex(
-    vertex_index,
-    origin,
-    extent_voxels,
-    material_face,
-    ao,
-    diagnostic_owner,
-    morph_heights,
-    true,
-    frame.lod_boundary_centres,
-    frame.lod_boundary_half_extents,
-    vec2<f32>(0.0),
-  );
-}
-
-fn transition_boundary_centres() -> array<vec4<f32>, 4> {
-  if cut_transition.phase_role.y == 1.0 {
-    return cut_transition.lod_boundary_centres;
-  }
-  return frame.lod_boundary_centres;
-}
-
-fn transition_boundary_half_extents() -> array<vec4<f32>, 2> {
-  if cut_transition.phase_role.y == 1.0 {
-    return cut_transition.lod_boundary_half_extents;
-  }
-  return frame.lod_boundary_half_extents;
-}
-
-@vertex
-fn vs_transition_fixed(
-  @builtin(vertex_index) vertex_index: u32,
-  @location(0) origin: vec3<i32>,
-  @location(1) extent_voxels: vec2<u32>,
-  @location(2) material_face: u32,
-  @location(3) ao: u32,
-) -> VertexOut {
-  return voxel_vertex(
-    vertex_index,
-    origin,
-    extent_voxels,
-    material_face,
-    ao,
-    vec2<u32>(0u),
-    vec4<i32>(0),
-    false,
-    transition_boundary_centres(),
-    transition_boundary_half_extents(),
-    cut_transition.phase_role.xy,
-  );
-}
-
-@vertex
-fn vs_transition_fixed_diagnostic(
-  @builtin(vertex_index) vertex_index: u32,
-  @location(0) origin: vec3<i32>,
-  @location(1) extent_voxels: vec2<u32>,
-  @location(2) material_face: u32,
-  @location(3) ao: u32,
-  @location(4) diagnostic_owner: vec2<u32>,
-) -> VertexOut {
-  return voxel_vertex(
-    vertex_index,
-    origin,
-    extent_voxels,
-    material_face,
-    ao,
-    diagnostic_owner,
-    vec4<i32>(0),
-    false,
-    transition_boundary_centres(),
-    transition_boundary_half_extents(),
-    cut_transition.phase_role.xy,
-  );
-}
-
-@vertex
-fn vs_transition_morph(
-  @builtin(vertex_index) vertex_index: u32,
-  @location(0) origin: vec3<i32>,
-  @location(1) extent_voxels: vec2<u32>,
-  @location(2) material_face: u32,
-  @location(3) ao: u32,
-  @location(4) morph_heights: vec4<i32>,
-) -> VertexOut {
-  return voxel_vertex(
-    vertex_index,
-    origin,
-    extent_voxels,
-    material_face,
-    ao,
-    vec2<u32>(0u),
-    morph_heights,
-    true,
-    transition_boundary_centres(),
-    transition_boundary_half_extents(),
-    cut_transition.phase_role.xy,
-  );
-}
-
-@vertex
-fn vs_transition_morph_diagnostic(
-  @builtin(vertex_index) vertex_index: u32,
-  @location(0) origin: vec3<i32>,
-  @location(1) extent_voxels: vec2<u32>,
-  @location(2) material_face: u32,
-  @location(3) ao: u32,
-  @location(4) diagnostic_owner: vec2<u32>,
-  @location(5) morph_heights: vec4<i32>,
-) -> VertexOut {
-  return voxel_vertex(
-    vertex_index,
-    origin,
-    extent_voxels,
-    material_face,
-    ao,
-    diagnostic_owner,
-    morph_heights,
-    true,
-    transition_boundary_centres(),
-    transition_boundary_half_extents(),
-    cut_transition.phase_role.xy,
   );
 }
 
@@ -1047,37 +663,14 @@ fn geometry_source_debug_color(input: VertexOut) -> vec3<f32> {
   switch input.source {
     // Temporary opaque exact-volume frontier cap.
     case 1u: { color = vec3<f32>(1.00, 0.02, 0.02); }
-    // Height-matched connector generated between two ownership sources.
-    case 2u: { color = vec3<f32>(1.00); }
-    // Streamed synthetic fallback wall standing in for unavailable exact vertical data.
-    case 3u: { color = vec3<f32>(1.00, 0.72, 0.02); }
-    // Streamed water keeps the surface level's hue but shifts toward blue.
-    case 4u: { color = mix(streamed_lod_debug_color(level), vec3<f32>(0.02, 0.35, 1.00), 0.48); }
-    // Streamed skyline proxy (and the legacy morph-closure stream, when present). A neutral
-    // checker stays categorical beside every saturated terrain-LOD hue.
-    case 5u: {
-      let closure_checker = (u32(input.position.x) ^ u32(input.position.y)) & 8u;
-      color = select(vec3<f32>(0.08), vec3<f32>(0.92), closure_checker != 0u);
-    }
-    // Coarse top cells subdivided to the adjacent fine lattice at an exact LOD cut.
-    case 6u: { color = vec3<f32>(1.00, 0.08, 0.02); }
-    // Connector whose fine and coarse edge curves cross within one segment.
-    case 7u: { color = vec3<f32>(0.72, 0.04, 1.00); }
+    // Triangle-cluster pages use a distinct violet palette from reconstructed surface pages.
+    case 8u: { color = vec3<f32>(0.72, 0.16, 1.00); }
     default: {}
-  }
-  if CUT_TRANSITION != 0u {
-    let checker = (u32(input.position.x) + u32(input.position.y)) & 4u;
-    let transition_color = select(
-      vec3<f32>(1.00, 0.02, 0.02),
-      vec3<f32>(0.02, 1.00, 0.88),
-      cut_transition.phase_role.y == 2.0,
-    );
-    color = select(transition_color, vec3<f32>(1.00), checker != 0u);
   }
 
   // Draw the source's actual sampling lattice in world space. Canonical cyan therefore carries a
-  // 10 cm grid, while every streamed hue exposes its own 20 cm, 40 cm, ... cell alignment.
-  let stride_voxels = select(1u, 1u << (level + 1u), streamed || input.source >= 2u);
+  // 10 cm grid, while every virtual hierarchy depth remains directly inspectable.
+  let stride_voxels = select(1u, 1u << level, streamed);
   let grid = surface_uv(input.world, input.normal)
     / (frame.viewport_voxel.z * f32(stride_voxels));
   let fraction = fract(grid);
@@ -1246,7 +839,7 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
   if material != 13u {
     discard;
   }
-  if frame.lod_options.x > 0.5 {
+  if frame.debug_options.x > 0.5 {
     return vec4<f32>(geometry_source_debug_color(input), 1.0);
   }
   let base_uv = input.position.xy / frame.viewport_voxel.xy;
@@ -1476,7 +1069,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
   let continuous_uv = surface_uv(input.world, input.normal) * material_scale;
   let detail_uv_dx = dpdx(continuous_uv);
   let detail_uv_dy = dpdy(continuous_uv);
-  if frame.lod_options.x > 0.5 {
+  if frame.debug_options.x > 0.5 {
     return vec4<f32>(geometry_source_debug_color(input), 1.0);
   }
   if distance_to_camera >= 144.0 {

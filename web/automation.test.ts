@@ -18,8 +18,11 @@ describe("engine automation contract", () => {
     expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.cameraX]).toBe("cameraX");
     expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.arenaPages]).toBe("arenaPages");
     expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.targetVoxelZ]).toBe("targetVoxelZ");
-    expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.lodIncompleteTransitionEdges]).toBe(
-      "lodIncompleteTransitionEdges",
+    expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.virtualTerrainOwnerlessRoots]).toBe(
+      "virtualTerrainOwnerlessRoots",
+    );
+    expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.virtualTerrainGpuOwnerlessRoots]).toBe(
+      "virtualTerrainGpuOwnerlessRoots",
     );
     expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.schemaVersion]).toBe("schemaVersion");
   });
@@ -62,7 +65,7 @@ describe("engine automation contract", () => {
     expect(() =>
       assertAutomationContract({
         ...valid,
-        snapshotFields: valid.snapshotFields.with(0, "movedCamera"),
+        snapshotFields: Array.from<string>(valid.snapshotFields).with(0, "movedCamera"),
       }),
     ).toThrow();
 

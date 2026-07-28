@@ -16,7 +16,7 @@ function near(value: number, target: number, tolerance = 0.002): boolean {
 async function waitForSettledWorld(engine: EngineClient): Promise<readonly number[]> {
   return engine.waitForSnapshot(
     (snapshot) =>
-      snapshotValue(snapshot, "allLodsReady") === 1 &&
+      snapshotValue(snapshot, "terrainReady") === 1 &&
       snapshotValue(snapshot, "pendingJobs") === 0 &&
       snapshotValue(snapshot, "residentChunks") > 0,
     { description: "World Lab fixture did not settle", timeoutMs: 60_000 },
@@ -222,19 +222,15 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
       viewportFingerprint?: string;
       selectedCutFingerprint?: string;
       selectedCut?: {
-        current?: {
-          ownerCounts?: { surfacePatches?: number; canonicalChunks?: number };
-          surfacePatches?: unknown[];
-        };
+        kind?: string;
+        cut?: { selectedPages?: unknown[] };
       };
-      incompleteTransitionEdges?: number;
     };
-    streaming?: { surfaceEpoch?: string; surfacePages?: unknown[]; canonicalPages?: unknown[] };
+    streaming?: { canonicalPages?: unknown[]; virtualRegions?: unknown[] };
     render?: {
       worldLabOpen?: boolean;
       geometrySourceDebug?: boolean;
       viewDistanceMetres?: number;
-      lodFocus?: unknown;
     };
   };
   const eye = reproduction.camera?.eyeMetres;
@@ -267,21 +263,13 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     !near(reproduction.environment?.weatherFraction ?? Number.NaN, 0.08) ||
     !/^[0-9a-f]{16}$/u.test(reproduction.presentation?.viewportFingerprint ?? "") ||
     !/^[0-9a-f]{16}$/u.test(reproduction.presentation?.selectedCutFingerprint ?? "") ||
-    !Number.isSafeInteger(
-      reproduction.presentation?.selectedCut?.current?.ownerCounts?.surfacePatches,
-    ) ||
-    !Number.isSafeInteger(
-      reproduction.presentation?.selectedCut?.current?.ownerCounts?.canonicalChunks,
-    ) ||
-    !Array.isArray(reproduction.presentation?.selectedCut?.current?.surfacePatches) ||
-    reproduction.presentation?.incompleteTransitionEdges !== 0 ||
-    !/^\d+$/u.test(reproduction.streaming?.surfaceEpoch ?? "") ||
-    !Array.isArray(reproduction.streaming?.surfacePages) ||
+    reproduction.presentation?.selectedCut?.kind !== "virtualTerrain" ||
+    !Array.isArray(reproduction.presentation?.selectedCut?.cut?.selectedPages) ||
     !Array.isArray(reproduction.streaming?.canonicalPages) ||
+    !Array.isArray(reproduction.streaming?.virtualRegions) ||
     reproduction.render?.worldLabOpen !== false ||
     reproduction.render.geometrySourceDebug !== true ||
-    !Number.isFinite(reproduction.render.viewDistanceMetres) ||
-    reproduction.render.lodFocus === null
+    !Number.isFinite(reproduction.render.viewDistanceMetres)
   ) {
     throw new Error(`F2 screenshot reproduction metadata is incomplete: ${reproductionText}`);
   }

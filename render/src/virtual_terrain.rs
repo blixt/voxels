@@ -777,7 +777,7 @@ impl CutBuilder<'_> {
         // Frustum-cull only complete region roots. Once a root becomes a visible owner, every
         // refinement remains a complete octree partition of that root. Culling individual
         // descendants made `is_renderable` lie: the selected pages no longer covered the volume
-        // whose legacy owner was being retired, which could expose gaps at the frustum edge.
+        // whose parent owner was being replaced, which could expose gaps at the frustum edge.
         let Some(node) = self.hierarchy.nodes.get(&key).cloned() else {
             if root {
                 self.ownerless_roots.push(key);

@@ -114,8 +114,8 @@ async function waitForSettledWorld(engine: EngineClient): Promise<readonly numbe
     (snapshot) =>
       snapshotValue(snapshot, "quads") > 0 &&
       snapshotValue(snapshot, "pendingJobs") === 0 &&
-      snapshotValue(snapshot, "surfaceInFlight") === 0 &&
-      snapshotValue(snapshot, "allLodsReady") === 1,
+      snapshotValue(snapshot, "virtualTerrainStreamInFlight") === 0 &&
+      snapshotValue(snapshot, "terrainReady") === 1,
     {
       timeoutMs: 90_000,
       intervalMs: 50,
@@ -188,7 +188,7 @@ async function performDig(
     const owned = snapshotValue(latest, "editCanonicalOwned");
     maximumPresentedStrideVoxels = Math.max(
       maximumPresentedStrideVoxels,
-      snapshotValue(latest, "presentedLodStrideVoxels"),
+      snapshotValue(latest, "canonicalLatticePresented"),
     );
     observedCommit ||= edits > editsBefore;
     if (required > 0) {
@@ -201,7 +201,7 @@ async function performDig(
       observedCommit &&
       required === 0 &&
       snapshotValue(latest, "pendingJobs") === 0 &&
-      snapshotValue(latest, "surfaceInFlight") === 0;
+      snapshotValue(latest, "virtualTerrainStreamInFlight") === 0;
     stableCompleteSamples = complete ? stableCompleteSamples + 1 : 0;
     if (stableCompleteSamples >= 3) break;
     await engine.wait(8);
@@ -221,9 +221,9 @@ async function performDig(
     throw new Error(
       `dig replacement did not settle at ${target.join(",")}: ${JSON.stringify({
         pendingJobs: snapshotValue(latest, "pendingJobs"),
-        surfaceInFlight: snapshotValue(latest, "surfaceInFlight"),
-        surfaceQueued: snapshotValue(latest, "surfaceQueued"),
-        surfaceDirty: snapshotValue(latest, "surfaceDirty"),
+        virtualTerrainStreamInFlight: snapshotValue(latest, "virtualTerrainStreamInFlight"),
+        virtualTerrainStreamPending: snapshotValue(latest, "virtualTerrainStreamPending"),
+        virtualTerrainDirectoryInFlight: snapshotValue(latest, "virtualTerrainDirectoryInFlight"),
         required: snapshotValue(latest, "editCanonicalRequired"),
         renderable: snapshotValue(latest, "editCanonicalRenderable"),
         owned: snapshotValue(latest, "editCanonicalOwned"),
@@ -432,8 +432,8 @@ async function captureStationaryTunnelStability(
         snapshotValue(snapshot, "enclosedViewRenderable") === required &&
         snapshotValue(snapshot, "enclosedViewOwned") === required &&
         snapshotValue(snapshot, "pendingJobs") === 0 &&
-        snapshotValue(snapshot, "surfaceInFlight") === 0 &&
-        snapshotValue(snapshot, "allLodsReady") === 1
+        snapshotValue(snapshot, "virtualTerrainStreamInFlight") === 0 &&
+        snapshotValue(snapshot, "terrainReady") === 1
       );
     },
     {

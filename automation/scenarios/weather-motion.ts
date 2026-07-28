@@ -88,7 +88,7 @@ function median(values: readonly number[]): number {
 async function waitForEngine(engine: EngineClient): Promise<readonly number[]> {
   return engine.waitForSnapshot(
     (snapshot) =>
-      snapshotValue(snapshot, "allLodsReady") === 1 &&
+      snapshotValue(snapshot, "terrainReady") === 1 &&
       snapshotValue(snapshot, "pendingJobs") === 0 &&
       snapshotValue(snapshot, "residentChunks") > 0,
     {

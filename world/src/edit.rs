@@ -1,8 +1,5 @@
-use crate::{
-    CHUNK_EDGE, Chunk, ChunkCoord, FEATURE_MAX_RADIUS_VOXELS, Generator, Material, MeshingHalo,
-    SkylineFeature, SurfaceTileCoord,
-};
-use std::collections::{BTreeMap, BTreeSet};
+use crate::{CHUNK_EDGE, Chunk, ChunkCoord, Generator, Material, MeshingHalo, SkylineFeature};
+use std::collections::BTreeMap;
 use std::fmt;
 
 const EDIT_CHUNK_MAGIC: &[u8; 4] = b"VXED";
@@ -289,30 +286,6 @@ impl EditMap {
         snapshot
     }
 
-    /// Copies the bounded horizontal edit neighborhood needed by surface tiles, including their
-    /// sampling shell and analytic skyline-feature radius.
-    pub fn snapshot_for_surface_tiles(&self, coords: &[SurfaceTileCoord]) -> Self {
-        let mut changes = Vec::new();
-        for coord in coords {
-            let [origin_x, origin_z] = coord.voxel_origin();
-            let span = i64::from(coord.voxel_span());
-            let margin = i64::from(coord.stride_voxels() + FEATURE_MAX_RADIUS_VOXELS);
-            let min_x = i64::from(origin_x) - margin;
-            let min_z = i64::from(origin_z) - margin;
-            let max_x = i64::from(origin_x) + span + margin;
-            let max_z = i64::from(origin_z) + span + margin;
-            for (voxel, material) in self.overrides_in_horizontal_bounds(min_x, min_z, max_x, max_z)
-            {
-                changes.push((voxel, Some(material)));
-            }
-        }
-        changes.sort_unstable_by_key(|&(coord, _)| coord);
-        changes.dedup_by_key(|change| change.0);
-        let mut snapshot = Self::default();
-        snapshot.replace_durable_overrides(&changes);
-        snapshot
-    }
-
     /// Copies every vertical override in an exact horizontal voxel rectangle. Edit planning uses
     /// this column-complete view because a below-ground mutation can become the new visible surface
     /// after another voxel in the same column is removed.
@@ -354,64 +327,6 @@ impl EditMap {
         let mut snapshot = Self::default();
         snapshot.replace_durable_overrides(&changes);
         snapshot
-    }
-
-    fn overrides_in_horizontal_bounds(
-        &self,
-        min_x: i64,
-        min_z: i64,
-        max_x: i64,
-        max_z: i64,
-    ) -> impl Iterator<Item = (VoxelCoord, Material)> + '_ {
-        let min_chunk_x = min_x
-            .div_euclid(CHUNK_EDGE as i64)
-            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-        let max_chunk_x = (max_x - 1)
-            .div_euclid(CHUNK_EDGE as i64)
-            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-        let min_chunk_z = min_z
-            .div_euclid(CHUNK_EDGE as i64)
-            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-        let max_chunk_z = (max_z - 1)
-            .div_euclid(CHUNK_EDGE as i64)
-            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-        (min_chunk_x..=max_chunk_x)
-            .flat_map(move |chunk_x| {
-                self.chunks
-                    .range((chunk_x, min_chunk_z, i32::MIN)..=(chunk_x, max_chunk_z, i32::MAX))
-            })
-            .flat_map(move |(&(chunk_x, chunk_z, chunk_y), chunk)| {
-                let origin = ChunkCoord::new(chunk_x, chunk_y, chunk_z).world_origin();
-                chunk
-                    .overrides
-                    .iter()
-                    .copied()
-                    .filter_map(move |(index, material)| {
-                        let local = local_coord(index);
-                        let voxel = VoxelCoord::new(
-                            origin[0] + local[0] as i32,
-                            origin[1] + local[1] as i32,
-                            origin[2] + local[2] as i32,
-                        );
-                        (i64::from(voxel.x) >= min_x
-                            && i64::from(voxel.x) < max_x
-                            && i64::from(voxel.z) >= min_z
-                            && i64::from(voxel.z) < max_z)
-                            .then_some((voxel, material))
-                    })
-            })
-    }
-
-    fn edited_columns_in(&self, bounds: [[i32; 2]; 2]) -> BTreeSet<(i32, i32)> {
-        let [[min_x, min_z], [max_x, max_z]] = bounds;
-        self.overrides_in_horizontal_bounds(
-            i64::from(min_x),
-            i64::from(min_z),
-            i64::from(max_x),
-            i64::from(max_z),
-        )
-        .map(|(coord, _)| (coord.x, coord.z))
-        .collect()
     }
 
     /// Returns all durable overrides in one canonical chunk in deterministic local-index order.
@@ -570,26 +485,6 @@ impl EditMap {
         self.chunks
             .insert(chunk_key(coord), EditedChunk { overrides: decoded });
         Ok(())
-    }
-
-    /// Conservative far-LOD additions within half-open X/Z bounds. Excavations remain represented
-    /// by the regular center sample, while an off-center player-built silhouette cannot disappear
-    /// merely because it missed the coarse sample point.
-    pub(crate) fn collidable_edited_surface_columns_in(
-        &self,
-        generator: Generator,
-        bounds: [[i32; 2]; 2],
-    ) -> Vec<(i32, i32, i32, Material)> {
-        let mut columns = Vec::new();
-        for (x, z) in self.edited_columns_in(bounds) {
-            let (height, material) = self.surface_sample(generator, x, z);
-            if material.is_collidable()
-                && self.override_at(VoxelCoord::new(x, height, z)) == Some(material)
-            {
-                columns.push((x, z, height, material));
-            }
-        }
-        columns
     }
 
     pub fn apply_to_chunk(&self, chunk: &mut Chunk) {
@@ -1161,41 +1056,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn surface_snapshots_include_world_boundary_edits() {
-        for coord in [
-            VoxelCoord::new(i32::MIN, 17, 7),
-            VoxelCoord::new(7, 17, i32::MIN),
-            VoxelCoord::new(i32::MAX, 17, 7),
-            VoxelCoord::new(7, 17, i32::MAX),
-        ] {
-            let mut edits = EditMap::default();
-            edits.insert_override(coord, Material::Basalt);
-            let tile =
-                SurfaceTileCoord::containing(crate::SurfaceLodLevel::Stride256, coord.x, coord.z);
-
-            let snapshot = edits.snapshot_for_surface_tiles(&[tile]);
-
-            assert_eq!(snapshot.override_at(coord), Some(Material::Basalt));
-        }
-    }
-
-    #[test]
-    fn surface_snapshots_ignore_distant_edits_in_the_same_x_strip() {
-        let local = VoxelCoord::new(7, -800, -9);
-        let distant = VoxelCoord::new(7, 900, 1_000_000);
-        let mut edits = EditMap::default();
-        edits.insert_override(local, Material::Stone);
-        edits.insert_override(distant, Material::Wood);
-        let tile = SurfaceTileCoord::containing(crate::SurfaceLodLevel::Stride2, local.x, local.z);
-
-        let snapshot = edits.snapshot_for_surface_tiles(&[tile]);
-
-        assert_eq!(snapshot.override_at(local), Some(Material::Stone));
-        assert_eq!(snapshot.override_at(distant), None);
-        assert_eq!(snapshot.len(), 1);
     }
 
     #[test]

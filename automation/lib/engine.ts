@@ -23,18 +23,6 @@ export {
   type SnapshotField,
 };
 
-export interface SurfaceEditState {
-  readonly tileX: number;
-  readonly tileZ: number;
-  readonly requiredServerRevision: number;
-  readonly acceptedServerRevision: number;
-  readonly resident: boolean;
-  readonly dirty: boolean;
-  readonly fingerprint: bigint;
-  readonly quadCount: number;
-  readonly activationMask: number;
-}
-
 export interface SnapshotWaitOptions {
   readonly timeoutMs?: number;
   readonly intervalMs?: number;
@@ -46,17 +34,6 @@ export interface CameraLookOptions extends SnapshotWaitOptions {
   readonly sensitivity?: number;
   readonly tolerance?: number;
 }
-
-export type LodBoundaryHalfExtents = readonly [
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-];
 
 export class EngineClient {
   readonly #page: Page;
@@ -282,26 +259,6 @@ export class EngineClient {
     );
   }
 
-  async setLodBoundaryHalfExtents(extents: LodBoundaryHalfExtents): Promise<void> {
-    const alignments = [32, 32, 64, 128, 256, 512, 1_024, 2_048] as const;
-    if (
-      extents.some(
-        (extent, index) =>
-          !Number.isSafeInteger(extent) ||
-          extent <= 0 ||
-          extent % (alignments[index] ?? 1) !== 0 ||
-          (index > 0 && extent <= (extents[index - 1] ?? 0)),
-      )
-    ) {
-      throw new Error("LOD boundary half extents must be positive, increasing, aligned integers");
-    }
-    const accepted = await this.#page.evaluate(
-      (values) => globalThis.__VOXELS__!.lodBoundaries(values),
-      extents,
-    );
-    if (!accepted) throw new Error("engine rejected the LOD boundary half extents");
-  }
-
   async exactVolumePresented(voxel: readonly [number, number, number]): Promise<boolean> {
     if (
       voxel.some(
@@ -352,54 +309,6 @@ export class EngineClient {
       throw new Error("engine returned an invalid browser player session");
     }
     return Object.freeze(player);
-  }
-
-  async surfaceEditState(stride: number, x: number, z: number): Promise<SurfaceEditState> {
-    const values = await this.#page.evaluate(
-      ([surfaceStride, voxelX, voxelZ]) =>
-        globalThis.__VOXELS__!.surfaceEditState(surfaceStride, voxelX, voxelZ),
-      [stride, x, z] as const,
-    );
-    if (values.length !== 10) {
-      throw new Error(`surface edit state returned ${values.length} values instead of 10`);
-    }
-    const [
-      tileX,
-      tileZ,
-      requiredServerRevision,
-      acceptedServerRevision,
-      resident,
-      dirty,
-      fingerprintLow,
-      fingerprintHigh,
-      quadCount,
-      activationMask,
-    ] = values;
-    if (
-      tileX === undefined ||
-      tileZ === undefined ||
-      requiredServerRevision === undefined ||
-      acceptedServerRevision === undefined ||
-      resident === undefined ||
-      dirty === undefined ||
-      fingerprintLow === undefined ||
-      fingerprintHigh === undefined ||
-      quadCount === undefined ||
-      activationMask === undefined
-    ) {
-      throw new Error("surface edit state is incomplete");
-    }
-    return Object.freeze({
-      tileX,
-      tileZ,
-      requiredServerRevision,
-      acceptedServerRevision,
-      resident: resident === 1,
-      dirty: dirty === 1,
-      fingerprint: (BigInt(fingerprintHigh) << 32n) | BigInt(fingerprintLow),
-      quadCount,
-      activationMask,
-    });
   }
 }
 

@@ -44,16 +44,13 @@ const OVERFLOW_SELECTION: u32 = 1u;
 const OVERFLOW_FEEDBACK: u32 = 2u;
 const OVERFLOW_TRAVERSAL: u32 = 4u;
 const OVERFLOW_STACK: u32 = 8u;
-const TRAVERSAL_WORKGROUP_SIZE: u32 = 32u;
-// Two 1,024-entry frontiers consume 8 KiB of workgroup storage, below WebGPU's 16 KiB portable
-// minimum. Capacity failure keeps the prior certified cut visible instead of publishing a hole.
-const FRONTIER_CAPACITY: u32 = 1024u;
-const MAX_TRAVERSAL_LEVELS: u32 = 21u;
+// A depth-first stack is bounded by hierarchy depth rather than by the number of selected leaves.
+// The worst supported volumetric path retains seven siblings at each of 21 levels (148 entries);
+// 256 entries therefore leave explicit headroom while using only 1 KiB of workgroup storage.
+const STACK_CAPACITY: u32 = 256u;
 
-var<workgroup> frontier_a: array<u32, 1024>;
-var<workgroup> frontier_b: array<u32, 1024>;
-var<workgroup> frontier_a_count: atomic<u32>;
-var<workgroup> frontier_b_count: atomic<u32>;
+var<workgroup> traversal_stack: array<u32, 256>;
+var<workgroup> traversal_stack_count: u32;
 
 fn node_flags(node: VirtualTerrainNode) -> u32 {
   return bitcast<u32>(node.maximum_flags.w);
@@ -136,143 +133,87 @@ fn append_request(node_index: u32) {
   }
 }
 
-fn append_children_a(node: VirtualTerrainNode, child_count: u32) -> bool {
-  let destination = atomicAdd(&frontier_a_count, child_count);
-  if destination <= FRONTIER_CAPACITY - child_count {
-    for (var child = 0u; child < child_count; child += 1u) {
-      frontier_a[destination + child] = child_index(node, child);
-    }
-    return true;
-  }
-  return false;
-}
-
-fn append_children_b(node: VirtualTerrainNode, child_count: u32) -> bool {
-  let destination = atomicAdd(&frontier_b_count, child_count);
-  if destination <= FRONTIER_CAPACITY - child_count {
-    for (var child = 0u; child < child_count; child += 1u) {
-      frontier_b[destination + child] = child_index(node, child);
-    }
-    return true;
-  }
-  return false;
-}
-
-@compute @workgroup_size(32)
-fn traverse(
-  @builtin(workgroup_id) workgroup: vec3<u32>,
-  @builtin(local_invocation_id) local: vec3<u32>,
-) {
+@compute @workgroup_size(1)
+fn traverse(@builtin(workgroup_id) workgroup: vec3<u32>) {
   if workgroup.x >= view.counts_flags.x {
     return;
   }
   let root_index = roots[workgroup.x];
-  if local.x == 0u {
-    atomicStore(&frontier_a_count, 0u);
-    atomicStore(&frontier_b_count, 0u);
-    if root_index >= view.options.z {
-      atomicOr(&counters.overflow_flags, OVERFLOW_TRAVERSAL);
-      atomicAdd(&counters.ownerless_roots, 1u);
-    } else if page_visible(nodes[root_index]) {
-      frontier_a[0] = root_index;
-      atomicStore(&frontier_a_count, 1u);
-      atomicMax(&counters.stack_peak, 1u);
-    }
+  traversal_stack_count = 0u;
+  if root_index >= view.options.z {
+    atomicOr(&counters.overflow_flags, OVERFLOW_TRAVERSAL);
+    atomicAdd(&counters.ownerless_roots, 1u);
+    return;
   }
-  workgroupBarrier();
+  if !page_visible(nodes[root_index]) {
+    return;
+  }
+  traversal_stack[0] = root_index;
+  traversal_stack_count = 1u;
+  atomicMax(&counters.stack_peak, 1u);
 
   // One workgroup owns one complete spatial root. Descendants are deliberately not frustum
-  // culled: every breadth frontier therefore remains a complete partition of that root, exactly
-  // like the CPU oracle, while 32 lanes evaluate its pages cooperatively.
-  for (var depth = 0u; depth < MAX_TRAVERSAL_LEVELS; depth += 1u) {
-    let source_is_a = (depth & 1u) == 0u;
-    if local.x == 0u {
-      if source_is_a {
-        atomicStore(&frontier_b_count, 0u);
-      } else {
-        atomicStore(&frontier_a_count, 0u);
-      }
+  // culled: the stack always represents a complete partition of that root. A depth-first walk
+  // cannot saturate merely because a cut contains many siblings, unlike the former breadth
+  // frontier.
+  loop {
+    if traversal_stack_count == 0u {
+      break;
     }
-    workgroupBarrier();
-
-    let source_count = min(
-      select(
-        atomicLoad(&frontier_b_count),
-        atomicLoad(&frontier_a_count),
-        source_is_a,
-      ),
-      FRONTIER_CAPACITY,
+    traversal_stack_count -= 1u;
+    let node_index = traversal_stack[traversal_stack_count];
+    if node_index >= view.options.z {
+      atomicOr(&counters.overflow_flags, OVERFLOW_TRAVERSAL);
+      continue;
+    }
+    let visited = atomicAdd(&counters.visited_nodes, 1u);
+    if visited >= view.counts_flags.w {
+      atomicOr(&counters.overflow_flags, OVERFLOW_TRAVERSAL);
+      if (node_flags(nodes[node_index]) & NODE_RESIDENT) != 0u {
+        append_selected(node_index);
+      } else if node_index == root_index {
+        atomicAdd(&counters.ownerless_roots, 1u);
+      }
+      continue;
+    }
+    let node = nodes[node_index];
+    let flags = node_flags(node);
+    if (flags & NODE_RESIDENT) == 0u {
+      append_request(node_index);
+      if node_index == root_index {
+        atomicAdd(&counters.ownerless_roots, 1u);
+      }
+      continue;
+    }
+    let threshold = select(
+      view.projection_thresholds.y,
+      view.projection_thresholds.z,
+      (flags & NODE_PRIOR_REFINED) != 0u,
     );
-    for (
-      var position = local.x;
-      position < source_count;
-      position += TRAVERSAL_WORKGROUP_SIZE
-    ) {
-      let node_index = select(frontier_b[position], frontier_a[position], source_is_a);
-      if node_index >= view.options.z {
-        atomicOr(&counters.overflow_flags, OVERFLOW_TRAVERSAL);
-        continue;
-      }
-      let visited = atomicAdd(&counters.visited_nodes, 1u);
-      if visited >= view.counts_flags.w {
-        atomicOr(&counters.overflow_flags, OVERFLOW_TRAVERSAL);
-        if (node_flags(nodes[node_index]) & NODE_RESIDENT) != 0u {
-          append_selected(node_index);
-        } else if depth == 0u {
-          atomicAdd(&counters.ownerless_roots, 1u);
-        }
-        continue;
-      }
-      let node = nodes[node_index];
-      let flags = node_flags(node);
-      if (flags & NODE_RESIDENT) == 0u {
-        append_request(node_index);
-        if depth == 0u {
-          atomicAdd(&counters.ownerless_roots, 1u);
-        }
-        continue;
-      }
-      let threshold = select(
-        view.projection_thresholds.y,
-        view.projection_thresholds.z,
-        (flags & NODE_PRIOR_REFINED) != 0u,
-      );
-      let wants_refinement = (flags & NODE_HAS_CHILDREN) != 0u
-        && (view.options.x != 0u || projected_error_exceeds(node, threshold));
-      if wants_refinement && (flags & NODE_REPLACEMENT_COHERENT) != 0u {
-        let child_count = select(8u, 4u, (flags & NODE_SURFACE) != 0u);
-        var enqueued = false;
-        if source_is_a {
-          enqueued = append_children_b(node, child_count);
-        } else {
-          enqueued = append_children_a(node, child_count);
-        }
-        if enqueued {
-          continue;
-        }
-        atomicOr(&counters.overflow_flags, OVERFLOW_STACK);
-      } else if wants_refinement {
-        let child_count = select(8u, 4u, (flags & NODE_SURFACE) != 0u);
+    let wants_refinement = (flags & NODE_HAS_CHILDREN) != 0u
+      && (view.options.x != 0u || projected_error_exceeds(node, threshold));
+    if wants_refinement && (flags & NODE_REPLACEMENT_COHERENT) != 0u {
+      let child_count = select(8u, 4u, (flags & NODE_SURFACE) != 0u);
+      if traversal_stack_count <= STACK_CAPACITY - child_count {
         for (var child = 0u; child < child_count; child += 1u) {
-          let child_node = child_index(node, child);
-          if child_node < view.options.z
-              && (node_flags(nodes[child_node]) & NODE_RESIDENT) == 0u {
-            append_request(child_node);
-          }
+          traversal_stack[traversal_stack_count + child] = child_index(node, child);
+        }
+        traversal_stack_count += child_count;
+        atomicMax(&counters.stack_peak, traversal_stack_count);
+        continue;
+      }
+      atomicOr(&counters.overflow_flags, OVERFLOW_STACK);
+    } else if wants_refinement {
+      let child_count = select(8u, 4u, (flags & NODE_SURFACE) != 0u);
+      for (var child = 0u; child < child_count; child += 1u) {
+        let child_node = child_index(node, child);
+        if child_node < view.options.z
+            && (node_flags(nodes[child_node]) & NODE_RESIDENT) == 0u {
+          append_request(child_node);
         }
       }
-      append_selected(node_index);
     }
-    workgroupBarrier();
-    if local.x == 0u {
-      let next_count = select(
-        atomicLoad(&frontier_a_count),
-        atomicLoad(&frontier_b_count),
-        source_is_a,
-      );
-      atomicMax(&counters.stack_peak, min(next_count, FRONTIER_CAPACITY));
-    }
-    workgroupBarrier();
+    append_selected(node_index);
   }
 }
 

@@ -10,7 +10,6 @@ import {
   type EngineAutomationContract,
   SNAPSHOT_SCHEMA_VERSION,
   snapshotValue,
-  type SurfaceEditState,
 } from "../lib/engine.ts";
 import { frameSamples } from "../lib/render-metrics.ts";
 import { createShapedLink, type LinkStats, type ShapedLink } from "../lib/network.ts";
@@ -76,19 +75,6 @@ interface Point3 {
   readonly x: number;
   readonly y: number;
   readonly z: number;
-}
-
-function surfaceEditReport(state: SurfaceEditState) {
-  return {
-    tile: [state.tileX, state.tileZ],
-    requiredRevision: state.requiredServerRevision,
-    acceptedRevision: state.acceptedServerRevision,
-    resident: state.resident,
-    dirty: state.dirty,
-    fingerprint: `0x${state.fingerprint.toString(16).padStart(16, "0")}`,
-    quadCount: state.quadCount,
-    activationMask: state.activationMask,
-  };
 }
 
 function required<T>(values: readonly T[], index: number, label: string): T {
@@ -253,30 +239,6 @@ async function waitForInventoryUnits(
   );
 }
 
-async function waitForSurfaceEditConvergence(
-  engine: EngineClient,
-  stride: number,
-  x: number,
-  z: number,
-  timeoutMs = 30_000,
-): Promise<SurfaceEditState> {
-  const deadline = performance.now() + timeoutMs;
-  let latest: SurfaceEditState | undefined;
-  while (performance.now() < deadline) {
-    latest = await engine.surfaceEditState(stride, x, z);
-    if (
-      latest.requiredServerRevision > 1 &&
-      latest.acceptedServerRevision === latest.requiredServerRevision &&
-      latest.resident &&
-      !latest.dirty
-    ) {
-      return latest;
-    }
-    await engine.wait(50);
-  }
-  throw new Error(`far surface edit did not converge: ${JSON.stringify(latest)}`);
-}
-
 async function waitFor(
   engine: EngineClient,
   label: string,
@@ -319,8 +281,8 @@ async function waitForSettledWorld(player: MultiplayerPlayer): Promise<readonly 
     player.engine,
     `${player.name} settled world coverage`,
     (next) =>
-      snapshotValue(next, "allLodsReady") === 1 &&
-      snapshotValue(next, "surfaceInFlight") === 0 &&
+      snapshotValue(next, "terrainReady") === 1 &&
+      snapshotValue(next, "virtualTerrainStreamInFlight") === 0 &&
       snapshotValue(next, "pendingJobs") === 0,
   );
 }
@@ -749,7 +711,6 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     const beforeTowerSnapshot = await observer.engine.snapshot();
     const beforeViewportFingerprint = viewportFingerprint(beforeTowerSnapshot);
     const beforeTowerNetwork = players.map((player) => player.link.snapshot());
-    const beforeTowerSurfaceState = await observer.engine.surfaceEditState(16, towerX, towerZ);
     const towerStarted = performance.now();
     const submissions = await Promise.all(
       builders.map((builder, index) => {
@@ -770,12 +731,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
         ),
       ),
     );
-    const observerSurfaceState = await waitForSurfaceEditConvergence(
-      observer.engine,
-      16,
-      towerX,
-      towerZ,
-    );
+    await waitForSettledWorld(observer);
     const towerConvergenceMs = performance.now() - towerStarted;
     await observer.page.waitForTimeout(1_000);
     const afterTowerPath = scenario.artifacts.resolve("observer-far-five-tower.png");
@@ -795,8 +751,6 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
       throw new Error(
         `distant tower was not visually legible: ${JSON.stringify({
           visualEvidence,
-          beforeSurface: surfaceEditReport(beforeTowerSurfaceState),
-          afterSurface: surfaceEditReport(observerSurfaceState),
         })}`,
       );
     }
@@ -818,7 +772,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     });
     const collaborativeTower = {
       status: "passed",
-      reason: `Five builders dug their own material, placed five current one-cubic-metre brushes (${towerVoxelCount} authoritative voxels), and every client applied them; the observer accepted the revised stride-16 surface ${distanceFromBuildersMetres.toFixed(1)} m away in ${towerConvergenceMs.toFixed(1)} ms.`,
+      reason: `Five builders dug their own material, placed five current one-cubic-metre brushes (${towerVoxelCount} authoritative voxels), and every client applied them; the observer accepted the revised virtual terrain hierarchy ${distanceFromBuildersMetres.toFixed(1)} m away in ${towerConvergenceMs.toFixed(1)} ms.`,
       voxelCount: towerVoxelCount,
       materialId: towerMaterialId,
       dugVoxelCount,
@@ -826,9 +780,6 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
       builders: BUILDER_COUNT,
       distanceMetres: rounded(distanceFromBuildersMetres, 3),
       convergenceMs: rounded(towerConvergenceMs),
-      observerSurface: surfaceEditReport(observerSurfaceState),
-      surfaceFingerprintChanged:
-        beforeTowerSurfaceState.fingerprint !== observerSurfaceState.fingerprint,
       viewportFingerprintChanged:
         snapshotValue(afterTowerSnapshot, "viewportFingerprintLow24") !==
           beforeViewportFingerprint[0] ||

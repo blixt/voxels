@@ -16,8 +16,6 @@ export const VXWP_KIND = Object.freeze({
   chunkBatchResult: 4,
   cancel: 5,
   error: 6,
-  surfaceTileBatch: 7,
-  surfaceTileBatchResult: 8,
   openPresence: 9,
   presenceOpened: 10,
   playerPose: 11,
@@ -29,6 +27,12 @@ export const VXWP_KIND = Object.freeze({
   resyncRequired: 17,
   frameFragment: 18,
   frameFragmentAbort: 19,
+  terrainDirectoryBatch: 20,
+  terrainDirectoryBatchResult: 21,
+  terrainPageBatch: 22,
+  terrainPageBatchResult: 23,
+  terrainRegionColumnBatch: 24,
+  terrainRegionColumnBatchResult: 25,
 } as const);
 
 export type VxwpKind = (typeof VXWP_KIND)[keyof typeof VXWP_KIND];
@@ -40,8 +44,6 @@ export const VXWP_KIND_NAMES = Object.freeze({
   [VXWP_KIND.chunkBatchResult]: "chunk_batch_result",
   [VXWP_KIND.cancel]: "cancel",
   [VXWP_KIND.error]: "error",
-  [VXWP_KIND.surfaceTileBatch]: "surface_tile_batch",
-  [VXWP_KIND.surfaceTileBatchResult]: "surface_tile_batch_result",
   [VXWP_KIND.openPresence]: "open_presence",
   [VXWP_KIND.presenceOpened]: "presence_opened",
   [VXWP_KIND.playerPose]: "player_pose",
@@ -53,6 +55,12 @@ export const VXWP_KIND_NAMES = Object.freeze({
   [VXWP_KIND.resyncRequired]: "resync_required",
   [VXWP_KIND.frameFragment]: "frame_fragment",
   [VXWP_KIND.frameFragmentAbort]: "frame_fragment_abort",
+  [VXWP_KIND.terrainDirectoryBatch]: "terrain_directory_batch",
+  [VXWP_KIND.terrainDirectoryBatchResult]: "terrain_directory_batch_result",
+  [VXWP_KIND.terrainPageBatch]: "terrain_page_batch",
+  [VXWP_KIND.terrainPageBatchResult]: "terrain_page_batch_result",
+  [VXWP_KIND.terrainRegionColumnBatch]: "terrain_region_column_batch",
+  [VXWP_KIND.terrainRegionColumnBatchResult]: "terrain_region_column_batch_result",
 } satisfies Record<VxwpKind, string>);
 
 export type LinkDirection = "upstream" | "downstream";
@@ -423,7 +431,10 @@ class ConnectionInspector {
     );
     if (
       direction === "upstream" &&
-      (kind === VXWP_KIND.chunkBatch || kind === VXWP_KIND.surfaceTileBatch)
+      (kind === VXWP_KIND.chunkBatch ||
+        kind === VXWP_KIND.terrainDirectoryBatch ||
+        kind === VXWP_KIND.terrainPageBatch ||
+        kind === VXWP_KIND.terrainRegionColumnBatch)
     ) {
       this.pendingWorldProducts.set(payload.readBigUInt64LE(12), name);
       const priority = worldProductPriorityName(payload);
@@ -444,7 +455,9 @@ class ConnectionInspector {
     if (
       direction === "downstream" &&
       (kind === VXWP_KIND.chunkBatchResult ||
-        kind === VXWP_KIND.surfaceTileBatchResult ||
+        kind === VXWP_KIND.terrainDirectoryBatchResult ||
+        kind === VXWP_KIND.terrainPageBatchResult ||
+        kind === VXWP_KIND.terrainRegionColumnBatchResult ||
         kind === VXWP_KIND.error)
     ) {
       this.pendingWorldProducts.delete(payload.readBigUInt64LE(12));

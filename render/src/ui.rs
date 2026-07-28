@@ -367,7 +367,6 @@ pub struct LiveStats {
     pub remesh_max_frames: u64,
     pub edit_last_ms: f32,
     pub edit_in_flight: u32,
-    pub lod_tiles: [u32; voxels_world::SURFACE_LOD_LEVEL_COUNT],
     pub pending_jobs: u32,
     pub core_gpu_bytes: u64,
     pub water_immersion: f32,
@@ -1488,9 +1487,9 @@ impl MissionControlUi {
             push_text(
                 draw,
                 if layout.compact {
-                    "SOURCE / LOD COLORS"
+                    "SOURCE / PAGE COLORS"
                 } else {
-                    "GEOMETRY SOURCE / LOD COLORS"
+                    "GEOMETRY SOURCE / PAGE COLORS"
                 },
                 [rect.x + 2.0, rect.y + 11.0],
                 if layout.compact { 7.5 } else { 8.5 },
@@ -1499,7 +1498,7 @@ impl MissionControlUi {
             );
             push_text(
                 draw,
-                "Exact cyan · L0→7 green→blue · connector white · holes black",
+                "Exact cyan · hierarchy green→blue · triangles violet · holes black",
                 [rect.x + 2.0, rect.y + 29.0],
                 if layout.compact { 6.0 } else { 7.0 },
                 TEXT_MUTED.with_alpha(opacity * enabled_alpha),
@@ -1951,16 +1950,6 @@ impl MissionControlUi {
                     ),
                 ),
             ];
-            if card_count > 6 {
-                cards.push((
-                    "LOD TILES 0 → 7",
-                    stats
-                        .lod_tiles
-                        .map(u64::from)
-                        .map(compact_count)
-                        .join(" · "),
-                ));
-            }
             cards.extend([(
                 "JOBS / EDITS",
                 format!(
@@ -2020,7 +2009,7 @@ impl MissionControlUi {
         );
         let _ = writeln!(
             report,
-            "Geometry source / LOD colors: {}",
+            "Geometry source / hierarchy colors: {}",
             if self.geometry_sources_active {
                 "on"
             } else {
@@ -2029,10 +2018,8 @@ impl MissionControlUi {
         );
         let _ = writeln!(
             report,
-            "Geometry legend: exact cyan; L0 green; L1 lime; L2 yellow; L3 orange; \
-             L4 red; L5 magenta; L6 violet; L7 blue; frontier red; connector white; \
-             fallback amber; streamed water blue; morph closure pink; outgoing cut red/white; \
-             missing coverage / sky black"
+            "Geometry legend: exact cyan; hierarchy levels green through blue; \
+             triangle-cluster pages violet; frontier red; missing coverage / sky black"
         );
         let _ = writeln!(report, "Collision geometry: simulation only, not rendered");
 
@@ -2112,12 +2099,6 @@ impl MissionControlUi {
             stats.shadow_draw_calls,
             stats.shadow_cascades,
         );
-        let _ = writeln!(
-            report,
-            "LOD tiles 0..7: {}",
-            stats.lod_tiles.map(|count| count.to_string()).join(", "),
-        );
-
         let _ = writeln!(report, "\nSTREAMING / EDITS");
         let _ = writeln!(report, "Pending jobs: {}", stats.pending_jobs);
         let _ = writeln!(
@@ -2592,29 +2573,9 @@ mod tests {
         let report = ui.diagnostics_report();
         assert!(report.contains("Time authority: local debug override"));
         assert!(report.contains("Weather authority: local debug override"));
-        assert!(report.contains("L0 green; L1 lime; L2 yellow"));
+        assert!(report.contains("hierarchy levels green through blue"));
         assert!(report.contains("Collision geometry: simulation only, not rendered"));
         assert!(!report.contains("RENDER FEATURES"));
-    }
-
-    #[test]
-    fn world_lab_labels_every_surface_lod_level() {
-        let mut ui = enabled(true);
-        ui.set_stats(LiveStats {
-            lod_tiles: [1, 2, 3, 4, 5, 6, 7, 8],
-            ..LiveStats::default()
-        });
-
-        assert!(
-            ui.card_data(false, 8)
-                .iter()
-                .any(|(label, value)| *label == "LOD TILES 0 → 7"
-                    && value == "1 · 2 · 3 · 4 · 5 · 6 · 7 · 8")
-        );
-        assert!(
-            ui.diagnostics_report()
-                .contains("LOD tiles 0..7: 1, 2, 3, 4, 5, 6, 7, 8")
-        );
     }
 
     #[test]

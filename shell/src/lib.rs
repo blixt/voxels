@@ -1266,9 +1266,8 @@ mod web {
         ChunkActivationReason, HostUiAction, LocalLightVisibility, MissionControlConfig, Renderer,
         RendererConfig, RendererFeatureConfig, ScreenshotCanonicalPageState, ScreenshotCapture,
         ScreenshotFeatureState, ScreenshotMutableRenderState, ScreenshotReproductionIdentity,
-        ScreenshotStreamingManifest, ScreenshotSurfacePageState, ScreenshotVirtualColumnState,
-        ScreenshotVirtualRegionState, VirtualTerrainRenderMode, VirtualTerrainRendererError,
-        VolumetricCloudConfig,
+        ScreenshotStreamingManifest, ScreenshotVirtualColumnState, ScreenshotVirtualRegionState,
+        VirtualTerrainRenderMode, VirtualTerrainRendererError, VolumetricCloudConfig,
     };
     use voxels_render::shadow::DirectionalShadowConfig;
     use voxels_render::ui::{LiveStats, NavigationTelemetry};
@@ -1299,26 +1298,38 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 8;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 45;
-    const FRAME_SAMPLE_WIDTH: u32 = 26;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 48;
+    const FRAME_SAMPLE_WIDTH: u32 = 22;
     const GPU_SAMPLE_WIDTH: u32 = 15;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
-        "cameraX,cameraY,cameraZ,yaw,pitch,grounded,quads,edits,residentChunks,trackedChunks,visibleChunks,drawCalls,",
-        "arenaPages,arenaAllocatedMiB,arenaCapacityMiB,pendingJobs,surfaceTiles,frameMs,shadowDrawCalls,shadowCascades,loadP95Frames,loadMaxFrames,remeshP95Frames,remeshMaxFrames,",
-        "stride2Tiles,stride4Tiles,stride8Tiles,stride16Tiles,waterQuads,waterDrawCalls,refractionCopyMiB,immersion,eyeDepthMetres,eyesSubmerged,swimming,targetVoxelX,",
-        "targetVoxelY,targetVoxelZ,targetPresent,coreGpuMiB,cpuMs,simulationMs,streamMs,renderMs,gpuSampleId,gpuTotalMs,gpuShadowMs,gpuWorldMs,",
-        "gpuWaterMs,gpuUiMs,wasmCommittedMiB,canonicalVoxelMiB,pendingMeshMiB,editLogicalMiB,totalEvictions,staleCompletions,profilePhase,profileElapsedSeconds,profileDistanceMetres,profileComplete,",
-        "profileTrackedHigh,profileSurfaceHigh,profilePendingHigh,profilePendingMeshHigh,profileArenaCapacityHighMiB,profileWasmHighMiB,profileEvictions,materialDetail,daylightPhase,surfaceRegion,cloudCoverage,screenSpaceAmbientOcclusion,",
-        "gpuDepthPrepassMs,gpuAmbientOcclusionMs,ambientOcclusionMiB,depthPrepassDrawCalls,enclosure,interiorExposure,caveHeadlamp,enclosureProbeUs,localLightCandidates,activeLocalLights,clippedLocalLights,occludedLocalLights,",
-        "portalRejectedLocalLights,localLightVisibilityTests,openCinderPortals,cinderPortalRevision,localLighting,placementMaterial,streamInterestRequested,streamInterestNormalized,streamInterestDesired,streamInterestTruncated,streamPlanOverflow,portalActiveChunks,",
-        "portalActiveColumns,unreachablePortalActive,remoteAvatars,avatarParts,avatarDrawCalls,viewportFingerprintLow24,viewportFingerprintHigh24,allLodsReady,surfaceInFlight,interactiveLodsReady,stride32Tiles,stride64Tiles,stride128Tiles,stride256Tiles,",
-        "renderCullMs,renderEncodeMs,renderSubmitMs,drawListTestedSlices,drawListSelectedSlices,surfaceWidth,surfaceHeight,devicePixelRatio,lodTransitionQuads,lodBoundary0X,lodBoundary0Z,lodBoundary1X,",
-        "lodBoundary1Z,lodBoundary2X,lodBoundary2Z,lodBoundary3X,lodBoundary3Z,lodBoundary4X,lodBoundary4Z,lodBoundary5X,lodBoundary5Z,lodBoundary6X,lodBoundary6Z,lodBoundary7X,lodBoundary7Z,dayFraction,localSolarDayFraction,yearFraction,",
-        "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
-        "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
-        "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,canonicalSurfaceCellsResident,canonicalSurfaceCellsRequired,",
-        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,lodIncompleteTransitionEdges,lodCutTransitionActive,lodCutTransitionPhase,virtualTerrainMode,virtualTerrainRegisteredRegions,virtualTerrainDirectoryInFlight,virtualTerrainDirectoryNodes,virtualTerrainResidentPages,virtualTerrainResidentMiB,virtualTerrainResidentPrimitives,virtualTerrainSelectedPages,virtualTerrainRequestedPages,virtualTerrainOwnerlessRoots,virtualTerrainGpuMatchesCpuCut,virtualTerrainStreamPending,virtualTerrainStreamInFlight,virtualTerrainCancellationWasteMiB,virtualTerrainCachePages,virtualTerrainCacheMiB,virtualTerrainColumns,virtualTerrainColumnInFlight,virtualTerrainColumnRevisionFloors,virtualTerrainCurrentColumnKnown,virtualTerrainCurrentColumnRoots,virtualTerrainCurrentColumnRegisteredRoots,virtualTerrainNearestRegisteredRootMetres,virtualTerrainColumnAccepted,virtualTerrainColumnSubmitDeferred,virtualTerrainColumnPreempted,virtualTerrainColumnTimedOut,virtualTerrainColumnOtherFailed,virtualTerrainDirectoryAccepted,virtualTerrainDirectorySubmitDeferred,virtualTerrainDirectoryPreempted,virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,virtualTerrainPublishedPages,virtualTerrainPublishedExactPages,virtualTerrainPublishedMinimumLevel,virtualTerrainPublishedMaximumLevel,frameSequence,schemaVersion,sampleCount,",
-        "droppedSamples",
+        "cameraX,cameraY,cameraZ,yaw,pitch,grounded,quads,edits,",
+        "residentChunks,trackedChunks,visibleChunks,drawCalls,arenaPages,arenaAllocatedMiB,arenaCapacityMiB,pendingJobs,",
+        "frameMs,shadowDrawCalls,shadowCascades,loadP95Frames,loadMaxFrames,remeshP95Frames,remeshMaxFrames,waterQuads,",
+        "waterDrawCalls,refractionCopyMiB,immersion,eyeDepthMetres,eyesSubmerged,swimming,targetVoxelX,targetVoxelY,",
+        "targetVoxelZ,targetPresent,coreGpuMiB,cpuMs,simulationMs,streamMs,renderMs,gpuSampleId,",
+        "gpuTotalMs,gpuShadowMs,gpuWorldMs,gpuWaterMs,gpuUiMs,wasmCommittedMiB,canonicalVoxelMiB,pendingMeshMiB,",
+        "editLogicalMiB,totalEvictions,staleCompletions,profilePhase,profileElapsedSeconds,profileDistanceMetres,profileComplete,profileTrackedHigh,",
+        "profilePendingHigh,profilePendingMeshHigh,profileArenaCapacityHighMiB,profileWasmHighMiB,profileEvictions,materialDetail,daylightPhase,surfaceRegion,",
+        "cloudCoverage,screenSpaceAmbientOcclusion,gpuDepthPrepassMs,gpuAmbientOcclusionMs,ambientOcclusionMiB,depthPrepassDrawCalls,enclosure,interiorExposure,",
+        "caveHeadlamp,enclosureProbeUs,localLightCandidates,activeLocalLights,clippedLocalLights,occludedLocalLights,portalRejectedLocalLights,localLightVisibilityTests,",
+        "openCinderPortals,cinderPortalRevision,localLighting,placementMaterial,streamInterestRequested,streamInterestNormalized,streamInterestDesired,streamInterestTruncated,",
+        "streamPlanOverflow,portalActiveChunks,portalActiveColumns,unreachablePortalActive,remoteAvatars,avatarParts,avatarDrawCalls,viewportFingerprintLow24,",
+        "viewportFingerprintHigh24,terrainReady,renderCullMs,renderEncodeMs,renderSubmitMs,drawListTestedSlices,drawListSelectedSlices,surfaceWidth,",
+        "surfaceHeight,devicePixelRatio,dayFraction,localSolarDayFraction,yearFraction,moonOrbitFraction,twinklePhase,latitudeDegrees,",
+        "longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,",
+        "moonDirectionY,moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,",
+        "weatherKind,weatherFraction,precipitation,storminess,lightning,cloudDensity,cloudBaseMetres,cloudTopMetres,",
+        "cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,canonicalLatticePresented,",
+        "canonicalImmediateResident,canonicalImmediateRequired,terrainColumnCellsOwned,terrainColumnCellsRequired,generationQueued,generationInFlight,meshingQueued,meshingInFlight,",
+        "uploadQueued,uploadInFlight,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,",
+        "collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,",
+        "enclosedViewOwned,virtualTerrainMode,virtualTerrainRegisteredRegions,virtualTerrainDirectoryInFlight,virtualTerrainDirectoryNodes,virtualTerrainResidentPages,virtualTerrainResidentMiB,virtualTerrainResidentPrimitives,",
+        "virtualTerrainSelectedPages,virtualTerrainRequestedPages,virtualTerrainOwnerlessRoots,virtualTerrainGpuMatchesCpuCut,virtualTerrainGpuOverflowFlags,virtualTerrainGpuStackPeak,virtualTerrainGpuOwnerlessRoots,virtualTerrainStreamPending,virtualTerrainStreamInFlight,virtualTerrainCancellationWasteMiB,virtualTerrainCachePages,",
+        "virtualTerrainCacheMiB,virtualTerrainColumns,virtualTerrainColumnInFlight,virtualTerrainColumnRevisionFloors,virtualTerrainCurrentColumnKnown,virtualTerrainCurrentColumnRoots,virtualTerrainCurrentColumnRegisteredRoots,virtualTerrainNearestRegisteredRootMetres,",
+        "virtualTerrainColumnAccepted,virtualTerrainColumnSubmitDeferred,virtualTerrainColumnPreempted,virtualTerrainColumnTimedOut,virtualTerrainColumnOtherFailed,virtualTerrainDirectoryAccepted,virtualTerrainDirectorySubmitDeferred,virtualTerrainDirectoryPreempted,",
+        "virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,virtualTerrainPublishedPages,virtualTerrainPublishedExactPages,virtualTerrainPublishedMinimumLevel,virtualTerrainPublishedMaximumLevel,virtualTerrainCutFingerprintLow24,virtualTerrainCutFingerprintHigh24,",
+        "frameSequence,schemaVersion,",
+        "sampleCount,droppedSamples",
     );
     const VIRTUAL_TERRAIN_MAX_COLUMNS: usize = 16;
     const VIRTUAL_TERRAIN_MAX_COLUMN_BATCHES_IN_FLIGHT: usize = 2;
@@ -1545,25 +1556,21 @@ mod web {
         render_ms: f32,
         frame_id: u32,
         render_cull_ms: f32,
-        render_lod_plan_ms: f32,
-        lod_plan_rebuild_reason: u32,
         render_encode_ms: f32,
         render_submit_ms: f32,
-        lod_ownership_refreshes: u32,
         tested_slices: u32,
         selected_slices: u32,
         stream_remote_ms: f32,
         stream_plan_ms: f32,
         stream_mesh_ms: f32,
         stream_publish_ms: f32,
-        stream_surface_ms: f32,
+        stream_virtual_terrain_ms: f32,
         stream_presence_ms: f32,
         stream_interest_ms: f32,
         stream_scheduler_update_ms: f32,
         stream_scheduler_admit_ms: f32,
         stream_collision_interest_ms: f32,
         stream_enclosed_interest_ms: f32,
-        stream_surface_interest_ms: f32,
     }
 
     #[derive(Clone, Copy, Default)]
@@ -1572,13 +1579,12 @@ mod web {
         plan_ms: f32,
         mesh_ms: f32,
         publish_ms: f32,
-        surface_ms: f32,
+        virtual_terrain_ms: f32,
         interest_ms: f32,
         scheduler_update_ms: f32,
         scheduler_admit_ms: f32,
         collision_interest_ms: f32,
         enclosed_interest_ms: f32,
-        surface_interest_ms: f32,
     }
 
     struct FrameHistory {
@@ -1622,25 +1628,21 @@ mod web {
                     sample.render_ms,
                     sample.frame_id as f32,
                     sample.render_cull_ms,
-                    sample.render_lod_plan_ms,
-                    sample.lod_plan_rebuild_reason as f32,
                     sample.render_encode_ms,
                     sample.render_submit_ms,
-                    sample.lod_ownership_refreshes as f32,
                     sample.tested_slices as f32,
                     sample.selected_slices as f32,
                     sample.stream_remote_ms,
                     sample.stream_plan_ms,
                     sample.stream_mesh_ms,
                     sample.stream_publish_ms,
-                    sample.stream_surface_ms,
+                    sample.stream_virtual_terrain_ms,
                     sample.stream_presence_ms,
                     sample.stream_interest_ms,
                     sample.stream_scheduler_update_ms,
                     sample.stream_scheduler_admit_ms,
                     sample.stream_collision_interest_ms,
                     sample.stream_enclosed_interest_ms,
-                    sample.stream_surface_interest_ms,
                 ]);
             }
             self.len = 0;
@@ -1820,7 +1822,6 @@ mod web {
         diagnostic_sky_color: Option<[f32; 3]>,
         geometry_source_debug: bool,
         view_distance_metres: f32,
-        lod_focus: Option<ReproductionLodFocus>,
     }
 
     #[derive(Deserialize)]
@@ -1836,12 +1837,6 @@ mod web {
         material_detail: bool,
         cave_headlamp: bool,
         local_lighting: bool,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct ReproductionLodFocus {
-        boundary_half_extents_voxels: [i32; 8],
     }
 
     struct Engine {
@@ -1872,8 +1867,7 @@ mod web {
         virtual_terrain: RefCell<VirtualTerrainStreamingState>,
         virtual_terrain_scheduler: RefCell<TerrainStreamScheduler>,
         virtual_terrain_cache: RefCell<TerrainPageMemoryCache>,
-        all_lods_ready: Cell<bool>,
-        interactive_lods_ready: Cell<bool>,
+        terrain_ready: Cell<bool>,
         startup_ready: Cell<bool>,
         scope: DedicatedWorkerGlobalScope,
         callback: RefCell<Option<FrameCallback>>,
@@ -1906,7 +1900,6 @@ mod web {
         profile: RefCell<ProfileAutomation>,
         profile_restore_camera: Cell<Option<CameraState>>,
         profile_tracked_high: Cell<usize>,
-        profile_surface_high: Cell<usize>,
         profile_pending_high: Cell<usize>,
         profile_pending_mesh_high: Cell<usize>,
         profile_arena_capacity_high: Cell<u64>,
@@ -1949,7 +1942,6 @@ mod web {
         }
 
         fn screenshot_streaming_manifest(&self) -> ScreenshotStreamingManifest {
-            let surface_pages: Vec<ScreenshotSurfacePageState> = Vec::new();
             let canonical_pages = self
                 .scheduler
                 .borrow()
@@ -2022,8 +2014,6 @@ mod web {
                 (cache.len(), cache.resident_bytes())
             };
             ScreenshotStreamingManifest {
-                surface_epoch: 0,
-                surface_pages,
                 canonical_pages,
                 virtual_columns,
                 virtual_regions,
@@ -2169,12 +2159,6 @@ mod web {
                 return Err("capture diagnostic sky color is invalid".to_owned());
             }
             let mut renderer = self.renderer.borrow_mut();
-            if let Some(focus) = reproduction.render.lod_focus
-                && !renderer
-                    .set_lod_boundary_half_extents_voxels(focus.boundary_half_extents_voxels)
-            {
-                return Err("capture LOD boundary policy is invalid".to_owned());
-            }
             if !renderer.set_reproduction_environment(Some(environment))
                 || !renderer.set_reproduction_render_state(ScreenshotMutableRenderState {
                     world_lab_open: reproduction.render.world_lab_open,
@@ -2236,7 +2220,6 @@ mod web {
                 (route == ProfileRoute::Straight).then_some(PLAYER_SPRINT_SPEED_METRES_PER_SECOND),
             );
             self.profile_tracked_high.set(0);
-            self.profile_surface_high.set(0);
             self.profile_pending_high.set(0);
             self.profile_pending_mesh_high.set(0);
             self.profile_arena_capacity_high.set(0);
@@ -2452,20 +2435,16 @@ mod web {
             renderer.set_route_status("NATIVE WORLD", 0);
             let stream = self.scheduler.borrow().diagnostics();
             let render = renderer.diagnostics();
-            let lod_tiles = [0; 8];
-            let virtual_stream = self.virtual_terrain_scheduler.borrow().stats();
-            let virtual_directories_in_flight =
-                self.virtual_terrain.borrow().directory_in_flight.len();
-            let all_lods_ready = renderer.virtual_terrain_render_mode()
+            // Readiness means the frame has one complete visible terrain owner. Progressive
+            // refinement may remain queued indefinitely as the error target improves; treating
+            // an empty refinement queue as presentation readiness would make healthy terrain
+            // appear unready while it is already covered by a valid parent cut.
+            let terrain_ready = renderer.virtual_terrain_render_mode()
                 == VirtualTerrainRenderMode::Visible
-                && render.virtual_terrain_gpu_requested_pages == 0
-                && render.virtual_terrain_gpu_ownerless_roots == 0
-                && virtual_stream.pending_pages == 0
-                && virtual_stream.in_flight_pages == 0
-                && virtual_directories_in_flight == 0;
-            let interactive_lods_ready = all_lods_ready;
-            self.all_lods_ready.set(all_lods_ready);
-            self.interactive_lods_ready.set(interactive_lods_ready);
+                && renderer
+                    .virtual_terrain_cut()
+                    .is_some_and(VirtualTerrainCut::is_renderable);
+            self.terrain_ready.set(terrain_ready);
             let render_start = performance_now(performance.as_ref());
             let chunks = self.chunks.borrow();
             let eye_voxel = VoxelCoord::new(
@@ -2512,7 +2491,6 @@ mod web {
                     remesh_max_frames: stream.remesh_latency.max_frames,
                     edit_last_ms: self.edit_last_ms.get(),
                     edit_in_flight: usize_to_u32(self.edit_trackers.borrow().len()),
-                    lod_tiles,
                     pending_jobs: usize_to_u32(
                         stream.generation.queued + stream.meshing.queued + stream.upload.queued,
                     ),
@@ -2591,7 +2569,7 @@ mod web {
                 self.profile_wasm_high
                     .set(self.profile_wasm_high.get().max(wasm_committed_bytes()));
                 if self.profile.borrow().phase() == ProfilePhase::Drain
-                    && all_lods_ready
+                    && terrain_ready
                     && submitted
                 {
                     self.profile.borrow_mut().complete_drain();
@@ -2611,25 +2589,21 @@ mod web {
                 render_ms,
                 frame_id: frame_sequence,
                 render_cull_ms: rendered.cpu_cull_ms,
-                render_lod_plan_ms: rendered.cpu_lod_plan_ms,
-                lod_plan_rebuild_reason: rendered.lod_plan_rebuild_reason,
                 render_encode_ms: rendered.cpu_encode_ms,
                 render_submit_ms: rendered.cpu_submit_ms,
-                lod_ownership_refreshes: rendered.lod_ownership_refreshes,
                 tested_slices: rendered.draw_list_tested_slices,
                 selected_slices: rendered.draw_list_selected_slices,
                 stream_remote_ms: stream_breakdown.remote_ms,
                 stream_plan_ms: stream_breakdown.plan_ms,
                 stream_mesh_ms: stream_breakdown.mesh_ms,
                 stream_publish_ms: stream_breakdown.publish_ms,
-                stream_surface_ms: stream_breakdown.surface_ms,
+                stream_virtual_terrain_ms: stream_breakdown.virtual_terrain_ms,
                 stream_presence_ms,
                 stream_interest_ms: stream_breakdown.interest_ms,
                 stream_scheduler_update_ms: stream_breakdown.scheduler_update_ms,
                 stream_scheduler_admit_ms: stream_breakdown.scheduler_admit_ms,
                 stream_collision_interest_ms: stream_breakdown.collision_interest_ms,
                 stream_enclosed_interest_ms: stream_breakdown.enclosed_interest_ms,
-                stream_surface_interest_ms: stream_breakdown.surface_interest_ms,
             });
             if let Err(error) = self.request_frame() {
                 web_sys::console::error_1(&error);
@@ -2682,17 +2656,12 @@ mod web {
             );
             let enclosed_interest_ms =
                 (performance_now(performance) - enclosed_interest_start) as f32;
-            let surface_interest_start = performance_now(performance);
             // Canonical chunks are simulation and collision data only. Visible terrain demand is
             // owned entirely by the virtual page scheduler, so no camera-driven visual chunk
-            // corridor or fixed-ring height hint participates in this scheduler.
-            let surface_interest = Vec::new();
-            let surface_interest_ms =
-                (performance_now(performance) - surface_interest_start) as f32;
+            // corridor or secondary terrain-height hint participates in this scheduler.
             let mut urgent_interest = collision_interest.clone();
             urgent_interest.extend(enclosed_view_interest.iter().copied());
-            let mut interest = urgent_interest.clone();
-            interest.extend(surface_interest.iter().copied());
+            let interest = urgent_interest.clone();
             let priority_hint = directional_stream_priority(
                 camera,
                 streaming_velocity,
@@ -2823,25 +2792,24 @@ mod web {
                     &collision_interest,
                     enclosed_view_interest,
                     &enclosed_view_plan.frontiers,
-                    &surface_interest,
+                    &[],
                 );
             }
             let publish_ms = (performance_now(performance) - publish_start) as f32;
-            let surface_start = performance_now(performance);
+            let virtual_terrain_start = performance_now(performance);
             self.stream_virtual_terrain(camera, streaming_velocity);
-            let surface_ms = (performance_now(performance) - surface_start) as f32;
+            let virtual_terrain_ms = (performance_now(performance) - virtual_terrain_start) as f32;
             StreamFrameSample {
                 remote_ms,
                 plan_ms,
                 mesh_ms,
                 publish_ms,
-                surface_ms,
+                virtual_terrain_ms,
                 interest_ms,
                 scheduler_update_ms,
                 scheduler_admit_ms,
                 collision_interest_ms,
                 enclosed_interest_ms,
-                surface_interest_ms,
             }
         }
 
@@ -3406,9 +3374,8 @@ mod web {
                     .virtual_terrain_candidate_is_gpu_certified()
             {
                 // Install only one refinement-directory mutation at a time, and do not begin the
-                // next until the GPU has certified the current CPU cut. The fixed-ring streamer
-                // previously throttled this work accidentally through server contention; pacing
-                // it explicitly prevents unbounded refinement churn once that old path is gone.
+                // next until the GPU has certified the current CPU cut. Explicit pacing prevents
+                // unbounded refinement churn without relying on transport contention.
                 self.request_virtual_terrain_directories(
                     &cut.refinement_roots,
                     now_ms,
@@ -3460,8 +3427,7 @@ mod web {
                     Err(
                         VirtualTerrainRendererError::GpuCutNotCertified
                         | VirtualTerrainRendererError::NoRenderableCut
-                        | VirtualTerrainRendererError::SelectedPageMissingGpu(_)
-                        | VirtualTerrainRendererError::LegacyOwnerCrossesVirtualBoundary,
+                        | VirtualTerrainRendererError::SelectedPageMissingGpu(_),
                     ) => {}
                     Err(error) => {
                         log_gpu_error(&format!("publish virtual terrain cut: {error}"));
@@ -3879,6 +3845,7 @@ mod web {
             let result = match completion.result {
                 Ok(result) => result,
                 Err(error) => {
+                    let preempted = matches!(error, RemoteWorldError::Preempted);
                     let mut state = self.virtual_terrain.borrow_mut();
                     match error {
                         RemoteWorldError::Preempted => {
@@ -3905,7 +3872,13 @@ mod web {
                         );
                     }
                     drop(state);
-                    log_gpu_error(&format!("virtual terrain directory batch failed: {error}"));
+                    // Collision-critical work is allowed to preempt disposable refinement. The
+                    // still-published parent remains authoritative and the directory is retried,
+                    // so surfacing this expected scheduling decision as a renderer error makes a
+                    // healthy fast-travel frame look corrupt.
+                    if !preempted {
+                        log_gpu_error(&format!("virtual terrain directory batch failed: {error}"));
+                    }
                     return;
                 }
             };
@@ -5227,18 +5200,6 @@ mod web {
             true
         }
 
-        pub fn set_lod_boundary_half_extents(&self, extents: Vec<i32>) -> bool {
-            let Ok(extents) = <[i32; 8]>::try_from(extents) else {
-                return false;
-            };
-            self.engine.as_ref().is_some_and(|engine| {
-                engine
-                    .renderer
-                    .borrow_mut()
-                    .set_lod_boundary_half_extents_voxels(extents)
-            })
-        }
-
         /// Reports actual current/outgoing cut ownership for one canonical voxel. This is a
         /// read-only automation assertion over renderer state, not an alternate streaming path.
         pub fn exact_volume_presented(&self, voxel_x: i32, voxel_y: i32, voxel_z: i32) -> bool {
@@ -5323,17 +5284,17 @@ mod web {
                 let camera_voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
                 let camera_voxel_y = (camera.position.y / VOXEL_SIZE_METRES).floor() as i32;
                 let camera_voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
-                let (render, target, presented_lod_stride_voxels, canonical_surface_coverage) = {
+                let (render, target, canonical_lattice_presented, terrain_column_ownership) = {
                     let renderer = engine.renderer.borrow();
                     (
                         renderer.diagnostics(),
                         renderer.target_voxel(),
-                        renderer.presented_lod_stride_voxels(
+                        renderer.canonical_lattice_presented(
                             camera_voxel_x,
                             camera_voxel_y,
                             camera_voxel_z,
                         ),
-                        renderer.canonical_surface_coverage_at(camera_voxel_x, camera_voxel_z),
+                        renderer.terrain_column_ownership_at(camera_voxel_x, camera_voxel_z),
                     )
                 };
                 let streaming_velocity = if profile.running() {
@@ -5411,13 +5372,6 @@ mod web {
                         .filter(|coord| renderer.edited_chunk_presented(**coord))
                         .count()
                 };
-                let lod_focus_lag_voxels = i64::from(camera_voxel_x)
-                    .abs_diff(i64::from(render.lod_boundary_centres[0][0]))
-                    .max(
-                        i64::from(camera_voxel_z)
-                            .abs_diff(i64::from(render.lod_boundary_centres[0][1])),
-                    );
-                let lod_tiles = [0_u32; 8];
                 let canonical_voxel_bytes = engine
                     .chunks
                     .borrow()
@@ -5560,7 +5514,6 @@ mod web {
                         + diagnostics.meshing.in_flight
                         + diagnostics.upload.queued
                         + diagnostics.upload.in_flight) as f32,
-                    0.0,
                     engine.frame_milliseconds.get(),
                     render.shadow_draw_calls as f32,
                     render.shadow_cascades as f32,
@@ -5568,10 +5521,6 @@ mod web {
                     diagnostics.initial_residency_latency.max_frames as f32,
                     diagnostics.remesh_latency.p95_frames as f32,
                     diagnostics.remesh_latency.max_frames as f32,
-                    lod_tiles[0] as f32,
-                    lod_tiles[1] as f32,
-                    lod_tiles[2] as f32,
-                    lod_tiles[3] as f32,
                     render.water_quads as f32,
                     render.water_draw_calls as f32,
                     render.refraction_copy_bytes as f32 / (1024.0 * 1024.0),
@@ -5609,7 +5558,6 @@ mod web {
                         0.0
                     },
                     engine.profile_tracked_high.get() as f32,
-                    engine.profile_surface_high.get() as f32,
                     engine.profile_pending_high.get() as f32,
                     engine.profile_pending_mesh_high.get() as f32,
                     engine.profile_arena_capacity_high.get() as f32 / (1024.0 * 1024.0),
@@ -5670,21 +5618,7 @@ mod web {
                     render.avatar_draw_calls as f32,
                     (render.viewport_fingerprint & 0x00ff_ffff) as f32,
                     ((render.viewport_fingerprint >> 24) & 0x00ff_ffff) as f32,
-                    if engine.all_lods_ready.get() {
-                        1.0
-                    } else {
-                        0.0
-                    },
-                    0.0,
-                    if engine.interactive_lods_ready.get() {
-                        1.0
-                    } else {
-                        0.0
-                    },
-                    lod_tiles[4] as f32,
-                    lod_tiles[5] as f32,
-                    lod_tiles[6] as f32,
-                    lod_tiles[7] as f32,
+                    if engine.terrain_ready.get() { 1.0 } else { 0.0 },
                     render.cpu_cull_ms,
                     render.cpu_encode_ms,
                     render.cpu_submit_ms,
@@ -5693,23 +5627,6 @@ mod web {
                     render.surface_width as f32,
                     render.surface_height as f32,
                     render.dpr,
-                    render.lod_transition_quads as f32,
-                    render.lod_boundary_centres[0][0] as f32,
-                    render.lod_boundary_centres[0][1] as f32,
-                    render.lod_boundary_centres[1][0] as f32,
-                    render.lod_boundary_centres[1][1] as f32,
-                    render.lod_boundary_centres[2][0] as f32,
-                    render.lod_boundary_centres[2][1] as f32,
-                    render.lod_boundary_centres[3][0] as f32,
-                    render.lod_boundary_centres[3][1] as f32,
-                    render.lod_boundary_centres[4][0] as f32,
-                    render.lod_boundary_centres[4][1] as f32,
-                    render.lod_boundary_centres[5][0] as f32,
-                    render.lod_boundary_centres[5][1] as f32,
-                    render.lod_boundary_centres[6][0] as f32,
-                    render.lod_boundary_centres[6][1] as f32,
-                    render.lod_boundary_centres[7][0] as f32,
-                    render.lod_boundary_centres[7][1] as f32,
                     render.day_fraction,
                     render.local_solar_day_fraction,
                     render.year_fraction,
@@ -5751,20 +5668,21 @@ mod web {
                     } else {
                         0.0
                     },
-                    f32::from(presented_lod_stride_voxels),
-                    lod_focus_lag_voxels as f32,
+                    if canonical_lattice_presented {
+                        1.0
+                    } else {
+                        0.0
+                    },
                     canonical_immediate.resident as f32,
                     canonical_immediate.required as f32,
-                    f32::from(canonical_surface_coverage.0),
-                    f32::from(canonical_surface_coverage.1),
+                    f32::from(terrain_column_ownership.0),
+                    f32::from(terrain_column_ownership.1),
                     diagnostics.generation.queued as f32,
                     diagnostics.generation.in_flight as f32,
                     diagnostics.meshing.queued as f32,
                     diagnostics.meshing.in_flight as f32,
                     diagnostics.upload.queued as f32,
                     diagnostics.upload.in_flight as f32,
-                    0.0,
-                    0.0,
                     diagnostics.initial_residency_latency.completed as f32,
                     diagnostics.initial_residency_latency.in_flight as f32,
                     diagnostics.accepted_completions as f32,
@@ -5780,13 +5698,6 @@ mod web {
                     enclosed_view.required as f32,
                     enclosed_view_renderable as f32,
                     enclosed_view_owned as f32,
-                    render.lod_incomplete_transition_edges as f32,
-                    if render.lod_cut_transition_active {
-                        1.0
-                    } else {
-                        0.0
-                    },
-                    render.lod_cut_transition_phase,
                     virtual_terrain_mode,
                     virtual_terrain_registered_regions as f32,
                     virtual_terrain_directory_in_flight as f32,
@@ -5796,12 +5707,15 @@ mod web {
                     virtual_terrain_resident_primitives as f32,
                     render.virtual_terrain_gpu_selected_pages as f32,
                     render.virtual_terrain_gpu_requested_pages as f32,
-                    render.virtual_terrain_gpu_ownerless_roots as f32,
+                    render.virtual_terrain_published_ownerless_roots as f32,
                     if render.virtual_terrain_gpu_matches_cpu_cut {
                         1.0
                     } else {
                         0.0
                     },
+                    render.virtual_terrain_gpu_overflow_flags as f32,
+                    render.virtual_terrain_gpu_stack_peak as f32,
+                    render.virtual_terrain_gpu_ownerless_roots as f32,
                     virtual_terrain_stream.pending_pages as f32,
                     virtual_terrain_stream.in_flight_pages as f32,
                     virtual_terrain_stream.cancellation_waste_bytes as f32 / (1024.0 * 1024.0),
@@ -5828,6 +5742,8 @@ mod web {
                     render.virtual_terrain_published_exact_pages as f32,
                     render.virtual_terrain_published_minimum_level as f32,
                     render.virtual_terrain_published_maximum_level as f32,
+                    (render.virtual_terrain_cut_fingerprint & 0x00ff_ffff) as f32,
+                    ((render.virtual_terrain_cut_fingerprint >> 24) & 0x00ff_ffff) as f32,
                     engine.frame_sequence.get() as f32,
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);
@@ -5964,10 +5880,6 @@ mod web {
                 spectator_available: false,
             },
             view_distance_metres: rendering.view_distance_metres,
-            lod_boundary_half_extents_voxels: rendering
-                .geometry_lod
-                .boundary_half_extents_voxels
-                .map(|extent| extent as i32),
             directional_shadows: DirectionalShadowConfig {
                 vertical_fov_radians: rendering.shadows.vertical_fov_radians,
                 near_plane: rendering.shadows.near_plane,
@@ -6112,8 +6024,7 @@ mod web {
                 )
                 .map_err(|error| JsValue::from_str(&error.to_string()))?,
             ),
-            all_lods_ready: Cell::new(false),
-            interactive_lods_ready: Cell::new(false),
+            terrain_ready: Cell::new(false),
             startup_ready: Cell::new(false),
             scope,
             callback: RefCell::new(None),
@@ -6151,7 +6062,6 @@ mod web {
             })),
             profile_restore_camera: Cell::new(None),
             profile_tracked_high: Cell::new(0),
-            profile_surface_high: Cell::new(0),
             profile_pending_high: Cell::new(0),
             profile_pending_mesh_high: Cell::new(0),
             profile_arena_capacity_high: Cell::new(0),

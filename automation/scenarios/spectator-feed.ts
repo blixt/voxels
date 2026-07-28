@@ -131,7 +131,7 @@ async function runSpectatorFeed(context: ScenarioContext, arguments_: readonly s
   });
   const settled = await viewport.engine.waitForSnapshot(
     (snapshot) =>
-      snapshotValue(snapshot, "allLodsReady") === 1 &&
+      snapshotValue(snapshot, "terrainReady") === 1 &&
       snapshotValue(snapshot, "residentChunks") > 0,
     {
       timeoutMs: CAMERA_SETTLE_TIMEOUT_MS,
@@ -167,9 +167,9 @@ async function runSpectatorFeed(context: ScenarioContext, arguments_: readonly s
   if (validateGroundCoverage) {
     await viewport.engine.waitForSnapshot(
       (snapshot) =>
-        snapshotValue(snapshot, "allLodsReady") === 1 &&
+        snapshotValue(snapshot, "terrainReady") === 1 &&
         snapshotValue(snapshot, "pendingJobs") === 0 &&
-        snapshotValue(snapshot, "surfaceInFlight") === 0,
+        snapshotValue(snapshot, "virtualTerrainStreamInFlight") === 0,
       {
         timeoutMs: CAMERA_SETTLE_TIMEOUT_MS,
         description: "aerial ground coverage did not settle after spectator motion",

@@ -21,15 +21,11 @@ const FAILURE =
   /panic|unreachable|runtimeerror|wgpu|webgpu|shader|sqlite|opfs|syncaccesshandle|nomodificationallowed|web lock request failed|no persistence leader|persistence .*failed|server rejected edit/iu;
 const VOXELS_PER_METRE = 10;
 const EDIT_TIMEOUT_MS = 30_000;
-const EXACT_BOUNDARIES = [192, 480, 960, 1_920, 3_840, 6_144, 12_288, 24_576] as const;
-// The smallest legal canonical square ends at 3.2 m. Fixtures are centred at least 4.2 m away,
-// making this a deterministic exact-to-stride-two handoff without moving the camera.
-const FAR_BOUNDARIES = [32, 64, 128, 256, 512, 1_024, 2_048, 4_096] as const;
+const GPU_FEEDBACK_OVERFLOW_FLAG = 1 << 1;
 const STRUCTURE_ROI = Object.freeze({ x0: 0.22, x1: 0.78, y0: 0.15, y1: 0.88 });
 const TUNNEL_ROI = Object.freeze({ x0: 0.08, x1: 0.92, y0: 0.08, y1: 0.92 });
-// Once every fixture chunk is independently proven to be exact-owned, the image comparison is a
-// guard against a large surrounding coverage regression rather than an identity requirement for
-// the ordinary exact-vs-heightfield terrain silhouette in the broad ROI.
+// Once every fixture voxel is independently proven to be canonically owned, the image comparison
+// guards against a large surrounding coverage regression between consecutive stable presentations.
 const MAX_TOPOLOGY_COMPONENT_PIXELS = 192;
 
 type Vector3 = readonly [number, number, number];
@@ -45,16 +41,16 @@ interface Options {
 
 interface OwnershipCapture {
   readonly label: string;
-  readonly exactSnapshot: readonly number[];
-  readonly farSnapshot: readonly number[];
-  readonly exactDiagnosticSkyPixels: number;
-  readonly farDiagnosticSkyPixels: number;
+  readonly initialSnapshot: readonly number[];
+  readonly settledSnapshot: readonly number[];
+  readonly initialDiagnosticSkyPixels: number;
+  readonly settledDiagnosticSkyPixels: number;
   readonly geometry: RenderedImageComparison;
   readonly appearance: RenderedImageComparison;
   readonly performance: RenderPhaseSummary;
-  readonly requiredExactVoxels: readonly VoxelVector3[];
-  readonly exactOwnership: readonly boolean[];
-  readonly farOwnership: readonly boolean[];
+  readonly requiredCanonicalVoxels: readonly VoxelVector3[];
+  readonly initialOwnership: readonly boolean[];
+  readonly settledOwnership: readonly boolean[];
 }
 
 function parseOptions(arguments_: readonly string[]): Options {
@@ -101,34 +97,61 @@ async function waitForSettledWorld(
   description: string,
   timeoutMs = 90_000,
 ): Promise<readonly number[]> {
-  let stableSamples = 0;
-  let previousFingerprint: string | undefined;
-  const settled = await engine.waitForSnapshot(
+  let coveredSamples = 0;
+  let previousCamera: Vector3 | undefined;
+  const covered = await engine.waitForSnapshot(
     (snapshot) => {
-      const fingerprint = `${snapshotValue(snapshot, "viewportFingerprintHigh24")}:${snapshotValue(snapshot, "viewportFingerprintLow24")}:${snapshotValue(snapshot, "quads")}`;
-      const legacySurfaceSettled =
-        snapshotValue(snapshot, "virtualTerrainMode") === 2 ||
-        (snapshotValue(snapshot, "surfaceQueued") === 0 &&
-          snapshotValue(snapshot, "surfaceDirty") === 0 &&
-          snapshotValue(snapshot, "surfaceInFlight") === 0);
+      const currentRoots = snapshotValue(snapshot, "virtualTerrainCurrentColumnRoots");
+      const publishedPages = snapshotValue(snapshot, "virtualTerrainPublishedPages");
+      const camera = cameraPosition(snapshot);
+      const cameraStable =
+        previousCamera !== undefined &&
+        Math.hypot(
+          camera[0] - previousCamera[0],
+          camera[1] - previousCamera[1],
+          camera[2] - previousCamera[2],
+        ) < 0.0015;
       const ready =
         snapshotValue(snapshot, "quads") > 0 &&
         snapshotValue(snapshot, "canonicalImmediateResident") ===
           snapshotValue(snapshot, "canonicalImmediateRequired") &&
-        snapshotValue(snapshot, "canonicalSurfaceCellsResident") ===
-          snapshotValue(snapshot, "canonicalSurfaceCellsRequired") &&
-        legacySurfaceSettled &&
-        snapshotValue(snapshot, "virtualTerrainDirectoryInFlight") === 0 &&
-        snapshotValue(snapshot, "lodIncompleteTransitionEdges") === 0;
-      stableSamples = ready && fingerprint === previousFingerprint ? stableSamples + 1 : 0;
-      previousFingerprint = fingerprint;
-      return stableSamples >= 3;
+        snapshotValue(snapshot, "terrainColumnCellsOwned") ===
+          snapshotValue(snapshot, "terrainColumnCellsRequired") &&
+        snapshotValue(snapshot, "virtualTerrainMode") === 2 &&
+        snapshotValue(snapshot, "virtualTerrainCurrentColumnKnown") === 1 &&
+        currentRoots > 0 &&
+        snapshotValue(snapshot, "virtualTerrainCurrentColumnRegisteredRoots") === currentRoots &&
+        publishedPages > 0 &&
+        snapshotValue(snapshot, "virtualTerrainResidentPages") >= publishedPages &&
+        snapshotValue(snapshot, "virtualTerrainOwnerlessRoots") === 0 &&
+        (snapshotValue(snapshot, "virtualTerrainGpuOverflowFlags") &
+          ~GPU_FEEDBACK_OVERFLOW_FLAG) ===
+          0 &&
+        snapshotValue(snapshot, "virtualTerrainGpuMatchesCpuCut") === 1 &&
+        cameraStable;
+      coveredSamples = ready ? coveredSamples + 1 : 0;
+      previousCamera = camera;
+      return coveredSamples >= 3;
     },
     { timeoutMs, intervalMs: 25, description },
   );
-  // Retire the deliberately short old-cut overlay before comparing ownership policies.
-  await engine.wait(300);
-  return settled;
+  const coveredFrame = snapshotValue(covered, "frameSequence");
+  return engine.waitForSnapshot(
+    (snapshot) =>
+      snapshotValue(snapshot, "frameSequence") > coveredFrame &&
+      snapshotValue(snapshot, "quads") > 0 &&
+      snapshotValue(snapshot, "terrainColumnCellsOwned") ===
+        snapshotValue(snapshot, "terrainColumnCellsRequired") &&
+      snapshotValue(snapshot, "virtualTerrainOwnerlessRoots") === 0 &&
+      (snapshotValue(snapshot, "virtualTerrainGpuOverflowFlags") & ~GPU_FEEDBACK_OVERFLOW_FLAG) ===
+        0 &&
+      snapshotValue(snapshot, "virtualTerrainGpuMatchesCpuCut") === 1,
+    {
+      timeoutMs,
+      intervalMs: 16,
+      description: `${description} did not retain a certified cut through presentation`,
+    },
+  );
 }
 
 async function moveDistance(
@@ -213,8 +236,7 @@ async function submitDigIfSolid(
     if (
       snapshotValue(after, "editCanonicalRenderable") ===
         snapshotValue(after, "editCanonicalRequired") &&
-      snapshotValue(after, "editCanonicalOwned") ===
-        snapshotValue(after, "editCanonicalRequired")
+      snapshotValue(after, "editCanonicalOwned") === snapshotValue(after, "editCanonicalRequired")
     ) {
       await engine.wait(250);
       const confirmed = await engine.snapshot();
@@ -314,49 +336,57 @@ async function captureOwnershipPair(
   target: Vector3,
   roi: NormalizedImageRegion,
   performanceSeconds: number,
-  requiredExactVoxels: readonly VoxelVector3[],
+  requiredCanonicalVoxels: readonly VoxelVector3[],
 ): Promise<OwnershipCapture> {
-  await engine.setLodBoundaryHalfExtents(EXACT_BOUNDARIES);
-  await aimAt(engine, target, `${label} exact view did not align`);
-  const exactSnapshot = await waitForSettledWorld(engine, `${label} exact view did not settle`);
-  const exactOwnership = await Promise.all(
-    requiredExactVoxels.map((voxel) => engine.exactVolumePresented(voxel)),
+  await aimAt(engine, target, `${label} view did not align`);
+  const initialSnapshot = await waitForSettledWorld(engine, `${label} initial view did not settle`);
+  const initialOwnership = await Promise.all(
+    requiredCanonicalVoxels.map((voxel) => engine.exactVolumePresented(voxel)),
   );
-  const exactNormal = await page.screenshot();
-  await context.artifacts.write(`${label} exact`, `${label}-exact.png`, exactNormal, "image/png");
+  const initialNormal = await page.screenshot();
+  await context.artifacts.write(
+    `${label} initial`,
+    `${label}-initial.png`,
+    initialNormal,
+    "image/png",
+  );
   await engine.setDiagnosticSky([255, 0, 255]);
-  const exactDiagnostic = await page.screenshot();
+  const initialDiagnostic = await page.screenshot();
   await context.artifacts.write(
-    `${label} exact diagnostic`,
-    `${label}-exact-diagnostic.png`,
-    exactDiagnostic,
+    `${label} initial diagnostic`,
+    `${label}-initial-diagnostic.png`,
+    initialDiagnostic,
     "image/png",
   );
-  const exactSky = await analyzeDiagnosticSky(page, exactDiagnostic, roi);
+  const initialSky = await analyzeDiagnosticSky(page, initialDiagnostic, roi);
 
-  await engine.setLodBoundaryHalfExtents(FAR_BOUNDARIES);
-  const farSnapshot = await waitForSettledWorld(engine, `${label} far view did not settle`);
-  const farOwnership = await Promise.all(
-    requiredExactVoxels.map((voxel) => engine.exactVolumePresented(voxel)),
+  const settledSnapshot = await waitForSettledWorld(engine, `${label} view did not remain settled`);
+  const settledOwnership = await Promise.all(
+    requiredCanonicalVoxels.map((voxel) => engine.exactVolumePresented(voxel)),
   );
-  const farDiagnostic = await page.screenshot();
+  const settledDiagnostic = await page.screenshot();
   await context.artifacts.write(
-    `${label} far diagnostic`,
-    `${label}-far-diagnostic.png`,
-    farDiagnostic,
+    `${label} settled diagnostic`,
+    `${label}-settled-diagnostic.png`,
+    settledDiagnostic,
     "image/png",
   );
-  const farSky = await analyzeDiagnosticSky(page, farDiagnostic, roi);
-  const geometry = await compareRenderedImages(page, farDiagnostic, exactDiagnostic, {
+  const settledSky = await analyzeDiagnosticSky(page, settledDiagnostic, roi);
+  const geometry = await compareRenderedImages(page, settledDiagnostic, initialDiagnostic, {
     region: roi,
     footprintPixels: 1,
     diagnosticGeometry: true,
   });
 
   await engine.setDiagnosticSky(null);
-  const farNormal = await page.screenshot();
-  await context.artifacts.write(`${label} far`, `${label}-far.png`, farNormal, "image/png");
-  const appearance = await compareRenderedImages(page, farNormal, exactNormal, {
+  const settledNormal = await page.screenshot();
+  await context.artifacts.write(
+    `${label} settled`,
+    `${label}-settled.png`,
+    settledNormal,
+    "image/png",
+  );
+  const appearance = await compareRenderedImages(page, settledNormal, initialNormal, {
     region: roi,
     footprintPixels: 2,
   });
@@ -365,42 +395,49 @@ async function captureOwnershipPair(
   );
   return {
     label,
-    exactSnapshot,
-    farSnapshot,
-    exactDiagnosticSkyPixels: exactSky.diagnosticSkyPixels,
-    farDiagnosticSkyPixels: farSky.diagnosticSkyPixels,
+    initialSnapshot,
+    settledSnapshot,
+    initialDiagnosticSkyPixels: initialSky.diagnosticSkyPixels,
+    settledDiagnosticSkyPixels: settledSky.diagnosticSkyPixels,
     geometry,
     appearance,
     performance,
-    requiredExactVoxels,
-    exactOwnership,
-    farOwnership,
+    requiredCanonicalVoxels,
+    initialOwnership,
+    settledOwnership,
   };
 }
 
 function captureReport(capture: OwnershipCapture) {
   return {
     label: capture.label,
-    exact: {
-      camera: cameraPosition(capture.exactSnapshot),
-      presentedStrideVoxels: snapshotValue(capture.exactSnapshot, "presentedLodStrideVoxels"),
-      incompleteTransitionEdges: snapshotValue(
-        capture.exactSnapshot,
-        "lodIncompleteTransitionEdges",
-      ),
-      enclosedViewRequired: snapshotValue(capture.exactSnapshot, "enclosedViewRequired"),
-      enclosedViewOwned: snapshotValue(capture.exactSnapshot, "enclosedViewOwned"),
-      diagnosticSkyPixels: capture.exactDiagnosticSkyPixels,
-      requiredExactOwnership: capture.exactOwnership,
+    initial: {
+      camera: cameraPosition(capture.initialSnapshot),
+      canonicalLatticePresented:
+        snapshotValue(capture.initialSnapshot, "canonicalLatticePresented") === 1,
+      ownerlessRoots: snapshotValue(capture.initialSnapshot, "virtualTerrainOwnerlessRoots"),
+      gpuMatchesCpuCut:
+        snapshotValue(capture.initialSnapshot, "virtualTerrainGpuMatchesCpuCut") === 1,
+      gpuOverflowFlags: snapshotValue(capture.initialSnapshot, "virtualTerrainGpuOverflowFlags"),
+      gpuStackPeak: snapshotValue(capture.initialSnapshot, "virtualTerrainGpuStackPeak"),
+      enclosedViewRequired: snapshotValue(capture.initialSnapshot, "enclosedViewRequired"),
+      enclosedViewOwned: snapshotValue(capture.initialSnapshot, "enclosedViewOwned"),
+      diagnosticSkyPixels: capture.initialDiagnosticSkyPixels,
+      requiredCanonicalOwnership: capture.initialOwnership,
     },
-    far: {
-      camera: cameraPosition(capture.farSnapshot),
-      presentedStrideVoxels: snapshotValue(capture.farSnapshot, "presentedLodStrideVoxels"),
-      incompleteTransitionEdges: snapshotValue(capture.farSnapshot, "lodIncompleteTransitionEdges"),
-      enclosedViewRequired: snapshotValue(capture.farSnapshot, "enclosedViewRequired"),
-      enclosedViewOwned: snapshotValue(capture.farSnapshot, "enclosedViewOwned"),
-      diagnosticSkyPixels: capture.farDiagnosticSkyPixels,
-      requiredExactOwnership: capture.farOwnership,
+    settled: {
+      camera: cameraPosition(capture.settledSnapshot),
+      canonicalLatticePresented:
+        snapshotValue(capture.settledSnapshot, "canonicalLatticePresented") === 1,
+      ownerlessRoots: snapshotValue(capture.settledSnapshot, "virtualTerrainOwnerlessRoots"),
+      gpuMatchesCpuCut:
+        snapshotValue(capture.settledSnapshot, "virtualTerrainGpuMatchesCpuCut") === 1,
+      gpuOverflowFlags: snapshotValue(capture.settledSnapshot, "virtualTerrainGpuOverflowFlags"),
+      gpuStackPeak: snapshotValue(capture.settledSnapshot, "virtualTerrainGpuStackPeak"),
+      enclosedViewRequired: snapshotValue(capture.settledSnapshot, "enclosedViewRequired"),
+      enclosedViewOwned: snapshotValue(capture.settledSnapshot, "enclosedViewOwned"),
+      diagnosticSkyPixels: capture.settledDiagnosticSkyPixels,
+      requiredCanonicalOwnership: capture.settledOwnership,
     },
     topology: topologyMetrics(capture.geometry),
     appearance: {
@@ -414,22 +451,42 @@ function captureReport(capture: OwnershipCapture) {
 function captureViolations(capture: OwnershipCapture): string[] {
   const topology = topologyMetrics(capture.geometry);
   const violations: string[] = [];
-  for (const [index, voxel] of capture.requiredExactVoxels.entries()) {
-    if (!capture.exactOwnership[index]) {
-      violations.push(`${capture.label} exact policy did not own fixture voxel ${voxel.join(",")}`);
+  for (const [phase, snapshot] of [
+    ["initial", capture.initialSnapshot],
+    ["settled", capture.settledSnapshot],
+  ] as const) {
+    if (
+      (snapshotValue(snapshot, "virtualTerrainGpuOverflowFlags") & ~GPU_FEEDBACK_OVERFLOW_FLAG) !==
+      0
+    ) {
+      violations.push(`${capture.label} ${phase} GPU ownership traversal overflowed`);
     }
-    if (!capture.farOwnership[index]) {
-      violations.push(`${capture.label} far policy did not own fixture voxel ${voxel.join(",")}`);
+    if (snapshotValue(snapshot, "virtualTerrainGpuMatchesCpuCut") !== 1) {
+      violations.push(
+        `${capture.label} ${phase} GPU traversal disagreed with the CPU ownership oracle`,
+      );
+    }
+  }
+  for (const [index, voxel] of capture.requiredCanonicalVoxels.entries()) {
+    if (!capture.initialOwnership[index]) {
+      violations.push(
+        `${capture.label} initial cut did not own canonical fixture voxel ${voxel.join(",")}`,
+      );
+    }
+    if (!capture.settledOwnership[index]) {
+      violations.push(
+        `${capture.label} settled cut did not own canonical fixture voxel ${voxel.join(",")}`,
+      );
     }
   }
   if (topology.largestFalseSkyComponentPixels > MAX_TOPOLOGY_COMPONENT_PIXELS) {
     violations.push(
-      `${capture.label} lost exact geometry to ${topology.largestFalseSkyComponentPixels}-pixel false sky`,
+      `${capture.label} lost canonical geometry to ${topology.largestFalseSkyComponentPixels}-pixel false sky`,
     );
   }
   if (topology.largestOpaqueFillComponentPixels > MAX_TOPOLOGY_COMPONENT_PIXELS) {
     violations.push(
-      `${capture.label} filled exact air with a ${topology.largestOpaqueFillComponentPixels}-pixel opaque region`,
+      `${capture.label} filled canonical air with a ${topology.largestOpaqueFillComponentPixels}-pixel opaque region`,
     );
   }
   if (capture.performance.frameMs.p95 > 12) {
@@ -607,7 +664,6 @@ async function runArbitraryGeometry(context: ScenarioContext, arguments_: readon
   });
   const { engine, page } = viewport;
   const contract = await engine.ready(90_000);
-  await engine.setLodBoundaryHalfExtents(EXACT_BOUNDARIES);
   await waitForSettledWorld(engine, "arbitrary-geometry world did not settle");
   await engine.setCameraLook(0, 0);
   const workOrigin = await moveDistance(page, engine, 10, "KeyW");
@@ -654,7 +710,6 @@ async function runArbitraryGeometry(context: ScenarioContext, arguments_: readon
     build,
   );
 
-  await engine.setLodBoundaryHalfExtents(EXACT_BOUNDARIES);
   await engine.setCameraLook(Math.PI / 2, 0);
   const tunnelFixture = await excavateTunnelFixture(
     page,
@@ -675,11 +730,14 @@ async function runArbitraryGeometry(context: ScenarioContext, arguments_: readon
 
   const captures = [floatingCapture, buildCapture, tunnelCapture];
   const violations = captures.flatMap(captureViolations);
-  const tunnelFarRequired = snapshotValue(tunnelCapture.farSnapshot, "enclosedViewRequired");
-  const tunnelFarOwned = snapshotValue(tunnelCapture.farSnapshot, "enclosedViewOwned");
-  if (tunnelFarRequired === 0 || tunnelFarOwned !== tunnelFarRequired) {
+  const tunnelSettledRequired = snapshotValue(
+    tunnelCapture.settledSnapshot,
+    "enclosedViewRequired",
+  );
+  const tunnelSettledOwned = snapshotValue(tunnelCapture.settledSnapshot, "enclosedViewOwned");
+  if (tunnelSettledRequired === 0 || tunnelSettledOwned !== tunnelSettledRequired) {
     violations.push(
-      `branched tunnel did not cross the surface handoff with complete exact-volume ownership (${tunnelFarOwned}/${tunnelFarRequired})`,
+      `branched tunnel did not retain complete canonical-volume ownership (${tunnelSettledOwned}/${tunnelSettledRequired})`,
     );
   }
   const result = {
@@ -689,7 +747,6 @@ async function runArbitraryGeometry(context: ScenarioContext, arguments_: readon
     source: options.source,
     browser: browser.version,
     options,
-    ownershipPolicies: { exact: EXACT_BOUNDARIES, far: FAR_BOUNDARIES },
     topologyTolerance: { maximumConnectedComponentPixels: MAX_TOPOLOGY_COMPONENT_PIXELS },
     fixtures: {
       floating: { voxel: floating, materialId: prepared.materialId },
@@ -702,7 +759,8 @@ async function runArbitraryGeometry(context: ScenarioContext, arguments_: readon
   await context.artifacts.writeJson("Arbitrary geometry report", "report.json", result);
   if (!result.ok) throw new Error(`arbitrary geometry violations: ${violations.join("; ")}`);
   return {
-    summary: "Edited standalone structures and branched tunnel survived the exact-to-far handoff.",
+    summary:
+      "Edited standalone structures and branched tunnel survived canonical-to-virtual ownership.",
     metrics: {
       maximumFalseSkyComponentPixels: Math.max(
         ...captures.map(
@@ -724,7 +782,7 @@ export default defineScenario({
   id: "arbitrary-geometry",
   kind: "validation",
   summary:
-    "Validates standalone edited structures and branched volume across the exact-to-far handoff.",
+    "Validates standalone edited structures and branched volume under one virtual-terrain cut.",
   uses: {
     world: true,
     browser: true,

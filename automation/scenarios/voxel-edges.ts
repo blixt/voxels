@@ -69,24 +69,17 @@ async function waitForSettledWorld(
   engine: EngineClient,
   description: string,
 ): Promise<readonly number[]> {
-  let stableSamples = 0;
-  let previousFingerprint: string | undefined;
   return engine.waitForSnapshot(
-    (snapshot) => {
-      const fingerprint = `${snapshotValue(snapshot, "viewportFingerprintHigh24")}:${snapshotValue(snapshot, "viewportFingerprintLow24")}:${snapshotValue(snapshot, "quads")}`;
-      const ready =
-        snapshotValue(snapshot, "quads") > 0 &&
-        snapshotValue(snapshot, "canonicalImmediateResident") ===
-          snapshotValue(snapshot, "canonicalImmediateRequired") &&
-        snapshotValue(snapshot, "surfaceQueued") === 0 &&
-        snapshotValue(snapshot, "surfaceDirty") === 0 &&
-        snapshotValue(snapshot, "surfaceInFlight") === 0 &&
-        snapshotValue(snapshot, "pendingJobs") === 0 &&
-        snapshotValue(snapshot, "lodIncompleteTransitionEdges") === 0;
-      stableSamples = ready && fingerprint === previousFingerprint ? stableSamples + 1 : 0;
-      previousFingerprint = fingerprint;
-      return stableSamples >= 3;
-    },
+    (snapshot) =>
+      snapshotValue(snapshot, "quads") > 0 &&
+      snapshotValue(snapshot, "canonicalImmediateResident") ===
+        snapshotValue(snapshot, "canonicalImmediateRequired") &&
+      snapshotValue(snapshot, "terrainReady") === 1 &&
+      snapshotValue(snapshot, "virtualTerrainMode") === 2 &&
+      snapshotValue(snapshot, "virtualTerrainOwnerlessRoots") === 0 &&
+      (snapshotValue(snapshot, "virtualTerrainGpuOverflowFlags") & ~2) === 0 &&
+      snapshotValue(snapshot, "virtualTerrainGpuMatchesCpuCut") === 1 &&
+      snapshotValue(snapshot, "pendingJobs") === 0,
     { timeoutMs: 90_000, intervalMs: 25, description },
   );
 }
@@ -104,7 +97,7 @@ async function waitForEdit(
         snapshotValue(snapshot, "editCanonicalRenderable") === required &&
         snapshotValue(snapshot, "editCanonicalOwned") === required &&
         snapshotValue(snapshot, "pendingJobs") === 0 &&
-        snapshotValue(snapshot, "surfaceInFlight") === 0
+        snapshotValue(snapshot, "virtualTerrainOwnerlessRoots") === 0
       );
     },
     { timeoutMs: 30_000, intervalMs: 25, description },
@@ -130,7 +123,7 @@ async function submitDigIfSolid(
     }
     if (
       snapshotValue(after, "pendingJobs") === 0 &&
-      snapshotValue(after, "surfaceInFlight") === 0
+      snapshotValue(after, "virtualTerrainStreamInFlight") === 0
     ) {
       await engine.wait(100);
       const confirmed = await engine.snapshot();
