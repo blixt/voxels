@@ -592,13 +592,13 @@ impl WorldTransportConfig {
         if !is_websocket_url(&self.endpoint) {
             return invalid(
                 "world.endpoint",
-                "must be an absolute ws:// or wss:// URL without whitespace",
+                "must be a valid absolute ws:// or wss:// URL without a fragment",
             );
         }
         if !is_websocket_url(&self.presence_endpoint) {
             return invalid(
                 "world.presence_endpoint",
-                "must be an absolute ws:// or wss:// URL without whitespace",
+                "must be a valid absolute ws:// or wss:// URL without a fragment",
             );
         }
         if !is_websocket_protocol_token(&self.subprotocol) {
@@ -819,8 +819,47 @@ fn startup_chunk_count(horizontal_radius: u32, vertical_radius: u32) -> u64 {
 }
 
 fn is_websocket_url(value: &str) -> bool {
-    (value.starts_with("ws://") || value.starts_with("wss://"))
-        && !value.chars().any(char::is_whitespace)
+    if value
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+        || value.contains(['#', '\\'])
+    {
+        return false;
+    }
+    let Some(remainder) = value
+        .strip_prefix("ws://")
+        .or_else(|| value.strip_prefix("wss://"))
+    else {
+        return false;
+    };
+    let authority_end = remainder.find(['/', '?']).unwrap_or(remainder.len());
+    valid_websocket_authority(&remainder[..authority_end])
+}
+
+fn valid_websocket_authority(authority: &str) -> bool {
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some(close) = bracketed.find(']') else {
+            return false;
+        };
+        let host = &bracketed[..close];
+        let suffix = &bracketed[close + 1..];
+        return !host.is_empty()
+            && !host.contains(['[', ']'])
+            && (suffix.is_empty() || suffix.strip_prefix(':').is_some_and(valid_websocket_port));
+    }
+    let (host, port) = authority
+        .rsplit_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    !host.is_empty() && !host.contains([':', '[', ']']) && port.is_none_or(valid_websocket_port)
+}
+
+fn valid_websocket_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
 }
 
 #[cfg(test)]
@@ -1118,6 +1157,17 @@ mod tests {
         let mut invalid = config.clone();
         invalid.world.endpoint = "http://127.0.0.1/world".to_owned();
         assert_invalid_field(&invalid, "world.endpoint");
+
+        for endpoint in [
+            "ws://",
+            "wss:///",
+            "ws://127.0.0.1:9777/v39/world#fragment",
+            "ws://127.0.0.1:99999/v39/world",
+        ] {
+            let mut invalid = config.clone();
+            invalid.world.endpoint = endpoint.to_owned();
+            assert_invalid_field(&invalid, "world.endpoint");
+        }
 
         let mut invalid = config.clone();
         invalid.world.subprotocol = "voxels world".to_owned();
