@@ -23,6 +23,52 @@ let screenshotDeadline = 0;
 let screenshotEncoding = false;
 let disposal: Promise<void> | null = null;
 const pending: Exclude<ToWorker, InitMessage>[] = [];
+const STARTUP_PROGRESS_VERSION = 1;
+const STARTUP_PROGRESS_WORDS = 44;
+
+function bitmaskLabels(flags: number, labels: ReadonlyArray<readonly [number, string]>): string {
+  if (flags === 0) return "none";
+  const known = labels.filter(([flag]) => (flags & flag) !== 0).map(([, label]) => label);
+  const knownMask = labels.reduce((mask, [flag]) => mask | flag, 0);
+  const unknown = flags & ~knownMask;
+  if (unknown !== 0) known.push(`unknown-0x${unknown.toString(16)}`);
+  return known.join(",");
+}
+
+function gpuMatchFailureLabels(flags: number): string {
+  return bitmaskLabels(flags, [
+    [1, "feedback-missing"],
+    [2, "candidate-missing"],
+    [4, "submission-stale"],
+    [8, "ownership-overflow"],
+    [16, "fingerprint"],
+    [32, "ownerless"],
+    [64, "compacted-count"],
+    [128, "cpu-overflow"],
+    [256, "selected-pages"],
+  ]);
+}
+
+function uploadFailureLabel(kind: number): string {
+  return (
+    [
+      "none",
+      "hierarchy",
+      "representation",
+      "surface-cluster",
+      "triangle-cluster",
+      "page-too-large",
+      "source-capacity",
+      "gpu-traversal",
+      "compact-capacity",
+      "no-renderable-cut",
+      "selected-page-missing",
+      "gpu-not-certified",
+      "incomplete-partition",
+      "source-working-set",
+    ][kind] ?? `unknown-${kind}`
+  );
+}
 
 function stopReadinessMonitor(): void {
   if (readinessTimer !== undefined) clearInterval(readinessTimer);
@@ -36,13 +82,130 @@ function stopScreenshotMonitor(): void {
 
 function monitorReadiness(engine: EngineHandle): void {
   let previous = "";
+  let lastDetailedPost = Number.NEGATIVE_INFINITY;
+  let schemaMismatch = "";
   const update = (): void => {
     if (disposed) return;
-    const [resident = 0, required = 0, playable = 0] = Array.from(engine.startup_progress());
-    const key = `${resident}/${required}/${playable}`;
+    const progress = Array.from(engine.startup_progress());
+    if (
+      progress.length !== STARTUP_PROGRESS_WORDS ||
+      progress[0] !== STARTUP_PROGRESS_VERSION ||
+      progress[1] !== STARTUP_PROGRESS_WORDS
+    ) {
+      const mismatch = `Engine update in progress (startup schema v${progress[0] ?? "missing"}/${progress.length}, expected v${STARTUP_PROGRESS_VERSION}/${STARTUP_PROGRESS_WORDS}).`;
+      if (mismatch !== schemaMismatch) {
+        schemaMismatch = mismatch;
+        scope.postMessage({
+          kind: "loading",
+          stage: "vicinity",
+          resident: 0,
+          required: 0,
+          detail: mismatch,
+        });
+      }
+      return;
+    }
+    schemaMismatch = "";
+    const [
+      ,
+      ,
+      resident = 0,
+      required = 0,
+      playable = 0,
+      terrainReady = 0,
+      gpuMatchesCpu = 0,
+      cpuSelected = 0,
+      cpuRequested = 0,
+      cpuRefinementRoots = 0,
+      cpuOwnerless = 0,
+      cpuDiscontinuities = 0,
+      gpuSelected = 0,
+      gpuRequested = 0,
+      gpuOwnerless = 0,
+      gpuOverflow = 0,
+      gpuCompacted = 0,
+      gpuMatchFailures = 0,
+      streamPending = 0,
+      streamInFlight = 0,
+      streamFailed = 0,
+      directoryInFlight = 0,
+      pageSubmitDeferred = 0,
+      pagePreempted = 0,
+      pageTimedOut = 0,
+      pageOtherFailed = 0,
+      pageUnavailable = 0,
+      pageStaleRevision = 0,
+      pageGenerationFailed = 0,
+      pageUploadFailed = 0,
+      lastPageUploadFailureKind = 0,
+      lastPageFailureKind = 0,
+      lastPageFailureLevel = 0,
+      lastPageFailureX = 0,
+      lastPageFailureY = 0,
+      lastPageFailureZ = 0,
+      streamUsefulKiB = 0,
+      cachePages = 0,
+      residentPages = 0,
+      gpuAllocatedMiB = 0,
+      gpuCapacityMiB = 0,
+      publishedPages = 0,
+      publishedExactPages = 0,
+      publishedDiscontinuities = 0,
+    ] = progress;
+    const key = [
+      resident,
+      required,
+      playable,
+      terrainReady,
+      gpuMatchesCpu,
+      cpuSelected,
+      cpuRequested,
+      cpuRefinementRoots,
+      cpuOwnerless,
+      cpuDiscontinuities,
+      gpuSelected,
+      gpuRequested,
+      gpuOwnerless,
+      gpuOverflow,
+      gpuCompacted,
+      gpuMatchFailures,
+      streamPending,
+      streamInFlight,
+      streamFailed,
+      directoryInFlight,
+      pageSubmitDeferred,
+      pagePreempted,
+      pageTimedOut,
+      pageOtherFailed,
+      pageUnavailable,
+      pageStaleRevision,
+      pageGenerationFailed,
+      pageUploadFailed,
+      lastPageUploadFailureKind,
+      lastPageFailureKind,
+      lastPageFailureLevel,
+      lastPageFailureX,
+      lastPageFailureY,
+      lastPageFailureZ,
+      streamUsefulKiB,
+      cachePages,
+      residentPages,
+      gpuAllocatedMiB,
+      gpuCapacityMiB,
+      publishedPages,
+      publishedExactPages,
+      publishedDiscontinuities,
+    ].join("/");
     if (key !== previous) {
+      const now = performance.now();
+      const detailed = resident >= required && playable === 0;
+      if (detailed && now - lastDetailedPost < 250) return;
       previous = key;
-      scope.postMessage({ kind: "loading", stage: "vicinity", resident, required });
+      if (detailed) lastDetailedPost = now;
+      const detail = detailed
+        ? `Terrain cut: CPU ${cpuSelected} pages/${cpuRequested} requested/${cpuRefinementRoots} refinement roots/${cpuOwnerless} ownerless/${cpuDiscontinuities} skipped-level edges; GPU ${gpuSelected} pages/${gpuCompacted} compacted/${gpuRequested} requested/${gpuOwnerless} ownerless/overflow ${gpuOverflow}; match ${gpuMatchesCpu === 1 ? "yes" : `no (${gpuMatchFailureLabels(gpuMatchFailures)})`}; stream ${streamPending} pending/${streamInFlight} in flight/${streamFailed} failed/${streamUsefulKiB} KiB useful, cache ${cachePages}, resident ${residentPages}, GPU ${gpuAllocatedMiB}/${gpuCapacityMiB} MiB, ${directoryInFlight} directories in flight; flow ${pageSubmitDeferred} deferred/${pagePreempted} preempted/${pageTimedOut} timed out/${pageOtherFailed} transport errors; products ${pageUnavailable} unavailable/${pageStaleRevision} stale/${pageGenerationFailed} generation/${pageUploadFailed} upload (last ${uploadFailureLabel(lastPageUploadFailureKind)})${lastPageFailureKind === 0 ? "" : `, last product ${lastPageFailureKind}@L${lastPageFailureLevel}(${lastPageFailureX | 0},${lastPageFailureY | 0},${lastPageFailureZ | 0})`}; published ${publishedPages} pages (${publishedExactPages} exact, ${publishedDiscontinuities} skipped-level edges), terrain ${terrainReady === 1 ? "ready" : "pending"}.`
+        : undefined;
+      scope.postMessage({ kind: "loading", stage: "vicinity", resident, required, detail });
     }
     if (playable === 1) {
       stopReadinessMonitor();
@@ -91,12 +254,8 @@ async function encodeScreenshot(capture: MissionControlScreenshot): Promise<void
     const metadata = JSON.parse(capture.metadata) as {
       attachments?: { terrainPixelOwnership?: { populated?: boolean } };
     };
-    const diagnosticPopulated =
-      metadata.attachments?.terrainPixelOwnership?.populated === true;
-    if (
-      terrainDiagnostic.byteLength !==
-      (diagnosticPopulated ? width * height * 20 : 0)
-    ) {
+    const diagnosticPopulated = metadata.attachments?.terrainPixelOwnership?.populated === true;
+    if (terrainDiagnostic.byteLength !== (diagnosticPopulated ? width * height * 20 : 0)) {
       throw new Error("renderer returned an invalid u32x5 terrain diagnostic attachment");
     }
     const canvas = new OffscreenCanvas(width, height);

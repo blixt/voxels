@@ -94,6 +94,7 @@ export type FromWorker =
       stage: "wasm" | "world" | "vicinity";
       resident?: number;
       required?: number;
+      detail?: string;
     }
   | { kind: "ready" }
   | { kind: "destroyed" }

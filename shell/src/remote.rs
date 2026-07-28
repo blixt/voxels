@@ -277,6 +277,16 @@ impl RemoteWorldClient {
         self.inner.send_terrain_page_request(priority, pages)
     }
 
+    /// Reports whether a batch at this priority can claim the negotiated request window.
+    ///
+    /// Schedulers use this before transferring pending work into their in-flight state. The send
+    /// path still performs the authoritative check, including priority preemption and socket
+    /// backpressure, but a full equal-priority window is normal flow control rather than a failed
+    /// terrain request that should consume retry budget.
+    pub fn has_request_capacity(&self, priority: WorldProductPriority) -> bool {
+        self.inner.has_request_window(priority)
+    }
+
     pub fn next_terrain_page_completion(&self) -> Option<RemoteTerrainPageCompletion> {
         self.inner.terrain_page_completions.borrow_mut().pop_front()
     }
@@ -1039,11 +1049,7 @@ impl RemoteInner {
                 "batch contains duplicate chunk coordinates",
             ));
         }
-        let server_window = self.opened.borrow().as_ref().map_or(1, |opened| {
-            usize::from(opened.recommended_in_flight_batches)
-        });
-        let client_window = self.config.max_in_flight_batches as usize;
-        if !self.ensure_request_window(priority, server_window.min(client_window)) {
+        if !self.ensure_request_window(priority) {
             return Err(RemoteWorldError::RequestWindowFull);
         }
         let Some(socket) = self.socket.borrow().clone() else {
@@ -1107,13 +1113,7 @@ impl RemoteInner {
             columns: columns.clone(),
         })
         .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
-        let server_window = self.opened.borrow().as_ref().map_or(1, |opened| {
-            usize::from(opened.recommended_in_flight_batches)
-        });
-        if !self.ensure_request_window(
-            priority,
-            server_window.min(self.config.max_in_flight_batches as usize),
-        ) {
+        if !self.ensure_request_window(priority) {
             return Err(RemoteWorldError::RequestWindowFull);
         }
         let socket = self.request_socket()?;
@@ -1151,13 +1151,7 @@ impl RemoteInner {
             roots: roots.clone(),
         })
         .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
-        let server_window = self.opened.borrow().as_ref().map_or(1, |opened| {
-            usize::from(opened.recommended_in_flight_batches)
-        });
-        if !self.ensure_request_window(
-            priority,
-            server_window.min(self.config.max_in_flight_batches as usize),
-        ) {
+        if !self.ensure_request_window(priority) {
             return Err(RemoteWorldError::RequestWindowFull);
         }
         let socket = self.request_socket()?;
@@ -1205,13 +1199,7 @@ impl RemoteInner {
             },
         })
         .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
-        let server_window = self.opened.borrow().as_ref().map_or(1, |opened| {
-            usize::from(opened.recommended_in_flight_batches)
-        });
-        if !self.ensure_request_window(
-            priority,
-            server_window.min(self.config.max_in_flight_batches as usize),
-        ) {
+        if !self.ensure_request_window(priority) {
             return Err(RemoteWorldError::RequestWindowFull);
         }
         let socket = self.request_socket()?;
@@ -1288,7 +1276,30 @@ impl RemoteInner {
         }
     }
 
-    fn ensure_request_window(&self, priority: WorldProductPriority, window: usize) -> bool {
+    fn request_window(&self) -> usize {
+        let server = self.opened.borrow().as_ref().map_or(1, |opened| {
+            usize::from(opened.recommended_in_flight_batches)
+        });
+        server.min(self.config.max_in_flight_batches as usize)
+    }
+
+    fn has_request_window(&self, priority: WorldProductPriority) -> bool {
+        let window = self.request_window();
+        if self.pending.borrow().len() < window {
+            return true;
+        }
+        let pending = self.pending.borrow();
+        priority_preemption_candidate(
+            priority,
+            pending
+                .iter()
+                .map(|(&request_id, batch)| (request_id, batch.priority())),
+        )
+        .is_some()
+    }
+
+    fn ensure_request_window(&self, priority: WorldProductPriority) -> bool {
+        let window = self.request_window();
         if self.pending.borrow().len() < window {
             return true;
         }

@@ -38,7 +38,7 @@ export class EngineHandle {
     snapshot(): Float32Array;
     start_profile(profile_id: number): boolean;
     /**
-     * `[resident, required, playable]` for the browser's canvas-only startup surface.
+     * Collision and virtual-terrain readiness for the browser's canvas-only startup surface.
      */
     startup_progress(): Uint32Array;
     /**

@@ -13,6 +13,8 @@ pub(crate) struct ArenaStats {
     pub pages: usize,
     pub capacity_bytes: u64,
     pub allocated_bytes: u64,
+    pub free_bytes: u64,
+    pub largest_free_range_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -128,12 +130,9 @@ impl ArenaAllocator {
     }
 
     pub fn can_allocate(&self, requested_size: u32) -> bool {
-        let Some(size) = align_up(requested_size, self.alignment) else {
+        let Some(size) = self.aligned_allocation_size(requested_size) else {
             return false;
         };
-        if size == 0 {
-            return false;
-        }
         if self
             .pages
             .iter()
@@ -153,6 +152,12 @@ impl ArenaAllocator {
             .sum::<u64>();
         self.maximum_capacity_bytes
             .is_none_or(|maximum| current_capacity.saturating_add(u64::from(capacity)) <= maximum)
+    }
+
+    pub fn aligned_allocation_size(&self, requested_size: u32) -> Option<u32> {
+        (requested_size > 0)
+            .then(|| align_up(requested_size, self.alignment))
+            .flatten()
     }
 
     pub fn free(&mut self, allocation: Allocation) -> bool {
@@ -185,10 +190,19 @@ impl ArenaAllocator {
     }
 
     pub fn stats(&self) -> ArenaStats {
+        let capacity_bytes = self.pages.iter().map(|page| u64::from(page.capacity)).sum();
+        let allocated_bytes = self.active.values().map(|(size, _)| u64::from(*size)).sum();
         ArenaStats {
             pages: self.pages.len(),
-            capacity_bytes: self.pages.iter().map(|page| u64::from(page.capacity)).sum(),
-            allocated_bytes: self.active.values().map(|(size, _)| u64::from(*size)).sum(),
+            capacity_bytes,
+            allocated_bytes,
+            free_bytes: capacity_bytes - allocated_bytes,
+            largest_free_range_bytes: self
+                .pages
+                .iter()
+                .flat_map(|page| page.free.iter().map(|(_, size)| u64::from(*size)))
+                .max()
+                .unwrap_or(0),
         }
     }
 }
@@ -273,5 +287,12 @@ mod tests {
         assert!(page_bounded.allocate(4).is_none());
         assert_eq!(page_bounded.stats().pages, 1);
         Ok(())
+    }
+
+    #[test]
+    fn allocation_size_uses_the_same_alignment_as_capacity_checks() {
+        let arena = ArenaAllocator::new(64, 24);
+        assert_eq!(arena.aligned_allocation_size(25), Some(48));
+        assert_eq!(arena.aligned_allocation_size(0), None);
     }
 }

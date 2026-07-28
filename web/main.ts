@@ -330,9 +330,10 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
         const fraction = required > 0 ? resident / required : 0;
         showLoading(
           "Loading nearby world",
-          required > 0
-            ? `${resident} of ${required} collision-safe chunks ready`
-            : "Prioritizing the player vicinity…",
+          event.data.detail ??
+            (required > 0
+              ? `${resident} of ${required} collision-safe chunks ready`
+              : "Prioritizing the player vicinity…"),
           0.25 + fraction * 0.75,
         );
       }

@@ -239,7 +239,7 @@ impl VirtualTerrainAuthority {
         }
 
         let flight = self.flight_lock(root);
-        let _flight_guard = flight.lock().await;
+        let flight_guard = Arc::clone(&flight).lock_owned().await;
         let revision = self
             .current_revision(root)
             .ok_or(VirtualTerrainError::InvalidRoot)?;
@@ -248,22 +248,31 @@ impl VirtualTerrainAuthority {
             return Ok(region);
         }
 
-        let _generation_permit = self.generation_limiter.acquire(priority).await;
-        let _region_permit = Arc::clone(&self.region_build_limiter)
+        // Claim the narrow terrain-build lane before the broader priority generation permit.
+        // Otherwise queued terrain tasks can occupy every process-wide permit while waiting for
+        // one or two region lanes, preventing collision-critical work from preempting them.
+        let region_permit = Arc::clone(&self.region_build_limiter)
             .acquire_owned()
             .await
             .map_err(|_| VirtualTerrainError::TaskFailed)?;
+        let generation_permit = self.generation_limiter.acquire(priority).await;
         let authority = Arc::clone(self);
-        let generated =
-            tokio::task::spawn_blocking(move || authority.build_current_region(root, priority))
-                .await
-                .map_err(|_| VirtualTerrainError::TaskFailed)
-                .and_then(|result| result);
-        if let Ok(region) = &generated {
-            self.lock_cache().insert(Arc::clone(region));
-        }
-        self.finish_flight(root, &flight);
-        generated
+        tokio::task::spawn_blocking(move || {
+            // Once native generation starts, it is not abortable. Own the single-flight lock and
+            // cache publication inside this task so a browser request timeout cannot discard the
+            // completed region and force every retry to repeat the same expensive build.
+            let _flight_guard = flight_guard;
+            let _generation_permit = generation_permit;
+            let _region_permit = region_permit;
+            let generated = authority.build_current_region(root, priority);
+            if let Ok(region) = &generated {
+                authority.lock_cache().insert(Arc::clone(region));
+            }
+            authority.finish_flight(root, &flight);
+            generated
+        })
+        .await
+        .map_err(|_| VirtualTerrainError::TaskFailed)?
     }
 
     pub(crate) async fn discover_region_column(

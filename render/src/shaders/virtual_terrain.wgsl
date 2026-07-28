@@ -40,6 +40,8 @@ const NODE_RESIDENT: u32 = 4u;
 const NODE_REPLACEMENT_COHERENT: u32 = 8u;
 const NODE_PRIOR_REFINED: u32 = 16u;
 const NODE_SURFACE: u32 = 32u;
+const NODE_BALANCED_REFINED: u32 = 64u;
+const NODE_BALANCED_SELECTED: u32 = 128u;
 const OVERFLOW_SELECTION: u32 = 1u;
 const OVERFLOW_FEEDBACK: u32 = 2u;
 const OVERFLOW_TRAVERSAL: u32 = 4u;
@@ -221,10 +223,12 @@ fn traverse(@builtin(workgroup_id) workgroup: vec3<u32>) {
       view.projection_thresholds.z,
       (flags & NODE_PRIOR_REFINED) != 0u,
     );
-    let wants_more_detail = view.options.x != 0u
-      || page_intersects_exact_surface_radius(node, flags)
-      || page_intersects_surface_lod_guard(node, flags)
-      || projected_error_exceeds(node, threshold);
+    let wants_more_detail = (flags & NODE_BALANCED_SELECTED) == 0u
+      && ((flags & NODE_BALANCED_REFINED) != 0u
+        || view.options.x != 0u
+        || page_intersects_exact_surface_radius(node, flags)
+        || page_intersects_surface_lod_guard(node, flags)
+        || projected_error_exceeds(node, threshold));
     let wants_refinement = (flags & NODE_HAS_CHILDREN) != 0u && wants_more_detail;
     if wants_refinement && (flags & NODE_REPLACEMENT_COHERENT) != 0u {
       let child_count = select(8u, 4u, (flags & NODE_SURFACE) != 0u);

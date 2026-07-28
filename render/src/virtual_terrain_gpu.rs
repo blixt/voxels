@@ -23,6 +23,8 @@ const NODE_RESIDENT: u32 = 1 << 2;
 const NODE_REPLACEMENT_COHERENT: u32 = 1 << 3;
 const NODE_PRIOR_REFINED: u32 = 1 << 4;
 const NODE_SURFACE: u32 = 1 << 5;
+const NODE_BALANCED_REFINED: u32 = 1 << 6;
+const NODE_BALANCED_SELECTED: u32 = 1 << 7;
 const INVALID_NODE: u32 = u32::MAX;
 const GPU_TRAVERSAL_OVERFLOW_FEEDBACK: u32 = 1 << 1;
 const GPU_TRAVERSAL_READBACK_SLOTS: usize = 3;
@@ -215,6 +217,8 @@ pub(crate) struct VirtualTerrainGpuControl {
     node_keys: Vec<TerrainPageKey>,
     root_indices: Vec<u32>,
     prior_refined: BTreeSet<TerrainPageKey>,
+    balanced_refined: BTreeSet<TerrainPageKey>,
+    balanced_selected: BTreeSet<TerrainPageKey>,
     geometry_pages: Vec<GpuVirtualTerrainGeometryPage>,
     geometry_source_bytes: u64,
     geometry_source_bound: bool,
@@ -491,6 +495,8 @@ impl VirtualTerrainGpuControl {
             node_keys: Vec::new(),
             root_indices: Vec::new(),
             prior_refined: BTreeSet::new(),
+            balanced_refined: BTreeSet::new(),
+            balanced_selected: BTreeSet::new(),
             geometry_pages: Vec::new(),
             geometry_source_bytes: geometry_source_placeholder.size(),
             geometry_source_bound: false,
@@ -624,6 +630,12 @@ impl VirtualTerrainGpuControl {
             node_keys.push(node.key);
         }
         let prior_refined = hierarchy.refined_last_cut().collect::<BTreeSet<_>>();
+        let balanced_refined = hierarchy
+            .balanced_refined_last_cut()
+            .collect::<BTreeSet<_>>();
+        let balanced_selected = hierarchy
+            .balanced_selected_last_cut()
+            .collect::<BTreeSet<_>>();
         let mut nodes = Vec::with_capacity(directory_nodes.len());
         let mut root_indices = Vec::with_capacity(roots.len());
         for node in &directory_nodes {
@@ -637,6 +649,12 @@ impl VirtualTerrainGpuControl {
             }
             if prior_refined.contains(&node.key) {
                 flags |= NODE_PRIOR_REFINED;
+            }
+            if balanced_refined.contains(&node.key) {
+                flags |= NODE_BALANCED_REFINED;
+            }
+            if balanced_selected.contains(&node.key) {
+                flags |= NODE_BALANCED_SELECTED;
             }
             packed.maximum_flags[3] = flags as i32;
             if roots.contains(&node.key) {
@@ -667,6 +685,8 @@ impl VirtualTerrainGpuControl {
         self.node_keys = node_keys;
         self.root_indices = root_indices;
         self.prior_refined = prior_refined;
+        self.balanced_refined = balanced_refined;
+        self.balanced_selected = balanced_selected;
         self.geometry_pages = geometry_pages;
         self.invalidate_feedback();
         Ok(())
@@ -700,6 +720,20 @@ impl VirtualTerrainGpuControl {
                     .is_some_and(|root| key.ancestor_at(root.level) == Some(*root))
             })
         });
+        self.balanced_refined.retain(|key| {
+            self.root_indices.iter().any(|root_index| {
+                self.node_keys
+                    .get(*root_index as usize)
+                    .is_some_and(|root| key.ancestor_at(root.level) == Some(*root))
+            })
+        });
+        self.balanced_selected.retain(|key| {
+            self.root_indices.iter().any(|root_index| {
+                self.node_keys
+                    .get(*root_index as usize)
+                    .is_some_and(|root| key.ancestor_at(root.level) == Some(*root))
+            })
+        });
         self.invalidate_feedback();
         Ok(())
     }
@@ -716,6 +750,23 @@ impl VirtualTerrainGpuControl {
         }
         if self.geometry_source_bound && self.geometry_source_bytes == source.size() {
             return Ok(());
+        }
+        self.replace_geometry_source(device, source)
+    }
+
+    /// Replaces the source arena even when its byte size is unchanged.
+    ///
+    /// Arena compaction deliberately swaps one fixed-capacity buffer for another, so byte size
+    /// alone cannot identify whether the existing bind groups still reference the live source.
+    pub(crate) fn replace_geometry_source(
+        &mut self,
+        device: &Device,
+        source: &Buffer,
+    ) -> Result<(), VirtualTerrainGpuError> {
+        if source.size() > device.limits().max_storage_buffer_binding_size
+            || !source.usage().contains(wgpu::BufferUsages::STORAGE)
+        {
+            return Err(VirtualTerrainGpuError::DeviceLimit);
         }
         self.compaction_bind_group = create_compaction_bind_group(
             device,
@@ -755,20 +806,7 @@ impl VirtualTerrainGpuControl {
             .node_indices
             .get(&key)
             .ok_or(VirtualTerrainGpuError::UnknownPage(key))?;
-        let opaque_surface = self.pack_geometry_range(geometry.opaque_surface)?;
-        let opaque_triangle = self.pack_geometry_range(geometry.opaque_triangle)?;
-        let water_surface = self.pack_geometry_range(geometry.water_surface)?;
-        let water_triangle = self.pack_geometry_range(geometry.water_triangle)?;
-        let record = GpuVirtualTerrainGeometryPage {
-            opaque_surface_offset: opaque_surface.0,
-            opaque_surface_count: opaque_surface.1,
-            opaque_triangle_offset: opaque_triangle.0,
-            opaque_triangle_count: opaque_triangle.1,
-            water_surface_offset: water_surface.0,
-            water_surface_count: water_surface.1,
-            water_triangle_offset: water_triangle.0,
-            water_triangle_count: water_triangle.1,
-        };
+        let record = self.pack_geometry_page(geometry)?;
         let destination = self
             .geometry_pages
             .get_mut(index as usize)
@@ -783,6 +821,76 @@ impl VirtualTerrainGpuControl {
             bytemuck::bytes_of(&record),
         );
         Ok(())
+    }
+
+    /// Replaces several page records and publishes the mirror with one queue write.
+    pub(crate) fn update_page_geometries(
+        &mut self,
+        queue: &Queue,
+        geometries: impl IntoIterator<Item = (TerrainPageKey, VirtualTerrainGpuGeometry)>,
+    ) -> Result<(), VirtualTerrainGpuError> {
+        let records = geometries
+            .into_iter()
+            .map(|(key, geometry)| {
+                let index = *self
+                    .node_indices
+                    .get(&key)
+                    .ok_or(VirtualTerrainGpuError::UnknownPage(key))?;
+                Ok((index, self.pack_geometry_page(geometry)?))
+            })
+            .collect::<Result<Vec<_>, VirtualTerrainGpuError>>()?;
+        for (index, record) in records {
+            let destination = self
+                .geometry_pages
+                .get_mut(index as usize)
+                .ok_or(VirtualTerrainGpuError::GeometryCapacity)?;
+            *destination = record;
+        }
+        if !self.geometry_pages.is_empty() {
+            queue.write_buffer(
+                &self.geometry_page_buffer,
+                0,
+                bytemuck::cast_slice(&self.geometry_pages),
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_page_geometries(
+        &self,
+        geometries: impl IntoIterator<Item = (TerrainPageKey, VirtualTerrainGpuGeometry)>,
+    ) -> Result<(), VirtualTerrainGpuError> {
+        for (key, geometry) in geometries {
+            let index = *self
+                .node_indices
+                .get(&key)
+                .ok_or(VirtualTerrainGpuError::UnknownPage(key))?;
+            self.geometry_pages
+                .get(index as usize)
+                .ok_or(VirtualTerrainGpuError::GeometryCapacity)?;
+            self.pack_geometry_page(geometry)?;
+        }
+        Ok(())
+    }
+
+    fn pack_geometry_page(
+        &self,
+        geometry: VirtualTerrainGpuGeometry,
+    ) -> Result<GpuVirtualTerrainGeometryPage, VirtualTerrainGpuError> {
+        let opaque_surface = self.pack_geometry_range(geometry.opaque_surface)?;
+        let opaque_triangle = self.pack_geometry_range(geometry.opaque_triangle)?;
+        let water_surface = self.pack_geometry_range(geometry.water_surface)?;
+        let water_triangle = self.pack_geometry_range(geometry.water_triangle)?;
+        Ok(GpuVirtualTerrainGeometryPage {
+            opaque_surface_offset: opaque_surface.0,
+            opaque_surface_count: opaque_surface.1,
+            opaque_triangle_offset: opaque_triangle.0,
+            opaque_triangle_count: opaque_triangle.1,
+            water_surface_offset: water_surface.0,
+            water_surface_count: water_surface.1,
+            water_triangle_offset: water_triangle.0,
+            water_triangle_count: water_triangle.1,
+        })
     }
 
     fn pack_geometry_range(
@@ -850,19 +958,37 @@ impl VirtualTerrainGpuControl {
         Ok(())
     }
 
-    pub(crate) fn synchronize_prior_refinement(
+    pub(crate) fn synchronize_refinement_state(
         &mut self,
         queue: &Queue,
         hierarchy: &VirtualTerrainHierarchy,
     ) -> Result<bool, VirtualTerrainGpuError> {
-        let next = hierarchy.refined_last_cut().collect::<BTreeSet<_>>();
-        let changed = self
+        let next_prior = hierarchy.refined_last_cut().collect::<BTreeSet<_>>();
+        let next_balanced = hierarchy
+            .balanced_refined_last_cut()
+            .collect::<BTreeSet<_>>();
+        let next_balanced_selected = hierarchy
+            .balanced_selected_last_cut()
+            .collect::<BTreeSet<_>>();
+        let mut changed = self
             .prior_refined
-            .symmetric_difference(&next)
+            .symmetric_difference(&next_prior)
             .copied()
-            .collect::<Vec<_>>();
+            .collect::<BTreeSet<_>>();
+        changed.extend(
+            self.balanced_refined
+                .symmetric_difference(&next_balanced)
+                .copied(),
+        );
+        changed.extend(
+            self.balanced_selected
+                .symmetric_difference(&next_balanced_selected)
+                .copied(),
+        );
         let changed_any = !changed.is_empty();
-        self.prior_refined = next;
+        self.prior_refined = next_prior;
+        self.balanced_refined = next_balanced;
+        self.balanced_selected = next_balanced_selected;
         for key in changed {
             self.update_node_flags(queue, hierarchy, key)?;
         }
@@ -891,6 +1017,12 @@ impl VirtualTerrainGpuControl {
         }
         if self.prior_refined.contains(&key) {
             flags |= NODE_PRIOR_REFINED;
+        }
+        if self.balanced_refined.contains(&key) {
+            flags |= NODE_BALANCED_REFINED;
+        }
+        if self.balanced_selected.contains(&key) {
+            flags |= NODE_BALANCED_SELECTED;
         }
         let packed = self
             .nodes

@@ -153,6 +153,7 @@ pub struct TerrainStreamStats {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingDemand {
     demand: TerrainPageDemand,
+    replacement_parent: Option<TerrainPageKey>,
     attempt: u8,
     retry_at_ms: u64,
 }
@@ -173,6 +174,7 @@ pub struct TerrainRequestBatch {
 pub enum TerrainStreamError {
     InvalidConfig,
     InvalidDemandGroup,
+    UnknownPending(TerrainPageTransferIdentity),
     UnknownInFlight(TerrainPageTransferIdentity),
 }
 
@@ -182,6 +184,12 @@ impl fmt::Display for TerrainStreamError {
             Self::InvalidConfig => formatter.write_str("invalid virtual terrain stream capacity"),
             Self::InvalidDemandGroup => {
                 formatter.write_str("invalid or incomplete virtual terrain demand group")
+            }
+            Self::UnknownPending(identity) => {
+                write!(
+                    formatter,
+                    "virtual terrain page {identity:?} is not pending"
+                )
             }
             Self::UnknownInFlight(identity) => {
                 write!(
@@ -261,6 +269,7 @@ impl TerrainStreamScheduler {
                     demand.identity,
                     PendingDemand {
                         demand,
+                        replacement_parent: group.replacement_parent,
                         attempt: prior.map_or(0, |pending| pending.attempt),
                         retry_at_ms: prior.map_or(0, |pending| pending.retry_at_ms),
                     },
@@ -280,7 +289,12 @@ impl TerrainStreamScheduler {
         Ok(())
     }
 
-    pub fn next_batch(&mut self, now_ms: u64) -> Option<TerrainRequestBatch> {
+    /// Selects the next complete replacement group without moving it to in-flight.
+    ///
+    /// Transport submission is the capability boundary. Callers commit only after the transport
+    /// has accepted the batch, so window pressure and socket backpressure cannot manufacture
+    /// failed in-flight work.
+    pub fn peek_batch(&self, now_ms: u64) -> Option<TerrainRequestBatch> {
         let available = self
             .config
             .max_in_flight_pages
@@ -289,38 +303,68 @@ impl TerrainStreamScheduler {
         if item_limit == 0 {
             return None;
         }
-        let mut candidates = self
-            .pending
-            .values()
-            .filter(|pending| pending.retry_at_ms <= now_ms)
-            .cloned()
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| compare_demands(&left.demand, &right.demand));
+        let mut replacement_groups = BTreeMap::<TerrainPageKey, Vec<PendingDemand>>::new();
+        let mut candidates = Vec::<Vec<PendingDemand>>::new();
+        for pending in self.pending.values().cloned() {
+            if let Some(parent) = pending.replacement_parent {
+                replacement_groups.entry(parent).or_default().push(pending);
+            } else {
+                candidates.push(vec![pending]);
+            }
+        }
+        candidates.extend(replacement_groups.into_values());
+        candidates.retain(|group| group.iter().all(|pending| pending.retry_at_ms <= now_ms));
+        candidates.sort_by(|left, right| compare_pending_groups(left, right));
         let mut pages = Vec::new();
         let mut estimated_bytes = 0usize;
-        for pending in candidates {
-            if pages.len() == item_limit {
-                break;
-            }
-            let bytes = pending.demand.estimated_encoded_bytes as usize;
-            if estimated_bytes.saturating_add(bytes) > self.config.max_batch_bytes {
+        for mut group in candidates {
+            group.sort_by(|left, right| compare_demands(&left.demand, &right.demand));
+            if pages.len().saturating_add(group.len()) > item_limit {
                 continue;
             }
-            estimated_bytes += bytes;
-            pages.push(pending.demand.identity);
-            self.pending.remove(&pending.demand.identity);
+            let group_bytes = group.iter().fold(0usize, |bytes, pending| {
+                bytes.saturating_add(pending.demand.estimated_encoded_bytes as usize)
+            });
+            if estimated_bytes.saturating_add(group_bytes) > self.config.max_batch_bytes {
+                continue;
+            }
+            estimated_bytes = estimated_bytes.saturating_add(group_bytes);
+            pages.extend(group.into_iter().map(|pending| pending.demand.identity));
+        }
+        (!pages.is_empty()).then_some(TerrainRequestBatch {
+            pages,
+            estimated_bytes,
+        })
+    }
+
+    pub fn commit_batch(&mut self, batch: &TerrainRequestBatch) -> Result<(), TerrainStreamError> {
+        if let Some(identity) = batch
+            .pages
+            .iter()
+            .find(|identity| !self.pending.contains_key(identity))
+        {
+            return Err(TerrainStreamError::UnknownPending(*identity));
+        }
+        for identity in &batch.pages {
+            let pending = self
+                .pending
+                .remove(identity)
+                .ok_or(TerrainStreamError::UnknownPending(*identity))?;
             self.in_flight.insert(
-                pending.demand.identity,
+                *identity,
                 InFlightDemand {
                     pending,
                     obsolete: false,
                 },
             );
         }
-        (!pages.is_empty()).then_some(TerrainRequestBatch {
-            pages,
-            estimated_bytes,
-        })
+        Ok(())
+    }
+
+    pub fn next_batch(&mut self, now_ms: u64) -> Option<TerrainRequestBatch> {
+        let batch = self.peek_batch(now_ms)?;
+        self.commit_batch(&batch).ok()?;
+        Some(batch)
     }
 
     pub fn complete(
@@ -368,6 +412,24 @@ impl TerrainStreamScheduler {
         Ok(())
     }
 
+    /// Returns an unsent or preempted page to pending demand without charging retry backoff.
+    ///
+    /// Transport flow control is not a page failure. Keeping this separate from [`Self::fail`]
+    /// prevents a full shared request window from exponentially delaying the exact-vicinity work
+    /// that is ready to send as soon as a capability becomes available.
+    pub fn defer(
+        &mut self,
+        identity: TerrainPageTransferIdentity,
+    ) -> Result<(), TerrainStreamError> {
+        let Some(entry) = self.in_flight.remove(&identity) else {
+            return Err(TerrainStreamError::UnknownInFlight(identity));
+        };
+        if !entry.obsolete && self.pending.len() < self.config.max_pending_pages {
+            self.pending.insert(identity, entry.pending);
+        }
+        Ok(())
+    }
+
     pub fn stats(&self) -> TerrainStreamStats {
         TerrainStreamStats {
             pending_pages: self.pending.len(),
@@ -392,6 +454,21 @@ fn compare_demand_groups(left: &TerrainDemandGroup, right: &TerrainDemandGroup) 
             .iter()
             .min_by(|left, right| compare_demands(left, right))
             .copied()
+    };
+    match (best(left), best(right)) {
+        (Some(left), Some(right)) => compare_demands(&left, &right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn compare_pending_groups(left: &[PendingDemand], right: &[PendingDemand]) -> Ordering {
+    let best = |group: &[PendingDemand]| {
+        group
+            .iter()
+            .min_by(|left, right| compare_demands(&left.demand, &right.demand))
+            .map(|pending| pending.demand)
     };
     match (best(left), best(right)) {
         (Some(left), Some(right)) => compare_demands(&left, &right),
@@ -638,6 +715,53 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_preserves_replacement_groups_instead_of_interleaving_pages() {
+        let identity = |key: TerrainPageKey, marker: u8| TerrainPageTransferIdentity {
+            key,
+            revision: 1,
+            content_fingerprint: [marker; 32],
+        };
+        let first_parent = TerrainPageKey::surface(1, 0, 0);
+        let second_parent = TerrainPageKey::surface(1, 1, 0);
+        let first = first_parent
+            .refinement_children()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| demand(identity(key, index as u8 + 1), 100 - index as u32 * 30))
+            .collect::<Vec<_>>();
+        let second = second_parent
+            .refinement_children()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| demand(identity(key, index as u8 + 11), 99 - index as u32))
+            .collect::<Vec<_>>();
+        let first_keys = first
+            .iter()
+            .map(|page| page.identity.key)
+            .collect::<BTreeSet<_>>();
+        let mut scheduler =
+            TerrainStreamScheduler::new(TerrainStreamConfig::INTERACTIVE_CLIENT).unwrap();
+        scheduler
+            .reconcile([
+                TerrainDemandGroup::replacement(first_parent, first).unwrap(),
+                TerrainDemandGroup::replacement(second_parent, second).unwrap(),
+            ])
+            .unwrap();
+        let batch = scheduler.next_batch(0).unwrap();
+        assert_eq!(batch.pages.len(), 4);
+        assert_eq!(
+            batch
+                .pages
+                .iter()
+                .map(|identity| identity.key)
+                .collect::<BTreeSet<_>>(),
+            first_keys
+        );
+    }
+
+    #[test]
     fn incomplete_replacement_groups_are_rejected() {
         let parent = TerrainPageKey {
             level: 1,
@@ -724,6 +848,25 @@ mod tests {
         scheduler.reconcile([]).unwrap();
         assert!(!scheduler.complete(identity, 12_345).unwrap());
         assert_eq!(scheduler.stats().cancellation_waste_bytes, 12_345);
+    }
+
+    #[test]
+    fn transport_deferral_preserves_priority_without_retry_backoff() {
+        let (identity, _) = page(
+            TerrainPageKey {
+                level: 0,
+                coord: [0, 0, 0],
+            },
+            1,
+        );
+        let mut scheduler = TerrainStreamScheduler::new(TerrainStreamConfig::DEVELOPMENT).unwrap();
+        scheduler
+            .reconcile([TerrainDemandGroup::singleton(demand(identity, 10))])
+            .unwrap();
+        assert_eq!(scheduler.next_batch(0).unwrap().pages, vec![identity]);
+        scheduler.defer(identity).unwrap();
+        assert_eq!(scheduler.stats().failed_pages, 0);
+        assert_eq!(scheduler.next_batch(0).unwrap().pages, vec![identity]);
     }
 
     #[test]
