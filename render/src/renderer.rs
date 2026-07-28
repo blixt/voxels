@@ -562,9 +562,9 @@ struct GpuQuad {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 struct GpuTerrainVertex {
-    position: [i32; 3],
+    position: [f32; 3],
     material: u32,
     normal: [i16; 4],
 }
@@ -821,8 +821,15 @@ fn virtual_surface_gpu_quads(
     Ok(gpu_quads)
 }
 
+#[derive(Clone, Debug)]
+struct VirtualHeightfieldSamples {
+    ground: Vec<f32>,
+    water: Vec<Option<f32>>,
+}
+
 fn virtual_triangle_gpu_vertices(
     page: &TerrainPageV1,
+    constrained_heightfield: Option<&VirtualHeightfieldSamples>,
 ) -> Result<Vec<GpuTerrainVertex>, VirtualTerrainRendererError> {
     match &page.representation {
         TerrainPageRepresentation::TriangleCluster(cluster) => {
@@ -856,7 +863,7 @@ fn virtual_triangle_gpu_vertices(
                         page.key,
                     ));
                 }
-                push_virtual_triangle(
+                push_virtual_triangle_i32(
                     &mut vertices,
                     [left.position, middle.position, right.position],
                     material,
@@ -867,6 +874,18 @@ fn virtual_triangle_gpu_vertices(
         }
         TerrainPageRepresentation::HeightfieldGrid(grid) => {
             let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+            let owned_heightfield;
+            let heightfield = if let Some(heightfield) = constrained_heightfield {
+                heightfield
+            } else {
+                owned_heightfield = unconstrained_virtual_heightfield_samples(grid);
+                &owned_heightfield
+            };
+            if heightfield.ground.len() != edge * edge || heightfield.water.len() != edge * edge {
+                return Err(VirtualTerrainRendererError::InvalidTriangleCluster(
+                    page.key,
+                ));
+            }
             let cell_count =
                 TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize;
             let mut vertices = Vec::with_capacity(cell_count.saturating_mul(12));
@@ -896,24 +915,24 @@ fn virtual_triangle_gpu_vertices(
                     })?;
                     let positions = [
                         [
-                            page.bounds.min.x + x as i32 * stride,
-                            grid.ground_heights[sample_indices[0]],
-                            page.bounds.min.z + z as i32 * stride,
+                            (page.bounds.min.x + x as i32 * stride) as f32,
+                            heightfield.ground[sample_indices[0]],
+                            (page.bounds.min.z + z as i32 * stride) as f32,
                         ],
                         [
-                            page.bounds.min.x + (x as i32 + 1) * stride,
-                            grid.ground_heights[sample_indices[1]],
-                            page.bounds.min.z + z as i32 * stride,
+                            (page.bounds.min.x + (x as i32 + 1) * stride) as f32,
+                            heightfield.ground[sample_indices[1]],
+                            (page.bounds.min.z + z as i32 * stride) as f32,
                         ],
                         [
-                            page.bounds.min.x + (x as i32 + 1) * stride,
-                            grid.ground_heights[sample_indices[2]],
-                            page.bounds.min.z + (z as i32 + 1) * stride,
+                            (page.bounds.min.x + (x as i32 + 1) * stride) as f32,
+                            heightfield.ground[sample_indices[2]],
+                            (page.bounds.min.z + (z as i32 + 1) * stride) as f32,
                         ],
                         [
-                            page.bounds.min.x + x as i32 * stride,
-                            grid.ground_heights[sample_indices[3]],
-                            page.bounds.min.z + (z as i32 + 1) * stride,
+                            (page.bounds.min.x + x as i32 * stride) as f32,
+                            heightfield.ground[sample_indices[3]],
+                            (page.bounds.min.z + (z as i32 + 1) * stride) as f32,
                         ],
                     ];
                     for triangle in [[0, 2, 1], [0, 3, 2]] {
@@ -929,14 +948,21 @@ fn virtual_triangle_gpu_vertices(
                     };
                     let water_positions = std::array::from_fn::<_, 4, _>(|index| {
                         let mut position = positions[index];
-                        position[1] = grid.water_heights[sample_indices[index]];
-                        position
+                        heightfield.water[sample_indices[index]].map(|height| {
+                            position[1] = height;
+                            position
+                        })
                     });
                     let flat_height = water_positions
                         .iter()
-                        .map(|position| position[1])
-                        .reduce(|left, right| if left == right { left } else { i32::MIN });
-                    if flat_height.is_some_and(|height| height != i32::MIN) {
+                        .copied()
+                        .reduce(|left, right| {
+                            left.zip(right)
+                                .filter(|(left, right)| left[1] == right[1])
+                                .map(|(left, _)| left)
+                        })
+                        .flatten();
+                    if flat_height.is_some() {
                         // Coplanar wet cells are emitted as maximal rectangles after the ground
                         // pass. Skipping them here prevents every source-grid cell from becoming
                         // two duplicated water triangles.
@@ -945,11 +971,11 @@ fn virtual_triangle_gpu_vertices(
                     for triangle in [[0, 2, 1], [0, 3, 2]] {
                         if triangle
                             .iter()
-                            .all(|index| water_positions[*index][1] != i32::MIN)
+                            .all(|index| water_positions[*index].is_some())
                         {
                             push_virtual_triangle(
                                 &mut vertices,
-                                triangle.map(|index| water_positions[index]),
+                                triangle.map(|index| water_positions[index].unwrap()),
                                 water,
                                 page.key,
                             )?;
@@ -958,7 +984,7 @@ fn virtual_triangle_gpu_vertices(
                 }
             }
             if let Some(water) = water {
-                push_virtual_flat_water_rectangles(&mut vertices, page, grid, water)?;
+                push_virtual_flat_water_rectangles(&mut vertices, page, grid, heightfield, water)?;
             }
             Ok(vertices)
         }
@@ -972,6 +998,7 @@ fn push_virtual_flat_water_rectangles(
     vertices: &mut Vec<GpuTerrainVertex>,
     page: &TerrainPageV1,
     grid: &voxels_world::TerrainHeightfieldGrid,
+    heightfield: &VirtualHeightfieldSamples,
     material: Material,
 ) -> Result<(), VirtualTerrainRendererError> {
     let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
@@ -985,9 +1012,13 @@ fn push_virtual_flat_water_rectangles(
                 x + 1 + (z + 1) * edge,
                 x + (z + 1) * edge,
             ];
-            let heights = samples.map(|sample| grid.water_heights[sample]);
-            if heights[0] != i32::MIN && heights.into_iter().all(|height| height == heights[0]) {
-                flat_heights[x + z * cells] = Some(heights[0]);
+            let heights = samples.map(|sample| heightfield.water[sample]);
+            if let Some(height) = heights[0]
+                && heights
+                    .into_iter()
+                    .all(|candidate| candidate == Some(height))
+            {
+                flat_heights[x + z * cells] = Some(height);
             }
         }
     }
@@ -1028,6 +1059,7 @@ fn push_virtual_flat_water_rectangles(
                     .ok()
                     .and_then(|cell| cell.checked_mul(stride))
                     .and_then(|offset| origin.checked_add(offset))
+                    .map(|coordinate| coordinate as f32)
                     .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(
                         page.key,
                     ))
@@ -1055,9 +1087,134 @@ fn push_virtual_flat_water_rectangles(
     Ok(())
 }
 
-fn push_virtual_triangle(
+fn unconstrained_virtual_heightfield_samples(
+    grid: &voxels_world::TerrainHeightfieldGrid,
+) -> VirtualHeightfieldSamples {
+    VirtualHeightfieldSamples {
+        ground: grid
+            .ground_heights
+            .iter()
+            .map(|height| *height as f32)
+            .collect(),
+        water: grid
+            .water_heights
+            .iter()
+            .map(|height| (*height != i32::MIN).then_some(*height as f32))
+            .collect(),
+    }
+}
+
+fn constrained_virtual_heightfield_samples(
+    hierarchy: &VirtualTerrainHierarchy,
+    page: &TerrainPageV1,
+) -> Result<VirtualHeightfieldSamples, VirtualTerrainRendererError> {
+    let TerrainPageRepresentation::HeightfieldGrid(grid) = &page.representation else {
+        return Err(VirtualTerrainRendererError::UnsupportedRepresentation(
+            page.representation.kind(),
+        ));
+    };
+    let mut samples = unconstrained_virtual_heightfield_samples(grid);
+    let Some(parent_key) = page.key.parent() else {
+        return Ok(samples);
+    };
+    let Some(parent) = hierarchy.resident_page(parent_key) else {
+        return Ok(samples);
+    };
+    if !matches!(
+        parent.representation,
+        TerrainPageRepresentation::HeightfieldGrid(_)
+    ) {
+        return Ok(samples);
+    }
+    let parent_samples = constrained_virtual_heightfield_samples(hierarchy, parent)?;
+    let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+    let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+    if samples.ground.len() != edge * edge
+        || samples.water.len() != edge * edge
+        || parent_samples.ground.len() != edge * edge
+        || parent_samples.water.len() != edge * edge
+    {
+        return Err(VirtualTerrainRendererError::InvalidTriangleCluster(
+            page.key,
+        ));
+    }
+    let quadrant_x = usize::try_from(page.key.coord[0].rem_euclid(2))
+        .map_err(|_| VirtualTerrainRendererError::InvalidTriangleCluster(page.key))?;
+    let quadrant_z = usize::try_from(page.key.coord[2].rem_euclid(2))
+        .map_err(|_| VirtualTerrainRendererError::InvalidTriangleCluster(page.key))?;
+    let interpolate_ground = |fixed: usize, combined: usize, row: bool| {
+        let coarse = combined / 2;
+        let first = if row {
+            coarse + fixed * edge
+        } else {
+            fixed + coarse * edge
+        };
+        if combined % 2 == 0 {
+            parent_samples.ground[first]
+        } else {
+            let second = if row { first + 1 } else { first + edge };
+            (parent_samples.ground[first] + parent_samples.ground[second]) * 0.5
+        }
+    };
+    let interpolate_water = |fixed: usize, combined: usize, row: bool| {
+        let coarse = combined / 2;
+        let first = if row {
+            coarse + fixed * edge
+        } else {
+            fixed + coarse * edge
+        };
+        if combined % 2 == 0 {
+            parent_samples.water[first]
+        } else {
+            let second = if row { first + 1 } else { first + edge };
+            parent_samples.water[first]
+                .zip(parent_samples.water[second])
+                .map(|(left, right)| (left + right) * 0.5)
+        }
+    };
+    for offset in 0..=cells {
+        if quadrant_z == 0 {
+            let combined = quadrant_x * cells + offset;
+            samples.ground[offset] = interpolate_ground(0, combined, true);
+            samples.water[offset] = interpolate_water(0, combined, true);
+        } else {
+            let combined = quadrant_x * cells + offset;
+            let child = offset + cells * edge;
+            samples.ground[child] = interpolate_ground(cells, combined, true);
+            samples.water[child] = interpolate_water(cells, combined, true);
+        }
+        if quadrant_x == 0 {
+            let combined = quadrant_z * cells + offset;
+            let child = offset * edge;
+            samples.ground[child] = interpolate_ground(0, combined, false);
+            samples.water[child] = interpolate_water(0, combined, false);
+        } else {
+            let combined = quadrant_z * cells + offset;
+            let child = cells + offset * edge;
+            samples.ground[child] = interpolate_ground(cells, combined, false);
+            samples.water[child] = interpolate_water(cells, combined, false);
+        }
+    }
+    Ok(samples)
+}
+
+fn push_virtual_triangle_i32(
     vertices: &mut Vec<GpuTerrainVertex>,
     positions: [[i32; 3]; 3],
+    material: Material,
+    key: TerrainPageKey,
+) -> Result<(), VirtualTerrainRendererError> {
+    push_virtual_triangle(
+        vertices,
+        positions.map(|position| position.map(|component| component as f32)),
+        material,
+        key,
+    )
+}
+
+fn push_virtual_triangle(
+    vertices: &mut Vec<GpuTerrainVertex>,
+    positions: [[f32; 3]; 3],
     material: Material,
     key: TerrainPageKey,
 ) -> Result<(), VirtualTerrainRendererError> {
@@ -4943,6 +5100,12 @@ impl Renderer {
                 .as_array()
                 .map(|value| value as f32 * VOXEL_SIZE_METRES),
         );
+        let constrained_heightfield = matches!(
+            page.representation,
+            TerrainPageRepresentation::HeightfieldGrid(_)
+        )
+        .then(|| constrained_virtual_heightfield_samples(&self.virtual_terrain, &page))
+        .transpose()?;
         let mesh = match &page.representation {
             TerrainPageRepresentation::SteppedSurfaceResidual(_)
             | TerrainPageRepresentation::SparseVoxelBrick(_)
@@ -5007,7 +5170,8 @@ impl Renderer {
             }
             TerrainPageRepresentation::TriangleCluster(_)
             | TerrainPageRepresentation::HeightfieldGrid(_) => {
-                let vertices = virtual_triangle_gpu_vertices(&page)?;
+                let vertices =
+                    virtual_triangle_gpu_vertices(&page, constrained_heightfield.as_ref())?;
                 let (vertices, opaque_vertex_count, water_vertex_count) =
                     partition_virtual_triangle_geometry(vertices)
                         .ok_or(VirtualTerrainRendererError::GpuPageTooLarge(page.key))?;
@@ -12804,7 +12968,7 @@ fn quad_layout() -> wgpu::VertexBufferLayout<'static> {
 
 fn terrain_triangle_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRIBUTES: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
-        0 => Sint32x3,
+        0 => Float32x3,
         1 => Uint32,
         2 => Snorm16x4
     ];
@@ -16600,7 +16764,7 @@ mod tests {
             voxels_world::TerrainErrorBounds::EXACT,
         )
         .unwrap();
-        let vertices = virtual_triangle_gpu_vertices(&page).unwrap();
+        let vertices = virtual_triangle_gpu_vertices(&page, None).unwrap();
         let ground_vertices =
             TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize * 6;
         assert_eq!(vertices.len(), ground_vertices + 6);
@@ -16608,6 +16772,78 @@ mod tests {
         let (_, opaque, water) = partition_virtual_triangle_geometry(vertices).unwrap();
         assert_eq!(opaque as usize, ground_vertices);
         assert_eq!(water, 6);
+    }
+
+    #[test]
+    fn child_heightfield_outer_vertices_use_the_recursive_parent_edge_equation() {
+        let source = voxels_world::WorldSourceIdentityHash::from_bytes([31; 32]);
+        let parent_key = TerrainPageKey::surface(1, 0, 0);
+        let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+        let parent_samples = (0..edge * edge)
+            .map(|index| voxels_world::SurfaceSample {
+                height: if index % edge == 0 { 0 } else { 1 },
+                material: Material::Grass,
+                water_level: None,
+                region: SurfaceRegion::VerdantForest,
+                moisture: 0.5,
+                temperature: 0.5,
+                ridge: 0.0,
+                route: None,
+            })
+            .collect::<Vec<_>>();
+        let parent = voxels_world::build_sampled_heightfield_terrain_page(
+            source,
+            parent_key,
+            1,
+            &parent_samples,
+            voxels_world::TerrainErrorBounds::EXACT,
+        )
+        .unwrap();
+        let children = parent_key
+            .refinement_children()
+            .unwrap()
+            .into_iter()
+            .map(|key| {
+                voxels_world::build_sampled_heightfield_terrain_page(
+                    source,
+                    key,
+                    1,
+                    &vec![
+                        voxels_world::SurfaceSample {
+                            height: 9,
+                            material: Material::Grass,
+                            water_level: None,
+                            region: SurfaceRegion::VerdantForest,
+                            moisture: 0.5,
+                            temperature: 0.5,
+                            ridge: 0.0,
+                            route: None,
+                        };
+                        edge * edge
+                    ],
+                    voxels_world::TerrainErrorBounds::EXACT,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let pages = children
+            .iter()
+            .cloned()
+            .chain([parent.clone()])
+            .collect::<Vec<_>>();
+        let directory = voxels_world::TerrainHierarchyDirectoryV1::from_surface_refinement_pages(
+            parent_key, &pages,
+        )
+        .unwrap();
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        hierarchy.register_region_directory(&directory).unwrap();
+        hierarchy.install_page(parent).unwrap();
+
+        let constrained =
+            constrained_virtual_heightfield_samples(&hierarchy, &children[0]).unwrap();
+        assert_eq!(constrained.ground[1], 1.5);
+        assert_eq!(constrained.ground[1 + edge], 10.0);
     }
 
     #[test]
@@ -16634,7 +16870,7 @@ mod tests {
         }));
 
         let vertex = |material: Material| GpuTerrainVertex {
-            position: [0; 3],
+            position: [0.0; 3],
             material: u32::from(material.id()),
             normal: [0, i16::MAX, 0, 0],
         };
@@ -16708,13 +16944,13 @@ mod tests {
             ),
             content_fingerprint: [0; 32],
         };
-        let vertices = virtual_triangle_gpu_vertices(&page).expect("triangle conversion");
+        let vertices = virtual_triangle_gpu_vertices(&page, None).expect("triangle conversion");
         assert_eq!(
             vertices
                 .iter()
                 .map(|vertex| vertex.position)
                 .collect::<Vec<_>>(),
-            [[0, 0, 0], [2, 0, 0], [0, 3, 0]]
+            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 3.0, 0.0]]
         );
         assert!(
             vertices

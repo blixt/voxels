@@ -616,12 +616,12 @@ fn virtual_cluster_surface_weather(world: vec3<f32>) -> vec2<f32> {
 }
 
 fn virtual_cluster_vertex(
-  position_voxels: vec3<i32>,
+  position_voxels: vec3<f32>,
   material: u32,
   packed_normal: vec4<f32>,
   encoded_owner_id: vec2<u32>,
 ) -> VertexOut {
-  let world = vec3<f32>(position_voxels) * frame.viewport_voxel.z;
+  let world = position_voxels * frame.viewport_voxel.z;
   var out: VertexOut;
   out.position = frame.view_projection * vec4<f32>(world, 1.0);
   out.world = world;
@@ -650,7 +650,7 @@ fn virtual_cluster_vertex(
 
 @vertex
 fn vs_virtual_cluster(
-  @location(0) position_voxels: vec3<i32>,
+  @location(0) position_voxels: vec3<f32>,
   @location(1) material: u32,
   @location(2) packed_normal: vec4<f32>,
 ) -> VertexOut {
@@ -664,7 +664,7 @@ fn vs_virtual_cluster(
 
 @vertex
 fn vs_virtual_cluster_diagnostic(
-  @location(0) position_voxels: vec3<i32>,
+  @location(0) position_voxels: vec3<f32>,
   @location(1) material: u32,
   @location(2) packed_normal: vec4<f32>,
   @location(3) diagnostic_owner: vec2<u32>,
