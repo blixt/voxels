@@ -113,7 +113,8 @@ pub use terrain_page::{
     TerrainPageReconstructionError, TerrainPageRepresentation, TerrainPageRepresentationKind,
     TerrainPageV1, TerrainReplacementError, TerrainSimplificationBudget, TerrainSparseBrick,
     TerrainSurfaceQuad, TerrainTopologyClass, TerrainTriangleCluster, assemble_terrain_parent,
-    build_compact_exact_terrain_page, build_exact_cluster_terrain_parent, build_exact_terrain_page,
+    build_compact_exact_terrain_page, build_exact_cluster_terrain_parent,
+    build_exact_surface_terrain_page, build_exact_terrain_page,
     build_sampled_heightfield_terrain_page, decode_terrain_page, encode_terrain_page,
     reconstruct_exact_terrain_surface, validate_terrain_replacement,
 };

@@ -563,7 +563,7 @@ impl std::error::Error for TerrainPageCodecError {}
 
 struct ExactPageSamples {
     halo_min: VoxelCoord,
-    halo_edge: usize,
+    halo_shape: [usize; 3],
     materials: Vec<Material>,
 }
 
@@ -574,16 +574,15 @@ impl ExactPageSamples {
             i64::from(coord.y) - i64::from(self.halo_min.y),
             i64::from(coord.z) - i64::from(self.halo_min.z),
         ];
-        if local
-            .iter()
-            .any(|component| *component < 0 || *component >= self.halo_edge as i64)
-        {
+        if local.iter().zip(self.halo_shape).any(|(component, shape)| {
+            *component < 0 || *component >= i64::try_from(shape).unwrap_or(i64::MAX)
+        }) {
             return Material::Air;
         }
         let x = local[0] as usize;
         let y = local[1] as usize;
         let z = local[2] as usize;
-        self.materials[x + y * self.halo_edge + z * self.halo_edge * self.halo_edge]
+        self.materials[x + y * self.halo_shape[0] + z * self.halo_shape[0] * self.halo_shape[1]]
     }
 }
 
@@ -673,7 +672,8 @@ fn build_exact_terrain_page_with_policy(
             .ok_or(TerrainPageBuildError::SamplingBoundsOverflow)?,
     );
     let halo_edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 2;
-    let mut sampled = Vec::with_capacity(halo_edge * halo_edge * halo_edge);
+    let halo_shape = [halo_edge; 3];
+    let mut sampled = Vec::with_capacity(halo_shape.into_iter().product());
     for z in halo_min.z..halo_max.z {
         for y in halo_min.y..halo_max.y {
             for x in halo_min.x..halo_max.x {
@@ -683,7 +683,7 @@ fn build_exact_terrain_page_with_policy(
     }
     let samples = ExactPageSamples {
         halo_min,
-        halo_edge,
+        halo_shape,
         materials: sampled,
     };
     let faces = canonical_exposed_faces(bounds, |coord| samples.sample(coord));
@@ -743,6 +743,117 @@ fn build_exact_terrain_page_with_policy(
         content_fingerprint: [0; 32],
     };
     page.content_fingerprint = terrain_page_fingerprint(&page);
+    Ok(page)
+}
+
+/// Builds one exact 32xN x32 surface-column leaf from canonical occupancy and material.
+///
+/// A surface key owns a half-open horizontal column rather than a fixed cube. The caller supplies
+/// the conservative vertical interval containing every exposed face that can affect this leaf.
+/// Faces are still derived from a one-voxel canonical halo, so page borders never invent walls and
+/// arbitrary caves, overhangs, excavations, and floating voxels remain ordinary page geometry.
+pub fn build_exact_surface_terrain_page(
+    source_identity_hash: WorldSourceIdentityHash,
+    key: TerrainPageKey,
+    revision: u64,
+    vertical_bounds: [i32; 2],
+    mut material_at: impl FnMut(VoxelCoord) -> Material,
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    if key.level != 0 || !key.is_surface() || vertical_bounds[0] >= vertical_bounds[1] {
+        return Err(TerrainPageBuildError::InvalidPageKey);
+    }
+    let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = key
+        .horizontal_bounds()
+        .ok_or(TerrainPageBuildError::InvalidPageKey)?;
+    let bounds = VoxelBounds::new(
+        VoxelCoord::new(minimum_x, vertical_bounds[0], minimum_z),
+        VoxelCoord::new(maximum_x, vertical_bounds[1], maximum_z),
+    )
+    .ok_or(TerrainPageBuildError::InvalidPageKey)?;
+    let halo_min = VoxelCoord::new(
+        bounds
+            .min
+            .x
+            .checked_sub(1)
+            .ok_or(TerrainPageBuildError::SamplingBoundsOverflow)?,
+        bounds
+            .min
+            .y
+            .checked_sub(1)
+            .ok_or(TerrainPageBuildError::SamplingBoundsOverflow)?,
+        bounds
+            .min
+            .z
+            .checked_sub(1)
+            .ok_or(TerrainPageBuildError::SamplingBoundsOverflow)?,
+    );
+    let halo_max = VoxelCoord::new(
+        bounds
+            .max
+            .x
+            .checked_add(1)
+            .ok_or(TerrainPageBuildError::SamplingBoundsOverflow)?,
+        bounds
+            .max
+            .y
+            .checked_add(1)
+            .ok_or(TerrainPageBuildError::SamplingBoundsOverflow)?,
+        bounds
+            .max
+            .z
+            .checked_add(1)
+            .ok_or(TerrainPageBuildError::SamplingBoundsOverflow)?,
+    );
+    let halo_shape = [
+        usize::try_from(i64::from(halo_max.x) - i64::from(halo_min.x))
+            .map_err(|_| TerrainPageBuildError::SamplingBoundsOverflow)?,
+        usize::try_from(i64::from(halo_max.y) - i64::from(halo_min.y))
+            .map_err(|_| TerrainPageBuildError::SamplingBoundsOverflow)?,
+        usize::try_from(i64::from(halo_max.z) - i64::from(halo_min.z))
+            .map_err(|_| TerrainPageBuildError::SamplingBoundsOverflow)?,
+    ];
+    let capacity = halo_shape
+        .into_iter()
+        .try_fold(1usize, usize::checked_mul)
+        .ok_or(TerrainPageBuildError::SamplingBoundsOverflow)?;
+    let mut sampled = Vec::with_capacity(capacity);
+    for z in halo_min.z..halo_max.z {
+        for y in halo_min.y..halo_max.y {
+            for x in halo_min.x..halo_max.x {
+                sampled.push(material_at(VoxelCoord::new(x, y, z)));
+            }
+        }
+    }
+    let samples = ExactPageSamples {
+        halo_min,
+        halo_shape,
+        materials: sampled,
+    };
+    let faces = canonical_exposed_faces(bounds, |coord| samples.sample(coord));
+    let certificate = BoundaryCertificate::build(bounds, |coord| samples.sample(coord));
+    let boundary_fingerprints =
+        std::array::from_fn(|index| certificate.side(BoundarySide::ALL[index]).fingerprint);
+    let (materials, palette_indices) = material_coverage(bounds, &samples, &faces)?;
+    let representation =
+        TerrainPageRepresentation::SurfaceCluster(merge_surface_faces(&faces, &palette_indices));
+    if representation_bytes(&representation).len() > TERRAIN_PAGE_MAX_PAYLOAD_BYTES {
+        return Err(TerrainPageBuildError::PayloadOverflow);
+    }
+    let mut page = TerrainPageV1 {
+        source_identity_hash,
+        key,
+        revision,
+        bounds,
+        children: Vec::new(),
+        errors: TerrainErrorBounds::EXACT,
+        topology: TerrainTopologyClass::Volumetric,
+        boundary_fingerprints,
+        materials,
+        representation,
+        content_fingerprint: [0; 32],
+    };
+    page.content_fingerprint = terrain_page_fingerprint(&page);
+    encode_terrain_page(&page).map_err(|_| TerrainPageBuildError::PayloadOverflow)?;
     Ok(page)
 }
 
@@ -1759,6 +1870,26 @@ fn validate_surface_heightfield_replacement(
     let TerrainPageRepresentation::HeightfieldGrid(parent_grid) = &parent.representation else {
         return Err(TerrainReplacementError::InvalidRepresentation);
     };
+    let exact_topology_children = children.iter().all(|child| {
+        child.key.level == 0
+            && child.errors == TerrainErrorBounds::EXACT
+            && child.topology == TerrainTopologyClass::Volumetric
+            && matches!(
+                child.representation,
+                TerrainPageRepresentation::SurfaceCluster(_)
+            )
+    });
+    if exact_topology_children {
+        // Internal sibling boundaries were already compared by `validate_children_for_key`.
+        // An exact surface-column group is permitted only below a parent that explicitly declares
+        // its topology unresolved. The parent remains the complete fallback until all four exact
+        // columns are resident, then the group replaces it atomically.
+        return parent
+            .errors
+            .unresolved_topology
+            .then_some(())
+            .ok_or(TerrainReplacementError::InvalidRepresentation);
+    }
     let child_by_key = children
         .iter()
         .map(|child| (child.key, child))
@@ -3589,6 +3720,116 @@ mod tests {
         assert_eq!(material(grid.cell_material_indices[0]), Material::Grass);
         let encoded = encode_terrain_page(&page).unwrap();
         assert_eq!(decode_terrain_page(&encoded, identity()).unwrap(), page);
+    }
+
+    #[test]
+    fn exact_surface_column_preserves_openings_overhangs_and_floating_voxels() {
+        let key = TerrainPageKey::surface(0, -1, 0);
+        let material_at = |coord: VoxelCoord| {
+            if coord == VoxelCoord::new(-16, 5, 16) {
+                Material::Grass
+            } else if (-24..-20).contains(&coord.x)
+                && (12..16).contains(&coord.z)
+                && (-4..=0).contains(&coord.y)
+            {
+                Material::Air
+            } else if coord.y <= 0 {
+                Material::Stone
+            } else {
+                Material::Air
+            }
+        };
+        let page =
+            build_exact_surface_terrain_page(identity(), key, 23, [-8, 8], material_at).unwrap();
+        assert!(page.validates_identity());
+        assert_eq!(page.topology, TerrainTopologyClass::Volumetric);
+        assert_eq!(page.bounds.min, VoxelCoord::new(-32, -8, 0));
+        assert_eq!(page.bounds.max, VoxelCoord::new(0, 8, 32));
+
+        let TerrainPageRepresentation::SurfaceCluster(quads) = &page.representation else {
+            panic!("exact surface column did not produce a clustered surface");
+        };
+        let mut faces = BTreeSet::new();
+        for quad in quads {
+            let material_id = page.materials[usize::from(quad.material_index)]
+                .material
+                .id();
+            expand_surface_quad(*quad, material_id, &mut faces);
+        }
+        assert!(faces.contains(&CanonicalFaceKey {
+            axis: FaceAxis::Y,
+            plane: 6,
+            u: -16,
+            v: 16,
+            solid_side: VoxelCoord::new(-16, 5, 16),
+            material_id: Material::Grass.id(),
+        }));
+        assert!(faces.contains(&CanonicalFaceKey {
+            axis: FaceAxis::X,
+            plane: -24,
+            u: 0,
+            v: 12,
+            solid_side: VoxelCoord::new(-25, 0, 12),
+            material_id: Material::Stone.id(),
+        }));
+        assert!(
+            !faces
+                .iter()
+                .any(|face| face.axis == FaceAxis::Y && face.plane == -8),
+            "the vertical scan boundary must not become an invented bottom wall"
+        );
+
+        let encoded = encode_terrain_page(&page).unwrap();
+        assert_eq!(decode_terrain_page(&encoded, identity()).unwrap(), page);
+    }
+
+    #[test]
+    fn unresolved_surface_parent_is_atomically_replaced_by_exact_topology_columns() {
+        let parent_key = TerrainPageKey::surface(1, 0, 0);
+        let samples = vec![
+            sampled_surface(0, Material::Stone, None);
+            (TERRAIN_PAGE_EDGE_SAMPLES as usize + 1).pow(2)
+        ];
+        let mut parent = build_sampled_heightfield_terrain_page(
+            identity(),
+            parent_key,
+            30,
+            &samples,
+            TerrainErrorBounds {
+                unresolved_topology: true,
+                ..TerrainErrorBounds::EXACT
+            },
+        )
+        .unwrap();
+        let exact_material = |coord: VoxelCoord| {
+            if (30..34).contains(&coord.x)
+                && (30..34).contains(&coord.z)
+                && (-4..=0).contains(&coord.y)
+            {
+                Material::Air
+            } else if coord.y <= 0 {
+                Material::Stone
+            } else {
+                Material::Air
+            }
+        };
+        let children = parent_key
+            .refinement_children()
+            .unwrap()
+            .into_iter()
+            .map(|key| {
+                build_exact_surface_terrain_page(identity(), key, 31, [-8, 8], exact_material)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        validate_terrain_replacement(&parent, &children).unwrap();
+        parent.errors.unresolved_topology = false;
+        parent.content_fingerprint = terrain_page_fingerprint(&parent);
+        assert_eq!(
+            validate_terrain_replacement(&parent, &children),
+            Err(TerrainReplacementError::InvalidRepresentation)
+        );
     }
 
     #[test]
