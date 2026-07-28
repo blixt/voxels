@@ -122,7 +122,7 @@ pub use terrain_page::{build_budgeted_terrain_parent, build_simplified_triangle_
 #[cfg(feature = "terrain-page-builder")]
 pub use terrain_region::{
     TerrainRegionBuildError, TerrainRegionBuildV1, build_terrain_coverage_root,
-    build_terrain_region,
+    build_terrain_coverage_root_with_revisions, build_terrain_region,
 };
 pub use terrain_stream::{
     TerrainDemandGroup, TerrainPageCacheError, TerrainPageDemand, TerrainPageMemoryCache,

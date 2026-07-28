@@ -17,7 +17,7 @@ use voxels_world::{
     TerrainHierarchyDirectoryV1, TerrainPageKey, TerrainPageTransferIdentity, TerrainPageV1,
     TerrainRegionBuildV1, TerrainSimplificationBudget, VoxelBlockRequest, VoxelCoord, WorldProduct,
     WorldProductBatch, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
-    WorldSourceIdentityHash, build_terrain_coverage_root, build_terrain_region,
+    WorldSourceIdentityHash, build_terrain_coverage_root_with_revisions, build_terrain_region,
     decode_terrain_page, encode_terrain_directory, encode_terrain_page,
 };
 
@@ -294,6 +294,7 @@ impl VirtualTerrainAuthority {
                     snapshot.clone(),
                     self.source_identity_hash(),
                     priority,
+                    |key| self.edits.surface_terrain_revision(key),
                 )?;
                 if self.edits.surface_terrain_revision(root) == Some(snapshot.revision) {
                     return prepare_region(built);
@@ -420,6 +421,7 @@ fn build_coverage_region(
     snapshot: TerrainEditSnapshot,
     source_identity_hash: WorldSourceIdentityHash,
     priority: WorldProductPriority,
+    revision_at: impl FnMut(TerrainPageKey) -> Option<u64>,
 ) -> Result<TerrainRegionBuildV1, VirtualTerrainError> {
     if root.level == 0 || root.level > TERRAIN_COVERAGE_ROOT_LEVEL || !root.is_surface() {
         return Err(VirtualTerrainError::InvalidRoot);
@@ -448,10 +450,10 @@ fn build_coverage_region(
             priority,
         )?;
     }
-    build_terrain_coverage_root(
+    build_terrain_coverage_root_with_revisions(
         source_identity_hash,
         root,
-        snapshot.revision,
+        revision_at,
         &samples,
         TerrainErrorBounds {
             geometric_millivoxels: stride.saturating_mul(2_000),
@@ -866,6 +868,7 @@ mod tests {
             },
             source.source_identity_hash(),
             WorldProductPriority::VirtualTerrain,
+            |_| Some(9),
         )
         .expect("coverage");
         assert_eq!(built.pages.len(), 5);
@@ -878,6 +881,49 @@ mod tests {
         assert!(built.pages.iter().all(|page| {
             encode_terrain_page(page).unwrap().len() <= TERRAIN_PAGE_TARGET_COMPRESSED_BYTES
         }));
+    }
+
+    #[test]
+    fn surface_page_identity_is_independent_of_directory_discovery_depth() {
+        let source = ProceduralWorldSource::new(17);
+        let parent_root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 1);
+        let child_root = parent_root.refinement_children().unwrap()[0];
+        let parent = build_coverage_region(
+            &source,
+            parent_root,
+            TerrainEditSnapshot {
+                edits: voxels_world::EditMap::default(),
+                revision: 9,
+            },
+            source.source_identity_hash(),
+            WorldProductPriority::VirtualTerrain,
+            |key| Some(if key == child_root { 13 } else { 23 }),
+        )
+        .expect("parent coverage");
+        let child = build_coverage_region(
+            &source,
+            child_root,
+            TerrainEditSnapshot {
+                edits: voxels_world::EditMap::default(),
+                revision: 9,
+            },
+            source.source_identity_hash(),
+            WorldProductPriority::VirtualTerrain,
+            |key| Some(if key == child_root { 13 } else { 29 }),
+        )
+        .expect("child coverage");
+
+        let embedded = parent
+            .pages
+            .iter()
+            .find(|page| page.key == child_root)
+            .expect("embedded child");
+        let independent = child
+            .pages
+            .iter()
+            .find(|page| page.key == child_root)
+            .expect("independent child");
+        assert_eq!(independent, embedded);
     }
 
     #[test]
@@ -912,6 +958,7 @@ mod tests {
             },
             source.source_identity_hash(),
             WorldProductPriority::VirtualTerrain,
+            |_| Some(11),
         )
         .unwrap();
         let child = built

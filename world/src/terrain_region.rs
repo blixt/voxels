@@ -28,6 +28,7 @@ pub struct TerrainRegionBuildV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TerrainRegionBuildError {
     InvalidRoot,
+    MissingRevision(TerrainPageKey),
     MissingChild(TerrainPageKey),
     Page(TerrainPageBuildError),
     Codec(TerrainPageCodecError),
@@ -42,6 +43,12 @@ impl fmt::Display for TerrainRegionBuildError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidRoot => formatter.write_str("terrain region root is invalid"),
+            Self::MissingRevision(key) => {
+                write!(
+                    formatter,
+                    "terrain region is missing revision authority for {key:?}"
+                )
+            }
             Self::MissingChild(key) => write!(formatter, "terrain region is missing child {key:?}"),
             Self::Page(error) => write!(formatter, "terrain region page build failed: {error}"),
             Self::Codec(error) => write!(formatter, "terrain region page codec failed: {error}"),
@@ -152,6 +159,28 @@ pub fn build_terrain_coverage_root(
     samples: &[SurfaceSample],
     errors: TerrainErrorBounds,
 ) -> Result<TerrainRegionBuildV1, TerrainRegionBuildError> {
+    build_terrain_coverage_root_with_revisions(
+        source_identity_hash,
+        root,
+        |_| Some(revision),
+        samples,
+        errors,
+    )
+}
+
+/// Builds a surface refinement segment with revision identity scoped to each spatial page.
+///
+/// A child page can be discovered either inside its parent's segment or later as the root of its
+/// own refinement segment. Its revision must therefore depend on the child's bounds, not on the
+/// directory request that happened to reveal it. Otherwise identical geometry acquires two
+/// identities and cannot participate in an atomic root replacement.
+pub fn build_terrain_coverage_root_with_revisions(
+    source_identity_hash: WorldSourceIdentityHash,
+    root: TerrainPageKey,
+    mut revision_at: impl FnMut(TerrainPageKey) -> Option<u64>,
+    samples: &[SurfaceSample],
+    errors: TerrainErrorBounds,
+) -> Result<TerrainRegionBuildV1, TerrainRegionBuildError> {
     if root.level == 0
         || root.level > TERRAIN_COVERAGE_ROOT_LEVEL
         || !root.is_surface()
@@ -183,7 +212,7 @@ pub fn build_terrain_coverage_root(
             let page = build_sampled_heightfield_terrain_page(
                 source_identity_hash,
                 key,
-                revision,
+                revision_at(key).ok_or(TerrainRegionBuildError::MissingRevision(key))?,
                 &child_samples,
                 TerrainErrorBounds {
                     geometric_millivoxels: errors.geometric_millivoxels / 2,
@@ -206,7 +235,7 @@ pub fn build_terrain_coverage_root(
     let sampled_root = build_sampled_heightfield_terrain_page(
         source_identity_hash,
         root,
-        revision,
+        revision_at(root).ok_or(TerrainRegionBuildError::MissingRevision(root))?,
         &root_samples,
         errors,
     )?;
