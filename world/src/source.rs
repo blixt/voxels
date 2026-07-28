@@ -589,6 +589,76 @@ pub trait WorldSourceEngine: Send + Sync {
         surface_sample_height_bounds(snapshot.samples())
     }
 
+    /// Samples a regular surface lattice without requiring a dense canonical-resolution block.
+    ///
+    /// The returned order is Z-major with X as the fastest-moving axis. Implementations backed by
+    /// macro fields should override this method so a 33x33 coarse terrain page costs 1,089 source
+    /// samples regardless of its world-space extent.
+    fn surface_sample_lattice(
+        &self,
+        priority: WorldProductPriority,
+        origin: [i32; 2],
+        sample_shape: [u32; 2],
+        stride_voxels: u32,
+    ) -> Result<Vec<SurfaceSample>, WorldSourceError> {
+        validate_surface_lattice_request(origin, sample_shape, stride_voxels)?;
+        let [width, depth] = sample_shape;
+        let capacity = usize::try_from(width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(depth)
+                    .ok()
+                    .and_then(|depth| width.checked_mul(depth))
+            })
+            .ok_or(WorldSourceError::MacroBlockTooLarge)?;
+        let mut samples = Vec::with_capacity(capacity);
+        let mut requests = Vec::with_capacity(MAX_WORLD_PRODUCT_BATCH);
+        for z in 0..depth {
+            for x in 0..width {
+                let sample_x = i64::from(origin[0]) + i64::from(x) * i64::from(stride_voxels);
+                let sample_z = i64::from(origin[1]) + i64::from(z) * i64::from(stride_voxels);
+                requests.push(WorldProductRequest::SurfaceSampleBlock(
+                    SurfaceSampleBlockRequest {
+                        origin: [
+                            i32::try_from(sample_x)
+                                .map_err(|_| WorldSourceError::InvalidBlockCoordinate)?,
+                            i32::try_from(sample_z)
+                                .map_err(|_| WorldSourceError::InvalidBlockCoordinate)?,
+                        ],
+                        sample_shape: [1, 1],
+                    },
+                ));
+                if requests.len() == MAX_WORLD_PRODUCT_BATCH || (z + 1 == depth && x + 1 == width) {
+                    let expected = std::mem::take(&mut requests);
+                    let result = self.generate_batch(WorldProductBatch {
+                        priority,
+                        requests: expected.clone(),
+                    })?;
+                    if result.source_identity_hash != self.identity().identity_hash()
+                        || result.items.len() != expected.len()
+                    {
+                        return Err(WorldSourceError::MalformedMacroBlock);
+                    }
+                    for (expected, item) in expected.into_iter().zip(result.items) {
+                        match (item.request, item.result) {
+                            (actual, Ok(WorldProduct::SurfaceSampleBlock(snapshot)))
+                                if actual == expected
+                                    && snapshot.source_identity_hash
+                                        == self.identity().identity_hash()
+                                    && snapshot.samples().len() == 1 =>
+                            {
+                                samples.push(snapshot.samples()[0]);
+                            }
+                            (_, Err(error)) => return Err(error),
+                            _ => return Err(WorldSourceError::MalformedMacroBlock),
+                        }
+                    }
+                }
+            }
+        }
+        Ok(samples)
+    }
+
     /// Generates surface-tile products in request order and offers each keyed result to `emit`.
     ///
     /// Returning [`ControlFlow::Break`] stops before any later item is emitted. The compatibility
@@ -667,6 +737,41 @@ pub trait WorldSourceEngine: Send + Sync {
         kind: SkylineFeatureKind,
         max_radius_cells: i32,
     ) -> Option<SkylineFeature>;
+}
+
+fn validate_surface_lattice_request(
+    origin: [i32; 2],
+    sample_shape: [u32; 2],
+    stride_voxels: u32,
+) -> Result<(), WorldSourceError> {
+    let [width, depth] = sample_shape;
+    if width == 0 || depth == 0 || stride_voxels == 0 {
+        return Err(WorldSourceError::EmptyMacroBlock);
+    }
+    let count = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(depth)
+                .ok()
+                .and_then(|depth| width.checked_mul(depth))
+        })
+        .ok_or(WorldSourceError::MacroBlockTooLarge)?;
+    if count > MAX_SURFACE_SAMPLE_BLOCK_SAMPLES {
+        return Err(WorldSourceError::MacroBlockTooLarge);
+    }
+    for (axis_origin, count) in origin.into_iter().zip(sample_shape) {
+        let final_offset = i64::from(count - 1)
+            .checked_mul(i64::from(stride_voxels))
+            .ok_or(WorldSourceError::InvalidBlockCoordinate)?;
+        if i64::from(axis_origin)
+            .checked_add(final_offset)
+            .filter(|final_sample| *final_sample <= i64::from(i32::MAX))
+            .is_none()
+        {
+            return Err(WorldSourceError::InvalidBlockCoordinate);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn surface_sample_height_bounds(
@@ -1294,6 +1399,33 @@ impl WorldSourceEngine for ProceduralWorldSource {
         })
     }
 
+    fn surface_sample_lattice(
+        &self,
+        _priority: WorldProductPriority,
+        origin: [i32; 2],
+        sample_shape: [u32; 2],
+        stride_voxels: u32,
+    ) -> Result<Vec<SurfaceSample>, WorldSourceError> {
+        validate_surface_lattice_request(origin, sample_shape, stride_voxels)?;
+        let [width, depth] = sample_shape;
+        let mut samples = Vec::with_capacity((width as usize).saturating_mul(depth as usize));
+        for z in 0..depth {
+            for x in 0..width {
+                let sample_x = i64::from(origin[0]) + i64::from(x) * i64::from(stride_voxels);
+                let sample_z = i64::from(origin[1]) + i64::from(z) * i64::from(stride_voxels);
+                samples.push(
+                    self.generator.surface_sample(
+                        i32::try_from(sample_x)
+                            .map_err(|_| WorldSourceError::InvalidBlockCoordinate)?,
+                        i32::try_from(sample_z)
+                            .map_err(|_| WorldSourceError::InvalidBlockCoordinate)?,
+                    ),
+                );
+            }
+        }
+        Ok(samples)
+    }
+
     fn generate_surface_tiles(
         &self,
         _priority: WorldProductPriority,
@@ -1599,6 +1731,53 @@ mod tests {
                 .copied()
                 .map(WorldProductRequest::SurfaceTile)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn default_surface_lattice_preserves_stride_order_and_negative_coordinates() {
+        let source = BatchOnlySource::new(7);
+        let samples = source
+            .surface_sample_lattice(WorldProductPriority::VirtualTerrain, [-19, -31], [3, 2], 7)
+            .expect("bounded lattice");
+        let expected = (0..2)
+            .flat_map(|z| {
+                (0..3).map(move |x| {
+                    source
+                        .inner
+                        .generator
+                        .surface_sample(-19 + x * 7, -31 + z * 7)
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(samples, expected);
+        assert_eq!(source.batch_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn surface_lattice_rejects_empty_oversized_and_overflowing_requests() {
+        let source = ProceduralWorldSource::new(7);
+        assert_eq!(
+            source.surface_sample_lattice(WorldProductPriority::VirtualTerrain, [0, 0], [0, 1], 1,),
+            Err(WorldSourceError::EmptyMacroBlock)
+        );
+        assert_eq!(
+            source.surface_sample_lattice(
+                WorldProductPriority::VirtualTerrain,
+                [0, 0],
+                [MAX_SURFACE_SAMPLE_BLOCK_SAMPLES as u32 + 1, 1],
+                1,
+            ),
+            Err(WorldSourceError::MacroBlockTooLarge)
+        );
+        assert_eq!(
+            source.surface_sample_lattice(
+                WorldProductPriority::VirtualTerrain,
+                [i32::MAX, 0],
+                [2, 1],
+                2,
+            ),
+            Err(WorldSourceError::InvalidBlockCoordinate)
         );
     }
 

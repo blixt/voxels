@@ -983,6 +983,34 @@ impl WorldSourceEngine for HeightfieldWorldSource {
         }
     }
 
+    fn surface_sample_lattice(
+        &self,
+        priority: WorldProductPriority,
+        origin: [i32; 2],
+        sample_shape: [u32; 2],
+        stride_voxels: u32,
+    ) -> Result<Vec<SurfaceSample>, WorldSourceError> {
+        let region = self.prepare_region(priority, origin, sample_shape, stride_voxels)?;
+        let [width, depth] = sample_shape;
+        let mut samples = Vec::with_capacity((width as usize).saturating_mul(depth as usize));
+        for z in 0..depth {
+            for x in 0..width {
+                let sample_x = i64::from(origin[0]) + i64::from(x) * i64::from(stride_voxels);
+                let sample_z = i64::from(origin[1]) + i64::from(z) * i64::from(stride_voxels);
+                samples.push(
+                    self.surface_sample_from_region(
+                        &region,
+                        i32::try_from(sample_x)
+                            .map_err(|_| WorldSourceError::InvalidBlockCoordinate)?,
+                        i32::try_from(sample_z)
+                            .map_err(|_| WorldSourceError::InvalidBlockCoordinate)?,
+                    )?,
+                );
+            }
+        }
+        Ok(samples)
+    }
+
     fn generate_surface_tiles(
         &self,
         priority: WorldProductPriority,
