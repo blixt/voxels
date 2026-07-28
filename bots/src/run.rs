@@ -20,23 +20,21 @@ use voxels_world::protocol::EditShape;
 use voxels_world::protocol::{
     BrowserUserId, ChunkBatchRequest, EDIT_CUBE_VOLUME_VOXELS, EditAction, EditCommand, EditVolume,
     FrameReassembler, MaterialInventory, PLAYER_POSE_GROUNDED, PLAYER_POSE_SWIMMING, PlayerId,
-    PlayerIdentity, PlayerPoseUpdate, PresencePing, SurfaceTileBatchRequest, VoxelMutation,
-    chunk_batch_result_kind, decode_chunk_batch_result, decode_edit_commit, decode_error,
-    decode_presence_delta, decode_presence_pong, decode_resync_required,
-    decode_surface_tile_batch_result, edit_commit_kind, encode_chunk_batch, encode_edit_command,
-    encode_player_pose, encode_presence_ping, encode_surface_tile_batch, error_kind, message_kind,
-    presence_delta_kind, presence_pong_kind, resync_required_kind, surface_tile_batch_result_kind,
+    PlayerIdentity, PlayerPoseUpdate, PresencePing, VoxelMutation, chunk_batch_result_kind,
+    decode_chunk_batch_result, decode_edit_commit, decode_error, decode_presence_delta,
+    decode_presence_pong, decode_resync_required, edit_commit_kind, encode_chunk_batch,
+    encode_edit_command, encode_player_pose, encode_presence_ping, error_kind, message_kind,
+    presence_delta_kind, presence_pong_kind, resync_required_kind,
 };
 use voxels_world::{
-    ChunkCoord, Material, SurfaceLodLevel, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
-    WorldProductPriority, WorldSourceIdentityHash,
+    ChunkCoord, Material, VOXEL_SIZE_METRES, VoxelCoord, WorldProductPriority,
+    WorldSourceIdentityHash,
 };
 
-const REPORT_SCHEMA_VERSION: u32 = 4;
+const REPORT_SCHEMA_VERSION: u32 = 5;
 const SIMULATION_HZ: u64 = 60;
 const POSE_HZ: u64 = 30;
 const PING_INTERVAL: Duration = Duration::from_secs(1);
-const SURFACE_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 const CHUNK_CACHE_CAPACITY: usize = 96;
 const MAX_DIG_SURFACE_SCAN_VOXELS: i32 = 40;
 const MAX_TOWER_COLUMN_SCAN_VOXELS: i32 = 48;
@@ -182,10 +180,6 @@ pub struct BotReport {
     pub chunk_results: u64,
     pub unique_chunks_requested: usize,
     pub chunk_latency: LatencySummary,
-    pub surface_batches_sent: u64,
-    pub surface_results: u64,
-    pub unique_surface_tiles_requested: usize,
-    pub surface_latency: LatencySummary,
     pub edits_submitted: u64,
     pub edits_accepted: u64,
     pub edits_rejected: u64,
@@ -216,7 +210,6 @@ pub struct BotRunReport {
     pub traffic: TrafficCounters,
     pub poses_sent: u64,
     pub unique_chunks_requested: usize,
-    pub unique_surface_tiles_requested: usize,
     pub edits_submitted: u64,
     pub edits_accepted: u64,
     pub edits_rejected: u64,
@@ -242,11 +235,6 @@ struct PendingEdit {
 struct PendingChunkBatch {
     submitted: Instant,
     coords: Vec<ChunkCoord>,
-}
-
-struct PendingSurfaceTile {
-    submitted: Instant,
-    coord: SurfaceTileCoord,
 }
 
 #[derive(Default)]
@@ -286,53 +274,6 @@ impl ChunkRequests {
     }
 }
 
-#[derive(Default)]
-struct SurfaceRequests {
-    requested: HashSet<SurfaceTileCoord>,
-    completed: HashSet<SurfaceTileCoord>,
-    in_flight: HashSet<SurfaceTileCoord>,
-    pending: HashMap<u64, PendingSurfaceTile>,
-}
-
-impl SurfaceRequests {
-    fn needs(&self, coord: SurfaceTileCoord) -> bool {
-        !self.completed.contains(&coord) && !self.in_flight.contains(&coord)
-    }
-
-    fn begin(&mut self, request_id: u64, coord: SurfaceTileCoord, submitted: Instant) {
-        self.requested.insert(coord);
-        self.in_flight.insert(coord);
-        self.pending
-            .insert(request_id, PendingSurfaceTile { submitted, coord });
-    }
-
-    fn finish(&mut self, request_id: u64) -> Option<PendingSurfaceTile> {
-        let pending = self.pending.remove(&request_id)?;
-        self.in_flight.remove(&pending.coord);
-        Some(pending)
-    }
-
-    fn complete(&mut self, coord: SurfaceTileCoord) {
-        self.completed.insert(coord);
-    }
-
-    fn invalidate(&mut self, coords: &[SurfaceTileCoord]) {
-        for coord in coords {
-            self.completed.remove(coord);
-        }
-    }
-
-    fn reset_after_resync(&mut self) {
-        self.completed.clear();
-        self.in_flight.clear();
-        self.pending.clear();
-    }
-
-    fn unique_count(&self) -> usize {
-        self.requested.len()
-    }
-}
-
 struct BotRuntime {
     index: usize,
     name: String,
@@ -350,7 +291,6 @@ struct BotRuntime {
     edit_revisions: AuthoritativeEditRevisions,
     frame_reassembler: FrameReassembler,
     chunk_requests: ChunkRequests,
-    surface_requests: SurfaceRequests,
     pending_edits: HashMap<u64, PendingEdit>,
     pending_pings: HashMap<u32, Instant>,
     leader_connection_id: Option<u64>,
@@ -363,7 +303,6 @@ struct BotRuntime {
     max_outbound_rate_bytes_per_second: u32,
     next_pose: Instant,
     next_ping: Instant,
-    next_surface: Instant,
     start: Instant,
     end: Instant,
     spawn_position: Vec3,
@@ -384,9 +323,6 @@ struct BotReportAccumulator {
     chunk_batches_sent: u64,
     chunk_results: u64,
     chunk_latency_ms: Vec<f64>,
-    surface_batches_sent: u64,
-    surface_results: u64,
-    surface_latency_ms: Vec<f64>,
     edits_submitted: u64,
     edits_accepted: u64,
     edits_rejected: u64,
@@ -506,7 +442,6 @@ impl BotRuntime {
             edit_revisions: AuthoritativeEditRevisions::default(),
             frame_reassembler: FrameReassembler::default(),
             chunk_requests: ChunkRequests::default(),
-            surface_requests: SurfaceRequests::default(),
             pending_edits: HashMap::new(),
             pending_pings: HashMap::new(),
             leader_connection_id: None,
@@ -519,7 +454,6 @@ impl BotRuntime {
             max_outbound_rate_bytes_per_second: 0,
             next_pose: now,
             next_ping: now + PING_INTERVAL,
-            next_surface: now,
             start,
             end,
             spawn_position: camera.position,
@@ -598,10 +532,6 @@ impl BotRuntime {
             self.next_ping = now + PING_INTERVAL;
             self.send_ping().await?;
         }
-        if now >= self.next_surface {
-            self.next_surface = now + SURFACE_REQUEST_INTERVAL;
-            self.request_surface().await?;
-        }
         self.request_local_chunks().await?;
         if let Some(action) = intent.edit {
             if intent.copied_leader_action {
@@ -679,26 +609,6 @@ impl BotRuntime {
         self.chunk_requests
             .begin(request_id, request.coords, Instant::now());
         self.report.chunk_batches_sent = self.report.chunk_batches_sent.saturating_add(1);
-        Ok(())
-    }
-
-    async fn request_surface(&mut self) -> Result<()> {
-        let voxel = position_voxel(self.camera.position);
-        let coord = SurfaceTileCoord::containing(SurfaceLodLevel::Stride16, voxel.x, voxel.z);
-        if !self.surface_requests.needs(coord) {
-            return Ok(());
-        }
-        let request_id = self.allocate_request_id();
-        let bytes = encode_surface_tile_batch(&SurfaceTileBatchRequest {
-            request_id,
-            priority: WorldProductPriority::VisibleSurface,
-            coords: vec![coord],
-        })?;
-        self.traffic.sent(&bytes)?;
-        self.world.send(Message::Binary(bytes.into())).await?;
-        self.surface_requests
-            .begin(request_id, coord, Instant::now());
-        self.report.surface_batches_sent = self.report.surface_batches_sent.saturating_add(1);
         Ok(())
     }
 
@@ -793,48 +703,6 @@ impl BotRuntime {
                     }
                 }
             }
-        } else if kind == surface_tile_batch_result_kind() {
-            let result = decode_surface_tile_batch_result(bytes)?;
-            if let Some(pending) = self.surface_requests.finish(result.request_id) {
-                self.report
-                    .surface_latency_ms
-                    .push(pending.submitted.elapsed().as_secs_f64() * 1_000.0);
-                let returned = result
-                    .items
-                    .iter()
-                    .map(|item| item.coord)
-                    .collect::<Vec<_>>();
-                if let Err(error) = validate_result_envelope(
-                    "surface",
-                    self.source_identity_hash,
-                    result.source_identity_hash,
-                    &[pending.coord],
-                    &returned,
-                ) {
-                    self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
-                    self.record_error(format!("request {}: {error}", result.request_id));
-                    return Ok(());
-                }
-                for item in result.items {
-                    self.report.surface_results = self.report.surface_results.saturating_add(1);
-                    match item.result {
-                        Ok(_)
-                            if surface_result_is_current(
-                                &pending,
-                                item.coord,
-                                item.edit_revision,
-                                &self.edit_revisions,
-                            ) =>
-                        {
-                            self.surface_requests.complete(item.coord);
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            self.record_error(format!("surface {:?}: {error}", item.coord))
-                        }
-                    }
-                }
-            }
         } else if kind == edit_commit_kind() {
             let commit = decode_edit_commit(bytes)?;
             apply_authoritative_mutations(
@@ -843,10 +711,7 @@ impl BotRuntime {
                 commit.revision,
                 &commit.mutations,
                 &commit.affected_chunks,
-                &commit.affected_surface_tiles,
             );
-            self.surface_requests
-                .invalidate(&commit.affected_surface_tiles);
             self.report.edits_observed = self.report.edits_observed.saturating_add(1);
             if commit.editor_connection_id == self.connection_id {
                 self.report.edits_accepted = self.report.edits_accepted.saturating_add(1);
@@ -900,7 +765,6 @@ impl BotRuntime {
                     .push(pending.submitted.elapsed().as_secs_f64() * 1_000.0);
             }
             self.chunk_requests.finish(request_id);
-            self.surface_requests.finish(request_id);
             if !expected_edit_rejection {
                 self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
                 self.record_error(format!("request {request_id}: {message}"));
@@ -910,7 +774,6 @@ impl BotRuntime {
             self.cache.clear();
             self.edit_revisions.clear();
             self.chunk_requests.reset_after_resync();
-            self.surface_requests.reset_after_resync();
             self.report.resyncs = self.report.resyncs.saturating_add(1);
         } else {
             self.record_error(format!("unexpected world message kind {kind}"));
@@ -1040,10 +903,6 @@ impl BotRuntime {
             chunk_results: self.report.chunk_results,
             unique_chunks_requested: self.chunk_requests.unique_count(),
             chunk_latency: summarize_latencies(&self.report.chunk_latency_ms),
-            surface_batches_sent: self.report.surface_batches_sent,
-            surface_results: self.report.surface_results,
-            unique_surface_tiles_requested: self.surface_requests.unique_count(),
-            surface_latency: summarize_latencies(&self.report.surface_latency_ms),
             edits_submitted: self.report.edits_submitted,
             edits_accepted: self.report.edits_accepted,
             edits_rejected: self.report.edits_rejected,
@@ -1211,14 +1070,12 @@ fn apply_authoritative_mutations(
     revision: u64,
     mutations: &[VoxelMutation],
     affected_chunks: &[ChunkCoord],
-    affected_surfaces: &[SurfaceTileCoord],
 ) {
     let coords = mutations
         .iter()
         .map(|mutation| mutation.coord)
         .collect::<Vec<_>>();
-    let apply_values =
-        revisions.observe_commit_batch(&coords, revision, affected_chunks, affected_surfaces);
+    let apply_values = revisions.observe_commit_batch(&coords, revision, affected_chunks);
     for (mutation, apply) in mutations.iter().zip(apply_values) {
         if apply {
             cache.apply(mutation.coord, mutation.material);
@@ -1234,15 +1091,6 @@ fn chunk_result_is_current(
 ) -> bool {
     pending.coords.contains(&coord)
         && revision_satisfies(edit_revision, revisions.chunk_floor(coord))
-}
-
-fn surface_result_is_current(
-    pending: &PendingSurfaceTile,
-    coord: SurfaceTileCoord,
-    edit_revision: u64,
-    revisions: &AuthoritativeEditRevisions,
-) -> bool {
-    pending.coord == coord && revision_satisfies(edit_revision, revisions.surface_floor(coord))
 }
 
 fn summarize_latencies(values: &[f64]) -> LatencySummary {
@@ -1276,7 +1124,6 @@ fn aggregate_report(
     let mut behaviors = BTreeMap::new();
     let mut poses_sent = 0_u64;
     let mut unique_chunks_requested = 0_usize;
-    let mut unique_surface_tiles_requested = 0_usize;
     let mut edits_submitted = 0_u64;
     let mut edits_accepted = 0_u64;
     let mut edits_rejected = 0_u64;
@@ -1294,8 +1141,6 @@ fn aggregate_report(
         poses_sent = poses_sent.saturating_add(report.poses_sent);
         unique_chunks_requested =
             unique_chunks_requested.saturating_add(report.unique_chunks_requested);
-        unique_surface_tiles_requested =
-            unique_surface_tiles_requested.saturating_add(report.unique_surface_tiles_requested);
         edits_submitted = edits_submitted.saturating_add(report.edits_submitted);
         edits_accepted = edits_accepted.saturating_add(report.edits_accepted);
         edits_rejected = edits_rejected.saturating_add(report.edits_rejected);
@@ -1321,7 +1166,6 @@ fn aggregate_report(
         traffic,
         poses_sent,
         unique_chunks_requested,
-        unique_surface_tiles_requested,
         edits_submitted,
         edits_accepted,
         edits_rejected,
@@ -1596,30 +1440,9 @@ mod tests {
     }
 
     #[test]
-    fn surface_requests_retry_failures_but_not_successes() {
-        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 2, -3);
-        let mut requests = SurfaceRequests::default();
-
-        assert!(requests.needs(coord));
-        requests.begin(1, coord, Instant::now());
-        assert!(!requests.needs(coord));
-
-        let failed = requests.finish(1).expect("pending request");
-        assert_eq!(failed.coord, coord);
-        assert!(requests.needs(coord));
-
-        requests.begin(2, coord, Instant::now());
-        requests.finish(2);
-        requests.complete(coord);
-        assert!(!requests.needs(coord));
-        assert_eq!(requests.unique_count(), 1);
-    }
-
-    #[test]
     fn authoritative_products_and_voxels_never_regress_after_newer_commits() {
         let coord = VoxelCoord::new(4, 5, 6);
         let chunk = coord.chunk();
-        let surface = SurfaceTileCoord::containing(SurfaceLodLevel::Stride16, coord.x, coord.z);
         let mut cache = ChunkCache::new(1);
         cache.insert(Chunk::filled(chunk, Material::Dirt));
         let mut revisions = AuthoritativeEditRevisions::default();
@@ -1631,7 +1454,6 @@ mod tests {
             12,
             &[mutation(Material::Wood)],
             &[chunk],
-            &[surface],
         );
         apply_authoritative_mutations(
             &mut cache,
@@ -1639,17 +1461,12 @@ mod tests {
             11,
             &[mutation(Material::Stone)],
             &[chunk],
-            &[surface],
         );
 
         assert_eq!(cache.material(coord), Some(Material::Wood));
         let chunk_request = PendingChunkBatch {
             submitted: Instant::now(),
             coords: vec![chunk],
-        };
-        let surface_request = PendingSurfaceTile {
-            submitted: Instant::now(),
-            coord: surface,
         };
         assert!(!chunk_result_is_current(
             &chunk_request,
@@ -1663,45 +1480,19 @@ mod tests {
             12,
             &revisions
         ));
-        assert!(!surface_result_is_current(
-            &surface_request,
-            surface,
-            11,
-            &revisions
-        ));
-        assert!(surface_result_is_current(
-            &surface_request,
-            surface,
-            12,
-            &revisions
-        ));
     }
 
     #[test]
-    fn resync_retires_in_flight_products_and_makes_completed_tiles_retryable() {
+    fn resync_retires_in_flight_chunk_products() {
         let chunk = ChunkCoord::new(1, 2, 3);
-        let surface = SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 4, 5);
         let cache = ChunkCache::new(1);
         let mut chunks = ChunkRequests::default();
-        let mut surfaces = SurfaceRequests::default();
 
         chunks.begin(7, vec![chunk], Instant::now());
-        surfaces.begin(8, surface, Instant::now());
-        surfaces.finish(8);
-        surfaces.complete(surface);
-        assert!(!surfaces.needs(surface));
-        surfaces.invalidate(&[surface]);
-        assert!(surfaces.needs(surface));
-        surfaces.begin(9, surface, Instant::now());
-        surfaces.finish(9);
-        surfaces.complete(surface);
         chunks.reset_after_resync();
-        surfaces.reset_after_resync();
 
         assert!(chunks.finish(7).is_none());
         assert!(chunks.needs(&cache, chunk));
-        assert!(surfaces.needs(surface));
         assert_eq!(chunks.unique_count(), 1);
-        assert_eq!(surfaces.unique_count(), 1);
     }
 }

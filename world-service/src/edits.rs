@@ -12,16 +12,16 @@ use uuid::Uuid;
 use voxels_world::protocol::{EDIT_CUBE_VOLUME_VOXELS, EDIT_MAX_VOLUME_VOXELS};
 use voxels_world::protocol::{
     EDIT_SESSION_NOT_CURRENT, EditAction, EditCommand, EditCommit, EditSessionId, EditShape,
-    EditVolume, MATERIAL_INVENTORY_SLOTS, MAX_EDIT_AFFECTED_CHUNKS,
-    MAX_EDIT_AFFECTED_SURFACE_TILES, MAX_EDIT_MUTATIONS, MaterialInventory, PlayerId, PlayerResume,
-    ProtocolError, VoxelMutation, encode_edit_commit,
+    EditVolume, MATERIAL_INVENTORY_SLOTS, MAX_EDIT_AFFECTED_CHUNKS, MAX_EDIT_MUTATIONS,
+    MaterialInventory, PlayerId, PlayerResume, ProtocolError, VoxelMutation, encode_edit_commit,
 };
 use voxels_world::{
-    ChunkCoord, EditMap, Material, SurfaceLodLevel, SurfaceTileCoord, TERRAIN_REGION_ROOT_LEVEL,
-    TerrainPageKey, VOXEL_SIZE_METRES, VoxelBlockRequest, VoxelCoord, WorldId, WorldProduct,
-    WorldProductBatch, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
-    WorldSourceIdentityHash,
+    ChunkCoord, EditMap, Material, TERRAIN_REGION_ROOT_LEVEL, TerrainPageKey, VOXEL_SIZE_METRES,
+    VoxelBlockRequest, VoxelCoord, WorldId, WorldProduct, WorldProductBatch, WorldProductPriority,
+    WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash,
 };
+#[cfg(test)]
+use voxels_world::{SurfaceLodLevel, SurfaceTileCoord};
 
 use crate::EDIT_DATABASE_SCHEMA_VERSION;
 
@@ -29,8 +29,8 @@ const INITIAL_REVISION: u64 = 1;
 const EDIT_REGION_EDGE_VOXELS: i32 = 256;
 pub(crate) const RETAINED_OPERATION_OUTCOMES_PER_PLAYER: i64 = 64;
 const OPERATION_OUTCOME_MAGIC: &[u8; 4] = b"VXEO";
-const OPERATION_OUTCOME_VERSION: u8 = 1;
-const OPERATION_OUTCOME_HEADER_BYTES: usize = 12;
+const OPERATION_OUTCOME_VERSION: u8 = 2;
+const OPERATION_OUTCOME_HEADER_BYTES: usize = 10;
 #[cfg(test)]
 const DIG_MAX_MUTATIONS: usize = EDIT_MAX_VOLUME_VOXELS;
 
@@ -158,7 +158,6 @@ struct EditState {
     edits: EditMap,
     revision: u64,
     chunk_revisions: BTreeMap<ChunkCoord, u64>,
-    surface_revisions: BTreeMap<SurfaceTileCoord, u64>,
 }
 
 struct EditSubscriber {
@@ -329,14 +328,13 @@ impl EditAuthority {
             .map_err(sql_error("configure edit database"))?;
         initialize_schema(&mut connection, world_id, source.identity().identity_hash())?;
         let (edits, revision) = load_edits(&connection)?;
-        let (chunk_revisions, surface_revisions) = load_product_revisions(&connection, revision)?;
+        let chunk_revisions = load_product_revisions(&connection, revision)?;
         Ok(Arc::new(Self {
             inner: Mutex::new(EditState {
                 connection,
                 edits,
                 revision,
                 chunk_revisions,
-                surface_revisions,
             }),
             player_edit_locks: KeyedLocks::default(),
             region_edit_locks: KeyedLocks::default(),
@@ -749,19 +747,10 @@ impl EditAuthority {
             player.inventory
         };
 
-        let (affected_chunks, affected_surface_tiles) = if changed {
-            let mut affected = AffectedProducts::from_state(source, &planning_edits, &mutations);
-            let mut edited_planning = planning_edits;
-            let planning_changes = mutations
-                .iter()
-                .zip(&durable_overrides)
-                .map(|(mutation, durable_override)| (mutation.coord, *durable_override))
-                .collect::<Vec<_>>();
-            edited_planning.replace_durable_overrides(&planning_changes);
-            affected.extend_surfaces(source, &edited_planning, &mutations);
-            affected.finish(&mutations)?
+        let affected_chunks = if changed {
+            AffectedProducts::from_mutations(&mutations).finish(&mutations)?
         } else {
-            (Vec::new(), Vec::new())
+            Vec::new()
         };
         let mut state = self.lock();
         let revision = if changed {
@@ -790,7 +779,6 @@ impl EditAuthority {
             action: command.action,
             mutations: mutations.clone(),
             affected_chunks: affected_chunks.clone(),
-            affected_surface_tiles: affected_surface_tiles.clone(),
             editor_inventory: Some(inventory),
         };
         let durable_chunks = encode_durable_chunks(&state.edits, &mutations);
@@ -805,7 +793,6 @@ impl EditAuthority {
             &mutations,
             &durable_chunks,
             &affected_chunks,
-            &affected_surface_tiles,
         ) {
             restore_overrides(&mut state.edits, &mutations, &previous_overrides);
             return Err(error);
@@ -814,9 +801,6 @@ impl EditAuthority {
             state.revision = revision;
             for coord in &affected_chunks {
                 state.chunk_revisions.insert(*coord, revision);
-            }
-            for coord in &affected_surface_tiles {
-                state.surface_revisions.insert(*coord, revision);
             }
         }
         Ok(AppliedEdit { commit, changed })
@@ -835,7 +819,6 @@ struct StoredOperation {
     revision: u64,
     mutations: Vec<VoxelMutation>,
     affected_chunks: Vec<ChunkCoord>,
-    affected_surface_tiles: Vec<SurfaceTileCoord>,
 }
 
 impl StoredOperation {
@@ -853,7 +836,6 @@ impl StoredOperation {
             action: self.action,
             mutations: self.mutations,
             affected_chunks: self.affected_chunks,
-            affected_surface_tiles: self.affected_surface_tiles,
             editor_inventory,
         }
     }
@@ -892,13 +874,6 @@ fn initialize_schema(
                     z INTEGER NOT NULL,
                     revision INTEGER NOT NULL CHECK(revision >= 1),
                     PRIMARY KEY (x, y, z)
-                 ) WITHOUT ROWID;
-                 CREATE TABLE surface_revisions (
-                    stride INTEGER NOT NULL,
-                    x INTEGER NOT NULL,
-                    z INTEGER NOT NULL,
-                    revision INTEGER NOT NULL CHECK(revision >= 1),
-                    PRIMARY KEY (stride, x, z)
                  ) WITHOUT ROWID;
                  CREATE TABLE players (
                     player_id BLOB PRIMARY KEY CHECK(length(player_id) = 16),
@@ -1010,12 +985,10 @@ fn load_edits(connection: &Connection) -> Result<(EditMap, u64), EditAuthorityEr
     Ok((edits, revision))
 }
 
-type ProductRevisions = (BTreeMap<ChunkCoord, u64>, BTreeMap<SurfaceTileCoord, u64>);
-
 fn load_product_revisions(
     connection: &Connection,
     world_revision: u64,
-) -> Result<ProductRevisions, EditAuthorityError> {
+) -> Result<BTreeMap<ChunkCoord, u64>, EditAuthorityError> {
     let mut chunk_revisions = BTreeMap::new();
     let mut chunk_statement = connection
         .prepare("SELECT x,y,z,revision FROM chunk_revisions ORDER BY x,y,z")
@@ -1039,35 +1012,7 @@ fn load_product_revisions(
         chunk_revisions.insert(coord, revision);
     }
 
-    let mut surface_revisions = BTreeMap::new();
-    let mut surface_statement = connection
-        .prepare("SELECT stride,x,z,revision FROM surface_revisions ORDER BY stride,x,z")
-        .map_err(sql_error("prepare surface revisions"))?;
-    let rows = surface_statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, i32>(0)?,
-                row.get::<_, i32>(1)?,
-                row.get::<_, i32>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })
-        .map_err(sql_error("load surface revisions"))?;
-    for row in rows {
-        let (stride, x, z, revision) = row.map_err(sql_error("decode surface revision"))?;
-        let level = SurfaceLodLevel::from_stride_voxels(stride).ok_or_else(|| {
-            EditAuthorityError(format!("unknown durable surface revision stride {stride}"))
-        })?;
-        let coord = SurfaceTileCoord::new(level, x, z);
-        let revision = positive_u64(revision, "surface revision")?;
-        if revision > world_revision || !coord.is_world_representable() {
-            return Err(EditAuthorityError(
-                "durable surface revision is inconsistent".to_owned(),
-            ));
-        }
-        surface_revisions.insert(coord, revision);
-    }
-    Ok((chunk_revisions, surface_revisions))
+    Ok(chunk_revisions)
 }
 
 fn load_durable_player(
@@ -1194,13 +1139,12 @@ fn load_operation(
         return Ok(None);
     };
     let action = decode_action(action, coord, argument)?;
-    let (mutations, affected_chunks, affected_surface_tiles) = decode_operation_outcome(&outcome)?;
+    let (mutations, affected_chunks) = decode_operation_outcome(&outcome)?;
     Ok(Some(StoredOperation {
         action,
         revision: positive_u64(revision, "operation revision")?,
         mutations,
         affected_chunks,
-        affected_surface_tiles,
     }))
 }
 
@@ -1396,58 +1340,28 @@ fn source_voxel_block(
 #[derive(Default)]
 struct AffectedProducts {
     chunks: BTreeSet<ChunkCoord>,
-    surfaces: BTreeSet<SurfaceTileCoord>,
 }
 
 impl AffectedProducts {
-    fn from_state(
-        source: &dyn WorldSourceEngine,
-        edits: &EditMap,
-        mutations: &[VoxelMutation],
-    ) -> Self {
+    fn from_mutations(mutations: &[VoxelMutation]) -> Self {
         let mut affected = Self::default();
         for mutation in mutations {
             affected
                 .chunks
                 .extend(EditMap::affected_chunks(mutation.coord));
         }
-        affected.extend_surfaces(source, edits, mutations);
         affected
     }
 
-    fn extend_surfaces(
-        &mut self,
-        source: &dyn WorldSourceEngine,
-        edits: &EditMap,
-        mutations: &[VoxelMutation],
-    ) {
-        let coords = mutations
-            .iter()
-            .map(|mutation| mutation.coord)
-            .collect::<Vec<_>>();
-        self.surfaces
-            .extend(source.surface_tiles_affected_by_voxels(edits, &coords));
-    }
-
-    fn finish(
-        self,
-        mutations: &[VoxelMutation],
-    ) -> Result<(Vec<ChunkCoord>, Vec<SurfaceTileCoord>), EditAuthorityError> {
-        if mutations.len() > MAX_EDIT_MUTATIONS
-            || self.chunks.len() > MAX_EDIT_AFFECTED_CHUNKS
-            || self.surfaces.len() > MAX_EDIT_AFFECTED_SURFACE_TILES
-        {
+    fn finish(self, mutations: &[VoxelMutation]) -> Result<Vec<ChunkCoord>, EditAuthorityError> {
+        if mutations.len() > MAX_EDIT_MUTATIONS || self.chunks.len() > MAX_EDIT_AFFECTED_CHUNKS {
             return Err(EditAuthorityError(format!(
-                "edit outcome exceeds protocol bounds: {} mutations, {} chunks, {} surface tiles",
+                "edit outcome exceeds protocol bounds: {} mutations, {} chunks",
                 mutations.len(),
                 self.chunks.len(),
-                self.surfaces.len(),
             )));
         }
-        Ok((
-            self.chunks.into_iter().collect(),
-            self.surfaces.into_iter().collect(),
-        ))
+        Ok(self.chunks.into_iter().collect())
     }
 }
 
@@ -1491,7 +1405,6 @@ fn persist_action(
     mutations: &[VoxelMutation],
     durable_chunks: &[(ChunkCoord, Option<Vec<u8>>)],
     affected_chunks: &[ChunkCoord],
-    affected_surface_tiles: &[SurfaceTileCoord],
 ) -> Result<(), EditAuthorityError> {
     let transaction = connection
         .transaction()
@@ -1536,12 +1449,7 @@ fn persist_action(
             )
             .map_err(sql_error("persist inventory revision"))?;
         persist_inventory_delta(&transaction, player_id, previous_inventory, inventory)?;
-        persist_product_revisions(
-            &transaction,
-            revision,
-            affected_chunks,
-            affected_surface_tiles,
-        )?;
+        persist_product_revisions(&transaction, revision, affected_chunks)?;
     }
     persist_operation(
         &transaction,
@@ -1550,7 +1458,6 @@ fn persist_action(
         revision,
         mutations,
         affected_chunks,
-        affected_surface_tiles,
     )?;
     transaction
         .commit()
@@ -1591,7 +1498,6 @@ fn persist_product_revisions(
     transaction: &Transaction<'_>,
     revision: u64,
     chunks: &[ChunkCoord],
-    surfaces: &[SurfaceTileCoord],
 ) -> Result<(), EditAuthorityError> {
     let revision = to_sql_i64(revision, "product revision")?;
     {
@@ -1605,24 +1511,6 @@ fn persist_product_revisions(
             statement
                 .execute(params![coord.x, coord.y, coord.z, revision])
                 .map_err(sql_error("persist chunk revision"))?;
-        }
-    }
-    {
-        let mut statement = transaction
-            .prepare_cached(
-                "INSERT INTO surface_revisions(stride,x,z,revision) VALUES(?1,?2,?3,?4)
-                 ON CONFLICT(stride,x,z) DO UPDATE SET revision=excluded.revision",
-            )
-            .map_err(sql_error("prepare surface revisions"))?;
-        for coord in surfaces {
-            statement
-                .execute(params![
-                    coord.level.stride_voxels(),
-                    coord.x,
-                    coord.z,
-                    revision
-                ])
-                .map_err(sql_error("persist surface revision"))?;
         }
     }
     Ok(())
@@ -1639,10 +1527,9 @@ fn persist_operation(
     revision: u64,
     mutations: &[VoxelMutation],
     affected_chunks: &[ChunkCoord],
-    affected_surface_tiles: &[SurfaceTileCoord],
 ) -> Result<(), EditAuthorityError> {
     let (action, coord, argument) = encode_action(command.action);
-    let outcome = encode_operation_outcome(mutations, affected_chunks, affected_surface_tiles)?;
+    let outcome = encode_operation_outcome(mutations, affected_chunks)?;
     let receipt_order = transaction
         .query_row(
             "SELECT coalesce(max(receipt_order),0) + 1
@@ -1701,32 +1588,24 @@ fn persist_operation(
     Ok(())
 }
 
-type DecodedOperationOutcome = (Vec<VoxelMutation>, Vec<ChunkCoord>, Vec<SurfaceTileCoord>);
+type DecodedOperationOutcome = (Vec<VoxelMutation>, Vec<ChunkCoord>);
 
 fn encode_operation_outcome(
     mutations: &[VoxelMutation],
     chunks: &[ChunkCoord],
-    surfaces: &[SurfaceTileCoord],
 ) -> Result<Vec<u8>, EditAuthorityError> {
-    validate_outcome_collections(mutations, chunks, surfaces)?;
+    validate_outcome_collections(mutations, chunks)?;
     let mutation_count = u16::try_from(mutations.len())
         .map_err(|_| EditAuthorityError("operation mutation count exceeds u16".to_owned()))?;
     let chunk_count = u16::try_from(chunks.len())
         .map_err(|_| EditAuthorityError("operation chunk count exceeds u16".to_owned()))?;
-    let surface_count = u16::try_from(surfaces.len())
-        .map_err(|_| EditAuthorityError("operation surface count exceeds u16".to_owned()))?;
-    let mut encoded = Vec::with_capacity(
-        OPERATION_OUTCOME_HEADER_BYTES
-            + mutations.len() * 5
-            + chunks.len() * 4
-            + surfaces.len() * 4,
-    );
+    let mut encoded =
+        Vec::with_capacity(OPERATION_OUTCOME_HEADER_BYTES + mutations.len() * 5 + chunks.len() * 4);
     encoded.extend_from_slice(OPERATION_OUTCOME_MAGIC);
     encoded.push(OPERATION_OUTCOME_VERSION);
     encoded.push(0);
     encoded.extend_from_slice(&mutation_count.to_le_bytes());
     encoded.extend_from_slice(&chunk_count.to_le_bytes());
-    encoded.extend_from_slice(&surface_count.to_le_bytes());
 
     let mut previous = [0_i32; 3];
     for mutation in mutations {
@@ -1736,18 +1615,6 @@ fn encode_operation_outcome(
     previous = [0; 3];
     for chunk in chunks {
         push_coord_deltas(&mut encoded, &mut previous, [chunk.x, chunk.y, chunk.z]);
-    }
-    let mut previous_level = None;
-    let mut previous_xz = [0_i32; 2];
-    for surface in surfaces {
-        let level_code = u8::try_from(surface.level.stride_voxels().trailing_zeros())
-            .map_err(|_| EditAuthorityError("surface LOD code exceeds u8".to_owned()))?;
-        encoded.push(level_code);
-        if previous_level != Some(surface.level) {
-            previous_level = Some(surface.level);
-            previous_xz = [0; 2];
-        }
-        push_coord_deltas(&mut encoded, &mut previous_xz, [surface.x, surface.z]);
     }
     Ok(encoded)
 }
@@ -1764,11 +1631,7 @@ fn decode_operation_outcome(bytes: &[u8]) -> Result<DecodedOperationOutcome, Edi
     }
     let mutation_count = usize::from(u16::from_le_bytes([bytes[6], bytes[7]]));
     let chunk_count = usize::from(u16::from_le_bytes([bytes[8], bytes[9]]));
-    let surface_count = usize::from(u16::from_le_bytes([bytes[10], bytes[11]]));
-    if mutation_count > MAX_EDIT_MUTATIONS
-        || chunk_count > MAX_EDIT_AFFECTED_CHUNKS
-        || surface_count > MAX_EDIT_AFFECTED_SURFACE_TILES
-    {
+    if mutation_count > MAX_EDIT_MUTATIONS || chunk_count > MAX_EDIT_AFFECTED_CHUNKS {
         return Err(EditAuthorityError(
             "durable operation outcome exceeds protocol bounds".to_owned(),
         ));
@@ -1799,48 +1662,20 @@ fn decode_operation_outcome(bytes: &[u8]) -> Result<DecodedOperationOutcome, Edi
         }
         chunks.push(chunk);
     }
-    let mut surfaces = Vec::with_capacity(surface_count);
-    let mut previous_level = None;
-    let mut previous_xz = [0_i32; 2];
-    for _ in 0..surface_count {
-        let level_code = cursor.byte()?;
-        let stride = 1_i32
-            .checked_shl(u32::from(level_code))
-            .and_then(SurfaceLodLevel::from_stride_voxels)
-            .ok_or_else(|| {
-                EditAuthorityError("durable operation outcome has an invalid LOD".to_owned())
-            })?;
-        if previous_level != Some(stride) {
-            previous_level = Some(stride);
-            previous_xz = [0; 2];
-        }
-        let [x, z] = cursor.coord_deltas(&mut previous_xz)?;
-        let surface = SurfaceTileCoord::new(stride, x, z);
-        if !surface.is_world_representable() {
-            return Err(EditAuthorityError(
-                "durable operation outcome contains an invalid surface tile".to_owned(),
-            ));
-        }
-        surfaces.push(surface);
-    }
     if cursor.index != bytes.len() {
         return Err(EditAuthorityError(
             "durable operation outcome contains trailing bytes".to_owned(),
         ));
     }
-    validate_outcome_collections(&mutations, &chunks, &surfaces)?;
-    Ok((mutations, chunks, surfaces))
+    validate_outcome_collections(&mutations, &chunks)?;
+    Ok((mutations, chunks))
 }
 
 fn validate_outcome_collections(
     mutations: &[VoxelMutation],
     chunks: &[ChunkCoord],
-    surfaces: &[SurfaceTileCoord],
 ) -> Result<(), EditAuthorityError> {
-    if mutations.len() > MAX_EDIT_MUTATIONS
-        || chunks.len() > MAX_EDIT_AFFECTED_CHUNKS
-        || surfaces.len() > MAX_EDIT_AFFECTED_SURFACE_TILES
-    {
+    if mutations.len() > MAX_EDIT_MUTATIONS || chunks.len() > MAX_EDIT_AFFECTED_CHUNKS {
         return Err(EditAuthorityError(
             "operation outcome exceeds protocol bounds".to_owned(),
         ));
@@ -1849,7 +1684,6 @@ fn validate_outcome_collections(
         .windows(2)
         .all(|pair| pair[0].coord < pair[1].coord)
         || !chunks.windows(2).all(|pair| pair[0] < pair[1])
-        || !surfaces.windows(2).all(|pair| pair[0] < pair[1])
     {
         return Err(EditAuthorityError(
             "operation outcome coordinates are not strictly sorted".to_owned(),
@@ -2286,7 +2120,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_operation_outcome_round_trips_extreme_and_multilevel_coordinates() {
+    fn compact_operation_outcome_round_trips_extreme_coordinates() {
         let mutations = vec![
             VoxelMutation {
                 coord: VoxelCoord::new(i32::MIN, -12, 9),
@@ -2301,14 +2135,9 @@ mod tests {
             ChunkCoord::new(-1_000_000, -2, 3),
             ChunkCoord::new(1_000_000, 4, 5),
         ];
-        let surfaces = vec![
-            SurfaceTileCoord::new(SurfaceLodLevel::Stride2, -100, 20),
-            SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 400, 21),
-            SurfaceTileCoord::new(SurfaceLodLevel::Stride256, -7, 9),
-        ];
-        let encoded = encode_operation_outcome(&mutations, &chunks, &surfaces).unwrap();
+        let encoded = encode_operation_outcome(&mutations, &chunks).unwrap();
         let decoded = decode_operation_outcome(&encoded).unwrap();
-        assert_eq!(decoded, (mutations, chunks, surfaces));
+        assert_eq!(decoded, (mutations, chunks));
     }
 
     #[test]
@@ -2317,7 +2146,7 @@ mod tests {
             coord: VoxelCoord::new(1, 2, 3),
             material: Material::Stone,
         };
-        let encoded = encode_operation_outcome(&[mutation], &[], &[]).unwrap();
+        let encoded = encode_operation_outcome(&[mutation], &[]).unwrap();
         for length in 0..encoded.len() {
             assert!(decode_operation_outcome(&encoded[..length]).is_err());
         }
@@ -2333,7 +2162,6 @@ mod tests {
                         material: Material::Stone,
                     },
                 ],
-                &[],
                 &[],
             )
             .is_err()
@@ -2903,7 +2731,6 @@ mod tests {
         assert_eq!(noop.commit.revision, 3);
         assert!(noop.commit.mutations.is_empty());
         assert!(noop.commit.affected_chunks.is_empty());
-        assert!(noop.commit.affected_surface_tiles.is_empty());
         assert_eq!(noop.commit.editor_inventory, Some(after_dig));
 
         let replaced = authority
@@ -3263,7 +3090,7 @@ mod tests {
         ));
         let player = player_id(5);
         let coord = VoxelCoord::new(-57, 300, 89);
-        let (affected_chunks, affected_surfaces, edit_revision) = {
+        let (affected_chunks, edit_revision) = {
             let authority = EditAuthority::open_with_inventory(
                 &path,
                 world_id(4),
@@ -3288,11 +3115,7 @@ mod tests {
             let mut stale = resume(3);
             stale.eye_position_metres = [99.0, 99.0, 99.0];
             authority.save_player_resume(player, stale).unwrap();
-            (
-                applied.commit.affected_chunks,
-                applied.commit.affected_surface_tiles,
-                applied.commit.revision,
-            )
+            (applied.commit.affected_chunks, applied.commit.revision)
         };
         {
             let reopened =
@@ -3318,7 +3141,6 @@ mod tests {
                     .iter()
                     .all(|revision| *revision == edit_revision)
             );
-            assert!(!affected_surfaces.is_empty());
         }
         remove_sqlite_files(&path);
     }

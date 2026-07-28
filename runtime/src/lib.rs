@@ -7,9 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use voxels_world::{
-    CHUNK_EDGE, ChunkCoord, EditMap, SurfaceTileCoord, VOXEL_SIZE_METRES, VoxelCoord,
-};
+use voxels_world::{CHUNK_EDGE, ChunkCoord, EditMap, VOXEL_SIZE_METRES, VoxelCoord};
 
 /// Physical edge length of a full-resolution chunk.
 pub const CHUNK_EDGE_METRES: f32 = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
@@ -37,7 +35,6 @@ pub const fn revision_satisfies(candidate: u64, requested: u64) -> bool {
 pub struct AuthoritativeEditRevisions {
     voxels: BTreeMap<VoxelCoord, u64>,
     chunks: BTreeMap<ChunkCoord, u64>,
-    surfaces: BTreeMap<SurfaceTileCoord, u64>,
 }
 
 impl AuthoritativeEditRevisions {
@@ -49,9 +46,8 @@ impl AuthoritativeEditRevisions {
         coord: VoxelCoord,
         revision: u64,
         affected_chunks: &[ChunkCoord],
-        affected_surfaces: &[SurfaceTileCoord],
     ) -> bool {
-        self.observe_commit_batch(&[coord], revision, affected_chunks, affected_surfaces)[0]
+        self.observe_commit_batch(&[coord], revision, affected_chunks)[0]
     }
 
     /// Records one atomic multi-voxel commit without repeatedly advancing identical product
@@ -62,7 +58,6 @@ impl AuthoritativeEditRevisions {
         coords: &[VoxelCoord],
         revision: u64,
         affected_chunks: &[ChunkCoord],
-        affected_surfaces: &[SurfaceTileCoord],
     ) -> Vec<bool> {
         let apply_values = coords
             .iter()
@@ -71,9 +66,6 @@ impl AuthoritativeEditRevisions {
         for &chunk in affected_chunks {
             advance_revision(&mut self.chunks, chunk, revision);
         }
-        for &surface in affected_surfaces {
-            advance_revision(&mut self.surfaces, surface, revision);
-        }
         apply_values
     }
 
@@ -81,14 +73,9 @@ impl AuthoritativeEditRevisions {
         self.chunks.get(&coord).copied().unwrap_or(1)
     }
 
-    pub fn surface_floor(&self, coord: SurfaceTileCoord) -> u64 {
-        self.surfaces.get(&coord).copied().unwrap_or(1)
-    }
-
     pub fn clear(&mut self) {
         self.voxels.clear();
         self.chunks.clear();
-        self.surfaces.clear();
     }
 }
 
@@ -2011,49 +1998,37 @@ mod tests {
     fn authoritative_edit_floors_do_not_regress_on_out_of_order_commits() {
         let voxel = VoxelCoord::new(7, 8, 9);
         let chunk = voxel.chunk();
-        let surface =
-            SurfaceTileCoord::containing(voxels_world::SurfaceLodLevel::Stride16, voxel.x, voxel.z);
         let mut revisions = AuthoritativeEditRevisions::default();
 
-        assert!(revisions.observe_commit(voxel, 12, &[chunk], &[surface]));
+        assert!(revisions.observe_commit(voxel, 12, &[chunk]));
         assert_eq!(revisions.chunk_floor(chunk), 12);
-        assert_eq!(revisions.surface_floor(surface), 12);
 
-        assert!(!revisions.observe_commit(voxel, 11, &[chunk], &[surface]));
+        assert!(!revisions.observe_commit(voxel, 11, &[chunk]));
         assert_eq!(revisions.chunk_floor(chunk), 12);
-        assert_eq!(revisions.surface_floor(surface), 12);
-        assert!(!revisions.observe_commit(voxel, 12, &[chunk], &[surface]));
+        assert!(!revisions.observe_commit(voxel, 12, &[chunk]));
 
-        assert!(revisions.observe_commit(voxel, 13, &[chunk], &[surface]));
+        assert!(revisions.observe_commit(voxel, 13, &[chunk]));
         assert_eq!(revisions.chunk_floor(chunk), 13);
-        assert_eq!(revisions.surface_floor(surface), 13);
         revisions.clear();
         assert_eq!(revisions.chunk_floor(chunk), 1);
-        assert_eq!(revisions.surface_floor(surface), 1);
     }
 
     #[test]
     fn atomic_edit_batch_advances_each_value_and_shared_product_floor_once() {
         let voxels = [VoxelCoord::new(31, 8, 7), VoxelCoord::new(32, 8, 7)];
         let chunks = [ChunkCoord::new(0, 0, 0), ChunkCoord::new(1, 0, 0)];
-        let surface = SurfaceTileCoord::containing(
-            voxels_world::SurfaceLodLevel::Stride16,
-            voxels[0].x,
-            voxels[0].z,
-        );
         let mut revisions = AuthoritativeEditRevisions::default();
 
         assert_eq!(
-            revisions.observe_commit_batch(&voxels, 9, &chunks, &[surface]),
+            revisions.observe_commit_batch(&voxels, 9, &chunks),
             vec![true, true]
         );
         assert_eq!(
-            revisions.observe_commit_batch(&voxels, 9, &chunks, &[surface]),
+            revisions.observe_commit_batch(&voxels, 9, &chunks),
             vec![false, false]
         );
         assert_eq!(revisions.chunk_floor(chunks[0]), 9);
         assert_eq!(revisions.chunk_floor(chunks[1]), 9);
-        assert_eq!(revisions.surface_floor(surface), 9);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Multiplayer scaling envelope
 
-VXWP v39 supports one unsharded authoritative world with up to 1,024 admitted player sessions. Spatial
+VXWP v40 supports one unsharded authoritative world with up to 1,024 admitted player sessions. Spatial
 interest management is an internal replication index, not a gameplay shard: every player inside the
 same location's 256 m interest radius can discover every other player there. Players beyond that
 radius contribute no entity records or bytes to one another's presence streams.
@@ -98,7 +98,7 @@ and six independent ephemeral BrowserContexts. Each context has separate local s
 receives an independently shaped 40 ms RTT, 50/10 Mbit/s link, and must negotiate a distinct browser
 user and player identity. Five builders and one observer start together. The observer then travels at
 least 120 m from the builders, beyond the configured 96 m mid-presence tier, and all six clients must
-still render the other five articulated avatars. Per-player `/v39/world` and `/v39/presence` stream and
+still render the other five articulated avatars. Per-player `/v40/world` and `/v40/presence` stream and
 VXWP byte counts and screenshots are written to the isolated
 `target/automation/multiplayer/<run-id>/` directory. The stable
 `target/automation/multiplayer/latest.json` pointer identifies the newest run; its far-observer
@@ -155,14 +155,15 @@ pings, lifecycle, malformed, and other control frames remain lossless. Admission
 inside the serialized presence hub so lock contention cannot make valid queued motion appear faster
 than the unchanged receipt-time movement budget.
 
-Individual chunks and surface tiles use process-wide single-flight generation. Overlapping batches
-join the first computation per product, and later requesters reuse validated encoded items from a
-256 MiB byte-bounded LRU while receiving their own request ID and requested item order. This prevents
-a crowd spawning in one place from performing the same CPU or Metal work hundreds of times even when
-clients choose different batch boundaries. The cache key contains product kind, coordinate, and
-per-product edit revision; the service instance supplies one immutable source identity. Priority and
-coordinate order remain scheduling/envelope data and do not fragment the cache. An edit therefore
-invalidates only affected chunk/surface products; unrelated regions retain cache reuse.
+Canonical chunks and virtual-terrain directories/pages use process-wide single-flight generation.
+Overlapping batches join the first computation per product, and later requesters reuse validated
+encoded items from a byte-bounded cache while receiving their own request ID and requested item
+order. This prevents a crowd spawning in one place from performing the same CPU or Metal work
+hundreds of times even when clients choose different batch boundaries. Cache identity includes the
+canonical key and edit revision; the service instance supplies one immutable source identity.
+Priority and coordinate order remain scheduling/envelope data and do not fragment the cache. An
+edit advances affected chunk revisions, from which virtual-terrain revision floors are derived;
+unrelated regions retain cache reuse.
 
 The finite generation worker pool is still shared compute. Interest isolation guarantees zero
 cross-region presence candidates and entity bytes, but it cannot promise zero CPU contention while

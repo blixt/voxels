@@ -65,9 +65,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v39/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v39/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v39";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v40/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v40/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v40";
 pub const HEALTH_PATH: &str = "/healthz";
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
@@ -450,7 +450,6 @@ fn prepare_world(
     };
     manifest.validate()?;
     let capabilities = WorldCapabilities::CANONICAL_CHUNKS
-        .union(WorldCapabilities::SURFACE_LOD)
         .union(WorldCapabilities::VIRTUAL_TERRAIN)
         .union(WorldCapabilities::SERVER_EDITS)
         .union(WorldCapabilities::ENVIRONMENT)
@@ -4903,7 +4902,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v39, test-local-token"),
+            HeaderValue::from_static("voxels.world.v40, test-local-token"),
         );
         let (socket, response) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -4927,7 +4926,6 @@ mod tests {
         assert_eq!(opened.manifest.world_id, config.canonical_world_id());
         assert_eq!(opened.recommended_in_flight_batches, 2);
         assert_eq!(opened.identity, identity);
-        assert!(opened.capabilities.contains(WorldCapabilities::SURFACE_LOD));
         assert!(opened.capabilities.contains(WorldCapabilities::GLIDING));
         let spawn_top = VoxelCoord::new(opened.spawn.x, opened.spawn.height, opened.spawn.z);
         let expected_eye_y = (opened.spawn.height + 1) as f32 * voxels_world::VOXEL_SIZE_METRES
@@ -5794,7 +5792,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v39, test-local-token"),
+            HeaderValue::from_static("voxels.world.v40, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -5828,7 +5826,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v39, test-local-token"),
+            HeaderValue::from_static("voxels.world.v40, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);

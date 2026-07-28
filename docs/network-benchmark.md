@@ -176,7 +176,7 @@ decode jank on this machine.
 
 ## 2026-07-18 canonical view-and-velocity priority
 
-VXWP v39 preserves the complete immediate 3x3 canonical-chunk vicinity, then reorders unstarted
+VXWP v40 preserves the complete immediate 3x3 canonical-chunk vicinity, then reorders unstarted
 generation, meshing, and upload tickets every frame by a 55-degree camera cone and a 1.5-second
 velocity prediction. This changes request order only: residency, cache identity, product fidelity,
 and every traffic bound remain unchanged. The values are typed client configuration.
@@ -197,14 +197,15 @@ The candidate recorded zero frames above 33.33 ms. Dynamic scenarios improved wi
 bandwidth change; the mixed cold median/max result is treated as neutral three-run variance rather
 than a claimed win.
 
-Applying the same directional policy to surface tiles did not land. A three-run candidate reached
+Applying the same directional policy to the former surface tiles did not land. A three-run candidate reached
 the streaming-walk viewport 128 ms sooner than radial order, but made turn-during-spawn 1.69 seconds
 slower and produced a 20.9-second outlier. Surface levels activate atomically, so partial directional
-progress cannot be presented; reordering only disrupted spatial generation locality. Surface tiles
-therefore retain their proven coarsest-first radial order.
+progress could not be presented; reordering only disrupted spatial generation locality. This
+historical result helped motivate deleting that fixed-ring stream in VXWP v40.
 
-Later work implemented priority-aware admission, cancellation, and velocity-led surface residency.
-The fixed-ring conclusion in this historical section no longer describes current traversal; see the
+Later work implemented priority-aware admission, cancellation, and virtual-page residency before
+the fixed-ring transport was removed. This historical section no longer describes current
+traversal; see the
 [2026-07-22 fast-travel streaming study](20260722-fast-travel-streaming-study.md) for the measured
 replacement and the remaining progressive-codec boundary.
 

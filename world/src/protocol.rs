@@ -6,21 +6,21 @@
 
 use crate::{
     ChunkCoord, ChunkSnapshot, Material, MeshingHalo, ModelIdentity, SourceDeviceRequirement,
-    SurfaceLodLevel, SurfaceRegion, SurfaceTileCoord, TERRAIN_COVERAGE_ROOT_LEVEL,
-    TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError, TerrainHierarchyDirectoryV1,
-    TerrainPageBatchRequestV1, TerrainPageBatchResultV1, TerrainPageCodecError, TerrainPageKey,
-    TerrainPageTransferCodecError, TerrainPageV1, VOXEL_SIZE_METRES, VoxelCoord, WorldId,
-    WorldManifest, WorldProductPriority, WorldSourceError, WorldSourceIdentity,
-    WorldSourceIdentityHash, WorldSourceKind, codec, decode_terrain_directory, decode_terrain_page,
-    decode_terrain_page_batch_request, decode_terrain_page_batch_result, encode_terrain_directory,
-    encode_terrain_page, encode_terrain_page_batch_request, encode_terrain_page_batch_result,
+    SurfaceRegion, TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError,
+    TerrainHierarchyDirectoryV1, TerrainPageBatchRequestV1, TerrainPageBatchResultV1,
+    TerrainPageCodecError, TerrainPageKey, TerrainPageTransferCodecError, TerrainPageV1,
+    VOXEL_SIZE_METRES, VoxelCoord, WorldId, WorldManifest, WorldProductPriority, WorldSourceError,
+    WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind, codec, decode_terrain_directory,
+    decode_terrain_page, decode_terrain_page_batch_request, decode_terrain_page_batch_result,
+    encode_terrain_directory, encode_terrain_page, encode_terrain_page_batch_request,
+    encode_terrain_page_batch_result,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 39;
+pub const PROTOCOL_VERSION: u16 = 40;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -30,7 +30,6 @@ pub const MAX_PLAYERS_PER_PRESENCE_DELTA: usize = 1_024;
 pub const MAX_PLAYER_NAME_BYTES: usize = 32;
 pub const MAX_EDIT_MUTATIONS: usize = EDIT_MAX_VOLUME_VOXELS;
 pub const MAX_EDIT_AFFECTED_CHUNKS: usize = 27;
-pub const MAX_EDIT_AFFECTED_SURFACE_TILES: usize = 128;
 pub const FRAME_FRAGMENT_OVERHEAD_BYTES: usize = FRAME_HEADER_BYTES + 8;
 pub const MAX_FRAME_FRAGMENT_DATA_BYTES: usize =
     MAX_PROTOCOL_FRAME_BYTES - FRAME_FRAGMENT_OVERHEAD_BYTES;
@@ -763,7 +762,6 @@ pub struct EditCommit {
     /// Strictly coordinate-sorted, unique final voxel values committed at `revision`.
     pub mutations: Vec<VoxelMutation>,
     pub affected_chunks: Vec<ChunkCoord>,
-    pub affected_surface_tiles: Vec<SurfaceTileCoord>,
     /// Present only on the editor's receipt. Observer commits intentionally omit private inventory.
     pub editor_inventory: Option<MaterialInventory>,
 }
@@ -2174,8 +2172,7 @@ pub fn encode_edit_commit(commit: &EditCommit) -> Result<Vec<u8>, ProtocolError>
     let (action_kind, shape, material, target) = encode_edit_action(commit.action)?;
     let (mutation_encoding, encoded_mutations) = encode_edit_mutations(commit)?;
     let mut payload = Vec::with_capacity(
-        60 + encoded_mutations.len()
-            + commit.affected_surface_tiles.len() * 12
+        58 + encoded_mutations.len()
             + commit.editor_inventory.is_some() as usize * (8 + MATERIAL_INVENTORY_SLOTS * 8),
     );
     payload.extend_from_slice(commit.edit_session_id.as_bytes());
@@ -2189,15 +2186,9 @@ pub fn encode_edit_commit(commit: &EditCommit) -> Result<Vec<u8>, ProtocolError>
     push_u16(&mut payload, 0);
     encode_voxel_coord(&mut payload, target);
     push_u16(&mut payload, commit.mutations.len() as u16);
-    push_u16(&mut payload, commit.affected_surface_tiles.len() as u16);
     push_u16(&mut payload, u16::from(commit.editor_inventory.is_some()));
     push_u16(&mut payload, 0);
     payload.extend_from_slice(&encoded_mutations);
-    let mut previous_surface = [0_i64; 2];
-    for coord in &commit.affected_surface_tiles {
-        payload.push(coord.level.index());
-        encode_delta_coord(&mut payload, [coord.x, coord.z], &mut previous_surface);
-    }
     if let Some(inventory) = commit.editor_inventory {
         encode_inventory(&mut payload, inventory);
     }
@@ -2240,7 +2231,6 @@ pub fn decode_edit_commit(bytes: &[u8]) -> Result<EditCommit, ProtocolError> {
     let target = decode_voxel_coord(&mut cursor)?;
     let action = decode_edit_action(action_kind, shape, material, target)?;
     let mutation_count = usize::from(cursor.u16()?);
-    let surface_count = usize::from(cursor.u16()?);
     let inventory_present = cursor.u16()?;
     if cursor.u16()? != 0 {
         return Err(ProtocolError::InvalidPayload(
@@ -2249,9 +2239,6 @@ pub fn decode_edit_commit(bytes: &[u8]) -> Result<EditCommit, ProtocolError> {
     }
     if mutation_count > MAX_EDIT_MUTATIONS {
         return Err(ProtocolError::LimitExceeded("edit mutations"));
-    }
-    if surface_count > MAX_EDIT_AFFECTED_SURFACE_TILES {
-        return Err(ProtocolError::LimitExceeded("edit affected surface tiles"));
     }
     if inventory_present > 1 {
         return Err(ProtocolError::InvalidPayload(
@@ -2265,19 +2252,6 @@ pub fn decode_edit_commit(bytes: &[u8]) -> Result<EditCommit, ProtocolError> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let mut affected_surface_tiles = Vec::with_capacity(surface_count);
-    let mut previous_surface = [0_i64; 2];
-    for _ in 0..surface_count {
-        let level = decode_surface_lod(cursor.u8()?)?;
-        let [x, z] = decode_delta_coord(&mut cursor, &mut previous_surface)?;
-        let coord = SurfaceTileCoord::new(level, x, z);
-        if !coord.is_world_representable() {
-            return Err(ProtocolError::InvalidPayload(
-                "invalid surface tile coordinate",
-            ));
-        }
-        affected_surface_tiles.push(coord);
-    }
     let editor_inventory = (inventory_present == 1)
         .then(|| decode_inventory(&mut cursor))
         .transpose()?;
@@ -2290,7 +2264,6 @@ pub fn decode_edit_commit(bytes: &[u8]) -> Result<EditCommit, ProtocolError> {
         action,
         mutations,
         affected_chunks,
-        affected_surface_tiles,
         editor_inventory,
     };
     validate_edit_commit(&commit)?;
@@ -3211,16 +3184,12 @@ fn validate_edit_commit(commit: &EditCommit) -> Result<(), ProtocolError> {
     if commit.affected_chunks.len() > MAX_EDIT_AFFECTED_CHUNKS {
         return Err(ProtocolError::LimitExceeded("edit affected chunks"));
     }
-    if (commit.mutations.is_empty()
-        && (!commit.affected_chunks.is_empty() || !commit.affected_surface_tiles.is_empty()))
+    if (commit.mutations.is_empty() && !commit.affected_chunks.is_empty())
         || (!commit.mutations.is_empty() && commit.affected_chunks.is_empty())
     {
         return Err(ProtocolError::InvalidPayload(
             "no-op edit has affected products or changed edit omits them",
         ));
-    }
-    if commit.affected_surface_tiles.len() > MAX_EDIT_AFFECTED_SURFACE_TILES {
-        return Err(ProtocolError::LimitExceeded("edit affected surface tiles"));
     }
     if !strictly_sorted(&commit.affected_chunks) {
         return Err(ProtocolError::InvalidPayload(
@@ -3245,20 +3214,6 @@ fn validate_edit_commit(commit: &EditCommit) -> Result<(), ProtocolError> {
         .any(|coord| !coord.is_world_representable())
     {
         return Err(ProtocolError::InvalidPayload("invalid chunk coordinate"));
-    }
-    if !strictly_sorted(&commit.affected_surface_tiles) {
-        return Err(ProtocolError::InvalidPayload(
-            "edit affected surface tiles are not strictly sorted",
-        ));
-    }
-    if commit
-        .affected_surface_tiles
-        .iter()
-        .any(|coord| !coord.is_world_representable())
-    {
-        return Err(ProtocolError::InvalidPayload(
-            "invalid surface tile coordinate",
-        ));
     }
     if let Some(inventory) = &commit.editor_inventory {
         validate_inventory(inventory)?;
@@ -3575,45 +3530,6 @@ fn decode_manifest(bytes: &[u8]) -> Result<WorldManifest, ProtocolError> {
     Ok(manifest)
 }
 
-fn encode_delta_coord<const N: usize>(
-    output: &mut Vec<u8>,
-    coord: [i32; N],
-    previous: &mut [i64; N],
-) {
-    for axis in 0..N {
-        let value = i64::from(coord[axis]);
-        push_var_u64(output, zigzag_i64(value - previous[axis]));
-        previous[axis] = value;
-    }
-}
-
-fn decode_delta_coord<const N: usize>(
-    cursor: &mut Cursor<'_>,
-    previous: &mut [i64; N],
-) -> Result<[i32; N], ProtocolError> {
-    let mut coord = [0; N];
-    for axis in 0..N {
-        let delta = unzigzag_i64(decode_var_u64(cursor, 5)?);
-        let value = previous[axis]
-            .checked_add(delta)
-            .and_then(|value| i32::try_from(value).ok())
-            .ok_or(ProtocolError::InvalidPayload(
-                "delta-encoded coordinate overflows",
-            ))?;
-        coord[axis] = value;
-        previous[axis] = i64::from(value);
-    }
-    Ok(coord)
-}
-
-fn zigzag_i64(value: i64) -> u64 {
-    ((value as u64) << 1) ^ ((value >> 63) as u64)
-}
-
-fn unzigzag_i64(value: u64) -> i64 {
-    ((value >> 1) as i64) ^ -((value & 1) as i64)
-}
-
 fn push_var_u64(output: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
         output.push((value as u8 & 0x7f) | 0x80);
@@ -3913,25 +3829,6 @@ fn decode_priority(value: u8) -> Result<WorldProductPriority, ProtocolError> {
         6 => WorldProductPriority::Prefetch,
         7 => WorldProductPriority::VirtualTerrain,
         _ => return Err(ProtocolError::UnknownEnum("priority", u64::from(value))),
-    })
-}
-
-fn decode_surface_lod(value: u8) -> Result<SurfaceLodLevel, ProtocolError> {
-    Ok(match value {
-        0 => SurfaceLodLevel::Stride2,
-        1 => SurfaceLodLevel::Stride4,
-        2 => SurfaceLodLevel::Stride8,
-        3 => SurfaceLodLevel::Stride16,
-        4 => SurfaceLodLevel::Stride32,
-        5 => SurfaceLodLevel::Stride64,
-        6 => SurfaceLodLevel::Stride128,
-        7 => SurfaceLodLevel::Stride256,
-        _ => {
-            return Err(ProtocolError::UnknownEnum(
-                "surface LOD level",
-                u64::from(value),
-            ));
-        }
     })
 }
 
@@ -4741,10 +4638,6 @@ mod tests {
             action: dig.action,
             mutations,
             affected_chunks,
-            affected_surface_tiles: vec![
-                SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, -1),
-                SurfaceTileCoord::new(SurfaceLodLevel::Stride16, 0, -1),
-            ],
             editor_inventory: Some(MaterialInventory {
                 revision: 8,
                 counts,
@@ -4757,7 +4650,7 @@ mod tests {
         );
         assert_eq!(message_kind(&encoded_commit), Ok(edit_commit_kind()));
         assert_eq!(decode_edit_commit(&encoded_commit), Ok(commit.clone()));
-        let mutation_offset = FRAME_HEADER_BYTES + 60;
+        let mutation_offset = FRAME_HEADER_BYTES + 58;
         let mut overlong_delta = encoded_commit.clone();
         overlong_delta[mutation_offset..mutation_offset + 5].fill(0x80);
         assert_eq!(
@@ -4933,7 +4826,6 @@ mod tests {
             action,
             mutations,
             affected_chunks,
-            affected_surface_tiles: Vec::new(),
             editor_inventory: None,
         };
         let encoded = encode_edit_commit(&commit).expect("encode maximum commit");
@@ -4944,7 +4836,7 @@ mod tests {
         );
         assert_eq!(decode_edit_commit(&encoded), Ok(commit.clone()));
         let mut nonzero_padding = encoded;
-        let bitset_last = FRAME_HEADER_BYTES + 60 + MAX_EDIT_MUTATIONS.div_ceil(8) - 1;
+        let bitset_last = FRAME_HEADER_BYTES + 58 + MAX_EDIT_MUTATIONS.div_ceil(8) - 1;
         nonzero_padding[bitset_last] |= 0x80;
         assert_eq!(
             decode_edit_commit(&nonzero_padding),

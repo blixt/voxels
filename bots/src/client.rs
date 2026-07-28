@@ -53,7 +53,6 @@ pub async fn connect_bot(
         bail!("world server echoed a different player identity");
     }
     let required_capabilities = WorldCapabilities::CANONICAL_CHUNKS
-        .union(WorldCapabilities::SURFACE_LOD)
         .union(WorldCapabilities::PLAYER_PRESENCE)
         .union(WorldCapabilities::SERVER_EDITS);
     if !opened.capabilities.contains(required_capabilities) {

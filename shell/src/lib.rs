@@ -1286,7 +1286,7 @@ mod web {
     use voxels_world::{
         AtmosphereSample, BinaryMeshScratch, CHUNK_EDGE, CHUNK_VOXEL_BYTES,
         CINDER_VAULT_PORTAL_COUNT, CaveStreamInterest, Chunk, ChunkCoord, EditMap, Material,
-        MeshedChunk, MeshingHalo, PortalState, SurfaceRegion, SurfaceSample, SurfaceTileCoord,
+        MeshedChunk, MeshingHalo, PortalState, SurfaceRegion, SurfaceSample,
         TERRAIN_COVERAGE_ROOT_LEVEL, TerrainDemandGroup, TerrainHierarchyNode, TerrainPageDemand,
         TerrainPageKey, TerrainPageMemoryCache, TerrainPageTransferIdentity, TerrainStreamConfig,
         TerrainStreamScheduler, VOXEL_SIZE_METRES, VoxelCoord, WorldProductPriority,
@@ -4797,7 +4797,6 @@ mod web {
                             &commit.mutations,
                             commit.revision,
                             &commit.affected_chunks,
-                            &commit.affected_surface_tiles,
                         );
                     }
                     RemoteEditEvent::ResyncRequired { revision } => {
@@ -4834,7 +4833,6 @@ mod web {
             mutations: &[VoxelMutation],
             server_revision: u64,
             affected_chunks: &[ChunkCoord],
-            affected_surface_tiles: &[SurfaceTileCoord],
         ) -> EditRequirements {
             if mutations.is_empty() {
                 return EditRequirements::default();
@@ -4847,7 +4845,6 @@ mod web {
                 &coords,
                 server_revision,
                 affected_chunks,
-                affected_surface_tiles,
             );
             let accepted_mutations = mutations
                 .iter()
