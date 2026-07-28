@@ -659,7 +659,12 @@ fn progress_latency_summaries(values: &[u64]) -> Vec<LatencySummary> {
 }
 
 fn percentile(values: &[u64], percentile: usize) -> u64 {
-    let index = (values.len() - 1) * percentile / 100;
+    let index = values
+        .len()
+        .saturating_mul(percentile)
+        .div_ceil(100)
+        .saturating_sub(1)
+        .min(values.len().saturating_sub(1));
     values[index]
 }
 
@@ -701,6 +706,11 @@ mod tests {
         assert_eq!(summary.p99, 99);
         assert_eq!(summary.maximum, 100);
         assert_eq!(summary.mean, 50.5);
+
+        let small = summarize_latencies(&(1..=10).collect::<Vec<_>>());
+        assert_eq!(small.median, 5);
+        assert_eq!(small.p95, 10);
+        assert_eq!(small.p99, 10);
     }
 
     #[test]
