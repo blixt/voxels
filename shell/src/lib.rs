@@ -1522,11 +1522,23 @@ mod web {
         column_retry_after_ms: BTreeMap<[i32; 2], u64>,
         minimum_column_revisions: BTreeMap<[i32; 2], u64>,
         registered_roots: BTreeSet<TerrainPageKey>,
+        registered_refinements: BTreeSet<TerrainPageKey>,
         directory_in_flight: BTreeMap<TerrainPageKey, RemoteRequestId>,
         directory_retry_after_ms: BTreeMap<TerrainPageKey, u64>,
         minimum_region_revisions: BTreeMap<TerrainPageKey, u64>,
         nodes: BTreeMap<TerrainPageKey, TerrainHierarchyNode>,
         stats: VirtualTerrainRequestStats,
+    }
+
+    fn virtual_terrain_directory_is_registered(
+        state: &VirtualTerrainStreamingState,
+        root: TerrainPageKey,
+    ) -> bool {
+        if root.is_surface() && root.level < TERRAIN_COVERAGE_ROOT_LEVEL {
+            state.registered_refinements.contains(&root)
+        } else {
+            state.registered_roots.contains(&root)
+        }
     }
 
     fn terrain_page_bounds_metres(key: TerrainPageKey) -> Option<([f64; 3], [f64; 3])> {
@@ -2167,6 +2179,7 @@ mod web {
                 let roots = state
                     .registered_roots
                     .iter()
+                    .chain(state.registered_refinements.iter())
                     .chain(state.directory_in_flight.keys())
                     .chain(state.minimum_region_revisions.keys())
                     .copied()
@@ -2180,7 +2193,7 @@ mod web {
                             .get(&root)
                             .copied()
                             .unwrap_or(0),
-                        registered: state.registered_roots.contains(&root),
+                        registered: virtual_terrain_directory_is_registered(&state, root),
                         in_flight: state.directory_in_flight.contains_key(&root),
                     })
                     .collect();
@@ -3664,14 +3677,40 @@ mod web {
                 {
                     log_gpu_error(&format!("retire virtual terrain regions: {error}"));
                 } else {
-                    let mut state = self.virtual_terrain.borrow_mut();
-                    state
-                        .registered_roots
-                        .retain(|root| retained_roots.contains(root));
-                    state.nodes.retain(|key, _| {
-                        key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
-                            .is_some_and(|root| retained_roots.contains(&root))
-                    });
+                    let canceled = {
+                        let mut state = self.virtual_terrain.borrow_mut();
+                        let canceled = state
+                            .directory_in_flight
+                            .iter()
+                            .filter(|(key, _)| {
+                                key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                                    .is_some_and(|root| removed_roots.contains(&root))
+                            })
+                            .map(|(_, request_id)| *request_id)
+                            .collect::<BTreeSet<_>>();
+                        state
+                            .directory_in_flight
+                            .retain(|_, request_id| !canceled.contains(request_id));
+                        state.directory_retry_after_ms.retain(|key, _| {
+                            key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                                .is_none_or(|root| !removed_roots.contains(&root))
+                        });
+                        state
+                            .registered_roots
+                            .retain(|root| retained_roots.contains(root));
+                        state.registered_refinements.retain(|key| {
+                            key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                                .is_some_and(|root| retained_roots.contains(&root))
+                        });
+                        state.nodes.retain(|key, _| {
+                            key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                                .is_some_and(|root| retained_roots.contains(&root))
+                        });
+                        canceled
+                    };
+                    for request_id in canceled {
+                        self.remote.cancel(request_id);
+                    }
                 }
             }
 
@@ -3694,6 +3733,8 @@ mod web {
                     }
                 }
             }
+
+            self.request_virtual_terrain_directories(&cut.refinement_roots, now_ms);
 
             let demands =
                 self.virtual_terrain_demand_groups(&cut, view, streaming_velocity.length());
@@ -3828,7 +3869,7 @@ mod web {
                 desired_roots
                     .iter()
                     .filter(|root| {
-                        !state.registered_roots.contains(root)
+                        !virtual_terrain_directory_is_registered(&state, **root)
                             && !state.directory_in_flight.contains_key(root)
                             && state
                                 .directory_retry_after_ms
@@ -4101,6 +4142,7 @@ mod web {
             }
             for item in result.items {
                 let root = item.root;
+                let is_refinement = root.is_surface() && root.level < TERRAIN_COVERAGE_ROOT_LEVEL;
                 let Ok(bootstrap) = item.result else {
                     let mut state = self.virtual_terrain.borrow_mut();
                     state.stats.directory_other_failed =
@@ -4115,11 +4157,14 @@ mod web {
                     ));
                     continue;
                 };
+                let revision_root = root
+                    .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                    .unwrap_or(root);
                 let minimum_revision = self
                     .virtual_terrain
                     .borrow()
                     .minimum_region_revisions
-                    .get(&root)
+                    .get(&revision_root)
                     .copied()
                     .unwrap_or(0);
                 let directory_revision = bootstrap
@@ -4138,12 +4183,7 @@ mod web {
                     );
                     continue;
                 }
-                if self
-                    .virtual_terrain
-                    .borrow()
-                    .registered_roots
-                    .contains(&root)
-                {
+                if virtual_terrain_directory_is_registered(&self.virtual_terrain.borrow(), root) {
                     continue;
                 }
                 let existing_roots = self
@@ -4155,52 +4195,68 @@ mod web {
                     .collect::<Vec<_>>();
                 let publication = {
                     let mut renderer = self.renderer.borrow_mut();
-                    match renderer.register_virtual_terrain_directory(&bootstrap.directory) {
-                        Ok(()) => match renderer
-                            .upload_virtual_terrain_page(bootstrap.root_page.clone())
-                        {
-                            Ok(()) => Ok(()),
-                            Err(error) => {
-                                let rollback = renderer
-                                    .retain_virtual_terrain_regions(existing_roots.iter().copied());
-                                Err((error, rollback.err()))
-                            }
-                        },
-                        Err(error) => Err((error, None)),
+                    if is_refinement {
+                        renderer
+                            .register_virtual_terrain_refinement_directory(&bootstrap.directory)
+                            .map_err(|error| (error, None))
+                    } else {
+                        match renderer.register_virtual_terrain_directory(&bootstrap.directory) {
+                            Ok(()) => match renderer
+                                .upload_virtual_terrain_page(bootstrap.root_page.clone())
+                            {
+                                Ok(()) => Ok(()),
+                                Err(error) => {
+                                    let rollback = renderer.retain_virtual_terrain_regions(
+                                        existing_roots.iter().copied(),
+                                    );
+                                    Err((error, rollback.err()))
+                                }
+                            },
+                            Err(error) => Err((error, None)),
+                        }
                     }
                 };
                 match publication {
                     Ok(()) => {
-                        match encode_terrain_page(&bootstrap.root_page) {
-                            Ok(encoded) => {
-                                if let Err(error) = self
-                                    .virtual_terrain_cache
-                                    .borrow_mut()
-                                    .insert(encoded, false)
-                                {
+                        if !is_refinement {
+                            match encode_terrain_page(&bootstrap.root_page) {
+                                Ok(encoded) => {
+                                    if let Err(error) = self
+                                        .virtual_terrain_cache
+                                        .borrow_mut()
+                                        .insert(encoded, false)
+                                    {
+                                        log_gpu_error(&format!(
+                                            "cache virtual terrain bootstrap root: {error}"
+                                        ));
+                                    }
+                                }
+                                Err(error) => {
                                     log_gpu_error(&format!(
-                                        "cache virtual terrain bootstrap root: {error}"
+                                        "encode virtual terrain bootstrap root: {error}"
                                     ));
                                 }
                             }
-                            Err(error) => {
-                                log_gpu_error(&format!(
-                                    "encode virtual terrain bootstrap root: {error}"
-                                ));
-                            }
                         }
                         let mut state = self.virtual_terrain.borrow_mut();
-                        state.registered_roots.insert(root);
+                        if is_refinement {
+                            state.registered_refinements.insert(root);
+                        } else {
+                            state.registered_roots.insert(root);
+                        }
                         state.stats.directory_accepted =
                             state.stats.directory_accepted.saturating_add(1);
                         state.directory_retry_after_ms.remove(&root);
-                        state.nodes.extend(
-                            bootstrap
-                                .directory
-                                .nodes
-                                .into_iter()
-                                .map(|node| (node.key, node)),
-                        );
+                        for mut node in bootstrap.directory.nodes {
+                            if is_refinement {
+                                node.is_root = false;
+                            }
+                            if let Some(existing) = state.nodes.get_mut(&node.key) {
+                                existing.has_children |= node.has_children;
+                            } else {
+                                state.nodes.insert(node.key, node);
+                            }
+                        }
                     }
                     Err((error, rollback_error)) => {
                         let mut state = self.virtual_terrain.borrow_mut();
@@ -4251,9 +4307,14 @@ mod web {
             };
             let canceled_requests = {
                 let mut state = self.virtual_terrain.borrow_mut();
-                let request_ids = invalid
+                let request_ids = state
+                    .directory_in_flight
                     .iter()
-                    .filter_map(|root| state.directory_in_flight.get(root).copied())
+                    .filter(|(key, _)| {
+                        key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                            .is_some_and(|root| invalid.contains(&root))
+                    })
+                    .map(|(_, request_id)| *request_id)
                     .chain(
                         invalid_columns
                             .iter()
@@ -4312,12 +4373,19 @@ mod web {
             state
                 .registered_roots
                 .retain(|root| !invalid.contains(root));
+            state.registered_refinements.retain(|key| {
+                key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                    .is_none_or(|root| !invalid.contains(&root))
+            });
             state.nodes.retain(|key, _| {
                 key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
                     .is_none_or(|root| !invalid.contains(&root))
             });
+            state.directory_retry_after_ms.retain(|key, _| {
+                key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                    .is_none_or(|root| !invalid.contains(&root))
+            });
             for root in invalid {
-                state.directory_retry_after_ms.remove(&root);
                 if let Some(revision) = minimum_revision {
                     state
                         .minimum_region_revisions

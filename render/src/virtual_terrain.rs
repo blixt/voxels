@@ -32,7 +32,7 @@ pub struct VirtualTerrainCapacity {
 
 impl VirtualTerrainCapacity {
     pub const DEVELOPMENT_128_MIB: Self = Self {
-        max_directories: 512,
+        max_directories: 65_536,
         max_roots: 512,
         max_directory_nodes: 299_520,
         max_resident_pages: 8_192,
@@ -103,6 +103,7 @@ impl VirtualTerrainView {
 pub struct VirtualTerrainCut {
     pub selected_pages: Vec<TerrainPageKey>,
     pub requested_pages: Vec<TerrainPageTransferIdentity>,
+    pub refinement_roots: Vec<TerrainPageKey>,
     pub ownerless_roots: Vec<TerrainPageKey>,
     pub fingerprint: u64,
     pub visited_nodes: usize,
@@ -289,7 +290,7 @@ impl VirtualTerrainHierarchy {
         &mut self,
         directory: &TerrainHierarchyDirectoryV1,
     ) -> Result<(), VirtualTerrainError> {
-        self.register_directory(directory, true)
+        self.register_directory(directory, true, false)
     }
 
     /// Registers a validated directory without granting any of its roots render ownership.
@@ -300,13 +301,52 @@ impl VirtualTerrainHierarchy {
         &mut self,
         directory: &TerrainHierarchyDirectoryV1,
     ) -> Result<(), VirtualTerrainError> {
-        self.register_directory(directory, false)
+        self.register_directory(directory, false, false)
+    }
+
+    /// Extends an existing surface node with one four-child directory segment.
+    ///
+    /// The segment root repeats the already-known geometry identity. Only its directory
+    /// `has_children` bit is upgraded; it never becomes another active render root.
+    pub fn register_refinement_directory(
+        &mut self,
+        directory: &TerrainHierarchyDirectoryV1,
+    ) -> Result<(), VirtualTerrainError> {
+        let roots = directory.roots().collect::<Vec<_>>();
+        let Some(root) = roots
+            .first()
+            .filter(|root| roots.len() == 1 && root.key.is_surface())
+        else {
+            return Err(VirtualTerrainError::InvalidDirectory);
+        };
+        let expected = root
+            .key
+            .refinement_children()
+            .map(|children| {
+                children
+                    .into_iter()
+                    .chain([root.key])
+                    .collect::<BTreeSet<_>>()
+            })
+            .ok_or(VirtualTerrainError::InvalidDirectory)?;
+        if directory
+            .nodes
+            .iter()
+            .map(|node| node.key)
+            .collect::<BTreeSet<_>>()
+            != expected
+            || !self.nodes.contains_key(&root.key)
+        {
+            return Err(VirtualTerrainError::InvalidDirectory);
+        }
+        self.register_directory(directory, false, true)
     }
 
     fn register_directory(
         &mut self,
         directory: &TerrainHierarchyDirectoryV1,
         activate_roots: bool,
+        refinement: bool,
     ) -> Result<(), VirtualTerrainError> {
         if !directory.validates_identity() {
             return Err(VirtualTerrainError::InvalidDirectory);
@@ -323,25 +363,36 @@ impl VirtualTerrainHierarchy {
         {
             return Ok(());
         }
+        let new_node_count = directory
+            .nodes
+            .iter()
+            .filter(|node| !self.nodes.contains_key(&node.key))
+            .count();
         if self.directory_fingerprints.len() >= self.capacity.max_directories
-            || self.nodes.len().saturating_add(directory.nodes.len())
-                > self.capacity.max_directory_nodes
-            || self.directory_roots.len().saturating_add(
-                directory
-                    .roots()
-                    .filter(|node| !self.directory_roots.contains_key(&node.key))
-                    .count(),
-            ) > self.capacity.max_roots
+            || self.nodes.len().saturating_add(new_node_count) > self.capacity.max_directory_nodes
+            || (!refinement
+                && self.directory_roots.len().saturating_add(
+                    directory
+                        .roots()
+                        .filter(|node| !self.directory_roots.contains_key(&node.key))
+                        .count(),
+                ) > self.capacity.max_roots)
         {
             return Err(VirtualTerrainError::DirectoryCapacity);
         }
         for node in &directory.nodes {
-            if self
-                .nodes
-                .get(&node.key)
-                .is_some_and(|existing| existing != node)
-            {
-                return Err(VirtualTerrainError::DirectoryCollision(node.key));
+            if let Some(existing) = self.nodes.get(&node.key) {
+                let collision = if refinement {
+                    let mut normalized = *node;
+                    normalized.has_children = existing.has_children;
+                    normalized.is_root = existing.is_root;
+                    normalized != *existing
+                } else {
+                    node != existing
+                };
+                if collision {
+                    return Err(VirtualTerrainError::DirectoryCollision(node.key));
+                }
             }
         }
         self.source_identity_hash = Some(directory.source_identity_hash);
@@ -352,8 +403,16 @@ impl VirtualTerrainHierarchy {
             directory.nodes.iter().map(|node| node.key).collect(),
         );
         for node in &directory.nodes {
-            self.nodes.entry(node.key).or_insert(*node);
-            if node.is_root {
+            if let Some(existing) = self.nodes.get_mut(&node.key) {
+                existing.has_children |= refinement && node.has_children;
+            } else {
+                let mut inserted = *node;
+                if refinement {
+                    inserted.is_root = false;
+                }
+                self.nodes.insert(node.key, inserted);
+            }
+            if node.is_root && !refinement {
                 if activate_roots {
                     self.active_roots.insert(node.key);
                 }
@@ -553,15 +612,29 @@ impl VirtualTerrainHierarchy {
         let Some(fingerprint) = self.directory_roots.get(&root).copied() else {
             return Vec::new();
         };
-        let Some(keys) = self.directory_nodes.remove(&fingerprint) else {
-            return Vec::new();
-        };
-        self.directory_fingerprints.remove(&fingerprint);
-        let key_set = keys.iter().copied().collect::<BTreeSet<_>>();
+        let related = self
+            .directory_nodes
+            .iter()
+            .filter(|(candidate, keys)| {
+                **candidate == fingerprint
+                    || keys
+                        .iter()
+                        .all(|key| key.ancestor_at(root.level) == Some(root))
+            })
+            .map(|(fingerprint, _)| *fingerprint)
+            .collect::<BTreeSet<_>>();
+        let key_set = related
+            .iter()
+            .filter_map(|fingerprint| self.directory_nodes.remove(fingerprint))
+            .flatten()
+            .collect::<BTreeSet<_>>();
+        for fingerprint in &related {
+            self.directory_fingerprints.remove(fingerprint);
+        }
         self.directory_roots
-            .retain(|_, owner| *owner != fingerprint);
+            .retain(|_, owner| !related.contains(owner));
         self.active_roots.retain(|key| !key_set.contains(key));
-        for key in &keys {
+        for key in &key_set {
             self.remove_page(*key);
             self.nodes.remove(key);
             self.refined_last_cut.remove(key);
@@ -569,7 +642,7 @@ impl VirtualTerrainHierarchy {
         if self.directory_fingerprints.is_empty() {
             self.source_identity_hash = None;
         }
-        keys
+        key_set.into_iter().collect()
     }
 
     pub fn select_cut(
@@ -590,6 +663,7 @@ impl VirtualTerrainHierarchy {
             next_refined: BTreeSet::new(),
             selected: Vec::new(),
             requests: BTreeSet::new(),
+            refinement_requests: BTreeSet::new(),
             ownerless_roots: Vec::new(),
             visited_nodes: 0,
             selected_primitives: 0,
@@ -625,11 +699,13 @@ impl VirtualTerrainHierarchy {
         builder.ownerless_roots.sort_unstable();
         let mut requested_pages = builder.requests.into_iter().collect::<Vec<_>>();
         requested_pages.sort_unstable_by_key(|identity| identity.key);
+        let refinement_roots = builder.refinement_requests.into_iter().collect();
         let fingerprint = cut_fingerprint(&builder.selected, builder.hierarchy);
         builder.hierarchy.refined_last_cut = builder.next_refined;
         Ok(VirtualTerrainCut {
             selected_pages: builder.selected,
             requested_pages,
+            refinement_roots,
             ownerless_roots: builder.ownerless_roots,
             fingerprint,
             visited_nodes: builder.visited_nodes,
@@ -662,6 +738,7 @@ struct CutBuilder<'a> {
     next_refined: BTreeSet<TerrainPageKey>,
     selected: Vec<TerrainPageKey>,
     requests: BTreeSet<TerrainPageTransferIdentity>,
+    refinement_requests: BTreeSet<TerrainPageKey>,
     ownerless_roots: Vec<TerrainPageKey>,
     visited_nodes: usize,
     selected_primitives: usize,
@@ -710,8 +787,15 @@ impl CutBuilder<'_> {
             self.view.refine_above_pixels
         };
         let projected_error = projected_page_error_pixels(&node, self.view);
-        let wants_refinement =
-            node.has_children && (self.view.force_exact_leaves || projected_error > threshold);
+        let wants_more_detail = self.view.force_exact_leaves || projected_error > threshold;
+        if wants_more_detail && !node.has_children && key.is_surface() && key.level > 0 {
+            if self.refinement_requests.len() < self.hierarchy.capacity.max_feedback_pages {
+                self.refinement_requests.insert(key);
+            } else {
+                self.feedback_overflow = true;
+            }
+        }
+        let wants_refinement = node.has_children && wants_more_detail;
         if wants_refinement
             && self.selected.len().saturating_add(
                 key.refinement_children()
@@ -974,8 +1058,9 @@ fn normalize(vector: [f64; 3]) -> [f64; 3] {
 mod tests {
     use super::*;
     use voxels_world::{
-        Material, TerrainErrorBounds, TerrainHierarchyDirectoryV1, VoxelCoord,
-        build_exact_cluster_terrain_parent, build_exact_terrain_page,
+        Material, SurfaceRegion, SurfaceSample, TerrainErrorBounds, TerrainHierarchyDirectoryV1,
+        VoxelCoord, build_exact_cluster_terrain_parent, build_exact_terrain_page,
+        build_sampled_heightfield_terrain_page,
     };
 
     fn identity() -> WorldSourceIdentityHash {
@@ -1027,8 +1112,160 @@ mod tests {
         let directory = TerrainHierarchyDirectoryV1::from_pages(&pages).unwrap();
         let mut hierarchy =
             VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
-        hierarchy.register_directory(&directory, true).unwrap();
+        hierarchy.register_region_directory(&directory).unwrap();
         (hierarchy, pages)
+    }
+
+    fn surface_page(key: TerrainPageKey) -> TerrainPageV1 {
+        let [[minimum_x, minimum_z], _] = key.horizontal_bounds().unwrap();
+        let stride = 1_i32 << u32::from(key.level);
+        let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+        let samples = (0..edge)
+            .flat_map(|z| {
+                (0..edge).map(move |x| {
+                    let world_x = minimum_x + i32::try_from(x).unwrap() * stride;
+                    let world_z = minimum_z + i32::try_from(z).unwrap() * stride;
+                    SurfaceSample {
+                        height: world_x.div_euclid(5) + world_z.div_euclid(7),
+                        material: Material::Stone,
+                        water_level: None,
+                        region: SurfaceRegion::VerdantForest,
+                        moisture: 0.5,
+                        temperature: 0.5,
+                        ridge: 0.0,
+                        route: None,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let error = 1_000_u32 << u32::from(key.level);
+        build_sampled_heightfield_terrain_page(
+            identity(),
+            key,
+            7,
+            &samples,
+            TerrainErrorBounds {
+                geometric_millivoxels: error,
+                silhouette_millivoxels: error,
+                material_boundary_millivoxels: 0,
+                normal_milliradians: 0,
+                unresolved_topology: false,
+            },
+        )
+        .unwrap()
+    }
+
+    fn surface_segment(root: TerrainPageKey) -> (TerrainHierarchyDirectoryV1, Vec<TerrainPageV1>) {
+        let pages = root
+            .refinement_children()
+            .unwrap()
+            .into_iter()
+            .map(surface_page)
+            .chain([surface_page(root)])
+            .collect::<Vec<_>>();
+        let directory =
+            TerrainHierarchyDirectoryV1::from_surface_refinement_pages(root, &pages).unwrap();
+        (directory, pages)
+    }
+
+    #[test]
+    fn independently_streamed_surface_segment_refines_without_a_second_owner() {
+        let root = TerrainPageKey::surface(2, -1, -1);
+        let (base_directory, base_pages) = surface_segment(root);
+        let mut orphan =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        assert_eq!(
+            orphan.register_refinement_directory(&base_directory),
+            Err(VirtualTerrainError::InvalidDirectory)
+        );
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        hierarchy
+            .register_region_directory(&base_directory)
+            .unwrap();
+        hierarchy
+            .install_page(
+                base_pages
+                    .iter()
+                    .find(|page| page.key == root)
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+
+        let initial = hierarchy.select_cut(view(true)).unwrap();
+        assert_eq!(initial.selected_pages, vec![root]);
+        assert_eq!(initial.requested_pages.len(), 4);
+        assert!(initial.refinement_roots.is_empty());
+
+        for child in base_pages.iter().filter(|page| page.key != root) {
+            hierarchy.install_page(child.clone()).unwrap();
+        }
+        let children = root.refinement_children().unwrap();
+        let terminal = hierarchy.select_cut(view(true)).unwrap();
+        assert_eq!(
+            terminal
+                .selected_pages
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            children.iter().copied().collect()
+        );
+        assert_eq!(
+            terminal
+                .refinement_roots
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            children.iter().copied().collect()
+        );
+
+        let refined_root = children[0];
+        let (refinement_directory, refinement_pages) = surface_segment(refined_root);
+        hierarchy
+            .register_refinement_directory(&refinement_directory)
+            .unwrap();
+        assert_eq!(hierarchy.registered_roots().collect::<Vec<_>>(), vec![root]);
+        assert!(
+            hierarchy
+                .directory_node(refined_root)
+                .is_some_and(|node| node.has_children && !node.is_root)
+        );
+        for child in refinement_pages
+            .iter()
+            .filter(|page| page.key != refined_root)
+        {
+            hierarchy.install_page(child.clone()).unwrap();
+        }
+
+        let refined = hierarchy.select_cut(view(true)).unwrap();
+        assert!(!refined.selected_pages.contains(&refined_root));
+        assert_eq!(refined.selected_pages.len(), 7);
+        assert_eq!(
+            refined
+                .selected_pages
+                .iter()
+                .filter(|key| key.parent() == Some(refined_root))
+                .count(),
+            4
+        );
+        assert_eq!(
+            refined
+                .refinement_roots
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            children.iter().copied().skip(1).collect()
+        );
+
+        let removed = hierarchy
+            .remove_region_directory(root)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert!(removed.contains(&root));
+        assert!(removed.contains(&refined_root));
+        assert!(hierarchy.nodes().next().is_none());
+        assert!(hierarchy.roots().next().is_none());
     }
 
     #[test]
@@ -1047,7 +1284,7 @@ mod tests {
         let directory = TerrainHierarchyDirectoryV1::from_pages(&pages).unwrap();
         let mut hierarchy =
             VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
-        hierarchy.register_directory(&directory, true).unwrap();
+        hierarchy.register_region_directory(&directory).unwrap();
         for page in &pages {
             hierarchy.install_page(page.clone()).unwrap();
         }
@@ -1081,7 +1318,7 @@ mod tests {
         let directory = TerrainHierarchyDirectoryV1::from_pages(&pages).unwrap();
         let mut hierarchy =
             VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
-        hierarchy.register_directory(&directory, false).unwrap();
+        hierarchy.register_staging_directory(&directory).unwrap();
 
         assert!(matches!(
             hierarchy.set_active_roots([parent.key, child.key]),

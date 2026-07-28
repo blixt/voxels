@@ -220,7 +220,7 @@ impl VirtualTerrainAuthority {
     pub(crate) fn current_revision(&self, root: TerrainPageKey) -> Option<u64> {
         match (root.level, root.is_surface()) {
             (TERRAIN_REGION_ROOT_LEVEL, false) => self.edits.terrain_region_revision(root),
-            (TERRAIN_COVERAGE_ROOT_LEVEL, true) => Some(self.edits.revision()),
+            (1..=TERRAIN_COVERAGE_ROOT_LEVEL, true) => Some(self.edits.revision()),
             _ => None,
         }
     }
@@ -282,7 +282,7 @@ impl VirtualTerrainAuthority {
         root: TerrainPageKey,
         priority: WorldProductPriority,
     ) -> Result<Arc<PreparedTerrainRegion>, VirtualTerrainError> {
-        if root.level == TERRAIN_COVERAGE_ROOT_LEVEL && root.is_surface() {
+        if (1..=TERRAIN_COVERAGE_ROOT_LEVEL).contains(&root.level) && root.is_surface() {
             for _ in 0..REGION_BUILD_ATTEMPTS {
                 let revision = self.edits.revision();
                 let built = build_coverage_region(
@@ -418,7 +418,7 @@ fn build_coverage_region(
     source_identity_hash: WorldSourceIdentityHash,
     priority: WorldProductPriority,
 ) -> Result<TerrainRegionBuildV1, VirtualTerrainError> {
-    if root.level != TERRAIN_COVERAGE_ROOT_LEVEL || !root.is_surface() {
+    if root.level == 0 || root.level > TERRAIN_COVERAGE_ROOT_LEVEL || !root.is_surface() {
         return Err(VirtualTerrainError::InvalidRoot);
     }
     let [[minimum_x, minimum_z], _] = root

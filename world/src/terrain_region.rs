@@ -11,9 +11,9 @@ use crate::{
     Material, SurfaceSample, TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_EDGE_SAMPLES,
     TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError,
     TerrainErrorBounds, TerrainHierarchyDirectoryV1, TerrainPageBuildError, TerrainPageCodecError,
-    TerrainPageKey, TerrainPageV1, TerrainReplacementError, TerrainSimplificationBudget,
-    VoxelCoord, WorldSourceIdentityHash, assemble_terrain_parent, build_exact_terrain_page,
-    build_sampled_heightfield_terrain_page, encode_terrain_page,
+    TerrainPageKey, TerrainPageV1, TerrainSimplificationBudget, VoxelCoord,
+    WorldSourceIdentityHash, build_exact_terrain_page, build_sampled_heightfield_terrain_page,
+    encode_terrain_page,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -30,7 +30,6 @@ pub enum TerrainRegionBuildError {
     InvalidRoot,
     MissingChild(TerrainPageKey),
     Page(TerrainPageBuildError),
-    Replacement(TerrainReplacementError),
     Codec(TerrainPageCodecError),
     Directory(TerrainDirectoryError),
     PublishedPageOverBudget {
@@ -45,12 +44,6 @@ impl fmt::Display for TerrainRegionBuildError {
             Self::InvalidRoot => formatter.write_str("terrain region root is invalid"),
             Self::MissingChild(key) => write!(formatter, "terrain region is missing child {key:?}"),
             Self::Page(error) => write!(formatter, "terrain region page build failed: {error}"),
-            Self::Replacement(error) => {
-                write!(
-                    formatter,
-                    "terrain region replacement build failed: {error}"
-                )
-            }
             Self::Codec(error) => write!(formatter, "terrain region page codec failed: {error}"),
             Self::Directory(error) => {
                 write!(formatter, "terrain region directory build failed: {error}")
@@ -74,12 +67,6 @@ impl From<TerrainPageBuildError> for TerrainRegionBuildError {
 impl From<TerrainPageCodecError> for TerrainRegionBuildError {
     fn from(error: TerrainPageCodecError) -> Self {
         Self::Codec(error)
-    }
-}
-
-impl From<TerrainReplacementError> for TerrainRegionBuildError {
-    fn from(error: TerrainReplacementError) -> Self {
-        Self::Replacement(error)
     }
 }
 
@@ -165,7 +152,8 @@ pub fn build_terrain_coverage_root(
     samples: &[SurfaceSample],
     errors: TerrainErrorBounds,
 ) -> Result<TerrainRegionBuildV1, TerrainRegionBuildError> {
-    if root.level != TERRAIN_COVERAGE_ROOT_LEVEL
+    if root.level == 0
+        || root.level > TERRAIN_COVERAGE_ROOT_LEVEL
         || !root.is_surface()
         || root.horizontal_bounds().is_none()
     {
@@ -222,18 +210,12 @@ pub fn build_terrain_coverage_root(
         &root_samples,
         errors,
     )?;
-    let page = assemble_terrain_parent(
-        root,
-        revision,
-        sampled_root.errors,
-        sampled_root.topology,
-        sampled_root.materials,
-        sampled_root.representation,
-        &children,
-    )?;
-    ensure_publication_budget(&page)?;
-    let pages = children.into_iter().chain([page]).collect::<Vec<_>>();
-    let directory = TerrainHierarchyDirectoryV1::from_pages(&pages)?;
+    ensure_publication_budget(&sampled_root)?;
+    let pages = children
+        .into_iter()
+        .chain([sampled_root])
+        .collect::<Vec<_>>();
+    let directory = TerrainHierarchyDirectoryV1::from_surface_refinement_pages(root, &pages)?;
     Ok(TerrainRegionBuildV1 {
         root,
         pages,

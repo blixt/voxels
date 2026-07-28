@@ -1809,12 +1809,14 @@ pub fn decode_terrain_directory_batch_result(
                         "terrain directory root mismatch",
                     ));
                 }
-                if (root.level == TERRAIN_REGION_ROOT_LEVEL
+                if (!root.is_surface()
+                    && root.level == TERRAIN_REGION_ROOT_LEVEL
                     && !directory.validates_region_partition())
-                    || (root.level == TERRAIN_COVERAGE_ROOT_LEVEL
-                        && directory.nodes.iter().any(|node| {
-                            node.key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL) != Some(root)
-                        }))
+                    || (root.is_surface()
+                        && directory
+                            .nodes
+                            .iter()
+                            .any(|node| node.key.ancestor_at(root.level) != Some(root)))
                 {
                     return Err(ProtocolError::InvalidPayload(
                         "terrain directory does not partition its requested root",
@@ -2107,13 +2109,11 @@ fn validate_terrain_directory_roots(
         || roots.len() > MAX_TERRAIN_DIRECTORIES_PER_BATCH
         || !roots.windows(2).all(|pair| pair[0] < pair[1])
         || roots.iter().any(|root| {
-            !matches!(
-                (root.level, root.is_surface()),
-                (TERRAIN_REGION_ROOT_LEVEL, false) | (TERRAIN_COVERAGE_ROOT_LEVEL, true)
-            ) || if root.is_surface() {
-                root.horizontal_bounds().is_none()
+            if root.is_surface() {
+                !(1..=TERRAIN_COVERAGE_ROOT_LEVEL).contains(&root.level)
+                    || root.horizontal_bounds().is_none()
             } else {
-                root.bounds().is_none()
+                root.level != TERRAIN_REGION_ROOT_LEVEL || root.bounds().is_none()
             }
         })
     {
@@ -6299,10 +6299,10 @@ mod tests {
 
     #[cfg(feature = "terrain-page-builder")]
     #[test]
-    fn virtual_terrain_directory_results_round_trip_refinable_coverage_roots() {
+    fn virtual_terrain_directory_results_round_trip_refinable_surface_segments() {
         let source = ProceduralWorldSource::new(43);
         let source_identity_hash = source.identity().identity_hash();
-        let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, 0, 0);
+        let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL - 3, 0, 0);
         let mut sample = source
             .surface_sample_lattice(WorldProductPriority::VirtualTerrain, [0, 0], [1, 1], 1)
             .expect("coverage sample")

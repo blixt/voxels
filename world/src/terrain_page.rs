@@ -15,7 +15,7 @@ use std::io::Read;
 #[cfg(feature = "terrain-page-builder")]
 use crate::terrain_error::certify_bidirectional_surface_error;
 
-pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 4;
+pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 5;
 pub const TERRAIN_PAGE_EDGE_SAMPLES: u32 = 32;
 pub const TERRAIN_PAGE_MAX_LEVEL: u8 = 20;
 pub const TERRAIN_PAGE_MAX_CHILDREN: usize = 8;
@@ -30,7 +30,7 @@ pub const TERRAIN_PAGE_TARGET_COMPRESSED_BYTES: usize = 65_536;
 pub const TERRAIN_PAGE_MAX_COMPRESSED_BYTES: usize = 262_144;
 pub const TERRAIN_PAGE_MAX_PAYLOAD_BYTES: usize = 2_097_152;
 const SPARSE_BRICK_EDGE: u8 = 8;
-const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v4\0";
+const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v5\0";
 const PARENT_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-parent-boundary-v1\0";
 const HEIGHTFIELD_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-heightfield-boundary-v1\0";
 const PAGE_MAGIC: &[u8; 4] = b"VXTP";
@@ -367,12 +367,7 @@ impl TerrainPageV1 {
     pub fn validates_identity(&self) -> bool {
         page_bounds_match_key(self.key, self.bounds)
             && (self.children.is_empty()
-                || self.children.len()
-                    == if self.key.is_surface() {
-                        TERRAIN_SURFACE_PAGE_CHILDREN
-                    } else {
-                        TERRAIN_PAGE_MAX_CHILDREN
-                    })
+                || (!self.key.is_surface() && self.children.len() == TERRAIN_PAGE_MAX_CHILDREN))
             && children_are_complete(self)
             && self.materials.len() <= Material::ALL.len()
             && self
@@ -964,7 +959,7 @@ pub fn assemble_terrain_parent(
     representation: TerrainPageRepresentation,
     children: &[TerrainPageV1],
 ) -> Result<TerrainPageV1, TerrainReplacementError> {
-    if key.level == 0 {
+    if key.level == 0 || key.is_surface() {
         return Err(TerrainReplacementError::InvalidParent);
     }
     validate_children_for_key(key, children)?;
@@ -1701,6 +1696,9 @@ pub fn validate_terrain_replacement(
         return Err(TerrainReplacementError::InvalidParent);
     }
     validate_children_for_key(parent.key, children)?;
+    if parent.key.is_surface() {
+        return validate_surface_heightfield_replacement(parent, children);
+    }
     let references = children
         .iter()
         .map(|child| (child.key, (child.revision, child.content_fingerprint)))
@@ -1712,6 +1710,53 @@ pub fn validate_terrain_replacement(
     }
     if aggregate_child_boundaries(parent.key, children)? != parent.boundary_fingerprints {
         return Err(TerrainReplacementError::OuterBoundaryMismatch);
+    }
+    Ok(())
+}
+
+fn validate_surface_heightfield_replacement(
+    parent: &TerrainPageV1,
+    children: &[TerrainPageV1],
+) -> Result<(), TerrainReplacementError> {
+    if !parent.children.is_empty() {
+        return Err(TerrainReplacementError::ChildReferenceMismatch);
+    }
+    let TerrainPageRepresentation::HeightfieldGrid(parent_grid) = &parent.representation else {
+        return Err(TerrainReplacementError::InvalidRepresentation);
+    };
+    let child_by_key = children
+        .iter()
+        .map(|child| (child.key, child))
+        .collect::<BTreeMap<_, _>>();
+    let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+    for z in 0..edge {
+        for x in 0..edge {
+            let quadrant_x = usize::from(x > TERRAIN_PAGE_EDGE_SAMPLES as usize / 2);
+            let quadrant_z = usize::from(z > TERRAIN_PAGE_EDGE_SAMPLES as usize / 2);
+            let key = TerrainPageKey::surface(
+                parent.key.level - 1,
+                parent.key.coord[0] * 2 + quadrant_x as i32,
+                parent.key.coord[2] * 2 + quadrant_z as i32,
+            );
+            let child = child_by_key
+                .get(&key)
+                .ok_or(TerrainReplacementError::IncompleteChildKeys)?;
+            let TerrainPageRepresentation::HeightfieldGrid(child_grid) = &child.representation
+            else {
+                return Err(TerrainReplacementError::InvalidRepresentation);
+            };
+            let child_x = x * 2 - quadrant_x * TERRAIN_PAGE_EDGE_SAMPLES as usize;
+            let child_z = z * 2 - quadrant_z * TERRAIN_PAGE_EDGE_SAMPLES as usize;
+            let parent_sample = x + z * edge;
+            let child_sample = child_x + child_z * edge;
+            if parent_grid.ground_heights.get(parent_sample)
+                != child_grid.ground_heights.get(child_sample)
+                || parent_grid.water_heights.get(parent_sample)
+                    != child_grid.water_heights.get(child_sample)
+            {
+                return Err(TerrainReplacementError::OuterBoundaryMismatch);
+            }
+        }
     }
     Ok(())
 }
@@ -2947,10 +2992,7 @@ pub fn decode_terrain_page(
     let material_count = usize::from(cursor.u16()?);
     let payload_len = cursor.u32()? as usize;
     let compressed_len = cursor.u32()? as usize;
-    if !matches!(
-        child_count,
-        0 | TERRAIN_SURFACE_PAGE_CHILDREN | TERRAIN_PAGE_MAX_CHILDREN
-    ) {
+    if !matches!(child_count, 0 | TERRAIN_PAGE_MAX_CHILDREN) {
         return Err(TerrainPageCodecError::LimitExceeded("child count"));
     }
     if material_count > Material::ALL.len() {
@@ -3529,24 +3571,14 @@ mod tests {
             TerrainErrorBounds::EXACT,
         )
         .unwrap();
-        let parent = assemble_terrain_parent(
-            key,
-            28,
-            sampled_parent.errors,
-            sampled_parent.topology,
-            sampled_parent.materials.clone(),
-            sampled_parent.representation.clone(),
-            &children,
-        )
-        .unwrap();
-
-        assert!(parent.bounds.min.y < 0);
-        assert!(parent.bounds.max.y > 0);
-        assert_eq!(parent.children.len(), TERRAIN_SURFACE_PAGE_CHILDREN);
-        validate_terrain_replacement(&parent, &children).unwrap();
+        assert!(sampled_parent.bounds.min.y < 0);
+        assert!(sampled_parent.bounds.max.y > 0);
+        assert!(sampled_parent.children.is_empty());
+        validate_terrain_replacement(&sampled_parent, &children).unwrap();
         assert_eq!(
-            decode_terrain_page(&encode_terrain_page(&parent).unwrap(), identity()).unwrap(),
-            parent
+            decode_terrain_page(&encode_terrain_page(&sampled_parent).unwrap(), identity())
+                .unwrap(),
+            sampled_parent
         );
     }
 

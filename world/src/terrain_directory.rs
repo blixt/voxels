@@ -126,6 +126,71 @@ impl TerrainHierarchyDirectoryV1 {
         Ok(directory)
     }
 
+    /// Builds one independently cacheable surface refinement segment.
+    ///
+    /// A surface page's payload identity is geometry-only and remains stable before and after its
+    /// child directory is discovered. The directory, rather than the page payload, grants the
+    /// root four-child refinement structure.
+    pub fn from_surface_refinement_pages(
+        root: TerrainPageKey,
+        pages: &[TerrainPageV1],
+    ) -> Result<Self, TerrainDirectoryError> {
+        let children = root
+            .refinement_children()
+            .filter(|_| root.is_surface())
+            .ok_or(TerrainDirectoryError::InvalidHierarchy)?;
+        let expected = children
+            .iter()
+            .copied()
+            .chain([root])
+            .collect::<BTreeSet<_>>();
+        let page_by_key = pages
+            .iter()
+            .map(|page| (page.key, page))
+            .collect::<BTreeMap<_, _>>();
+        if page_by_key.len() != pages.len()
+            || page_by_key.keys().copied().collect::<BTreeSet<_>>() != expected
+        {
+            return Err(TerrainDirectoryError::InvalidHierarchy);
+        }
+        let source_identity_hash = pages
+            .first()
+            .map(|page| page.source_identity_hash)
+            .ok_or(TerrainDirectoryError::InvalidHierarchy)?;
+        if pages.iter().any(|page| {
+            page.source_identity_hash != source_identity_hash || !page.children.is_empty()
+        }) {
+            return Err(TerrainDirectoryError::ChildIdentityMismatch);
+        }
+        let mut nodes = Vec::with_capacity(pages.len());
+        for page in page_by_key.values() {
+            let encoded_bytes = u32::try_from(encode_terrain_page(page)?.len())
+                .map_err(|_| TerrainDirectoryError::LimitExceeded("encoded page bytes"))?;
+            nodes.push(TerrainHierarchyNode {
+                key: page.key,
+                bounds: page.bounds,
+                revision: page.revision,
+                content_fingerprint: page.content_fingerprint,
+                errors: page.errors,
+                topology: page.topology,
+                representation: page.representation.kind(),
+                encoded_bytes,
+                has_children: page.key == root,
+                is_root: page.key == root,
+            });
+        }
+        let mut directory = Self {
+            source_identity_hash,
+            nodes,
+            content_fingerprint: [0; 32],
+        };
+        directory.content_fingerprint = directory_fingerprint(&directory);
+        if !directory.validates_identity() {
+            return Err(TerrainDirectoryError::InvalidHierarchy);
+        }
+        Ok(directory)
+    }
+
     /// Builds the production directory form: a forest of fixed, independently cacheable region
     /// roots with complete refinement to exact level-0 leaves.
     pub fn from_region_pages(pages: &[TerrainPageV1]) -> Result<Self, TerrainDirectoryError> {

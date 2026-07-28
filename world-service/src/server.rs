@@ -2788,12 +2788,15 @@ async fn serve_virtual_terrain_pages(
     let mut failed_regions = BTreeMap::<TerrainPageKey, TerrainPageTransferFailure>::new();
     let mut items = Vec::with_capacity(request.batch.pages.len());
     for identity in request.batch.pages {
-        let root_level = if identity.key.is_surface() {
-            TERRAIN_COVERAGE_ROOT_LEVEL
+        let root = if identity.key.is_surface() {
+            identity
+                .key
+                .parent()
+                .filter(|parent| parent.level <= TERRAIN_COVERAGE_ROOT_LEVEL)
         } else {
-            TERRAIN_REGION_ROOT_LEVEL
+            identity.key.ancestor_at(TERRAIN_REGION_ROOT_LEVEL)
         };
-        let Some(root) = identity.key.ancestor_at(root_level) else {
+        let Some(root) = root else {
             items.push(TerrainPageBatchItemV1 {
                 requested: identity,
                 result: Err(TerrainPageTransferFailure::Unavailable),
@@ -4511,7 +4514,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn virtual_terrain_page_handler_resolves_surface_child_to_coverage_root() {
+    async fn virtual_terrain_page_handler_resolves_surface_child_to_immediate_segment_root() {
         let source: Arc<dyn WorldSourceEngine> = Arc::new(ProceduralWorldSource::new(19));
         let edits = EditAuthority::in_memory(
             voxels_world::WorldId::from_bytes([8; 16]),
@@ -4526,7 +4529,7 @@ mod tests {
             1,
             128 * 1024 * 1024,
         );
-        let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 1);
+        let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL - 3, -1, 1);
         let region = authority
             .ensure_region(root, WorldProductPriority::VirtualTerrain)
             .await

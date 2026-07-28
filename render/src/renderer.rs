@@ -4758,6 +4758,28 @@ impl Renderer {
         Ok(())
     }
 
+    /// Extends one resident surface node with an independently streamed four-child segment.
+    pub fn register_virtual_terrain_refinement_directory(
+        &mut self,
+        directory: &TerrainHierarchyDirectoryV1,
+    ) -> Result<(), VirtualTerrainRendererError> {
+        self.virtual_terrain
+            .register_refinement_directory(directory)?;
+        self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
+        self.virtual_terrain_cut = None;
+        self.virtual_terrain_oracle_cut = None;
+        self.virtual_terrain_oracle_view = None;
+        self.virtual_terrain_gpu
+            .synchronize_directory_set(&self.queue, &self.virtual_terrain)
+            .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
+        for (key, page) in &self.virtual_terrain_pages {
+            self.virtual_terrain_gpu
+                .update_page_geometry(&self.queue, *key, virtual_terrain_gpu_geometry(&page.mesh))
+                .map_err(|_| VirtualTerrainRendererError::GpuTraversal)?;
+        }
+        Ok(())
+    }
+
     /// Atomically transfers terrain ownership between complete registered root partitions.
     pub fn set_virtual_terrain_active_roots(
         &mut self,
@@ -13308,6 +13330,7 @@ mod tests {
         let cut = VirtualTerrainCut {
             selected_pages: vec![key],
             requested_pages: Vec::new(),
+            refinement_roots: Vec::new(),
             ownerless_roots: Vec::new(),
             fingerprint: 0x1234,
             visited_nodes: 1,
@@ -15565,6 +15588,7 @@ mod tests {
         let cut = VirtualTerrainCut {
             selected_pages: vec![key],
             requested_pages: Vec::new(),
+            refinement_roots: Vec::new(),
             ownerless_roots: Vec::new(),
             fingerprint: 0x1234_5678_9abc_def0,
             visited_nodes: 1,
@@ -16527,6 +16551,7 @@ mod tests {
         VirtualTerrainCut {
             selected_pages,
             requested_pages: Vec::new(),
+            refinement_roots: Vec::new(),
             ownerless_roots: Vec::new(),
             fingerprint: 1,
             visited_nodes: 1,
