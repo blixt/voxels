@@ -44,7 +44,9 @@ const OVERFLOW_SELECTION: u32 = 1u;
 const OVERFLOW_FEEDBACK: u32 = 2u;
 const OVERFLOW_TRAVERSAL: u32 = 4u;
 const OVERFLOW_STACK: u32 = 8u;
-const STACK_CAPACITY: u32 = 192u;
+// Matches the host-side proof: a level-10 surface quadtree peaks at 31 deferred nodes and a
+// level-2 volumetric octree peaks at 15.
+const STACK_CAPACITY: u32 = 32u;
 
 fn node_flags(node: VirtualTerrainNode) -> u32 {
   return bitcast<u32>(node.maximum_flags.w);
@@ -83,25 +85,30 @@ fn page_visible(node: VirtualTerrainNode) -> bool {
       <= depth * tangent_vertical + vertical_radius;
 }
 
-fn distance_to_page(node: VirtualTerrainNode) -> f32 {
+fn page_distance_squared(node: VirtualTerrainNode) -> f32 {
   let bounds = page_bounds_metres(node);
   let point = view.camera_near.xyz;
   let delta = max(max(bounds[0] - point, point - bounds[1]), vec3<f32>(0.0));
-  return max(length(delta), view.camera_near.w);
+  return max(dot(delta, delta), view.camera_near.w * view.camera_near.w);
 }
 
-fn projected_error_pixels(node: VirtualTerrainNode) -> f32 {
+fn projected_error_exceeds(node: VirtualTerrainNode, threshold: f32) -> bool {
   if (node.errors.w & 0x100u) != 0u {
-    return 3.402823466e+38;
+    return true;
   }
-  let positional_metres = f32(node.errors.x) * 0.0001;
-  let positional_pixels =
-    positional_metres * view.projection_thresholds.x / distance_to_page(node);
   let normal_pixels = f32(node.errors.y)
     * 0.001
     * 0.25
     * view.projection_thresholds.w;
-  return max(positional_pixels, normal_pixels);
+  if normal_pixels > threshold {
+    return true;
+  }
+  // `positional * projection / distance > threshold`, squared. Every term is non-negative, so
+  // this exactly preserves the comparison without a square root for every visited hierarchy node.
+  let projected_positional =
+    f32(node.errors.x) * 0.0001 * view.projection_thresholds.x;
+  return projected_positional * projected_positional
+    > threshold * threshold * page_distance_squared(node);
 }
 
 fn append_selected(node_index: u32) {
@@ -122,7 +129,7 @@ fn append_request(node_index: u32) {
   }
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(32)
 fn traverse(@builtin(global_invocation_id) invocation: vec3<u32>) {
   if invocation.x >= view.counts_flags.x {
     return;
@@ -137,7 +144,7 @@ fn traverse(@builtin(global_invocation_id) invocation: vec3<u32>) {
     return;
   }
 
-  var stack: array<u32, 192>;
+  var stack: array<u32, 32>;
   var stack_count = 1u;
   stack[0] = root_index;
   atomicMax(&counters.stack_peak, stack_count);
@@ -181,7 +188,7 @@ fn traverse(@builtin(global_invocation_id) invocation: vec3<u32>) {
       (flags & NODE_PRIOR_REFINED) != 0u,
     );
     let wants_refinement = (flags & NODE_HAS_CHILDREN) != 0u
-      && (force_exact || projected_error_pixels(node) > threshold);
+      && (force_exact || projected_error_exceeds(node, threshold));
     if wants_refinement && (flags & NODE_REPLACEMENT_COHERENT) != 0u {
       let child_count = select(8u, 4u, (flags & NODE_SURFACE) != 0u);
       if stack_count + child_count <= STACK_CAPACITY {

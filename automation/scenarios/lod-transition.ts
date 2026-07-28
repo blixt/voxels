@@ -210,15 +210,14 @@ function virtualTerrainReady(snapshot: readonly number[]): boolean {
     snapshot,
     "virtualTerrainCurrentColumnRegisteredRoots",
   );
-  const selectedPages = snapshotValue(snapshot, "virtualTerrainSelectedPages");
+  const publishedPages = snapshotValue(snapshot, "virtualTerrainPublishedPages");
   return (
     snapshotValue(snapshot, "virtualTerrainMode") === 2 &&
     snapshotValue(snapshot, "virtualTerrainCurrentColumnKnown") === 1 &&
     currentRoots > 0 &&
     currentRegisteredRoots === currentRoots &&
-    selectedPages > 0 &&
-    snapshotValue(snapshot, "virtualTerrainResidentPages") >= selectedPages &&
-    snapshotValue(snapshot, "virtualTerrainPublishedPages") > 0
+    publishedPages > 0 &&
+    snapshotValue(snapshot, "virtualTerrainResidentPages") >= publishedPages
   );
 }
 

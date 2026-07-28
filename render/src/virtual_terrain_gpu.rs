@@ -12,7 +12,8 @@ use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use voxels_world::{
-    TERRAIN_PAGE_MAX_CHILDREN, TerrainHierarchyDirectoryV1, TerrainHierarchyNode, TerrainPageKey,
+    TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_MAX_CHILDREN, TERRAIN_REGION_ROOT_LEVEL,
+    TerrainHierarchyDirectoryV1, TerrainHierarchyNode, TerrainPageKey,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{Buffer, CommandEncoder, ComputePipeline, Device, QuerySet, Queue};
@@ -26,7 +27,14 @@ const NODE_SURFACE: u32 = 1 << 5;
 const INVALID_NODE: u32 = u32::MAX;
 const GPU_TRAVERSAL_OVERFLOW_FEEDBACK: u32 = 1 << 1;
 const GPU_TRAVERSAL_READBACK_SLOTS: usize = 3;
-const GPU_TRAVERSAL_WORKGROUP_SIZE: u32 = 64;
+const GPU_TRAVERSAL_WORKGROUP_SIZE: u32 = 32;
+// A depth-first quadtree walk needs one entry plus three deferred siblings per level. Production
+// surface roots start at level 10 (31 entries), while volumetric roots start at level 2 (15).
+// Keeping the shader's private stack at this proven ceiling avoids allocating 192 entries for
+// every lane in a traversal workgroup.
+const GPU_TRAVERSAL_STACK_CAPACITY: u32 = 32;
+const _: () = assert!(3 * (TERRAIN_COVERAGE_ROOT_LEVEL as u32) < GPU_TRAVERSAL_STACK_CAPACITY);
+const _: () = assert!(7 * (TERRAIN_REGION_ROOT_LEVEL as u32) < GPU_TRAVERSAL_STACK_CAPACITY);
 pub(crate) const VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES: u64 = 64 * 1_024 * 1_024;
 pub(crate) const VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES: u64 = 64 * 1_024 * 1_024;
 pub(crate) const VIRTUAL_TERRAIN_COMPACT_WATER_SURFACE_BYTES: u64 = 16 * 1_024 * 1_024;
@@ -1428,6 +1436,14 @@ fn normalize(vector: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_roots_fit_the_private_gpu_traversal_stack() {
+        let surface_stack = 1 + 3 * u32::from(TERRAIN_COVERAGE_ROOT_LEVEL);
+        let volume_stack = 1 + 7 * u32::from(TERRAIN_REGION_ROOT_LEVEL);
+        assert!(surface_stack <= GPU_TRAVERSAL_STACK_CAPACITY);
+        assert!(volume_stack <= GPU_TRAVERSAL_STACK_CAPACITY);
+    }
 
     #[test]
     fn feedback_parser_clamps_untrusted_gpu_counts_to_fixed_regions() {
