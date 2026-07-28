@@ -1,140 +1,97 @@
-//! Fixed-capacity WebGPU control plane for virtual microvoxel terrain.
+//! Failure-atomic GPU snapshots for virtual microvoxel terrain.
 //!
-//! The CPU hierarchy remains the executable correctness oracle. This module mirrors its immutable
-//! directory and mutable residency/coherence bits into bounded storage buffers, traverses one
-//! region root per GPU invocation, and returns selected-page/request feedback for comparison and
-//! later indirect rendering. Overflow is data, never an implicit allocation or fabricated owner.
+//! The CPU hierarchy is the sole selection authority. A candidate cut is supplied explicitly,
+//! expanded into 32-bit geometry handles in the inactive bank, and certified by bounded GPU
+//! counters. The published bank is never written. Promotion is a CPU-side bank swap after the
+//! exact candidate generation, fingerprint, page count, geometry counts, and bounds are read back.
 
-use crate::virtual_terrain::{VirtualTerrainCapacity, VirtualTerrainHierarchy, VirtualTerrainView};
+use crate::virtual_terrain::VirtualTerrainCapacity;
 use bytemuck::{Pod, Zeroable};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::mem::size_of;
+#[cfg(test)]
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use voxels_world::{
-    TERRAIN_PAGE_MAX_CHILDREN, TerrainHierarchyDirectoryV1, TerrainHierarchyNode, TerrainPageKey,
-};
+use voxels_world::TerrainPageKey;
 use wgpu::util::DeviceExt;
 use wgpu::{Buffer, CommandEncoder, ComputePipeline, Device, QuerySet, Queue};
 
-const NODE_HAS_CHILDREN: u32 = 1;
-const NODE_IS_ROOT: u32 = 1 << 1;
-const NODE_RESIDENT: u32 = 1 << 2;
-const NODE_REPLACEMENT_COHERENT: u32 = 1 << 3;
-const NODE_PRIOR_REFINED: u32 = 1 << 4;
-const NODE_SURFACE: u32 = 1 << 5;
-const NODE_BALANCED_REFINED: u32 = 1 << 6;
-const NODE_BALANCED_SELECTED: u32 = 1 << 7;
-const INVALID_NODE: u32 = u32::MAX;
-const GPU_TRAVERSAL_OVERFLOW_FEEDBACK: u32 = 1 << 1;
-const GPU_TRAVERSAL_READBACK_SLOTS: usize = 3;
-pub(crate) const VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES: u64 = 64 * 1_024 * 1_024;
-pub(crate) const VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES: u64 = 96 * 1_024 * 1_024;
-pub(crate) const VIRTUAL_TERRAIN_COMPACT_WATER_SURFACE_BYTES: u64 = 16 * 1_024 * 1_024;
-pub(crate) const VIRTUAL_TERRAIN_COMPACT_WATER_TRIANGLE_BYTES: u64 = 16 * 1_024 * 1_024;
-const VIRTUAL_TERRAIN_SURFACE_BUFFER_BYTES: u64 =
-    VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES + VIRTUAL_TERRAIN_COMPACT_WATER_SURFACE_BYTES;
-const VIRTUAL_TERRAIN_TRIANGLE_BUFFER_BYTES: u64 =
-    VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES + VIRTUAL_TERRAIN_COMPACT_WATER_TRIANGLE_BYTES;
-pub(crate) const VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET: u64 = 16;
-pub(crate) const VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET: u64 = 32;
-pub(crate) const VIRTUAL_TERRAIN_WATER_SURFACE_INDIRECT_OFFSET: u64 = 48;
-pub(crate) const VIRTUAL_TERRAIN_WATER_TRIANGLE_INDIRECT_OFFSET: u64 = 64;
+const GPU_SNAPSHOT_READBACK_SLOTS: usize = 3;
 const GPU_GEOMETRY_ELEMENT_BYTES: u64 = 24;
+const GPU_HANDLE_SEGMENT_BIT: u32 = 1 << 31;
+const GPU_HANDLE_ELEMENT_MASK: u32 = GPU_HANDLE_SEGMENT_BIT - 1;
+
+// These are logical stream ceilings. The old implementation allocated this many geometry bytes
+// again and copied every selected element. A handle bank needs only one u32 per logical element.
+pub(crate) const VIRTUAL_TERRAIN_SURFACE_HANDLE_SOURCE_BYTES: u64 = 64 * 1_024 * 1_024;
+pub(crate) const VIRTUAL_TERRAIN_TRIANGLE_HANDLE_SOURCE_BYTES: u64 = 96 * 1_024 * 1_024;
+pub(crate) const VIRTUAL_TERRAIN_WATER_SURFACE_HANDLE_SOURCE_BYTES: u64 = 16 * 1_024 * 1_024;
+pub(crate) const VIRTUAL_TERRAIN_WATER_TRIANGLE_HANDLE_SOURCE_BYTES: u64 = 16 * 1_024 * 1_024;
+
+pub(crate) const VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET: u64 = 0;
+pub(crate) const VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET: u64 = 16;
+pub(crate) const VIRTUAL_TERRAIN_WATER_SURFACE_INDIRECT_OFFSET: u64 = 32;
+pub(crate) const VIRTUAL_TERRAIN_WATER_TRIANGLE_INDIRECT_OFFSET: u64 = 48;
+
+const STREAM_SURFACE: usize = 0;
+const STREAM_TRIANGLE: usize = 1;
+const STREAM_WATER_SURFACE: usize = 2;
+const STREAM_WATER_TRIANGLE: usize = 3;
+const STREAM_COUNT: usize = 4;
+
+const fn stream_element_capacity(bytes: u64) -> u32 {
+    (bytes / GPU_GEOMETRY_ELEMENT_BYTES) as u32
+}
+
+pub(crate) const VIRTUAL_TERRAIN_HANDLE_CAPACITIES: [u32; STREAM_COUNT] = [
+    stream_element_capacity(VIRTUAL_TERRAIN_SURFACE_HANDLE_SOURCE_BYTES),
+    stream_element_capacity(VIRTUAL_TERRAIN_TRIANGLE_HANDLE_SOURCE_BYTES),
+    stream_element_capacity(VIRTUAL_TERRAIN_WATER_SURFACE_HANDLE_SOURCE_BYTES),
+    stream_element_capacity(VIRTUAL_TERRAIN_WATER_TRIANGLE_HANDLE_SOURCE_BYTES),
+];
+
+pub(crate) const VIRTUAL_TERRAIN_HANDLE_OFFSETS: [u32; STREAM_COUNT] = [
+    0,
+    VIRTUAL_TERRAIN_HANDLE_CAPACITIES[0],
+    VIRTUAL_TERRAIN_HANDLE_CAPACITIES[0] + VIRTUAL_TERRAIN_HANDLE_CAPACITIES[1],
+    VIRTUAL_TERRAIN_HANDLE_CAPACITIES[0]
+        + VIRTUAL_TERRAIN_HANDLE_CAPACITIES[1]
+        + VIRTUAL_TERRAIN_HANDLE_CAPACITIES[2],
+];
+
+pub(crate) const VIRTUAL_TERRAIN_HANDLE_BANK_BYTES: u64 =
+    (VIRTUAL_TERRAIN_HANDLE_OFFSETS[3] + VIRTUAL_TERRAIN_HANDLE_CAPACITIES[3]) as u64
+        * size_of::<u32>() as u64;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
-struct GpuVirtualTerrainNode {
-    minimum_level: [i32; 4],
-    maximum_flags: [i32; 4],
-    errors: [u32; 4],
-    children_low: [u32; 4],
-    children_high: [u32; 4],
+struct GpuCandidatePage {
+    // Each pair is (packed first handle, element count).
+    ranges: [[u32; 2]; STREAM_COUNT],
 }
 
-const _: () = assert!(size_of::<GpuVirtualTerrainNode>() == 80);
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
-struct GpuVirtualTerrainView {
-    camera_near: [f32; 4],
-    forward_far: [f32; 4],
-    right_tangent_horizontal: [f32; 4],
-    up_tangent_vertical: [f32; 4],
-    projection_thresholds: [f32; 4],
-    counts_flags: [u32; 4],
-    options: [u32; 4],
-}
-
-const _: () = assert!(size_of::<GpuVirtualTerrainView>() == 112);
+const _: () = assert!(size_of::<GpuCandidatePage>() == 32);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
-struct GpuVirtualTerrainCounters {
+struct GpuSnapshotCounters {
+    element_counts: [u32; STREAM_COUNT],
+    encoded_pages: u32,
+    overflow_flags: u32,
+    generation: [u32; 2],
+    fingerprint: [u32; 2],
     selected_count: u32,
-    request_count: u32,
     ownerless_roots: u32,
-    visited_nodes: u32,
-    overflow_flags: u32,
-    stack_peak: u32,
-    submission_id: [u32; 2],
-    oracle_fingerprint: [u32; 2],
+    source_element_capacities: [u32; 2],
+    reserved: [u32; 2],
 }
 
-const _: () = assert!(size_of::<GpuVirtualTerrainCounters>() == 40);
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
-struct GpuVirtualTerrainGeometryPage {
-    opaque_surface_offset: u32,
-    opaque_surface_count: u32,
-    opaque_triangle_offset: u32,
-    opaque_triangle_count: u32,
-    water_surface_offset: u32,
-    water_surface_count: u32,
-    water_triangle_offset: u32,
-    water_triangle_count: u32,
-}
-
-const _: () = assert!(size_of::<GpuVirtualTerrainGeometryPage>() == 32);
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
-struct GpuVirtualTerrainCompactionCounters {
-    surface_elements: u32,
-    triangle_elements: u32,
-    water_surface_elements: u32,
-    water_triangle_elements: u32,
-    copied_pages: u32,
-    overflow_flags: u32,
-    surface_capacity: u32,
-    triangle_capacity: u32,
-    water_surface_capacity: u32,
-    water_triangle_capacity: u32,
-    surface_water_word_offset: u32,
-    triangle_water_word_offset: u32,
-}
-
-const _: () = assert!(size_of::<GpuVirtualTerrainCompactionCounters>() == 48);
-
-impl GpuVirtualTerrainCompactionCounters {
-    fn reset() -> Result<Self, VirtualTerrainGpuError> {
-        Ok(Self {
-            surface_capacity: element_capacity(VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES)?,
-            triangle_capacity: element_capacity(VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES)?,
-            water_surface_capacity: element_capacity(VIRTUAL_TERRAIN_COMPACT_WATER_SURFACE_BYTES)?,
-            water_triangle_capacity: element_capacity(
-                VIRTUAL_TERRAIN_COMPACT_WATER_TRIANGLE_BYTES,
-            )?,
-            surface_water_word_offset: word_offset(VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES)?,
-            triangle_water_word_offset: word_offset(VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES)?,
-            ..Self::default()
-        })
-    }
-}
+const _: () = assert!(size_of::<GpuSnapshotCounters>() == 64);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct VirtualTerrainGpuGeometryRange {
+    pub source_segment: u32,
     pub source_offset_bytes: u64,
     pub element_count: u32,
 }
@@ -147,12 +104,15 @@ pub(crate) struct VirtualTerrainGpuGeometry {
     pub water_triangle: VirtualTerrainGpuGeometryRange,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct RawGpuVirtualTerrainFeedback {
-    counters: GpuVirtualTerrainCounters,
-    compaction: GpuVirtualTerrainCompactionCounters,
-    selected_indices: Vec<u32>,
-    requested_indices: Vec<u32>,
+impl VirtualTerrainGpuGeometry {
+    const fn ranges(self) -> [VirtualTerrainGpuGeometryRange; STREAM_COUNT] {
+        [
+            self.opaque_surface,
+            self.opaque_triangle,
+            self.water_surface,
+            self.water_triangle,
+        ]
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -160,93 +120,79 @@ pub(crate) struct GpuVirtualTerrainFeedback {
     pub submission_id: u64,
     pub oracle_fingerprint: u64,
     pub selected_pages: Vec<TerrainPageKey>,
-    pub requested_pages: Vec<TerrainPageKey>,
     pub ownerless_roots: u32,
-    pub visited_nodes: u32,
-    pub overflow_flags: u32,
-    pub stack_peak: u32,
-    pub compacted_surface_elements: u32,
-    pub compacted_triangle_elements: u32,
-    pub compacted_water_surface_elements: u32,
-    pub compacted_water_triangle_elements: u32,
-    pub compacted_pages: u32,
-    pub compaction_overflow_flags: u32,
+    pub encoded_surface_handles: u32,
+    pub encoded_triangle_handles: u32,
+    pub encoded_water_surface_handles: u32,
+    pub encoded_water_triangle_handles: u32,
+    pub encoded_pages: u32,
+    pub encoding_overflow_flags: u32,
 }
 
 impl GpuVirtualTerrainFeedback {
-    /// Returns whether the GPU could not prove the selected geometry cut.
-    ///
-    /// Missing-page feedback is deliberately lossy and independently bounded. Saturating that
-    /// queue delays refinement but does not invalidate the selected resident owners or their
-    /// compacted geometry.
     pub const fn ownership_overflowed(&self) -> bool {
-        self.overflow_flags & !GPU_TRAVERSAL_OVERFLOW_FEEDBACK != 0
-            || self.compaction_overflow_flags != 0
+        self.encoding_overflow_flags != 0
     }
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct VirtualTerrainGpuTimestampWrites<'a> {
     pub query_set: &'a QuerySet,
-    pub traversal_first_query: u32,
-    pub compaction_first_query: u32,
+    pub encoding_first_query: u32,
+    pub finalize_first_query: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum VirtualTerrainGpuError {
-    DirectoryCapacity,
-    RootCapacity,
     GeometryCapacity,
     InvalidGeometry,
-    DuplicateNodeMismatch(TerrainPageKey),
-    MissingChild(TerrainPageKey),
     UnknownPage(TerrainPageKey),
-    InvalidView,
     DeviceLimit,
+    CandidateNotCertified,
 }
 
-struct TraversalReadbackSlot {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SnapshotMetadata {
+    generation: u64,
+    fingerprint: u64,
+    selected_pages: Vec<TerrainPageKey>,
+    ownerless_roots: u32,
+    expected_counts: [u32; STREAM_COUNT],
+}
+
+struct SnapshotBank {
+    handles: Buffer,
+    counters: Buffer,
+    indirect: Buffer,
+    encode_bind_group: wgpu::BindGroup,
+    render_bind_group: wgpu::BindGroup,
+    metadata: Option<SnapshotMetadata>,
+}
+
+struct SnapshotReadbackSlot {
     buffer: Buffer,
     available: Arc<AtomicBool>,
 }
 
 pub(crate) struct VirtualTerrainGpuControl {
     capacity: VirtualTerrainCapacity,
-    nodes: Vec<GpuVirtualTerrainNode>,
-    node_indices: BTreeMap<TerrainPageKey, u32>,
-    node_keys: Vec<TerrainPageKey>,
-    root_indices: Vec<u32>,
-    prior_refined: BTreeSet<TerrainPageKey>,
-    balanced_refined: BTreeSet<TerrainPageKey>,
-    balanced_selected: BTreeSet<TerrainPageKey>,
-    geometry_pages: Vec<GpuVirtualTerrainGeometryPage>,
-    geometry_source_bytes: u64,
-    geometry_source_bound: bool,
-    node_buffer: Buffer,
-    root_buffer: Buffer,
-    view_buffer: Buffer,
-    counter_buffer: Buffer,
-    selected_buffer: Buffer,
-    request_buffer: Buffer,
-    geometry_page_buffer: Buffer,
-    compact_surface_buffer: Buffer,
-    compact_triangle_buffer: Buffer,
-    compaction_counter_buffer: Buffer,
-    indirect_buffer: Buffer,
-    bind_group: wgpu::BindGroup,
-    pipeline: ComputePipeline,
-    compaction_layout: wgpu::BindGroupLayout,
-    compaction_bind_group: wgpu::BindGroup,
-    compaction_copy_layout: wgpu::BindGroupLayout,
-    compaction_copy_bind_group: wgpu::BindGroup,
-    compaction_prepare_pipeline: ComputePipeline,
-    compaction_pipeline: ComputePipeline,
-    compaction_finalize_pipeline: ComputePipeline,
-    readback_slots: Vec<TraversalReadbackSlot>,
+    geometries: BTreeMap<TerrainPageKey, VirtualTerrainGpuGeometry>,
+    candidate_pages: Buffer,
+    source_buffers: [Buffer; 2],
+    source_element_capacities: [u32; 2],
+    bound_source_count: usize,
+    render_layout: wgpu::BindGroupLayout,
+    encode_pipeline: ComputePipeline,
+    finalize_pipeline: ComputePipeline,
+    banks: [SnapshotBank; 2],
+    active_bank: usize,
+    pending_bank: Option<usize>,
+    active_geometry_dirty: bool,
+    next_generation: u64,
+    latest_raw_feedback: Arc<Mutex<Option<GpuSnapshotCounters>>>,
+    minimum_feedback_generation: Arc<Mutex<u64>>,
+    readback_slots: Vec<SnapshotReadbackSlot>,
     next_readback_slot: usize,
-    next_submission_id: u64,
-    minimum_feedback_submission_id: Arc<Mutex<u64>>,
-    feedback: Arc<Mutex<Option<RawGpuVirtualTerrainFeedback>>>,
 }
 
 impl VirtualTerrainGpuControl {
@@ -254,235 +200,115 @@ impl VirtualTerrainGpuControl {
         device: &Device,
         capacity: VirtualTerrainCapacity,
     ) -> Result<Self, VirtualTerrainGpuError> {
-        let node_bytes = buffer_bytes::<GpuVirtualTerrainNode>(capacity.max_directory_nodes)?;
-        let root_bytes = buffer_bytes::<u32>(capacity.max_roots)?;
-        let selected_bytes = buffer_bytes::<u32>(capacity.max_selected_pages)?;
-        let request_bytes = buffer_bytes::<u32>(capacity.max_feedback_pages)?;
-        let geometry_page_bytes =
-            buffer_bytes::<GpuVirtualTerrainGeometryPage>(capacity.max_directory_nodes)?;
-        let maximum_storage = device.limits().max_storage_buffer_binding_size;
-        if [
-            node_bytes,
-            root_bytes,
-            selected_bytes,
-            request_bytes,
-            geometry_page_bytes,
-            VIRTUAL_TERRAIN_SURFACE_BUFFER_BYTES,
-            VIRTUAL_TERRAIN_TRIANGLE_BUFFER_BYTES,
-        ]
-        .into_iter()
-        .any(|bytes| bytes > maximum_storage)
-            || device.limits().max_storage_buffers_per_shader_stage < 8
+        let maximum_storage = u64::from(device.limits().max_storage_buffer_binding_size);
+        let candidate_bytes = buffer_bytes::<GpuCandidatePage>(capacity.max_selected_pages)?;
+        if VIRTUAL_TERRAIN_HANDLE_BANK_BYTES > maximum_storage
+            || candidate_bytes > maximum_storage
+            || device.limits().max_storage_buffers_per_shader_stage < 4
         {
             return Err(VirtualTerrainGpuError::DeviceLimit);
         }
-        let node_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bounded virtual terrain hierarchy nodes"),
-            size: node_bytes,
+        let candidate_pages = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bounded virtual terrain CPU-selected candidate pages"),
+            size: candidate_bytes,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let root_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bounded virtual terrain hierarchy roots"),
-            size: root_bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let view_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("virtual terrain traversal view"),
-            contents: bytemuck::bytes_of(&GpuVirtualTerrainView::default()),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let counter_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("virtual terrain traversal counters"),
-            contents: bytemuck::bytes_of(&GpuVirtualTerrainCounters::default()),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-        });
-        let selected_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bounded virtual terrain selected pages"),
-            size: selected_bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let request_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bounded virtual terrain request feedback"),
-            size: request_bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let geometry_page_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bounded virtual terrain geometry page directory"),
-            size: geometry_page_bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let geometry_source_placeholder = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("empty virtual terrain geometry source"),
-            size: size_of::<GpuVirtualTerrainGeometryPage>() as u64,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-        let compact_surface_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bounded compact virtual terrain surface stream"),
-            size: VIRTUAL_TERRAIN_SURFACE_BUFFER_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
-            mapped_at_creation: false,
-        });
-        let compact_triangle_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bounded compact virtual terrain triangle stream"),
-            size: VIRTUAL_TERRAIN_TRIANGLE_BUFFER_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
-            mapped_at_creation: false,
-        });
-        let compaction_counter_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("virtual terrain compaction counters"),
-                contents: bytemuck::bytes_of(&GpuVirtualTerrainCompactionCounters::reset()?),
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_DST
-                    | wgpu::BufferUsages::COPY_SRC,
-            });
-        let indirect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("virtual terrain dispatch and draw indirect commands"),
-            size: 80,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
-            mapped_at_creation: false,
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("virtual terrain traversal layout"),
+        let placeholder = || {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("empty virtual terrain geometry segment"),
+                size: GPU_GEOMETRY_ELEMENT_BYTES,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        };
+        let source_buffers = [placeholder(), placeholder()];
+        let render_layout = create_render_layout(device);
+        let encode_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("virtual terrain snapshot encoding layout"),
             entries: &[
-                uniform_entry(0),
-                storage_entry(1, true),
-                storage_entry(2, true),
-                storage_entry(3, false),
-                storage_entry(4, false),
-                storage_entry(5, false),
-            ],
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("virtual terrain traversal bind group"),
-            layout: &layout,
-            entries: &[
-                entire_entry(0, &view_buffer),
-                entire_entry(1, &node_buffer),
-                entire_entry(2, &root_buffer),
-                entire_entry(3, &counter_buffer),
-                entire_entry(4, &selected_buffer),
-                entire_entry(5, &request_buffer),
+                storage_entry(0, true, wgpu::ShaderStages::COMPUTE),
+                storage_entry(1, false, wgpu::ShaderStages::COMPUTE),
+                storage_entry(2, false, wgpu::ShaderStages::COMPUTE),
+                storage_entry(3, false, wgpu::ShaderStages::COMPUTE),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("virtual terrain traversal pipeline layout"),
-            bind_group_layouts: &[Some(&layout)],
+            label: Some("virtual terrain snapshot encoding pipeline layout"),
+            bind_group_layouts: &[Some(&encode_layout)],
             immediate_size: 0,
         });
         let shader =
             device.create_shader_module(wgpu::include_wgsl!("shaders/virtual_terrain.wgsl"));
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("bounded virtual terrain hierarchy traversal"),
+        let encode_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("encode CPU-selected virtual terrain handles"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: Some("traverse"),
+            entry_point: Some("encode_snapshot"),
             compilation_options: Default::default(),
             cache: None,
         });
-        let compaction_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("virtual terrain compaction layout"),
-            entries: &[
-                storage_entry(0, true),
-                storage_entry(1, false),
-                storage_entry(2, true),
-                storage_entry(3, true),
-                storage_entry(4, false),
-                storage_entry(5, false),
-                storage_entry(6, false),
-                storage_entry(7, false),
-            ],
+        let finalize_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("finalize virtual terrain snapshot"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("finalize_snapshot"),
+            compilation_options: Default::default(),
+            cache: None,
         });
-        let compaction_bind_group = create_compaction_bind_group(
-            device,
-            &compaction_layout,
-            &selected_buffer,
-            &counter_buffer,
-            &geometry_page_buffer,
-            &geometry_source_placeholder,
-            &compact_surface_buffer,
-            &compact_triangle_buffer,
-            &compaction_counter_buffer,
-            &indirect_buffer,
-        );
-        let compaction_copy_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("virtual terrain compaction copy layout"),
-                entries: &[
-                    storage_entry(0, true),
-                    storage_entry(1, false),
-                    storage_entry(2, true),
-                    storage_entry(3, true),
-                    storage_entry(4, false),
-                    storage_entry(5, false),
-                    storage_entry(6, false),
-                ],
+        let make_bank = |index| {
+            let handles = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(if index == 0 {
+                    "virtual terrain handle bank A"
+                } else {
+                    "virtual terrain handle bank B"
+                }),
+                size: VIRTUAL_TERRAIN_HANDLE_BANK_BYTES,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
             });
-        let compaction_copy_bind_group = create_compaction_copy_bind_group(
-            device,
-            &compaction_copy_layout,
-            &selected_buffer,
-            &counter_buffer,
-            &geometry_page_buffer,
-            &geometry_source_placeholder,
-            &compact_surface_buffer,
-            &compact_triangle_buffer,
-            &compaction_counter_buffer,
-        );
-        let compaction_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("virtual terrain compaction pipeline layout"),
-                bind_group_layouts: &[None, Some(&compaction_layout)],
-                immediate_size: 0,
+            let counters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("virtual terrain snapshot counters"),
+                contents: bytemuck::bytes_of(&GpuSnapshotCounters::default()),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
             });
-        let compaction_copy_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("virtual terrain compaction copy pipeline layout"),
-                bind_group_layouts: &[None, Some(&compaction_copy_layout)],
-                immediate_size: 0,
+            let indirect = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("virtual terrain snapshot indirect commands"),
+                size: 64,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::INDIRECT
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             });
-        let compaction_prepare_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("prepare virtual terrain compaction"),
-                layout: Some(&compaction_pipeline_layout),
-                module: &shader,
-                entry_point: Some("prepare_compaction"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-        let compaction_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("compact selected virtual terrain"),
-                layout: Some(&compaction_copy_pipeline_layout),
-                module: &shader,
-                entry_point: Some("compact_selected"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-        let compaction_finalize_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("finalize virtual terrain compaction"),
-                layout: Some(&compaction_pipeline_layout),
-                module: &shader,
-                entry_point: Some("finalize_compaction"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-        let readback_bytes = readback_bytes(capacity)?;
-        let readback_slots = (0..GPU_TRAVERSAL_READBACK_SLOTS)
-            .map(|_| TraversalReadbackSlot {
+            let encode_bind_group = create_encode_bind_group(
+                device,
+                &encode_layout,
+                &candidate_pages,
+                &handles,
+                &counters,
+                &indirect,
+            );
+            let render_bind_group =
+                create_render_bind_group(device, &render_layout, &handles, &source_buffers);
+            SnapshotBank {
+                handles,
+                counters,
+                indirect,
+                encode_bind_group,
+                render_bind_group,
+                metadata: None,
+            }
+        };
+        let banks = [make_bank(0), make_bank(1)];
+        let readback_bytes = size_of::<GpuSnapshotCounters>() as u64;
+        let readback_slots = (0..GPU_SNAPSHOT_READBACK_SLOTS)
+            .map(|_| SnapshotReadbackSlot {
                 buffer: device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("virtual terrain traversal readback"),
+                    label: Some("virtual terrain snapshot feedback readback"),
                     size: readback_bytes,
-                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                     mapped_at_creation: false,
                 }),
                 available: Arc::new(AtomicBool::new(true)),
@@ -490,642 +316,319 @@ impl VirtualTerrainGpuControl {
             .collect();
         Ok(Self {
             capacity,
-            nodes: Vec::new(),
-            node_indices: BTreeMap::new(),
-            node_keys: Vec::new(),
-            root_indices: Vec::new(),
-            prior_refined: BTreeSet::new(),
-            balanced_refined: BTreeSet::new(),
-            balanced_selected: BTreeSet::new(),
-            geometry_pages: Vec::new(),
-            geometry_source_bytes: geometry_source_placeholder.size(),
-            geometry_source_bound: false,
-            node_buffer,
-            root_buffer,
-            view_buffer,
-            counter_buffer,
-            selected_buffer,
-            request_buffer,
-            geometry_page_buffer,
-            compact_surface_buffer,
-            compact_triangle_buffer,
-            compaction_counter_buffer,
-            indirect_buffer,
-            bind_group,
-            pipeline,
-            compaction_layout,
-            compaction_bind_group,
-            compaction_copy_layout,
-            compaction_copy_bind_group,
-            compaction_prepare_pipeline,
-            compaction_pipeline,
-            compaction_finalize_pipeline,
+            geometries: BTreeMap::new(),
+            candidate_pages,
+            source_buffers,
+            source_element_capacities: [1, 1],
+            bound_source_count: 0,
+            render_layout,
+            encode_pipeline,
+            finalize_pipeline,
+            banks,
+            active_bank: 0,
+            pending_bank: None,
+            active_geometry_dirty: false,
+            next_generation: 1,
+            latest_raw_feedback: Arc::new(Mutex::new(None)),
+            minimum_feedback_generation: Arc::new(Mutex::new(1)),
             readback_slots,
             next_readback_slot: 0,
-            next_submission_id: 1,
-            minimum_feedback_submission_id: Arc::new(Mutex::new(1)),
-            feedback: Arc::new(Mutex::new(None)),
         })
     }
 
-    pub(crate) fn register_directory(
-        &mut self,
-        queue: &Queue,
-        directory: &TerrainHierarchyDirectoryV1,
-    ) -> Result<(), VirtualTerrainGpuError> {
-        let new_nodes = directory
-            .nodes
-            .iter()
-            .filter(|node| !self.node_indices.contains_key(&node.key))
-            .collect::<Vec<_>>();
-        if self.nodes.len().saturating_add(new_nodes.len()) > self.capacity.max_directory_nodes {
-            return Err(VirtualTerrainGpuError::DirectoryCapacity);
-        }
-        let new_roots = new_nodes.iter().filter(|node| node.is_root).count();
-        if self.root_indices.len().saturating_add(new_roots) > self.capacity.max_roots {
-            return Err(VirtualTerrainGpuError::RootCapacity);
-        }
-        for node in &directory.nodes {
-            if let Some(index) = self.node_indices.get(&node.key).copied() {
-                let packed = self
-                    .nodes
-                    .get(index as usize)
-                    .ok_or(VirtualTerrainGpuError::DirectoryCapacity)?;
-                if packed_static_identity(*packed) != node_static_identity(node) {
-                    return Err(VirtualTerrainGpuError::DuplicateNodeMismatch(node.key));
-                }
-            }
-        }
-        let base = u32::try_from(self.nodes.len())
-            .map_err(|_| VirtualTerrainGpuError::DirectoryCapacity)?;
-        for (offset, node) in new_nodes.iter().enumerate() {
-            let index = base
-                .checked_add(
-                    u32::try_from(offset).map_err(|_| VirtualTerrainGpuError::DirectoryCapacity)?,
-                )
-                .ok_or(VirtualTerrainGpuError::DirectoryCapacity)?;
-            self.node_indices.insert(node.key, index);
-            self.node_keys.push(node.key);
-        }
-        let mut packed_nodes = Vec::with_capacity(new_nodes.len());
-        for node in new_nodes {
-            let packed = pack_node(node, &self.node_indices)?;
-            if node.is_root {
-                self.root_indices.push(
-                    *self
-                        .node_indices
-                        .get(&node.key)
-                        .ok_or(VirtualTerrainGpuError::DirectoryCapacity)?,
-                );
-            }
-            packed_nodes.push(packed);
-        }
-        if !packed_nodes.is_empty() {
-            let offset = u64::from(base)
-                .checked_mul(size_of::<GpuVirtualTerrainNode>() as u64)
-                .ok_or(VirtualTerrainGpuError::DirectoryCapacity)?;
-            queue.write_buffer(
-                &self.node_buffer,
-                offset,
-                bytemuck::cast_slice(&packed_nodes),
-            );
-            self.nodes.extend(packed_nodes);
-            self.geometry_pages
-                .resize(self.nodes.len(), GpuVirtualTerrainGeometryPage::default());
-        }
-        if !self.root_indices.is_empty() {
-            queue.write_buffer(
-                &self.root_buffer,
-                0,
-                bytemuck::cast_slice(&self.root_indices),
-            );
-        }
-        Ok(())
+    pub(crate) const fn render_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.render_layout
     }
 
-    /// Rebuilds the bounded GPU directory mirror after immutable region directories are retired.
-    ///
-    /// Node indices are an internal cache detail, so compaction is preferable to leaving tombstones
-    /// that would eventually exhaust a long-travel session. Callers republish geometry records
-    /// after this method because every index may have changed.
-    pub(crate) fn synchronize_directory_set(
-        &mut self,
-        queue: &Queue,
-        hierarchy: &VirtualTerrainHierarchy,
-    ) -> Result<(), VirtualTerrainGpuError> {
-        let directory_nodes = hierarchy.nodes().collect::<Vec<_>>();
-        let roots = hierarchy.roots().collect::<BTreeSet<_>>();
-        if directory_nodes.len() > self.capacity.max_directory_nodes {
-            return Err(VirtualTerrainGpuError::DirectoryCapacity);
-        }
-        if roots.len() > self.capacity.max_roots {
-            return Err(VirtualTerrainGpuError::RootCapacity);
-        }
-        let mut node_indices = BTreeMap::new();
-        let mut node_keys = Vec::with_capacity(directory_nodes.len());
-        for (index, node) in directory_nodes.iter().enumerate() {
-            let index =
-                u32::try_from(index).map_err(|_| VirtualTerrainGpuError::DirectoryCapacity)?;
-            node_indices.insert(node.key, index);
-            node_keys.push(node.key);
-        }
-        let prior_refined = hierarchy.refined_last_cut().collect::<BTreeSet<_>>();
-        let balanced_refined = hierarchy
-            .balanced_refined_last_cut()
-            .collect::<BTreeSet<_>>();
-        let balanced_selected = hierarchy
-            .balanced_selected_last_cut()
-            .collect::<BTreeSet<_>>();
-        let mut nodes = Vec::with_capacity(directory_nodes.len());
-        let mut root_indices = Vec::with_capacity(roots.len());
-        for node in &directory_nodes {
-            let mut packed = pack_node(node, &node_indices)?;
-            let mut flags = static_flags(node);
-            if hierarchy.resident_page(node.key).is_some() {
-                flags |= NODE_RESIDENT;
-            }
-            if hierarchy.replacement_is_resident_and_coherent(node.key) {
-                flags |= NODE_REPLACEMENT_COHERENT;
-            }
-            if prior_refined.contains(&node.key) {
-                flags |= NODE_PRIOR_REFINED;
-            }
-            if balanced_refined.contains(&node.key) {
-                flags |= NODE_BALANCED_REFINED;
-            }
-            if balanced_selected.contains(&node.key) {
-                flags |= NODE_BALANCED_SELECTED;
-            }
-            packed.maximum_flags[3] = flags as i32;
-            if roots.contains(&node.key) {
-                root_indices.push(
-                    *node_indices
-                        .get(&node.key)
-                        .ok_or(VirtualTerrainGpuError::DirectoryCapacity)?,
-                );
-            }
-            nodes.push(packed);
-        }
-        if !nodes.is_empty() {
-            queue.write_buffer(&self.node_buffer, 0, bytemuck::cast_slice(&nodes));
-        }
-        if !root_indices.is_empty() {
-            queue.write_buffer(&self.root_buffer, 0, bytemuck::cast_slice(&root_indices));
-        }
-        let geometry_pages = vec![GpuVirtualTerrainGeometryPage::default(); nodes.len()];
-        if !geometry_pages.is_empty() {
-            queue.write_buffer(
-                &self.geometry_page_buffer,
-                0,
-                bytemuck::cast_slice(&geometry_pages),
-            );
-        }
-        self.nodes = nodes;
-        self.node_indices = node_indices;
-        self.node_keys = node_keys;
-        self.root_indices = root_indices;
-        self.prior_refined = prior_refined;
-        self.balanced_refined = balanced_refined;
-        self.balanced_selected = balanced_selected;
-        self.geometry_pages = geometry_pages;
-        self.invalidate_feedback();
-        Ok(())
+    pub(crate) fn active_render_bind_group(&self) -> &wgpu::BindGroup {
+        &self.banks[self.active_bank].render_bind_group
     }
 
-    pub(crate) fn synchronize_active_roots(
-        &mut self,
-        queue: &Queue,
-        roots: impl IntoIterator<Item = TerrainPageKey>,
-    ) -> Result<(), VirtualTerrainGpuError> {
-        let root_indices = roots
-            .into_iter()
-            .map(|root| {
-                self.node_indices
-                    .get(&root)
-                    .copied()
-                    .ok_or(VirtualTerrainGpuError::UnknownPage(root))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if root_indices.len() > self.capacity.max_roots {
-            return Err(VirtualTerrainGpuError::RootCapacity);
-        }
-        if !root_indices.is_empty() {
-            queue.write_buffer(&self.root_buffer, 0, bytemuck::cast_slice(&root_indices));
-        }
-        self.root_indices = root_indices;
-        self.prior_refined.retain(|key| {
-            self.root_indices.iter().any(|root_index| {
-                self.node_keys
-                    .get(*root_index as usize)
-                    .is_some_and(|root| key.ancestor_at(root.level) == Some(*root))
-            })
-        });
-        self.balanced_refined.retain(|key| {
-            self.root_indices.iter().any(|root_index| {
-                self.node_keys
-                    .get(*root_index as usize)
-                    .is_some_and(|root| key.ancestor_at(root.level) == Some(*root))
-            })
-        });
-        self.balanced_selected.retain(|key| {
-            self.root_indices.iter().any(|root_index| {
-                self.node_keys
-                    .get(*root_index as usize)
-                    .is_some_and(|root| key.ancestor_at(root.level) == Some(*root))
-            })
-        });
-        self.invalidate_feedback();
-        Ok(())
+    #[expect(
+        dead_code,
+        reason = "explicit active-bank buffer exposure is part of the renderer integration contract"
+    )]
+    pub(crate) fn active_handle_buffer(&self) -> &Buffer {
+        &self.banks[self.active_bank].handles
     }
 
-    pub(crate) fn bind_geometry_source(
+    #[expect(
+        dead_code,
+        reason = "explicit active-bank stream slices are part of the renderer integration contract"
+    )]
+    pub(crate) fn active_handle_slice(&self, stream: usize) -> wgpu::BufferSlice<'_> {
+        let start = u64::from(VIRTUAL_TERRAIN_HANDLE_OFFSETS[stream]) * 4;
+        let end = start + u64::from(VIRTUAL_TERRAIN_HANDLE_CAPACITIES[stream]) * 4;
+        self.banks[self.active_bank].handles.slice(start..end)
+    }
+
+    pub(crate) fn active_indirect_buffer(&self) -> &Buffer {
+        &self.banks[self.active_bank].indirect
+    }
+
+    pub(crate) fn active_generation(&self) -> Option<u64> {
+        self.banks[self.active_bank]
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.generation)
+    }
+
+    pub(crate) fn active_snapshot_identity(&self) -> Option<(u64, u64)> {
+        self.banks[self.active_bank]
+            .metadata
+            .as_ref()
+            .map(|metadata| (metadata.generation, metadata.fingerprint))
+    }
+
+    pub(crate) fn bind_geometry_sources(
         &mut self,
         device: &Device,
-        source: &Buffer,
+        sources: &[Buffer],
     ) -> Result<(), VirtualTerrainGpuError> {
-        if source.size() > device.limits().max_storage_buffer_binding_size
-            || !source.usage().contains(wgpu::BufferUsages::STORAGE)
-        {
+        if sources.len() > 2 {
             return Err(VirtualTerrainGpuError::DeviceLimit);
         }
-        if self.geometry_source_bound && self.geometry_source_bytes == source.size() {
-            return Ok(());
+        for source in sources {
+            if source.size() > u64::from(device.limits().max_storage_buffer_binding_size)
+                || !source.usage().contains(wgpu::BufferUsages::STORAGE)
+                || !source.size().is_multiple_of(GPU_GEOMETRY_ELEMENT_BYTES)
+            {
+                return Err(VirtualTerrainGpuError::DeviceLimit);
+            }
         }
-        self.replace_geometry_source(device, source)
+        for (index, source) in sources.iter().enumerate() {
+            self.source_buffers[index] = source.clone();
+            self.source_element_capacities[index] =
+                u32::try_from(source.size() / GPU_GEOMETRY_ELEMENT_BYTES)
+                    .map_err(|_| VirtualTerrainGpuError::DeviceLimit)?;
+        }
+        for index in sources.len()..2 {
+            self.source_element_capacities[index] = 1;
+        }
+        self.bound_source_count = sources.len();
+        for bank in &mut self.banks {
+            bank.render_bind_group = create_render_bind_group(
+                device,
+                &self.render_layout,
+                &bank.handles,
+                &self.source_buffers,
+            );
+        }
+        Ok(())
     }
 
-    /// Replaces the source arena even when its byte size is unchanged.
-    ///
-    /// Arena compaction deliberately swaps one fixed-capacity buffer for another, so byte size
-    /// alone cannot identify whether the existing bind groups still reference the live source.
-    pub(crate) fn replace_geometry_source(
-        &mut self,
-        device: &Device,
-        source: &Buffer,
-    ) -> Result<(), VirtualTerrainGpuError> {
-        if source.size() > device.limits().max_storage_buffer_binding_size
-            || !source.usage().contains(wgpu::BufferUsages::STORAGE)
-        {
-            return Err(VirtualTerrainGpuError::DeviceLimit);
-        }
-        self.compaction_bind_group = create_compaction_bind_group(
-            device,
-            &self.compaction_layout,
-            &self.selected_buffer,
-            &self.counter_buffer,
-            &self.geometry_page_buffer,
-            source,
-            &self.compact_surface_buffer,
-            &self.compact_triangle_buffer,
-            &self.compaction_counter_buffer,
-            &self.indirect_buffer,
-        );
-        self.compaction_copy_bind_group = create_compaction_copy_bind_group(
-            device,
-            &self.compaction_copy_layout,
-            &self.selected_buffer,
-            &self.counter_buffer,
-            &self.geometry_page_buffer,
-            source,
-            &self.compact_surface_buffer,
-            &self.compact_triangle_buffer,
-            &self.compaction_counter_buffer,
-        );
-        self.geometry_source_bytes = source.size();
-        self.geometry_source_bound = true;
-        Ok(())
+    pub(crate) const fn bound_geometry_source_count(&self) -> usize {
+        self.bound_source_count
     }
 
     pub(crate) fn update_page_geometry(
         &mut self,
-        queue: &Queue,
+        _queue: &Queue,
         key: TerrainPageKey,
         geometry: VirtualTerrainGpuGeometry,
     ) -> Result<(), VirtualTerrainGpuError> {
-        let index = *self
-            .node_indices
-            .get(&key)
-            .ok_or(VirtualTerrainGpuError::UnknownPage(key))?;
-        let record = self.pack_geometry_page(geometry)?;
-        let destination = self
-            .geometry_pages
-            .get_mut(index as usize)
-            .ok_or(VirtualTerrainGpuError::UnknownPage(key))?;
-        *destination = record;
-        let offset = u64::from(index)
-            .checked_mul(size_of::<GpuVirtualTerrainGeometryPage>() as u64)
-            .ok_or(VirtualTerrainGpuError::GeometryCapacity)?;
-        queue.write_buffer(
-            &self.geometry_page_buffer,
-            offset,
-            bytemuck::bytes_of(&record),
-        );
-        Ok(())
-    }
-
-    /// Replaces several page records and publishes the mirror with one queue write.
-    pub(crate) fn update_page_geometries(
-        &mut self,
-        queue: &Queue,
-        geometries: impl IntoIterator<Item = (TerrainPageKey, VirtualTerrainGpuGeometry)>,
-    ) -> Result<(), VirtualTerrainGpuError> {
-        let records = geometries
-            .into_iter()
-            .map(|(key, geometry)| {
-                let index = *self
-                    .node_indices
-                    .get(&key)
-                    .ok_or(VirtualTerrainGpuError::UnknownPage(key))?;
-                Ok((index, self.pack_geometry_page(geometry)?))
-            })
-            .collect::<Result<Vec<_>, VirtualTerrainGpuError>>()?;
-        for (index, record) in records {
-            let destination = self
-                .geometry_pages
-                .get_mut(index as usize)
-                .ok_or(VirtualTerrainGpuError::GeometryCapacity)?;
-            *destination = record;
-        }
-        if !self.geometry_pages.is_empty() {
-            queue.write_buffer(
-                &self.geometry_page_buffer,
-                0,
-                bytemuck::cast_slice(&self.geometry_pages),
-            );
+        self.validate_geometry(geometry)?;
+        if geometry == VirtualTerrainGpuGeometry::default() {
+            self.geometries.remove(&key);
+        } else {
+            self.geometries.insert(key, geometry);
         }
         Ok(())
     }
 
-    pub(crate) fn validate_page_geometries(
-        &self,
-        geometries: impl IntoIterator<Item = (TerrainPageKey, VirtualTerrainGpuGeometry)>,
-    ) -> Result<(), VirtualTerrainGpuError> {
-        for (key, geometry) in geometries {
-            let index = *self
-                .node_indices
-                .get(&key)
-                .ok_or(VirtualTerrainGpuError::UnknownPage(key))?;
-            self.geometry_pages
-                .get(index as usize)
-                .ok_or(VirtualTerrainGpuError::GeometryCapacity)?;
-            self.pack_geometry_page(geometry)?;
-        }
-        Ok(())
-    }
-
-    fn pack_geometry_page(
+    fn validate_geometry(
         &self,
         geometry: VirtualTerrainGpuGeometry,
-    ) -> Result<GpuVirtualTerrainGeometryPage, VirtualTerrainGpuError> {
-        let opaque_surface = self.pack_geometry_range(geometry.opaque_surface)?;
-        let opaque_triangle = self.pack_geometry_range(geometry.opaque_triangle)?;
-        let water_surface = self.pack_geometry_range(geometry.water_surface)?;
-        let water_triangle = self.pack_geometry_range(geometry.water_triangle)?;
-        Ok(GpuVirtualTerrainGeometryPage {
-            opaque_surface_offset: opaque_surface.0,
-            opaque_surface_count: opaque_surface.1,
-            opaque_triangle_offset: opaque_triangle.0,
-            opaque_triangle_count: opaque_triangle.1,
-            water_surface_offset: water_surface.0,
-            water_surface_count: water_surface.1,
-            water_triangle_offset: water_triangle.0,
-            water_triangle_count: water_triangle.1,
-        })
+    ) -> Result<(), VirtualTerrainGpuError> {
+        for range in geometry.ranges() {
+            self.pack_range(range)?;
+        }
+        Ok(())
     }
 
-    fn pack_geometry_range(
+    fn pack_range(
         &self,
         range: VirtualTerrainGpuGeometryRange,
-    ) -> Result<(u32, u32), VirtualTerrainGpuError> {
+    ) -> Result<[u32; 2], VirtualTerrainGpuError> {
         if range.element_count == 0 {
-            return Ok((0, 0));
+            return Ok([0, 0]);
         }
+        let segment = usize::try_from(range.source_segment)
+            .ok()
+            .filter(|segment| *segment < 2)
+            .ok_or(VirtualTerrainGpuError::InvalidGeometry)?;
         if !range
             .source_offset_bytes
-            .is_multiple_of(size_of::<u32>() as u64)
+            .is_multiple_of(GPU_GEOMETRY_ELEMENT_BYTES)
         {
             return Err(VirtualTerrainGpuError::InvalidGeometry);
         }
-        let byte_count = u64::from(range.element_count)
-            .checked_mul(GPU_GEOMETRY_ELEMENT_BYTES)
+        let first = u32::try_from(range.source_offset_bytes / GPU_GEOMETRY_ELEMENT_BYTES)
+            .map_err(|_| VirtualTerrainGpuError::GeometryCapacity)?;
+        let end = first
+            .checked_add(range.element_count)
             .ok_or(VirtualTerrainGpuError::GeometryCapacity)?;
-        if range
-            .source_offset_bytes
-            .checked_add(byte_count)
-            .is_none_or(|end| end > self.geometry_source_bytes)
-        {
+        if end > self.source_element_capacities[segment] || first > GPU_HANDLE_ELEMENT_MASK {
             return Err(VirtualTerrainGpuError::GeometryCapacity);
         }
-        let source_word_offset = u32::try_from(range.source_offset_bytes / size_of::<u32>() as u64)
-            .map_err(|_| VirtualTerrainGpuError::GeometryCapacity)?;
-        Ok((source_word_offset, range.element_count))
+        let segment_bit = if segment == 0 {
+            0
+        } else {
+            GPU_HANDLE_SEGMENT_BIT
+        };
+        Ok([segment_bit | first, range.element_count])
     }
 
-    pub(crate) const fn compact_surface_buffer(&self) -> &Buffer {
-        &self.compact_surface_buffer
+    pub(crate) fn candidate_requires_encoding(
+        &self,
+        fingerprint: u64,
+        selected_pages: &[TerrainPageKey],
+    ) -> bool {
+        let matches = |metadata: Option<&SnapshotMetadata>| {
+            snapshot_metadata_matches(metadata, fingerprint, selected_pages)
+        };
+        !(self.active_geometry_dirty || matches(self.banks[self.active_bank].metadata.as_ref()))
+            && !self
+                .pending_bank
+                .is_some_and(|bank| matches(self.banks[bank].metadata.as_ref()))
     }
 
-    pub(crate) const fn compact_triangle_buffer(&self) -> &Buffer {
-        &self.compact_triangle_buffer
+    pub(crate) fn active_snapshot_matches(
+        &self,
+        fingerprint: u64,
+        selected_pages: &[TerrainPageKey],
+    ) -> bool {
+        !self.active_geometry_dirty
+            && snapshot_metadata_matches(
+                self.banks[self.active_bank].metadata.as_ref(),
+                fingerprint,
+                selected_pages,
+            )
     }
 
-    pub(crate) fn compact_water_surface_slice(&self) -> wgpu::BufferSlice<'_> {
-        self.compact_surface_buffer
-            .slice(VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES..)
+    /// Whether the immutable active bank still represents the already-published cut.
+    ///
+    /// Candidate geometry may have changed under the same logical key/fingerprint while the old
+    /// source allocation remains retired and immutable for presentation. In that case the active
+    /// bank is still safe to draw, but `active_snapshot_matches` correctly requires a new candidate
+    /// encoding before it can be treated as current.
+    pub(crate) fn presented_snapshot_matches(
+        &self,
+        fingerprint: u64,
+        selected_pages: &[TerrainPageKey],
+    ) -> bool {
+        snapshot_metadata_matches(
+            self.banks[self.active_bank].metadata.as_ref(),
+            fingerprint,
+            selected_pages,
+        )
     }
 
-    pub(crate) fn compact_water_triangle_slice(&self) -> wgpu::BufferSlice<'_> {
-        self.compact_triangle_buffer
-            .slice(VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES..)
-    }
-
-    pub(crate) const fn indirect_buffer(&self) -> &Buffer {
-        &self.indirect_buffer
-    }
-
-    pub(crate) fn update_page_residency(
-        &mut self,
-        queue: &Queue,
-        hierarchy: &VirtualTerrainHierarchy,
-        key: TerrainPageKey,
-    ) -> Result<(), VirtualTerrainGpuError> {
-        self.update_node_flags(queue, hierarchy, key)?;
-        if let Some(parent) = key.parent()
-            && hierarchy.directory_node(parent).is_some()
-        {
-            self.update_node_flags(queue, hierarchy, parent)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn synchronize_refinement_state(
-        &mut self,
-        queue: &Queue,
-        hierarchy: &VirtualTerrainHierarchy,
-    ) -> Result<bool, VirtualTerrainGpuError> {
-        let next_prior = hierarchy.refined_last_cut().collect::<BTreeSet<_>>();
-        let next_balanced = hierarchy
-            .balanced_refined_last_cut()
-            .collect::<BTreeSet<_>>();
-        let next_balanced_selected = hierarchy
-            .balanced_selected_last_cut()
-            .collect::<BTreeSet<_>>();
-        let mut changed = self
-            .prior_refined
-            .symmetric_difference(&next_prior)
-            .copied()
-            .collect::<BTreeSet<_>>();
-        changed.extend(
-            self.balanced_refined
-                .symmetric_difference(&next_balanced)
-                .copied(),
-        );
-        changed.extend(
-            self.balanced_selected
-                .symmetric_difference(&next_balanced_selected)
-                .copied(),
-        );
-        let changed_any = !changed.is_empty();
-        self.prior_refined = next_prior;
-        self.balanced_refined = next_balanced;
-        self.balanced_selected = next_balanced_selected;
-        for key in changed {
-            self.update_node_flags(queue, hierarchy, key)?;
-        }
-        Ok(changed_any)
-    }
-
-    fn update_node_flags(
-        &mut self,
-        queue: &Queue,
-        hierarchy: &VirtualTerrainHierarchy,
-        key: TerrainPageKey,
-    ) -> Result<(), VirtualTerrainGpuError> {
-        let index = *self
-            .node_indices
-            .get(&key)
-            .ok_or(VirtualTerrainGpuError::UnknownPage(key))?;
-        let node = hierarchy
-            .directory_node(key)
-            .ok_or(VirtualTerrainGpuError::UnknownPage(key))?;
-        let mut flags = static_flags(&node);
-        if hierarchy.resident_page(key).is_some() {
-            flags |= NODE_RESIDENT;
-        }
-        if hierarchy.replacement_is_resident_and_coherent(key) {
-            flags |= NODE_REPLACEMENT_COHERENT;
-        }
-        if self.prior_refined.contains(&key) {
-            flags |= NODE_PRIOR_REFINED;
-        }
-        if self.balanced_refined.contains(&key) {
-            flags |= NODE_BALANCED_REFINED;
-        }
-        if self.balanced_selected.contains(&key) {
-            flags |= NODE_BALANCED_SELECTED;
-        }
-        let packed = self
-            .nodes
-            .get_mut(index as usize)
-            .ok_or(VirtualTerrainGpuError::UnknownPage(key))?;
-        packed.maximum_flags[3] = flags as i32;
-        let offset = u64::from(index)
-            .checked_mul(size_of::<GpuVirtualTerrainNode>() as u64)
-            .and_then(|offset| {
-                offset
-                    .checked_add(std::mem::offset_of!(GpuVirtualTerrainNode, maximum_flags) as u64)
-            })
-            .and_then(|offset| offset.checked_add(3 * size_of::<i32>() as u64))
-            .ok_or(VirtualTerrainGpuError::DirectoryCapacity)?;
-        queue.write_buffer(&self.node_buffer, offset, bytemuck::bytes_of(&flags));
-        Ok(())
-    }
-
-    pub(crate) fn encode_traversal(
+    pub(crate) fn encode_candidate(
         &mut self,
         queue: &Queue,
         encoder: &mut CommandEncoder,
-        view: VirtualTerrainView,
-        oracle_fingerprint: u64,
+        selected_pages: &[TerrainPageKey],
+        ownerless_roots: u32,
+        fingerprint: u64,
         timestamps: Option<VirtualTerrainGpuTimestampWrites<'_>>,
     ) -> Result<u64, VirtualTerrainGpuError> {
-        let view = pack_view(
-            view,
-            self.root_indices.len(),
-            self.nodes.len(),
-            self.capacity,
-        )?;
-        let submission_id = self.next_submission_id;
-        self.next_submission_id = self.next_submission_id.wrapping_add(1).max(1);
-        let counters = GpuVirtualTerrainCounters {
-            submission_id: split_u64(submission_id),
-            oracle_fingerprint: split_u64(oracle_fingerprint),
-            ..GpuVirtualTerrainCounters::default()
+        if selected_pages.len() > self.capacity.max_selected_pages {
+            return Err(VirtualTerrainGpuError::GeometryCapacity);
+        }
+        if let Some(bank) = self.pending_bank
+            && let Some(metadata) = self.banks[bank].metadata.as_ref()
+            && metadata.fingerprint == fingerprint
+            && metadata.selected_pages == selected_pages
+        {
+            return Ok(metadata.generation);
+        }
+        let inactive = 1 - self.active_bank;
+        let mut pages = Vec::with_capacity(selected_pages.len());
+        let mut expected_counts = [0u32; STREAM_COUNT];
+        for key in selected_pages {
+            let geometry = self
+                .geometries
+                .get(key)
+                .copied()
+                .ok_or(VirtualTerrainGpuError::UnknownPage(*key))?;
+            let ranges = geometry
+                .ranges()
+                .map(|range| self.pack_range(range))
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?
+                .try_into()
+                .map_err(|_| VirtualTerrainGpuError::InvalidGeometry)?;
+            for (stream, range) in geometry.ranges().into_iter().enumerate() {
+                expected_counts[stream] = expected_counts[stream]
+                    .checked_add(range.element_count)
+                    .ok_or(VirtualTerrainGpuError::GeometryCapacity)?;
+            }
+            pages.push(GpuCandidatePage { ranges });
+        }
+        if !pages.is_empty() {
+            queue.write_buffer(&self.candidate_pages, 0, bytemuck::cast_slice(&pages));
+        }
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        let counters = GpuSnapshotCounters {
+            generation: split_u64(generation),
+            fingerprint: split_u64(fingerprint),
+            selected_count: selected_pages.len() as u32,
+            ownerless_roots,
+            source_element_capacities: self.source_element_capacities,
+            ..GpuSnapshotCounters::default()
         };
-        queue.write_buffer(&self.view_buffer, 0, bytemuck::bytes_of(&view));
-        queue.write_buffer(&self.counter_buffer, 0, bytemuck::bytes_of(&counters));
         queue.write_buffer(
-            &self.compaction_counter_buffer,
+            &self.banks[inactive].counters,
             0,
-            bytemuck::bytes_of(&GpuVirtualTerrainCompactionCounters::reset()?),
+            bytemuck::bytes_of(&counters),
         );
-        if !self.root_indices.is_empty() {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("virtual terrain hierarchy traversal"),
-                timestamp_writes: timestamps.map(|timestamps| wgpu::ComputePassTimestampWrites {
-                    query_set: timestamps.query_set,
-                    beginning_of_pass_write_index: Some(timestamps.traversal_first_query),
-                    end_of_pass_write_index: Some(timestamps.traversal_first_query + 1),
-                }),
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.dispatch_workgroups(self.root_indices.len() as u32, 1, 1);
+        queue.write_buffer(&self.banks[inactive].indirect, 0, &[0; 64]);
+        self.banks[inactive].metadata = Some(SnapshotMetadata {
+            generation,
+            fingerprint,
+            selected_pages: selected_pages.to_vec(),
+            ownerless_roots,
+            expected_counts,
+        });
+        self.pending_bank = Some(inactive);
+        if let Ok(mut minimum) = self.minimum_feedback_generation.lock() {
+            *minimum = generation;
         }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("prepare virtual terrain selected geometry compaction"),
+                label: Some("encode CPU-selected virtual terrain snapshot"),
                 timestamp_writes: timestamps.map(|timestamps| wgpu::ComputePassTimestampWrites {
                     query_set: timestamps.query_set,
-                    beginning_of_pass_write_index: Some(timestamps.compaction_first_query),
-                    end_of_pass_write_index: None,
+                    beginning_of_pass_write_index: Some(timestamps.encoding_first_query),
+                    end_of_pass_write_index: Some(timestamps.encoding_first_query + 1),
                 }),
             });
-            pass.set_bind_group(1, &self.compaction_bind_group, &[]);
-            pass.set_pipeline(&self.compaction_prepare_pipeline);
+            pass.set_pipeline(&self.encode_pipeline);
+            pass.set_bind_group(0, &self.banks[inactive].encode_bind_group, &[]);
+            if !pages.is_empty() {
+                pass.dispatch_workgroups(pages.len() as u32, 1, 1);
+            }
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("finalize CPU-selected virtual terrain snapshot"),
+                timestamp_writes: timestamps.map(|timestamps| wgpu::ComputePassTimestampWrites {
+                    query_set: timestamps.query_set,
+                    beginning_of_pass_write_index: Some(timestamps.finalize_first_query),
+                    end_of_pass_write_index: Some(timestamps.finalize_first_query + 1),
+                }),
+            });
+            pass.set_pipeline(&self.finalize_pipeline);
+            pass.set_bind_group(0, &self.banks[inactive].encode_bind_group, &[]);
             pass.dispatch_workgroups(1, 1, 1);
         }
-        {
-            // WebGPU synchronization scopes are pass-wide. Keep the storage write that prepares
-            // `indirect_buffer`, its indirect read, and the storage writes that finalize the draw
-            // commands in separate passes so the buffer never has writable and indirect usages in
-            // the same scope.
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("virtual terrain selected geometry compaction"),
-                timestamp_writes: None,
-            });
-            pass.set_bind_group(1, &self.compaction_copy_bind_group, &[]);
-            pass.set_pipeline(&self.compaction_pipeline);
-            pass.dispatch_workgroups_indirect(&self.indirect_buffer, 0);
-        }
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("finalize virtual terrain selected geometry compaction"),
-                timestamp_writes: timestamps.map(|timestamps| wgpu::ComputePassTimestampWrites {
-                    query_set: timestamps.query_set,
-                    beginning_of_pass_write_index: None,
-                    end_of_pass_write_index: Some(timestamps.compaction_first_query + 1),
-                }),
-            });
-            pass.set_bind_group(1, &self.compaction_bind_group, &[]);
-            pass.set_pipeline(&self.compaction_finalize_pipeline);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        self.schedule_readback(encoder);
-        Ok(submission_id)
+        self.schedule_readback(encoder, inactive);
+        Ok(generation)
     }
 
-    fn schedule_readback(&mut self, encoder: &mut CommandEncoder) {
+    fn schedule_readback(&mut self, encoder: &mut CommandEncoder, bank: usize) {
         let Some((slot_index, slot)) = (0..self.readback_slots.len())
             .map(|offset| (self.next_readback_slot + offset) % self.readback_slots.len())
             .find_map(|index| {
@@ -1139,332 +642,207 @@ impl VirtualTerrainGpuControl {
             return;
         };
         self.next_readback_slot = (slot_index + 1) % self.readback_slots.len();
-        let counter_bytes = size_of::<GpuVirtualTerrainCounters>() as u64;
-        let compaction_bytes = size_of::<GpuVirtualTerrainCompactionCounters>() as u64;
-        let selected_bytes = (self.capacity.max_selected_pages * size_of::<u32>()) as u64;
-        let request_bytes = (self.capacity.max_feedback_pages * size_of::<u32>()) as u64;
-        encoder.copy_buffer_to_buffer(&self.counter_buffer, 0, &slot.buffer, 0, counter_bytes);
         encoder.copy_buffer_to_buffer(
-            &self.compaction_counter_buffer,
+            &self.banks[bank].counters,
             0,
             &slot.buffer,
-            counter_bytes,
-            compaction_bytes,
-        );
-        encoder.copy_buffer_to_buffer(
-            &self.selected_buffer,
             0,
-            &slot.buffer,
-            counter_bytes + compaction_bytes,
-            selected_bytes,
-        );
-        encoder.copy_buffer_to_buffer(
-            &self.request_buffer,
-            0,
-            &slot.buffer,
-            counter_bytes + compaction_bytes + selected_bytes,
-            request_bytes,
+            size_of::<GpuSnapshotCounters>() as u64,
         );
         let callback_buffer = slot.buffer.clone();
         let available = Arc::clone(&slot.available);
-        let feedback = Arc::clone(&self.feedback);
-        let minimum_feedback_submission_id = Arc::clone(&self.minimum_feedback_submission_id);
-        let capacity = self.capacity;
+        let feedback = Arc::clone(&self.latest_raw_feedback);
+        let minimum = Arc::clone(&self.minimum_feedback_generation);
         encoder.map_buffer_on_submit(&slot.buffer, wgpu::MapMode::Read, .., move |result| {
             if result.is_ok()
                 && let Ok(mapped) = callback_buffer.get_mapped_range(..)
-                && let Some(parsed) = parse_feedback(&mapped, capacity)
-                && minimum_feedback_submission_id
+                && let Ok(parsed) = bytemuck::try_from_bytes::<GpuSnapshotCounters>(&mapped)
+                && minimum
                     .lock()
-                    .is_ok_and(|minimum| feedback_submission_id(&parsed) >= *minimum)
+                    .is_ok_and(|minimum| join_u64(parsed.generation) >= *minimum)
                 && let Ok(mut destination) = feedback.lock()
+                && destination.as_ref().is_none_or(|current| {
+                    join_u64(parsed.generation) > join_u64(current.generation)
+                })
             {
-                let is_newer = destination.as_ref().is_none_or(|current| {
-                    feedback_submission_id(&parsed) > feedback_submission_id(current)
-                });
-                if is_newer {
-                    *destination = Some(parsed);
-                }
+                *destination = Some(*parsed);
             }
             callback_buffer.unmap();
             available.store(true, Ordering::Release);
         });
     }
 
+    fn feedback_metadata(&self, counters: &GpuSnapshotCounters) -> Option<&SnapshotMetadata> {
+        let generation = join_u64(counters.generation);
+        self.banks
+            .iter()
+            .filter_map(|bank| bank.metadata.as_ref())
+            .find(|metadata| metadata.generation == generation)
+    }
+
     pub(crate) fn latest_feedback(&self) -> Option<GpuVirtualTerrainFeedback> {
-        let raw = self.feedback.lock().ok()?.clone()?;
-        let minimum = *self.minimum_feedback_submission_id.lock().ok()?;
-        if feedback_submission_id(&raw) < minimum {
-            return None;
-        }
+        let raw = *self.latest_raw_feedback.lock().ok()?.as_ref()?;
+        let metadata = self.feedback_metadata(&raw)?;
         Some(GpuVirtualTerrainFeedback {
-            submission_id: feedback_submission_id(&raw),
-            oracle_fingerprint: join_u64(raw.counters.oracle_fingerprint),
-            selected_pages: raw
-                .selected_indices
-                .into_iter()
-                .filter_map(|index| self.node_keys.get(index as usize).copied())
-                .collect(),
-            requested_pages: raw
-                .requested_indices
-                .into_iter()
-                .filter_map(|index| self.node_keys.get(index as usize).copied())
-                .collect(),
-            ownerless_roots: raw.counters.ownerless_roots,
-            visited_nodes: raw.counters.visited_nodes,
-            overflow_flags: raw.counters.overflow_flags,
-            stack_peak: raw.counters.stack_peak,
-            compacted_surface_elements: raw.compaction.surface_elements,
-            compacted_triangle_elements: raw.compaction.triangle_elements,
-            compacted_water_surface_elements: raw.compaction.water_surface_elements,
-            compacted_water_triangle_elements: raw.compaction.water_triangle_elements,
-            compacted_pages: raw.compaction.copied_pages,
-            compaction_overflow_flags: raw.compaction.overflow_flags,
+            submission_id: metadata.generation,
+            oracle_fingerprint: join_u64(raw.fingerprint),
+            selected_pages: metadata.selected_pages.clone(),
+            ownerless_roots: raw.ownerless_roots,
+            encoded_surface_handles: raw.element_counts[STREAM_SURFACE],
+            encoded_triangle_handles: raw.element_counts[STREAM_TRIANGLE],
+            encoded_water_surface_handles: raw.element_counts[STREAM_WATER_SURFACE],
+            encoded_water_triangle_handles: raw.element_counts[STREAM_WATER_TRIANGLE],
+            encoded_pages: raw.encoded_pages,
+            encoding_overflow_flags: raw.overflow_flags,
         })
     }
 
-    pub(crate) fn invalidate_feedback(&mut self) {
-        if let Ok(mut minimum) = self.minimum_feedback_submission_id.lock() {
-            *minimum = self.next_submission_id;
+    pub(crate) fn candidate_is_certified(
+        &self,
+        fingerprint: u64,
+        selected_pages: &[TerrainPageKey],
+    ) -> bool {
+        let Some(bank) = self.pending_bank else {
+            return false;
+        };
+        let Some(metadata) = self.banks[bank].metadata.as_ref() else {
+            return false;
+        };
+        let Ok(feedback) = self.latest_raw_feedback.lock() else {
+            return false;
+        };
+        let Some(feedback) = feedback.as_ref() else {
+            return false;
+        };
+        metadata.fingerprint == fingerprint
+            && metadata.selected_pages == selected_pages
+            && join_u64(feedback.generation) == metadata.generation
+            && join_u64(feedback.fingerprint) == metadata.fingerprint
+            && feedback.selected_count == metadata.selected_pages.len() as u32
+            && feedback.ownerless_roots == metadata.ownerless_roots
+            && feedback.encoded_pages == metadata.selected_pages.len() as u32
+            && feedback.element_counts == metadata.expected_counts
+            && feedback.overflow_flags == 0
+    }
+
+    pub(crate) fn promote_certified_candidate(
+        &mut self,
+        fingerprint: u64,
+        selected_pages: &[TerrainPageKey],
+    ) -> Result<u64, VirtualTerrainGpuError> {
+        if !self.candidate_is_certified(fingerprint, selected_pages) {
+            return Err(VirtualTerrainGpuError::CandidateNotCertified);
         }
-        if let Ok(mut feedback) = self.feedback.lock() {
+        let bank = self
+            .pending_bank
+            .take()
+            .ok_or(VirtualTerrainGpuError::CandidateNotCertified)?;
+        self.active_bank = bank;
+        self.active_geometry_dirty = false;
+        self.active_generation()
+            .ok_or(VirtualTerrainGpuError::CandidateNotCertified)
+    }
+
+    pub(crate) fn invalidate_candidate(&mut self) {
+        self.active_geometry_dirty = true;
+        self.pending_bank = None;
+        self.banks[1 - self.active_bank].metadata = None;
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        if let Ok(mut minimum) = self.minimum_feedback_generation.lock() {
+            *minimum = generation;
+        }
+        if let Ok(mut feedback) = self.latest_raw_feedback.lock() {
             *feedback = None;
         }
     }
-}
 
-const fn split_u64(value: u64) -> [u32; 2] {
-    [value as u32, (value >> 32) as u32]
-}
-
-const fn join_u64(value: [u32; 2]) -> u64 {
-    value[0] as u64 | ((value[1] as u64) << 32)
-}
-
-const fn feedback_submission_id(feedback: &RawGpuVirtualTerrainFeedback) -> u64 {
-    join_u64(feedback.counters.submission_id)
-}
-
-fn pack_node(
-    node: &TerrainHierarchyNode,
-    indices: &BTreeMap<TerrainPageKey, u32>,
-) -> Result<GpuVirtualTerrainNode, VirtualTerrainGpuError> {
-    let bounds = node.bounds;
-    let mut children = [INVALID_NODE; TERRAIN_PAGE_MAX_CHILDREN];
-    if node.has_children {
-        let keys = node
-            .key
-            .refinement_children()
-            .ok_or(VirtualTerrainGpuError::MissingChild(node.key))?;
-        for (destination, child) in children.iter_mut().zip(keys) {
-            *destination = indices.get(&child).copied().unwrap_or(INVALID_NODE);
-        }
+    pub(crate) const fn handle_bank_capacity_bytes(&self) -> u64 {
+        VIRTUAL_TERRAIN_HANDLE_BANK_BYTES * 2
     }
-    let positional_error = node
-        .errors
-        .geometric_millivoxels
-        .max(node.errors.silhouette_millivoxels)
-        .max(node.errors.material_boundary_millivoxels);
-    Ok(GpuVirtualTerrainNode {
-        minimum_level: [
-            bounds.min.x,
-            bounds.min.y,
-            bounds.min.z,
-            i32::from(node.key.level),
-        ],
-        maximum_flags: [
-            bounds.max.x,
-            bounds.max.y,
-            bounds.max.z,
-            static_flags(node) as i32,
-        ],
-        errors: [
-            positional_error,
-            node.errors.normal_milliradians,
-            node.encoded_bytes,
-            u32::from(node.representation as u8)
-                | (u32::from(node.errors.unresolved_topology) << 8),
-        ],
-        children_low: children[..4].try_into().unwrap_or([INVALID_NODE; 4]),
-        children_high: children[4..].try_into().unwrap_or([INVALID_NODE; 4]),
+
+    pub(crate) fn allocated_handle_bytes(&self) -> u64 {
+        self.banks
+            .iter()
+            .filter_map(|bank| bank.metadata.as_ref())
+            .map(|metadata| {
+                metadata
+                    .expected_counts
+                    .into_iter()
+                    .map(u64::from)
+                    .sum::<u64>()
+                    * 4
+            })
+            .sum()
+    }
+}
+
+fn snapshot_metadata_matches(
+    metadata: Option<&SnapshotMetadata>,
+    fingerprint: u64,
+    selected_pages: &[TerrainPageKey],
+) -> bool {
+    metadata.is_some_and(|metadata| {
+        metadata.fingerprint == fingerprint && metadata.selected_pages == selected_pages
     })
 }
 
-fn static_flags(node: &TerrainHierarchyNode) -> u32 {
-    (u32::from(node.has_children) * NODE_HAS_CHILDREN)
-        | (u32::from(node.is_root) * NODE_IS_ROOT)
-        | (u32::from(node.key.is_surface()) * NODE_SURFACE)
-}
-
-fn node_static_identity(node: &TerrainHierarchyNode) -> ([i32; 4], [i32; 3], [u32; 4]) {
-    let bounds = node.bounds.min.as_array();
-    (
-        [bounds[0], bounds[1], bounds[2], i32::from(node.key.level)],
-        node.bounds.max.as_array(),
-        [
-            node.errors
-                .geometric_millivoxels
-                .max(node.errors.silhouette_millivoxels)
-                .max(node.errors.material_boundary_millivoxels),
-            node.errors.normal_milliradians,
-            node.encoded_bytes,
-            u32::from(node.representation as u8)
-                | (u32::from(node.errors.unresolved_topology) << 8),
-        ],
-    )
-}
-
-fn packed_static_identity(node: GpuVirtualTerrainNode) -> ([i32; 4], [i32; 3], [u32; 4]) {
-    (
-        node.minimum_level,
-        [
-            node.maximum_flags[0],
-            node.maximum_flags[1],
-            node.maximum_flags[2],
-        ],
-        node.errors,
-    )
-}
-
-fn pack_view(
-    view: VirtualTerrainView,
-    root_count: usize,
-    node_count: usize,
-    capacity: VirtualTerrainCapacity,
-) -> Result<GpuVirtualTerrainView, VirtualTerrainGpuError> {
-    if !view.validates()
-        || root_count > u32::MAX as usize
-        || node_count > capacity.max_directory_nodes
-        || capacity.max_selected_pages > u32::MAX as usize
-        || capacity.max_feedback_pages > u32::MAX as usize
-        || capacity.max_traversal_nodes > u32::MAX as usize
-    {
-        return Err(VirtualTerrainGpuError::InvalidView);
-    }
-    let forward = normalize(view.camera_forward);
-    let mut right = cross(forward, [0.0, 1.0, 0.0]);
-    if length_squared(right) <= f64::EPSILON {
-        right = [1.0, 0.0, 0.0];
-    } else {
-        right = normalize(right);
-    }
-    let up = normalize(cross(right, forward));
-    let tangent_vertical = (view.vertical_fov_radians * 0.5).tan();
-    let tangent_horizontal = tangent_vertical * view.aspect_ratio;
-    let projection_scale = f64::from(view.viewport_height_pixels) / (2.0 * tangent_vertical);
-    let f32x3 = |value: [f64; 3]| value.map(|component| component as f32);
-    let camera = f32x3(view.camera_position_metres);
-    let forward = f32x3(forward);
-    let right = f32x3(right);
-    let up = f32x3(up);
-    Ok(GpuVirtualTerrainView {
-        camera_near: [camera[0], camera[1], camera[2], view.near_metres as f32],
-        forward_far: [forward[0], forward[1], forward[2], view.far_metres as f32],
-        right_tangent_horizontal: [right[0], right[1], right[2], tangent_horizontal as f32],
-        up_tangent_vertical: [up[0], up[1], up[2], tangent_vertical as f32],
-        projection_thresholds: [
-            projection_scale as f32,
-            view.refine_above_pixels as f32,
-            view.coarsen_below_pixels as f32,
-            view.wet_specular_sensitivity as f32,
-        ],
-        counts_flags: [
-            root_count as u32,
-            capacity.max_selected_pages as u32,
-            capacity.max_feedback_pages as u32,
-            capacity.max_traversal_nodes as u32,
-        ],
-        options: [
-            u32::from(view.force_exact_leaves),
-            0,
-            u32::try_from(node_count).map_err(|_| VirtualTerrainGpuError::InvalidView)?,
-            (view.exact_surface_radius_metres as f32).to_bits(),
+fn create_render_layout(device: &Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("virtual terrain immutable geometry handle layout"),
+        entries: &[
+            storage_entry(0, true, wgpu::ShaderStages::VERTEX),
+            storage_entry(1, true, wgpu::ShaderStages::VERTEX),
+            storage_entry(2, true, wgpu::ShaderStages::VERTEX),
         ],
     })
 }
 
-fn parse_feedback(
-    bytes: &[u8],
-    capacity: VirtualTerrainCapacity,
-) -> Option<RawGpuVirtualTerrainFeedback> {
-    let counter_bytes = size_of::<GpuVirtualTerrainCounters>();
-    let counters =
-        bytemuck::try_from_bytes::<GpuVirtualTerrainCounters>(bytes.get(..counter_bytes)?)
-            .ok()?
-            .to_owned();
-    let compaction_start = counter_bytes;
-    let compaction_end =
-        compaction_start.checked_add(size_of::<GpuVirtualTerrainCompactionCounters>())?;
-    let compaction = bytemuck::try_from_bytes::<GpuVirtualTerrainCompactionCounters>(
-        bytes.get(compaction_start..compaction_end)?,
-    )
-    .ok()?
-    .to_owned();
-    let selected_count = usize::try_from(counters.selected_count)
-        .ok()?
-        .min(capacity.max_selected_pages);
-    let request_count = usize::try_from(counters.request_count)
-        .ok()?
-        .min(capacity.max_feedback_pages);
-    let selected_region_bytes = capacity.max_selected_pages.checked_mul(size_of::<u32>())?;
-    let selected_start = compaction_end;
-    let selected_end = selected_start.checked_add(selected_region_bytes)?;
-    let request_start = selected_end;
-    let selected =
-        bytemuck::try_cast_slice::<u8, u32>(bytes.get(selected_start..selected_end)?).ok()?;
-    let request = bytemuck::try_cast_slice::<u8, u32>(bytes.get(request_start..)?).ok()?;
-    Some(RawGpuVirtualTerrainFeedback {
-        counters,
-        compaction,
-        selected_indices: selected.get(..selected_count)?.to_vec(),
-        requested_indices: request.get(..request_count)?.to_vec(),
+fn create_render_bind_group(
+    device: &Device,
+    layout: &wgpu::BindGroupLayout,
+    handles: &Buffer,
+    sources: &[Buffer; 2],
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("virtual terrain immutable geometry handles"),
+        layout,
+        entries: &[
+            entire_entry(0, handles),
+            entire_entry(1, &sources[0]),
+            entire_entry(2, &sources[1]),
+        ],
     })
 }
 
-fn readback_bytes(capacity: VirtualTerrainCapacity) -> Result<u64, VirtualTerrainGpuError> {
-    (size_of::<GpuVirtualTerrainCounters>() as u64)
-        .checked_add(size_of::<GpuVirtualTerrainCompactionCounters>() as u64)
-        .and_then(|bytes| bytes.checked_add(buffer_bytes::<u32>(capacity.max_selected_pages).ok()?))
-        .and_then(|bytes| bytes.checked_add(buffer_bytes::<u32>(capacity.max_feedback_pages).ok()?))
-        .ok_or(VirtualTerrainGpuError::DeviceLimit)
+fn create_encode_bind_group(
+    device: &Device,
+    layout: &wgpu::BindGroupLayout,
+    candidates: &Buffer,
+    handles: &Buffer,
+    counters: &Buffer,
+    indirect: &Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("virtual terrain inactive snapshot encoder"),
+        layout,
+        entries: &[
+            entire_entry(0, candidates),
+            entire_entry(1, handles),
+            entire_entry(2, counters),
+            entire_entry(3, indirect),
+        ],
+    })
 }
 
-fn buffer_bytes<T>(count: usize) -> Result<u64, VirtualTerrainGpuError> {
-    let bytes = count
-        .checked_mul(size_of::<T>())
-        .ok_or(VirtualTerrainGpuError::DeviceLimit)?;
-    u64::try_from(bytes.max(size_of::<T>())).map_err(|_| VirtualTerrainGpuError::DeviceLimit)
-}
-
-fn element_capacity(bytes: u64) -> Result<u32, VirtualTerrainGpuError> {
-    u32::try_from(bytes / GPU_GEOMETRY_ELEMENT_BYTES)
-        .map_err(|_| VirtualTerrainGpuError::DeviceLimit)
-}
-
-fn word_offset(bytes: u64) -> Result<u32, VirtualTerrainGpuError> {
-    if !bytes.is_multiple_of(size_of::<u32>() as u64) {
-        return Err(VirtualTerrainGpuError::DeviceLimit);
-    }
-    u32::try_from(bytes / size_of::<u32>() as u64).map_err(|_| VirtualTerrainGpuError::DeviceLimit)
-}
-
-fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+fn storage_entry(
+    binding: u32,
+    read_only: bool,
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
+        visibility,
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Storage { read_only },
             has_dynamic_offset: false,
@@ -1481,91 +859,25 @@ fn entire_entry(binding: u32, buffer: &Buffer) -> wgpu::BindGroupEntry<'_> {
     }
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the fixed WebGPU layout has eight independently bounded storage roles"
-)]
-fn create_compaction_bind_group(
-    device: &Device,
-    layout: &wgpu::BindGroupLayout,
-    selected: &Buffer,
-    traversal_counters: &Buffer,
-    geometry_pages: &Buffer,
-    geometry_source: &Buffer,
-    compact_surfaces: &Buffer,
-    compact_triangles: &Buffer,
-    compaction_counters: &Buffer,
-    indirect_commands: &Buffer,
-) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("virtual terrain compaction bind group"),
-        layout,
-        entries: &[
-            entire_entry(0, selected),
-            entire_entry(1, traversal_counters),
-            entire_entry(2, geometry_pages),
-            entire_entry(3, geometry_source),
-            entire_entry(4, compact_surfaces),
-            entire_entry(5, compact_triangles),
-            entire_entry(6, compaction_counters),
-            entire_entry(7, indirect_commands),
-        ],
-    })
+fn buffer_bytes<T>(count: usize) -> Result<u64, VirtualTerrainGpuError> {
+    count
+        .checked_mul(size_of::<T>())
+        .and_then(|bytes| u64::try_from(bytes.max(size_of::<T>())).ok())
+        .ok_or(VirtualTerrainGpuError::DeviceLimit)
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the fixed copy layout has seven independently bounded storage roles"
-)]
-fn create_compaction_copy_bind_group(
-    device: &Device,
-    layout: &wgpu::BindGroupLayout,
-    selected: &Buffer,
-    traversal_counters: &Buffer,
-    geometry_pages: &Buffer,
-    geometry_source: &Buffer,
-    compact_surfaces: &Buffer,
-    compact_triangles: &Buffer,
-    compaction_counters: &Buffer,
-) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("virtual terrain compaction copy bind group"),
-        layout,
-        entries: &[
-            entire_entry(0, selected),
-            entire_entry(1, traversal_counters),
-            entire_entry(2, geometry_pages),
-            entire_entry(3, geometry_source),
-            entire_entry(4, compact_surfaces),
-            entire_entry(5, compact_triangles),
-            entire_entry(6, compaction_counters),
-        ],
-    })
+const fn split_u64(value: u64) -> [u32; 2] {
+    [value as u32, (value >> 32) as u32]
 }
 
-fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
-    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+const fn join_u64(value: [u32; 2]) -> u64 {
+    value[0] as u64 | ((value[1] as u64) << 32)
 }
 
-fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [
-        left[1] * right[2] - left[2] * right[1],
-        left[2] * right[0] - left[0] * right[2],
-        left[0] * right[1] - left[1] * right[0],
-    ]
-}
-
-fn length_squared(vector: [f64; 3]) -> f64 {
-    dot(vector, vector)
-}
-
-fn normalize(vector: [f64; 3]) -> [f64; 3] {
-    let inverse = length_squared(vector).sqrt().recip();
-    [
-        vector[0] * inverse,
-        vector[1] * inverse,
-        vector[2] * inverse,
-    ]
+#[cfg(test)]
+const fn handle_stream_byte_range(stream: usize) -> Range<u64> {
+    let start = VIRTUAL_TERRAIN_HANDLE_OFFSETS[stream] as u64 * 4;
+    start..start + VIRTUAL_TERRAIN_HANDLE_CAPACITIES[stream] as u64 * 4
 }
 
 #[cfg(test)]
@@ -1573,126 +885,79 @@ mod tests {
     use super::*;
 
     #[test]
-    fn traversal_storage_is_bounded_by_depth_not_selected_leaf_count() {
+    fn two_handle_banks_replace_the_old_geometry_copy_without_more_memory() {
+        let old_copied_bytes = VIRTUAL_TERRAIN_SURFACE_HANDLE_SOURCE_BYTES
+            + VIRTUAL_TERRAIN_TRIANGLE_HANDLE_SOURCE_BYTES
+            + VIRTUAL_TERRAIN_WATER_SURFACE_HANDLE_SOURCE_BYTES
+            + VIRTUAL_TERRAIN_WATER_TRIANGLE_HANDLE_SOURCE_BYTES;
+        assert_eq!(old_copied_bytes, 192 * 1_024 * 1_024);
+        assert!(VIRTUAL_TERRAIN_HANDLE_BANK_BYTES < 33 * 1_024 * 1_024);
+        assert!(VIRTUAL_TERRAIN_HANDLE_BANK_BYTES * 2 < old_copied_bytes);
+    }
+
+    #[test]
+    fn handle_stream_partitions_are_bounded_and_disjoint() {
+        for stream in 0..STREAM_COUNT {
+            let range = handle_stream_byte_range(stream);
+            assert!(range.end <= VIRTUAL_TERRAIN_HANDLE_BANK_BYTES);
+            if stream > 0 {
+                assert_eq!(handle_stream_byte_range(stream - 1).end, range.start);
+            }
+        }
+        assert_eq!(
+            handle_stream_byte_range(STREAM_COUNT - 1).end,
+            VIRTUAL_TERRAIN_HANDLE_BANK_BYTES
+        );
+        assert_eq!(VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET, 0);
+        assert_eq!(VIRTUAL_TERRAIN_WATER_TRIANGLE_INDIRECT_OFFSET, 48);
+    }
+
+    #[test]
+    fn packed_handle_addresses_one_of_two_24_byte_segments() {
+        let first = 123_456u32;
+        let segment_zero = first;
+        let segment_one = GPU_HANDLE_SEGMENT_BIT | first;
+        assert_eq!(segment_zero >> 31, 0);
+        assert_eq!(segment_one >> 31, 1);
+        assert_eq!(segment_zero & GPU_HANDLE_ELEMENT_MASK, first);
+        assert_eq!(segment_one & GPU_HANDLE_ELEMENT_MASK, first);
+        assert_eq!(
+            u64::from(first) * (GPU_GEOMETRY_ELEMENT_BYTES / 4) * 4,
+            u64::from(first) * GPU_GEOMETRY_ELEMENT_BYTES
+        );
+    }
+
+    #[test]
+    fn snapshot_shader_has_no_hierarchy_ownership_or_geometry_copy_path() {
         let shader = include_str!("shaders/virtual_terrain.wgsl");
-        assert!(shader.contains("const STACK_CAPACITY: u32 = 256u"));
-        assert!(shader.contains("@compute @workgroup_size(1)"));
-        assert!(shader.contains("var<workgroup> traversal_stack: array<u32, 256>"));
-        assert!(!shader.contains("FRONTIER_CAPACITY"));
-        assert!(!shader.contains("frontier_a"));
-        assert!(!shader.contains("frontier_b"));
+        assert!(shader.contains("fn encode_snapshot"));
+        assert!(shader.contains("handles[destination + element] = first_handle + element"));
+        assert!(!shader.contains("traverse"));
+        assert!(!shader.contains("geometry_source"));
+        assert!(!shader.contains("compact_surfaces"));
     }
 
     #[test]
-    fn feedback_parser_clamps_untrusted_gpu_counts_to_fixed_regions() {
-        let capacity = VirtualTerrainCapacity {
-            max_directories: 1,
-            max_roots: 1,
-            max_directory_nodes: 8,
-            max_resident_pages: 8,
-            max_resident_encoded_bytes: 1,
-            max_resident_primitives: 1,
-            max_selected_pages: 2,
-            max_traversal_nodes: 8,
-            max_feedback_pages: 1,
+    fn matching_metadata_cannot_override_a_dirty_active_geometry_generation() {
+        let key = TerrainPageKey::surface(3, -2, 7);
+        let metadata = SnapshotMetadata {
+            generation: 9,
+            fingerprint: 42,
+            selected_pages: vec![key],
+            ownerless_roots: 0,
+            expected_counts: [1, 0, 0, 0],
         };
-        let counters = GpuVirtualTerrainCounters {
-            selected_count: u32::MAX,
-            request_count: u32::MAX,
-            ownerless_roots: 3,
-            visited_nodes: 4,
-            overflow_flags: 3,
-            stack_peak: 192,
-            submission_id: split_u64(0x1234_5678_9abc_def0),
-            oracle_fingerprint: split_u64(0xfedc_ba98_7654_3210),
-        };
-        let mut bytes = bytemuck::bytes_of(&counters).to_vec();
-        let compaction = GpuVirtualTerrainCompactionCounters {
-            surface_elements: 11,
-            triangle_elements: 12,
-            water_surface_elements: 13,
-            water_triangle_elements: 14,
-            copied_pages: 2,
-            overflow_flags: 4,
-            ..GpuVirtualTerrainCompactionCounters::reset().unwrap()
-        };
-        bytes.extend_from_slice(bytemuck::bytes_of(&compaction));
-        bytes.extend_from_slice(bytemuck::cast_slice(&[7u32, 8]));
-        bytes.extend_from_slice(bytemuck::cast_slice(&[9u32]));
-        let parsed = parse_feedback(&bytes, capacity).expect("bounded feedback");
-        assert_eq!(feedback_submission_id(&parsed), 0x1234_5678_9abc_def0);
-        assert_eq!(
-            join_u64(parsed.counters.oracle_fingerprint),
-            0xfedc_ba98_7654_3210
-        );
-        assert_eq!(parsed.selected_indices, [7, 8]);
-        assert_eq!(parsed.requested_indices, [9]);
-        assert_eq!(parsed.counters.ownerless_roots, 3);
-        assert_eq!(parsed.compaction, compaction);
-    }
-
-    #[test]
-    fn compact_stream_partitions_are_bounded_disjoint_and_vertex_aligned() {
-        let counters = GpuVirtualTerrainCompactionCounters::reset().unwrap();
-        assert_eq!(
-            u64::from(counters.surface_water_word_offset) * size_of::<u32>() as u64,
-            VIRTUAL_TERRAIN_COMPACT_SURFACE_BYTES
-        );
-        assert_eq!(
-            u64::from(counters.triangle_water_word_offset) * size_of::<u32>() as u64,
-            VIRTUAL_TERRAIN_COMPACT_TRIANGLE_BYTES
+        assert!(snapshot_metadata_matches(Some(&metadata), 42, &[key]));
+        let partial_seam_rebuild_failed_after_mutation = true;
+        let snapshot_is_current = !partial_seam_rebuild_failed_after_mutation
+            && snapshot_metadata_matches(Some(&metadata), 42, &[key]);
+        assert!(
+            !snapshot_is_current,
+            "a failed seam batch must leave the matching active snapshot non-current"
         );
         assert!(
-            u64::from(counters.surface_water_word_offset) * size_of::<u32>() as u64
-                + u64::from(counters.water_surface_capacity) * GPU_GEOMETRY_ELEMENT_BYTES
-                <= VIRTUAL_TERRAIN_SURFACE_BUFFER_BYTES
+            snapshot_metadata_matches(Some(&metadata), 42, &[key]),
+            "the immutable previously published allocation remains safe to present while a replacement is encoded"
         );
-        assert!(
-            u64::from(counters.triangle_water_word_offset) * size_of::<u32>() as u64
-                + u64::from(counters.water_triangle_capacity) * GPU_GEOMETRY_ELEMENT_BYTES
-                <= VIRTUAL_TERRAIN_TRIANGLE_BUFFER_BYTES
-        );
-        assert_eq!(VIRTUAL_TERRAIN_WATER_SURFACE_INDIRECT_OFFSET, 48);
-        assert_eq!(VIRTUAL_TERRAIN_WATER_TRIANGLE_INDIRECT_OFFSET, 64);
-    }
-
-    #[test]
-    fn view_pack_keeps_negative_world_coordinates_and_hard_caps() {
-        let capacity = VirtualTerrainCapacity {
-            max_directories: 4,
-            max_roots: 8,
-            max_directory_nodes: 64,
-            max_resident_pages: 64,
-            max_resident_encoded_bytes: 1,
-            max_resident_primitives: 1,
-            max_selected_pages: 32,
-            max_traversal_nodes: 48,
-            max_feedback_pages: 7,
-        };
-        let packed = pack_view(
-            VirtualTerrainView {
-                camera_position_metres: [-1961.5, 54.0, -1616.0],
-                camera_forward: [-1.0, -0.2, 0.4],
-                vertical_fov_radians: 1.0,
-                aspect_ratio: 2.0,
-                viewport_height_pixels: 1814,
-                near_metres: 0.05,
-                far_metres: 3_200.0,
-                refine_above_pixels: 0.65,
-                coarsen_below_pixels: 0.35,
-                wet_specular_sensitivity: 1.0,
-                exact_surface_radius_metres: 12.8,
-                force_exact_leaves: false,
-            },
-            3,
-            64,
-            capacity,
-        )
-        .expect("view pack");
-        assert_eq!(packed.camera_near[0], -1961.5);
-        assert_eq!(packed.camera_near[2], -1616.0);
-        assert_eq!(packed.counts_flags, [3, 32, 7, 48]);
-        assert_eq!(packed.options, [0, 0, 64, 12.8_f32.to_bits()]);
-        assert!(packed.projection_thresholds[0] > 0.0);
     }
 }

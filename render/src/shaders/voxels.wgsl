@@ -19,6 +19,9 @@ struct LocalLightUniform {
 @group(1) @binding(1) var opaque_scene_sampler: sampler;
 @group(1) @binding(2) var opaque_depth: texture_depth_2d;
 @group(2) @binding(0) var filtered_spatial_ao: texture_2d<f32>;
+@group(3) @binding(0) var<storage, read> virtual_handles: array<u32>;
+@group(3) @binding(1) var<storage, read> virtual_geometry_segment_0: array<u32>;
+@group(3) @binding(2) var<storage, read> virtual_geometry_segment_1: array<u32>;
 
 override MATERIAL_DETAIL: u32 = 1u;
 
@@ -49,6 +52,60 @@ const TRIANGLE_STRIP = array<u32, 4>(1u, 2u, 0u, 0u);
 const CANONICAL_TRIANGLE_FLAG: u32 = 0x2000u;
 const CANONICAL_TRIANGLE_OFFSET_MASK: u32 = 0x003fu;
 const GPU_SOURCE_SHIFT: u32 = 5u;
+const VIRTUAL_TRIANGLE_HANDLE_OFFSET: u32 = 2796202u;
+const VIRTUAL_WATER_SURFACE_HANDLE_OFFSET: u32 = 6990506u;
+const VIRTUAL_WATER_TRIANGLE_HANDLE_OFFSET: u32 = 7689556u;
+
+struct PulledVirtualQuad {
+  origin: vec3<i32>,
+  extent_voxels: vec2<u32>,
+  material_face: u32,
+  ao: u32,
+};
+
+struct PulledVirtualVertex {
+  position_voxels: vec3<f32>,
+  material: u32,
+  packed_normal: vec4<f32>,
+};
+
+fn virtual_geometry_word(handle: u32, word: u32) -> u32 {
+  let source_word = (handle & 0x7fffffffu) * 6u + word;
+  if (handle & 0x80000000u) == 0u {
+    return virtual_geometry_segment_0[source_word];
+  }
+  return virtual_geometry_segment_1[source_word];
+}
+
+fn pull_virtual_quad(handle_index: u32) -> PulledVirtualQuad {
+  let handle = virtual_handles[handle_index];
+  let packed_extent = virtual_geometry_word(handle, 3u);
+  var quad: PulledVirtualQuad;
+  quad.origin = vec3<i32>(
+    bitcast<i32>(virtual_geometry_word(handle, 0u)),
+    bitcast<i32>(virtual_geometry_word(handle, 1u)),
+    bitcast<i32>(virtual_geometry_word(handle, 2u)),
+  );
+  quad.extent_voxels = vec2<u32>(packed_extent & 0xffffu, packed_extent >> 16u);
+  quad.material_face = virtual_geometry_word(handle, 4u);
+  quad.ao = virtual_geometry_word(handle, 5u);
+  return quad;
+}
+
+fn pull_virtual_vertex(handle_index: u32) -> PulledVirtualVertex {
+  let handle = virtual_handles[handle_index];
+  let normal_xy = unpack2x16snorm(virtual_geometry_word(handle, 4u));
+  let normal_zw = unpack2x16snorm(virtual_geometry_word(handle, 5u));
+  var vertex: PulledVirtualVertex;
+  vertex.position_voxels = vec3<f32>(
+    bitcast<f32>(virtual_geometry_word(handle, 0u)),
+    bitcast<f32>(virtual_geometry_word(handle, 1u)),
+    bitcast<f32>(virtual_geometry_word(handle, 2u)),
+  );
+  vertex.material = virtual_geometry_word(handle, 3u);
+  vertex.packed_normal = vec4<f32>(normal_xy, normal_zw);
+  return vertex;
+}
 fn diagnostic_primitive_id(
   origin: vec3<i32>,
   extent_voxels: vec2<u32>,
@@ -414,6 +471,38 @@ fn vs_main_fixed(
   );
 }
 
+@vertex
+fn vs_virtual_surface_handle(
+  @builtin(vertex_index) vertex_index: u32,
+  @builtin(instance_index) instance_index: u32,
+) -> VertexOut {
+  let quad = pull_virtual_quad(instance_index);
+  return voxel_vertex(
+    vertex_index,
+    quad.origin,
+    quad.extent_voxels,
+    quad.material_face,
+    quad.ao,
+    vec4<u32>(0u),
+  );
+}
+
+@vertex
+fn vs_virtual_water_surface_handle(
+  @builtin(vertex_index) vertex_index: u32,
+  @builtin(instance_index) instance_index: u32,
+) -> VertexOut {
+  let quad = pull_virtual_quad(VIRTUAL_WATER_SURFACE_HANDLE_OFFSET + instance_index);
+  return voxel_vertex(
+    vertex_index,
+    quad.origin,
+    quad.extent_voxels,
+    quad.material_face,
+    quad.ao,
+    vec4<u32>(0u),
+  );
+}
+
 fn virtual_cluster_surface_weather(world: vec3<f32>) -> vec2<f32> {
   return cloud_surface_weather(world);
 }
@@ -468,6 +557,32 @@ fn vs_virtual_cluster(
     position_voxels,
     material,
     packed_normal,
+    vec4<u32>(0u),
+  );
+}
+
+@vertex
+fn vs_virtual_triangle_handle(
+  @builtin(vertex_index) vertex_index: u32,
+) -> VertexOut {
+  let vertex = pull_virtual_vertex(VIRTUAL_TRIANGLE_HANDLE_OFFSET + vertex_index);
+  return virtual_cluster_vertex(
+    vertex.position_voxels,
+    vertex.material,
+    vertex.packed_normal,
+    vec4<u32>(0u),
+  );
+}
+
+@vertex
+fn vs_virtual_water_triangle_handle(
+  @builtin(vertex_index) vertex_index: u32,
+) -> VertexOut {
+  let vertex = pull_virtual_vertex(VIRTUAL_WATER_TRIANGLE_HANDLE_OFFSET + vertex_index);
+  return virtual_cluster_vertex(
+    vertex.position_voxels,
+    vertex.material,
+    vertex.packed_normal,
     vec4<u32>(0u),
   );
 }

@@ -4,6 +4,9 @@ struct ShadowFrame {
 };
 
 @group(0) @binding(0) var<uniform> shadow_frame: ShadowFrame;
+@group(1) @binding(0) var<storage, read> virtual_handles: array<u32>;
+@group(1) @binding(1) var<storage, read> virtual_geometry_segment_0: array<u32>;
+@group(1) @binding(2) var<storage, read> virtual_geometry_segment_1: array<u32>;
 
 const CORNERS = array<vec2<i32>, 4>(
   vec2<i32>(0, 0),
@@ -16,6 +19,15 @@ const FLIPPED_STRIP = array<u32, 4>(0u, 1u, 3u, 2u);
 const TRIANGLE_STRIP = array<u32, 4>(1u, 2u, 0u, 0u);
 const CANONICAL_TRIANGLE_FLAG: u32 = 0x2000u;
 const CANONICAL_TRIANGLE_SHADOW_OWNER_FLAG: u32 = 0x4000u;
+const VIRTUAL_TRIANGLE_HANDLE_OFFSET: u32 = 2796202u;
+
+fn virtual_geometry_word(handle: u32, word: u32) -> u32 {
+  let source_word = (handle & 0x7fffffffu) * 6u + word;
+  if (handle & 0x80000000u) == 0u {
+    return virtual_geometry_segment_0[source_word];
+  }
+  return virtual_geometry_segment_1[source_word];
+}
 
 fn corner_ao(packed: u32, corner: u32) -> f32 {
   return f32((packed >> (corner * 2u)) & 3u) / 3.0;
@@ -127,5 +139,38 @@ fn vs_virtual_cluster(
   @location(0) position_voxels: vec3<f32>,
 ) -> @builtin(position) vec4<f32> {
   let world = position_voxels * shadow_frame.camera_voxel.w;
+  return shadow_frame.clip_from_world * vec4<f32>(world, 1.0);
+}
+
+@vertex
+fn vs_virtual_surface_handle(
+  @builtin(vertex_index) vertex_index: u32,
+  @builtin(instance_index) instance_index: u32,
+) -> @builtin(position) vec4<f32> {
+  let handle = virtual_handles[instance_index];
+  let packed_extent = virtual_geometry_word(handle, 3u);
+  return shadow_vertex(
+    vertex_index,
+    vec3<i32>(
+      bitcast<i32>(virtual_geometry_word(handle, 0u)),
+      bitcast<i32>(virtual_geometry_word(handle, 1u)),
+      bitcast<i32>(virtual_geometry_word(handle, 2u)),
+    ),
+    vec2<u32>(packed_extent & 0xffffu, packed_extent >> 16u),
+    virtual_geometry_word(handle, 4u),
+    virtual_geometry_word(handle, 5u),
+  );
+}
+
+@vertex
+fn vs_virtual_triangle_handle(
+  @builtin(vertex_index) vertex_index: u32,
+) -> @builtin(position) vec4<f32> {
+  let handle = virtual_handles[VIRTUAL_TRIANGLE_HANDLE_OFFSET + vertex_index];
+  let world = vec3<f32>(
+    bitcast<f32>(virtual_geometry_word(handle, 0u)),
+    bitcast<f32>(virtual_geometry_word(handle, 1u)),
+    bitcast<f32>(virtual_geometry_word(handle, 2u)),
+  ) * shadow_frame.camera_voxel.w;
   return shadow_frame.clip_from_world * vec4<f32>(world, 1.0);
 }

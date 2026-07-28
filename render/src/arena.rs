@@ -90,8 +90,7 @@ impl ArenaAllocator {
             if self.pages.len() >= self.maximum_pages.unwrap_or(u16::MAX as usize) {
                 return None;
             }
-            let minimum = self.default_page_size.max(size);
-            let capacity = minimum.checked_next_power_of_two().unwrap_or(minimum);
+            let capacity = page_capacity(self.default_page_size, size);
             let current_capacity = self
                 .pages
                 .iter()
@@ -143,8 +142,7 @@ impl ArenaAllocator {
         if self.pages.len() >= self.maximum_pages.unwrap_or(u16::MAX as usize) {
             return false;
         }
-        let minimum = self.default_page_size.max(size);
-        let capacity = minimum.checked_next_power_of_two().unwrap_or(minimum);
+        let capacity = page_capacity(self.default_page_size, size);
         let current_capacity = self
             .pages
             .iter()
@@ -213,6 +211,18 @@ fn align_up(value: u32, alignment: u32) -> Option<u32> {
         Some(value)
     } else {
         value.checked_add(alignment - remainder)
+    }
+}
+
+fn page_capacity(default_page_size: u32, allocation_size: u32) -> u32 {
+    if allocation_size <= default_page_size {
+        // A bounded arena's default is often chosen to match a GPU binding limit exactly. Rounding
+        // that already-sufficient capacity can make a valid non-power-of-two binding impossible.
+        default_page_size
+    } else {
+        allocation_size
+            .checked_next_power_of_two()
+            .unwrap_or(allocation_size)
     }
 }
 
@@ -294,5 +304,21 @@ mod tests {
         let arena = ArenaAllocator::new(64, 24);
         assert_eq!(arena.aligned_allocation_size(25), Some(48));
         assert_eq!(arena.aligned_allocation_size(0), None);
+    }
+
+    #[test]
+    fn bounded_non_power_of_two_pages_keep_the_exact_binding_capacity() {
+        let page = 96 * 1024 * 1024;
+        let mut arena =
+            ArenaAllocator::new_bounded(page, 24, u64::from(page) * 2, 2).expect("bounded arena");
+        let first = arena.allocate(24).expect("first segment");
+        let fill = arena
+            .allocate(page - 24)
+            .expect("remainder of first segment");
+        let second = arena.allocate(24).expect("second segment");
+        assert_eq!((first.page, fill.page, second.page), (0, 0, 1));
+        assert_eq!(arena.page_capacity(0), Some(page));
+        assert_eq!(arena.page_capacity(1), Some(page));
+        assert_eq!(arena.stats().capacity_bytes, u64::from(page) * 2);
     }
 }
