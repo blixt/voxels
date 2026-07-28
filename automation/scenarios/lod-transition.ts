@@ -169,6 +169,16 @@ function virtualTerrainState(snapshot: readonly number[]) {
     columns: snapshotValue(snapshot, "virtualTerrainColumns"),
     columnInFlight: snapshotValue(snapshot, "virtualTerrainColumnInFlight"),
     columnRevisionFloors: snapshotValue(snapshot, "virtualTerrainColumnRevisionFloors"),
+    columnAccepted: snapshotValue(snapshot, "virtualTerrainColumnAccepted"),
+    columnSubmitDeferred: snapshotValue(snapshot, "virtualTerrainColumnSubmitDeferred"),
+    columnPreempted: snapshotValue(snapshot, "virtualTerrainColumnPreempted"),
+    columnTimedOut: snapshotValue(snapshot, "virtualTerrainColumnTimedOut"),
+    columnOtherFailed: snapshotValue(snapshot, "virtualTerrainColumnOtherFailed"),
+    directoryAccepted: snapshotValue(snapshot, "virtualTerrainDirectoryAccepted"),
+    directorySubmitDeferred: snapshotValue(snapshot, "virtualTerrainDirectorySubmitDeferred"),
+    directoryPreempted: snapshotValue(snapshot, "virtualTerrainDirectoryPreempted"),
+    directoryTimedOut: snapshotValue(snapshot, "virtualTerrainDirectoryTimedOut"),
+    directoryOtherFailed: snapshotValue(snapshot, "virtualTerrainDirectoryOtherFailed"),
   };
 }
 

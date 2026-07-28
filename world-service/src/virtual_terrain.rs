@@ -12,17 +12,16 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use voxels_world::{
-    Material, SurfaceSampleBlockRequest, TERRAIN_PAGE_EDGE_SAMPLES,
-    TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TERRAIN_REGION_ROOT_LEVEL, TerrainHierarchyDirectoryV1,
-    TerrainPageKey, TerrainPageTransferIdentity, TerrainPageV1, TerrainRegionBuildV1,
-    TerrainSimplificationBudget, VoxelBlockRequest, VoxelCoord, WorldProduct, WorldProductBatch,
-    WorldProductPriority, WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash,
-    build_terrain_region, decode_terrain_page, encode_terrain_directory, encode_terrain_page,
+    Material, TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_PAGE_TARGET_COMPRESSED_BYTES,
+    TERRAIN_REGION_ROOT_LEVEL, TerrainHierarchyDirectoryV1, TerrainPageKey,
+    TerrainPageTransferIdentity, TerrainPageV1, TerrainRegionBuildV1, TerrainSimplificationBudget,
+    VoxelBlockRequest, VoxelCoord, WorldProduct, WorldProductBatch, WorldProductPriority,
+    WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash, build_terrain_region,
+    decode_terrain_page, encode_terrain_directory, encode_terrain_page,
 };
 
 const REGION_SAMPLE_EDGE: u32 = (TERRAIN_PAGE_EDGE_SAMPLES << TERRAIN_REGION_ROOT_LEVEL) + 2;
 const REGION_SAMPLE_YZ_SEGMENT_EDGE: u32 = 65;
-const REGION_COLUMN_SAMPLE_ROWS: u32 = REGION_SAMPLE_EDGE / 2;
 const REGION_COLUMN_FEATURE_MARGIN_VOXELS: i32 = 18;
 const MAX_REGION_ROOTS_PER_COLUMN: usize = 64;
 const REGION_BUILD_ATTEMPTS: usize = 3;
@@ -315,73 +314,36 @@ impl VirtualTerrainAuthority {
         let bounds = horizontal_root
             .bounds()
             .ok_or(VirtualTerrainError::InvalidRoot)?;
-        let origin_x = bounds
-            .min
-            .x
-            .checked_sub(1)
-            .ok_or(VirtualTerrainError::InvalidRoot)?;
-        let origin_z = bounds
-            .min
-            .z
-            .checked_sub(1)
-            .ok_or(VirtualTerrainError::InvalidRoot)?;
-        let second_z = origin_z
-            .checked_add(REGION_COLUMN_SAMPLE_ROWS as i32)
-            .ok_or(VirtualTerrainError::InvalidRoot)?;
-        let requests = [
-            SurfaceSampleBlockRequest {
-                origin: [origin_x, origin_z],
-                sample_shape: [REGION_SAMPLE_EDGE, REGION_COLUMN_SAMPLE_ROWS],
-            },
-            SurfaceSampleBlockRequest {
-                origin: [origin_x, second_z],
-                sample_shape: [REGION_SAMPLE_EDGE, REGION_COLUMN_SAMPLE_ROWS],
-            },
+        let surface_bounds = [
+            [
+                bounds
+                    .min
+                    .x
+                    .checked_sub(1)
+                    .ok_or(VirtualTerrainError::InvalidRoot)?,
+                bounds
+                    .min
+                    .z
+                    .checked_sub(1)
+                    .ok_or(VirtualTerrainError::InvalidRoot)?,
+            ],
+            [
+                bounds
+                    .max
+                    .x
+                    .checked_add(1)
+                    .ok_or(VirtualTerrainError::InvalidRoot)?,
+                bounds
+                    .max
+                    .z
+                    .checked_add(1)
+                    .ok_or(VirtualTerrainError::InvalidRoot)?,
+            ],
         ];
-        let batch = self
+        let [mut minimum_y, mut maximum_y] = self
             .source
-            .generate_batch(WorldProductBatch {
-                priority,
-                requests: requests
-                    .iter()
-                    .copied()
-                    .map(WorldProductRequest::SurfaceSampleBlock)
-                    .collect(),
-            })
+            .conservative_surface_height_bounds(priority, surface_bounds)
             .map_err(|error| VirtualTerrainError::Source(error.to_string()))?;
-        if batch.source_identity_hash != self.source_identity_hash()
-            || batch.items.len() != requests.len()
-        {
-            return Err(VirtualTerrainError::Source(
-                "source returned a mismatched terrain region column sample batch".to_owned(),
-            ));
-        }
-
-        let mut minimum_y = i32::MAX;
-        let mut maximum_y = i32::MIN;
-        for (expected, item) in requests.into_iter().zip(batch.items) {
-            let snapshot = match (item.request, item.result) {
-                (
-                    WorldProductRequest::SurfaceSampleBlock(returned),
-                    Ok(WorldProduct::SurfaceSampleBlock(snapshot)),
-                ) if returned == expected
-                    && snapshot.request == expected
-                    && snapshot.source_identity_hash == self.source_identity_hash() =>
-                {
-                    snapshot
-                }
-                (_, Err(error)) => return Err(VirtualTerrainError::Source(error.to_string())),
-                _ => {
-                    return Err(VirtualTerrainError::Source(
-                        "source returned a mismatched terrain region column sample".to_owned(),
-                    ));
-                }
-            };
-            for sample in snapshot.samples() {
-                minimum_y = minimum_y.min(sample.height);
-                maximum_y = maximum_y.max(sample.water_level.unwrap_or(sample.height));
-            }
-        }
 
         let feature_minimum = [
             bounds

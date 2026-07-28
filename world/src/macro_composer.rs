@@ -6,7 +6,7 @@
 //! routes, or authored atlas content.
 
 use crate::lod::generate_surface_tile_mesh_with_materials_and_aggregated_ecology_and_shading;
-use crate::source::exact_detail_chunks_for_surface_tile;
+use crate::source::{exact_detail_chunks_for_surface_tile, surface_sample_height_bounds};
 use crate::{
     AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, ChunkSnapshot, EditMap,
     FEATURE_MAX_RADIUS_VOXELS, MACRO_FIELD_SCHEMA_VERSION, MAX_MACRO_BLOCK_SAMPLES,
@@ -110,6 +110,92 @@ impl HeightfieldWorldSource {
 
     pub const fn sea_level_voxels(&self) -> i32 {
         self.sea_level_voxels
+    }
+
+    fn dense_surface_height_bounds(
+        &self,
+        priority: WorldProductPriority,
+        bounds: [[i32; 2]; 2],
+    ) -> Result<[i32; 2], WorldSourceError> {
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = bounds;
+        let request = SurfaceSampleBlockRequest {
+            origin: [minimum_x, minimum_z],
+            sample_shape: [
+                u32::try_from(i64::from(maximum_x) - i64::from(minimum_x))
+                    .map_err(|_| WorldSourceError::InvalidBlockCoordinate)?,
+                u32::try_from(i64::from(maximum_z) - i64::from(minimum_z))
+                    .map_err(|_| WorldSourceError::InvalidBlockCoordinate)?,
+            ],
+        };
+        let snapshot = self.surface_sample_block(priority, request)?;
+        surface_sample_height_bounds(snapshot.samples())
+    }
+
+    fn macro_lattice_surface_height_bounds(
+        &self,
+        priority: WorldProductPriority,
+        bounds: [[i32; 2]; 2],
+    ) -> Result<[i32; 2], WorldSourceError> {
+        let lattice = self
+            .subgrid_lattice
+            .ok_or(WorldSourceError::MalformedMacroBlock)?;
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = bounds;
+        if minimum_x >= maximum_x || minimum_z >= maximum_z {
+            return Err(WorldSourceError::InvalidBlockCoordinate);
+        }
+        let minimum = [minimum_x, minimum_z].map(i64::from);
+        let maximum_inclusive = [maximum_x - 1, maximum_z - 1].map(i64::from);
+        let mut origin = [0_i64; 2];
+        let mut end = [0_i64; 2];
+        for axis in 0..2 {
+            let relative_minimum = minimum[axis] - lattice.origin[axis];
+            let relative_maximum = maximum_inclusive[axis] - lattice.origin[axis];
+            origin[axis] = lattice.origin[axis]
+                + relative_minimum.div_euclid(lattice.stride_voxels) * lattice.stride_voxels;
+            end[axis] = lattice.origin[axis]
+                + (relative_maximum.div_euclid(lattice.stride_voxels) + 1) * lattice.stride_voxels;
+        }
+        let width = u32::try_from((end[0] - origin[0]) / lattice.stride_voxels + 1)
+            .map_err(|_| WorldSourceError::MacroBlockTooLarge)?;
+        let depth = u32::try_from((end[1] - origin[1]) / lattice.stride_voxels + 1)
+            .map_err(|_| WorldSourceError::MacroBlockTooLarge)?;
+        let macro_region = self.prepare_region(
+            priority,
+            [
+                i32::try_from(origin[0]).map_err(|_| WorldSourceError::InvalidBlockCoordinate)?,
+                i32::try_from(origin[1]).map_err(|_| WorldSourceError::InvalidBlockCoordinate)?,
+            ],
+            [width, depth],
+            u32::try_from(lattice.stride_voxels)
+                .map_err(|_| WorldSourceError::InvalidBlockCoordinate)?,
+        )?;
+        let mut minimum_height = i32::MAX;
+        let mut maximum_height = i32::MIN;
+        let mut maximum_ridge = 0.0_f32;
+        for z in 0..depth {
+            for x in 0..width {
+                let sample_x = origin[0] + i64::from(x) * lattice.stride_voxels;
+                let sample_z = origin[1] + i64::from(z) * lattice.stride_voxels;
+                let column = macro_region
+                    .column(
+                        i32::try_from(sample_x)
+                            .map_err(|_| WorldSourceError::InvalidBlockCoordinate)?,
+                        i32::try_from(sample_z)
+                            .map_err(|_| WorldSourceError::InvalidBlockCoordinate)?,
+                    )
+                    .ok_or(WorldSourceError::MalformedMacroBlock)?;
+                minimum_height = minimum_height.min(column.height);
+                maximum_height = maximum_height.max(column.height);
+                maximum_ridge = maximum_ridge.max(column.ridge);
+            }
+        }
+        let relief_bound = terrain_diffusion_micro_relief_abs_bound(maximum_ridge);
+        Ok([
+            minimum_height.saturating_sub(relief_bound),
+            maximum_height
+                .saturating_add(relief_bound)
+                .max(self.sea_level_voxels),
+        ])
     }
 
     fn prepare_region(
@@ -882,6 +968,19 @@ impl WorldSourceEngine for HeightfieldWorldSource {
             source_identity_hash: self.identity_hash,
             items,
         })
+    }
+
+    fn conservative_surface_height_bounds(
+        &self,
+        priority: WorldProductPriority,
+        bounds: [[i32; 2]; 2],
+    ) -> Result<[i32; 2], WorldSourceError> {
+        if self.add_subgrid_relief {
+            self.macro_lattice_surface_height_bounds(priority, bounds)
+                .or_else(|_| self.dense_surface_height_bounds(priority, bounds))
+        } else {
+            self.dense_surface_height_bounds(priority, bounds)
+        }
     }
 
     fn generate_surface_tiles(
@@ -1809,6 +1908,14 @@ fn micro_relief_voxels(seed: u64, x: i32, z: i32, ridge: f32, lattice: SubgridLa
         + fine * (2.2 + ridge * 1.8)
 }
 
+fn terrain_diffusion_micro_relief_abs_bound(ridge: f32) -> i32 {
+    // Every residual term is the difference of two coherent-noise values in [-1, 1]. At a fixed
+    // ridge the four maximum coefficients sum to 10.7 + 27.8 * ridge^1.35; multiply by two for
+    // the residual range and round outward once more for floating-point evaluation.
+    let ridge = ridge.clamp(0.0, 1.0).powf(1.35);
+    (21.4 + 55.6 * ridge).ceil() as i32 + 1
+}
+
 fn lattice_residual_noise(seed: u64, x: i32, z: i32, period: i32, lattice: SubgridLattice) -> f32 {
     let x = i64::from(x);
     let z = i64::from(z);
@@ -2051,6 +2158,35 @@ mod tests {
             0,
         )
         .expect("valid Terrain Diffusion fake source")
+    }
+
+    #[test]
+    fn diffusion_lattice_bounds_conservatively_enclose_dense_micro_relief() {
+        let source = diffusion_heightfield();
+        let bounds = [[-47, -31], [94, 83]];
+        let [minimum, maximum] = source
+            .conservative_surface_height_bounds(WorldProductPriority::VisibleSurface, bounds)
+            .expect("conservative bounds");
+        let dense = source
+            .surface_sample_block(
+                WorldProductPriority::VisibleSurface,
+                SurfaceSampleBlockRequest {
+                    origin: bounds[0],
+                    sample_shape: [
+                        (bounds[1][0] - bounds[0][0]) as u32,
+                        (bounds[1][1] - bounds[0][1]) as u32,
+                    ],
+                },
+            )
+            .expect("dense reference");
+        assert!(dense.samples().iter().all(|sample| {
+            minimum <= sample.height && maximum >= sample.water_level.unwrap_or(sample.height)
+        }));
+        assert_eq!(
+            maximum - minimum,
+            terrain_diffusion_micro_relief_abs_bound(0.12) * 2,
+            "constant macro elevation should expose only the analytical micro-relief envelope"
+        );
     }
 
     fn column(

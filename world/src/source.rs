@@ -541,6 +541,49 @@ pub trait WorldSourceEngine: Send + Sync {
         request: WorldProductBatch,
     ) -> Result<WorldProductBatchResult, WorldSourceError>;
 
+    /// Conservative generated terrain/water height range for a half-open canonical X/Z rectangle.
+    ///
+    /// This product exists so sparse virtual-terrain root discovery does not have to materialize
+    /// every 10 cm surface sample merely to learn which fixed Y regions can contain geometry.
+    /// Source-specific implementations may use analytical field bounds; the default remains exact
+    /// by sampling every column.
+    fn conservative_surface_height_bounds(
+        &self,
+        priority: WorldProductPriority,
+        bounds: [[i32; 2]; 2],
+    ) -> Result<[i32; 2], WorldSourceError> {
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = bounds;
+        let width = u32::try_from(i64::from(maximum_x) - i64::from(minimum_x))
+            .map_err(|_| WorldSourceError::InvalidBlockCoordinate)?;
+        let depth = u32::try_from(i64::from(maximum_z) - i64::from(minimum_z))
+            .map_err(|_| WorldSourceError::InvalidBlockCoordinate)?;
+        let request = SurfaceSampleBlockRequest {
+            origin: [minimum_x, minimum_z],
+            sample_shape: [width, depth],
+        };
+        let result = self.generate_batch(WorldProductBatch {
+            priority,
+            requests: vec![WorldProductRequest::SurfaceSampleBlock(request)],
+        })?;
+        let Some(item) = result.items.into_iter().next() else {
+            return Err(WorldSourceError::MalformedMacroBlock);
+        };
+        let snapshot = match (item.request, item.result) {
+            (
+                WorldProductRequest::SurfaceSampleBlock(returned),
+                Ok(WorldProduct::SurfaceSampleBlock(snapshot)),
+            ) if returned == request
+                && snapshot.request == request
+                && snapshot.source_identity_hash == self.identity().identity_hash() =>
+            {
+                snapshot
+            }
+            (_, Err(error)) => return Err(error),
+            _ => return Err(WorldSourceError::MalformedMacroBlock),
+        };
+        surface_sample_height_bounds(snapshot.samples())
+    }
+
     /// Generates surface-tile products in request order and offers each keyed result to `emit`.
     ///
     /// Returning [`ControlFlow::Break`] stops before any later item is emitted. The compatibility
@@ -619,6 +662,20 @@ pub trait WorldSourceEngine: Send + Sync {
         kind: SkylineFeatureKind,
         max_radius_cells: i32,
     ) -> Option<SkylineFeature>;
+}
+
+pub(crate) fn surface_sample_height_bounds(
+    samples: &[SurfaceSample],
+) -> Result<[i32; 2], WorldSourceError> {
+    let mut minimum = i32::MAX;
+    let mut maximum = i32::MIN;
+    for sample in samples {
+        minimum = minimum.min(sample.height);
+        maximum = maximum.max(sample.water_level.unwrap_or(sample.height));
+    }
+    (minimum <= maximum)
+        .then_some([minimum, maximum])
+        .ok_or(WorldSourceError::EmptyBlock)
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
