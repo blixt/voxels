@@ -15,20 +15,19 @@ use voxels_client_config::WorldTransportConfig;
 use voxels_runtime::{WorkStage, WorkTicket};
 use voxels_world::protocol::{
     self, ChunkBatchRequest, ChunkBatchResult, EditAction, EditCommand, EditCommit,
-    FrameReassembler, OpenWorld, PlayerIdentity, SurfaceTileBatchRequest, SurfaceTileBatchResult,
-    TerrainDirectoryBatchRequest, TerrainDirectoryBatchResult, TerrainRegionColumnBatchRequest,
-    TerrainRegionColumnBatchResult, VirtualTerrainPageBatchRequest, VirtualTerrainPageBatchResult,
-    WorldCapabilities, WorldOpened,
+    FrameReassembler, OpenWorld, PlayerIdentity, TerrainDirectoryBatchRequest,
+    TerrainDirectoryBatchResult, TerrainRegionColumnBatchRequest, TerrainRegionColumnBatchResult,
+    VirtualTerrainPageBatchRequest, VirtualTerrainPageBatchResult, WorldCapabilities, WorldOpened,
 };
 use voxels_world::{
-    ChunkCoord, SurfaceTileCoord, TerrainPageBatchRequestV1, TerrainPageTransferIdentity,
-    WorldManifestHash, WorldProductPriority, WorldSourceError, WorldSourceIdentityHash,
+    ChunkCoord, TerrainPageBatchRequestV1, TerrainPageTransferIdentity, WorldManifestHash,
+    WorldProductPriority, WorldSourceError, WorldSourceIdentityHash,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket, WorkerGlobalScope};
 
-use crate::request_window::{batch_has_obsolete_item, priority_preemption_candidate};
+use crate::request_window::priority_preemption_candidate;
 
 pub type RemoteRequestId = u64;
 
@@ -100,19 +99,6 @@ pub struct RemoteChunkCompletion {
     pub request_id: RemoteRequestId,
     pub tickets: Vec<WorkTicket>,
     pub result: Result<ChunkBatchResult, RemoteWorldError>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RemoteSurfaceTicket {
-    pub coord: SurfaceTileCoord,
-    pub revision: u64,
-}
-
-#[derive(Clone, Debug)]
-pub struct RemoteSurfaceCompletion {
-    pub request_id: RemoteRequestId,
-    pub tickets: Vec<RemoteSurfaceTicket>,
-    pub result: Result<SurfaceTileBatchResult, RemoteWorldError>,
 }
 
 #[derive(Clone, Debug)]
@@ -250,18 +236,6 @@ impl RemoteWorldClient {
         self.inner.cancel_chunk_batches_outside(keep)
     }
 
-    pub fn submit_surface_batch(
-        &self,
-        priority: WorldProductPriority,
-        tickets: Vec<RemoteSurfaceTicket>,
-    ) -> Result<RemoteRequestId, RemoteWorldError> {
-        self.inner.send_surface_request(priority, tickets)
-    }
-
-    pub fn next_surface_completion(&self) -> Option<RemoteSurfaceCompletion> {
-        self.inner.surface_completions.borrow_mut().pop_front()
-    }
-
     pub fn submit_terrain_directory_batch(
         &self,
         priority: WorldProductPriority,
@@ -307,13 +281,6 @@ impl RemoteWorldClient {
         self.inner.terrain_page_completions.borrow_mut().pop_front()
     }
 
-    /// Cancels surface batches as soon as any tile falls outside the caller's current coverage.
-    /// The completion path immediately requeues still-useful siblings, preventing obsolete work
-    /// from occupying an equal-priority request slot during sustained travel.
-    pub fn cancel_surface_batches_outside(&self, keep: impl Fn(SurfaceTileCoord) -> bool) -> usize {
-        self.inner.cancel_surface_batches_outside(keep)
-    }
-
     pub fn submit_edit(&self, action: EditAction) -> Result<RemoteRequestId, RemoteWorldError> {
         self.inner.send_edit(action)
     }
@@ -348,7 +315,6 @@ struct RemoteInner {
     open_waiters: RefCell<Vec<LocalSender<Result<WorldOpened, RemoteWorldError>>>>,
     pending: RefCell<BTreeMap<RemoteRequestId, PendingBatch>>,
     completions: RefCell<VecDeque<RemoteChunkCompletion>>,
-    surface_completions: RefCell<VecDeque<RemoteSurfaceCompletion>>,
     terrain_region_column_completions: RefCell<VecDeque<RemoteTerrainRegionColumnCompletion>>,
     terrain_directory_completions: RefCell<VecDeque<RemoteTerrainDirectoryCompletion>>,
     terrain_page_completions: RefCell<VecDeque<RemoteTerrainPageCompletion>>,
@@ -365,10 +331,6 @@ enum PendingBatch {
         priority: WorldProductPriority,
         expected_coords: Vec<ChunkCoord>,
         delivery: ChunkDelivery,
-    },
-    Surface {
-        priority: WorldProductPriority,
-        tickets: Vec<RemoteSurfaceTicket>,
     },
     TerrainDirectories {
         priority: WorldProductPriority,
@@ -387,7 +349,6 @@ enum PendingBatch {
 #[derive(Clone, Copy)]
 enum PendingBatchKind {
     Chunks,
-    Surface,
     TerrainRegionColumns,
     TerrainDirectories,
     TerrainPages,
@@ -397,7 +358,6 @@ impl PendingBatch {
     const fn priority(&self) -> WorldProductPriority {
         match self {
             Self::Chunks { priority, .. }
-            | Self::Surface { priority, .. }
             | Self::TerrainRegionColumns { priority, .. }
             | Self::TerrainDirectories { priority, .. }
             | Self::TerrainPages { priority, .. } => *priority,
@@ -407,7 +367,6 @@ impl PendingBatch {
     const fn kind(&self) -> PendingBatchKind {
         match self {
             Self::Chunks { .. } => PendingBatchKind::Chunks,
-            Self::Surface { .. } => PendingBatchKind::Surface,
             Self::TerrainRegionColumns { .. } => PendingBatchKind::TerrainRegionColumns,
             Self::TerrainDirectories { .. } => PendingBatchKind::TerrainDirectories,
             Self::TerrainPages { .. } => PendingBatchKind::TerrainPages,
@@ -442,7 +401,6 @@ impl RemoteInner {
             open_waiters: RefCell::new(Vec::new()),
             pending: RefCell::new(BTreeMap::new()),
             completions: RefCell::new(VecDeque::new()),
-            surface_completions: RefCell::new(VecDeque::new()),
             terrain_region_column_completions: RefCell::new(VecDeque::new()),
             terrain_directory_completions: RefCell::new(VecDeque::new()),
             terrain_page_completions: RefCell::new(VecDeque::new()),
@@ -627,8 +585,6 @@ impl RemoteInner {
             self.handle_world_opened(generation, &bytes);
         } else if kind == protocol::chunk_batch_result_kind() {
             self.handle_chunk_result(generation, &bytes);
-        } else if kind == protocol::surface_tile_batch_result_kind() {
-            self.handle_surface_result(generation, &bytes);
         } else if kind == protocol::terrain_region_column_batch_result_kind() {
             self.handle_terrain_region_column_result(generation, &bytes);
         } else if kind == protocol::terrain_directory_batch_result_kind() {
@@ -678,7 +634,6 @@ impl RemoteInner {
         if !opened
             .capabilities
             .contains(WorldCapabilities::CANONICAL_CHUNKS)
-            || !opened.capabilities.contains(WorldCapabilities::SURFACE_LOD)
             || !opened
                 .capabilities
                 .contains(WorldCapabilities::VIRTUAL_TERRAIN)
@@ -795,50 +750,6 @@ impl RemoteInner {
             return;
         }
         self.finish_request(result.request_id, Ok(result));
-    }
-
-    fn handle_surface_result(self: &Rc<Self>, generation: u64, bytes: &[u8]) {
-        if self.state.get() != RemoteConnectionState::Open {
-            self.disconnect(
-                generation,
-                RemoteWorldError::Protocol("surface result arrived before WorldOpened".to_owned()),
-            );
-            return;
-        }
-        let result = match protocol::decode_surface_tile_batch_result(bytes) {
-            Ok(result) => result,
-            Err(error) => {
-                self.disconnect(generation, RemoteWorldError::Protocol(error.to_string()));
-                return;
-            }
-        };
-        let tickets =
-            self.pending
-                .borrow()
-                .get(&result.request_id)
-                .and_then(|pending| match pending {
-                    PendingBatch::Surface { tickets, .. } => Some(tickets.clone()),
-                    _ => None,
-                });
-        let Some(tickets) = tickets else {
-            return;
-        };
-        let expected = tickets
-            .iter()
-            .map(|ticket| ticket.coord)
-            .collect::<Vec<_>>();
-        let expected_identity = self
-            .opened
-            .borrow()
-            .as_ref()
-            .map(|opened| opened.manifest.source_identity_hash());
-        let validation = validate_surface_result(&result, &expected, expected_identity);
-        if let Err(error) = validation {
-            self.send_cancel(result.request_id);
-            self.finish_surface_request(result.request_id, Err(error));
-            return;
-        }
-        self.accept_surface_item(result);
     }
 
     fn handle_terrain_directory_result(self: &Rc<Self>, generation: u64, bytes: &[u8]) {
@@ -1181,75 +1092,6 @@ impl RemoteInner {
         Ok(request_id)
     }
 
-    fn send_surface_request(
-        self: &Rc<Self>,
-        priority: WorldProductPriority,
-        tickets: Vec<RemoteSurfaceTicket>,
-    ) -> Result<RemoteRequestId, RemoteWorldError> {
-        if self.state.get() != RemoteConnectionState::Open {
-            return Err(self.terminal_error().unwrap_or(RemoteWorldError::NotOpen));
-        }
-        if tickets.is_empty() {
-            return Err(RemoteWorldError::InvalidBatch("batch must not be empty"));
-        }
-        let coords = tickets
-            .iter()
-            .map(|ticket| ticket.coord)
-            .collect::<Vec<_>>();
-        let unique = coords.iter().copied().collect::<BTreeSet<_>>();
-        if unique.len() != coords.len() {
-            return Err(RemoteWorldError::InvalidBatch(
-                "batch contains duplicate surface coordinates",
-            ));
-        }
-        let server_window = self.opened.borrow().as_ref().map_or(1, |opened| {
-            usize::from(opened.recommended_in_flight_batches)
-        });
-        let client_window = self.config.max_in_flight_batches as usize;
-        if !self.ensure_request_window(priority, server_window.min(client_window)) {
-            return Err(RemoteWorldError::RequestWindowFull);
-        }
-        let Some(socket) = self.socket.borrow().clone() else {
-            return Err(RemoteWorldError::NotOpen);
-        };
-        let buffered = socket.buffered_amount();
-        if self.send_paused.get() {
-            if buffered > self.config.buffered_amount_low_water_bytes {
-                return Err(RemoteWorldError::Backpressured);
-            }
-            self.send_paused.set(false);
-        }
-        if buffered >= self.config.buffered_amount_high_water_bytes {
-            self.send_paused.set(true);
-            return Err(RemoteWorldError::Backpressured);
-        }
-
-        let request_id = self.allocate_request_id()?;
-        let frame = protocol::encode_surface_tile_batch(&SurfaceTileBatchRequest {
-            request_id,
-            priority,
-            coords,
-        })
-        .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
-        socket
-            .send_with_u8_array(&frame)
-            .map_err(|error| RemoteWorldError::Socket(js_reason(error)))?;
-        self.pending
-            .borrow_mut()
-            .insert(request_id, PendingBatch::Surface { priority, tickets });
-        let weak = Rc::downgrade(self);
-        if let Err(error) = schedule_after(self.config.request_timeout_ms, move || {
-            if let Some(inner) = weak.upgrade() {
-                inner.timeout_request(request_id);
-            }
-        }) {
-            self.pending.borrow_mut().remove(&request_id);
-            self.send_cancel(request_id);
-            return Err(error);
-        }
-        Ok(request_id)
-    }
-
     fn send_terrain_region_column_request(
         self: &Rc<Self>,
         priority: WorldProductPriority,
@@ -1486,27 +1328,6 @@ impl RemoteInner {
         true
     }
 
-    fn cancel_surface_batches_outside(&self, keep: impl Fn(SurfaceTileCoord) -> bool) -> usize {
-        let request_ids = self
-            .pending
-            .borrow()
-            .iter()
-            .filter_map(|(&request_id, pending)| match pending {
-                PendingBatch::Surface { tickets, .. }
-                    if batch_has_obsolete_item(tickets.iter().map(|ticket| keep(ticket.coord))) =>
-                {
-                    Some(request_id)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let canceled = request_ids.len();
-        for request_id in request_ids {
-            self.cancel(request_id);
-        }
-        canceled
-    }
-
     fn cancel_chunk_batches_outside(&self, keep: impl Fn(ChunkCoord) -> bool) -> usize {
         let request_ids = self
             .pending
@@ -1522,7 +1343,6 @@ impl RemoteInner {
                     delivery: ChunkDelivery::OneShot(_),
                     ..
                 }
-                | PendingBatch::Surface { .. }
                 | PendingBatch::TerrainRegionColumns { .. }
                 | PendingBatch::TerrainDirectories { .. }
                 | PendingBatch::TerrainPages { .. }
@@ -1566,51 +1386,6 @@ impl RemoteInner {
             }
             ChunkDelivery::OneShot(sender) => sender.send(result),
         }
-    }
-
-    fn finish_surface_request(
-        &self,
-        request_id: u64,
-        result: Result<SurfaceTileBatchResult, RemoteWorldError>,
-    ) {
-        let Some(pending) = self.pending.borrow_mut().remove(&request_id) else {
-            return;
-        };
-        let PendingBatch::Surface { tickets, .. } = pending else {
-            return;
-        };
-        self.surface_completions
-            .borrow_mut()
-            .push_back(RemoteSurfaceCompletion {
-                request_id,
-                tickets,
-                result,
-            });
-    }
-
-    fn accept_surface_item(&self, result: SurfaceTileBatchResult) {
-        let request_id = result.request_id;
-        let ticket = {
-            let mut pending = self.pending.borrow_mut();
-            let Some(PendingBatch::Surface { tickets, .. }) = pending.get_mut(&request_id) else {
-                return;
-            };
-            tickets.remove(0)
-        };
-        if result.final_item {
-            let removed = self.pending.borrow_mut().remove(&request_id);
-            debug_assert!(matches!(
-                removed,
-                Some(PendingBatch::Surface { tickets, .. }) if tickets.is_empty()
-            ));
-        }
-        self.surface_completions
-            .borrow_mut()
-            .push_back(RemoteSurfaceCompletion {
-                request_id,
-                tickets: vec![ticket],
-                result: Ok(result),
-            });
     }
 
     fn finish_terrain_directory_request(
@@ -1681,7 +1456,6 @@ impl RemoteInner {
             .map(PendingBatch::kind);
         match kind {
             Some(PendingBatchKind::Chunks) => self.finish_request(request_id, Err(error)),
-            Some(PendingBatchKind::Surface) => self.finish_surface_request(request_id, Err(error)),
             Some(PendingBatchKind::TerrainRegionColumns) => {
                 self.finish_terrain_region_column_request(request_id, Err(error))
             }
@@ -1829,52 +1603,6 @@ fn validate_chunk_result(
         return Err(RemoteWorldError::ResponseMismatch(
             "returned chunk keys differ from request",
         ));
-    }
-    Ok(())
-}
-
-fn validate_surface_result(
-    result: &SurfaceTileBatchResult,
-    expected_coords: &[SurfaceTileCoord],
-    expected_identity: Option<WorldSourceIdentityHash>,
-) -> Result<(), RemoteWorldError> {
-    if Some(result.source_identity_hash) != expected_identity {
-        return Err(RemoteWorldError::ResponseMismatch(
-            "source identity changed",
-        ));
-    }
-    if result.items.len() != 1 {
-        return Err(RemoteWorldError::ResponseMismatch(
-            "surface result must contain exactly one item",
-        ));
-    }
-    let Some(expected_coord) = expected_coords.first() else {
-        return Err(RemoteWorldError::ResponseMismatch(
-            "surface result has no remaining request item",
-        ));
-    };
-    if result.items[0].coord != *expected_coord {
-        return Err(RemoteWorldError::ResponseMismatch(
-            "surface result is out of request order",
-        ));
-    }
-    if result.final_item != (expected_coords.len() == 1) {
-        return Err(RemoteWorldError::ResponseMismatch(if result.final_item {
-            "surface result ended before every requested item"
-        } else {
-            "surface result omitted its final marker"
-        }));
-    }
-    for item in &result.items {
-        if let Ok(snapshot) = &item.result
-            && (snapshot.source_identity_hash != result.source_identity_hash
-                || snapshot.terrain.coord != item.coord
-                || snapshot.water.coord != item.coord)
-        {
-            return Err(RemoteWorldError::ResponseMismatch(
-                "surface snapshot key or identity differs from envelope",
-            ));
-        }
     }
     Ok(())
 }

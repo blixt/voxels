@@ -18,15 +18,6 @@ const fn request_window_rank(priority: WorldProductPriority) -> u8 {
     }
 }
 
-/// Whether an in-flight batch should yield its request slot after the streaming focus changes.
-///
-/// The completion path requeues tickets that still belong to the new focus and drops obsolete
-/// tickets. Canceling a partly stale batch is therefore both safe and necessary: otherwise one
-/// barely relevant tile can let three obsolete siblings hold an equal-priority socket slot.
-pub(crate) fn batch_has_obsolete_item(relevance: impl IntoIterator<Item = bool>) -> bool {
-    relevance.into_iter().any(|relevant| !relevant)
-}
-
 /// Selects lower-value pending work that may be canceled to admit a more valuable request.
 ///
 /// The browser and server negotiate a deliberately small request window. Letting old visible or
@@ -156,12 +147,5 @@ mod tests {
             priority_preemption_candidate(WorldProductPriority::CollisionCritical, pending,),
             None
         );
-    }
-
-    #[test]
-    fn a_partly_obsolete_batch_yields_its_request_slot() {
-        assert!(!batch_has_obsolete_item([true, true, true, true]));
-        assert!(batch_has_obsolete_item([true, false, true, true]));
-        assert!(batch_has_obsolete_item([false, false]));
     }
 }
