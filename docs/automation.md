@@ -51,9 +51,9 @@ automation/
     protocol.ts           versioned VXWP constants used by automation
 ```
 
-Only build integration and the Rust static gate remain under `scripts/`. Model setup, native
-benchmarks, provider validation, browser captures, network experiments, multiplayer checks, and bot
-loads are scenarios. There are no `.mjs` files.
+Only build/deployment integration, child-process helpers, and the Rust static gate remain under
+`scripts/`. Model setup, native benchmarks, provider validation, browser captures, network
+experiments, multiplayer checks, and bot loads are scenarios.
 
 ## Scenario contract
 
@@ -63,7 +63,7 @@ Every scenario declares what it is and which mechanisms it uses:
 import { ScenarioArguments } from "../lib/arguments.ts";
 import { BrowserCapability } from "../lib/browser.ts";
 import { defineScenario } from "../lib/scenario.ts";
-import { startWorldPreview } from "../lib/world.ts";
+import { startWorldStack } from "../lib/world.ts";
 
 export default defineScenario({
   id: "weather-motion",
@@ -78,11 +78,15 @@ export default defineScenario({
   },
   async run(context, arguments_) {
     new ScenarioArguments(arguments_).assertEmpty();
-    const world = await startWorldPreview(context, {
+    const world = await startWorldStack(context, {
       fixture: { weatherCycleSeconds: 120 },
     });
     const browser = await BrowserCapability.start(context);
-    const viewport = await browser.open({ url: world.url, label: "weather" });
+    const viewport = await browser.open({
+      url: world.url,
+      label: "weather",
+      ...world.clientRoute,
+    });
     await viewport.screenshot("before");
     // Scenario-specific movement and assertions stay here.
     await viewport.screenshot("after");
