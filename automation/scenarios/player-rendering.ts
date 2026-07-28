@@ -245,6 +245,14 @@ async function stablePhaseCapture(
       ),
       gpuMatchesCpu: snapshotValue(current, "virtualTerrainGpuMatchesCpuCut"),
       gpuOverflow: snapshotValue(current, "virtualTerrainGpuOverflowFlags"),
+      columnSubmitDeferred: snapshotValue(current, "virtualTerrainColumnSubmitDeferred"),
+      columnPreempted: snapshotValue(current, "virtualTerrainColumnPreempted"),
+      columnTimedOut: snapshotValue(current, "virtualTerrainColumnTimedOut"),
+      columnOtherFailed: snapshotValue(current, "virtualTerrainColumnOtherFailed"),
+      directorySubmitDeferred: snapshotValue(current, "virtualTerrainDirectorySubmitDeferred"),
+      directoryPreempted: snapshotValue(current, "virtualTerrainDirectoryPreempted"),
+      directoryTimedOut: snapshotValue(current, "virtualTerrainDirectoryTimedOut"),
+      directoryOtherFailed: snapshotValue(current, "virtualTerrainDirectoryOtherFailed"),
       pageSubmitDeferred: snapshotValue(current, "virtualTerrainPageSubmitDeferred"),
       pagePreempted: snapshotValue(current, "virtualTerrainPagePreempted"),
       pageTimedOut: snapshotValue(current, "virtualTerrainPageTimedOut"),
@@ -260,6 +268,14 @@ async function stablePhaseCapture(
       editCanonicalOwned: snapshotValue(current, "editCanonicalOwned"),
     };
     const flow = [
+      state.columnSubmitDeferred,
+      state.columnPreempted,
+      state.columnTimedOut,
+      state.columnOtherFailed,
+      state.directorySubmitDeferred,
+      state.directoryPreempted,
+      state.directoryTimedOut,
+      state.directoryOtherFailed,
       state.pageSubmitDeferred,
       state.pagePreempted,
       state.pageTimedOut,
@@ -324,6 +340,7 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
   if (arguments_.length > 0) {
     throw new Error(`player-rendering takes no arguments; received ${arguments_.join(" ")}`);
   }
+  const coldStartStarted = performance.now();
   const world = await startDevelopmentWorldStack(context, {
     fixture: {
       prefix: "voxels-player-rendering-",
@@ -345,7 +362,6 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
     ...world.clientRoute,
   });
   const { engine, page } = viewport;
-  const coldStartStarted = performance.now();
   let lastProgressLog = 0;
   const ready = await engine.waitForSnapshot(
     (snapshot) =>
@@ -373,6 +389,20 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
             requestedPages: snapshotValue(snapshot, "virtualTerrainRequestedPages"),
             pendingPages: snapshotValue(snapshot, "virtualTerrainStreamPending"),
             inFlightPages: snapshotValue(snapshot, "virtualTerrainStreamInFlight"),
+            columns: snapshotValue(snapshot, "virtualTerrainColumns"),
+            columnInFlight: snapshotValue(snapshot, "virtualTerrainColumnInFlight"),
+            columnRevisionFloors: snapshotValue(snapshot, "virtualTerrainColumnRevisionFloors"),
+            currentColumnKnown: snapshotValue(snapshot, "virtualTerrainCurrentColumnKnown"),
+            currentColumnRoots: snapshotValue(snapshot, "virtualTerrainCurrentColumnRoots"),
+            currentColumnRegisteredRoots: snapshotValue(
+              snapshot,
+              "virtualTerrainCurrentColumnRegisteredRoots",
+            ),
+            directoryInFlight: snapshotValue(snapshot, "virtualTerrainDirectoryInFlight"),
+            columnOtherFailed: snapshotValue(snapshot, "virtualTerrainColumnOtherFailed"),
+            directoryOtherFailed: snapshotValue(snapshot, "virtualTerrainDirectoryOtherFailed"),
+            pageOtherFailed: snapshotValue(snapshot, "virtualTerrainPageOtherFailed"),
+            pageUploadFailed: snapshotValue(snapshot, "virtualTerrainPageUploadFailed"),
           }),
         );
       },

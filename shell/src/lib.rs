@@ -1298,11 +1298,12 @@ mod web {
         AtmosphereSample, BinaryMeshScratch, CHUNK_EDGE, CHUNK_VOXEL_BYTES,
         CINDER_VAULT_PORTAL_COUNT, CaveStreamInterest, Chunk, ChunkCoord, EditMap, Material,
         MeshedChunk, MeshingHalo, PortalState, SurfaceRegion, SurfaceSample,
-        TERRAIN_COVERAGE_ROOT_LEVEL, TerrainDemandGroup, TerrainHierarchyNode, TerrainPageDemand,
-        TerrainPageKey, TerrainPageMemoryCache, TerrainPageTransferIdentity, TerrainStreamConfig,
-        TerrainStreamScheduler, VOXEL_SIZE_METRES, VoxelCoord, WorldProductPriority,
-        WorldSourceIdentityHash, decode_terrain_page, encode_terrain_page,
-        mesh_chunk_binary_with_scratch,
+        TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_MAX_CHILDREN, TerrainDemandGroup,
+        TerrainHierarchyNode, TerrainPageDemand, TerrainPageKey, TerrainPageMemoryCache,
+        TerrainPageTransferIdentity, TerrainStreamConfig, TerrainStreamScheduler,
+        VOXEL_SIZE_METRES, VoxelCoord, WorldProductPriority, WorldSourceIdentityHash,
+        decode_terrain_page, encode_terrain_page, mesh_chunk_binary_with_scratch,
+        terrain_page_replacement_groups,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -1355,7 +1356,7 @@ mod web {
     const VIRTUAL_TERRAIN_MAX_DIRECTORY_BATCHES_IN_FLIGHT: usize = 2;
     const VIRTUAL_TERRAIN_MAX_REFINEMENT_DIRECTORY_BATCHES_IN_FLIGHT: usize = 2;
     const VIRTUAL_TERRAIN_PAGE_COMPLETIONS_PER_FRAME: usize = 1;
-    const VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME: usize = 4;
+    const VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME: usize = TERRAIN_PAGE_MAX_CHILDREN;
     const VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS: u64 = 1_000;
     const VIRTUAL_TERRAIN_PAGE_CACHE_BYTES: usize = 128 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_REFINE_ABOVE_PIXELS: f64 = 0.75;
@@ -1430,8 +1431,8 @@ mod web {
         last_page_failure_key: Option<TerrainPageKey>,
     }
 
-    const STARTUP_PROGRESS_VERSION: u32 = 2;
-    const STARTUP_PROGRESS_PAYLOAD_WORDS: usize = 52;
+    const STARTUP_PROGRESS_VERSION: u32 = 3;
+    const STARTUP_PROGRESS_PAYLOAD_WORDS: usize = 59;
     const STARTUP_PROGRESS_WORDS: usize = STARTUP_PROGRESS_PAYLOAD_WORDS + 2;
 
     #[derive(Default)]
@@ -3898,22 +3899,11 @@ mod web {
             }
             let mut grouped = BTreeSet::new();
             let mut groups = Vec::new();
-            let parents = requested
-                .keys()
-                .filter_map(|key| key.parent())
-                .collect::<BTreeSet<_>>();
-            for parent in parents {
-                let Some(children) = parent.refinement_children() else {
-                    continue;
-                };
-                if !children.iter().all(|child| requested.contains_key(child)) {
-                    continue;
-                }
-                let pages = children
+            for (parent, identities) in terrain_page_replacement_groups(&cut.requested_pages) {
+                let pages = identities
                     .iter()
-                    .filter_map(|child| {
-                        let identity = requested.get(child)?;
-                        let node = state.nodes.get(child)?;
+                    .filter_map(|identity| {
+                        let node = state.nodes.get(&identity.key)?;
                         Some(terrain_page_demand(
                             *identity,
                             node,
@@ -3922,10 +3912,10 @@ mod web {
                         ))
                     })
                     .collect::<Vec<_>>();
-                if pages.len() == children.len()
+                if pages.len() == identities.len()
                     && let Ok(group) = TerrainDemandGroup::replacement(parent, pages)
                 {
-                    grouped.extend(children);
+                    grouped.extend(identities.into_iter().map(|identity| identity.key));
                     groups.push(group);
                 }
             }
@@ -5514,6 +5504,23 @@ mod web {
             let virtual_cache_pages = engine.virtual_terrain_cache.borrow().len();
             let virtual_state = engine.virtual_terrain.borrow();
             let virtual_directory_in_flight = virtual_state.directory_in_flight.len();
+            let virtual_columns = virtual_state.columns.len();
+            let virtual_column_in_flight = virtual_state.column_in_flight.len();
+            let virtual_column_revision_floors = virtual_state.minimum_column_revisions.len();
+            let virtual_region_revision_floors = virtual_state.minimum_region_revisions.len();
+            let camera_chunk = world_to_chunk(engine.camera.borrow().position);
+            let current_column = TerrainPageKey::surface(0, camera_chunk.x, camera_chunk.z)
+                .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                .map(|root| [root.coord[0], root.coord[2]]);
+            let current_roots =
+                current_column.and_then(|column| virtual_state.columns.get(&column));
+            let current_registered_roots = current_roots.map_or(0, |column| {
+                column
+                    .roots
+                    .iter()
+                    .filter(|root| virtual_state.registered_roots.contains(root))
+                    .count()
+            });
             let column_accepted = virtual_state.stats.column_accepted;
             let column_submit_deferred = virtual_state.stats.column_submit_deferred;
             let column_preempted = virtual_state.stats.column_preempted;
@@ -5558,6 +5565,13 @@ mod web {
                 usize_to_u32(virtual_stream.in_flight_pages),
                 u32::try_from(virtual_stream.failed_pages).unwrap_or(u32::MAX),
                 usize_to_u32(virtual_directory_in_flight),
+                usize_to_u32(virtual_columns),
+                usize_to_u32(virtual_column_in_flight),
+                usize_to_u32(virtual_column_revision_floors),
+                usize_to_u32(virtual_region_revision_floors),
+                u32::from(current_roots.is_some()),
+                current_roots.map_or(0, |column| usize_to_u32(column.roots.len())),
+                usize_to_u32(current_registered_roots),
                 u32::try_from(column_accepted).unwrap_or(u32::MAX),
                 u32::try_from(column_submit_deferred).unwrap_or(u32::MAX),
                 u32::try_from(column_preempted).unwrap_or(u32::MAX),

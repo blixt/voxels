@@ -113,7 +113,7 @@ pub use terrain_region::{
 pub use terrain_stream::{
     TerrainDemandGroup, TerrainPageCacheError, TerrainPageDemand, TerrainPageMemoryCache,
     TerrainRequestBatch, TerrainStreamConfig, TerrainStreamError, TerrainStreamScheduler,
-    TerrainStreamStats,
+    TerrainStreamStats, terrain_page_replacement_groups,
 };
 pub use terrain_transport::{
     TERRAIN_PAGE_TRANSFER_MAX_BYTES, TERRAIN_PAGE_TRANSFER_MAX_ITEMS,

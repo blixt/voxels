@@ -23,8 +23,8 @@ let screenshotDeadline = 0;
 let screenshotEncoding = false;
 let disposal: Promise<void> | null = null;
 const pending: Exclude<ToWorker, InitMessage>[] = [];
-const STARTUP_PROGRESS_VERSION = 2;
-const STARTUP_PROGRESS_WORDS = 54;
+const STARTUP_PROGRESS_VERSION = 3;
+const STARTUP_PROGRESS_WORDS = 61;
 const STARTUP_SCHEMA_MISMATCH_TIMEOUT_MS = 5_000;
 
 function bitmaskLabels(flags: number, labels: ReadonlyArray<readonly [number, string]>): string {
@@ -147,6 +147,13 @@ function monitorReadiness(engine: EngineHandle): void {
       streamInFlight = 0,
       streamFailed = 0,
       directoryInFlight = 0,
+      columns = 0,
+      columnInFlight = 0,
+      columnRevisionFloors = 0,
+      regionRevisionFloors = 0,
+      currentColumnKnown = 0,
+      currentColumnRoots = 0,
+      currentColumnRegisteredRoots = 0,
       columnAccepted = 0,
       columnSubmitDeferred = 0,
       columnPreempted = 0,
@@ -201,6 +208,13 @@ function monitorReadiness(engine: EngineHandle): void {
       streamInFlight,
       streamFailed,
       directoryInFlight,
+      columns,
+      columnInFlight,
+      columnRevisionFloors,
+      regionRevisionFloors,
+      currentColumnKnown,
+      currentColumnRoots,
+      currentColumnRegisteredRoots,
       columnAccepted,
       columnSubmitDeferred,
       columnPreempted,
@@ -241,7 +255,7 @@ function monitorReadiness(engine: EngineHandle): void {
       previous = key;
       if (detailed) lastDetailedPost = now;
       const detail = detailed
-        ? `Terrain cut: CPU ${cpuSelected} pages/${cpuRequested} requested/${cpuRefinementRoots} refinement roots/${cpuOwnerless} ownerless/${cpuDiscontinuities} skipped-level edges; GPU ${gpuSelected} pages/${gpuCompacted} compacted/${gpuRequested} requested/${gpuOwnerless} ownerless/overflow ${gpuOverflow}; match ${gpuMatchesCpu === 1 ? "yes" : `no (${gpuMatchFailureLabels(gpuMatchFailures)})`}; discovery columns ${columnAccepted} accepted/${columnSubmitDeferred} deferred/${columnPreempted} preempted/${columnTimedOut} timed out/${columnOtherFailed} errors, directories ${directoryAccepted} accepted/${directorySubmitDeferred} deferred/${directoryPreempted} preempted/${directoryTimedOut} timed out/${directoryOtherFailed} errors/${directoryInFlight} in flight; stream ${streamPending} pending/${streamInFlight} in flight/${streamFailed} failed/${streamUsefulKiB} KiB useful, cache ${cachePages}, resident ${residentPages}, GPU ${gpuAllocatedMiB}/${gpuCapacityMiB} MiB; page flow ${pageSubmitDeferred} deferred/${pagePreempted} preempted/${pageTimedOut} timed out/${pageOtherFailed} transport errors; products ${pageUnavailable} unavailable/${pageStaleRevision} stale/${pageGenerationFailed} generation/${pageUploadFailed} upload (last ${uploadFailureLabel(lastPageUploadFailureKind)})${lastPageFailureKind === 0 ? "" : `, last product ${pageFailureLabel(lastPageFailureKind)}@L${lastPageFailureLevel}(${lastPageFailureX | 0},${lastPageFailureY | 0},${lastPageFailureZ | 0})`}; published ${publishedPages} pages (${publishedExactPages} exact, ${publishedDiscontinuities} skipped-level edges), terrain ${terrainReady === 1 ? "ready" : "pending"}.`
+        ? `Terrain cut: CPU ${cpuSelected} pages/${cpuRequested} requested/${cpuRefinementRoots} refinement roots/${cpuOwnerless} ownerless/${cpuDiscontinuities} skipped-level edges; GPU ${gpuSelected} pages/${gpuCompacted} compacted/${gpuRequested} requested/${gpuOwnerless} ownerless/overflow ${gpuOverflow}; match ${gpuMatchesCpu === 1 ? "yes" : `no (${gpuMatchFailureLabels(gpuMatchFailures)})`}; discovery ${columns} columns/${columnInFlight} in flight/${columnRevisionFloors} column revision floors/${regionRevisionFloors} region revision floors/current ${currentColumnKnown === 1 ? `${currentColumnRegisteredRoots}/${currentColumnRoots} roots registered` : "column unknown"}, flow ${columnAccepted} accepted/${columnSubmitDeferred} deferred/${columnPreempted} preempted/${columnTimedOut} timed out/${columnOtherFailed} errors; directories ${directoryAccepted} accepted/${directorySubmitDeferred} deferred/${directoryPreempted} preempted/${directoryTimedOut} timed out/${directoryOtherFailed} errors/${directoryInFlight} in flight; stream ${streamPending} pending/${streamInFlight} in flight/${streamFailed} failed/${streamUsefulKiB} KiB useful, cache ${cachePages}, resident ${residentPages}, GPU ${gpuAllocatedMiB}/${gpuCapacityMiB} MiB; page flow ${pageSubmitDeferred} deferred/${pagePreempted} preempted/${pageTimedOut} timed out/${pageOtherFailed} transport errors; products ${pageUnavailable} unavailable/${pageStaleRevision} stale/${pageGenerationFailed} generation/${pageUploadFailed} upload (last ${uploadFailureLabel(lastPageUploadFailureKind)})${lastPageFailureKind === 0 ? "" : `, last product ${pageFailureLabel(lastPageFailureKind)}@L${lastPageFailureLevel}(${lastPageFailureX | 0},${lastPageFailureY | 0},${lastPageFailureZ | 0})`}; published ${publishedPages} pages (${publishedExactPages} exact, ${publishedDiscontinuities} skipped-level edges), terrain ${terrainReady === 1 ? "ready" : "pending"}.`
         : undefined;
       scope.postMessage({ kind: "loading", stage: "vicinity", resident, required, detail });
     }

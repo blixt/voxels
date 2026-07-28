@@ -844,6 +844,39 @@ mod tests {
     }
 
     #[test]
+    fn replacement_group_partition_reports_only_complete_sibling_sets() {
+        let complete_parent = TerrainPageKey::surface(2, -1, 3);
+        let incomplete_parent = TerrainPageKey::surface(2, 4, -2);
+        let mut requested = complete_parent
+            .refinement_children()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| TerrainPageTransferIdentity {
+                key,
+                revision: 7,
+                content_fingerprint: [index as u8 + 1; 32],
+            })
+            .collect::<Vec<_>>();
+        requested.push(TerrainPageTransferIdentity {
+            key: incomplete_parent.refinement_children().unwrap()[0],
+            revision: 8,
+            content_fingerprint: [9; 32],
+        });
+
+        let groups = terrain_page_replacement_groups(&requested);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, complete_parent);
+        assert_eq!(groups[0].1.len(), 4);
+        assert!(
+            groups[0]
+                .1
+                .iter()
+                .all(|identity| identity.key.parent() == Some(complete_parent))
+        );
+    }
+
+    #[test]
     fn reconcile_admits_complete_groups_without_unbounded_pending_work() {
         let parent = TerrainPageKey {
             level: 1,
