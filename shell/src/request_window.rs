@@ -1,20 +1,12 @@
 use voxels_world::WorldProductPriority;
 
 /// Client request-window value order.
-///
-/// The wire discriminants preserve protocol compatibility and are not a scheduling contract:
-/// `ImmediateSurface` was added after `VisibleChunk`, while the server deliberately admits the
-/// current/lead surface chain before ordinary visible chunks. Keep this rank explicit so enum
-/// declaration order cannot silently invert browser-side admission again.
 const fn request_window_rank(priority: WorldProductPriority) -> u8 {
     match priority {
         WorldProductPriority::CollisionCritical => 0,
         WorldProductPriority::VirtualTerrain => 1,
-        WorldProductPriority::ImmediateSurface => 2,
-        WorldProductPriority::VisibleChunk => 3,
-        WorldProductPriority::VisibleSurface => 4,
-        WorldProductPriority::ReplacementSurface => 5,
-        WorldProductPriority::Prefetch => 6,
+        WorldProductPriority::VisibleChunk => 2,
+        WorldProductPriority::Prefetch => 3,
     }
 }
 
@@ -47,7 +39,7 @@ mod tests {
             (11, WorldProductPriority::Prefetch),
             (12, WorldProductPriority::CollisionCritical),
             (13, WorldProductPriority::Prefetch),
-            (14, WorldProductPriority::VisibleSurface),
+            (14, WorldProductPriority::VisibleChunk),
         ];
 
         assert_eq!(
@@ -60,7 +52,7 @@ mod tests {
     fn visible_work_preempts_strictly_lower_value_work() {
         let pending = [
             (10, WorldProductPriority::Prefetch),
-            (11, WorldProductPriority::VisibleSurface),
+            (11, WorldProductPriority::VisibleChunk),
         ];
 
         assert_eq!(
@@ -70,22 +62,22 @@ mod tests {
     }
 
     #[test]
-    fn immediate_surface_preempts_older_visible_surface_work() {
+    fn virtual_terrain_preempts_visible_chunk_work() {
         let pending = [
-            (10, WorldProductPriority::VisibleSurface),
-            (11, WorldProductPriority::ImmediateSurface),
+            (10, WorldProductPriority::VisibleChunk),
+            (11, WorldProductPriority::VirtualTerrain),
         ];
 
         assert_eq!(
-            priority_preemption_candidate(WorldProductPriority::ImmediateSurface, pending),
+            priority_preemption_candidate(WorldProductPriority::VirtualTerrain, pending),
             Some(10)
         );
     }
 
     #[test]
-    fn virtual_terrain_preempts_migration_surface_work_but_not_collision() {
+    fn virtual_terrain_preempts_visible_chunks_but_not_collision() {
         let pending = [
-            (10, WorldProductPriority::ImmediateSurface),
+            (10, WorldProductPriority::VirtualTerrain),
             (11, WorldProductPriority::CollisionCritical),
             (12, WorldProductPriority::VisibleChunk),
         ];
@@ -97,23 +89,23 @@ mod tests {
     }
 
     #[test]
-    fn immediate_surface_preempts_ordinary_visible_chunks() {
+    fn newest_visible_chunk_is_preempted_for_virtual_terrain() {
         let pending = [
             (10, WorldProductPriority::VisibleChunk),
-            (11, WorldProductPriority::ImmediateSurface),
+            (11, WorldProductPriority::VirtualTerrain),
             (12, WorldProductPriority::VisibleChunk),
         ];
 
         assert_eq!(
-            priority_preemption_candidate(WorldProductPriority::ImmediateSurface, pending),
+            priority_preemption_candidate(WorldProductPriority::VirtualTerrain, pending),
             Some(12)
         );
     }
 
     #[test]
-    fn visible_chunks_do_not_displace_current_surface_work() {
+    fn visible_chunks_do_not_displace_virtual_terrain_work() {
         let pending = [
-            (10, WorldProductPriority::ImmediateSurface),
+            (10, WorldProductPriority::VirtualTerrain),
             (11, WorldProductPriority::VisibleChunk),
         ];
 
@@ -126,12 +118,12 @@ mod tests {
     #[test]
     fn equal_priority_work_does_not_churn_the_window() {
         let pending = [
-            (10, WorldProductPriority::VisibleSurface),
-            (11, WorldProductPriority::VisibleSurface),
+            (10, WorldProductPriority::VisibleChunk),
+            (11, WorldProductPriority::VisibleChunk),
         ];
 
         assert_eq!(
-            priority_preemption_candidate(WorldProductPriority::VisibleSurface, pending),
+            priority_preemption_candidate(WorldProductPriority::VisibleChunk, pending),
             None
         );
     }

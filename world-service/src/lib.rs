@@ -1583,7 +1583,7 @@ sea_level_voxels = 52
         );
         let result = source
             .request_blocks(MacroBlockBatch {
-                priority: WorldProductPriority::VisibleSurface,
+                priority: WorldProductPriority::VisibleChunk,
                 requests: vec![MacroBlockRequest {
                     origin: [0, 0],
                     sample_shape: [2, 2],

@@ -3659,11 +3659,9 @@ async fn deliver_generation_frames(
 fn traffic_priority(priority: WorldProductPriority) -> TrafficPriority {
     match priority {
         WorldProductPriority::CollisionCritical => TrafficPriority::Collision,
-        WorldProductPriority::VirtualTerrain
-        | WorldProductPriority::VisibleChunk
-        | WorldProductPriority::ImmediateSurface
-        | WorldProductPriority::VisibleSurface
-        | WorldProductPriority::ReplacementSurface => TrafficPriority::VisibleWorld,
+        WorldProductPriority::VirtualTerrain | WorldProductPriority::VisibleChunk => {
+            TrafficPriority::VisibleWorld
+        }
         WorldProductPriority::Prefetch => TrafficPriority::BackgroundWorld,
     }
 }
@@ -3751,8 +3749,7 @@ mod tests {
         error_kind, frame_fragment_kind, presence_delta_kind,
     };
     use voxels_world::{
-        ChunkCoord, EditMap, ProceduralWorldSource, SurfaceLodLevel, SurfaceTileCoord, VoxelCoord,
-        WorldProductPriority,
+        ChunkCoord, EditMap, ProceduralWorldSource, VoxelCoord, WorldProductPriority,
     };
 
     fn encode_base36(mut value: u64) -> String {
@@ -3839,7 +3836,7 @@ mod tests {
             coord: [-1, 0, 1],
         };
         let built = authority
-            .ensure_region(root, WorldProductPriority::VisibleSurface)
+            .ensure_region(root, WorldProductPriority::VisibleChunk)
             .await
             .expect("region");
         let cached = authority
@@ -3891,7 +3888,7 @@ mod tests {
 
         let directory_request = TerrainDirectoryBatchRequest {
             request_id: 801,
-            priority: WorldProductPriority::VisibleSurface,
+            priority: WorldProductPriority::VisibleChunk,
             roots: vec![root],
         };
         let tracked =
@@ -3942,7 +3939,7 @@ mod tests {
         };
         let page_request = VirtualTerrainPageBatchRequest {
             request_id: 802,
-            priority: WorldProductPriority::VisibleSurface,
+            priority: WorldProductPriority::VisibleChunk,
             batch: voxels_world::TerrainPageBatchRequestV1 {
                 source_identity_hash: authority.source_identity_hash(),
                 pages: vec![identity],
@@ -4227,24 +4224,6 @@ mod tests {
             self.inner.generate_batch(request)
         }
 
-        fn generate_edited_surface_tile(
-            &self,
-            edits: &voxels_world::EditMap,
-            coord: SurfaceTileCoord,
-        ) -> Result<voxels_world::SurfaceTileSnapshot, WorldSourceError> {
-            self.inner.generate_edited_surface_tile(edits, coord)
-        }
-
-        fn surface_tiles_affected_by_voxel(
-            &self,
-            edits: &voxels_world::EditMap,
-            level: SurfaceLodLevel,
-            coord: voxels_world::VoxelCoord,
-        ) -> Vec<SurfaceTileCoord> {
-            self.inner
-                .surface_tiles_affected_by_voxel(edits, level, coord)
-        }
-
         fn atmosphere_sample(
             &self,
             x: i32,
@@ -4301,7 +4280,7 @@ mod tests {
             request: GenerationRequest::Chunks {
                 request: ChunkBatchRequest {
                     request_id,
-                    priority: WorldProductPriority::VisibleSurface,
+                    priority: WorldProductPriority::VisibleChunk,
                     coords: vec![coord],
                 },
                 snapshot: ChunkEditSnapshot {
@@ -4337,7 +4316,7 @@ mod tests {
                         coord,
                         edit_revision: 0,
                     },
-                    priority: WorldProductPriority::VisibleSurface,
+                    priority: WorldProductPriority::VisibleChunk,
                 },
                 ProductFlight {
                     waiters: vec![ProductWaiter {
@@ -4382,7 +4361,7 @@ mod tests {
                 coord,
                 edit_revision: 0,
             },
-            priority: WorldProductPriority::VisibleSurface,
+            priority: WorldProductPriority::VisibleChunk,
         };
         let mut in_flight = HashMap::from([(
             key,
@@ -4415,7 +4394,7 @@ mod tests {
     #[tokio::test]
     async fn orphan_generation_stops_waiting_for_a_global_worker() {
         let global = PriorityGenerationLimiter::new(1);
-        let held = global.acquire(WorldProductPriority::VisibleSurface).await;
+        let held = global.acquire(WorldProductPriority::VisibleChunk).await;
         let session = Arc::new(SessionRequests::new(
             1,
             1,
@@ -4426,7 +4405,7 @@ mod tests {
         let request = GenerationRequest::Chunks {
             request: ChunkBatchRequest {
                 request_id: 1,
-                priority: WorldProductPriority::VisibleSurface,
+                priority: WorldProductPriority::VisibleChunk,
                 coords: vec![ChunkCoord::new(2, 0, 3)],
             },
             snapshot: ChunkEditSnapshot {
@@ -4442,7 +4421,7 @@ mod tests {
                 coord: ChunkCoord::new(2, 0, 3),
                 edit_revision: 0,
             },
-            priority: WorldProductPriority::VisibleSurface,
+            priority: WorldProductPriority::VisibleChunk,
         }];
         let (completion_tx, mut completions) = mpsc::channel(1);
         let task_generation = Arc::clone(&generation);
@@ -4490,7 +4469,7 @@ mod tests {
             Arc::new(Notify::new()),
         ));
         let _ordinary_a = session
-            .acquire_generation(WorldProductPriority::VisibleSurface)
+            .acquire_generation(WorldProductPriority::VisibleChunk)
             .await
             .expect("first ordinary permit");
         let _ordinary_b = session
@@ -4523,7 +4502,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn each_session_prioritizes_current_surface_over_ordinary_generation() {
+    async fn each_session_prioritizes_virtual_terrain_over_ordinary_generation() {
         let session = Arc::new(SessionRequests::new(
             16,
             1,
@@ -4541,7 +4520,7 @@ mod tests {
         let ordinary_order = Arc::clone(&order);
         let ordinary = tokio::spawn(async move {
             let _permit = ordinary_session
-                .acquire_generation(WorldProductPriority::VisibleSurface)
+                .acquire_generation(WorldProductPriority::VisibleChunk)
                 .await
                 .expect("ordinary generation permit");
             ordinary_order
@@ -4561,7 +4540,7 @@ mod tests {
         let immediate_order = Arc::clone(&order);
         let immediate = tokio::spawn(async move {
             let _permit = immediate_session
-                .acquire_generation(WorldProductPriority::ImmediateSurface)
+                .acquire_generation(WorldProductPriority::VirtualTerrain)
                 .await
                 .expect("immediate generation permit");
             immediate_order

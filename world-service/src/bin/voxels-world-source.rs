@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect::<Vec<_>>();
     let result = source.generate_batch(WorldProductBatch {
-        priority: WorldProductPriority::VisibleSurface,
+        priority: WorldProductPriority::VirtualTerrain,
         requests,
     })?;
     let mut heights = Vec::with_capacity(result.items.len());

@@ -5,33 +5,26 @@
 //! learned macro shape. It adds deterministic climate-driven vegetation, but does not invent caves,
 //! routes, or authored atlas content.
 
-use crate::lod::generate_surface_tile_mesh_with_materials_and_aggregated_ecology_and_shading;
-use crate::source::{exact_detail_chunks_for_surface_tile, surface_sample_height_bounds};
+use crate::source::surface_sample_height_bounds;
 use crate::{
-    AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, ChunkSnapshot, EditMap,
-    FEATURE_MAX_RADIUS_VOXELS, MACRO_FIELD_SCHEMA_VERSION, MAX_MACRO_BLOCK_SAMPLES,
-    MAX_SURFACE_SAMPLE_BLOCK_SAMPLES, MAX_SURFACE_SEARCH_RADIUS, MAX_VOXEL_BLOCK_SAMPLES,
-    MAX_WORLD_PRODUCT_BATCH, MacroBlock, MacroBlockBatch, MacroBlockRequest, MacroTerrainSource,
-    Material, MeshingHalo, SURFACE_TILE_EDGE_CELLS, SkylineFeature, SkylineFeatureId,
-    SkylineFeatureKind, SurfaceLodLevel, SurfaceRegion, SurfaceSample, SurfaceSampleBlockRequest,
+    AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, ChunkSnapshot, FEATURE_MAX_RADIUS_VOXELS,
+    MACRO_FIELD_SCHEMA_VERSION, MAX_MACRO_BLOCK_SAMPLES, MAX_SURFACE_SAMPLE_BLOCK_SAMPLES,
+    MAX_SURFACE_SEARCH_RADIUS, MAX_VOXEL_BLOCK_SAMPLES, MAX_WORLD_PRODUCT_BATCH, MacroBlock,
+    MacroBlockBatch, MacroBlockRequest, MacroTerrainSource, Material, MeshingHalo, SkylineFeature,
+    SkylineFeatureId, SkylineFeatureKind, SurfaceRegion, SurfaceSample, SurfaceSampleBlockRequest,
     SurfaceSampleBlockSnapshot, SurfaceSearchHit, SurfaceSearchKind, SurfaceSearchRequest,
-    SurfaceSearchSnapshot, SurfaceTileCoord, SurfaceTileSnapshot, TreeSpecies, VoxelBlockRequest,
-    VoxelBlockSnapshot, VoxelCoord, WorldProduct, WorldProductBatch, WorldProductBatchItem,
-    WorldProductBatchResult, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
-    WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash, generate_water_tile_mesh_with,
-    surface_tiles_affected_by_column,
+    SurfaceSearchSnapshot, TreeSpecies, VoxelBlockRequest, VoxelBlockSnapshot, VoxelCoord,
+    WorldProduct, WorldProductBatch, WorldProductBatchItem, WorldProductBatchResult,
+    WorldProductPriority, WorldProductRequest, WorldSourceEngine, WorldSourceError,
+    WorldSourceIdentity, WorldSourceIdentityHash,
 };
-use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
-use std::ops::ControlFlow;
-
-const SURFACE_TILE_SAMPLE_EDGE: u32 = 34;
+#[cfg(test)]
+use std::collections::BTreeMap;
 const ECOLOGY_CELL_VOXELS: i32 = 64;
 const ECOLOGY_MIN_TREE_SPACING_VOXELS: i32 = 30;
 const CANONICAL_VOXEL_EDGE_MILLIMETRES: u32 = 100;
 const HEIGHTFIELD_COMPOSER_CONFIGURATION_DOMAIN: &[u8] =
     b"voxels-heightfield-composer-configuration-v1\0";
-type SurfaceAliasMap = BTreeMap<(i32, i32), (i32, Material)>;
 
 #[derive(Clone, Copy, Debug)]
 struct SubgridLattice {
@@ -543,254 +536,6 @@ impl HeightfieldWorldSource {
         })
     }
 
-    fn surface_tile(
-        &self,
-        edits: &EditMap,
-        coord: SurfaceTileCoord,
-        priority: WorldProductPriority,
-    ) -> Result<SurfaceTileSnapshot, WorldSourceError> {
-        if !coord.is_world_representable() {
-            return Err(WorldSourceError::InvalidSurfaceTileCoordinate);
-        }
-        let [origin_x, origin_z] = coord.voxel_origin();
-        let stride = coord.stride_voxels();
-        let sample_origin = [
-            origin_x
-                .checked_sub(stride / 2)
-                .ok_or(WorldSourceError::SourceCoverageUnavailable)?,
-            origin_z
-                .checked_sub(stride / 2)
-                .ok_or(WorldSourceError::SourceCoverageUnavailable)?,
-        ];
-        let stride_u32 = stride as u32;
-        let region = self.prepare_region(
-            priority,
-            sample_origin,
-            [SURFACE_TILE_SAMPLE_EDGE; 2],
-            stride_u32,
-        )?;
-        for sample_z in 0..SURFACE_TILE_SAMPLE_EDGE {
-            for sample_x in 0..SURFACE_TILE_SAMPLE_EDGE {
-                let x = i64::from(sample_origin[0]) + i64::from(sample_x) * i64::from(stride_u32);
-                let z = i64::from(sample_origin[1]) + i64::from(sample_z) * i64::from(stride_u32);
-                let Some((x, z)) = i32::try_from(x).ok().zip(i32::try_from(z).ok()) else {
-                    return Err(WorldSourceError::SourceCoverageUnavailable);
-                };
-                if region.column(x, z).is_none() {
-                    return Err(WorldSourceError::MalformedMacroBlock);
-                }
-            }
-        }
-        let parent_region = if coord.level.next_coarser().is_some() {
-            let parent_stride = stride
-                .checked_mul(2)
-                .ok_or(WorldSourceError::SourceCoverageUnavailable)?;
-            let parent_origin = [
-                origin_x
-                    .checked_sub(stride)
-                    .ok_or(WorldSourceError::SourceCoverageUnavailable)?,
-                origin_z
-                    .checked_sub(stride)
-                    .ok_or(WorldSourceError::SourceCoverageUnavailable)?,
-            ];
-            let region =
-                self.prepare_region(priority, parent_origin, [18; 2], parent_stride as u32)?;
-            for sample_z in 0..18 {
-                for sample_x in 0..18 {
-                    let x = i64::from(parent_origin[0])
-                        + i64::from(sample_x) * i64::from(parent_stride);
-                    let z = i64::from(parent_origin[1])
-                        + i64::from(sample_z) * i64::from(parent_stride);
-                    let Some((x, z)) = i32::try_from(x).ok().zip(i32::try_from(z).ok()) else {
-                        return Err(WorldSourceError::SourceCoverageUnavailable);
-                    };
-                    if region.column(x, z).is_none() {
-                        return Err(WorldSourceError::MalformedMacroBlock);
-                    }
-                }
-            }
-            Some(region)
-        } else {
-            None
-        };
-        let aliases = self.collidable_edit_aliases(edits, coord, priority)?;
-        let (mut features, ecology_aggregate_shift) =
-            self.ecology_features_for_surface(coord, priority)?;
-        features.retain(|feature| {
-            // An outer representative is an area-filtered forest stand, not the selected
-            // canonical tree. Removing that one sub-pixel tree must not erase the whole canopy.
-            ecology_aggregate_shift > 0
-                || edits.skyline_feature_is_pristine_with(*feature, |coord| {
-                    feature.material_at(coord).unwrap_or(Material::Air)
-                })
-        });
-        let surface_dependency_floors = RefCell::new(BTreeMap::new());
-        let terrain = generate_surface_tile_mesh_with_materials_and_aggregated_ecology_and_shading(
-            coord,
-            |x, z| {
-                let sampled = self
-                    .edited_surface(&region, edits, x, z)
-                    .unwrap_or((i32::MIN, Material::Stone));
-                aliases
-                    .get(&(x, z))
-                    .copied()
-                    .filter(|(height, _)| *height >= sampled.0)
-                    .unwrap_or(sampled)
-            },
-            |x, y, z| {
-                let Some(column) = region.column(x, z) else {
-                    return Material::Stone;
-                };
-                let generated = material_for_column(column, self.sea_level_voxels, y);
-                let dependency_floor = *surface_dependency_floors
-                    .borrow_mut()
-                    .entry((x, z))
-                    .or_insert_with(|| {
-                        self.edited_surface(&region, edits, x, z)
-                            .map_or(column.height, |surface| column.height.min(surface.0))
-                    });
-                if coord.level == SurfaceLodLevel::Stride2 || y >= dependency_floor {
-                    edits.resolve_generated(VoxelCoord::new(x, y, z), generated)
-                } else {
-                    generated
-                }
-            },
-            |x, z| {
-                self.edited_surface(&region, edits, x, z)
-                    .unwrap_or((i32::MIN, Material::Stone))
-            },
-            |x, z| {
-                parent_region
-                    .as_ref()
-                    .and_then(|region| self.edited_surface(region, edits, x, z).ok())
-                    .unwrap_or((i32::MIN, Material::Stone))
-            },
-            &features,
-            ecology_aggregate_shift,
-        );
-        let water = generate_water_tile_mesh_with(coord, self.sea_level_voxels, |x, z| {
-            region.column(x, z).is_some_and(|column| {
-                edits
-                    .override_at(VoxelCoord::new(x, self.sea_level_voxels, z))
-                    .map_or(column.height < self.sea_level_voxels, |material| {
-                        material == Material::Water
-                    })
-            })
-        });
-        Ok(SurfaceTileSnapshot {
-            source_identity_hash: self.identity_hash,
-            terrain,
-            water,
-            exact_detail_chunks: exact_detail_chunks_for_surface_tile(edits, coord),
-        })
-    }
-
-    fn collidable_edit_aliases(
-        &self,
-        edits: &EditMap,
-        coord: SurfaceTileCoord,
-        priority: WorldProductPriority,
-    ) -> Result<SurfaceAliasMap, WorldSourceError> {
-        let [origin_x, origin_z] = coord.voxel_origin();
-        let stride = coord.stride_voxels();
-        let halo_span = (SURFACE_TILE_EDGE_CELLS + 1).saturating_mul(stride);
-        let bounds = [
-            [
-                origin_x.saturating_sub(stride),
-                origin_z.saturating_sub(stride),
-            ],
-            [
-                origin_x.saturating_add(halo_span),
-                origin_z.saturating_add(halo_span),
-            ],
-        ];
-        let coordinates = edits.edited_column_coordinates_in(bounds);
-        let mut aliases = BTreeMap::new();
-        for coordinate_batch in coordinates.chunks(MAX_WORLD_PRODUCT_BATCH) {
-            let requests = coordinate_batch
-                .iter()
-                .map(|&(x, z)| MacroBlockRequest {
-                    origin: [x, z],
-                    sample_shape: [1, 1],
-                    stride_voxels: 1,
-                })
-                .collect::<Vec<_>>();
-            let result = self.source.request_blocks(MacroBlockBatch {
-                priority,
-                requests: requests.clone(),
-            })?;
-            if result.source_identity_hash != self.macro_source_identity_hash
-                || result.blocks.len() != requests.len()
-            {
-                return Err(WorldSourceError::MalformedMacroBlock);
-            }
-            for (request, block) in requests.into_iter().zip(result.blocks) {
-                let grid = self.validate_block(request, block)?;
-                let [x, z] = request.origin;
-                let column = grid
-                    .column(x, z)
-                    .ok_or(WorldSourceError::MalformedMacroBlock)?;
-                let generated_surface = (
-                    column.height,
-                    surface_profile(column, self.sea_level_voxels).0,
-                );
-                let (height, material) =
-                    edits.surface_sample_with(x, z, generated_surface, i32::MIN, |voxel| {
-                        material_for_column(column, self.sea_level_voxels, voxel.y)
-                    });
-                if !material.is_collidable()
-                    || edits.override_at(VoxelCoord::new(x, height, z)) != Some(material)
-                {
-                    continue;
-                }
-                let cell_x = (i64::from(x) - i64::from(origin_x)).div_euclid(i64::from(stride));
-                let cell_z = (i64::from(z) - i64::from(origin_z)).div_euclid(i64::from(stride));
-                if !(-1..=i64::from(SURFACE_TILE_EDGE_CELLS)).contains(&cell_x)
-                    || !(-1..=i64::from(SURFACE_TILE_EDGE_CELLS)).contains(&cell_z)
-                {
-                    continue;
-                }
-                let sample_x =
-                    i64::from(origin_x) + cell_x * i64::from(stride) + i64::from(stride / 2);
-                let sample_z =
-                    i64::from(origin_z) + cell_z * i64::from(stride) + i64::from(stride / 2);
-                let Some((sample_x, sample_z)) = i32::try_from(sample_x)
-                    .ok()
-                    .zip(i32::try_from(sample_z).ok())
-                else {
-                    continue;
-                };
-                aliases
-                    .entry((sample_x, sample_z))
-                    .and_modify(|current: &mut (i32, Material)| {
-                        if height > current.0 {
-                            *current = (height, material);
-                        }
-                    })
-                    .or_insert((height, material));
-            }
-        }
-        Ok(aliases)
-    }
-
-    fn edited_surface(
-        &self,
-        region: &PreparedMacroRegion,
-        edits: &EditMap,
-        x: i32,
-        z: i32,
-    ) -> Result<(i32, Material), WorldSourceError> {
-        let column = region
-            .column(x, z)
-            .ok_or(WorldSourceError::MalformedMacroBlock)?;
-        let surface_material = surface_profile(column, self.sea_level_voxels).0;
-        Ok(
-            edits.surface_sample_with(x, z, (column.height, surface_material), i32::MIN, |coord| {
-                material_for_column(column, self.sea_level_voxels, coord.y)
-            }),
-        )
-    }
-
     fn surface_sample_from_region(
         &self,
         region: &PreparedMacroRegion,
@@ -848,23 +593,6 @@ impl HeightfieldWorldSource {
         self.ecology_features_from_candidates(candidates, priority)
     }
 
-    fn ecology_features_for_surface(
-        &self,
-        coord: SurfaceTileCoord,
-        priority: WorldProductPriority,
-    ) -> Result<(Vec<SkylineFeature>, u8), WorldSourceError> {
-        if !self.add_subgrid_relief {
-            return Ok((Vec::new(), 0));
-        }
-        let candidates = ecology_candidates_in(self.composer_seed, coord.voxel_bounds_xz())?;
-        let (candidates, aggregate_shift) =
-            aggregate_ecology_candidates_for_surface(coord.level, candidates);
-        Ok((
-            self.ecology_features_from_candidates(candidates, priority)?,
-            aggregate_shift,
-        ))
-    }
-
     fn ecology_features_from_candidates(
         &self,
         candidates: Vec<EcologyCandidate>,
@@ -912,20 +640,6 @@ impl HeightfieldWorldSource {
         }
         Ok(features)
     }
-
-    fn conservative_surface_tiles_affected_by_voxels(
-        &self,
-        edits: &EditMap,
-        coords: &[VoxelCoord],
-    ) -> Vec<SurfaceTileCoord> {
-        let mut affected = BTreeSet::new();
-        for &coord in coords {
-            for level in SurfaceLodLevel::ALL {
-                affected.extend(self.surface_tiles_affected_by_voxel(edits, level, coord));
-            }
-        }
-        affected.into_iter().collect()
-    }
 }
 
 impl WorldSourceEngine for HeightfieldWorldSource {
@@ -955,9 +669,6 @@ impl WorldSourceEngine for HeightfieldWorldSource {
                 WorldProductRequest::SurfaceSearch(search) => self
                     .surface_search(request.priority, search)
                     .map(WorldProduct::SurfaceSearch),
-                WorldProductRequest::SurfaceTile(coord) => self
-                    .surface_tile(&EditMap::default(), coord, request.priority)
-                    .map(WorldProduct::SurfaceTile),
             };
             items.push(WorldProductBatchItem {
                 request: product_request,
@@ -1011,148 +722,9 @@ impl WorldSourceEngine for HeightfieldWorldSource {
         Ok(samples)
     }
 
-    fn generate_surface_tiles(
-        &self,
-        priority: WorldProductPriority,
-        coords: &[SurfaceTileCoord],
-        emit: &mut dyn FnMut(WorldProductBatchItem) -> ControlFlow<()>,
-    ) -> Result<WorldSourceIdentityHash, WorldSourceError> {
-        if coords.len() > MAX_WORLD_PRODUCT_BATCH {
-            return Err(WorldSourceError::BatchTooLarge);
-        }
-        let edits = EditMap::default();
-        for &coord in coords {
-            let item = WorldProductBatchItem {
-                request: WorldProductRequest::SurfaceTile(coord),
-                result: self
-                    .surface_tile(&edits, coord, priority)
-                    .map(WorldProduct::SurfaceTile),
-            };
-            if emit(item).is_break() {
-                break;
-            }
-        }
-        Ok(self.identity_hash)
-    }
-
-    fn generate_edited_surface_tile(
-        &self,
-        edits: &EditMap,
-        coord: SurfaceTileCoord,
-    ) -> Result<SurfaceTileSnapshot, WorldSourceError> {
-        self.surface_tile(edits, coord, WorldProductPriority::ReplacementSurface)
-    }
-
-    fn surface_tiles_affected_by_voxel(
-        &self,
-        edits: &EditMap,
-        level: SurfaceLodLevel,
-        coord: VoxelCoord,
-    ) -> Vec<SurfaceTileCoord> {
-        let dependency_floor = self
-            .prepare_region(
-                WorldProductPriority::ReplacementSurface,
-                [coord.x, coord.z],
-                [1, 1],
-                1,
-            )
-            .ok()
-            .and_then(|region| {
-                let generated = region.column(coord.x, coord.z)?.height;
-                let edited = self
-                    .edited_surface(&region, edits, coord.x, coord.z)
-                    .ok()?
-                    .0;
-                Some(generated.min(edited))
-            });
-        let affects_terrain_shell = level == SurfaceLodLevel::Stride2
-            || dependency_floor.is_none_or(|surface_y| coord.y >= surface_y);
-        let mut affected = if affects_terrain_shell {
-            surface_tiles_affected_by_column(level, coord.x, coord.z)
-        } else {
-            Vec::new()
-        };
-        for feature in self.skyline_features_at(coord) {
-            if feature.material_at(coord).is_none() {
-                continue;
-            }
-            let owner = SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
-            if owner.is_world_representable() && !affected.contains(&owner) {
-                affected.push(owner);
-            }
-        }
-        affected
-    }
-
-    fn surface_tiles_affected_by_voxels(
-        &self,
-        edits: &EditMap,
-        coords: &[VoxelCoord],
-    ) -> Vec<SurfaceTileCoord> {
-        let Some(min_x) = coords.iter().map(|coord| coord.x).min() else {
-            return Vec::new();
-        };
-        let min_z = coords.iter().map(|coord| coord.z).min().unwrap_or(0);
-        let max_x = coords.iter().map(|coord| coord.x).max().unwrap_or(min_x);
-        let max_z = coords.iter().map(|coord| coord.z).max().unwrap_or(min_z);
-        let Some(width) = max_x
-            .checked_sub(min_x)
-            .and_then(|span| span.checked_add(1))
-            .and_then(|span| u32::try_from(span).ok())
-        else {
-            return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
-        };
-        let Some(depth) = max_z
-            .checked_sub(min_z)
-            .and_then(|span| span.checked_add(1))
-            .and_then(|span| u32::try_from(span).ok())
-        else {
-            return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
-        };
-        let Ok(region) = self.prepare_region(
-            WorldProductPriority::ReplacementSurface,
-            [min_x, min_z],
-            [width, depth],
-            1,
-        ) else {
-            return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
-        };
-        let mut affected = BTreeSet::new();
-        for &coord in coords {
-            let Some(generated_surface_y) =
-                region.column(coord.x, coord.z).map(|column| column.height)
-            else {
-                return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
-            };
-            let Ok((edited_surface_y, _)) = self.edited_surface(&region, edits, coord.x, coord.z)
-            else {
-                return self.conservative_surface_tiles_affected_by_voxels(edits, coords);
-            };
-            let dependency_floor = generated_surface_y.min(edited_surface_y);
-            for level in SurfaceLodLevel::ALL {
-                if level == SurfaceLodLevel::Stride2 || coord.y >= dependency_floor {
-                    affected.extend(surface_tiles_affected_by_column(level, coord.x, coord.z));
-                }
-            }
-            for feature in self.skyline_features_at(coord) {
-                if feature.material_at(coord).is_none() {
-                    continue;
-                }
-                for level in SurfaceLodLevel::ALL {
-                    let owner =
-                        SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
-                    if owner.is_world_representable() {
-                        affected.insert(owner);
-                    }
-                }
-            }
-        }
-        affected.into_iter().collect()
-    }
-
     fn atmosphere_sample(&self, x: i32, z: i32) -> (AtmosphereSample, SurfaceRegion) {
         let sample = self
-            .prepare_region(WorldProductPriority::VisibleSurface, [x, z], [1, 1], 1)
+            .prepare_region(WorldProductPriority::Prefetch, [x, z], [1, 1], 1)
             .ok()
             .and_then(|region| region.column(x, z).copied());
         let Some(column) = sample else {
@@ -1172,7 +744,7 @@ impl WorldSourceEngine for HeightfieldWorldSource {
     }
 
     fn skyline_features_anchored_in(&self, bounds: [[i32; 2]; 2]) -> Vec<SkylineFeature> {
-        self.ecology_features_anchored_in(bounds, WorldProductPriority::VisibleSurface)
+        self.ecology_features_anchored_in(bounds, WorldProductPriority::Prefetch)
             .unwrap_or_default()
     }
 
@@ -1353,48 +925,6 @@ fn ecology_candidates_in(
         }
     }
     Ok(candidates)
-}
-
-fn aggregate_ecology_candidates_for_surface(
-    level: SurfaceLodLevel,
-    candidates: Vec<EcologyCandidate>,
-) -> (Vec<EcologyCandidate>, u8) {
-    let aggregate_shift = match level {
-        SurfaceLodLevel::Stride128 => 1,
-        SurfaceLodLevel::Stride256 => 2,
-        _ => 0,
-    };
-    if aggregate_shift == 0 {
-        return (candidates, 0);
-    }
-    let group_edge = 1_i32 << aggregate_shift;
-    let represented_candidates = (group_edge * group_edge) as f32;
-    let mut groups = BTreeMap::<(i32, i32), EcologyCandidate>::new();
-    for candidate in candidates {
-        let key = (
-            candidate.cell_x.div_euclid(group_edge),
-            candidate.cell_z.div_euclid(group_edge),
-        );
-        let replace = groups.get(&key).is_none_or(|current| {
-            (candidate.priority, candidate.cell_x, candidate.cell_z)
-                < (current.priority, current.cell_x, current.cell_z)
-        });
-        if replace {
-            groups.insert(key, candidate);
-        }
-    }
-    let candidates = groups
-        .into_values()
-        .map(|mut candidate| {
-            // One area-preserving representative should appear whenever any member of its
-            // aggregate stand would appear. Transform the still-independent uniform occurrence
-            // channel so ecology_tree's original density threshold gets exactly that probability.
-            candidate.occurrence =
-                1.0 - (1.0 - candidate.occurrence).powf(1.0 / represented_candidates);
-            candidate
-        })
-        .collect();
-    (candidates, aggregate_shift)
 }
 
 fn ecology_candidate(seed: u64, cell_x: i32, cell_z: i32) -> Option<EcologyCandidate> {
@@ -2193,11 +1723,11 @@ mod tests {
         let source = diffusion_heightfield();
         let bounds = [[-47, -31], [94, 83]];
         let [minimum, maximum] = source
-            .conservative_surface_height_bounds(WorldProductPriority::VisibleSurface, bounds)
+            .conservative_surface_height_bounds(WorldProductPriority::VirtualTerrain, bounds)
             .expect("conservative bounds");
         let dense = source
             .surface_sample_block(
-                WorldProductPriority::VisibleSurface,
+                WorldProductPriority::VirtualTerrain,
                 SurfaceSampleBlockRequest {
                     origin: bounds[0],
                     sample_shape: [
@@ -2323,115 +1853,6 @@ mod tests {
             hot_wet,
             SurfaceRegion::RedBadlands | SurfaceRegion::PaleDunes
         ));
-    }
-
-    #[test]
-    fn diffusion_surface_walls_at_reported_region_keep_surface_cover_one_voxel_deep() {
-        let source = diffusion_heightfield();
-        let edits = EditMap::default();
-        let mut wall_quads = 0_usize;
-        for level in SurfaceLodLevel::ALL {
-            let coord = SurfaceTileCoord::containing(level, 2_275, 4_520);
-            let tile = source
-                .generate_edited_surface_tile(&edits, coord)
-                .expect("reported-region diffusion surface tile")
-                .terrain;
-            for quad in tile
-                .quads
-                .iter()
-                .chain(tile.morph_closures.iter().map(|closure| &closure.quad))
-                .filter(|quad| quad.face != crate::mesh::FACE_POS_Y)
-            {
-                wall_quads += 1;
-                if matches!(
-                    quad.material,
-                    Material::Grass | Material::Moss | Material::Snow
-                ) {
-                    assert_eq!(
-                        quad.extent[1], 1,
-                        "{level:?} stretched {:?} down {} voxels at {:?}",
-                        quad.material, quad.extent[1], quad.origin
-                    );
-                }
-            }
-        }
-        assert!(
-            wall_quads > 0,
-            "fixture must exercise vertical surface walls"
-        );
-    }
-
-    #[test]
-    fn excavated_diffusion_crater_exposes_strata_at_every_surface_lod() {
-        let source = diffusion_heightfield();
-        let reported_position = [2_275, 4_520];
-        for level in SurfaceLodLevel::ALL {
-            let coord =
-                SurfaceTileCoord::containing(level, reported_position[0], reported_position[1]);
-            let stride = coord.stride_voxels();
-            let origin = coord.voxel_origin();
-            let cell = [
-                (reported_position[0] - origin[0]).div_euclid(stride),
-                (reported_position[1] - origin[1]).div_euclid(stride),
-            ];
-            let crater = [
-                origin[0] + cell[0] * stride + stride / 2,
-                origin[1] + cell[1] * stride + stride / 2,
-            ];
-            let sample_region = source
-                .prepare_region(WorldProductPriority::VisibleSurface, crater, [1, 1], 1)
-                .expect("reported-region material sample");
-            let surface = source
-                .surface_sample_from_region(&sample_region, crater[0], crater[1])
-                .expect("reported-region surface");
-            let mut edits = EditMap::default();
-            for y in surface.height.saturating_sub(11)..=surface.height {
-                let generated = source
-                    .material_at(&sample_region, crater[0], y, crater[1])
-                    .expect("reported-region stratum");
-                edits.set_against_generated(
-                    VoxelCoord::new(crater[0], y, crater[1]),
-                    Material::Air,
-                    generated,
-                );
-            }
-            assert_eq!(edits.len(), 12);
-
-            let tile = source
-                .generate_edited_surface_tile(&edits, coord)
-                .expect("edited reported-region diffusion surface tile")
-                .terrain;
-            let mut exposed_substrate = BTreeSet::new();
-            for quad in tile
-                .quads
-                .iter()
-                .chain(tile.morph_closures.iter().map(|closure| &closure.quad))
-                .filter(|quad| quad.face != crate::mesh::FACE_POS_Y)
-            {
-                if matches!(
-                    quad.material,
-                    Material::Grass | Material::Moss | Material::Snow
-                ) {
-                    assert_eq!(
-                        quad.extent[1], 1,
-                        "{level:?} stretched {:?} into the excavated opening at {:?}",
-                        quad.material, quad.origin
-                    );
-                }
-                if matches!(
-                    quad.material,
-                    Material::Dirt | Material::Stone | Material::Basalt | Material::Limestone
-                ) && (quad.origin[0] - crater[0]).abs() <= stride * 2
-                    && (quad.origin[2] - crater[1]).abs() <= stride * 2
-                {
-                    exposed_substrate.insert(quad.material.id());
-                }
-            }
-            assert!(
-                !exposed_substrate.is_empty(),
-                "{level:?} crater must expose a nearby non-surface stratum"
-            );
-        }
     }
 
     #[test]
@@ -2593,85 +2014,6 @@ mod tests {
     }
 
     #[test]
-    fn diffusion_ecology_is_deterministic_canonical_near_lod_editable_and_far_aggregated() {
-        let source = diffusion_heightfield();
-        let bounds = [[-2_048, -2_048], [2_048, 2_048]];
-        let features = source.skyline_features_anchored_in(bounds);
-        assert!(!features.is_empty());
-        assert_eq!(features, source.skyline_features_anchored_in(bounds));
-        assert!(
-            features
-                .iter()
-                .all(|feature| feature.tree_species().is_some())
-        );
-        assert!(
-            features
-                .iter()
-                .map(|feature| feature.tree_variation())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                >= 3
-        );
-
-        let feature = features[0];
-        let trunk = VoxelCoord::new(feature.anchor[0], feature.anchor[1] + 1, feature.anchor[2]);
-        let WorldProduct::Chunk(chunk) =
-            product(&source, WorldProductRequest::ChunkWithHalo(trunk.chunk()))
-                .expect("tree chunk is covered")
-        else {
-            panic!("expected canonical chunk");
-        };
-        assert_eq!(
-            chunk_material_at(&chunk, trunk.x, trunk.y, trunk.z),
-            Material::Wood
-        );
-
-        let mut edits = EditMap::default();
-        edits.insert_override(trunk, Material::Air);
-        for level in SurfaceLodLevel::ALL {
-            let owner = SurfaceTileCoord::containing(level, feature.anchor[0], feature.anchor[2]);
-            let pristine = source
-                .generate_edited_surface_tile(&EditMap::default(), owner)
-                .expect("pristine ecology surface tile");
-            let pristine_tree_quads = pristine
-                .terrain
-                .quads
-                .iter()
-                .filter(|quad| matches!(quad.material, Material::Wood | Material::Leaves))
-                .count();
-            assert!(pristine_tree_quads > 0, "tree absent at {level:?}");
-            let edited = source
-                .generate_edited_surface_tile(&edits, owner)
-                .expect("edited ecology surface tile");
-            let edited_tree_quads = edited
-                .terrain
-                .quads
-                .iter()
-                .filter(|quad| matches!(quad.material, Material::Wood | Material::Leaves))
-                .count();
-            if matches!(
-                level,
-                SurfaceLodLevel::Stride128 | SurfaceLodLevel::Stride256
-            ) {
-                assert_eq!(
-                    edited_tree_quads, pristine_tree_quads,
-                    "one sub-pixel tree changed an aggregate stand at {level:?}"
-                );
-            } else {
-                assert!(
-                    edited_tree_quads < pristine_tree_quads,
-                    "edit absent at {level:?}"
-                );
-            }
-            assert!(
-                source
-                    .surface_tiles_affected_by_voxel(&edits, level, trunk)
-                    .contains(&owner)
-            );
-        }
-    }
-
-    #[test]
     fn climate_niches_can_select_at_least_ten_tree_species() {
         let mut species = std::collections::BTreeSet::new();
         for temperature_step in 0..=20 {
@@ -2746,35 +2088,6 @@ mod tests {
                     assert!(delta_x * delta_x + delta_z * delta_z >= minimum_squared);
                 }
             }
-        }
-    }
-
-    #[test]
-    fn outer_surface_ecology_uses_deterministic_area_representatives() {
-        let seed = 0xa11c_e5eed;
-        for (level, expected_shift) in [
-            (SurfaceLodLevel::Stride128, 1),
-            (SurfaceLodLevel::Stride256, 2),
-        ] {
-            let coord = SurfaceTileCoord::new(level, -1, 2);
-            let raw =
-                ecology_candidates_in(seed, coord.voxel_bounds_xz()).expect("bounded ecology");
-            let (aggregated, shift) = aggregate_ecology_candidates_for_surface(level, raw.clone());
-            let (repeated, repeated_shift) =
-                aggregate_ecology_candidates_for_surface(level, raw.clone());
-            assert_eq!(shift, expected_shift);
-            assert_eq!(repeated_shift, expected_shift);
-            assert_eq!(aggregated, repeated);
-            assert!(
-                aggregated.len()
-                    <= SURFACE_TILE_EDGE_CELLS as usize * SURFACE_TILE_EDGE_CELLS as usize
-            );
-            assert!(aggregated.len() < raw.len());
-            assert!(
-                aggregated
-                    .iter()
-                    .all(|candidate| (0.0..=1.0).contains(&candidate.occurrence))
-            );
         }
     }
 
@@ -2919,45 +2232,6 @@ mod tests {
     }
 
     #[test]
-    fn heightfield_surface_emission_matches_batch_order_and_stops_early() {
-        let source = heightfield(FakeBehavior::Valid);
-        let coords = [
-            SurfaceTileCoord::new(SurfaceLodLevel::Stride256, -1, 2),
-            SurfaceTileCoord::new(SurfaceLodLevel::Stride256, 0, 2),
-        ];
-        let expected = source
-            .generate_batch(WorldProductBatch {
-                priority: WorldProductPriority::VisibleSurface,
-                requests: coords
-                    .iter()
-                    .copied()
-                    .map(WorldProductRequest::SurfaceTile)
-                    .collect(),
-            })
-            .expect("heightfield surface batch");
-        let engine: &dyn WorldSourceEngine = &source;
-        let mut emitted = Vec::new();
-        let identity = engine
-            .generate_surface_tiles(WorldProductPriority::VisibleSurface, &coords, &mut |item| {
-                emitted.push(item);
-                ControlFlow::Continue(())
-            })
-            .expect("progressive heightfield surfaces");
-
-        assert_eq!(identity, expected.source_identity_hash);
-        assert_eq!(emitted, expected.items);
-
-        let mut stopped = Vec::new();
-        engine
-            .generate_surface_tiles(WorldProductPriority::VisibleSurface, &coords, &mut |item| {
-                stopped.push(item.request);
-                ControlFlow::Break(())
-            })
-            .expect("stopped heightfield surfaces");
-        assert_eq!(stopped, [WorldProductRequest::SurfaceTile(coords[0])]);
-    }
-
-    #[test]
     fn all_products_share_one_biome_strata_water_and_air_composition() {
         let source = heightfield(FakeBehavior::Valid);
         let coord = ChunkCoord::new(0, 0, 0);
@@ -3026,30 +2300,6 @@ mod tests {
             panic!("expected surface search");
         };
         assert_eq!(search.hit.map(|hit| hit.coord), Some([0, 0]));
-
-        let tile_coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0);
-        let WorldProduct::SurfaceTile(tile) =
-            product(&source, WorldProductRequest::SurfaceTile(tile_coord))
-                .expect("covered surface tile")
-        else {
-            panic!("expected surface tile");
-        };
-        assert_eq!(tile.terrain.coord, tile_coord);
-        assert_eq!(tile.water.coord, tile_coord);
-        assert!(!tile.terrain.quads.is_empty());
-        assert!(!tile.water.quads.is_empty());
-        assert!(
-            tile.water
-                .quads
-                .iter()
-                .all(|quad| quad.origin[1] == source.sea_level_voxels())
-        );
-        assert_eq!(
-            tile.water.quads[0].origin[1] + 1,
-            4,
-            "streamed and exact water must share the same free-surface plane"
-        );
-        assert_eq!(tile.source_identity_hash, source.identity().identity_hash());
     }
 
     #[test]
@@ -3070,14 +2320,10 @@ mod tests {
         assert!(
             product(
                 &low,
-                WorldProductRequest::SurfaceTile(SurfaceTileCoord::new(
-                    SurfaceLodLevel::Stride2,
-                    0,
-                    0,
-                )),
+                WorldProductRequest::ChunkWithHalo(ChunkCoord::new(0, 0, 0)),
             )
             .is_ok(),
-            "derived identity must not reject upstream macro blocks"
+            "composed identity must not reject upstream macro blocks"
         );
     }
 
@@ -3117,110 +2363,6 @@ mod tests {
                     WorldProductRequest::ChunkWithHalo(ChunkCoord::new(0, 0, 0)),
                 ),
                 Err(expected)
-            );
-        }
-    }
-
-    #[test]
-    fn edited_surface_tiles_change_and_restore_without_a_generator() {
-        let source = heightfield(FakeBehavior::Valid);
-        let coord = SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0);
-        let pristine = source
-            .generate_edited_surface_tile(&EditMap::default(), coord)
-            .expect("pristine tile");
-        let target = VoxelCoord::new(1, 1, 1);
-        let mut edits = EditMap::default();
-        edits.insert_override(target, Material::Air);
-        let excavated = source
-            .generate_edited_surface_tile(&edits, coord)
-            .expect("edited tile");
-        assert_ne!(excavated.terrain, pristine.terrain);
-        assert!(
-            source
-                .surface_tiles_affected_by_voxel(&edits, coord.level, target)
-                .contains(&coord)
-        );
-
-        edits.replace_durable_override(target, None);
-        assert_eq!(
-            source
-                .generate_edited_surface_tile(&edits, coord)
-                .expect("restored tile"),
-            pristine
-        );
-
-        edits.insert_override(VoxelCoord::new(1, 3, 1), Material::Air);
-        let drained = source
-            .generate_edited_surface_tile(&edits, coord)
-            .expect("edited water tile");
-        assert_ne!(drained.water, pristine.water);
-    }
-
-    #[test]
-    fn batched_subsurface_edits_invalidate_only_the_exact_view_surface_shell() {
-        let source = heightfield(FakeBehavior::Valid);
-        let edits = EditMap::default();
-
-        let underground = source.surface_tiles_affected_by_voxels(
-            &edits,
-            &[VoxelCoord::new(1, -4, 1), VoxelCoord::new(2, 0, 2)],
-        );
-        assert!(!underground.is_empty());
-        assert!(
-            underground
-                .iter()
-                .all(|coord| coord.level == SurfaceLodLevel::Stride2)
-        );
-        let surface = source.surface_tiles_affected_by_voxels(&edits, &[VoxelCoord::new(1, 1, 1)]);
-        assert!(
-            SurfaceLodLevel::ALL
-                .into_iter()
-                .all(|level| { surface.contains(&SurfaceTileCoord::containing(level, 1, 1)) })
-        );
-    }
-
-    #[test]
-    fn one_metre_subsurface_edit_has_bounded_surface_replacement_fanout() {
-        let source = heightfield(FakeBehavior::Valid);
-        let edits = EditMap::default();
-        let coords = (1..=10)
-            .flat_map(|z| {
-                (1..=10).flat_map(move |x| (-10..0).map(move |y| VoxelCoord::new(x, y, z)))
-            })
-            .collect::<Vec<_>>();
-        let affected = source.surface_tiles_affected_by_voxels(&edits, &coords);
-
-        assert!(!affected.is_empty());
-        assert!(
-            affected
-                .iter()
-                .all(|coord| coord.level == SurfaceLodLevel::Stride2)
-        );
-        assert!(
-            affected.len() <= 3,
-            "one cubic metre of tunnel edits fanned out to {} surface products",
-            affected.len()
-        );
-    }
-
-    #[test]
-    fn off_lattice_player_tower_is_promoted_into_every_coarse_surface_tile() {
-        let source = heightfield(FakeBehavior::Valid);
-        let mut edits = EditMap::default();
-        for y in 2..=45 {
-            edits.insert_override(VoxelCoord::new(1, y, 1), Material::Dirt);
-        }
-        for level in SurfaceLodLevel::ALL {
-            let coord = SurfaceTileCoord::new(level, 0, 0);
-            let pristine = source
-                .generate_edited_surface_tile(&EditMap::default(), coord)
-                .expect("pristine tile");
-            let built = source
-                .generate_edited_surface_tile(&edits, coord)
-                .expect("edited tile");
-            assert_ne!(
-                built.terrain, pristine.terrain,
-                "off-lattice tower vanished at {level:?}"
             );
         }
     }

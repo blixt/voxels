@@ -445,25 +445,6 @@ impl EditMap {
             .collect()
     }
 
-    pub(crate) fn edited_chunks_in_horizontal_chunk_bounds(
-        &self,
-        minimum_x: i32,
-        maximum_x: i32,
-        minimum_z: i32,
-        maximum_z: i32,
-    ) -> Vec<ChunkCoord> {
-        if minimum_x > maximum_x || minimum_z > maximum_z {
-            return Vec::new();
-        }
-        (minimum_x..=maximum_x)
-            .flat_map(|chunk_x| {
-                self.chunks
-                    .range((chunk_x, minimum_z, i32::MIN)..=(chunk_x, maximum_z, i32::MAX))
-                    .map(|(&(x, z, y), _)| ChunkCoord::new(x, y, z))
-            })
-            .collect()
-    }
-
     /// Encodes one independently checksummed durable edit chunk. Pristine chunks have no record.
     pub fn encode_chunk_overrides(&self, coord: ChunkCoord) -> Option<Vec<u8>> {
         let chunk = self.chunks.get(&chunk_key(coord))?;
@@ -589,13 +570,6 @@ impl EditMap {
         self.chunks
             .insert(chunk_key(coord), EditedChunk { overrides: decoded });
         Ok(())
-    }
-
-    /// Returns edited X/Z columns inside half-open bounds in deterministic order. Source-neutral
-    /// far-LOD composers use this sparse index to sample only columns that could need promotion to
-    /// a coarse cell instead of scanning the full tile at canonical resolution.
-    pub(crate) fn edited_column_coordinates_in(&self, bounds: [[i32; 2]; 2]) -> Vec<(i32, i32)> {
-        self.edited_columns_in(bounds).into_iter().collect()
     }
 
     /// Conservative far-LOD additions within half-open X/Z bounds. Excavations remain represented

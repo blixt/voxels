@@ -246,7 +246,7 @@ fn sample_volume(
     let mut maximum_height = i32::MIN;
     for requests in surface_requests.chunks(MAX_BATCH_ITEMS) {
         let result = source.generate_batch(WorldProductBatch {
-            priority: WorldProductPriority::VisibleSurface,
+            priority: WorldProductPriority::VirtualTerrain,
             requests: requests.to_vec(),
         })?;
         for item in result.items {
@@ -380,7 +380,7 @@ fn sample_fixed_region(
     ];
     let focus = find_surface_focus(source, eye_voxels, forward)?;
     let result = source.generate_batch(WorldProductBatch {
-        priority: WorldProductPriority::VisibleSurface,
+        priority: WorldProductPriority::VirtualTerrain,
         requests: vec![WorldProductRequest::SurfaceSampleBlock(
             SurfaceSampleBlockRequest {
                 origin: focus,
@@ -534,7 +534,7 @@ fn find_surface_focus(
         })
         .collect::<Vec<_>>();
     let result = source.generate_batch(WorldProductBatch {
-        priority: WorldProductPriority::VisibleSurface,
+        priority: WorldProductPriority::VirtualTerrain,
         requests,
     })?;
     for (index, item) in result.items.into_iter().enumerate() {

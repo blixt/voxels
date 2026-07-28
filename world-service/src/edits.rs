@@ -20,8 +20,6 @@ use voxels_world::{
     VoxelBlockRequest, VoxelCoord, WorldId, WorldProduct, WorldProductBatch, WorldProductPriority,
     WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash,
 };
-#[cfg(test)]
-use voxels_world::{SurfaceLodLevel, SurfaceTileCoord};
 
 use crate::EDIT_DATABASE_SCHEMA_VERSION;
 
@@ -2002,24 +2000,6 @@ mod tests {
             }
             drop(entered);
             self.inner.generate_batch(request)
-        }
-
-        fn generate_edited_surface_tile(
-            &self,
-            edits: &EditMap,
-            coord: SurfaceTileCoord,
-        ) -> Result<voxels_world::SurfaceTileSnapshot, voxels_world::WorldSourceError> {
-            self.inner.generate_edited_surface_tile(edits, coord)
-        }
-
-        fn surface_tiles_affected_by_voxel(
-            &self,
-            edits: &EditMap,
-            level: SurfaceLodLevel,
-            coord: VoxelCoord,
-        ) -> Vec<SurfaceTileCoord> {
-            self.inner
-                .surface_tiles_affected_by_voxel(edits, level, coord)
         }
 
         fn atmosphere_sample(

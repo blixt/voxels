@@ -4,14 +4,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::Notify;
 use voxels_world::WorldProductPriority;
 
-// Immediate surface work protects the ground beneath a moving player, but it must not turn the
-// shared worker pool into a permanent priority inversion for every other visible product. Eight
-// grants preserve up to four full two-worker waves of urgent work while putting a finite bound on
-// ordinary wait time.
+// Virtual-terrain work protects the last-valid-parent chain beneath a moving player, but it must
+// not turn the shared worker pool into a permanent priority inversion for every other visible
+// product. Eight grants preserve up to four full two-worker waves of urgent work while putting a
+// finite bound on ordinary wait time.
 const MAX_CONSECUTIVE_IMMEDIATE_GRANTS: usize = 8;
 
 /// Keeps the configured generation capacity while waking collision work first, then the bounded
-/// current-surface ancestor chain, before queued ordinary generation. Already-executing work is
+/// virtual-terrain ancestor chain, before queued ordinary generation. Already-executing work is
 /// never interrupted.
 pub(crate) struct PriorityGenerationLimiter {
     capacity: usize,
@@ -41,13 +41,8 @@ impl GenerationLane {
     fn for_priority(priority: WorldProductPriority) -> Self {
         match priority {
             WorldProductPriority::CollisionCritical => Self::Collision,
-            WorldProductPriority::VirtualTerrain | WorldProductPriority::ImmediateSurface => {
-                Self::Immediate
-            }
-            WorldProductPriority::VisibleChunk
-            | WorldProductPriority::VisibleSurface
-            | WorldProductPriority::ReplacementSurface
-            | WorldProductPriority::Prefetch => Self::Ordinary,
+            WorldProductPriority::VirtualTerrain => Self::Immediate,
+            WorldProductPriority::VisibleChunk | WorldProductPriority::Prefetch => Self::Ordinary,
         }
     }
 }
@@ -241,7 +236,7 @@ mod tests {
     #[tokio::test]
     async fn collision_generation_jumps_queued_ordinary_work() {
         let limiter = PriorityGenerationLimiter::new(1);
-        let held = limiter.acquire(WorldProductPriority::VisibleSurface).await;
+        let held = limiter.acquire(WorldProductPriority::VisibleChunk).await;
         let order = Arc::new(Mutex::new(Vec::new()));
 
         let ordinary_limiter = Arc::clone(&limiter);
@@ -299,7 +294,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn immediate_surface_generation_jumps_queued_ordinary_work() {
+    async fn virtual_terrain_generation_jumps_queued_ordinary_work() {
         let limiter = PriorityGenerationLimiter::new(1);
         let held = limiter.acquire(WorldProductPriority::Prefetch).await;
         let order = Arc::new(Mutex::new(Vec::new()));
@@ -308,7 +303,7 @@ mod tests {
         let ordinary_order = Arc::clone(&order);
         let ordinary = tokio::spawn(async move {
             let _permit = ordinary_limiter
-                .acquire(WorldProductPriority::VisibleSurface)
+                .acquire(WorldProductPriority::VisibleChunk)
                 .await;
             ordinary_order
                 .lock()
@@ -327,7 +322,7 @@ mod tests {
         let immediate_order = Arc::clone(&order);
         let immediate = tokio::spawn(async move {
             let _permit = immediate_limiter
-                .acquire(WorldProductPriority::ImmediateSurface)
+                .acquire(WorldProductPriority::VirtualTerrain)
                 .await;
             immediate_order
                 .lock()
@@ -359,7 +354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collision_generation_still_jumps_immediate_surface_work() {
+    async fn collision_generation_still_jumps_virtual_terrain_work() {
         let limiter = PriorityGenerationLimiter::new(1);
         let held = limiter.acquire(WorldProductPriority::Prefetch).await;
         let order = Arc::new(Mutex::new(Vec::new()));
@@ -368,7 +363,7 @@ mod tests {
         let immediate_order = Arc::clone(&order);
         let immediate = tokio::spawn(async move {
             let _permit = immediate_limiter
-                .acquire(WorldProductPriority::ImmediateSurface)
+                .acquire(WorldProductPriority::VirtualTerrain)
                 .await;
             immediate_order
                 .lock()
@@ -421,14 +416,14 @@ mod tests {
     #[tokio::test]
     async fn ordinary_generation_has_a_bounded_turn_during_sustained_immediate_work() {
         let limiter = PriorityGenerationLimiter::new(1);
-        let held = limiter.acquire(WorldProductPriority::VisibleSurface).await;
+        let held = limiter.acquire(WorldProductPriority::VisibleChunk).await;
         let (order_tx, mut order_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let ordinary_limiter = Arc::clone(&limiter);
         let ordinary_tx = order_tx.clone();
         let ordinary = tokio::spawn(async move {
             let _permit = ordinary_limiter
-                .acquire(WorldProductPriority::VisibleSurface)
+                .acquire(WorldProductPriority::VisibleChunk)
                 .await;
             let _ = ordinary_tx.send("ordinary");
         });
@@ -446,7 +441,7 @@ mod tests {
             let immediate_tx = order_tx.clone();
             immediate.push(tokio::spawn(async move {
                 let _permit = immediate_limiter
-                    .acquire(WorldProductPriority::ImmediateSurface)
+                    .acquire(WorldProductPriority::VirtualTerrain)
                     .await;
                 let _ = immediate_tx.send("immediate");
             }));

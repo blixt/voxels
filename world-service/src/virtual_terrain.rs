@@ -1004,7 +1004,7 @@ mod tests {
     fn dense_region_sampling_covers_the_exact_leaf_halo() {
         let source = ProceduralWorldSource::new(17);
         let sampled =
-            sample_region(&source, root(), WorldProductPriority::VisibleSurface).expect("sample");
+            sample_region(&source, root(), WorldProductPriority::VisibleChunk).expect("sample");
         let bounds = root().bounds().expect("bounds");
         assert!(
             sampled

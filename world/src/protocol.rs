@@ -3783,7 +3783,6 @@ fn encode_world_source_error(error: WorldSourceError) -> u16 {
     match error {
         WorldSourceError::BatchTooLarge => 1,
         WorldSourceError::InvalidChunkCoordinate => 2,
-        WorldSourceError::InvalidSurfaceTileCoordinate => 3,
         WorldSourceError::InvalidBlockCoordinate => 4,
         WorldSourceError::EmptyBlock => 5,
         WorldSourceError::BlockTooLarge => 6,
@@ -3800,7 +3799,6 @@ fn decode_world_source_error(value: u16) -> Result<WorldSourceError, ProtocolErr
     Ok(match value {
         1 => WorldSourceError::BatchTooLarge,
         2 => WorldSourceError::InvalidChunkCoordinate,
-        3 => WorldSourceError::InvalidSurfaceTileCoordinate,
         4 => WorldSourceError::InvalidBlockCoordinate,
         5 => WorldSourceError::EmptyBlock,
         6 => WorldSourceError::BlockTooLarge,
@@ -3823,11 +3821,8 @@ fn decode_priority(value: u8) -> Result<WorldProductPriority, ProtocolError> {
     Ok(match value {
         1 => WorldProductPriority::CollisionCritical,
         2 => WorldProductPriority::VisibleChunk,
-        3 => WorldProductPriority::ImmediateSurface,
-        4 => WorldProductPriority::VisibleSurface,
-        5 => WorldProductPriority::ReplacementSurface,
-        6 => WorldProductPriority::Prefetch,
-        7 => WorldProductPriority::VirtualTerrain,
+        3 => WorldProductPriority::Prefetch,
+        4 => WorldProductPriority::VirtualTerrain,
         _ => return Err(ProtocolError::UnknownEnum("priority", u64::from(value))),
     })
 }

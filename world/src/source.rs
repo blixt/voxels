@@ -6,14 +6,10 @@
 use crate::generation::Generator;
 use crate::{
     ATLAS_VERSION, AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, GENERATOR_VERSION, Material,
-    SURFACE_TILE_EDGE_CELLS, SkylineFeature, SkylineFeatureKind, SurfaceLodLevel, SurfaceRegion,
-    SurfaceSample, SurfaceTileCoord, SurfaceTileMesh, VoxelCoord, WaterTileMesh,
-    generate_edited_surface_tile_mesh, generate_edited_water_tile_mesh, generate_surface_tile_mesh,
-    generate_water_tile_mesh_with, surface_tiles_affected_by_voxel,
+    SkylineFeature, SkylineFeatureKind, SurfaceRegion, SurfaceSample, VoxelCoord,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::ops::ControlFlow;
 
 pub const WORLD_SCHEMA_VERSION: u32 = 1;
 pub const MACRO_FIELD_SCHEMA_VERSION: u32 = 1;
@@ -377,17 +373,9 @@ impl WorldManifest {
 pub enum WorldProductPriority {
     CollisionCritical = 1,
     VisibleChunk = 2,
-    /// The surface tiles containing the current camera position. This class may preempt older
-    /// visible-ring work so rapid traversal cannot strand the player on an uncovered leading edge.
-    ImmediateSurface = 3,
-    VisibleSurface = 4,
-    ReplacementSurface = 5,
-    Prefetch = 6,
+    Prefetch = 3,
     /// The selected virtual-terrain cut and its current/predicted root coverage.
-    ///
-    /// This is the terrain renderer's last-valid-parent chain, so it outranks the migration-only
-    /// fixed surface rings without competing with collision-critical simulation products.
-    VirtualTerrain = 7,
+    VirtualTerrain = 4,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -396,7 +384,6 @@ pub enum WorldProductRequest {
     VoxelBlock(VoxelBlockRequest),
     SurfaceSampleBlock(SurfaceSampleBlockRequest),
     SurfaceSearch(SurfaceSearchRequest),
-    SurfaceTile(SurfaceTileCoord),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -427,43 +414,12 @@ impl ChunkSnapshot {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SurfaceTileSnapshot {
-    pub source_identity_hash: WorldSourceIdentityHash,
-    pub terrain: SurfaceTileMesh,
-    pub water: WaterTileMesh,
-    /// Canonical chunks containing edits whose topology cannot be represented by a heightfield.
-    ///
-    /// Only the finest surface level carries these sparse hints. They let a client request exact
-    /// volume for nearby floating structures, overhangs, and excavations without expanding the
-    /// entire radial exact cut or guessing from rendered surface geometry.
-    pub exact_detail_chunks: Vec<ChunkCoord>,
-}
-
-pub(crate) fn exact_detail_chunks_for_surface_tile(
-    edits: &crate::EditMap,
-    coord: SurfaceTileCoord,
-) -> Vec<ChunkCoord> {
-    if coord.level != SurfaceLodLevel::Stride2 {
-        return Vec::new();
-    }
-    let [origin_x, origin_z] = coord.voxel_origin();
-    let span = SURFACE_TILE_EDGE_CELLS.saturating_mul(coord.stride_voxels());
-    let chunk_edge = CHUNK_EDGE as i32;
-    let minimum_x = origin_x.div_euclid(chunk_edge);
-    let minimum_z = origin_z.div_euclid(chunk_edge);
-    let maximum_x = origin_x.saturating_add(span - 1).div_euclid(chunk_edge);
-    let maximum_z = origin_z.saturating_add(span - 1).div_euclid(chunk_edge);
-    edits.edited_chunks_in_horizontal_chunk_bounds(minimum_x, maximum_x, minimum_z, maximum_z)
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum WorldProduct {
     Chunk(ChunkSnapshot),
     VoxelBlock(VoxelBlockSnapshot),
     SurfaceSampleBlock(SurfaceSampleBlockSnapshot),
     SurfaceSearch(SurfaceSearchSnapshot),
-    SurfaceTile(SurfaceTileSnapshot),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -484,7 +440,6 @@ pub struct WorldProductBatchItem {
 pub enum WorldSourceError {
     BatchTooLarge,
     InvalidChunkCoordinate,
-    InvalidSurfaceTileCoordinate,
     InvalidBlockCoordinate,
     EmptyBlock,
     BlockTooLarge,
@@ -504,9 +459,6 @@ impl fmt::Display for WorldSourceError {
             }
             Self::InvalidChunkCoordinate => {
                 formatter.write_str("chunk coordinate is outside the canonical voxel grid")
-            }
-            Self::InvalidSurfaceTileCoordinate => {
-                formatter.write_str("surface tile is outside the canonical voxel grid")
             }
             Self::InvalidBlockCoordinate => {
                 formatter.write_str("sample block is outside the canonical voxel grid")
@@ -657,63 +609,6 @@ pub trait WorldSourceEngine: Send + Sync {
             }
         }
         Ok(samples)
-    }
-
-    /// Generates surface-tile products in request order and offers each keyed result to `emit`.
-    ///
-    /// Returning [`ControlFlow::Break`] stops before any later item is emitted. The compatibility
-    /// implementation retains the existing batch boundary, while sources that can produce tiles
-    /// incrementally should override this method so the break also avoids unfinished generation.
-    fn generate_surface_tiles(
-        &self,
-        priority: WorldProductPriority,
-        coords: &[SurfaceTileCoord],
-        emit: &mut dyn FnMut(WorldProductBatchItem) -> ControlFlow<()>,
-    ) -> Result<WorldSourceIdentityHash, WorldSourceError> {
-        let result = self.generate_batch(WorldProductBatch {
-            priority,
-            requests: coords
-                .iter()
-                .copied()
-                .map(WorldProductRequest::SurfaceTile)
-                .collect(),
-        })?;
-        for item in result.items {
-            if emit(item).is_break() {
-                break;
-            }
-        }
-        Ok(result.source_identity_hash)
-    }
-
-    fn generate_edited_surface_tile(
-        &self,
-        edits: &crate::EditMap,
-        coord: SurfaceTileCoord,
-    ) -> Result<SurfaceTileSnapshot, WorldSourceError>;
-
-    fn surface_tiles_affected_by_voxel(
-        &self,
-        edits: &crate::EditMap,
-        level: SurfaceLodLevel,
-        coord: VoxelCoord,
-    ) -> Vec<SurfaceTileCoord>;
-
-    /// Returns every derived surface tile affected by a batch of canonical voxel changes.
-    /// Sources with expensive field lookups can override this to sample the edited columns once
-    /// for the whole operation instead of repeating the same query for every LOD level.
-    fn surface_tiles_affected_by_voxels(
-        &self,
-        edits: &crate::EditMap,
-        coords: &[VoxelCoord],
-    ) -> Vec<SurfaceTileCoord> {
-        let mut affected = std::collections::BTreeSet::new();
-        for &coord in coords {
-            for level in SurfaceLodLevel::ALL {
-                affected.extend(self.surface_tiles_affected_by_voxel(edits, level, coord));
-            }
-        }
-        affected.into_iter().collect()
     }
 
     fn atmosphere_sample(&self, x: i32, z: i32) -> (AtmosphereSample, SurfaceRegion);
@@ -1156,25 +1051,6 @@ impl ProceduralWorldSource {
         self.identity.identity_hash()
     }
 
-    fn surface_tile(
-        &self,
-        coord: SurfaceTileCoord,
-    ) -> Result<SurfaceTileSnapshot, WorldSourceError> {
-        if !coord.is_world_representable() {
-            return Err(WorldSourceError::InvalidSurfaceTileCoordinate);
-        }
-        let terrain = generate_surface_tile_mesh(self.generator, coord);
-        let water = generate_water_tile_mesh_with(coord, crate::SEA_LEVEL_VOXELS, |x, z| {
-            self.generator.surface_sample(x, z).water_level == Some(crate::SEA_LEVEL_VOXELS)
-        });
-        Ok(SurfaceTileSnapshot {
-            source_identity_hash: self.source_identity_hash(),
-            terrain,
-            water,
-            exact_detail_chunks: Vec::new(),
-        })
-    }
-
     fn voxel_block(
         &self,
         request: VoxelBlockRequest,
@@ -1387,9 +1263,6 @@ impl WorldSourceEngine for ProceduralWorldSource {
                 WorldProductRequest::SurfaceSearch(request) => self
                     .surface_search(request)
                     .map(WorldProduct::SurfaceSearch),
-                WorldProductRequest::SurfaceTile(coord) => {
-                    self.surface_tile(coord).map(WorldProduct::SurfaceTile)
-                }
             };
             items.push(WorldProductBatchItem { request, result });
         }
@@ -1439,52 +1312,6 @@ impl WorldSourceEngine for ProceduralWorldSource {
             }
         }
         Ok(samples)
-    }
-
-    fn generate_surface_tiles(
-        &self,
-        _priority: WorldProductPriority,
-        coords: &[SurfaceTileCoord],
-        emit: &mut dyn FnMut(WorldProductBatchItem) -> ControlFlow<()>,
-    ) -> Result<WorldSourceIdentityHash, WorldSourceError> {
-        if coords.len() > MAX_WORLD_PRODUCT_BATCH {
-            return Err(WorldSourceError::BatchTooLarge);
-        }
-        for &coord in coords {
-            let item = WorldProductBatchItem {
-                request: WorldProductRequest::SurfaceTile(coord),
-                result: self.surface_tile(coord).map(WorldProduct::SurfaceTile),
-            };
-            if emit(item).is_break() {
-                break;
-            }
-        }
-        Ok(self.source_identity_hash())
-    }
-
-    fn generate_edited_surface_tile(
-        &self,
-        edits: &crate::EditMap,
-        coord: SurfaceTileCoord,
-    ) -> Result<SurfaceTileSnapshot, WorldSourceError> {
-        if !coord.is_world_representable() {
-            return Err(WorldSourceError::InvalidSurfaceTileCoordinate);
-        }
-        Ok(SurfaceTileSnapshot {
-            source_identity_hash: self.source_identity_hash(),
-            terrain: generate_edited_surface_tile_mesh(self.generator, edits, coord),
-            water: generate_edited_water_tile_mesh(self.generator, edits, coord),
-            exact_detail_chunks: exact_detail_chunks_for_surface_tile(edits, coord),
-        })
-    }
-
-    fn surface_tiles_affected_by_voxel(
-        &self,
-        edits: &crate::EditMap,
-        level: SurfaceLodLevel,
-        coord: VoxelCoord,
-    ) -> Vec<SurfaceTileCoord> {
-        surface_tiles_affected_by_voxel(self.generator, edits, level, coord)
     }
 
     fn atmosphere_sample(&self, x: i32, z: i32) -> (AtmosphereSample, SurfaceRegion) {
@@ -1628,24 +1455,6 @@ mod tests {
             self.inner.generate_batch(request)
         }
 
-        fn generate_edited_surface_tile(
-            &self,
-            edits: &crate::EditMap,
-            coord: SurfaceTileCoord,
-        ) -> Result<SurfaceTileSnapshot, WorldSourceError> {
-            self.inner.generate_edited_surface_tile(edits, coord)
-        }
-
-        fn surface_tiles_affected_by_voxel(
-            &self,
-            edits: &crate::EditMap,
-            level: SurfaceLodLevel,
-            coord: VoxelCoord,
-        ) -> Vec<SurfaceTileCoord> {
-            self.inner
-                .surface_tiles_affected_by_voxel(edits, level, coord)
-        }
-
         fn atmosphere_sample(&self, x: i32, z: i32) -> (AtmosphereSample, SurfaceRegion) {
             self.inner.atmosphere_sample(x, z)
         }
@@ -1681,14 +1490,6 @@ mod tests {
         }
     }
 
-    fn surface_coords() -> [SurfaceTileCoord; 3] {
-        [
-            SurfaceTileCoord::new(SurfaceLodLevel::Stride256, -2, 3),
-            SurfaceTileCoord::new(SurfaceLodLevel::Stride256, -1, 3),
-            SurfaceTileCoord::new(SurfaceLodLevel::Stride256, 0, 3),
-        ]
-    }
-
     fn terrain_diffusion_manifest() -> WorldManifest {
         let mut manifest = WorldManifest::procedural_v16(WorldId::from_bytes([7; 16]), 7);
         manifest.source.source_kind = WorldSourceKind::TerrainDiffusion30m;
@@ -1717,35 +1518,6 @@ mod tests {
         assert_eq!(
             first.identity_hash().to_string(),
             "012aa85549b15be04029033fcc5ca0220bfbd3c513fcecd360c02e7b96aae2e8"
-        );
-    }
-
-    #[test]
-    fn default_surface_emission_is_object_safe_ordered_and_stoppable() {
-        let source = BatchOnlySource::new(7);
-        let engine: &dyn WorldSourceEngine = &source;
-        let coords = surface_coords();
-        let mut emitted = Vec::new();
-        let identity = engine
-            .generate_surface_tiles(WorldProductPriority::VisibleSurface, &coords, &mut |item| {
-                emitted.push(item.request);
-                if emitted.len() == 2 {
-                    ControlFlow::Break(())
-                } else {
-                    ControlFlow::Continue(())
-                }
-            })
-            .expect("default surface emission");
-
-        assert_eq!(identity, source.inner.source_identity_hash());
-        assert_eq!(source.batch_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            emitted,
-            coords[..2]
-                .iter()
-                .copied()
-                .map(WorldProductRequest::SurfaceTile)
-                .collect::<Vec<_>>()
         );
     }
 
@@ -1794,50 +1566,6 @@ mod tests {
             ),
             Err(WorldSourceError::InvalidBlockCoordinate)
         );
-    }
-
-    #[test]
-    fn procedural_surface_emission_matches_batch_items_in_request_order() {
-        let source = ProceduralWorldSource::new(7);
-        let coords = surface_coords();
-        let expected = source
-            .generate_batch(WorldProductBatch {
-                priority: WorldProductPriority::ImmediateSurface,
-                requests: coords
-                    .iter()
-                    .copied()
-                    .map(WorldProductRequest::SurfaceTile)
-                    .collect(),
-            })
-            .expect("procedural surface batch");
-        let mut emitted = Vec::new();
-        let engine: &dyn WorldSourceEngine = &source;
-        let identity = engine
-            .generate_surface_tiles(
-                WorldProductPriority::ImmediateSurface,
-                &coords,
-                &mut |item| {
-                    emitted.push(item);
-                    ControlFlow::Continue(())
-                },
-            )
-            .expect("progressive procedural surfaces");
-
-        assert_eq!(identity, expected.source_identity_hash);
-        assert_eq!(emitted, expected.items);
-
-        let mut stopped = Vec::new();
-        engine
-            .generate_surface_tiles(
-                WorldProductPriority::ImmediateSurface,
-                &coords,
-                &mut |item| {
-                    stopped.push(item.request);
-                    ControlFlow::Break(())
-                },
-            )
-            .expect("stopped procedural surfaces");
-        assert_eq!(stopped, [WorldProductRequest::SurfaceTile(coords[0])]);
     }
 
     #[test]
@@ -2104,14 +1832,10 @@ mod tests {
     fn product_batch_keys_each_result_and_preserves_identity() {
         let source = ProceduralWorldSource::new(0x5eed_cafe);
         let chunk_coord = ChunkCoord::new(2, 0, -3);
-        let surface_coord = SurfaceTileCoord::containing(crate::SurfaceLodLevel::Stride8, 0, 0);
         let result = source
             .generate_batch(WorldProductBatch {
                 priority: WorldProductPriority::VisibleChunk,
-                requests: vec![
-                    WorldProductRequest::ChunkWithHalo(chunk_coord),
-                    WorldProductRequest::SurfaceTile(surface_coord),
-                ],
+                requests: vec![WorldProductRequest::ChunkWithHalo(chunk_coord)],
             })
             .expect("procedural products are infallible");
         assert_eq!(result.source_identity_hash, source.source_identity_hash());
@@ -2124,29 +1848,6 @@ mod tests {
                 if *request_coord == chunk_coord
                     && snapshot.chunk == source.generator.generate_chunk(chunk_coord)
         ));
-        let WorldProductBatchItem {
-            request: WorldProductRequest::SurfaceTile(request_coord),
-            result: Ok(WorldProduct::SurfaceTile(snapshot)),
-        } = &result.items[1]
-        else {
-            assert_eq!(
-                result.items.len(),
-                0,
-                "second product must be a surface tile"
-            );
-            return;
-        };
-        assert_eq!(*request_coord, surface_coord);
-        assert_eq!(
-            snapshot.terrain,
-            generate_surface_tile_mesh(source.generator, surface_coord)
-        );
-        assert_eq!(
-            snapshot.water,
-            generate_water_tile_mesh_with(surface_coord, crate::SEA_LEVEL_VOXELS, |x, z| {
-                source.generator.surface_sample(x, z).water_level == Some(crate::SEA_LEVEL_VOXELS)
-            },)
-        );
     }
 
     #[test]
@@ -2362,30 +2063,6 @@ mod tests {
     }
 
     #[test]
-    fn finest_surface_snapshot_identifies_only_its_sparse_exact_edit_chunks() {
-        let source = ProceduralWorldSource::new(9);
-        let mut edits = crate::EditMap::default();
-        edits.insert_override(VoxelCoord::new(40, 170, 45), Material::GlowCrystal);
-        edits.insert_override(VoxelCoord::new(41, 171, 45), Material::Stone);
-        edits.insert_override(VoxelCoord::new(70, 170, 45), Material::GlowCrystal);
-        let finest = source
-            .generate_edited_surface_tile(
-                &edits,
-                SurfaceTileCoord::new(SurfaceLodLevel::Stride2, 0, 0),
-            )
-            .expect("edited finest surface tile");
-        assert_eq!(finest.exact_detail_chunks, vec![ChunkCoord::new(1, 5, 1)]);
-
-        let coarse = source
-            .generate_edited_surface_tile(
-                &edits,
-                SurfaceTileCoord::new(SurfaceLodLevel::Stride4, 0, 0),
-            )
-            .expect("edited coarse surface tile");
-        assert!(coarse.exact_detail_chunks.is_empty());
-    }
-
-    #[test]
     fn source_rejects_unrepresentable_and_unbounded_requests() {
         let source = ProceduralWorldSource::new(9);
         let invalid_chunk = ChunkCoord::new(i32::MAX, 0, 0);
@@ -2398,27 +2075,6 @@ mod tests {
         assert_eq!(
             invalid_chunks.items[0].result,
             Err(WorldSourceError::InvalidChunkCoordinate)
-        );
-        let invalid_surfaces = source
-            .generate_batch(WorldProductBatch {
-                priority: WorldProductPriority::Prefetch,
-                requests: vec![WorldProductRequest::SurfaceTile(SurfaceTileCoord::new(
-                    SurfaceLodLevel::Stride16,
-                    i32::MAX,
-                    0,
-                ))],
-            })
-            .expect("one invalid item does not fail its whole batch");
-        assert_eq!(
-            invalid_surfaces.items[0].result,
-            Err(WorldSourceError::InvalidSurfaceTileCoordinate)
-        );
-        assert_eq!(
-            source.generate_edited_surface_tile(
-                &crate::EditMap::default(),
-                SurfaceTileCoord::new(SurfaceLodLevel::Stride16, i32::MAX, 0),
-            ),
-            Err(WorldSourceError::InvalidSurfaceTileCoordinate)
         );
         assert_eq!(
             source.request_blocks(MacroBlockBatch {

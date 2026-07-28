@@ -919,28 +919,6 @@ pub(crate) fn generate_surface_tile_mesh_with_aggregated_ecology_and_shading(
     )
 }
 
-pub(crate) fn generate_surface_tile_mesh_with_materials_and_aggregated_ecology_and_shading(
-    coord: SurfaceTileCoord,
-    surface: impl Fn(i32, i32) -> (i32, Material),
-    vertical_material: impl Fn(i32, i32, i32) -> Material,
-    shading_surface: impl Fn(i32, i32) -> (i32, Material),
-    parent_shading_surface: impl Fn(i32, i32) -> (i32, Material),
-    skyline_features: &[SkylineFeature],
-    ecology_aggregate_shift: u8,
-) -> SurfaceTileMesh {
-    generate_surface_tile_mesh_with_options(
-        coord,
-        &surface,
-        SurfaceTileMeshOptions {
-            vertical_material: Some(&vertical_material),
-            shading_surface: Some(&shading_surface),
-            parent_shading_surface: Some(&parent_shading_surface),
-            ecology_aggregate_shift,
-            ..SurfaceTileMeshOptions::plain(skyline_features)
-        },
-    )
-}
-
 fn quantized_surface_horizon(center: i32, blocker: i32, distance_voxels: i32) -> u8 {
     let rise = i64::from(blocker).saturating_sub(i64::from(center)).max(0);
     let distance = i64::from(distance_voxels.max(1));
