@@ -4827,14 +4827,27 @@ impl Renderer {
                 .virtual_terrain_cut
                 .as_ref()
                 .is_some_and(|visible| visible.fingerprint == cut.fingerprint);
-        if self.virtual_terrain_mode != VirtualTerrainRenderMode::Visible || preserves_visible_cut {
-            self.virtual_terrain_cut = Some(cut.clone());
-        } else {
-            // A changed candidate must traverse, compact, and round-trip through the bounded GPU
-            // feedback oracle before it can replace the currently visible owner. Shadow mode
-            // keeps the legacy path visible while that candidate is being certified.
-            self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
-            self.virtual_terrain_cut = Some(cut.clone());
+        match self.virtual_terrain_mode {
+            VirtualTerrainRenderMode::Disabled => {
+                // GPU certification is produced only by the shadow traversal pass. Enter shadow
+                // as soon as the first candidate exists; otherwise a fresh renderer waits for
+                // feedback from a pass that Disabled mode never schedules.
+                self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
+                self.virtual_terrain_cut = Some(cut.clone());
+            }
+            VirtualTerrainRenderMode::Shadow => {
+                self.virtual_terrain_cut = Some(cut.clone());
+            }
+            VirtualTerrainRenderMode::Visible if preserves_visible_cut => {
+                self.virtual_terrain_cut = Some(cut.clone());
+            }
+            VirtualTerrainRenderMode::Visible => {
+                // A changed candidate must traverse, compact, and round-trip through the bounded
+                // GPU feedback oracle before it can replace the currently visible owner. Shadow
+                // mode keeps the migration path visible while that candidate is being certified.
+                self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
+                self.virtual_terrain_cut = Some(cut.clone());
+            }
         }
         Ok(cut)
     }

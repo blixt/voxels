@@ -1436,7 +1436,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 7;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 43;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 44;
     const FRAME_SAMPLE_WIDTH: u32 = 26;
     const GPU_SAMPLE_WIDTH: u32 = 13;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -1454,7 +1454,7 @@ mod web {
         "moonOrbitFraction,twinklePhase,latitudeDegrees,longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,moonDirectionY,",
         "moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,weatherKind,weatherFraction,precipitation,storminess,lightning,",
         "cloudDensity,cloudBaseMetres,cloudTopMetres,cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,presentedLodStrideVoxels,lodFocusLagVoxels,canonicalImmediateResident,canonicalImmediateRequired,canonicalSurfaceCellsResident,canonicalSurfaceCellsRequired,",
-        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,lodIncompleteTransitionEdges,lodCutTransitionActive,lodCutTransitionPhase,virtualTerrainMode,virtualTerrainRegisteredRegions,virtualTerrainDirectoryInFlight,virtualTerrainDirectoryNodes,virtualTerrainResidentPages,virtualTerrainResidentMiB,virtualTerrainResidentPrimitives,virtualTerrainSelectedPages,virtualTerrainRequestedPages,virtualTerrainOwnerlessRoots,virtualTerrainGpuMatchesCpuCut,virtualTerrainStreamPending,virtualTerrainStreamInFlight,virtualTerrainCancellationWasteMiB,virtualTerrainCachePages,virtualTerrainCacheMiB,virtualTerrainColumns,virtualTerrainColumnInFlight,virtualTerrainColumnRevisionFloors,virtualTerrainColumnAccepted,virtualTerrainColumnSubmitDeferred,virtualTerrainColumnPreempted,virtualTerrainColumnTimedOut,virtualTerrainColumnOtherFailed,virtualTerrainDirectoryAccepted,virtualTerrainDirectorySubmitDeferred,virtualTerrainDirectoryPreempted,virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,frameSequence,schemaVersion,sampleCount,",
+        "generationQueued,generationInFlight,meshingQueued,meshingInFlight,uploadQueued,uploadInFlight,surfaceQueued,surfaceDirty,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,enclosedViewOwned,lodIncompleteTransitionEdges,lodCutTransitionActive,lodCutTransitionPhase,virtualTerrainMode,virtualTerrainRegisteredRegions,virtualTerrainDirectoryInFlight,virtualTerrainDirectoryNodes,virtualTerrainResidentPages,virtualTerrainResidentMiB,virtualTerrainResidentPrimitives,virtualTerrainSelectedPages,virtualTerrainRequestedPages,virtualTerrainOwnerlessRoots,virtualTerrainGpuMatchesCpuCut,virtualTerrainStreamPending,virtualTerrainStreamInFlight,virtualTerrainCancellationWasteMiB,virtualTerrainCachePages,virtualTerrainCacheMiB,virtualTerrainColumns,virtualTerrainColumnInFlight,virtualTerrainColumnRevisionFloors,virtualTerrainCurrentColumnKnown,virtualTerrainCurrentColumnRoots,virtualTerrainCurrentColumnRegisteredRoots,virtualTerrainNearestRegisteredRootMetres,virtualTerrainColumnAccepted,virtualTerrainColumnSubmitDeferred,virtualTerrainColumnPreempted,virtualTerrainColumnTimedOut,virtualTerrainColumnOtherFailed,virtualTerrainDirectoryAccepted,virtualTerrainDirectorySubmitDeferred,virtualTerrainDirectoryPreempted,virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,frameSequence,schemaVersion,sampleCount,",
         "droppedSamples",
     );
     const SURFACE_HINT_VERTICAL_MARGIN_CHUNKS: i32 = 1;
@@ -3711,7 +3711,7 @@ mod web {
                 .next_batch(now_ms);
             if let Some(batch) = batch
                 && let Err(error) = self.remote.submit_terrain_page_batch(
-                    WorldProductPriority::ImmediateSurface,
+                    WorldProductPriority::VirtualTerrain,
                     batch.pages.clone(),
                 )
             {
@@ -3779,7 +3779,7 @@ mod web {
                 return;
             }
             match self.remote.submit_terrain_region_column_batch(
-                WorldProductPriority::ImmediateSurface,
+                WorldProductPriority::VirtualTerrain,
                 columns.clone(),
             ) {
                 Ok(request_id) => {
@@ -3847,7 +3847,7 @@ mod web {
             // inside a single worker and made the second root miss fast-travel handoff.
             for root in roots {
                 match self.remote.submit_terrain_directory_batch(
-                    WorldProductPriority::ImmediateSurface,
+                    WorldProductPriority::VirtualTerrain,
                     vec![root],
                 ) {
                     Ok(request_id) => {
@@ -6268,6 +6268,10 @@ mod web {
                     virtual_terrain_columns,
                     virtual_terrain_column_in_flight,
                     virtual_terrain_column_revision_floors,
+                    virtual_terrain_current_column_known,
+                    virtual_terrain_current_column_roots,
+                    virtual_terrain_current_column_registered_roots,
+                    virtual_terrain_nearest_registered_root_metres,
                     virtual_terrain_registered_regions,
                     virtual_terrain_directory_in_flight,
                     virtual_terrain_directory_nodes,
@@ -6283,10 +6287,37 @@ mod web {
                     virtual_terrain_directory_other_failed,
                 ) = {
                     let state = engine.virtual_terrain.borrow();
+                    let camera_chunk = world_to_chunk(camera.position);
+                    let current_column = (TerrainPageKey {
+                        level: 0,
+                        coord: [camera_chunk.x, camera_chunk.y, camera_chunk.z],
+                    })
+                    .ancestor_at(TERRAIN_REGION_ROOT_LEVEL)
+                    .map(|root| [root.coord[0], root.coord[2]]);
+                    let current_roots =
+                        current_column.and_then(|column| state.columns.get(&column));
+                    let current_registered_roots = current_roots.map_or(0, |column| {
+                        column
+                            .roots
+                            .iter()
+                            .filter(|root| state.registered_roots.contains(root))
+                            .count()
+                    });
+                    let camera_position = camera.position.to_array().map(f64::from);
+                    let nearest_registered_root_metres = state
+                        .registered_roots
+                        .iter()
+                        .map(|root| terrain_page_distance_metres(*root, camera_position))
+                        .reduce(f64::min)
+                        .unwrap_or(-1.0);
                     (
                         state.columns.len(),
                         state.column_in_flight.len(),
                         state.minimum_column_revisions.len(),
+                        usize::from(current_roots.is_some()),
+                        current_roots.map_or(0, |column| column.roots.len()),
+                        current_registered_roots,
+                        nearest_registered_root_metres,
                         state.registered_roots.len(),
                         state.directory_in_flight.len(),
                         state.nodes.len(),
@@ -6582,6 +6613,10 @@ mod web {
                     virtual_terrain_columns as f32,
                     virtual_terrain_column_in_flight as f32,
                     virtual_terrain_column_revision_floors as f32,
+                    virtual_terrain_current_column_known as f32,
+                    virtual_terrain_current_column_roots as f32,
+                    virtual_terrain_current_column_registered_roots as f32,
+                    virtual_terrain_nearest_registered_root_metres as f32,
                     virtual_terrain_column_accepted as f32,
                     virtual_terrain_column_submit_deferred as f32,
                     virtual_terrain_column_preempted as f32,

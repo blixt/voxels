@@ -24,7 +24,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 36;
+pub const PROTOCOL_VERSION: u16 = 37;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -4713,6 +4713,7 @@ fn decode_priority(value: u8) -> Result<WorldProductPriority, ProtocolError> {
         4 => WorldProductPriority::VisibleSurface,
         5 => WorldProductPriority::ReplacementSurface,
         6 => WorldProductPriority::Prefetch,
+        7 => WorldProductPriority::VirtualTerrain,
         _ => return Err(ProtocolError::UnknownEnum("priority", u64::from(value))),
     })
 }
@@ -6169,7 +6170,7 @@ mod tests {
     fn virtual_terrain_directory_requests_round_trip_fixed_negative_regions() {
         let request = TerrainDirectoryBatchRequest {
             request_id: 71,
-            priority: WorldProductPriority::VisibleSurface,
+            priority: WorldProductPriority::VirtualTerrain,
             roots: vec![
                 TerrainPageKey {
                     level: TERRAIN_REGION_ROOT_LEVEL,
@@ -6285,7 +6286,7 @@ mod tests {
     fn virtual_terrain_region_columns_round_trip_exact_vertical_roots() {
         let request = TerrainRegionColumnBatchRequest {
             request_id: 73,
-            priority: WorldProductPriority::Prefetch,
+            priority: WorldProductPriority::VirtualTerrain,
             columns: vec![[-8, 2], [3, 11]],
         };
         assert_eq!(
@@ -6366,7 +6367,7 @@ mod tests {
         };
         let request = VirtualTerrainPageBatchRequest {
             request_id: 73,
-            priority: WorldProductPriority::ImmediateSurface,
+            priority: WorldProductPriority::VirtualTerrain,
             batch: TerrainPageBatchRequestV1 {
                 source_identity_hash: source,
                 pages: vec![identity],

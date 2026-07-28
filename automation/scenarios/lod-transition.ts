@@ -169,6 +169,16 @@ function virtualTerrainState(snapshot: readonly number[]) {
     columns: snapshotValue(snapshot, "virtualTerrainColumns"),
     columnInFlight: snapshotValue(snapshot, "virtualTerrainColumnInFlight"),
     columnRevisionFloors: snapshotValue(snapshot, "virtualTerrainColumnRevisionFloors"),
+    currentColumnKnown: snapshotValue(snapshot, "virtualTerrainCurrentColumnKnown") === 1,
+    currentColumnRoots: snapshotValue(snapshot, "virtualTerrainCurrentColumnRoots"),
+    currentColumnRegisteredRoots: snapshotValue(
+      snapshot,
+      "virtualTerrainCurrentColumnRegisteredRoots",
+    ),
+    nearestRegisteredRootMetres: snapshotValue(
+      snapshot,
+      "virtualTerrainNearestRegisteredRootMetres",
+    ),
     columnAccepted: snapshotValue(snapshot, "virtualTerrainColumnAccepted"),
     columnSubmitDeferred: snapshotValue(snapshot, "virtualTerrainColumnSubmitDeferred"),
     columnPreempted: snapshotValue(snapshot, "virtualTerrainColumnPreempted"),

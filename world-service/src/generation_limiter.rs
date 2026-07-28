@@ -41,7 +41,9 @@ impl GenerationLane {
     fn for_priority(priority: WorldProductPriority) -> Self {
         match priority {
             WorldProductPriority::CollisionCritical => Self::Collision,
-            WorldProductPriority::ImmediateSurface => Self::Immediate,
+            WorldProductPriority::VirtualTerrain | WorldProductPriority::ImmediateSurface => {
+                Self::Immediate
+            }
             WorldProductPriority::VisibleChunk
             | WorldProductPriority::VisibleSurface
             | WorldProductPriority::ReplacementSurface

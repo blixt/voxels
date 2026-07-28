@@ -1,7 +1,7 @@
 import type { BrowserPlayerSession } from "./local-player.ts";
 
 export const AUTOMATION_CONTRACT_VERSION = 7;
-export const SNAPSHOT_SCHEMA_VERSION = 43;
+export const SNAPSHOT_SCHEMA_VERSION = 44;
 export const FRAME_SAMPLE_WIDTH = 26;
 export const GPU_SAMPLE_WIDTH = 13;
 
@@ -231,20 +231,24 @@ export const SNAPSHOT = Object.freeze({
   virtualTerrainColumns: 220,
   virtualTerrainColumnInFlight: 221,
   virtualTerrainColumnRevisionFloors: 222,
-  virtualTerrainColumnAccepted: 223,
-  virtualTerrainColumnSubmitDeferred: 224,
-  virtualTerrainColumnPreempted: 225,
-  virtualTerrainColumnTimedOut: 226,
-  virtualTerrainColumnOtherFailed: 227,
-  virtualTerrainDirectoryAccepted: 228,
-  virtualTerrainDirectorySubmitDeferred: 229,
-  virtualTerrainDirectoryPreempted: 230,
-  virtualTerrainDirectoryTimedOut: 231,
-  virtualTerrainDirectoryOtherFailed: 232,
-  frameSequence: 233,
-  schemaVersion: 234,
-  sampleCount: 235,
-  droppedSamples: 236,
+  virtualTerrainCurrentColumnKnown: 223,
+  virtualTerrainCurrentColumnRoots: 224,
+  virtualTerrainCurrentColumnRegisteredRoots: 225,
+  virtualTerrainNearestRegisteredRootMetres: 226,
+  virtualTerrainColumnAccepted: 227,
+  virtualTerrainColumnSubmitDeferred: 228,
+  virtualTerrainColumnPreempted: 229,
+  virtualTerrainColumnTimedOut: 230,
+  virtualTerrainColumnOtherFailed: 231,
+  virtualTerrainDirectoryAccepted: 232,
+  virtualTerrainDirectorySubmitDeferred: 233,
+  virtualTerrainDirectoryPreempted: 234,
+  virtualTerrainDirectoryTimedOut: 235,
+  virtualTerrainDirectoryOtherFailed: 236,
+  frameSequence: 237,
+  schemaVersion: 238,
+  sampleCount: 239,
+  droppedSamples: 240,
 } as const);
 
 export type SnapshotField = keyof typeof SNAPSHOT;

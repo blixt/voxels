@@ -9,11 +9,12 @@ use voxels_world::WorldProductPriority;
 const fn request_window_rank(priority: WorldProductPriority) -> u8 {
     match priority {
         WorldProductPriority::CollisionCritical => 0,
-        WorldProductPriority::ImmediateSurface => 1,
-        WorldProductPriority::VisibleChunk => 2,
-        WorldProductPriority::VisibleSurface => 3,
-        WorldProductPriority::ReplacementSurface => 4,
-        WorldProductPriority::Prefetch => 5,
+        WorldProductPriority::VirtualTerrain => 1,
+        WorldProductPriority::ImmediateSurface => 2,
+        WorldProductPriority::VisibleChunk => 3,
+        WorldProductPriority::VisibleSurface => 4,
+        WorldProductPriority::ReplacementSurface => 5,
+        WorldProductPriority::Prefetch => 6,
     }
 }
 
@@ -87,6 +88,20 @@ mod tests {
         assert_eq!(
             priority_preemption_candidate(WorldProductPriority::ImmediateSurface, pending),
             Some(10)
+        );
+    }
+
+    #[test]
+    fn virtual_terrain_preempts_migration_surface_work_but_not_collision() {
+        let pending = [
+            (10, WorldProductPriority::ImmediateSurface),
+            (11, WorldProductPriority::CollisionCritical),
+            (12, WorldProductPriority::VisibleChunk),
+        ];
+
+        assert_eq!(
+            priority_preemption_candidate(WorldProductPriority::VirtualTerrain, pending),
+            Some(12)
         );
     }
 

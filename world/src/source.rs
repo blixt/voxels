@@ -383,6 +383,11 @@ pub enum WorldProductPriority {
     VisibleSurface = 4,
     ReplacementSurface = 5,
     Prefetch = 6,
+    /// The selected virtual-terrain cut and its current/predicted root coverage.
+    ///
+    /// This is the terrain renderer's last-valid-parent chain, so it outranks the migration-only
+    /// fixed surface rings without competing with collision-critical simulation products.
+    VirtualTerrain = 7,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
