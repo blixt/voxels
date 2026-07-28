@@ -140,12 +140,17 @@ impl TerrainPageKey {
             return None;
         }
         let child_level = self.level.checked_sub(1)?;
+        let child_origin = [
+            self.coord[0].checked_mul(2)?,
+            self.coord[1].checked_mul(2)?,
+            self.coord[2].checked_mul(2)?,
+        ];
         Some(std::array::from_fn(|index| Self {
             level: child_level,
             coord: [
-                self.coord[0].saturating_mul(2) + (index & 1) as i32,
-                self.coord[1].saturating_mul(2) + ((index >> 1) & 1) as i32,
-                self.coord[2].saturating_mul(2) + ((index >> 2) & 1) as i32,
+                child_origin[0] + (index & 1) as i32,
+                child_origin[1] + ((index >> 1) & 1) as i32,
+                child_origin[2] + ((index >> 2) & 1) as i32,
             ],
         }))
     }
@@ -3500,6 +3505,21 @@ mod tests {
         let encoded = encode_terrain_page(&left).unwrap();
         assert!(encoded.len() <= TERRAIN_PAGE_TARGET_COMPRESSED_BYTES);
         assert_eq!(decode_terrain_page(&encoded, identity()).unwrap(), left);
+    }
+
+    #[test]
+    fn volumetric_children_fail_closed_at_coordinate_limits() {
+        let key = TerrainPageKey {
+            level: 1,
+            coord: [i32::MAX, 0, 0],
+        };
+        assert_eq!(key.children(), None);
+
+        let key = TerrainPageKey {
+            level: 1,
+            coord: [0, i32::MIN, 0],
+        };
+        assert_eq!(key.children(), None);
     }
 
     #[test]
