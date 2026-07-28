@@ -18,6 +18,7 @@ describe("isolated browser world fixture", () => {
       spawnProtectionRadiusVoxels: 3,
       cascadedShadows: false,
       screenSpaceAmbientOcclusion: false,
+      lodBoundaryHalfExtentsVoxels: [160, 352, 704, 1_408, 2_816, 5_632, 11_264, 22_528],
       weatherCycleSeconds: 36,
       weatherFractionAtUnixEpoch: 0.62,
       cloudCoverage: 0.31,
@@ -37,6 +38,9 @@ describe("isolated browser world fixture", () => {
       expect(client).toContain(`auth_subprotocol_token = "${fixture.authToken}"`);
       expect(client).toContain("cascaded_sun_shadows = false");
       expect(client).toContain("screen_space_ambient_occlusion = false");
+      expect(client).toMatch(
+        /boundary_half_extents_voxels = \[\s+160,\s+352,\s+704,\s+1408,\s+2816,\s+5632,\s+11264,\s+22528,\s+\]/u,
+      );
       expect(service).toContain('source = "procedural-v16"');
       expect(service).toContain(`listen = "127.0.0.1:${fixture.backendPort}"`);
       expect(service).toContain('allowed_origins = ["http://127.0.0.1:41234"]');
@@ -56,6 +60,9 @@ describe("isolated browser world fixture", () => {
       expect(fixture.spawnProtectionRadiusVoxels).toBe(3);
       expect(fixture.cascadedShadows).toBe(false);
       expect(fixture.screenSpaceAmbientOcclusion).toBe(false);
+      expect(fixture.lodBoundaryHalfExtentsVoxels).toEqual([
+        160, 352, 704, 1_408, 2_816, 5_632, 11_264, 22_528,
+      ]);
       expect(fixture.weatherCycleSeconds).toBe(36);
       expect(fixture.weatherFractionAtUnixEpoch).toBe(0.62);
       expect(fixture.cloudCoverage).toBe(0.31);
