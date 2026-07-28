@@ -207,7 +207,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(build.pages.len(), 1 + 8 + 64 + 512);
+        assert_eq!(build.pages.len(), 1 + 8 + 64);
         assert!(build.directory.validates_region_partition());
         assert_eq!(build.directory.roots().next().unwrap().key, root);
         assert!(

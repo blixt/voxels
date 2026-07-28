@@ -720,7 +720,10 @@ mod tests {
         let directory = structural_region_forest(&[[-1, -1, -1], [0, -1, -1]]);
         assert!(directory.validates_region_partition());
         assert_eq!(directory.roots().count(), 2);
-        assert_eq!(directory.nodes.len(), 2 * (1 + 8 + 64 + 512));
+        let nodes_per_root = (0..=u32::from(TERRAIN_REGION_ROOT_LEVEL))
+            .map(|level| 8_usize.pow(level))
+            .sum::<usize>();
+        assert_eq!(directory.nodes.len(), 2 * nodes_per_root);
         let encoded = encode_terrain_directory(&directory).unwrap();
         assert_eq!(
             decode_region_terrain_directory(&encoded, identity()).unwrap(),
