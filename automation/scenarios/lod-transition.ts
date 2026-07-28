@@ -1062,6 +1062,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
     let worstScreenshot = options.geometrySourceTravel ? await page.screenshot() : before;
     let worst = await analyzeWatertightTerrain(page, worstScreenshot, diagnosticTarget);
     let failureGeometrySources: Buffer | undefined;
+    resetTimings(timings);
     await page.keyboard.down("KeyW");
     if (descentCoverage) await page.keyboard.down("ShiftLeft");
     try {
@@ -1107,6 +1108,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
       await page.keyboard.up("KeyW");
       if (descentCoverage) await page.keyboard.up("ShiftLeft");
     }
+    const travelPerformance = summarizePerformance(timings);
     if (descentCoverage) await page.waitForTimeout(500);
     const stoppedImmediateSnapshot = await readSnapshot(engine, timings);
     const travelFinishedPose = cameraPosition(stoppedImmediateSnapshot);
@@ -1307,6 +1309,7 @@ async function runLodTransition(context: ScenarioContext, arguments_: readonly s
             (sample) => sample.virtualTerrain.mode === 2 && !sample.virtualTerrain.gpuMatchesCpuCut,
           ).length,
         },
+        performance: travelPerformance,
         lodQuality: summarizeTravelLodQuality(samples),
       },
       worst,
