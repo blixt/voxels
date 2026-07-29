@@ -155,17 +155,14 @@ impl ArenaAllocator {
 
     /// Simulates a whole allocation transaction against the exact current free ranges.
     ///
-    /// Largest-first ordering is deterministic and avoids admitting a group merely because its
-    /// byte sum fits while no legal placement exists in the bounded source segments.
+    /// Sizes are simulated in caller order because admission must prove the exact sequence used by
+    /// the real uploader. Reordering only the proof can accept a transaction that later fails when
+    /// an early small allocation consumes the final bounded page slot.
     pub fn can_allocate_batch(&self, requested_sizes: impl IntoIterator<Item = u32>) -> bool {
-        let mut requested_sizes = requested_sizes
-            .into_iter()
-            .filter(|size| *size > 0)
-            .collect::<Vec<_>>();
-        requested_sizes.sort_unstable_by(|left, right| right.cmp(left));
         let mut simulation = self.clone();
         requested_sizes
             .into_iter()
+            .filter(|size| *size > 0)
             .all(|size| simulation.allocate(size).is_some())
     }
 
@@ -293,6 +290,20 @@ mod tests {
         assert_eq!(arena.stats(), before);
         assert!(arena.can_allocate_batch([16, 16]));
         assert_eq!(arena.stats(), before);
+    }
+
+    #[test]
+    fn batch_preflight_matches_real_allocation_order_at_the_page_limit() {
+        let arena = ArenaAllocator::new_bounded(16, 8, 32, 1).unwrap();
+        assert!(
+            !arena.can_allocate_batch([8, 24]),
+            "the first small allocation creates the final 16-byte page"
+        );
+        assert!(
+            arena.can_allocate_batch([24, 8]),
+            "the actual reverse order creates one 24-byte page with room for both"
+        );
+        assert_eq!(arena.stats().pages, 0, "preflight is non-mutating");
     }
 
     #[test]
