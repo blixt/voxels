@@ -258,10 +258,10 @@ fn quad_local(face: u32, uv: vec2<i32>, extent: vec2<i32>) -> vec3<i32> {
   }
 }
 
-fn canonical_triangle_extent(encoded_extent: vec2<u32>) -> vec2<f32> {
-  return vec2<f32>(
-    f32((((encoded_extent.x >> 6u) & 31u) | ((encoded_extent.x >> 10u) & 32u)) + 1u),
-    f32((((encoded_extent.y >> 6u) & 31u) | ((encoded_extent.y >> 10u) & 32u)) + 1u),
+fn canonical_triangle_extent(encoded_extent: vec2<u32>) -> vec2<i32> {
+  return vec2<i32>(
+    i32((((encoded_extent.x >> 6u) & 31u) | ((encoded_extent.x >> 10u) & 32u)) + 1u),
+    i32((((encoded_extent.y >> 6u) & 31u) | ((encoded_extent.y >> 10u) & 32u)) + 1u),
   );
 }
 
@@ -269,42 +269,42 @@ fn canonical_triangle_uv(
   corner: u32,
   encoded_extent: vec2<u32>,
   packed_ao: u32,
-) -> vec2<f32> {
+) -> vec2<i32> {
   let extent = canonical_triangle_extent(encoded_extent);
   let width = extent.x;
   let height = extent.y;
   let edge = (encoded_extent.x >> 11u) & 3u;
   let anchor_code = (encoded_extent.y >> 11u) & 7u;
-  let raw_start = f32(encoded_extent.x & CANONICAL_TRIANGLE_OFFSET_MASK);
-  let raw_end = f32(encoded_extent.y & CANONICAL_TRIANGLE_OFFSET_MASK);
+  let raw_start = i32(encoded_extent.x & CANONICAL_TRIANGLE_OFFSET_MASK);
+  let raw_end = i32(encoded_extent.y & CANONICAL_TRIANGLE_OFFSET_MASK);
   let reverse = edge == 0u || edge == 3u;
   let tangent = select(
     select(raw_start, raw_end, corner == 2u),
     select(raw_end, raw_start, corner == 2u),
     reverse,
   );
-  var boundary_uv = vec2<f32>(0.0);
+  var boundary_uv = vec2<i32>(0);
   switch edge {
-    case 0u: { boundary_uv = vec2<f32>(0.0, tangent); }
-    case 1u: { boundary_uv = vec2<f32>(width, tangent); }
-    case 2u: { boundary_uv = vec2<f32>(tangent, 0.0); }
-    default: { boundary_uv = vec2<f32>(tangent, height); }
+    case 0u: { boundary_uv = vec2<i32>(0, tangent); }
+    case 1u: { boundary_uv = vec2<i32>(width, tangent); }
+    case 2u: { boundary_uv = vec2<i32>(tangent, 0); }
+    default: { boundary_uv = vec2<i32>(tangent, height); }
   }
-  let corner_anchors = array<vec2<f32>, 4>(
-    vec2<f32>(0.0, 0.0),
-    vec2<f32>(width, 0.0),
-    vec2<f32>(width, height),
-    vec2<f32>(0.0, height),
+  let corner_anchors = array<vec2<i32>, 4>(
+    vec2<i32>(0, 0),
+    vec2<i32>(width, 0),
+    vec2<i32>(width, height),
+    vec2<i32>(0, height),
   );
   var anchor_uv = select(
-    corner_anchors[min(max(anchor_code, 1u), 4u) - 1u],
-    extent * 0.5,
+    corner_anchors[clamp(anchor_code, 1u, 4u) - 1u],
+    extent / 2,
     anchor_code == 0u,
   );
   if anchor_code == 5u {
-    anchor_uv = vec2<f32>(
-      f32((packed_ao >> 8u) & 63u),
-      f32((packed_ao >> 14u) & 63u),
+    anchor_uv = vec2<i32>(
+      i32((packed_ao >> 8u) & 63u),
+      i32((packed_ao >> 14u) & 63u),
     );
   }
   return select(boundary_uv, anchor_uv, corner == 0u);
@@ -315,15 +315,15 @@ fn canonical_triangle_local(
   encoded_extent: vec2<u32>,
   face: u32,
   packed_ao: u32,
-) -> vec3<f32> {
+) -> vec3<i32> {
   let uv = canonical_triangle_uv(corner, encoded_extent, packed_ao);
   switch face {
-    case 0u: { return vec3<f32>(1.0, uv.y, uv.x); }
-    case 1u: { return vec3<f32>(0.0, uv.y, uv.x); }
-    case 2u: { return vec3<f32>(uv.x, 1.0, uv.y); }
-    case 3u: { return vec3<f32>(uv.x, 0.0, uv.y); }
-    case 4u: { return vec3<f32>(uv.x, uv.y, 1.0); }
-    default: { return vec3<f32>(uv.x, uv.y, 0.0); }
+    case 0u: { return vec3<i32>(1, uv.y, uv.x); }
+    case 1u: { return vec3<i32>(0, uv.y, uv.x); }
+    case 2u: { return vec3<i32>(uv.x, 1, uv.y); }
+    case 3u: { return vec3<i32>(uv.x, 0, uv.y); }
+    case 4u: { return vec3<i32>(uv.x, uv.y, 1); }
+    default: { return vec3<i32>(uv.x, uv.y, 0); }
   }
 }
 
@@ -340,9 +340,8 @@ fn quad_world(
 ) -> vec3<f32> {
   var world = vec3<f32>(origin + quad_local(face, uv, extent)) * frame.viewport_voxel.z;
   if canonical_triangle {
-    world = (
-      vec3<f32>(origin)
-        + canonical_triangle_local(corner, encoded_extent, face, packed_ao)
+    world = vec3<f32>(
+      origin + canonical_triangle_local(corner, encoded_extent, face, packed_ao)
     )
       * frame.viewport_voxel.z;
   }

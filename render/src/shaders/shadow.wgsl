@@ -78,7 +78,7 @@ fn shadow_vertex(
     custom_triangle && !canonical_shadow_owner,
   );
   let uv = CORNERS[corner];
-  var local = vec3<f32>(0.0);
+  var local = vec3<i32>(0);
   if canonical_shadow_owner {
     let width = i32(
       (((extent_voxels.x >> 6u) & 31u) | ((extent_voxels.x >> 10u) & 32u)) + 1u,
@@ -87,29 +87,26 @@ fn shadow_vertex(
       (((extent_voxels.y >> 6u) & 31u) | ((extent_voxels.y >> 10u) & 32u)) + 1u,
     );
     switch face {
-      case 0u: { local = vec3<f32>(vec3<i32>(1, uv.y * height, uv.x * width)); }
-      case 1u: { local = vec3<f32>(vec3<i32>(0, uv.y * height, uv.x * width)); }
-      case 2u: { local = vec3<f32>(vec3<i32>(uv.x * width, 1, uv.y * height)); }
-      case 3u: { local = vec3<f32>(vec3<i32>(uv.x * width, 0, uv.y * height)); }
-      case 4u: { local = vec3<f32>(vec3<i32>(uv.x * width, uv.y * height, 1)); }
-      default: { local = vec3<f32>(vec3<i32>(uv.x * width, uv.y * height, 0)); }
+      case 0u: { local = vec3<i32>(1, uv.y * height, uv.x * width); }
+      case 1u: { local = vec3<i32>(0, uv.y * height, uv.x * width); }
+      case 2u: { local = vec3<i32>(uv.x * width, 1, uv.y * height); }
+      case 3u: { local = vec3<i32>(uv.x * width, 0, uv.y * height); }
+      case 4u: { local = vec3<i32>(uv.x * width, uv.y * height, 1); }
+      default: { local = vec3<i32>(uv.x * width, uv.y * height, 0); }
     }
   } else if canonical_triangle {
-    local = vec3<f32>(0.0, 1.0, 0.0);
+    local = vec3<i32>(0, 1, 0);
   } else {
     switch face {
-      case 0u: { local = vec3<f32>(vec3<i32>(1, uv.y * extent.y, uv.x * extent.x)); }
-      case 1u: { local = vec3<f32>(vec3<i32>(0, uv.y * extent.y, uv.x * extent.x)); }
-      case 2u: { local = vec3<f32>(vec3<i32>(uv.x * extent.x, 1, uv.y * extent.y)); }
-      case 3u: { local = vec3<f32>(vec3<i32>(uv.x * extent.x, 0, uv.y * extent.y)); }
-      case 4u: { local = vec3<f32>(vec3<i32>(uv.x * extent.x, uv.y * extent.y, 1)); }
-      default: { local = vec3<f32>(vec3<i32>(uv.x * extent.x, uv.y * extent.y, 0)); }
+      case 0u: { local = vec3<i32>(1, uv.y * extent.y, uv.x * extent.x); }
+      case 1u: { local = vec3<i32>(0, uv.y * extent.y, uv.x * extent.x); }
+      case 2u: { local = vec3<i32>(uv.x * extent.x, 1, uv.y * extent.y); }
+      case 3u: { local = vec3<i32>(uv.x * extent.x, 0, uv.y * extent.y); }
+      case 4u: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 1); }
+      default: { local = vec3<i32>(uv.x * extent.x, uv.y * extent.y, 0); }
     }
   }
-  var world = vec3<f32>(origin + vec3<i32>(local)) * shadow_frame.camera_voxel.w;
-  if canonical_triangle {
-    world = (vec3<f32>(origin) + local) * shadow_frame.camera_voxel.w;
-  }
+  var world = vec3<f32>(origin + local) * shadow_frame.camera_voxel.w;
   if surface_shape != 0u && !canonical_triangle {
     world.y += unpack_signed_i3(surface_shape >> (corner * 3u))
       * shadow_frame.camera_voxel.w;

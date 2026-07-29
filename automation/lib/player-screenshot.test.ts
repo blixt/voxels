@@ -18,6 +18,13 @@ describe("player screenshot surface-cut audit", () => {
     schema: "voxels.reproduction.v3",
     camera: { eyeMetres: [1, 2, 3] },
     presentation: {
+      publishedClientView: {
+        presentationSerial: "3",
+        viewRevision: "9",
+        terrainRequest: 4,
+        terrainGeneration: 7,
+        revisionDigest: "1234567890abcdef",
+      },
       selectedCutFingerprint: "0000000000001234",
       terrainHandleSnapshot: {
         generation: "7",

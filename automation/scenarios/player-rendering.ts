@@ -20,6 +20,9 @@ const STABILITY_TIMEOUT_MS = 60_000;
 interface AuditedCapture {
   readonly exactPages: number;
   readonly cutFingerprint: string;
+  readonly terrainRequest: number | null;
+  readonly terrainGeneration: number | null;
+  readonly terrainRevisionDigest: string;
   readonly largestEnclosedSkyComponent: number;
   readonly settleMs: number;
 }
@@ -71,6 +74,9 @@ async function auditCapture(
   let diagnostic;
   try {
     diagnostic = await takePlayerScreenshot(page);
+    if (!diagnostic.metadata.render.geometrySourceDebug) {
+      throw new Error(`${label} source-ownership capture lost its requested renderer state`);
+    }
     await context.artifacts.write(
       `${label} source and LOD ownership`,
       `${label}-source-ownership.png`,
@@ -142,6 +148,9 @@ async function auditCapture(
   return {
     exactPages,
     cutFingerprint: `${snapshotValue(frame, "virtualTerrainCutFingerprintHigh24")}:${snapshotValue(frame, "virtualTerrainCutFingerprintLow24")}`,
+    terrainRequest: diagnostic.metadata.presentation.publishedClientView.terrainRequest,
+    terrainGeneration: diagnostic.metadata.presentation.publishedClientView.terrainGeneration,
+    terrainRevisionDigest: diagnostic.metadata.presentation.publishedClientView.revisionDigest,
     largestEnclosedSkyComponent: sky.largestEnclosedComponentPixels,
     settleMs,
   };
@@ -223,8 +232,19 @@ async function walkBeyondProtectedPedestal(
     await page.keyboard.up("ShiftLeft");
   }
   if (distance < targetMetres) {
+    const evidence = {
+      requestedMetres: targetMetres,
+      travelledMetres: distance,
+      latest: recorder.latestFrame,
+      trace: recorder.trace(),
+    };
+    await context.artifacts.writeJson(
+      "incomplete real player travel trace",
+      "incomplete-player-travel.json",
+      evidence,
+    );
     throw new Error(
-      `player moved only ${distance.toFixed(2)}m of the requested ${targetMetres.toFixed(2)}m travel`,
+      `player moved only ${distance.toFixed(2)}m of the requested ${targetMetres.toFixed(2)}m travel: ${JSON.stringify(recorder.latestFrame)}`,
     );
   }
   return distance;
@@ -545,8 +565,14 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
       recorder,
       () => browser.assertHealthy(),
     );
-    if (edited.cutFingerprint === travel.cutFingerprint) {
-      throw new Error("the authoritative player dig never changed the published terrain revision");
+    if (
+      edited.terrainRequest === travel.terrainRequest ||
+      edited.terrainGeneration === travel.terrainGeneration ||
+      edited.terrainRevisionDigest === travel.terrainRevisionDigest
+    ) {
+      throw new Error(
+        "the authoritative player dig never promoted a newly requested, newly encoded terrain revision",
+      );
     }
     const reproductionCapture = await recorder.guard(takePlayerScreenshot(page));
     await context.artifacts.write(
@@ -569,6 +595,12 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
         pedestalSelectedCut: pedestal.cutFingerprint,
         travelSelectedCut: travel.cutFingerprint,
         editedSelectedCut: edited.cutFingerprint,
+        travelTerrainRequest: travel.terrainRequest,
+        editedTerrainRequest: edited.terrainRequest,
+        travelTerrainGeneration: travel.terrainGeneration,
+        editedTerrainGeneration: edited.terrainGeneration,
+        travelTerrainRevisionDigest: travel.terrainRevisionDigest,
+        editedTerrainRevisionDigest: edited.terrainRevisionDigest,
         largestEnclosedSkyComponent: Math.max(
           ...[pedestal, travel, edited].map((entry) => entry.largestEnclosedSkyComponent),
         ),

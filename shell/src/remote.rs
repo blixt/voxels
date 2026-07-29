@@ -291,6 +291,18 @@ impl RemoteWorldClient {
         self.inner.terrain_page_completions.borrow_mut().pop_front()
     }
 
+    /// Cancels page batches once none of their identities remain in the current immutable target.
+    ///
+    /// Mixed batches stay alive so a still-required coherent sibling is not discarded with stale
+    /// work. The generated `Canceled` completions return scheduler capabilities without retry
+    /// backoff, allowing newly exposed ownership pages to use the same request window immediately.
+    pub fn cancel_terrain_page_batches_outside(
+        &self,
+        keep: impl Fn(TerrainPageTransferIdentity) -> bool,
+    ) -> usize {
+        self.inner.cancel_terrain_page_batches_outside(keep)
+    }
+
     pub fn submit_edit(&self, action: EditAction) -> Result<RemoteRequestId, RemoteWorldError> {
         self.inner.send_edit(action)
     }
@@ -1357,6 +1369,33 @@ impl RemoteInner {
                 | PendingBatch::TerrainRegionColumns { .. }
                 | PendingBatch::TerrainDirectories { .. }
                 | PendingBatch::TerrainPages { .. }
+                | PendingBatch::Chunks { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let canceled = request_ids.len();
+        for request_id in request_ids {
+            self.cancel(request_id);
+        }
+        canceled
+    }
+
+    fn cancel_terrain_page_batches_outside(
+        &self,
+        keep: impl Fn(TerrainPageTransferIdentity) -> bool,
+    ) -> usize {
+        let request_ids = self
+            .pending
+            .borrow()
+            .iter()
+            .filter_map(|(&request_id, pending)| match pending {
+                PendingBatch::TerrainPages { requested, .. }
+                    if requested.iter().all(|identity| !keep(*identity)) =>
+                {
+                    Some(request_id)
+                }
+                PendingBatch::TerrainPages { .. }
+                | PendingBatch::TerrainRegionColumns { .. }
+                | PendingBatch::TerrainDirectories { .. }
                 | PendingBatch::Chunks { .. } => None,
             })
             .collect::<Vec<_>>();

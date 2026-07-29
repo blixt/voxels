@@ -217,6 +217,15 @@ fn exact_streaming_velocity(camera: &CameraState, streaming_velocity: glam::Vec3
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn canonical_interest_camera_matches(left: &CameraState, right: &CameraState) -> bool {
+    left.position.to_array().map(f32::to_bits) == right.position.to_array().map(f32::to_bits)
+        && left.yaw.to_bits() == right.yaw.to_bits()
+        && left.pitch.to_bits() == right.pitch.to_bits()
+        && left.velocity.to_array().map(f32::to_bits) == right.velocity.to_array().map(f32::to_bits)
+        && left.locomotion() == right.locomotion()
+}
+
 #[cfg(any(target_arch = "wasm32", test))]
 fn predictive_stream_position(
     position: glam::Vec3,
@@ -1405,7 +1414,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 8;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 55;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 56;
     const FRAME_SAMPLE_WIDTH: u32 = 22;
     const GPU_SAMPLE_WIDTH: u32 = 15;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -1440,6 +1449,7 @@ mod web {
         "virtualTerrainDesiredEnvelopeComplete,virtualTerrainDesiredEnvelopeFingerprintLow24,virtualTerrainDesiredEnvelopeFingerprintMid24,virtualTerrainDesiredEnvelopeFingerprintHigh16,virtualTerrainDesiredSafetyLeaves,virtualTerrainDesiredHorizonRoots,virtualTerrainDesiredLocusMinimumLeafX,virtualTerrainDesiredLocusMinimumLeafZ,virtualTerrainDesiredLocusMaximumLeafExclusiveX,virtualTerrainDesiredLocusMaximumLeafExclusiveZ,",
         "virtualTerrainCommittedEnvelopeFingerprintLow24,virtualTerrainCommittedEnvelopeFingerprintMid24,virtualTerrainCommittedEnvelopeFingerprintHigh16,virtualTerrainCommittedSafetyLeaves,virtualTerrainCommittedSafetyCoverage,virtualTerrainCommittedHorizonRoots,virtualTerrainCommittedHorizonCoverage,virtualTerrainCommittedLocusMinimumLeafX,virtualTerrainCommittedLocusMinimumLeafZ,virtualTerrainCommittedLocusMaximumLeafExclusiveX,virtualTerrainCommittedLocusMaximumLeafExclusiveZ,",
         "presentedCameraInsideCommittedEnvelope,presentationTargetX,presentationTargetY,presentationTargetZ,presentationGateActive,presentationGateStepsLow24,presentationGateStepsMid24,presentationGateStepsHigh16,presentationGateFramesLow24,presentationGateFramesMid24,presentationGateFramesHigh16,",
+        "clientViewGoalKind,clientViewAttemptPresent,clientViewAttemptCanonicalReady,clientViewAttemptTerrainStatus,virtualTerrainPublicationInFlight,",
         "frameSequence,schemaVersion,",
         "sampleCount,droppedSamples",
     );
@@ -1460,10 +1470,12 @@ mod web {
     const VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME: usize = TERRAIN_PAGE_MAX_CHILDREN * 2;
     const VIRTUAL_TERRAIN_CACHE_UPLOAD_BYTES_PER_FRAME: usize = 8 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_CACHE_UPLOAD_CPU_MS: f64 = 2.0;
-    // GPU expansion can reconstruct thousands of exact microvoxels from one logical page. Build
-    // one immutable-target page per frame so optional quality never turns into a multi-page frame
-    // hitch; publication remains atomic after the whole target is ready.
-    const VIRTUAL_TERRAIN_GPU_REBUILDS_PER_FRAME: usize = 1;
+    // Startup is hidden behind the loading surface, so use the same two-group microbatch as cache
+    // admission to build the first immutable owner promptly. Once any safe owner is visible,
+    // expand only one target page per frame: faster steady-state expansion can outrun travel,
+    // inflate the optional quality cut, and monopolize the browser renderer.
+    const VIRTUAL_TERRAIN_STARTUP_GPU_REBUILDS_PER_FRAME: usize = TERRAIN_PAGE_MAX_CHILDREN * 2;
+    const VIRTUAL_TERRAIN_STEADY_GPU_REBUILDS_PER_FRAME: usize = 1;
     const VIRTUAL_TERRAIN_MAX_EXACT_DOMAIN_LEAVES: usize = 16_384;
 
     /// Applies the committed half-open presentation boundary after one simulation proposal.
@@ -1692,8 +1704,8 @@ mod web {
             // to its leaves, even when its own simplified representation reports zero projected error.
             // Treating the chain as correctness-critical prevents distant high-error pages from
             // consuming the request window while spawn remains blocked on exact local terrain.
-            topology_critical: node.errors.unresolved_topology
-                || exact_surface_domain.intersects_page(node.key),
+            presentation_critical: exact_surface_domain.intersects_page(node.key),
+            topology_critical: node.errors.unresolved_topology,
             silhouette_critical: node.errors.silhouette_millivoxels > 0
                 || node.errors.material_boundary_millivoxels > 0,
             estimated_encoded_bytes: node.encoded_bytes,
@@ -2608,12 +2620,15 @@ mod web {
             self.frame_sequence.set(frame_sequence);
             let performance = self.scope.performance();
             let cpu_start = performance_now(performance.as_ref());
+            // Authoritative edits can synchronously revoke the renderer's terrain tuple and mint a
+            // new receipt. Apply them before reconciling the shell mirror so ordinary movement in
+            // this same frame never presents against the superseded receipt.
+            self.apply_server_edits();
             if !self.synchronize_client_view_from_renderer() {
                 log_gpu_error("renderer/client-view session identity diverged");
                 self.stopped.set(true);
                 return;
             }
-            self.apply_server_edits();
             let last = self.last_time.replace(time);
             let dt = if last <= 0.0 {
                 1.0 / 60.0
@@ -3254,35 +3269,120 @@ mod web {
                 self.config.stream_velocity_lookahead_seconds,
                 exact_lead_metres,
             ));
-            let collision_interest_start = performance_now(performance);
-            let mut collision_interest = if source_camera.locomotion() == LocomotionMode::Spectator
-            {
-                Vec::new()
-            } else {
-                self.collision_stream_interest(
-                    source_camera,
-                    crate::exact_streaming_velocity(source_camera, source_streaming_velocity),
-                    self.config.stream_collision_lookahead_seconds,
-                )
+            let client_view_attempt_target = {
+                let client_view = self.client_view.borrow();
+                client_view.goal().and_then(|goal| {
+                    client_view
+                        .attempt()
+                        .map(|_| (goal.version(), goal.target().camera()))
+                })
             };
-            if pending_relocation.is_some() {
-                collision_interest.extend(self.collision_stream_interest(
+            let attempt_target_matches_source =
+                client_view_attempt_target.is_some_and(|(_, target_camera)| {
+                    crate::canonical_interest_camera_matches(source_camera, &target_camera)
+                });
+            let attempt_target_matches_demand = pending_relocation.is_some()
+                && client_view_attempt_target.is_some_and(|(_, target_camera)| {
+                    crate::canonical_interest_camera_matches(&demand_camera, &target_camera)
+                });
+            let collision_interest_start = performance_now(performance);
+            let mut source_collision_interest =
+                if source_camera.locomotion() == LocomotionMode::Spectator {
+                    Vec::new()
+                } else {
+                    self.collision_stream_interest(
+                        source_camera,
+                        crate::exact_streaming_velocity(source_camera, source_streaming_velocity),
+                        self.config.stream_collision_lookahead_seconds,
+                    )
+                };
+            source_collision_interest.sort_unstable();
+            source_collision_interest.dedup();
+            let demand_collision_interest = pending_relocation.map(|_| {
+                let mut interest = self.collision_stream_interest(
                     &demand_camera,
                     crate::exact_streaming_velocity(&demand_camera, demand_streaming_velocity),
                     self.config.stream_collision_lookahead_seconds,
-                ));
-                collision_interest.sort_unstable_by_key(|coord| (coord.x, coord.y, coord.z));
-                collision_interest.dedup();
+                );
+                interest.sort_unstable();
+                interest.dedup();
+                interest
+            });
+            let attempt_collision_interest =
+                client_view_attempt_target.map(|(_, target_camera)| {
+                    let source_stream_matches =
+                        source_streaming_velocity.to_array().map(f32::to_bits)
+                            == target_camera.velocity.to_array().map(f32::to_bits);
+                    let mut interest = if source_stream_matches && attempt_target_matches_source {
+                        source_collision_interest.clone()
+                    } else if attempt_target_matches_demand {
+                        demand_collision_interest.clone().unwrap_or_default()
+                    } else {
+                        self.collision_stream_interest(
+                            &target_camera,
+                            crate::exact_streaming_velocity(&target_camera, target_camera.velocity),
+                            self.config.stream_collision_lookahead_seconds,
+                        )
+                    };
+                    interest.sort_unstable();
+                    interest.dedup();
+                    interest
+                });
+            let mut collision_interest = source_collision_interest;
+            if let Some(demand_interest) = &demand_collision_interest {
+                collision_interest.extend(demand_interest.iter().copied());
             }
+            let source_stream_matches_attempt =
+                client_view_attempt_target.is_some_and(|(_, target_camera)| {
+                    source_streaming_velocity.to_array().map(f32::to_bits)
+                        == target_camera.velocity.to_array().map(f32::to_bits)
+                });
+            if !attempt_target_matches_demand
+                && !(attempt_target_matches_source && source_stream_matches_attempt)
+                && let Some(attempt_interest) = &attempt_collision_interest
+            {
+                collision_interest.extend(attempt_interest.iter().copied());
+            }
+            collision_interest.sort_unstable();
+            collision_interest.dedup();
             let collision_interest_ms =
                 (performance_now(performance) - collision_interest_start) as f32;
             let enclosed_interest_start = performance_now(performance);
-            let mut enclosed_view_plan = self.enclosed_view_stream_plan(source_camera);
-            if pending_relocation.is_some() {
-                enclosed_view_plan = crate::merge_enclosed_view_stream_plans(
-                    enclosed_view_plan,
-                    self.enclosed_view_stream_plan(&demand_camera),
-                );
+            let source_enclosed_view_plan = self.enclosed_view_stream_plan(source_camera);
+            let demand_enclosed_view_plan =
+                pending_relocation.map(|_| self.enclosed_view_stream_plan(&demand_camera));
+            let (attempt_enclosed_interest, independent_attempt_enclosed_plan) =
+                match client_view_attempt_target {
+                    Some(_) if attempt_target_matches_source => {
+                        (Some(source_enclosed_view_plan.chunks.clone()), None)
+                    }
+                    Some(_) if attempt_target_matches_demand => (
+                        Some(
+                            demand_enclosed_view_plan
+                                .as_ref()
+                                .map(|plan| plan.chunks.clone())
+                                .unwrap_or_default(),
+                        ),
+                        None,
+                    ),
+                    Some((_, target_camera)) => {
+                        let plan = self.enclosed_view_stream_plan(&target_camera);
+                        (Some(plan.chunks.clone()), Some(plan))
+                    }
+                    None => (None, None),
+                };
+            let mut enclosed_view_plan = source_enclosed_view_plan;
+            if let Some(demand_plan) = demand_enclosed_view_plan {
+                enclosed_view_plan =
+                    crate::merge_enclosed_view_stream_plans(enclosed_view_plan, demand_plan);
+            }
+            if let Some(attempt_plan) = independent_attempt_enclosed_plan {
+                // The exact transaction that will certify a future camera owns its canonical
+                // dependencies until it commits or is superseded. Without this union, ordinary
+                // focus updates can evict a static attempt chunk, making its readiness predicate
+                // permanently false even after every current-camera diagnostic reports ready.
+                enclosed_view_plan =
+                    crate::merge_enclosed_view_stream_plans(enclosed_view_plan, attempt_plan);
             }
             let enclosed_view_interest = &enclosed_view_plan.chunks;
             let enclosed_view_frontiers_changed = crate::replace_portal_frontiers(
@@ -3438,11 +3538,18 @@ mod web {
             let virtual_terrain_start = performance_now(performance);
             let mut presentation_camera = demand_camera;
             presentation_camera.position = self.presentation_target_position.get();
+            let attempt_canonical_interests = client_view_attempt_target.and_then(|(goal, _)| {
+                attempt_collision_interest
+                    .as_deref()
+                    .zip(attempt_enclosed_interest.as_deref())
+                    .map(|(collision, enclosed)| (goal, collision, enclosed))
+            });
             self.stream_virtual_terrain(
                 &presentation_camera,
                 demand_streaming_velocity,
                 presentation_envelope,
                 prediction_domain,
+                attempt_canonical_interests,
             );
             let virtual_terrain_ms = (performance_now(performance) - virtual_terrain_start) as f32;
             StreamFrameSample {
@@ -3788,6 +3895,8 @@ mod web {
                 // Normal error is most visible on wet terrain. Always selecting against the
                 // conservative wet bound prevents rain from changing geometry ownership.
                 wet_specular_sensitivity: 1.0,
+                selection_mode:
+                    voxels_render::virtual_terrain::VirtualTerrainSelectionMode::Quality,
                 force_exact_leaves: false,
             }
         }
@@ -3972,6 +4081,116 @@ mod web {
             roots
         }
 
+        fn bind_client_view_publication(
+            &self,
+            request: VirtualTerrainRequestId,
+            canonical_interests: Option<(
+                crate::client_view::GoalVersion,
+                &[ChunkCoord],
+                &[ChunkCoord],
+            )>,
+        ) {
+            let (goal_version, target) = {
+                let mut client_view = self.client_view.borrow_mut();
+                match client_view.goal() {
+                    Some(goal) => (goal.version(), goal.target()),
+                    None => {
+                        let target = client_view.current();
+                        let goal_version =
+                            client_view.replace_goal(ClientViewGoalKind::TerrainRepair, target);
+                        (goal_version, target)
+                    }
+                }
+            };
+            let (collision, enclosed) = canonical_interests
+                .filter(|(plan_goal, _, _)| *plan_goal == goal_version)
+                .map(|(_, collision, enclosed)| (collision.to_vec(), enclosed.to_vec()))
+                .unwrap_or_else(|| self.relocation_canonical_interests(&target.camera()));
+            let installed = self.client_view.borrow_mut().install_attempt(
+                goal_version,
+                request,
+                collision,
+                enclosed,
+            );
+            if installed.is_none() {
+                self.renderer
+                    .borrow_mut()
+                    .discard_virtual_terrain_publication(request);
+                log_gpu_error(
+                    "discarded renderer publication whose client-view goal was superseded",
+                );
+            }
+        }
+
+        /// Maintains one aggregate handoff identity across the renderer and shell coordinator.
+        ///
+        /// Envelope changes can synchronously supersede renderer publication A before publication
+        /// B is prepared. The coordinator must drop A immediately and bind B even when A's
+        /// canonical dependencies were not ready; otherwise B can own the candidate bank forever
+        /// while no attempt is capable of polling or committing it.
+        fn reconcile_client_view_publication(
+            &self,
+            canonical_interests: Option<(
+                crate::client_view::GoalVersion,
+                &[ChunkCoord],
+                &[ChunkCoord],
+            )>,
+        ) {
+            let renderer_request = self.renderer.borrow().virtual_terrain_publication_request();
+            let coordinator_attempt = self
+                .client_view
+                .borrow()
+                .attempt()
+                .map(|attempt| (attempt.key(), *attempt.request()));
+            if coordinator_attempt.map(|(_, request)| request) == renderer_request {
+                return;
+            }
+            match renderer_request {
+                Some(request) => {
+                    self.bind_client_view_publication(request, canonical_interests);
+                }
+                None => {
+                    if let Some((key, _)) = coordinator_attempt {
+                        let discarded = self.client_view.borrow_mut().discard_attempt(key);
+                        debug_assert!(discarded);
+                    }
+                }
+            }
+        }
+
+        fn discard_client_view_attempt(
+            &self,
+            key: crate::client_view::AttemptKey,
+            request: VirtualTerrainRequestId,
+        ) {
+            self.renderer
+                .borrow_mut()
+                .discard_virtual_terrain_publication(request);
+            self.client_view.borrow_mut().discard_attempt(key);
+        }
+
+        fn rebase_client_view_canonical_plan(
+            &self,
+            canonical_interests: Option<(
+                crate::client_view::GoalVersion,
+                &[ChunkCoord],
+                &[ChunkCoord],
+            )>,
+        ) {
+            let Some((goal_version, collision, enclosed)) = canonical_interests else {
+                return;
+            };
+            let rebased = self.client_view.borrow_mut().reconcile_attempt_interests(
+                goal_version,
+                collision,
+                enclosed,
+            );
+            debug_assert!(
+                rebased.is_some(),
+                "a live client-view attempt must rebase its canonical certificate atomically"
+            );
+        }
+
         fn try_commit_client_view_attempt(&self) {
             let ready_attempt = {
                 let client_view = self.client_view.borrow();
@@ -3997,13 +4216,14 @@ mod web {
             if canonical.key() != key
                 || !canonical.fence().is_current(&self.edit_revisions.borrow())
             {
-                self.client_view.borrow_mut().discard_attempt(key);
+                self.discard_client_view_attempt(key, request);
                 return;
             }
-            let ready = match self.renderer.borrow().poll_virtual_terrain_ready(request) {
+            let terrain_status = self.renderer.borrow().poll_virtual_terrain_ready(request);
+            let ready = match terrain_status {
                 VirtualTerrainReadyStatus::Pending => return,
                 VirtualTerrainReadyStatus::Stale => {
-                    self.client_view.borrow_mut().discard_attempt(key);
+                    self.discard_client_view_attempt(key, request);
                     return;
                 }
                 VirtualTerrainReadyStatus::Ready(ready) => ready,
@@ -4037,7 +4257,7 @@ mod web {
                     }
                 }
                 Err(error) => {
-                    self.client_view.borrow_mut().discard_attempt(key);
+                    self.discard_client_view_attempt(key, request);
                     log_gpu_error(&format!("commit client-view publication: {error}"));
                 }
             }
@@ -4049,20 +4269,26 @@ mod web {
             streaming_velocity: Vec3,
             presentation_envelope: &PresentationEnvelope,
             prediction_domain: &ExactSurfaceDomain,
+            attempt_canonical_interests: Option<(
+                crate::client_view::GoalVersion,
+                &[ChunkCoord],
+                &[ChunkCoord],
+            )>,
         ) {
             if !self.virtual_terrain_supported() {
                 return;
             }
             let exact_surface_domain = presentation_envelope.exact_surface_domain();
-            // The exact attempt is the only owner allowed to replace the presented tuple.
+            // The renderer request and coordinator attempt are one aggregate transaction. Repair
+            // a synchronous envelope supersession before checking readiness so an obsolete
+            // canonical plan cannot strand a newer certified publication.
+            self.reconcile_client_view_publication(attempt_canonical_interests);
+            self.rebase_client_view_canonical_plan(attempt_canonical_interests);
             self.try_commit_client_view_attempt();
-            let (publication_in_flight, publication_owns_geometry) = {
-                let renderer = self.renderer.borrow();
-                (
-                    renderer.virtual_terrain_publication_in_flight(),
-                    renderer.virtual_terrain_publication_owns_geometry(),
-                )
-            };
+            let publication_in_flight = self
+                .renderer
+                .borrow()
+                .virtual_terrain_publication_in_flight();
             let now_ms = self.last_time.get().max(0.0) as u64;
             let prioritized_columns = self.desired_virtual_terrain_columns(
                 camera,
@@ -4116,7 +4342,7 @@ mod web {
                     .copied()
                     .collect::<BTreeSet<_>>()
             };
-            if !removed_roots.is_empty() && !publication_owns_geometry {
+            if !removed_roots.is_empty() && !publication_in_flight {
                 if let Err(error) = self
                     .renderer
                     .borrow_mut()
@@ -4169,8 +4395,12 @@ mod web {
             );
 
             let mut view = self.virtual_terrain_view(camera);
-            if self.renderer.borrow().virtual_terrain_cut().is_none() {
-                view = view.ownership_only();
+            if !self
+                .renderer
+                .borrow()
+                .virtual_terrain_committed_covers_presentation_envelope(presentation_envelope)
+            {
+                view = view.safety_only();
             }
             let mut cut = match self
                 .renderer
@@ -4188,13 +4418,19 @@ mod web {
                 // already held by the renderer. Rebuild the selected target locally; putting these
                 // keys back through the transport scheduler creates a redundant round trip and can
                 // leave an otherwise complete cut behind an unrelated request lease.
+                let maximum_pages = if self
+                    .renderer
+                    .borrow()
+                    .virtual_terrain_committed_snapshot_is_valid()
+                {
+                    VIRTUAL_TERRAIN_STEADY_GPU_REBUILDS_PER_FRAME
+                } else {
+                    VIRTUAL_TERRAIN_STARTUP_GPU_REBUILDS_PER_FRAME
+                };
                 if let Err(error) = self
                     .renderer
                     .borrow_mut()
-                    .rebuild_selected_virtual_terrain_gpu_pages(
-                        &cut,
-                        VIRTUAL_TERRAIN_GPU_REBUILDS_PER_FRAME,
-                    )
+                    .rebuild_selected_virtual_terrain_gpu_pages(&cut, maximum_pages)
                 {
                     log_gpu_error(&format!(
                         "rebuild selected virtual terrain GPU pages: {error}"
@@ -4246,6 +4482,16 @@ mod web {
                         .then_with(|| right.level.cmp(&left.level))
                         .then_with(|| left.cmp(right))
                 });
+                let retained_directory_roots = {
+                    let state = self.virtual_terrain.borrow();
+                    prioritized_roots
+                        .iter()
+                        .copied()
+                        .chain(refinement_roots.iter().copied())
+                        .chain(state.minimum_region_revisions.keys().copied())
+                        .collect::<BTreeSet<_>>()
+                };
+                self.cancel_virtual_terrain_directory_batches_outside(&retained_directory_roots);
                 self.request_virtual_terrain_directories(
                     &refinement_roots,
                     now_ms,
@@ -4260,28 +4506,7 @@ mod web {
                     .prepare_virtual_terrain_publication()
                 {
                     Ok(Some(request)) => {
-                        let mut client_view = self.client_view.borrow_mut();
-                        let goal_version = client_view.goal().map_or_else(
-                            || {
-                                let target = client_view.current();
-                                client_view.replace_goal(ClientViewGoalKind::Recenter, target)
-                            },
-                            |goal| goal.version(),
-                        );
-                        if client_view.attempt().is_none() {
-                            let target = client_view
-                                .goal()
-                                .map(|goal| goal.target())
-                                .unwrap_or_else(|| client_view.current());
-                            let (collision, enclosed) =
-                                self.relocation_canonical_interests(&target.camera());
-                            let _ = client_view.install_attempt(
-                                goal_version,
-                                request,
-                                collision,
-                                enclosed,
-                            );
-                        }
+                        self.bind_client_view_publication(request, attempt_canonical_interests);
                     }
                     Ok(None) => {}
                     Err(error) => match error {
@@ -4309,6 +4534,11 @@ mod web {
                     .filter(|identity| cache.contains(*identity))
                     .collect::<BTreeSet<_>>()
             };
+            let demanded_missing = demands
+                .iter()
+                .flat_map(|group| group.pages.iter().map(|page| page.identity))
+                .filter(|identity| !cached_demands.contains(identity))
+                .collect::<BTreeSet<_>>();
             if let Err(error) = self
                 .virtual_terrain_scheduler
                 .borrow_mut()
@@ -4316,6 +4546,15 @@ mod web {
             {
                 log_gpu_error(&format!("reconcile virtual terrain demand: {error}"));
                 return;
+            }
+            if self.remote.cancel_terrain_page_batches_outside(|identity| {
+                demanded_missing.contains(&identity)
+            }) > 0
+            {
+                // Cancellation creates ordinary typed completions. Drain them now so the
+                // scheduler capabilities released by obsolete quality work can be claimed by the
+                // newly exposed ownership frontier in this frame rather than the next one.
+                self.drain_remote_terrain_page_completions();
             }
             let priority = WorldProductPriority::VirtualTerrain;
             let batch = self
@@ -4497,6 +4736,33 @@ mod web {
             }
         }
 
+        fn cancel_virtual_terrain_directory_batches_outside(
+            &self,
+            keep: &BTreeSet<TerrainPageKey>,
+        ) -> usize {
+            let canceled = {
+                let mut state = self.virtual_terrain.borrow_mut();
+                let mut roots_by_request = BTreeMap::<RemoteRequestId, Vec<TerrainPageKey>>::new();
+                for (root, request_id) in &state.directory_in_flight {
+                    roots_by_request.entry(*request_id).or_default().push(*root);
+                }
+                let canceled = roots_by_request
+                    .into_iter()
+                    .filter(|(_, roots)| roots.iter().all(|root| !keep.contains(root)))
+                    .map(|(request_id, _)| request_id)
+                    .collect::<BTreeSet<_>>();
+                state
+                    .directory_in_flight
+                    .retain(|_, request_id| !canceled.contains(request_id));
+                canceled
+            };
+            let count = canceled.len();
+            for request_id in canceled {
+                self.remote.cancel(request_id);
+            }
+            count
+        }
+
         fn request_virtual_terrain_edit_directories(&self, now_ms: u64) {
             let roots = {
                 let state = self.virtual_terrain.borrow();
@@ -4616,6 +4882,17 @@ mod web {
 
                 let mut ready = None;
                 for group in groups {
+                    if group.replacement_parent.is_some_and(|parent| {
+                        !self
+                            .renderer
+                            .borrow()
+                            .virtual_terrain_page_is_resident(parent)
+                    }) {
+                        // A cached child group is only a legal replacement after its parent owns
+                        // the hierarchy region. Keep the encoded children warm and let the
+                        // separately requested ancestor install first.
+                        continue;
+                    }
                     let identities = group
                         .pages
                         .iter()
@@ -5328,6 +5605,10 @@ mod web {
                 };
                 self.accept_remote_terrain_directory_completion(completion);
             }
+            self.drain_remote_terrain_page_completions();
+        }
+
+        fn drain_remote_terrain_page_completions(&self) {
             for _ in 0..VIRTUAL_TERRAIN_PAGE_COMPLETIONS_PER_FRAME {
                 let Some(completion) = self.remote.next_terrain_page_completion() else {
                     break;
@@ -5803,6 +6084,12 @@ mod web {
                     }
                     _ => {}
                 }
+            }
+            // World Lab render-state actions are renderer-owned aggregate mutations: they revise
+            // the published receipt along with the visible setting. Reconcile before returning
+            // from the input event so no subsequent event observes a split shell/renderer tuple.
+            if !self.synchronize_client_view_from_renderer() {
+                log_gpu_error("input changed renderer state without a matching client view");
             }
             self.renderer.borrow().ui_open()
         }
@@ -6327,7 +6614,7 @@ mod web {
             let color = enabled
                 .then(|| [red, green, blue].map(|channel| f32::from(channel) / f32::from(u8::MAX)));
             engine.renderer.borrow_mut().set_diagnostic_sky_color(color);
-            true
+            engine.synchronize_client_view_from_renderer()
         }
 
         pub fn set_geometry_source_debug(&self, enabled: bool) -> bool {
@@ -6338,7 +6625,7 @@ mod web {
                 .renderer
                 .borrow_mut()
                 .set_geometry_source_debug(enabled);
-            true
+            engine.synchronize_client_view_from_renderer()
         }
 
         pub fn set_material_detail(&self, enabled: bool) -> bool {
@@ -6349,7 +6636,7 @@ mod web {
                 .renderer
                 .borrow_mut()
                 .set_material_detail_enabled(enabled);
-            true
+            engine.synchronize_client_view_from_renderer()
         }
 
         /// Reports actual current/outgoing cut ownership for one canonical voxel. This is a
@@ -6828,6 +7115,46 @@ mod web {
                 };
                 let presentation_gate_steps = engine.presentation_gate_steps.get();
                 let presentation_gate_frames = engine.presentation_gate_frames.get();
+                let (
+                    client_view_goal_kind,
+                    client_view_attempt_request,
+                    client_view_attempt_canonical_ready,
+                ) = {
+                    let client_view = engine.client_view.borrow();
+                    let goal_kind = client_view.goal().map_or(0, |goal| match goal.kind() {
+                        ClientViewGoalKind::Recenter => 1,
+                        ClientViewGoalKind::TerrainRepair => 2,
+                        ClientViewGoalKind::SpectatorEnter => 3,
+                        ClientViewGoalKind::SpectatorExit => 4,
+                        ClientViewGoalKind::ProfileStep => 5,
+                        ClientViewGoalKind::ProfileRestore => 6,
+                        ClientViewGoalKind::ReproductionApply => 7,
+                        ClientViewGoalKind::ReproductionRestore => 8,
+                    });
+                    let attempt = client_view.attempt();
+                    (
+                        goal_kind,
+                        attempt.map(|attempt| *attempt.request()),
+                        attempt.is_some_and(|attempt| {
+                            attempt
+                                .canonical()
+                                .ready_receipt(&engine.scheduler.borrow())
+                                .is_some()
+                        }),
+                    )
+                };
+                let client_view_attempt_terrain_status =
+                    client_view_attempt_request.map_or(0, |request| {
+                        match engine.renderer.borrow().poll_virtual_terrain_ready(request) {
+                            VirtualTerrainReadyStatus::Pending => 1,
+                            VirtualTerrainReadyStatus::Ready(_) => 2,
+                            VirtualTerrainReadyStatus::Stale => 3,
+                        }
+                    });
+                let virtual_terrain_publication_in_flight = engine
+                    .renderer
+                    .borrow()
+                    .virtual_terrain_publication_in_flight();
                 values.extend_from_slice(&[
                     camera.position.x,
                     camera.position.y,
@@ -7168,6 +7495,23 @@ mod web {
                     (presentation_gate_frames & 0x00ff_ffff) as f32,
                     ((presentation_gate_frames >> 24) & 0x00ff_ffff) as f32,
                     ((presentation_gate_frames >> 48) & 0x0000_ffff) as f32,
+                    client_view_goal_kind as f32,
+                    if client_view_attempt_request.is_some() {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    if client_view_attempt_canonical_ready {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    client_view_attempt_terrain_status as f32,
+                    if virtual_terrain_publication_in_flight {
+                        1.0
+                    } else {
+                        0.0
+                    },
                     engine.frame_sequence.get() as f32,
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);

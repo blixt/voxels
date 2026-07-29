@@ -1792,14 +1792,13 @@ fn validate_terrain_directory_result(
         .collect::<Vec<_>>();
     validate_terrain_directory_roots(result.request_id, &roots)?;
     for item in &result.items {
-        if let Ok(directory) = &item.result {
-            if directory.source_identity_hash != result.source_identity_hash
-                || directory.roots().map(|node| node.key).collect::<Vec<_>>() != [item.root]
-            {
-                return Err(ProtocolError::InvalidPayload(
-                    "terrain directory identity mismatch",
-                ));
-            }
+        if let Ok(directory) = &item.result
+            && (directory.source_identity_hash != result.source_identity_hash
+                || directory.roots().map(|node| node.key).collect::<Vec<_>>() != [item.root])
+        {
+            return Err(ProtocolError::InvalidPayload(
+                "terrain directory identity mismatch",
+            ));
         }
     }
     Ok(())

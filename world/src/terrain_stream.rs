@@ -69,6 +69,11 @@ pub struct TerrainPageDemand {
     pub distance_millimetres: u32,
     /// Zero means certainly visible; 1,000 means confidently occluded.
     pub occlusion_confidence_millis: u16,
+    /// This page is on the dependency chain of the next exact playable presentation envelope.
+    ///
+    /// Unlike visual topology or silhouette error, this is a movement-safety dependency: optional
+    /// refinement must never consume the stream indefinitely while this work is pending.
+    pub presentation_critical: bool,
     pub topology_critical: bool,
     pub silhouette_critical: bool,
     pub estimated_encoded_bytes: u32,
@@ -545,7 +550,8 @@ fn compare_demands(left: &TerrainPageDemand, right: &TerrainPageDemand) -> Order
 }
 
 fn demand_priority(demand: &TerrainPageDemand) -> u128 {
-    let critical = u128::from(demand.topology_critical) * (1u128 << 120)
+    let critical = u128::from(demand.presentation_critical) * (1u128 << 124)
+        + u128::from(demand.topology_critical) * (1u128 << 120)
         + u128::from(demand.silhouette_critical) * (1u128 << 112);
     let visibility = u128::from(1_000u16.saturating_sub(demand.occlusion_confidence_millis)) + 50;
     let error = u128::from(demand.projected_error_millipixels).saturating_add(1_000);
@@ -757,6 +763,7 @@ mod tests {
             time_to_exposure_ms: 1_000,
             distance_millimetres: 1_000,
             occlusion_confidence_millis: 0,
+            presentation_critical: false,
             topology_critical: false,
             silhouette_critical: false,
             estimated_encoded_bytes: 1_024,
@@ -1051,6 +1058,37 @@ mod tests {
         assert_eq!(
             scheduler.next_batch(0).unwrap().pages,
             vec![critical.identity]
+        );
+    }
+
+    #[test]
+    fn presentation_dependencies_beat_optional_unresolved_topology() {
+        let key = |x| TerrainPageKey {
+            level: 0,
+            coord: [x, 0, 0],
+        };
+        let (presentation, _) = page(key(0), 1);
+        let (optional, _) = page(key(1), 1);
+        let mut presentation = demand(presentation, 1);
+        presentation.presentation_critical = true;
+        presentation.time_to_exposure_ms = 10;
+        let mut optional = demand(optional, u32::MAX);
+        optional.topology_critical = true;
+        optional.silhouette_critical = true;
+        optional.time_to_exposure_ms = 0;
+        let mut config = TerrainStreamConfig::DEVELOPMENT;
+        config.max_in_flight_pages = 1;
+        config.max_batch_items = 1;
+        let mut scheduler = TerrainStreamScheduler::new(config).unwrap();
+        scheduler
+            .reconcile([
+                TerrainDemandGroup::singleton(optional),
+                TerrainDemandGroup::singleton(presentation),
+            ])
+            .unwrap();
+        assert_eq!(
+            scheduler.next_batch(0).unwrap().pages,
+            vec![presentation.identity]
         );
     }
 

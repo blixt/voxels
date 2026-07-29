@@ -446,7 +446,13 @@ mod tests {
         }
         assert!(voxels.contains("@location(4) diagnostic_owner: vec4<u32>"));
         assert!(voxels.contains("vec3<f32>(origin + quad_local(face, uv, extent))"));
-        assert!(shadows.contains("vec3<f32>(origin + vec3<i32>(local))"));
+        assert!(voxels.contains("fn canonical_triangle_uv("));
+        assert!(voxels.contains(") -> vec2<i32>"));
+        assert!(voxels.contains(
+            "origin + canonical_triangle_local(corner, encoded_extent, face, packed_ao)"
+        ));
+        assert!(shadows.contains("var local = vec3<i32>(0)"));
+        assert!(shadows.contains("vec3<f32>(origin + local)"));
     }
 
     #[test]

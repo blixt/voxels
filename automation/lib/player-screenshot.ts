@@ -26,6 +26,13 @@ export interface PlayerScreenshotMetadata {
     readonly pitchRadians: number;
   };
   readonly presentation: {
+    readonly publishedClientView: {
+      readonly presentationSerial: string;
+      readonly viewRevision: string;
+      readonly terrainRequest: number | null;
+      readonly terrainGeneration: number | null;
+      readonly revisionDigest: string;
+    };
     readonly selectedCutFingerprint: string;
     readonly terrainHandleSnapshot: {
       readonly generation: string;
@@ -247,6 +254,13 @@ export function assertPlayerScreenshotMetadata(metadata: unknown): PlayerScreens
     candidate.schema !== "voxels.reproduction.v3" ||
     candidate.attachments?.terrainPixelOwnership?.schema !== "voxels.terrain-pixel-ownership.v1" ||
     candidate.presentation?.selectedCut?.kind !== "virtualTerrain" ||
+    typeof candidate.presentation?.publishedClientView?.presentationSerial !== "string" ||
+    typeof candidate.presentation?.publishedClientView?.viewRevision !== "string" ||
+    (candidate.presentation?.publishedClientView?.terrainRequest !== null &&
+      !Number.isSafeInteger(candidate.presentation?.publishedClientView?.terrainRequest)) ||
+    (candidate.presentation?.publishedClientView?.terrainGeneration !== null &&
+      !Number.isSafeInteger(candidate.presentation?.publishedClientView?.terrainGeneration)) ||
+    !/^[0-9a-f]{16}$/.test(candidate.presentation?.publishedClientView?.revisionDigest ?? "") ||
     !["disabled", "shadow", "visible"].includes(
       candidate.presentation?.virtualTerrain?.mode ?? "",
     ) ||

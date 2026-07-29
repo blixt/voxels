@@ -330,6 +330,14 @@ impl CanonicalAttemptPlan {
             fence,
         })
     }
+
+    pub(crate) fn matches_interests(
+        &self,
+        collision: &[ChunkCoord],
+        enclosed: &[ChunkCoord],
+    ) -> bool {
+        self.collision.as_ref() == collision && self.enclosed.as_ref() == enclosed
+    }
 }
 
 fn canonicalize_coords(coords: &mut Vec<ChunkCoord>) {
@@ -362,6 +370,7 @@ pub(crate) struct GoalSequence {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClientViewGoalKind {
     Recenter,
+    TerrainRepair,
     SpectatorEnter,
     SpectatorExit,
     ProfileStep,
@@ -475,10 +484,26 @@ impl<Request, Receipt: Copy + Eq> ClientViewCoordinator<Request, Receipt> {
         {
             return false;
         }
+        let render_state = state.render_state;
         self.current = self
             .current
             .with_camera(state.camera)
-            .with_render_state(state.render_state);
+            .with_render_state(render_state);
+        if let Some(goal) = &mut self.goal {
+            if goal.kind == ClientViewGoalKind::TerrainRepair {
+                // A terrain-only replacement has no spatial target of its own. It tracks the
+                // exact currently presented state so a slow edit rebuild cannot later restore the
+                // camera pose from the frame in which its publication was first prepared.
+                goal.target = self.current;
+            } else if goal.kind != ClientViewGoalKind::ReproductionApply {
+                // A spatial handoff owns a future position, not a stale copy of live renderer
+                // controls. Keep those controls on every ordinary pending target so committing an
+                // adjacent locus cannot silently undo a debug/UI/material revision.
+                // ReproductionApply is deliberately excluded because its target owns the exact
+                // render state embedded in the capture being reproduced.
+                goal.target = goal.target.with_render_state(render_state);
+            }
+        }
         self.published = published;
         true
     }
@@ -525,6 +550,30 @@ impl<Request, Receipt: Copy + Eq> ClientViewCoordinator<Request, Receipt> {
         Some(key)
     }
 
+    /// Keeps the active renderer request while atomically replacing stale canonical evidence.
+    ///
+    /// The caller supplies already-canonical interests derived for `goal` in the current frame.
+    /// Returning the extant key for an unchanged plan avoids allocation and attempt churn.
+    pub(crate) fn reconcile_attempt_interests(
+        &mut self,
+        goal: GoalVersion,
+        collision: &[ChunkCoord],
+        enclosed: &[ChunkCoord],
+    ) -> Option<AttemptKey>
+    where
+        Request: Copy,
+    {
+        if self.goal.is_none_or(|current| current.version != goal) {
+            return None;
+        }
+        let attempt = self.attempt.as_ref()?;
+        if attempt.canonical.matches_interests(collision, enclosed) {
+            return Some(attempt.key);
+        }
+        let request = attempt.request;
+        self.install_attempt(goal, request, collision.to_vec(), enclosed.to_vec())
+    }
+
     pub(crate) fn commit_attempt(&mut self, key: AttemptKey, published: Receipt) -> bool {
         let Some(goal) = self.goal else {
             return false;
@@ -558,14 +607,17 @@ impl<Request, Receipt: Copy + Eq> ClientViewCoordinator<Request, Receipt> {
             return false;
         }
         self.current = next;
-        if matches!(self.current.session, ClientViewSession::Interactive(_))
-            && let Some(goal) = &mut self.goal
-            && matches!(goal.target.session, ClientViewSession::Interactive(_))
-        {
-            // A recenter target owns a future position, not a stale look direction. Pointer input
-            // continues while that spatial handoff streams, so copy only yaw/pitch into the target
-            // without leaking its unpresented position back into the current view.
-            goal.target = goal.target.with_look_from(self.current.camera());
+        if let Some(goal) = &mut self.goal {
+            if goal.kind == ClientViewGoalKind::TerrainRepair {
+                goal.target = self.current;
+            } else if matches!(self.current.session, ClientViewSession::Interactive(_))
+                && matches!(goal.target.session, ClientViewSession::Interactive(_))
+            {
+                // A recenter target owns a future position, not a stale look direction. Pointer
+                // input continues while that spatial handoff streams, so copy only yaw/pitch into
+                // the target without leaking its unpresented position back into the current view.
+                goal.target = goal.target.with_look_from(self.current.camera());
+            }
         }
         self.published = published;
         true
@@ -765,6 +817,168 @@ mod tests {
         assert_eq!(coordinator.target_camera().position, camera_b.position);
         assert_eq!(coordinator.target_camera().yaw, looked.yaw);
         assert_eq!(coordinator.target_camera().pitch, looked.pitch);
+    }
+
+    #[test]
+    fn terrain_repair_tracks_in_locus_motion_instead_of_restoring_an_old_pose() {
+        let camera_a = CameraState::spawn(Vec3::new(0.0, 4.0, 0.0));
+        let mut coordinator = ClientViewCoordinator::<u64, u64>::new(
+            ClientViewState::gameplay(camera_a, TEST_RENDER_STATE),
+            10,
+        );
+        let goal =
+            coordinator.replace_goal(ClientViewGoalKind::TerrainRepair, coordinator.current());
+        let attempt = coordinator
+            .install_attempt(goal, 20, Vec::new(), Vec::new())
+            .expect("terrain repair attempt");
+
+        let mut camera_b = camera_a;
+        camera_b.position = Vec3::new(2.5, 4.0, -3.0);
+        camera_b.yaw = 0.7;
+        camera_b.pitch = -0.4;
+        assert!(coordinator.commit_in_locus(10, coordinator.current().with_camera(camera_b), 11,));
+        assert_eq!(coordinator.target_camera().position, camera_b.position);
+        assert_eq!(coordinator.target_camera().yaw, camera_b.yaw);
+        assert_eq!(coordinator.target_camera().pitch, camera_b.pitch);
+
+        assert!(coordinator.commit_attempt(attempt, 12));
+        assert_eq!(coordinator.camera().position, camera_b.position);
+        assert_eq!(coordinator.camera().yaw, camera_b.yaw);
+        assert_eq!(coordinator.camera().pitch, camera_b.pitch);
+    }
+
+    #[test]
+    fn moving_terrain_repair_replaces_its_canonical_plan_before_commit() {
+        let camera_a = CameraState::spawn(Vec3::new(0.0, 4.0, 0.0));
+        let mut coordinator = ClientViewCoordinator::<u64, u64>::new(
+            ClientViewState::gameplay(camera_a, TEST_RENDER_STATE),
+            10,
+        );
+        let goal =
+            coordinator.replace_goal(ClientViewGoalKind::TerrainRepair, coordinator.current());
+        let chunk_a = ChunkCoord { x: 0, y: 0, z: 0 };
+        let chunk_b = ChunkCoord { x: 0, y: 0, z: -1 };
+        let attempt_a = coordinator
+            .install_attempt(goal, 20, vec![chunk_a], vec![chunk_a])
+            .expect("terrain repair at A");
+
+        let mut camera_b = camera_a;
+        camera_b.position.z = -3.3;
+        assert!(coordinator.commit_in_locus(10, coordinator.current().with_camera(camera_b), 11,));
+        assert!(
+            !coordinator
+                .attempt()
+                .unwrap()
+                .canonical()
+                .matches_interests(&[chunk_b], &[chunk_b]),
+            "the A certificate must not be mistaken for B evidence"
+        );
+
+        let attempt_b = coordinator
+            .install_attempt(goal, 20, vec![chunk_b], vec![chunk_b])
+            .expect("rebased terrain repair at B");
+        assert_ne!(attempt_a, attempt_b);
+        assert!(!coordinator.commit_attempt(attempt_a, 12));
+        assert!(
+            coordinator
+                .attempt()
+                .unwrap()
+                .canonical()
+                .matches_interests(&[chunk_b], &[chunk_b])
+        );
+    }
+
+    #[test]
+    fn turning_pending_recenter_replaces_its_canonical_plan_before_commit() {
+        let camera_a = CameraState::spawn(Vec3::new(0.0, 4.0, 0.0));
+        let mut camera_b = CameraState::spawn(Vec3::new(32.0, 4.0, 0.0));
+        camera_b.yaw = 0.25;
+        let mut coordinator = ClientViewCoordinator::<u64, u64>::new(
+            ClientViewState::gameplay(camera_a, TEST_RENDER_STATE),
+            10,
+        );
+        let goal = coordinator.replace_goal(
+            ClientViewGoalKind::Recenter,
+            coordinator.current().with_camera(camera_b),
+        );
+        let forward_chunk = ChunkCoord { x: 2, y: 0, z: -1 };
+        let reverse_chunk = ChunkCoord { x: 2, y: 0, z: 1 };
+        let attempt_a = coordinator
+            .install_attempt(goal, 20, vec![forward_chunk], vec![forward_chunk])
+            .expect("recenter looking forward");
+
+        let mut looked = camera_a;
+        looked.yaw = core::f32::consts::PI;
+        assert!(coordinator.commit_in_locus(10, coordinator.current().with_camera(looked), 11,));
+        assert_eq!(coordinator.target_camera().position, camera_b.position);
+        assert_eq!(coordinator.target_camera().yaw, looked.yaw);
+        assert!(
+            !coordinator
+                .attempt()
+                .unwrap()
+                .canonical()
+                .matches_interests(&[reverse_chunk], &[reverse_chunk]),
+            "the forward-view certificate must not be mistaken for reverse-view evidence"
+        );
+
+        let attempt_b = coordinator
+            .reconcile_attempt_interests(goal, &[reverse_chunk], &[reverse_chunk])
+            .expect("production rebase after turning");
+        assert_ne!(attempt_a, attempt_b);
+        assert!(!coordinator.commit_attempt(attempt_a, 12));
+        assert!(
+            coordinator
+                .attempt()
+                .unwrap()
+                .canonical()
+                .matches_interests(&[reverse_chunk], &[reverse_chunk])
+        );
+    }
+
+    #[test]
+    fn renderer_owned_render_state_revision_reconciles_state_and_receipt_atomically() {
+        let camera = CameraState::spawn(Vec3::new(0.0, 4.0, 0.0));
+        let current = ClientViewState::gameplay(camera, TEST_RENDER_STATE);
+        let mut coordinator = ClientViewCoordinator::<u64, u64>::new(current, 10);
+        let mut target_camera = camera;
+        target_camera.position.z = -16.0;
+        let goal = coordinator.replace_goal(
+            ClientViewGoalKind::Recenter,
+            current.with_camera(target_camera),
+        );
+        let attempt = coordinator
+            .install_attempt(goal, 20, Vec::new(), Vec::new())
+            .expect("pending adjacent-locus attempt");
+        let revised_render_state = ScreenshotMutableRenderState {
+            geometry_source_debug: true,
+            ..TEST_RENDER_STATE
+        };
+        let renderer_state = ClientViewPresentationState {
+            render_state: revised_render_state,
+            ..current.presentation_state()
+        };
+
+        assert!(coordinator.synchronize_renderer_presentation(renderer_state, 11));
+        assert_eq!(coordinator.published(), 11);
+        assert_eq!(
+            coordinator.current().presentation_state().render_state,
+            revised_render_state
+        );
+        assert_eq!(
+            coordinator
+                .goal()
+                .unwrap()
+                .target()
+                .presentation_state()
+                .render_state,
+            revised_render_state
+        );
+        assert!(coordinator.commit_attempt(attempt, 12));
+        assert_eq!(
+            coordinator.current().presentation_state().render_state,
+            revised_render_state
+        );
+        assert!(coordinator.commit_in_locus(12, coordinator.current(), 13));
     }
 
     #[test]

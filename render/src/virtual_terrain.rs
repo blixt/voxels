@@ -828,6 +828,14 @@ impl VirtualTerrainCapacity {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VirtualTerrainSelectionMode {
+    /// Build only the exact playable envelope, required horizon owners, and their balance closure.
+    Safety,
+    /// Refine the already-safe presentation using projected visual error.
+    Quality,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VirtualTerrainView {
     pub camera_position_metres: [f64; 3],
     pub camera_forward: [f64; 3],
@@ -839,19 +847,18 @@ pub struct VirtualTerrainView {
     pub refine_above_pixels: f64,
     pub coarsen_below_pixels: f64,
     pub wet_specular_sensitivity: f64,
+    pub selection_mode: VirtualTerrainSelectionMode,
     /// Reference/debug override. Production selection normally follows certified error.
     pub force_exact_leaves: bool,
 }
 
 impl VirtualTerrainView {
-    /// Preserves exact-domain and ownership refinement while disabling projected-error quality.
+    /// Preserves exact-domain, horizon ownership, and balance refinement while disabling quality.
     ///
-    /// Cold start uses this to publish the first mathematically complete cut before spending
-    /// bandwidth on optional visible detail. The ordinary view replaces it immediately after that
-    /// first cut commits.
-    pub fn ownership_only(mut self) -> Self {
-        self.refine_above_pixels = f64::MAX;
-        self.coarsen_below_pixels = f64::MAX / 2.0;
+    /// Startup and every locus handoff use this to publish the next mathematically complete cut
+    /// before optional visible detail can consume transport, cache, or GPU capacity.
+    pub fn safety_only(mut self) -> Self {
+        self.selection_mode = VirtualTerrainSelectionMode::Safety;
         self
     }
 
@@ -2536,10 +2543,14 @@ impl CutBuilder<'_> {
             self.view.refine_above_pixels
         };
         let projected_error = projected_page_error_pixels(&node, self.view);
-        let quality_visible = page_is_visible(node.bounds, self.view);
         let wants_more_detail = self.view.force_exact_leaves
             || exact_surface
-            || (quality_visible && projected_error > threshold);
+            || optional_quality_refinement_requested(
+                self.view.selection_mode,
+                page_is_visible(node.bounds, self.view),
+                projected_error,
+                threshold,
+            );
         if wants_more_detail && !node.has_children && key.is_surface() && key.level > 0 {
             if self.refinement_requests.len() < self.hierarchy.capacity.max_feedback_pages {
                 self.refinement_requests.insert(key);
@@ -2680,6 +2691,15 @@ fn projected_page_error_pixels(node: &TerrainHierarchyNode, view: VirtualTerrain
         * NORMAL_ERROR_PIXELS_PER_RADIAN
         * view.wet_specular_sensitivity;
     positional_pixels.max(normal_pixels)
+}
+
+fn optional_quality_refinement_requested(
+    selection_mode: VirtualTerrainSelectionMode,
+    visible: bool,
+    projected_error: f64,
+    threshold: f64,
+) -> bool {
+    selection_mode == VirtualTerrainSelectionMode::Quality && visible && projected_error > threshold
 }
 
 fn distance_to_page_metres(bounds: voxels_world::VoxelBounds, point: [f64; 3]) -> f64 {
@@ -2880,6 +2900,7 @@ mod tests {
             refine_above_pixels: 0.65,
             coarsen_below_pixels: 0.35,
             wet_specular_sensitivity: 1.0,
+            selection_mode: VirtualTerrainSelectionMode::Quality,
             force_exact_leaves,
         }
     }
@@ -3137,19 +3158,37 @@ mod tests {
     }
 
     #[test]
-    fn ownership_only_view_is_valid_and_disables_optional_pixel_refinement() {
+    fn safety_only_view_is_valid_and_disables_optional_pixel_refinement() {
         let ordinary = view(false);
-        let ownership = ordinary.ownership_only();
+        let safety = ordinary.safety_only();
 
-        assert!(ownership.validates());
+        assert!(safety.validates());
         assert_eq!(
-            ownership.camera_position_metres,
+            safety.camera_position_metres,
             ordinary.camera_position_metres
         );
-        assert_eq!(ownership.camera_forward, ordinary.camera_forward);
-        assert_eq!(ownership.force_exact_leaves, ordinary.force_exact_leaves);
-        assert!(ownership.coarsen_below_pixels > ordinary.refine_above_pixels);
-        assert!(ownership.refine_above_pixels > ownership.coarsen_below_pixels);
+        assert_eq!(safety.camera_forward, ordinary.camera_forward);
+        assert_eq!(safety.force_exact_leaves, ordinary.force_exact_leaves);
+        assert_eq!(safety.selection_mode, VirtualTerrainSelectionMode::Safety);
+        assert_eq!(
+            ordinary.selection_mode,
+            VirtualTerrainSelectionMode::Quality
+        );
+        assert!(
+            !optional_quality_refinement_requested(
+                safety.selection_mode,
+                true,
+                f64::INFINITY,
+                safety.refine_above_pixels,
+            ),
+            "unresolved optional topology must not recurse through the hierarchy while the playable envelope is unsafe",
+        );
+        assert!(optional_quality_refinement_requested(
+            ordinary.selection_mode,
+            true,
+            f64::INFINITY,
+            ordinary.refine_above_pixels,
+        ));
     }
 
     #[test]

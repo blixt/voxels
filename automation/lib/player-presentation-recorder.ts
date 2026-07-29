@@ -47,6 +47,20 @@ export interface PlayerPresentationTraceFrame {
     readonly pageBatchesInFlight: number;
     readonly pageUploadFailures: number;
   };
+  readonly canonical: {
+    readonly pendingJobs: number;
+    readonly generationQueued: number;
+    readonly generationInFlight: number;
+    readonly meshingQueued: number;
+    readonly meshingInFlight: number;
+    readonly uploadQueued: number;
+    readonly uploadInFlight: number;
+    readonly loadInFlight: number;
+    readonly immediateResident: number;
+    readonly immediateRequired: number;
+    readonly lookaheadResident: number;
+    readonly lookaheadRequired: number;
+  };
   readonly exactCore: {
     readonly complete: boolean;
     readonly requiredLeaves: number;
@@ -73,6 +87,14 @@ export interface PlayerPresentationTraceFrame {
     readonly active: boolean;
     readonly blockedSteps: string;
     readonly blockedFrames: string;
+  };
+  readonly presentationTransaction: {
+    readonly goalKind: number;
+    readonly attemptPresent: boolean;
+    readonly canonicalReady: boolean;
+    /// 0 means no attempt, 1 pending, 2 ready, and 3 stale.
+    readonly terrainStatus: number;
+    readonly terrainPublicationInFlight: boolean;
   };
 }
 
@@ -177,6 +199,20 @@ function traceFrame(
       pageBatchesInFlight: snapshotValue(snapshot, "virtualTerrainStreamInFlight"),
       pageUploadFailures: snapshotValue(snapshot, "virtualTerrainPageUploadFailed"),
     },
+    canonical: {
+      pendingJobs: snapshotValue(snapshot, "pendingJobs"),
+      generationQueued: snapshotValue(snapshot, "generationQueued"),
+      generationInFlight: snapshotValue(snapshot, "generationInFlight"),
+      meshingQueued: snapshotValue(snapshot, "meshingQueued"),
+      meshingInFlight: snapshotValue(snapshot, "meshingInFlight"),
+      uploadQueued: snapshotValue(snapshot, "uploadQueued"),
+      uploadInFlight: snapshotValue(snapshot, "uploadInFlight"),
+      loadInFlight: snapshotValue(snapshot, "loadInFlight"),
+      immediateResident: snapshotValue(snapshot, "collisionImmediateResident"),
+      immediateRequired: snapshotValue(snapshot, "collisionImmediateRequired"),
+      lookaheadResident: snapshotValue(snapshot, "collisionLookaheadResident"),
+      lookaheadRequired: snapshotValue(snapshot, "collisionLookaheadRequired"),
+    },
     exactCore: {
       complete: snapshotValue(snapshot, "virtualTerrainExactCoreComplete") === 1,
       requiredLeaves: snapshotValue(snapshot, "virtualTerrainExactCoreRequiredLeaves"),
@@ -234,6 +270,14 @@ function traceFrame(
         snapshotValue(snapshot, "presentationGateFramesMid24"),
         snapshotValue(snapshot, "presentationGateFramesHigh16"),
       ),
+    },
+    presentationTransaction: {
+      goalKind: snapshotValue(snapshot, "clientViewGoalKind"),
+      attemptPresent: snapshotValue(snapshot, "clientViewAttemptPresent") === 1,
+      canonicalReady: snapshotValue(snapshot, "clientViewAttemptCanonicalReady") === 1,
+      terrainStatus: snapshotValue(snapshot, "clientViewAttemptTerrainStatus"),
+      terrainPublicationInFlight:
+        snapshotValue(snapshot, "virtualTerrainPublicationInFlight") === 1,
     },
   };
 }

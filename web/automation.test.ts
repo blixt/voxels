@@ -98,6 +98,11 @@ describe("engine automation contract", () => {
       "presentationGateFramesLow24",
       "presentationGateFramesMid24",
       "presentationGateFramesHigh16",
+      "clientViewGoalKind",
+      "clientViewAttemptPresent",
+      "clientViewAttemptCanonicalReady",
+      "clientViewAttemptTerrainStatus",
+      "virtualTerrainPublicationInFlight",
     ]);
     expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.schemaVersion]).toBe("schemaVersion");
   });

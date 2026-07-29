@@ -243,6 +243,16 @@ pub enum VirtualTerrainRenderMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VirtualTerrainRequestId(u64);
 
+impl VirtualTerrainRequestId {
+    /// Stable numeric identity for diagnostics only.
+    ///
+    /// Hosts still cannot construct an identity, but can record both sides of a presentation
+    /// transaction and prove that the renderer publication and coordinator attempt remain joined.
+    pub const fn diagnostic_value(self) -> u64 {
+        self.0
+    }
+}
+
 /// Semantic session whose camera and reproduction-visible state are presented atomically.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ClientViewSession {
@@ -386,6 +396,7 @@ struct CommittedVirtualTerrainPresentation {
     envelope: PresentationEnvelope,
     certificate: PresentationCoverageCertificate,
     revisions: WorldRevisionFence,
+    revisions_current: bool,
     request: VirtualTerrainRequestId,
     generation: u64,
 }
@@ -397,6 +408,7 @@ impl CommittedVirtualTerrainPresentation {
             envelope: publication.envelope,
             certificate: publication.certificate,
             revisions: publication.revisions,
+            revisions_current: true,
             request: publication.request,
             generation,
         }
@@ -525,19 +537,18 @@ fn take_invalidated_virtual_terrain_publication(
     }
 }
 
-fn revoke_invalidated_presented_terrain(
+fn mark_invalidated_presented_terrain_revision(
     terrain: &mut PresentedTerrain,
     change: &WorldChange,
 ) -> bool {
-    if matches!(
-        terrain,
-        PresentedTerrain::Virtual(committed) if change.invalidates(&committed.revisions)
-    ) {
-        *terrain = PresentedTerrain::CanonicalShadow;
-        true
-    } else {
-        false
+    let PresentedTerrain::Virtual(committed) = terrain else {
+        return false;
+    };
+    if !change.invalidates(&committed.revisions) {
+        return false;
     }
+    committed.revisions_current = false;
+    true
 }
 
 fn reset_presented_terrain(terrain: &mut PresentedTerrain) -> bool {
@@ -917,6 +928,20 @@ impl QuadEdge {
     }
 }
 
+fn constrained_quad_anchor(constrained: &[QuadEdge]) -> (Option<usize>, Option<QuadEdge>) {
+    match constrained {
+        [QuadEdge::NegativeX] => (Some(1), Some(QuadEdge::PositiveZ)),
+        [QuadEdge::PositiveX] => (Some(0), Some(QuadEdge::PositiveZ)),
+        [QuadEdge::NegativeZ] => (Some(3), Some(QuadEdge::PositiveX)),
+        [QuadEdge::PositiveZ] => (Some(0), Some(QuadEdge::PositiveX)),
+        [QuadEdge::NegativeX, QuadEdge::NegativeZ] => (Some(2), None),
+        [QuadEdge::PositiveX, QuadEdge::NegativeZ] => (Some(3), None),
+        [QuadEdge::PositiveX, QuadEdge::PositiveZ] => (Some(0), None),
+        [QuadEdge::NegativeX, QuadEdge::PositiveZ] => (Some(1), None),
+        _ => (None, None),
+    }
+}
+
 fn canonical_triangle_ao(
     packed: u8,
     edge: QuadEdge,
@@ -1055,7 +1080,12 @@ fn virtual_surface_gpu_quads(
             ao: u32::from(u8::MAX),
         });
     }
-    Ok(gpu_quads)
+    Ok(constrain_bounded_gpu_quads(
+        &gpu_quads,
+        page.bounds.min.as_array(),
+        page.bounds.max.as_array(),
+        false,
+    ))
 }
 
 #[derive(Clone, Debug)]
@@ -2542,6 +2572,29 @@ fn canonical_gpu_subquad(base: GpuQuad, u: i32, v: i32) -> GpuQuad {
     canonical_gpu_subrectangle(base, u, v, [1, 1])
 }
 
+fn split_gpu_quads_for_canonical_triangles(base_quads: &[GpuQuad]) -> Vec<GpuQuad> {
+    let limit = i32::from(CANONICAL_TRIANGLE_OFFSET_MASK);
+    base_quads
+        .iter()
+        .flat_map(|&base| {
+            let [width, height] = base.extent_voxels.map(i32::from);
+            (0..height).step_by(limit as usize).flat_map(move |v| {
+                (0..width).step_by(limit as usize).map(move |u| {
+                    canonical_gpu_subrectangle(
+                        base,
+                        u,
+                        v,
+                        [
+                            (width - u).min(limit) as u16,
+                            (height - v).min(limit) as u16,
+                        ],
+                    )
+                })
+            })
+        })
+        .collect()
+}
+
 fn axis_line_key(axis: usize, point: [i32; 3]) -> (u8, i32, i32) {
     match axis {
         0 => (0, point[1], point[2]),
@@ -2557,8 +2610,13 @@ fn constrain_gpu_quad_t_junctions(
     preserve_packed_ao: bool,
 ) -> Vec<Vec<GpuQuad>> {
     let edge_corners = [(0, 3), (1, 2), (0, 1), (3, 2)];
-    let mut line_segments = HashMap::<(u8, i32, i32), Vec<[i32; 2]>>::new();
-    for &quad in base_quads {
+    // T-junction conformity depends only on the integer vertices present on each collinear edge,
+    // not on repeatedly comparing every pair of overlapping segments. Indexing the unique lattice
+    // coordinates keeps preparation O(edges log vertices + emitted splits); the former segment
+    // scan became quadratic on exact sparse pages and could stall the browser for whole seconds.
+    let mut line_vertices = HashMap::<(u8, i32, i32), BTreeSet<i32>>::new();
+    let mut line_quads = HashMap::<(u8, i32, i32), Vec<usize>>::new();
+    for (index, &quad) in base_quads.iter().enumerate() {
         let corners = canonical_quad_corners(quad);
         for (start_corner, end_corner) in edge_corners {
             let start = corners[start_corner];
@@ -2566,10 +2624,96 @@ fn constrain_gpu_quad_t_junctions(
             let Some(axis) = (0..3).find(|&axis| start[axis] != end[axis]) else {
                 continue;
             };
-            line_segments
-                .entry(axis_line_key(axis, start))
+            let line = axis_line_key(axis, start);
+            line_vertices
+                .entry(line)
                 .or_default()
-                .push([start[axis], end[axis]]);
+                .extend([start[axis], end[axis]]);
+            line_quads.entry(line).or_default().push(index);
+        }
+    }
+    // Forced page/chunk boundary partitions are real vertices too. Publish them into the shared
+    // line index before classifying any neighboring quad; keeping them local to one quad lets a
+    // long edge survive directly beside multiple short edges.
+    for (index, &quad) in base_quads.iter().enumerate() {
+        if !eligible(index, quad) {
+            continue;
+        }
+        let corners = canonical_quad_corners(quad);
+        for (edge_index, (start_corner, end_corner)) in edge_corners.into_iter().enumerate() {
+            let start = corners[start_corner];
+            let end = corners[end_corner];
+            let Some(axis) = (0..3).find(|&axis| start[axis] != end[axis]) else {
+                continue;
+            };
+            if force_unit_edge(index, edge_index, start, end) {
+                line_vertices
+                    .entry(axis_line_key(axis, start))
+                    .or_default()
+                    .extend(start[axis]..=end[axis]);
+            }
+        }
+    }
+    // A thin rectangle with incompatible opposing constraints must fall back to unit quads. Those
+    // quads introduce perimeter vertices which can force a neighboring long edge to split, and
+    // that split can trigger another thin fallback. Propagate only along changed collinear lines
+    // until the finite lattice reaches a fixed point. The worklist avoids rescanning unrelated
+    // quads and each fallback publishes its perimeter at most once.
+    let mut pending = (0..base_quads.len()).collect::<VecDeque<_>>();
+    let mut queued = vec![true; base_quads.len()];
+    let mut unit_fallback = vec![false; base_quads.len()];
+    while let Some(index) = pending.pop_front() {
+        queued[index] = false;
+        let quad = base_quads[index];
+        if unit_fallback[index] || !eligible(index, quad) {
+            continue;
+        }
+        let corners = canonical_quad_corners(quad);
+        let constrained = QuadEdge::ALL
+            .into_iter()
+            .filter(|edge| {
+                let (start_corner, end_corner) = edge_corners[edge.index()];
+                let start = corners[start_corner];
+                let end = corners[end_corner];
+                let Some(axis) = (0..3).find(|&axis| start[axis] != end[axis]) else {
+                    return false;
+                };
+                line_vertices
+                    .get(&axis_line_key(axis, start))
+                    .is_some_and(|vertices| {
+                        vertices.range(start[axis]..=end[axis]).nth(2).is_some()
+                    })
+            })
+            .collect::<Vec<_>>();
+        let [width, height] = quad.extent_voxels;
+        if constrained.is_empty()
+            || constrained_quad_anchor(&constrained).0.is_some()
+            || (width > 1 && height > 1)
+        {
+            continue;
+        }
+        unit_fallback[index] = true;
+        for (start_corner, end_corner) in edge_corners {
+            let start = corners[start_corner];
+            let end = corners[end_corner];
+            let Some(axis) = (0..3).find(|&axis| start[axis] != end[axis]) else {
+                continue;
+            };
+            let line = axis_line_key(axis, start);
+            let vertices = line_vertices.entry(line).or_default();
+            let mut changed = false;
+            for coordinate in start[axis]..=end[axis] {
+                changed |= vertices.insert(coordinate);
+            }
+            if !changed {
+                continue;
+            }
+            for &neighbor in line_quads.get(&line).into_iter().flatten() {
+                if !queued[neighbor] && !unit_fallback[neighbor] {
+                    queued[neighbor] = true;
+                    pending.push_back(neighbor);
+                }
+            }
         }
     }
     let mut output = Vec::with_capacity(base_quads.len());
@@ -2585,21 +2729,12 @@ fn constrain_gpu_quad_t_junctions(
             let extent = end[axis].saturating_sub(start[axis]);
             debug_assert!(extent > 0);
             let mut offsets = vec![0, extent as u16];
-            if force_unit_edge(index, edge_index, start, end) {
-                offsets.extend(1..extent as u16);
-            }
-            for segment in line_segments
-                .get(&axis_line_key(axis, start))
-                .into_iter()
-                .flatten()
-                .filter(|segment| segment[0] < end[axis] && start[axis] < segment[1])
-            {
-                offsets.extend(segment.iter().filter_map(|&coordinate| {
-                    (start[axis]..=end[axis])
-                        .contains(&coordinate)
-                        .then(|| u16::try_from(coordinate - start[axis]).ok())
-                        .flatten()
-                }));
+            if let Some(vertices) = line_vertices.get(&axis_line_key(axis, start)) {
+                offsets.extend(
+                    vertices
+                        .range(start[axis]..=end[axis])
+                        .filter_map(|coordinate| u16::try_from(*coordinate - start[axis]).ok()),
+                );
             }
             offsets.sort_unstable();
             offsets.dedup();
@@ -2615,17 +2750,7 @@ fn constrain_gpu_quad_t_junctions(
             .into_iter()
             .filter(|edge| edge_offsets[edge.index()].len() > 2)
             .collect::<Vec<_>>();
-        let (anchor, fill_edge) = match constrained.as_slice() {
-            [QuadEdge::NegativeX] => (Some(1), Some(QuadEdge::PositiveZ)),
-            [QuadEdge::PositiveX] => (Some(0), Some(QuadEdge::PositiveZ)),
-            [QuadEdge::NegativeZ] => (Some(3), Some(QuadEdge::PositiveX)),
-            [QuadEdge::PositiveZ] => (Some(0), Some(QuadEdge::PositiveX)),
-            [QuadEdge::NegativeX, QuadEdge::NegativeZ] => (Some(2), None),
-            [QuadEdge::PositiveX, QuadEdge::NegativeZ] => (Some(3), None),
-            [QuadEdge::PositiveX, QuadEdge::PositiveZ] => (Some(0), None),
-            [QuadEdge::NegativeX, QuadEdge::PositiveZ] => (Some(1), None),
-            _ => (None, None),
-        };
+        let (anchor, fill_edge) = constrained_quad_anchor(&constrained);
         let extent = base.extent_voxels;
         if anchor.is_none() && (extent[0] == 1 || extent[1] == 1) {
             output.push(
@@ -2702,35 +2827,51 @@ fn constrain_gpu_quad_t_junctions(
     output
 }
 
+fn constrain_bounded_gpu_quads(
+    base_quads: &[GpuQuad],
+    bounds_min: [i32; 3],
+    bounds_max: [i32; 3],
+    preserve_packed_ao: bool,
+) -> Vec<GpuQuad> {
+    // The triangle encoding has six-bit offsets. Split first, before indexing endpoints, so a
+    // tall edited wall cannot silently escape conformity merely because one greedy dimension is
+    // larger than the packed representation. The introduced tile vertices also become shared
+    // lattice endpoints for every neighbor in this same pass.
+    let base_quads = split_gpu_quads_for_canonical_triangles(base_quads);
+    constrain_gpu_quad_t_junctions(
+        &base_quads,
+        |_, quad| {
+            quad.extent_voxels[0] <= CANONICAL_TRIANGLE_OFFSET_MASK
+                && quad.extent_voxels[1] <= CANONICAL_TRIANGLE_OFFSET_MASK
+                && quad.extent_voxels.into_iter().all(|extent| extent > 0)
+        },
+        |_, _, start, end| {
+            let edge_extent = (0..3)
+                .find_map(|axis| {
+                    (start[axis] != end[axis]).then_some(end[axis].saturating_sub(start[axis]))
+                })
+                .unwrap_or_default();
+            edge_extent > 0
+                && edge_extent <= i32::from(CANONICAL_TRIANGLE_OFFSET_MASK)
+                && (0..3).any(|axis| {
+                    start[axis] == end[axis]
+                        && (start[axis] == bounds_min[axis] || start[axis] == bounds_max[axis])
+                })
+        },
+        preserve_packed_ao,
+    )
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 fn canonical_gpu_quads(world_origin: [i32; 3], quads: &[Quad]) -> Vec<GpuQuad> {
     let base_quads = quads
         .iter()
         .map(|quad| canonical_gpu_quad(world_origin, quad))
         .collect::<Vec<_>>();
     let chunk_max = world_origin.map(|value| value.saturating_add(CHUNK_EDGE as i32));
-    constrain_gpu_quad_t_junctions(
-        &base_quads,
-        |_, quad| {
-            quad.extent_voxels[0] <= 63
-                && quad.extent_voxels[1] <= 63
-                && quad.extent_voxels.into_iter().all(|extent| extent > 0)
-        },
-        |_, _, start, end| {
-            // Adjacent canonical chunks are uploaded independently, so their boundary vertices
-            // are not present in `base_quads`.
-            // Subdivide every chunk-boundary edge onto the authoritative 10 cm lattice. Both
-            // owners then rasterize identical short edges instead of a greedy long edge meeting
-            // several independently rounded segments at a T-junction.
-            (0..3).any(|axis| {
-                start[axis] == end[axis]
-                    && (start[axis] == world_origin[axis] || start[axis] == chunk_max[axis])
-            })
-        },
-        false,
-    )
-    .into_iter()
-    .flatten()
-    .collect()
+    constrain_bounded_gpu_quads(&base_quads, world_origin, chunk_max, false)
 }
 
 struct ChunkMesh {
@@ -5145,8 +5286,11 @@ impl Renderer {
     /// This is runtime-mutable so automation can measure ordinary weather first, then suppress it
     /// for an unambiguous sky-leak capture.
     pub fn set_diagnostic_sky_color(&mut self, color: Option<[f32; 3]>) {
-        self.runtime_config.diagnostic_sky_color =
-            color.map(|value| value.map(|channel| channel.clamp(0.0, 1.0)));
+        let color = color.map(|value| value.map(|channel| channel.clamp(0.0, 1.0)));
+        if self.runtime_config.diagnostic_sky_color == color {
+            return;
+        }
+        self.runtime_config.diagnostic_sky_color = color;
         self.ui
             .set_diagnostic_sky_active(self.runtime_config.diagnostic_sky_color.is_some());
         self.revise_presented_render_state();
@@ -5154,6 +5298,9 @@ impl Renderer {
 
     /// Colors visible geometry by its actual resident page representation and hierarchy depth.
     pub fn set_geometry_source_debug(&mut self, active: bool) {
+        if self.geometry_source_debug == active {
+            return;
+        }
         self.geometry_source_debug = active;
         self.ui.set_geometry_sources_active(active);
         self.revise_presented_render_state();
@@ -5162,6 +5309,9 @@ impl Renderer {
     /// Selects the material-detail pipeline for deterministic profiling without adding a
     /// developer-only control to the player-facing World Lab.
     pub fn set_material_detail_enabled(&mut self, enabled: bool) {
+        if self.options.material_detail == enabled {
+            return;
+        }
         self.options.material_detail = enabled;
         self.revise_presented_render_state();
     }
@@ -6553,6 +6703,15 @@ impl Renderer {
         self.committed_virtual_terrain_cut()
     }
 
+    /// Whether the validated logical hierarchy currently owns this page.
+    ///
+    /// Replacement children may arrive in the encoded cache before their parent is installed.
+    /// Hosts use this query to keep the complete child group cached until it can refine an actual
+    /// resident owner, instead of attempting an invalid detached replacement.
+    pub fn virtual_terrain_page_is_resident(&self, key: TerrainPageKey) -> bool {
+        self.virtual_terrain.resident_page(key).is_some()
+    }
+
     /// Whether the immutable active handle bank is the last committed ownership cut.
     ///
     /// A newer desired cut or an in-flight publication is expected during travel and does not make
@@ -6569,7 +6728,12 @@ impl Renderer {
                 .zip(envelope)
                 .is_some_and(|(committed, envelope)| {
                     self.virtual_terrain_gpu.presented_snapshot_matches(
-                        virtual_terrain_snapshot_identity(committed, envelope),
+                        virtual_terrain_snapshot_identity(
+                            committed,
+                            envelope,
+                            self.presented_virtual_terrain()
+                                .map_or(0, |presentation| presentation.revisions.digest()),
+                        ),
                     )
                 }),
         )
@@ -6580,6 +6744,9 @@ impl Renderer {
         envelope: &PresentationEnvelope,
     ) -> bool {
         self.virtual_terrain_committed_snapshot_is_valid()
+            && self
+                .presented_virtual_terrain()
+                .is_some_and(|committed| committed.revisions_current)
             && self.committed_virtual_terrain_envelope() == Some(envelope)
     }
 
@@ -6594,9 +6761,9 @@ impl Renderer {
 
     pub fn virtual_terrain_committed_contains_position(&self, position_metres: [f32; 3]) -> bool {
         self.virtual_terrain_committed_snapshot_is_valid()
-            && self
-                .committed_virtual_terrain_envelope()
-                .is_some_and(|envelope| envelope.contains_position(position_metres))
+            && self.presented_virtual_terrain().is_some_and(|committed| {
+                committed.revisions_current && committed.envelope.contains_position(position_metres)
+            })
     }
 
     pub fn clamp_to_virtual_terrain_committed_locus(
@@ -6782,7 +6949,11 @@ impl Renderer {
         if !publication.certificate.complete {
             return VirtualTerrainReadyStatus::Stale;
         }
-        let identity = virtual_terrain_snapshot_identity(&publication.cut, &publication.envelope);
+        let identity = virtual_terrain_snapshot_identity(
+            &publication.cut,
+            &publication.envelope,
+            publication.revisions.digest(),
+        );
         let active_generation = self
             .virtual_terrain_gpu
             .matching_active_generation(identity);
@@ -6847,8 +7018,11 @@ impl Renderer {
                 {
                     return Err(ClientViewCommitError::StaleTerrainReadyReceipt);
                 }
-                let identity =
-                    virtual_terrain_snapshot_identity(&publication.cut, &publication.envelope);
+                let identity = virtual_terrain_snapshot_identity(
+                    &publication.cut,
+                    &publication.envelope,
+                    publication.revisions.digest(),
+                );
                 let decision = match ready.source {
                     VirtualTerrainReadySource::Active => self
                         .virtual_terrain_gpu
@@ -6874,7 +7048,11 @@ impl Renderer {
         let Some(publication) = self.virtual_terrain_publication.take() else {
             unreachable!("ready admission retains the exact publication")
         };
-        let identity = virtual_terrain_snapshot_identity(&publication.cut, &publication.envelope);
+        let identity = virtual_terrain_snapshot_identity(
+            &publication.cut,
+            &publication.envelope,
+            publication.revisions.digest(),
+        );
         let generation = match decision {
             VirtualTerrainPromotionDecision::PromoteCandidate(generation) => {
                 match self
@@ -6923,9 +7101,29 @@ impl Renderer {
         self.virtual_terrain_publication.is_some()
     }
 
-    /// Whether a frozen publication currently owns immutable source geometry.
-    pub const fn virtual_terrain_publication_owns_geometry(&self) -> bool {
-        self.virtual_terrain_publication.is_some()
+    /// Exact renderer-side identity of the aggregate handoff currently being encoded.
+    pub const fn virtual_terrain_publication_request(&self) -> Option<VirtualTerrainRequestId> {
+        match &self.virtual_terrain_publication {
+            Some(publication) => Some(publication.request),
+            None => None,
+        }
+    }
+
+    /// Aborts the exact publication named by a stale coordinator attempt.
+    ///
+    /// The identity check is essential: a late stale receipt must never discard a newer
+    /// publication that already superseded it.
+    pub fn discard_virtual_terrain_publication(
+        &mut self,
+        request: VirtualTerrainRequestId,
+    ) -> bool {
+        if exact_virtual_terrain_publication(self.virtual_terrain_publication.as_ref(), request)
+            .is_none()
+        {
+            return false;
+        }
+        self.abort_virtual_terrain_publication();
+        true
     }
 
     fn abort_virtual_terrain_publication(&mut self) {
@@ -6939,11 +7137,13 @@ impl Renderer {
         self.invalidate_virtual_terrain_desired_plan();
     }
 
-    /// Synchronously revokes every presentation proof intersected by an accepted durable edit.
+    /// Synchronously invalidates every candidate proof intersected by an accepted durable edit.
     ///
-    /// This runs immediately after authoritative floors advance. Candidate GPU evidence is
-    /// discarded generation-safely, and a stale committed virtual owner is switched back to
-    /// truthful canonical Shadow rendering before the shell retires or mutates source geometry.
+    /// The already-presented cut is an immutable visual snapshot backed by the active GPU bank.
+    /// It remains the sole visible owner while revised directories and pages stream beside it.
+    /// Region retirement moves any removed source allocations into the published-retirement set,
+    /// so keeping this snapshot cannot expose freed or repurposed geometry. The replacement still
+    /// has to prove current authoritative revisions before it can atomically promote.
     pub fn invalidate_virtual_terrain_world_change(&mut self, change: &WorldChange) {
         if take_invalidated_virtual_terrain_publication(
             &mut self.virtual_terrain_publication,
@@ -6951,17 +7151,13 @@ impl Renderer {
         ) {
             self.discard_virtual_terrain_publication_resources();
         }
-        let revoke_presented = self
-            .presented_client_view
-            .as_mut()
-            .is_some_and(|presented| {
-                revoke_invalidated_presented_terrain(&mut presented.terrain, change)
-            });
-        if revoke_presented {
-            let receipt = self.mint_published_client_view_receipt(None, None, 0, true);
-            if let Some(presented) = self.presented_client_view.as_mut() {
-                presented.receipt = receipt;
-            }
+        let invalidated_presented_revision =
+            self.presented_client_view
+                .as_mut()
+                .is_some_and(|presented| {
+                    mark_invalidated_presented_terrain_revision(&mut presented.terrain, change)
+                });
+        if invalidated_presented_revision {
             self.invalidate_virtual_terrain_desired_plan();
         }
     }
@@ -7772,10 +7968,14 @@ impl Renderer {
                     // active handle bank.
                     return None;
                 }
-                if !self
-                    .virtual_terrain_gpu
-                    .presented_snapshot_matches(virtual_terrain_snapshot_identity(cut, envelope))
-                {
+                if !self.virtual_terrain_gpu.presented_snapshot_matches(
+                    virtual_terrain_snapshot_identity(
+                        cut,
+                        envelope,
+                        self.presented_virtual_terrain()
+                            .map_or(0, |committed| committed.revisions.digest()),
+                    ),
+                ) {
                     // A visible frame has exactly one terrain generation. Never combine a CPU
                     // ownership cut or diagnostic sidecar with handles from another bank.
                     return None;
@@ -7795,6 +7995,7 @@ impl Renderer {
                         .candidate_work(virtual_terrain_snapshot_identity(
                             &publication.cut,
                             &publication.envelope,
+                            publication.revisions.digest(),
                         ))
                 });
         let (shadow_draw_lists, world_draw_list) = collect_opaque_draw_lists(
@@ -7873,6 +8074,7 @@ impl Renderer {
             Some(virtual_terrain_snapshot_identity(
                 &publication.cut,
                 &publication.envelope,
+                publication.revisions.digest(),
             ))
         } else {
             None
@@ -8425,22 +8627,35 @@ impl Renderer {
         let certification_cut = self
             .virtual_terrain_publication
             .as_ref()
-            .map(|publication| (&publication.cut, &publication.envelope))
+            .map(|publication| {
+                (
+                    &publication.cut,
+                    &publication.envelope,
+                    publication.revisions.digest(),
+                )
+            })
             .or_else(|| {
-                self.presented_virtual_terrain()
-                    .map(|committed| (&committed.cut, &committed.envelope))
+                self.presented_virtual_terrain().map(|committed| {
+                    (
+                        &committed.cut,
+                        &committed.envelope,
+                        committed.revisions.digest(),
+                    )
+                })
             });
         let gpu_virtual_matches_cpu = gpu_virtual_feedback.as_ref().is_some_and(|feedback| {
             gpu_feedback_matches_cut(
                 feedback,
-                certification_cut.map(|(cut, _)| cut),
-                certification_cut.map(|(_, envelope)| envelope),
+                certification_cut.map(|(cut, _, _)| cut),
+                certification_cut.map(|(_, envelope, _)| envelope),
+                certification_cut.map(|(_, _, revisions)| revisions),
             )
         });
         let gpu_virtual_match_failure_flags = gpu_feedback_match_failure_flags(
             gpu_virtual_feedback.as_ref(),
-            certification_cut.map(|(cut, _)| cut),
-            certification_cut.map(|(_, envelope)| envelope),
+            certification_cut.map(|(cut, _, _)| cut),
+            certification_cut.map(|(_, envelope, _)| envelope),
+            certification_cut.map(|(_, _, revisions)| revisions),
             virtual_candidate_encode_failed,
         );
         let oracle_virtual_selected_pages = self
@@ -8584,7 +8799,11 @@ impl Renderer {
         let virtual_terrain_presented_snapshot_matches_cut = virtual_visible
             && self.presented_virtual_terrain().is_some_and(|committed| {
                 self.virtual_terrain_gpu.presented_snapshot_matches(
-                    virtual_terrain_snapshot_identity(&committed.cut, &committed.envelope),
+                    virtual_terrain_snapshot_identity(
+                        &committed.cut,
+                        &committed.envelope,
+                        committed.revisions.digest(),
+                    ),
                 )
             });
         self.diagnostics = RenderDiagnostics {
@@ -10717,9 +10936,10 @@ fn view_projection(
 fn virtual_terrain_snapshot_identity<'cut>(
     cut: &'cut VirtualTerrainCut,
     envelope: &PresentationEnvelope,
+    revision_digest: u64,
 ) -> VirtualTerrainSnapshotIdentity<'cut> {
     VirtualTerrainSnapshotIdentity {
-        fingerprint: virtual_terrain_presentation_fingerprint(cut, envelope),
+        fingerprint: virtual_terrain_presentation_fingerprint(cut, envelope, revision_digest),
         selected_pages: &cut.selected_pages,
         ownerless_roots: cut.ownerless_roots.len() as u32,
     }
@@ -10728,23 +10948,27 @@ fn virtual_terrain_snapshot_identity<'cut>(
 fn virtual_terrain_presentation_fingerprint(
     cut: &VirtualTerrainCut,
     envelope: &PresentationEnvelope,
+    revision_digest: u64,
 ) -> u64 {
-    (cut.fingerprint ^ envelope.fingerprint().rotate_left(23)).wrapping_mul(0x0000_0100_0000_01b3)
+    (cut.fingerprint ^ envelope.fingerprint().rotate_left(23) ^ revision_digest.rotate_left(41))
+        .wrapping_mul(0x0000_0100_0000_01b3)
 }
 
 fn gpu_feedback_matches_cut(
     feedback: &GpuVirtualTerrainFeedback,
     cut: Option<&VirtualTerrainCut>,
     envelope: Option<&PresentationEnvelope>,
+    revision_digest: Option<u64>,
 ) -> bool {
-    let Some((cut, envelope)) = cut.zip(envelope) else {
+    let Some(((cut, envelope), revision_digest)) = cut.zip(envelope).zip(revision_digest) else {
         return feedback.selected_pages.is_empty()
             && feedback.ownerless_roots == 0
             && !feedback.ownership_overflowed();
     };
     if feedback.submission_id == 0
         || feedback.ownership_overflowed()
-        || feedback.oracle_fingerprint != virtual_terrain_presentation_fingerprint(cut, envelope)
+        || feedback.oracle_fingerprint
+            != virtual_terrain_presentation_fingerprint(cut, envelope, revision_digest)
         || feedback.ownerless_roots != cut.ownerless_roots.len() as u32
         || feedback.encoded_pages != cut.selected_pages.len() as u32
         || cut.selection_overflow
@@ -10762,6 +10986,7 @@ fn gpu_feedback_match_failure_flags(
     feedback: Option<&GpuVirtualTerrainFeedback>,
     cut: Option<&VirtualTerrainCut>,
     envelope: Option<&PresentationEnvelope>,
+    revision_digest: Option<u64>,
     candidate_encode_failed: bool,
 ) -> u32 {
     const MISSING_FEEDBACK: u32 = 1 << 0;
@@ -10778,14 +11003,15 @@ fn gpu_feedback_match_failure_flags(
     let Some(feedback) = feedback else {
         return MISSING_FEEDBACK | (u32::from(candidate_encode_failed) * CANDIDATE_ENCODE_FAILED);
     };
-    let Some((cut, envelope)) = cut.zip(envelope) else {
+    let Some(((cut, envelope), revision_digest)) = cut.zip(envelope).zip(revision_digest) else {
         return MISSING_CUT | (u32::from(candidate_encode_failed) * CANDIDATE_ENCODE_FAILED);
     };
     let mut failures = 0;
     failures |= u32::from(feedback.submission_id == 0) * INVALID_SUBMISSION;
     failures |= u32::from(feedback.ownership_overflowed()) * OWNERSHIP_OVERFLOW;
     failures |= u32::from(
-        feedback.oracle_fingerprint != virtual_terrain_presentation_fingerprint(cut, envelope),
+        feedback.oracle_fingerprint
+            != virtual_terrain_presentation_fingerprint(cut, envelope, revision_digest),
     ) * FINGERPRINT_MISMATCH;
     failures |= u32::from(feedback.ownerless_roots != cut.ownerless_roots.len() as u32)
         * OWNERLESS_MISMATCH;
@@ -12276,7 +12502,7 @@ mod tests {
             "without a certified published bank there is no virtual owner to present"
         );
         assert_ne!(
-            gpu_feedback_match_failure_flags(None, None, None, true) & (1 << 9),
+            gpu_feedback_match_failure_flags(None, None, None, None, true) & (1 << 9),
             0,
             "the fail-open presentation path still surfaces the candidate encoding failure"
         );
@@ -12543,6 +12769,112 @@ mod tests {
         assert!(constrained[0].iter().all(|quad| {
             unpack_extent(quad.extent_voxels[0]) == 2 && unpack_extent(quad.extent_voxels[1]) == 63
         }));
+    }
+
+    #[test]
+    fn unit_fallback_vertices_repartition_every_overlapping_long_edge() {
+        let top = |x| GpuQuad {
+            origin: [x, 10, -5],
+            extent_voxels: [1, 5],
+            material_face: pack_gpu_material_face(u32::from(Material::Grass.id()), 2),
+            ao: u32::from(u8::MAX),
+        };
+        let constrained = constrain_gpu_quad_t_junctions(
+            &[top(-1), top(0)],
+            |_, _| true,
+            |index, edge, _, _| {
+                index == 0
+                    && matches!(
+                        QuadEdge::ALL[edge],
+                        QuadEdge::NegativeX | QuadEdge::PositiveX
+                    )
+            },
+            false,
+        );
+
+        assert_eq!(
+            constrained[0]
+                .iter()
+                .map(|quad| (quad.origin, quad.extent_voxels))
+                .collect::<Vec<_>>(),
+            (0..5)
+                .map(|z| ([-1, 10, -5 + z], [1, 1]))
+                .collect::<Vec<_>>(),
+            "opposite constraints tile the thin left face with ordinary unit quads"
+        );
+        assert_eq!(
+            constrained[1]
+                .iter()
+                .filter(|quad| {
+                    (quad.extent_voxels[0] >> CANONICAL_TRIANGLE_EDGE_SHIFT) & 3
+                        == QuadEdge::NegativeX.index() as u16
+                })
+                .map(|quad| {
+                    [
+                        quad.extent_voxels[0] & CANONICAL_TRIANGLE_OFFSET_MASK,
+                        quad.extent_voxels[1] & CANONICAL_TRIANGLE_OFFSET_MASK,
+                    ]
+                })
+                .collect::<Vec<_>>(),
+            [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5]],
+            "the fixed-point endpoint closure must split the adjacent long boundary identically"
+        );
+
+        let reversed = constrain_gpu_quad_t_junctions(
+            &[top(0), top(-1)],
+            |_, _| true,
+            |index, edge, _, _| {
+                index == 1
+                    && matches!(
+                        QuadEdge::ALL[edge],
+                        QuadEdge::NegativeX | QuadEdge::PositiveX
+                    )
+            },
+            false,
+        );
+        assert_eq!(
+            reversed[0]
+                .iter()
+                .filter(|quad| {
+                    (quad.extent_voxels[0] >> CANONICAL_TRIANGLE_EDGE_SHIFT) & 3
+                        == QuadEdge::NegativeX.index() as u16
+                })
+                .map(|quad| {
+                    [
+                        quad.extent_voxels[0] & CANONICAL_TRIANGLE_OFFSET_MASK,
+                        quad.extent_voxels[1] & CANONICAL_TRIANGLE_OFFSET_MASK,
+                    ]
+                })
+                .collect::<Vec<_>>(),
+            [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5]],
+            "worklist closure must be independent of source-quad order"
+        );
+    }
+
+    #[test]
+    fn complex_constraint_expansion_remains_perimeter_bounded() {
+        let slabs = (0..172)
+            .map(|y| GpuQuad {
+                origin: [0, y, 0],
+                extent_voxels: [32, 32],
+                material_face: pack_gpu_material_face(u32::from(Material::Stone.id()), 2),
+                ao: u32::from(u8::MAX),
+            })
+            .collect::<Vec<_>>();
+        let constrained =
+            constrain_gpu_quad_t_junctions(&slabs, |_, _| true, |_, _, _, _| true, false)
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+        assert_eq!(
+            constrained.len(),
+            slabs.len() * 32 * 4,
+            "four-edge conformity must emit one triangle per perimeter segment, not one quad per area cell"
+        );
+        assert!(
+            constrained.len() * size_of::<GpuQuad>() < ARENA_PAGE_BYTES as usize,
+            "a valid dense exact page must remain below the hard per-page GPU allocation"
+        );
     }
 
     #[test]
@@ -12969,9 +13301,14 @@ mod tests {
             incoherent_replacement_groups: 0,
             exact_surface_lod_discontinuities: 0,
         };
+        let revision_digest = 0xfeed_beef_cafe_babe;
         let certified = GpuVirtualTerrainFeedback {
             submission_id: 9,
-            oracle_fingerprint: virtual_terrain_presentation_fingerprint(&cut, &envelope),
+            oracle_fingerprint: virtual_terrain_presentation_fingerprint(
+                &cut,
+                &envelope,
+                revision_digest,
+            ),
             selected_pages: vec![key],
             encoded_pages: 1,
             ..GpuVirtualTerrainFeedback::default()
@@ -12979,7 +13316,8 @@ mod tests {
         assert!(gpu_feedback_matches_cut(
             &certified,
             Some(&cut),
-            Some(&envelope)
+            Some(&envelope),
+            Some(revision_digest),
         ));
 
         let mut ownership_overflow = certified.clone();
@@ -12987,7 +13325,8 @@ mod tests {
         assert!(!gpu_feedback_matches_cut(
             &ownership_overflow,
             Some(&cut),
-            Some(&envelope)
+            Some(&envelope),
+            Some(revision_digest),
         ));
 
         let mut stale = certified.clone();
@@ -12995,7 +13334,8 @@ mod tests {
         assert!(!gpu_feedback_matches_cut(
             &stale,
             Some(&cut),
-            Some(&envelope)
+            Some(&envelope),
+            Some(revision_digest),
         ));
 
         let mut incomplete = certified;
@@ -13003,7 +13343,8 @@ mod tests {
         assert!(!gpu_feedback_matches_cut(
             &incomplete,
             Some(&cut),
-            Some(&envelope)
+            Some(&envelope),
+            Some(revision_digest),
         ));
     }
 
@@ -13180,7 +13521,7 @@ mod tests {
     }
 
     #[test]
-    fn world_change_revokes_only_intersecting_revision_fences() {
+    fn world_change_invalidates_candidates_but_retains_the_immutable_presented_owner() {
         let affected_chunk = ChunkCoord::new(3, 0, -4);
         let mut authoritative = AuthoritativeEditRevisions::default();
         let observed = authoritative
@@ -13240,7 +13581,10 @@ mod tests {
             changed
         ));
         assert!(candidate.is_none());
-        assert!(!revoke_invalidated_presented_terrain(&mut terrain, changed));
+        assert!(!mark_invalidated_presented_terrain_revision(
+            &mut terrain,
+            changed
+        ));
         assert_eq!(
             terrain,
             PresentedTerrain::Virtual(Box::new(unrelated_committed))
@@ -13251,8 +13595,14 @@ mod tests {
         let affected_committed =
             CommittedVirtualTerrainPresentation::from_publication(affected_publication, 9);
         let mut terrain = PresentedTerrain::Virtual(Box::new(affected_committed));
-        assert!(revoke_invalidated_presented_terrain(&mut terrain, changed));
-        assert_eq!(terrain, PresentedTerrain::CanonicalShadow);
+        assert!(mark_invalidated_presented_terrain_revision(
+            &mut terrain,
+            changed
+        ));
+        let PresentedTerrain::Virtual(committed) = terrain else {
+            panic!("an accepted edit must not create an ownerless frame")
+        };
+        assert!(!committed.revisions_current);
     }
 
     #[test]
@@ -13375,6 +13725,113 @@ mod tests {
             expected.sort_unstable();
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn virtual_surface_clusters_constrain_internal_and_page_boundary_t_junctions() {
+        let key = TerrainPageKey {
+            level: 0,
+            coord: [0, 0, 0],
+        };
+        let page = |quads: Vec<voxels_world::TerrainSurfaceQuad>| TerrainPageV1 {
+            source_identity_hash: voxels_world::WorldSourceIdentityHash::from_bytes([17; 32]),
+            key,
+            revision: 1,
+            bounds: key.bounds().expect("valid test bounds"),
+            children: Vec::new(),
+            errors: voxels_world::TerrainErrorBounds::EXACT,
+            topology: voxels_world::TerrainTopologyClass::Volumetric,
+            boundary_fingerprints: [[0; 32]; 6],
+            materials: vec![voxels_world::TerrainMaterialCoverage {
+                material: Material::Stone,
+                occupied_voxels: 1,
+                exposed_unit_faces: 1,
+            }],
+            representation: TerrainPageRepresentation::SurfaceCluster(quads),
+            content_fingerprint: [0; 32],
+        };
+        let top = |u, v, width, height| voxels_world::TerrainSurfaceQuad {
+            axis: FaceAxis::Y,
+            plane: 10,
+            u,
+            v,
+            width,
+            height,
+            positive: true,
+            material_index: 0,
+        };
+
+        let internal = virtual_surface_gpu_quads(&page(vec![top(4, 4, 4, 4), top(8, 6, 1, 1)]))
+            .expect("internal T-junction conversion");
+        let large_triangles = internal
+            .iter()
+            .filter(|quad| {
+                quad.origin == [4, 9, 4] && quad.extent_voxels[0] & CANONICAL_TRIANGLE_FLAG != 0
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            large_triangles.len(),
+            4,
+            "the long edge must contain the neighboring exact endpoints"
+        );
+        assert_eq!(
+            large_triangles
+                .iter()
+                .filter(|quad| {
+                    (quad.extent_voxels[0] >> CANONICAL_TRIANGLE_EDGE_SHIFT) & 3
+                        == QuadEdge::PositiveX.index() as u16
+                })
+                .map(|quad| {
+                    [
+                        quad.extent_voxels[0] & CANONICAL_TRIANGLE_OFFSET_MASK,
+                        quad.extent_voxels[1] & CANONICAL_TRIANGLE_OFFSET_MASK,
+                    ]
+                })
+                .collect::<Vec<_>>(),
+            [[0, 2], [2, 3], [3, 4]]
+        );
+
+        let boundary = virtual_surface_gpu_quads(&page(vec![top(0, 4, 4, 4)]))
+            .expect("page-boundary conversion");
+        assert_eq!(
+            boundary.len(),
+            5,
+            "four unit boundary segments plus one fill triangle close an independently uploaded page edge"
+        );
+        assert!(
+            boundary
+                .iter()
+                .all(|quad| { quad.extent_voxels[0] & CANONICAL_TRIANGLE_FLAG != 0 })
+        );
+    }
+
+    #[test]
+    fn canonical_constraints_split_faces_larger_than_packed_triangle_offsets() {
+        let wall = GpuQuad {
+            origin: [0, 0, 0],
+            extent_voxels: [1, 130],
+            material_face: pack_gpu_material_face(u32::from(Material::Stone.id()), 0),
+            ao: u32::from(u8::MAX),
+        };
+        let split = split_gpu_quads_for_canonical_triangles(&[wall]);
+        assert_eq!(
+            split
+                .iter()
+                .map(|quad| quad.extent_voxels)
+                .collect::<Vec<_>>(),
+            [[1, 63], [1, 63], [1, 4]]
+        );
+        assert_eq!(split[0].origin, [0, 0, 0]);
+        assert_eq!(split[1].origin, [0, 63, 0]);
+        assert_eq!(split[2].origin, [0, 126, 0]);
+
+        let constrained = constrain_bounded_gpu_quads(&[wall], [0, 0, 0], [1, 130, 1], false);
+        assert_eq!(
+            constrained.len(),
+            130,
+            "the complete tall page-boundary wall must use unit shared raster edges"
+        );
+        assert!(constrained.iter().all(|quad| quad.extent_voxels == [1, 1]));
     }
 
     #[test]
