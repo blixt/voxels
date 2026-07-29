@@ -1,9 +1,11 @@
 //! Failure-atomic GPU snapshots for virtual microvoxel terrain.
 //!
 //! The CPU hierarchy is the sole selection authority. A candidate cut is supplied explicitly,
-//! expanded into 32-bit geometry handles in the inactive bank, and certified by bounded GPU
-//! counters. The published bank is never written. Promotion is a CPU-side bank swap after the
-//! exact candidate generation, fingerprint, page count, geometry counts, and bounds are read back.
+//! assigned deterministic stream destinations, and expanded into 32-bit geometry handles in the
+//! inactive bank. A second GPU pass compares every destination and value exactly. The published
+//! bank is never written. Promotion is a CPU-side bank swap only after the exact candidate
+//! generation, fingerprint, page count, geometry counts, bounds, and indirect commands are read
+//! back.
 
 use crate::virtual_terrain::VirtualTerrainCapacity;
 use bytemuck::{Pod, Zeroable};
@@ -69,9 +71,11 @@ pub(crate) const VIRTUAL_TERRAIN_HANDLE_BANK_BYTES: u64 =
 struct GpuCandidatePage {
     // Each pair is (packed first handle, element count).
     ranges: [[u32; 2]; STREAM_COUNT],
+    // Stream-relative, exclusive-prefix destinations assigned deterministically by the CPU.
+    destinations: [u32; STREAM_COUNT],
 }
 
-const _: () = assert!(size_of::<GpuCandidatePage>() == 32);
+const _: () = assert!(size_of::<GpuCandidatePage>() == 48);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
@@ -85,19 +89,15 @@ struct GpuSnapshotCounters {
     ownerless_roots: u32,
     source_element_capacities: [u32; 2],
     reserved: [u32; 2],
-    handle_fingerprint_sums: [u32; STREAM_COUNT],
-    handle_fingerprint_squares: [u32; STREAM_COUNT],
 }
 
-const _: () = assert!(size_of::<GpuSnapshotCounters>() == 96);
+const _: () = assert!(size_of::<GpuSnapshotCounters>() == 64);
 
 const GPU_SNAPSHOT_INDIRECT_WORDS: usize = 16;
 const GPU_SNAPSHOT_INDIRECT_BYTES: u64 = (GPU_SNAPSHOT_INDIRECT_WORDS * size_of::<u32>()) as u64;
 const GPU_SNAPSHOT_READBACK_BYTES: u64 =
     size_of::<GpuSnapshotCounters>() as u64 + GPU_SNAPSHOT_INDIRECT_BYTES;
 
-const VALIDATION_HANDLE_SUM_MISMATCH: u32 = 1 << 8;
-const VALIDATION_HANDLE_SQUARE_MISMATCH: u32 = 1 << 9;
 const VALIDATION_INDIRECT_MISMATCH: u32 = 1 << 10;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -169,8 +169,6 @@ struct SnapshotMetadata {
     selected_pages: Vec<TerrainPageKey>,
     ownerless_roots: u32,
     expected_counts: [u32; STREAM_COUNT],
-    expected_handle_fingerprint_sums: [u32; STREAM_COUNT],
-    expected_handle_fingerprint_squares: [u32; STREAM_COUNT],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,7 +235,6 @@ pub(crate) struct VirtualTerrainGpuControl {
     render_layout: wgpu::BindGroupLayout,
     encode_pipeline: ComputePipeline,
     validate_pipeline: ComputePipeline,
-    finalize_pipeline: ComputePipeline,
     banks: [SnapshotBank; 2],
     active_bank: usize,
     pending_bank: Option<usize>,
@@ -311,14 +308,6 @@ impl VirtualTerrainGpuControl {
             compilation_options: Default::default(),
             cache: None,
         });
-        let finalize_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("finalize virtual terrain snapshot"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("finalize_snapshot"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
         let make_bank = |index| {
             let handles = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(if index == 0 {
@@ -333,16 +322,12 @@ impl VirtualTerrainGpuControl {
             let counters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("virtual terrain snapshot counters"),
                 contents: bytemuck::bytes_of(&GpuSnapshotCounters::default()),
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_DST
-                    | wgpu::BufferUsages::COPY_SRC,
+                usage: snapshot_counter_buffer_usage(),
             });
             let indirect = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("virtual terrain snapshot indirect commands"),
                 size: 64,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::INDIRECT
-                    | wgpu::BufferUsages::COPY_DST,
+                usage: snapshot_indirect_buffer_usage(),
                 mapped_at_creation: false,
             });
             let encode_bind_group = create_encode_bind_group(
@@ -386,7 +371,6 @@ impl VirtualTerrainGpuControl {
             render_layout,
             encode_pipeline,
             validate_pipeline,
-            finalize_pipeline,
             banks,
             active_bank: 0,
             pending_bank: None,
@@ -636,8 +620,6 @@ impl VirtualTerrainGpuControl {
         let inactive = 1 - self.active_bank;
         let mut pages = Vec::with_capacity(identity.selected_pages.len());
         let mut expected_counts = [0u32; STREAM_COUNT];
-        let mut expected_handle_fingerprint_sums = [0u32; STREAM_COUNT];
-        let mut expected_handle_fingerprint_squares = [0u32; STREAM_COUNT];
         for key in identity.selected_pages {
             let geometry = self
                 .geometries
@@ -651,17 +633,11 @@ impl VirtualTerrainGpuControl {
                 self.pack_range(geometry_ranges[2])?,
                 self.pack_range(geometry_ranges[3])?,
             ];
-            for (stream, range) in ranges.into_iter().enumerate() {
-                let [sum, square] = handle_range_fingerprints(range[0], range[1]);
-                expected_counts[stream] = expected_counts[stream]
-                    .checked_add(range[1])
-                    .ok_or(VirtualTerrainGpuError::GeometryCapacity)?;
-                expected_handle_fingerprint_sums[stream] =
-                    expected_handle_fingerprint_sums[stream].wrapping_add(sum);
-                expected_handle_fingerprint_squares[stream] =
-                    expected_handle_fingerprint_squares[stream].wrapping_add(square);
-            }
-            pages.push(GpuCandidatePage { ranges });
+            pages.push(assign_candidate_page_destinations(
+                ranges,
+                &mut expected_counts,
+                VIRTUAL_TERRAIN_HANDLE_CAPACITIES,
+            )?);
         }
         if !pages.is_empty() {
             queue.write_buffer(&self.candidate_pages, 0, bytemuck::cast_slice(&pages));
@@ -669,6 +645,8 @@ impl VirtualTerrainGpuControl {
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
         let counters = GpuSnapshotCounters {
+            element_counts: expected_counts,
+            encoded_pages: identity.selected_pages.len() as u32,
             generation: split_u64(generation),
             fingerprint: split_u64(identity.fingerprint),
             selected_count: identity.selected_pages.len() as u32,
@@ -681,15 +659,18 @@ impl VirtualTerrainGpuControl {
             0,
             bytemuck::bytes_of(&counters),
         );
-        queue.write_buffer(&self.banks[inactive].indirect, 0, &[0; 64]);
+        let indirect_commands = expected_indirect_commands(expected_counts);
+        queue.write_buffer(
+            &self.banks[inactive].indirect,
+            0,
+            bytemuck::bytes_of(&indirect_commands),
+        );
         self.banks[inactive].metadata = Some(SnapshotMetadata {
             generation,
             fingerprint: identity.fingerprint,
             selected_pages: identity.selected_pages.to_vec(),
             ownerless_roots: identity.ownerless_roots,
             expected_counts,
-            expected_handle_fingerprint_sums,
-            expected_handle_fingerprint_squares,
         });
         self.pending_bank = Some(inactive);
         if let Ok(mut pending) = self.pending_feedback.lock() {
@@ -718,7 +699,7 @@ impl VirtualTerrainGpuControl {
         }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("validate and finalize CPU-selected virtual terrain snapshot"),
+                label: Some("validate CPU-selected virtual terrain snapshot"),
                 timestamp_writes: timestamps.map(|timestamps| wgpu::ComputePassTimestampWrites {
                     query_set: timestamps.query_set,
                     beginning_of_pass_write_index: Some(timestamps.finalize_first_query),
@@ -727,12 +708,9 @@ impl VirtualTerrainGpuControl {
             });
             pass.set_bind_group(0, &self.banks[inactive].encode_bind_group, &[]);
             pass.set_pipeline(&self.validate_pipeline);
-            let validation_workgroups = handle_validation_workgroups(expected_counts);
-            if validation_workgroups > 0 {
-                pass.dispatch_workgroups(validation_workgroups, 1, 1);
+            if !pages.is_empty() {
+                pass.dispatch_workgroups(pages.len() as u32, 1, 1);
             }
-            pass.set_pipeline(&self.finalize_pipeline);
-            pass.dispatch_workgroups(1, 1, 1);
         }
         Ok(VirtualTerrainCandidateEncodeOutcome::Encoded(generation))
     }
@@ -1000,29 +978,24 @@ fn snapshot_metadata_matches(
     })
 }
 
-fn handle_range_fingerprints(first: u32, count: u32) -> [u32; 2] {
-    let first = u128::from(first);
-    let count = u128::from(count);
-    let index_sum = count.saturating_mul(count.saturating_sub(1)) / 2;
-    let index_square_sum = count
-        .saturating_mul(count.saturating_sub(1))
-        .saturating_mul(count.saturating_mul(2).saturating_sub(1))
-        / 6;
-    let sum = count.saturating_mul(first).saturating_add(index_sum);
-    let square = count
-        .saturating_mul(first.saturating_mul(first))
-        .saturating_add(first.saturating_mul(index_sum).saturating_mul(2))
-        .saturating_add(index_square_sum);
-    [sum as u32, square as u32]
-}
-
-const fn handle_validation_workgroups(counts: [u32; STREAM_COUNT]) -> u32 {
-    const WORKGROUP_SIZE: u32 = 256;
-    let total = counts[0]
-        .saturating_add(counts[1])
-        .saturating_add(counts[2])
-        .saturating_add(counts[3]);
-    total.div_ceil(WORKGROUP_SIZE)
+fn assign_candidate_page_destinations(
+    ranges: [[u32; 2]; STREAM_COUNT],
+    stream_prefixes: &mut [u32; STREAM_COUNT],
+    stream_capacities: [u32; STREAM_COUNT],
+) -> Result<GpuCandidatePage, VirtualTerrainGpuError> {
+    let destinations = *stream_prefixes;
+    let mut next_prefixes = destinations;
+    for stream in 0..STREAM_COUNT {
+        next_prefixes[stream] = next_prefixes[stream]
+            .checked_add(ranges[stream][1])
+            .filter(|end| *end <= stream_capacities[stream])
+            .ok_or(VirtualTerrainGpuError::GeometryCapacity)?;
+    }
+    *stream_prefixes = next_prefixes;
+    Ok(GpuCandidatePage {
+        ranges,
+        destinations,
+    })
 }
 
 fn expected_indirect_commands(counts: [u32; STREAM_COUNT]) -> [u32; GPU_SNAPSHOT_INDIRECT_WORDS] {
@@ -1035,18 +1008,49 @@ fn snapshot_validation_failure_flags(
     readback: &GpuSnapshotReadback,
     metadata: &SnapshotMetadata,
 ) -> u32 {
-    let mut failures = 0;
-    failures |= u32::from(
-        readback.counters.handle_fingerprint_sums != metadata.expected_handle_fingerprint_sums,
-    ) * VALIDATION_HANDLE_SUM_MISMATCH;
-    failures |= u32::from(
-        readback.counters.handle_fingerprint_squares
-            != metadata.expected_handle_fingerprint_squares,
-    ) * VALIDATION_HANDLE_SQUARE_MISMATCH;
-    failures |= u32::from(
-        readback.indirect_commands != expected_indirect_commands(metadata.expected_counts),
-    ) * VALIDATION_INDIRECT_MISMATCH;
-    failures
+    u32::from(readback.indirect_commands != expected_indirect_commands(metadata.expected_counts))
+        * VALIDATION_INDIRECT_MISMATCH
+}
+
+fn snapshot_counter_buffer_usage() -> wgpu::BufferUsages {
+    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC
+}
+
+fn snapshot_indirect_buffer_usage() -> wgpu::BufferUsages {
+    wgpu::BufferUsages::STORAGE
+        | wgpu::BufferUsages::INDIRECT
+        | wgpu::BufferUsages::COPY_DST
+        | wgpu::BufferUsages::COPY_SRC
+}
+
+#[cfg(test)]
+fn exact_candidate_handles_match(
+    pages: &[GpuCandidatePage],
+    stream_handles: &[Vec<u32>; STREAM_COUNT],
+) -> bool {
+    pages.iter().all(|page| {
+        (0..STREAM_COUNT).all(|stream| {
+            let [first, count] = page.ranges[stream];
+            let Some(end) = page.destinations[stream].checked_add(count) else {
+                return false;
+            };
+            let Ok(destination) = usize::try_from(page.destinations[stream]) else {
+                return false;
+            };
+            let Ok(end) = usize::try_from(end) else {
+                return false;
+            };
+            let Some(actual) = stream_handles[stream].get(destination..end) else {
+                return false;
+            };
+            actual.iter().enumerate().all(|(index, actual)| {
+                u32::try_from(index)
+                    .ok()
+                    .and_then(|index| first.checked_add(index))
+                    == Some(*actual)
+            })
+        })
+    })
 }
 
 fn geometry_directory_entry_changes(
@@ -1248,8 +1252,6 @@ mod tests {
             selected_pages,
             ownerless_roots,
             expected_counts,
-            expected_handle_fingerprint_sums: [0; STREAM_COUNT],
-            expected_handle_fingerprint_squares: [0; STREAM_COUNT],
         }
     }
 
@@ -1299,13 +1301,41 @@ mod tests {
     #[test]
     fn snapshot_shader_has_no_hierarchy_ownership_or_geometry_copy_path() {
         let shader = include_str!("shaders/virtual_terrain.wgsl");
+        let module = wgpu::naga::front::wgsl::parse_str(shader)
+            .expect("virtual terrain snapshot shader must parse as WGSL");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("virtual terrain snapshot shader must pass Naga validation");
         assert!(shader.contains("fn encode_snapshot"));
         assert!(shader.contains("fn validate_snapshot"));
         assert!(shader.contains("handles[destination + element] = first_handle + element"));
-        assert!(shader.contains("let handle = handles[STREAM_OFFSETS[stream] + stream_index]"));
+        assert!(shader.contains("if handles[destination + element] != first_handle + element"));
+        assert!(shader.contains("page.destinations[stream]"));
+        for line in shader
+            .lines()
+            .filter(|line| line.contains("atomic") && !line.trim_start().starts_with("//"))
+        {
+            assert!(
+                line.contains("overflow_flags: atomic<u32>") || line.contains("atomicOr"),
+                "the only shader atomic may OR a failure into the overflow word: {line}"
+            );
+        }
+        assert!(!shader.contains("fingerprint_sum"));
+        assert!(!shader.contains("fingerprint_square"));
+        assert!(!shader.contains("finalize_snapshot"));
         assert!(!shader.contains("traverse"));
         assert!(!shader.contains("geometry_source"));
         assert!(!shader.contains("compact_surfaces"));
+    }
+
+    #[test]
+    fn snapshot_feedback_buffers_remain_copyable_for_exact_readback() {
+        assert!(snapshot_counter_buffer_usage().contains(wgpu::BufferUsages::COPY_SRC));
+        assert!(snapshot_indirect_buffer_usage().contains(wgpu::BufferUsages::COPY_SRC));
+        assert!(snapshot_indirect_buffer_usage().contains(wgpu::BufferUsages::INDIRECT));
     }
 
     #[test]
@@ -1483,49 +1513,170 @@ mod tests {
     }
 
     #[test]
-    fn handle_fingerprints_cover_actual_values_and_indirect_arguments() {
-        let [sum, square] = handle_range_fingerprints(GPU_HANDLE_SEGMENT_BIT | 17, 3);
-        let handles = [
-            GPU_HANDLE_SEGMENT_BIT | 17,
-            GPU_HANDLE_SEGMENT_BIT | 18,
-            GPU_HANDLE_SEGMENT_BIT | 19,
-        ];
-        assert_eq!(sum, handles.into_iter().fold(0u32, u32::wrapping_add));
-        assert_eq!(
-            square,
-            handles
-                .into_iter()
-                .map(|handle| handle.wrapping_mul(handle))
-                .fold(0u32, u32::wrapping_add)
-        );
-
-        let mut metadata = metadata(5, 8, vec![], 0, [3, 0, 0, 0]);
-        metadata.expected_handle_fingerprint_sums[0] = sum;
-        metadata.expected_handle_fingerprint_squares[0] = square;
+    fn readback_validates_actual_indirect_arguments() {
+        let metadata = metadata(5, 8, vec![], 0, [3, 2, 1, 0]);
         let mut readback = GpuSnapshotReadback {
-            counters: GpuSnapshotCounters {
-                handle_fingerprint_sums: metadata.expected_handle_fingerprint_sums,
-                handle_fingerprint_squares: metadata.expected_handle_fingerprint_squares,
-                ..GpuSnapshotCounters::default()
-            },
+            counters: GpuSnapshotCounters::default(),
             indirect_commands: expected_indirect_commands(metadata.expected_counts),
         };
         assert_eq!(snapshot_validation_failure_flags(&readback, &metadata), 0);
-        readback.counters.handle_fingerprint_sums[0] ^= 1;
-        assert_ne!(
-            snapshot_validation_failure_flags(&readback, &metadata)
-                & VALIDATION_HANDLE_SUM_MISMATCH,
-            0
-        );
-        readback.counters.handle_fingerprint_sums[0] ^= 1;
         readback.indirect_commands[1] = 2;
         assert_ne!(
             snapshot_validation_failure_flags(&readback, &metadata) & VALIDATION_INDIRECT_MISMATCH,
             0
         );
-        assert_eq!(handle_validation_workgroups([0; STREAM_COUNT]), 0);
-        assert_eq!(handle_validation_workgroups([257, 0, 0, 0]), 2);
-        assert!(handle_validation_workgroups(VIRTUAL_TERRAIN_HANDLE_CAPACITIES) <= 32_768);
+    }
+
+    #[test]
+    fn deterministic_prefix_destinations_partition_every_stream() {
+        let ranges = [
+            [[10, 2], [20, 0], [30, 1], [40, 3]],
+            [[12, 1], [50, 4], [31, 0], [43, 2]],
+            [[13, 3], [54, 1], [31, 2], [45, 0]],
+        ];
+        let capacities = [6, 5, 3, 5];
+        let build = || {
+            let mut prefixes = [0; STREAM_COUNT];
+            let pages = ranges
+                .into_iter()
+                .map(|ranges| {
+                    assign_candidate_page_destinations(ranges, &mut prefixes, capacities).unwrap()
+                })
+                .collect::<Vec<_>>();
+            (pages, prefixes)
+        };
+        let (pages, counts) = build();
+        assert_eq!(build(), (pages.clone(), counts));
+        assert_eq!(counts, capacities);
+        assert_eq!(pages[0].destinations, [0, 0, 0, 0]);
+        assert_eq!(pages[1].destinations, [2, 0, 1, 3]);
+        assert_eq!(pages[2].destinations, [3, 4, 1, 5]);
+        for stream in 0..STREAM_COUNT {
+            for pair in pages.windows(2) {
+                assert_eq!(
+                    pair[0].destinations[stream] + pair[0].ranges[stream][1],
+                    pair[1].destinations[stream]
+                );
+            }
+            assert_eq!(
+                pages.last().unwrap().destinations[stream]
+                    + pages.last().unwrap().ranges[stream][1],
+                counts[stream]
+            );
+        }
+    }
+
+    #[test]
+    fn deterministic_prefix_assignment_is_capacity_checked_and_transactional() {
+        let mut prefixes = [3, u32::MAX, 0, 0];
+        let before = prefixes;
+        assert_eq!(
+            assign_candidate_page_destinations(
+                [[0, 2], [0, 1], [0, 0], [0, 0]],
+                &mut prefixes,
+                [4, u32::MAX, 0, 0],
+            ),
+            Err(VirtualTerrainGpuError::GeometryCapacity)
+        );
+        assert_eq!(
+            prefixes, before,
+            "a rejected page cannot partially advance another stream"
+        );
+
+        let mut prefixes = [3, 0, 0, 0];
+        let page = assign_candidate_page_destinations(
+            [[0, 1], [0, 0], [0, 0], [0, 0]],
+            &mut prefixes,
+            [4, 0, 0, 0],
+        )
+        .unwrap();
+        assert_eq!(page.destinations, [3, 0, 0, 0]);
+        assert_eq!(prefixes, [4, 0, 0, 0]);
+    }
+
+    #[test]
+    fn exact_validation_rejects_sum_square_collision_duplicates_and_missing_handles() {
+        let mut prefixes = [0; STREAM_COUNT];
+        let pages = [0, 3, 3]
+            .map(|first| {
+                assign_candidate_page_destinations(
+                    [[first, 1], [0, 0], [0, 0], [0, 0]],
+                    &mut prefixes,
+                    [3, 0, 0, 0],
+                )
+                .unwrap()
+            })
+            .to_vec();
+        assert!(exact_candidate_handles_match(
+            &pages,
+            &[vec![0, 3, 3], vec![], vec![], vec![]]
+        ));
+        assert!(
+            !exact_candidate_handles_match(&pages, &[vec![1, 1, 4], vec![], vec![], vec![]]),
+            "[0, 3, 3] and [1, 1, 4] collide under sum and square-sum but not exact comparison"
+        );
+        assert!(!exact_candidate_handles_match(
+            &pages,
+            &[vec![0, 3, 0], vec![], vec![], vec![]]
+        ));
+        assert!(!exact_candidate_handles_match(
+            &pages,
+            &[vec![0, 3], vec![], vec![], vec![]]
+        ));
+    }
+
+    #[test]
+    fn exact_validation_rejects_wrong_segment_and_wrong_destination() {
+        let mut prefixes = [0; STREAM_COUNT];
+        let pages = [
+            assign_candidate_page_destinations(
+                [[GPU_HANDLE_SEGMENT_BIT | 7, 1], [0, 0], [0, 0], [0, 0]],
+                &mut prefixes,
+                [2, 0, 0, 0],
+            )
+            .unwrap(),
+            assign_candidate_page_destinations(
+                [[19, 1], [0, 0], [0, 0], [0, 0]],
+                &mut prefixes,
+                [2, 0, 0, 0],
+            )
+            .unwrap(),
+        ];
+        assert!(exact_candidate_handles_match(
+            &pages,
+            &[vec![GPU_HANDLE_SEGMENT_BIT | 7, 19], vec![], vec![], vec![]]
+        ));
+        assert!(!exact_candidate_handles_match(
+            &pages,
+            &[vec![7, 19], vec![], vec![], vec![]]
+        ));
+        assert!(!exact_candidate_handles_match(
+            &pages,
+            &[vec![19, GPU_HANDLE_SEGMENT_BIT | 7], vec![], vec![], vec![]]
+        ));
+        let mut wrong_destination = pages;
+        wrong_destination[1].destinations[0] = 2;
+        assert!(!exact_candidate_handles_match(
+            &wrong_destination,
+            &[vec![GPU_HANDLE_SEGMENT_BIT | 7, 19], vec![], vec![], vec![]]
+        ));
+    }
+
+    #[test]
+    fn empty_pages_and_zero_streams_have_exact_zero_width_partitions() {
+        let mut prefixes = [0; STREAM_COUNT];
+        let empty = assign_candidate_page_destinations(
+            [[123, 0], [456, 0], [789, 0], [999, 0]],
+            &mut prefixes,
+            [0; STREAM_COUNT],
+        )
+        .unwrap();
+        assert_eq!(empty.destinations, [0; STREAM_COUNT]);
+        assert_eq!(prefixes, [0; STREAM_COUNT]);
+        assert!(exact_candidate_handles_match(
+            &[empty],
+            &[vec![], vec![], vec![], vec![]]
+        ));
     }
 
     #[test]
