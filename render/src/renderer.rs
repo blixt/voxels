@@ -3000,7 +3000,7 @@ pub struct RenderDiagnostics {
     pub gpu_weather_ms: Option<f32>,
     pub gpu_ui_ms: Option<f32>,
     pub gpu_virtual_terrain_snapshot_encode_ms: Option<f32>,
-    pub gpu_virtual_terrain_snapshot_finalize_ms: Option<f32>,
+    pub gpu_virtual_terrain_snapshot_validation_ms: Option<f32>,
     pub cpu_cull_ms: f32,
     pub cpu_encode_ms: f32,
     pub cpu_submit_ms: f32,
@@ -3127,7 +3127,7 @@ pub struct GpuTimingSample {
     pub weather_ms: f32,
     pub ui_ms: f32,
     pub virtual_terrain_snapshot_encode_ms: f32,
-    pub virtual_terrain_snapshot_finalize_ms: f32,
+    pub virtual_terrain_snapshot_validation_ms: f32,
 }
 
 #[derive(Debug, Default)]
@@ -3236,7 +3236,7 @@ fn parse_gpu_timestamps(
     } else {
         0.0
     };
-    let virtual_terrain_snapshot_finalize_ms = if passes.virtual_terrain {
+    let virtual_terrain_snapshot_validation_ms = if passes.virtual_terrain {
         elapsed_ms(26, 27)?
     } else {
         0.0
@@ -3292,7 +3292,7 @@ fn parse_gpu_timestamps(
         weather_ms,
         ui_ms,
         virtual_terrain_snapshot_encode_ms,
-        virtual_terrain_snapshot_finalize_ms,
+        virtual_terrain_snapshot_validation_ms,
     })
 }
 
@@ -7132,7 +7132,7 @@ impl Renderer {
                         .map(|frame| VirtualTerrainGpuTimestampWrites {
                             query_set: &frame.query_set,
                             encoding_first_query: 24,
-                            finalize_first_query: 26,
+                            validation_first_query: 26,
                         })
                 })
                 .flatten();
@@ -7833,8 +7833,8 @@ impl Renderer {
             gpu_ui_ms: gpu_timing.map(|timing| timing.ui_ms),
             gpu_virtual_terrain_snapshot_encode_ms: gpu_timing
                 .map(|timing| timing.virtual_terrain_snapshot_encode_ms),
-            gpu_virtual_terrain_snapshot_finalize_ms: gpu_timing
-                .map(|timing| timing.virtual_terrain_snapshot_finalize_ms),
+            gpu_virtual_terrain_snapshot_validation_ms: gpu_timing
+                .map(|timing| timing.virtual_terrain_snapshot_validation_ms),
             cpu_cull_ms,
             cpu_encode_ms: 0.0,
             cpu_submit_ms: 0.0,
@@ -11742,7 +11742,7 @@ mod tests {
             1_000_000, 2_000_000, 2_100_000, 3_100_000, 3_200_000, 4_200_000, 4_500_000, 6_500_000,
             6_700_000, 7_700_000, 7_900_000, 8_400_000, 8_600_000, 10_600_000, 10_800_000,
             12_800_000, 13_000_000, 13_400_000, 13_600_000, 16_600_000, 16_800_000, 17_100_000,
-            17_300_000, 18_300_000, 18_500_000, 18_900_000, 19_000_000, 19_800_000,
+            17_300_000, 18_300_000, 18_500_000, 18_900_000, 18_400_000, 19_800_000,
         ];
         let active = GpuPassMask {
             shadows: true,
@@ -11764,7 +11764,12 @@ mod tests {
         assert!((timing.weather_ms - 0.3).abs() < f32::EPSILON);
         assert!((timing.ui_ms - 1.0).abs() < f32::EPSILON);
         assert!((timing.virtual_terrain_snapshot_encode_ms - 0.4).abs() < f32::EPSILON);
-        assert!((timing.virtual_terrain_snapshot_finalize_ms - 0.8).abs() < f32::EPSILON);
+        assert!((timing.virtual_terrain_snapshot_validation_ms - 1.4).abs() < f32::EPSILON);
+        assert!(
+            timing.virtual_terrain_snapshot_validation_ms
+                > timing.virtual_terrain_snapshot_encode_ms,
+            "validation spans descriptor structure through post-encode exact comparison",
+        );
 
         let mut skipped = timestamps;
         skipped[0..6].copy_from_slice(&[90, 80, 70, 60, 50, 40]);
@@ -11781,7 +11786,7 @@ mod tests {
         assert_eq!(timing.cloud_ms, 0.0);
         assert_eq!(timing.weather_ms, 0.0);
         assert_eq!(timing.virtual_terrain_snapshot_encode_ms, 0.0);
-        assert_eq!(timing.virtual_terrain_snapshot_finalize_ms, 0.0);
+        assert_eq!(timing.virtual_terrain_snapshot_validation_ms, 0.0);
     }
 
     #[test]

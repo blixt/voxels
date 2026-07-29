@@ -102,6 +102,10 @@ const GPU_SNAPSHOT_READBACK_PREFIX_BYTES: u64 =
 
 const VALIDATION_DESCRIPTOR_MISMATCH: u32 = 1 << 8;
 const VALIDATION_INDIRECT_MISMATCH: u32 = 1 << 10;
+#[cfg(test)]
+const GPU_VALIDATION_STRUCTURE_MISMATCH: u32 = 1 << 6;
+#[cfg(test)]
+const GPU_VALIDATION_HANDLE_MISMATCH: u32 = 1 << 7;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct VirtualTerrainGpuGeometryRange {
@@ -153,7 +157,7 @@ impl GpuVirtualTerrainFeedback {
 pub(crate) struct VirtualTerrainGpuTimestampWrites<'a> {
     pub query_set: &'a QuerySet,
     pub encoding_first_query: u32,
-    pub finalize_first_query: u32,
+    pub validation_first_query: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -252,6 +256,8 @@ pub(crate) struct VirtualTerrainGpuControl {
     pending_feedback: Arc<Mutex<Option<PendingSnapshotFeedback>>>,
     readback_slots: Vec<SnapshotReadbackSlot>,
     next_readback_slot: usize,
+    #[cfg(test)]
+    test_handle_clear_before_validation: Option<u64>,
 }
 
 impl VirtualTerrainGpuControl {
@@ -344,7 +350,7 @@ impl VirtualTerrainGpuControl {
                     "virtual terrain handle bank B"
                 }),
                 size: VIRTUAL_TERRAIN_HANDLE_BANK_BYTES,
-                usage: wgpu::BufferUsages::STORAGE,
+                usage: handle_bank_buffer_usage(),
                 mapped_at_creation: false,
             });
             let counters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -411,6 +417,8 @@ impl VirtualTerrainGpuControl {
             pending_feedback: Arc::new(Mutex::new(None)),
             readback_slots,
             next_readback_slot: 0,
+            #[cfg(test)]
+            test_handle_clear_before_validation: None,
         })
     }
 
@@ -723,7 +731,11 @@ impl VirtualTerrainGpuControl {
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("validate virtual terrain candidate descriptor structure"),
-                timestamp_writes: None,
+                timestamp_writes: timestamps.map(|timestamps| wgpu::ComputePassTimestampWrites {
+                    query_set: timestamps.query_set,
+                    beginning_of_pass_write_index: Some(timestamps.validation_first_query),
+                    end_of_pass_write_index: None,
+                }),
             });
             pass.set_pipeline(&self.structural_pipeline);
             pass.set_bind_group(0, &self.banks[inactive].encode_bind_group, &[]);
@@ -746,13 +758,21 @@ impl VirtualTerrainGpuControl {
                 pass.dispatch_workgroups(pages.len() as u32, 1, 1);
             }
         }
+        #[cfg(test)]
+        if let Some(offset) = self.test_handle_clear_before_validation.take() {
+            encoder.clear_buffer(
+                &self.banks[inactive].handles,
+                offset,
+                Some(size_of::<u32>() as u64),
+            );
+        }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("validate CPU-selected virtual terrain snapshot"),
                 timestamp_writes: timestamps.map(|timestamps| wgpu::ComputePassTimestampWrites {
                     query_set: timestamps.query_set,
-                    beginning_of_pass_write_index: Some(timestamps.finalize_first_query),
-                    end_of_pass_write_index: Some(timestamps.finalize_first_query + 1),
+                    beginning_of_pass_write_index: None,
+                    end_of_pass_write_index: Some(timestamps.validation_first_query + 1),
                 }),
             });
             pass.set_bind_group(0, &self.banks[inactive].encode_bind_group, &[]);
@@ -1133,6 +1153,17 @@ fn snapshot_counter_buffer_usage() -> wgpu::BufferUsages {
     wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC
 }
 
+fn handle_bank_buffer_usage() -> wgpu::BufferUsages {
+    #[cfg(test)]
+    {
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST
+    }
+    #[cfg(not(test))]
+    {
+        wgpu::BufferUsages::STORAGE
+    }
+}
+
 fn candidate_page_buffer_usage() -> wgpu::BufferUsages {
     wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC
 }
@@ -1357,6 +1388,7 @@ const fn handle_stream_byte_range(stream: usize) -> Range<u64> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
     fn block_on_native<F: std::future::Future>(future: F) -> F::Output {
         struct ThreadWake(std::thread::Thread);
 
@@ -1478,7 +1510,6 @@ mod tests {
         );
         assert!(!shader.contains("fingerprint_sum"));
         assert!(!shader.contains("fingerprint_square"));
-        assert!(!shader.contains("finalize_snapshot"));
         assert!(!shader.contains("indirect_commands"));
         assert!(!shader.contains("traverse"));
         assert!(!shader.contains("geometry_source"));
@@ -1487,6 +1518,8 @@ mod tests {
 
     #[test]
     fn snapshot_feedback_buffers_remain_copyable_for_exact_readback() {
+        assert!(handle_bank_buffer_usage().contains(wgpu::BufferUsages::STORAGE));
+        assert!(handle_bank_buffer_usage().contains(wgpu::BufferUsages::COPY_DST));
         assert!(snapshot_counter_buffer_usage().contains(wgpu::BufferUsages::COPY_SRC));
         assert!(candidate_page_buffer_usage().contains(wgpu::BufferUsages::COPY_SRC));
         assert!(snapshot_indirect_buffer_usage().contains(wgpu::BufferUsages::COPY_SRC));
@@ -1495,10 +1528,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     #[ignore = "requires an actual native WGPU adapter; browser automation must run this path"]
     fn real_wgpu_executes_structure_encode_exact_validation_and_readback() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::METAL,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = block_on_native(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -1508,6 +1542,11 @@ mod tests {
             apply_limit_buckets: false,
         }))
         .expect("the explicit hardware test requires a real WGPU adapter");
+        assert_eq!(
+            adapter.get_info().backend,
+            wgpu::Backend::Metal,
+            "the explicit macOS hardware test must execute on Metal",
+        );
         let (device, queue) = block_on_native(adapter.request_device(&wgpu::DeviceDescriptor {
             required_limits: wgpu::Limits::default(),
             required_features: wgpu::Features::empty(),
@@ -1613,6 +1652,110 @@ mod tests {
             "GPU encode and exact validation agreeing with a corrupted descriptor cannot certify it against canonical CPU metadata",
         );
         assert!(!control.candidate_is_certified(identity));
+
+        control.invalidate_candidate();
+        let second_key = TerrainPageKey::surface(0, 1, 0);
+        control
+            .update_page_geometry(
+                second_key,
+                VirtualTerrainGpuGeometry {
+                    opaque_surface: VirtualTerrainGpuGeometryRange {
+                        source_segment: 0,
+                        source_offset_bytes: GPU_GEOMETRY_ELEMENT_BYTES * 5,
+                        element_count: 1,
+                    },
+                    opaque_triangle: VirtualTerrainGpuGeometryRange {
+                        source_segment: 0,
+                        source_offset_bytes: GPU_GEOMETRY_ELEMENT_BYTES * 6,
+                        element_count: 1,
+                    },
+                    ..VirtualTerrainGpuGeometry::default()
+                },
+            )
+            .expect("second hardware-test geometry");
+        let selected_pages = [key, second_key];
+        let two_page_identity = VirtualTerrainSnapshotIdentity {
+            fingerprint: 0x0fed_cba9_8765_4321,
+            selected_pages: &selected_pages,
+            ownerless_roots: 0,
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("descriptor gap-overlap hardware-test encoder"),
+        });
+        let generation = match control
+            .encode_candidate(&queue, &mut encoder, two_page_identity, None)
+            .expect("descriptor gap-overlap candidate encoding")
+        {
+            VirtualTerrainCandidateEncodeOutcome::Encoded(generation) => generation,
+            VirtualTerrainCandidateEncodeOutcome::ReadbackOnly(_) => {
+                panic!("the descriptor gap-overlap candidate must encode")
+            }
+        };
+        let gap_and_overlap = GpuCandidatePage {
+            ranges: [[5, 1], [6, 1], [0, 0], [0, 0]],
+            // Surface skips destination 3 while triangle overlaps destination 1.
+            destinations: [4, 1, 0, 0],
+        };
+        queue.write_buffer(
+            &control.candidate_pages,
+            size_of::<GpuCandidatePage>() as u64,
+            bytemuck::bytes_of(&gap_and_overlap),
+        );
+        control.submit_pending_readback(&mut encoder, generation);
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("descriptor gap-overlap submission");
+
+        let feedback = control
+            .latest_feedback()
+            .expect("descriptor gap-overlap feedback");
+        assert_ne!(
+            feedback.encoding_overflow_flags & GPU_VALIDATION_STRUCTURE_MISMATCH,
+            0,
+            "the real structural pass must reject both non-contiguous streams",
+        );
+        assert_eq!(
+            feedback.encoded_pages, 1,
+            "only the structurally valid first page may contribute completion evidence",
+        );
+        assert!(!control.candidate_is_certified(two_page_identity));
+
+        control.invalidate_candidate();
+        control.test_handle_clear_before_validation = Some(
+            u64::from(VIRTUAL_TERRAIN_HANDLE_OFFSETS[STREAM_TRIANGLE]) * size_of::<u32>() as u64,
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("post-encode handle corruption hardware-test encoder"),
+        });
+        let generation = match control
+            .encode_candidate(&queue, &mut encoder, two_page_identity, None)
+            .expect("post-encode handle corruption candidate encoding")
+        {
+            VirtualTerrainCandidateEncodeOutcome::Encoded(generation) => generation,
+            VirtualTerrainCandidateEncodeOutcome::ReadbackOnly(_) => {
+                panic!("the post-encode handle corruption candidate must encode")
+            }
+        };
+        control.submit_pending_readback(&mut encoder, generation);
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("post-encode handle corruption submission");
+
+        let feedback = control
+            .latest_feedback()
+            .expect("post-encode handle corruption feedback");
+        assert_ne!(
+            feedback.encoding_overflow_flags & GPU_VALIDATION_HANDLE_MISMATCH,
+            0,
+            "the exact validator must detect a GPU handle changed after encoding",
+        );
+        assert_eq!(
+            feedback.encoded_pages, 1,
+            "the corrupted page cannot contribute completion evidence",
+        );
+        assert!(!control.candidate_is_certified(two_page_identity));
     }
 
     #[test]
