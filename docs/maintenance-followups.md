@@ -48,3 +48,11 @@ their real directory requests, then compare their persisted schema-v7 boundary w
 reconstructed shared edges. The eventual fix belongs in generation/persistence if those products
 disagree; renderer admission should continue failing closed. Re-run `world-lab` through exact
 coverage and GPU certification before revisiting bounded staging retention.
+
+The default `player-rendering` dev-server scenario exposes the other side of the same staging
+problem with Terrain Diffusion: startup fails while admitting
+`TerrainPageKey { level: 2, coord: [-2, i32::MIN, -7] }` because the virtual-terrain GPU page pool
+is exhausted. A bounded frontier must therefore prove both liveness and a hard memory bound for the
+published cut, its causal balancing closure, and one maximum replacement group. The direct-child
+prototype bounded memory but did not converge; retaining every historical descendant progressed
+farther but exposed the incoherent root above and is not safe to ship.
