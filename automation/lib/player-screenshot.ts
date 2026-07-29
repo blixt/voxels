@@ -48,12 +48,23 @@ export interface PlayerScreenshotMetadata {
       } | null;
     };
     readonly virtualTerrain: {
+      readonly mode: "disabled" | "shadow" | "visible";
       readonly exactSurfaceDomain: {
         readonly complete: boolean;
         readonly requiredLeaves: number;
         readonly fingerprint: string;
         readonly currentExactCoverage: number;
         readonly oracleExactCoverage: number;
+        readonly coreComplete: boolean;
+        readonly coreRequiredLeaves: number;
+        readonly coreFingerprint: string;
+        readonly coreCurrentCoverage: number;
+        readonly coreOracleCoverage: number;
+        readonly predictionComplete: boolean;
+        readonly predictionRequiredLeaves: number;
+        readonly predictionFingerprint: string;
+        readonly predictionCurrentCoverage: number;
+        readonly predictionOracleCoverage: number;
       };
     };
   };
@@ -222,10 +233,22 @@ export function summarizeSurfaceCutAdjacency(
 export function assertPlayerScreenshotMetadata(metadata: unknown): PlayerScreenshotMetadata {
   const candidate = metadata as PlayerScreenshotMetadata;
   const exactSurfaceDomain = candidate.presentation?.virtualTerrain?.exactSurfaceDomain;
+  const effectiveRequiredLeaves = exactSurfaceDomain?.predictionComplete
+    ? exactSurfaceDomain.predictionRequiredLeaves
+    : exactSurfaceDomain?.coreRequiredLeaves;
+  const effectiveCurrentCoverage = exactSurfaceDomain?.predictionComplete
+    ? exactSurfaceDomain.predictionCurrentCoverage
+    : exactSurfaceDomain?.coreCurrentCoverage;
+  const effectiveOracleCoverage = exactSurfaceDomain?.predictionComplete
+    ? exactSurfaceDomain.predictionOracleCoverage
+    : exactSurfaceDomain?.coreOracleCoverage;
   if (
     candidate.schema !== "voxels.reproduction.v2" ||
     candidate.attachments?.terrainPixelOwnership?.schema !== "voxels.terrain-pixel-ownership.v1" ||
     candidate.presentation?.selectedCut?.kind !== "virtualTerrain" ||
+    !["disabled", "shadow", "visible"].includes(
+      candidate.presentation?.virtualTerrain?.mode ?? "",
+    ) ||
     typeof candidate.presentation?.terrainHandleSnapshot?.matchesPublishedCut !== "boolean" ||
     typeof candidate.presentation.terrainHandleSnapshot.generation !== "string" ||
     typeof candidate.presentation.terrainHandleSnapshot.cutFingerprint !== "string" ||
@@ -234,17 +257,55 @@ export function assertPlayerScreenshotMetadata(metadata: unknown): PlayerScreens
     typeof exactSurfaceDomain?.complete !== "boolean" ||
     !Number.isSafeInteger(exactSurfaceDomain.requiredLeaves) ||
     exactSurfaceDomain.requiredLeaves < 0 ||
-    (exactSurfaceDomain.complete
-      ? exactSurfaceDomain.requiredLeaves === 0
-      : exactSurfaceDomain.requiredLeaves !== 0) ||
     !/^[0-9a-f]{16}$/.test(exactSurfaceDomain.fingerprint) ||
-    (!exactSurfaceDomain.complete && exactSurfaceDomain.fingerprint !== "0000000000000000") ||
     !Number.isSafeInteger(exactSurfaceDomain.currentExactCoverage) ||
     exactSurfaceDomain.currentExactCoverage < 0 ||
     exactSurfaceDomain.currentExactCoverage > exactSurfaceDomain.requiredLeaves ||
     !Number.isSafeInteger(exactSurfaceDomain.oracleExactCoverage) ||
     exactSurfaceDomain.oracleExactCoverage < 0 ||
     exactSurfaceDomain.oracleExactCoverage > exactSurfaceDomain.requiredLeaves ||
+    typeof exactSurfaceDomain.coreComplete !== "boolean" ||
+    !Number.isSafeInteger(exactSurfaceDomain.coreRequiredLeaves) ||
+    exactSurfaceDomain.coreRequiredLeaves < 0 ||
+    (exactSurfaceDomain.coreComplete
+      ? exactSurfaceDomain.coreRequiredLeaves === 0
+      : exactSurfaceDomain.coreRequiredLeaves !== 0) ||
+    !/^[0-9a-f]{16}$/.test(exactSurfaceDomain.coreFingerprint) ||
+    (!exactSurfaceDomain.coreComplete &&
+      exactSurfaceDomain.coreFingerprint !== "0000000000000000") ||
+    !Number.isSafeInteger(exactSurfaceDomain.coreCurrentCoverage) ||
+    exactSurfaceDomain.coreCurrentCoverage < 0 ||
+    exactSurfaceDomain.coreCurrentCoverage > exactSurfaceDomain.coreRequiredLeaves ||
+    !Number.isSafeInteger(exactSurfaceDomain.coreOracleCoverage) ||
+    exactSurfaceDomain.coreOracleCoverage < 0 ||
+    exactSurfaceDomain.coreOracleCoverage > exactSurfaceDomain.coreRequiredLeaves ||
+    typeof exactSurfaceDomain.predictionComplete !== "boolean" ||
+    !Number.isSafeInteger(exactSurfaceDomain.predictionRequiredLeaves) ||
+    exactSurfaceDomain.predictionRequiredLeaves < 0 ||
+    (exactSurfaceDomain.predictionComplete
+      ? exactSurfaceDomain.predictionRequiredLeaves < exactSurfaceDomain.coreRequiredLeaves
+      : exactSurfaceDomain.predictionRequiredLeaves !== 0) ||
+    !/^[0-9a-f]{16}$/.test(exactSurfaceDomain.predictionFingerprint) ||
+    (!exactSurfaceDomain.predictionComplete &&
+      exactSurfaceDomain.predictionFingerprint !== "0000000000000000") ||
+    !Number.isSafeInteger(exactSurfaceDomain.predictionCurrentCoverage) ||
+    exactSurfaceDomain.predictionCurrentCoverage < 0 ||
+    exactSurfaceDomain.predictionCurrentCoverage > exactSurfaceDomain.predictionRequiredLeaves ||
+    !Number.isSafeInteger(exactSurfaceDomain.predictionOracleCoverage) ||
+    exactSurfaceDomain.predictionOracleCoverage < 0 ||
+    exactSurfaceDomain.predictionOracleCoverage > exactSurfaceDomain.predictionRequiredLeaves ||
+    (exactSurfaceDomain.predictionComplete && !exactSurfaceDomain.coreComplete) ||
+    (candidate.presentation.virtualTerrain.mode === "visible" &&
+      !exactSurfaceDomain.coreComplete) ||
+    exactSurfaceDomain.complete !==
+      (exactSurfaceDomain.coreComplete && exactSurfaceDomain.predictionComplete) ||
+    exactSurfaceDomain.requiredLeaves !== effectiveRequiredLeaves ||
+    exactSurfaceDomain.currentExactCoverage !== effectiveCurrentCoverage ||
+    exactSurfaceDomain.oracleExactCoverage !== effectiveOracleCoverage ||
+    exactSurfaceDomain.fingerprint !==
+      (exactSurfaceDomain.predictionComplete
+        ? exactSurfaceDomain.predictionFingerprint
+        : exactSurfaceDomain.coreFingerprint) ||
     !Array.isArray(candidate.camera?.eyeMetres) ||
     candidate.camera.eyeMetres.length !== 3 ||
     !candidate.camera.eyeMetres.every(Number.isFinite)

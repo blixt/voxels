@@ -1,7 +1,7 @@
 import type { BrowserPlayerSession } from "./local-player.ts";
 
 export const AUTOMATION_CONTRACT_VERSION = 8;
-export const SNAPSHOT_SCHEMA_VERSION = 52;
+export const SNAPSHOT_SCHEMA_VERSION = 53;
 export const FRAME_SAMPLE_WIDTH = 22;
 export const GPU_SAMPLE_WIDTH = 15;
 
@@ -184,6 +184,12 @@ export const SNAPSHOT_FIELD_NAMES = [
   "virtualTerrainExactDomainFingerprintLow24",
   "virtualTerrainExactDomainFingerprintMid24",
   "virtualTerrainExactDomainFingerprintHigh16",
+  "virtualTerrainExactCoreComplete",
+  "virtualTerrainExactCoreRequiredLeaves",
+  "virtualTerrainExactCoreCurrentCoverage",
+  "virtualTerrainExactPredictionComplete",
+  "virtualTerrainExactPredictionRequiredLeaves",
+  "virtualTerrainExactPredictionCurrentCoverage",
   "virtualTerrainRegisteredRegions",
   "virtualTerrainDirectoryInFlight",
   "virtualTerrainDirectoryNodes",

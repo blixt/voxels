@@ -31,12 +31,23 @@ describe("player screenshot surface-cut audit", () => {
         },
       },
       virtualTerrain: {
+        mode: "visible",
         exactSurfaceDomain: {
           complete: true,
           requiredLeaves: 4,
           fingerprint: "0123456789abcdef",
           currentExactCoverage: 4,
           oracleExactCoverage: 4,
+          coreComplete: true,
+          coreRequiredLeaves: 2,
+          coreFingerprint: "1111111111111111",
+          coreCurrentCoverage: 2,
+          coreOracleCoverage: 2,
+          predictionComplete: true,
+          predictionRequiredLeaves: 4,
+          predictionFingerprint: "0123456789abcdef",
+          predictionCurrentCoverage: 4,
+          predictionOracleCoverage: 4,
         },
       },
     },
@@ -55,12 +66,23 @@ describe("player screenshot surface-cut audit", () => {
         presentation: {
           ...reproducibleMetadata.presentation,
           virtualTerrain: {
+            ...reproducibleMetadata.presentation.virtualTerrain,
             exactSurfaceDomain: {
               complete: false,
-              requiredLeaves: 0,
-              fingerprint: "0000000000000000",
-              currentExactCoverage: 0,
-              oracleExactCoverage: 0,
+              requiredLeaves: 2,
+              fingerprint: "1111111111111111",
+              currentExactCoverage: 2,
+              oracleExactCoverage: 2,
+              coreComplete: true,
+              coreRequiredLeaves: 2,
+              coreFingerprint: "1111111111111111",
+              coreCurrentCoverage: 2,
+              coreOracleCoverage: 2,
+              predictionComplete: false,
+              predictionRequiredLeaves: 0,
+              predictionFingerprint: "0000000000000000",
+              predictionCurrentCoverage: 0,
+              predictionOracleCoverage: 0,
             },
           },
         },
@@ -72,6 +94,36 @@ describe("player screenshot surface-cut audit", () => {
         presentation: {
           ...reproducibleMetadata.presentation,
           virtualTerrain: {
+            ...reproducibleMetadata.presentation.virtualTerrain,
+            exactSurfaceDomain: {
+              ...reproducibleMetadata.presentation.virtualTerrain.exactSurfaceDomain,
+              complete: false,
+              requiredLeaves: 0,
+              fingerprint: "0000000000000000",
+              currentExactCoverage: 0,
+              oracleExactCoverage: 0,
+              coreComplete: false,
+              coreRequiredLeaves: 0,
+              coreFingerprint: "0000000000000000",
+              coreCurrentCoverage: 0,
+              coreOracleCoverage: 0,
+              predictionComplete: false,
+              predictionRequiredLeaves: 0,
+              predictionFingerprint: "0000000000000000",
+              predictionCurrentCoverage: 0,
+              predictionOracleCoverage: 0,
+            },
+          },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      assertPlayerScreenshotMetadata({
+        ...reproducibleMetadata,
+        presentation: {
+          ...reproducibleMetadata.presentation,
+          virtualTerrain: {
+            ...reproducibleMetadata.presentation.virtualTerrain,
             exactSurfaceDomain: {
               ...reproducibleMetadata.presentation.virtualTerrain.exactSurfaceDomain,
               currentExactCoverage: 5,

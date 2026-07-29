@@ -42,6 +42,24 @@ describe("engine automation contract", () => {
     expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.virtualTerrainExactDomainFingerprintHigh16]).toBe(
       "virtualTerrainExactDomainFingerprintHigh16",
     );
+    expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.virtualTerrainExactCoreComplete]).toBe(
+      "virtualTerrainExactCoreComplete",
+    );
+    expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.virtualTerrainExactCoreRequiredLeaves]).toBe(
+      "virtualTerrainExactCoreRequiredLeaves",
+    );
+    expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.virtualTerrainExactCoreCurrentCoverage]).toBe(
+      "virtualTerrainExactCoreCurrentCoverage",
+    );
+    expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.virtualTerrainExactPredictionComplete]).toBe(
+      "virtualTerrainExactPredictionComplete",
+    );
+    expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.virtualTerrainExactPredictionRequiredLeaves]).toBe(
+      "virtualTerrainExactPredictionRequiredLeaves",
+    );
+    expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.virtualTerrainExactPredictionCurrentCoverage]).toBe(
+      "virtualTerrainExactPredictionCurrentCoverage",
+    );
     expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.schemaVersion]).toBe("schemaVersion");
   });
 

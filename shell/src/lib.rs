@@ -1012,6 +1012,32 @@ fn virtual_terrain_column_working_set(
     keep
 }
 
+/// Selects requestable exact/quality debt without letting completed or in-flight prefixes consume
+/// the bounded request batch. Repeated calls therefore make monotonic progress through the full
+/// desired list instead of retrying the same coordinate-ordered prefix forever.
+#[cfg(any(target_arch = "wasm32", test))]
+fn virtual_terrain_pending_columns<Completed, InFlight>(
+    desired: &[[i32; 2]],
+    completed: &std::collections::BTreeMap<[i32; 2], Completed>,
+    in_flight: &std::collections::BTreeMap<[i32; 2], InFlight>,
+    retry_after_ms: &std::collections::BTreeMap<[i32; 2], u64>,
+    now_ms: u64,
+    limit: usize,
+) -> Vec<[i32; 2]> {
+    desired
+        .iter()
+        .copied()
+        .filter(|column| {
+            !completed.contains_key(column)
+                && !in_flight.contains_key(column)
+                && retry_after_ms
+                    .get(column)
+                    .is_none_or(|retry_at| *retry_at <= now_ms)
+        })
+        .take(limit)
+        .collect()
+}
+
 /// Retains already published roots until a bounded spatial working set actually needs space.
 ///
 /// A candidate cut may be temporarily incomplete while its column or directory is in flight. The
@@ -1230,7 +1256,7 @@ mod web {
     };
     use crate::{
         ChunkPortalMask, predictive_stream_position, virtual_terrain_column_working_set,
-        virtual_terrain_root_working_set, world_environment_at,
+        virtual_terrain_pending_columns, virtual_terrain_root_working_set, world_environment_at,
     };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
@@ -1256,7 +1282,7 @@ mod web {
     use voxels_render::shadow::DirectionalShadowConfig;
     use voxels_render::ui::{LiveStats, NavigationTelemetry};
     use voxels_render::virtual_terrain::{
-        ExactSurfaceDomain, VirtualTerrainCut, VirtualTerrainView,
+        ExactSurfaceDomain, ExactSurfaceDomainCache, VirtualTerrainCut, VirtualTerrainView,
     };
     use voxels_runtime::{
         AuthoritativeEditRevisions, ChunkState, CompletionStatus, DirectionalStreamPriority,
@@ -1285,7 +1311,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 8;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 52;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 53;
     const FRAME_SAMPLE_WIDTH: u32 = 22;
     const GPU_SAMPLE_WIDTH: u32 = 15;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -1310,7 +1336,9 @@ mod web {
         "canonicalImmediateResident,canonicalImmediateRequired,terrainColumnCellsOwned,terrainColumnCellsRequired,generationQueued,generationInFlight,meshingQueued,meshingInFlight,",
         "uploadQueued,uploadInFlight,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,",
         "collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,",
-        "enclosedViewOwned,virtualTerrainMode,virtualTerrainRegisteredRegions,virtualTerrainDirectoryInFlight,virtualTerrainDirectoryNodes,virtualTerrainResidentPages,virtualTerrainResidentMiB,virtualTerrainResidentPrimitives,",
+        "enclosedViewOwned,virtualTerrainMode,virtualTerrainExactDomainComplete,virtualTerrainExactDomainRequiredLeaves,virtualTerrainExactDomainCurrentCoverage,virtualTerrainExactDomainFingerprintLow24,virtualTerrainExactDomainFingerprintMid24,virtualTerrainExactDomainFingerprintHigh16,",
+        "virtualTerrainExactCoreComplete,virtualTerrainExactCoreRequiredLeaves,virtualTerrainExactCoreCurrentCoverage,virtualTerrainExactPredictionComplete,virtualTerrainExactPredictionRequiredLeaves,virtualTerrainExactPredictionCurrentCoverage,",
+        "virtualTerrainRegisteredRegions,virtualTerrainDirectoryInFlight,virtualTerrainDirectoryNodes,virtualTerrainResidentPages,virtualTerrainResidentMiB,virtualTerrainResidentPrimitives,",
         "virtualTerrainSelectedPages,virtualTerrainRequestedPages,virtualTerrainOwnerlessRoots,virtualTerrainGpuMatchesCpuCut,virtualTerrainGpuEncodingOverflowFlags,virtualTerrainGpuEncodedPages,virtualTerrainGpuOwnerlessRoots,virtualTerrainStreamPending,virtualTerrainStreamInFlight,virtualTerrainCancellationWasteMiB,virtualTerrainCachePages,",
         "virtualTerrainCacheMiB,virtualTerrainColumns,virtualTerrainColumnInFlight,virtualTerrainColumnRevisionFloors,virtualTerrainCurrentColumnKnown,virtualTerrainCurrentColumnRoots,virtualTerrainCurrentColumnRegisteredRoots,virtualTerrainNearestRegisteredRootMetres,",
         "virtualTerrainColumnAccepted,virtualTerrainColumnSubmitDeferred,virtualTerrainColumnPreempted,virtualTerrainColumnTimedOut,virtualTerrainColumnOtherFailed,virtualTerrainDirectoryAccepted,virtualTerrainDirectorySubmitDeferred,virtualTerrainDirectoryPreempted,",
@@ -1410,8 +1438,8 @@ mod web {
         last_page_failure_key: Option<TerrainPageKey>,
     }
 
-    const STARTUP_PROGRESS_VERSION: u32 = 5;
-    const STARTUP_PROGRESS_PAYLOAD_WORDS: usize = 64;
+    const STARTUP_PROGRESS_VERSION: u32 = 6;
+    const STARTUP_PROGRESS_PAYLOAD_WORDS: usize = 70;
     const STARTUP_PROGRESS_WORDS: usize = STARTUP_PROGRESS_PAYLOAD_WORDS + 2;
 
     #[derive(Default)]
@@ -1925,6 +1953,7 @@ mod web {
         virtual_terrain: RefCell<VirtualTerrainStreamingState>,
         virtual_terrain_scheduler: RefCell<TerrainStreamScheduler>,
         virtual_terrain_cache: RefCell<TerrainPageMemoryCache>,
+        exact_surface_domain_cache: RefCell<ExactSurfaceDomainCache>,
         terrain_ready: Cell<bool>,
         startup_ready: Cell<bool>,
         scope: DedicatedWorkerGlobalScope,
@@ -3176,7 +3205,7 @@ mod web {
             let velocity = velocity.is_finite().then_some(velocity).unwrap_or_default();
             let endpoint =
                 camera.position + velocity * self.config.stream_velocity_lookahead_seconds.max(0.0);
-            ExactSurfaceDomain::swept_horizontal_capsule(
+            self.exact_surface_domain_cache.borrow_mut().resolve(
                 camera.position.to_array().map(f64::from),
                 endpoint.to_array().map(f64::from),
                 self.virtual_terrain_exact_surface_radius_metres(),
@@ -3219,25 +3248,44 @@ mod web {
             let predicted_position = camera.position
                 + streaming_velocity * self.config.stream_velocity_lookahead_seconds.max(0.0);
             let current_column = [camera_root.coord[0], camera_root.coord[2]];
-            let mut prioritized = Vec::with_capacity(VIRTUAL_TERRAIN_MAX_COLUMNS);
+            let camera_position = camera.position.to_array().map(f64::from);
+            let predicted_position_f64 = predicted_position.to_array().map(f64::from);
+            let mut exact_columns = exact_surface_domain
+                .required_pages_at_level(TERRAIN_COVERAGE_ROOT_LEVEL)
+                .map(|root| {
+                    let distance =
+                        surface_page_horizontal_distance_squared(root, camera.position.to_array())
+                            .unwrap_or(f64::INFINITY)
+                            .min(
+                                surface_page_horizontal_distance_squared(
+                                    root,
+                                    predicted_position.to_array(),
+                                )
+                                .unwrap_or(f64::INFINITY),
+                            );
+                    ([root.coord[0], root.coord[2]], distance)
+                })
+                .collect::<Vec<_>>();
+            exact_columns.sort_by(|left, right| {
+                left.1
+                    .total_cmp(&right.1)
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            exact_columns.dedup_by_key(|(column, _)| *column);
+            let mut prioritized =
+                Vec::with_capacity(VIRTUAL_TERRAIN_MAX_COLUMNS.max(exact_columns.len() + 1));
             let mut included = BTreeSet::new();
-            // Current ownership is needed immediately. Every coverage root in the exact swept
-            // domain follows before ordinary directional quality work.
-            for column in std::iter::once(current_column).chain(
-                exact_surface_domain
-                    .required_pages_at_level(TERRAIN_COVERAGE_ROOT_LEVEL)
-                    .map(|root| [root.coord[0], root.coord[2]]),
-            ) {
+            // Current ownership is needed immediately. Every exact-debt column follows before
+            // ordinary directional quality work. The ordinary cap is not a proof-domain cap:
+            // resolved and in-flight entries are filtered only when a request batch is formed.
+            for column in std::iter::once(current_column)
+                .chain(exact_columns.into_iter().map(|(column, _)| column))
+            {
                 if included.insert(column) {
                     prioritized.push(column);
-                    if prioritized.len() == VIRTUAL_TERRAIN_MAX_COLUMNS {
-                        return prioritized;
-                    }
                 }
             }
 
-            let camera_position = camera.position.to_array().map(f64::from);
-            let predicted_position = predicted_position.to_array().map(f64::from);
             let forward = camera.forward().to_array().map(f64::from);
             let root_span_metres =
                 f64::from(CHUNK_EDGE as u32 * (1_u32 << TERRAIN_COVERAGE_ROOT_LEVEL)) * 0.1;
@@ -3272,8 +3320,8 @@ mod web {
                     let delta_x = center[0] - camera_position[0];
                     let delta_z = center[2] - camera_position[2];
                     let current_distance_squared = delta_x * delta_x + delta_z * delta_z;
-                    let predicted_delta_x = center[0] - predicted_position[0];
-                    let predicted_delta_z = center[2] - predicted_position[2];
+                    let predicted_delta_x = center[0] - predicted_position_f64[0];
+                    let predicted_delta_z = center[2] - predicted_position_f64[2];
                     let predicted_distance_squared = predicted_delta_x * predicted_delta_x
                         + predicted_delta_z * predicted_delta_z;
                     let distance_squared = current_distance_squared.min(predicted_distance_squared);
@@ -3348,6 +3396,21 @@ mod web {
         ) {
             if !self.virtual_terrain_supported() {
                 return;
+            }
+            let virtual_terrain_visible = {
+                self.renderer.borrow().virtual_terrain_render_mode()
+                    == VirtualTerrainRenderMode::Visible
+            };
+            if !exact_surface_domain.core_is_complete()
+                && virtual_terrain_visible
+                && let Err(error) = self
+                    .renderer
+                    .borrow_mut()
+                    .set_virtual_terrain_render_mode(VirtualTerrainRenderMode::Shadow)
+            {
+                log_gpu_error(&format!(
+                    "hide virtual terrain without a valid exact core: {error}"
+                ));
             }
             // Certification and promotion are the first renderer mutation of the frame. A cache
             // arrival or directory update may change the next desired cut, but cannot invalidate
@@ -3651,19 +3714,14 @@ mod web {
                 if in_flight_batches >= VIRTUAL_TERRAIN_MAX_COLUMN_BATCHES_IN_FLIGHT {
                     return;
                 }
-                desired_columns
-                    .iter()
-                    .filter(|column| {
-                        !state.columns.contains_key(*column)
-                            && !state.column_in_flight.contains_key(*column)
-                            && state
-                                .column_retry_after_ms
-                                .get(*column)
-                                .is_none_or(|retry_at| *retry_at <= now_ms)
-                    })
-                    .take(VIRTUAL_TERRAIN_COLUMN_BATCH_SIZE)
-                    .copied()
-                    .collect::<Vec<_>>()
+                virtual_terrain_pending_columns(
+                    desired_columns,
+                    &state.columns,
+                    &state.column_in_flight,
+                    &state.column_retry_after_ms,
+                    now_ms,
+                    VIRTUAL_TERRAIN_COLUMN_BATCH_SIZE,
+                )
             };
             if columns.is_empty() {
                 return;
@@ -5703,6 +5761,12 @@ mod web {
                 render.virtual_terrain_exact_domain_current_coverage,
                 render.virtual_terrain_exact_domain_fingerprint as u32,
                 (render.virtual_terrain_exact_domain_fingerprint >> 32) as u32,
+                u32::from(render.virtual_terrain_exact_core_complete),
+                render.virtual_terrain_exact_core_required_leaves,
+                render.virtual_terrain_exact_core_current_coverage,
+                u32::from(render.virtual_terrain_exact_prediction_complete),
+                render.virtual_terrain_exact_prediction_required_leaves,
+                render.virtual_terrain_exact_prediction_current_coverage,
             ];
             debug_assert_eq!(progress.len(), STARTUP_PROGRESS_WORDS);
             progress
@@ -6206,6 +6270,20 @@ mod web {
                     (render.virtual_terrain_exact_domain_fingerprint & 0x00ff_ffff) as f32,
                     ((render.virtual_terrain_exact_domain_fingerprint >> 24) & 0x00ff_ffff) as f32,
                     ((render.virtual_terrain_exact_domain_fingerprint >> 48) & 0x0000_ffff) as f32,
+                    if render.virtual_terrain_exact_core_complete {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    render.virtual_terrain_exact_core_required_leaves as f32,
+                    render.virtual_terrain_exact_core_current_coverage as f32,
+                    if render.virtual_terrain_exact_prediction_complete {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    render.virtual_terrain_exact_prediction_required_leaves as f32,
+                    render.virtual_terrain_exact_prediction_current_coverage as f32,
                     virtual_terrain_registered_regions as f32,
                     virtual_terrain_directory_in_flight as f32,
                     virtual_terrain_directory_nodes as f32,
@@ -6551,6 +6629,7 @@ mod web {
                 )
                 .map_err(|error| JsValue::from_str(&error.to_string()))?,
             ),
+            exact_surface_domain_cache: RefCell::new(ExactSurfaceDomainCache::default()),
             terrain_ready: Cell::new(false),
             startup_ready: Cell::new(false),
             scope,
@@ -7264,6 +7343,53 @@ mod tests {
         assert_eq!(
             keep,
             BTreeSet::from([[19, 0], [20, 0], [21, 0], [22, 0], [23, 0], [25, 0]])
+        );
+    }
+
+    #[test]
+    fn virtual_terrain_column_batches_progress_beyond_a_completed_prefix() {
+        let desired = (0..17).map(|x| [x, 0]).collect::<Vec<_>>();
+        let mut completed = BTreeMap::<[i32; 2], ()>::new();
+        let in_flight = BTreeMap::<[i32; 2], ()>::new();
+        let retry_after = BTreeMap::new();
+
+        while completed.len() < desired.len() {
+            let batch = virtual_terrain_pending_columns(
+                &desired,
+                &completed,
+                &in_flight,
+                &retry_after,
+                1_000,
+                4,
+            );
+            assert!(!batch.is_empty());
+            completed.extend(batch.into_iter().map(|column| (column, ())));
+        }
+
+        assert_eq!(
+            completed.keys().copied().collect::<Vec<_>>(),
+            desired,
+            "completed exact columns must stop consuming the bounded request prefix"
+        );
+    }
+
+    #[test]
+    fn virtual_terrain_column_batch_skips_in_flight_and_deferred_prefixes() {
+        let desired = (0..9).map(|x| [x, 0]).collect::<Vec<_>>();
+        let completed = BTreeMap::from([([0, 0], ())]);
+        let in_flight = BTreeMap::from([([1, 0], ()), ([2, 0], ())]);
+        let retry_after = BTreeMap::from([([3, 0], 1_001)]);
+
+        assert_eq!(
+            virtual_terrain_pending_columns(
+                &desired,
+                &completed,
+                &in_flight,
+                &retry_after,
+                1_000,
+                4,
+            ),
+            vec![[4, 0], [5, 0], [6, 0], [7, 0]]
         );
     }
 

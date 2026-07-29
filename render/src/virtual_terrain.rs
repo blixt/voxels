@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::Arc;
 use voxels_world::{
     TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_PAGE_MAX_CHILDREN,
     TerrainHierarchyDirectoryV1, TerrainHierarchyNode, TerrainPageKey, TerrainPageRepresentation,
@@ -24,158 +25,231 @@ const NORMAL_ERROR_PIXELS_PER_RADIAN: f64 = 0.25;
 /// enumerated analytically, including pages for which no hierarchy root has arrived yet.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExactSurfaceDomain {
+    data: Arc<ExactSurfaceDomainData>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExactSurfaceDomainInput {
+    start_bits: [u64; 3],
+    end_bits: [u64; 3],
+    radius_bits: u64,
+    max_required_leaves: usize,
+}
+
+impl ExactSurfaceDomainInput {
+    fn new(
+        start_metres: [f64; 3],
+        end_metres: [f64; 3],
+        radius_metres: f64,
+        max_required_leaves: usize,
+    ) -> Self {
+        Self {
+            start_bits: start_metres.map(f64::to_bits),
+            end_bits: end_metres.map(f64::to_bits),
+            radius_bits: radius_metres.to_bits(),
+            max_required_leaves,
+        }
+    }
+}
+
+/// Safe immutable reuse for frames whose exact continuous proof input did not change.
+///
+/// The fingerprint is deliberately absent from the cache key: it is diagnostic evidence, not a
+/// collision-free identity. Movement can alter capsule/corner intersections within one leaf, so
+/// endpoint page coordinates are likewise insufficient.
+#[derive(Clone, Debug, Default)]
+pub struct ExactSurfaceDomainCache {
+    entry: Option<(ExactSurfaceDomainInput, ExactSurfaceDomain)>,
+    rebuilds: u64,
+}
+
+impl ExactSurfaceDomainCache {
+    pub fn resolve(
+        &mut self,
+        start_metres: [f64; 3],
+        end_metres: [f64; 3],
+        radius_metres: f64,
+        max_required_leaves: usize,
+    ) -> ExactSurfaceDomain {
+        let input = ExactSurfaceDomainInput::new(
+            start_metres,
+            end_metres,
+            radius_metres,
+            max_required_leaves,
+        );
+        if let Some((cached_input, cached)) = &self.entry
+            && *cached_input == input
+        {
+            return cached.clone();
+        }
+        let domain = ExactSurfaceDomain::swept_horizontal_capsule(
+            start_metres,
+            end_metres,
+            radius_metres,
+            max_required_leaves,
+        );
+        self.rebuilds = self.rebuilds.saturating_add(1);
+        self.entry = Some((input, domain.clone()));
+        domain
+    }
+
+    pub const fn rebuilds(&self) -> u64 {
+        self.rebuilds
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ExactSurfaceDomainData {
+    core_required_leaves: BTreeSet<TerrainPageKey>,
     required_leaves: BTreeSet<TerrainPageKey>,
     ancestors_by_level: Vec<BTreeSet<TerrainPageKey>>,
-    complete: bool,
+    core_complete: bool,
+    prediction_complete: bool,
+    core_fingerprint: u64,
+    prediction_fingerprint: u64,
     fingerprint: u64,
 }
 
 impl ExactSurfaceDomain {
     /// Builds a conservative exact enumeration of the horizontal swept capsule.
     ///
-    /// The candidate page rectangle is bounded before allocation or iteration. Invalid input,
-    /// coordinate overflow, or a domain larger than `max_required_leaves` produces an incomplete
-    /// domain which can never certify presentation readiness.
+    /// The candidate page rectangle is bounded before allocation or iteration. Invalid current
+    /// input or current-domain overflow produces an incomplete domain which cannot certify
+    /// presentation readiness. If only the swept prediction exceeds the bound, the independently
+    /// bounded stationary core remains authoritative while prediction diagnostics report debt.
     pub fn swept_horizontal_capsule(
         start_metres: [f64; 3],
         end_metres: [f64; 3],
         radius_metres: f64,
         max_required_leaves: usize,
     ) -> Self {
-        let incomplete = || Self {
-            required_leaves: BTreeSet::new(),
-            ancestors_by_level: vec![BTreeSet::new(); usize::from(TERRAIN_COVERAGE_ROOT_LEVEL) + 1],
-            complete: false,
-            fingerprint: 0,
+        let core_required_leaves = enumerate_horizontal_capsule_leaves(
+            start_metres,
+            start_metres,
+            radius_metres,
+            max_required_leaves,
+        );
+        let Some(core_required_leaves) = core_required_leaves else {
+            return Self::incomplete();
         };
-        if !start_metres.into_iter().all(f64::is_finite)
-            || !end_metres.into_iter().all(f64::is_finite)
-            || !radius_metres.is_finite()
-            || radius_metres < 0.0
-            || max_required_leaves == 0
-        {
-            return incomplete();
-        }
+        let prediction = if start_metres == end_metres {
+            Some(core_required_leaves.clone())
+        } else {
+            enumerate_horizontal_capsule_leaves(
+                start_metres,
+                end_metres,
+                radius_metres,
+                max_required_leaves,
+            )
+        };
+        Self::from_parts(core_required_leaves, prediction)
+    }
 
-        let start = [start_metres[0], start_metres[2]];
-        let end = [end_metres[0], end_metres[2]];
-        let leaf_span_metres = f64::from(TERRAIN_PAGE_EDGE_SAMPLES) * 0.1;
-        let minimum = [
-            (start[0].min(end[0]) - radius_metres) / leaf_span_metres,
-            (start[1].min(end[1]) - radius_metres) / leaf_span_metres,
-        ];
-        let maximum = [
-            (start[0].max(end[0]) + radius_metres) / leaf_span_metres,
-            (start[1].max(end[1]) + radius_metres) / leaf_span_metres,
-        ];
-        let minimum = minimum.map(f64::floor);
-        // Page ownership is half-open. `floor` selects the unique owner at the lower capsule bound;
-        // at the upper bound it also includes the page owning that boundary point, while the page
-        // immediately below is included by the non-zero interior.
-        let maximum = maximum.map(f64::floor);
-        if minimum
-            .into_iter()
-            .chain(maximum)
-            .any(|value| value < f64::from(i32::MIN) || value > f64::from(i32::MAX))
-        {
-            return incomplete();
-        }
-        let minimum = minimum.map(|value| value as i32);
-        let maximum = maximum.map(|value| value as i32);
-        let Some(width) = i64::from(maximum[0])
-            .checked_sub(i64::from(minimum[0]))
-            .and_then(|value| value.checked_add(1))
-        else {
-            return incomplete();
+    fn from_parts(
+        core_required_leaves: BTreeSet<TerrainPageKey>,
+        prediction: Option<BTreeSet<TerrainPageKey>>,
+    ) -> Self {
+        let core_complete = !core_required_leaves.is_empty();
+        let prediction_complete = core_complete && prediction.is_some();
+        let required_leaves = prediction.unwrap_or_else(|| core_required_leaves.clone());
+        let Some(ancestors_by_level) = required_leaf_ancestors(&required_leaves) else {
+            return Self::incomplete();
         };
-        let Some(height) = i64::from(maximum[1])
-            .checked_sub(i64::from(minimum[1]))
-            .and_then(|value| value.checked_add(1))
-        else {
-            return incomplete();
+        let core_fingerprint = required_leaf_fingerprint(&core_required_leaves);
+        let prediction_fingerprint = if prediction_complete {
+            required_leaf_fingerprint(&required_leaves)
+        } else {
+            0
         };
-        let Some(candidate_count) = width
-            .checked_mul(height)
-            .and_then(|value| usize::try_from(value).ok())
-        else {
-            return incomplete();
-        };
-        if candidate_count > max_required_leaves {
-            return incomplete();
-        }
-
-        let radius_squared = radius_metres * radius_metres;
-        let coordinate_scale = start
-            .into_iter()
-            .chain(end)
-            .chain([radius_metres])
-            .map(f64::abs)
-            .fold(1.0_f64, f64::max);
-        let conservative_roundoff =
-            f64::EPSILON * coordinate_scale * coordinate_scale * 128.0 + 1.0e-12;
-        let mut required_leaves = BTreeSet::new();
-        for z in minimum[1]..=maximum[1] {
-            for x in minimum[0]..=maximum[0] {
-                let key = TerrainPageKey::surface(0, x, z);
-                let Some([page_minimum, page_maximum]) = key.horizontal_bounds() else {
-                    return incomplete();
-                };
-                let page_minimum = page_minimum.map(|value| f64::from(value) * 0.1);
-                let page_maximum = page_maximum.map(|value| f64::from(value) * 0.1);
-                if segment_aabb_distance_squared_2d(start, end, page_minimum, page_maximum)
-                    <= radius_squared + conservative_roundoff
-                {
-                    required_leaves.insert(key);
-                }
-            }
-        }
-        if required_leaves.is_empty() {
-            return incomplete();
-        }
-
-        let mut ancestors_by_level =
-            vec![BTreeSet::new(); usize::from(TERRAIN_COVERAGE_ROOT_LEVEL) + 1];
-        let mut fingerprint = FINGERPRINT_OFFSET;
-        for leaf in &required_leaves {
-            for level in 0..=TERRAIN_COVERAGE_ROOT_LEVEL {
-                let Some(ancestor) = leaf.ancestor_at(level) else {
-                    return incomplete();
-                };
-                ancestors_by_level[usize::from(level)].insert(ancestor);
-            }
-            fingerprint ^= u64::from(leaf.level);
-            fingerprint = fingerprint.wrapping_mul(FINGERPRINT_PRIME);
-            for component in leaf.coord {
-                fingerprint ^= u64::from(component as u32);
-                fingerprint = fingerprint.wrapping_mul(FINGERPRINT_PRIME);
-            }
-        }
+        let fingerprint = required_leaf_fingerprint(&required_leaves);
         Self {
-            required_leaves,
-            ancestors_by_level,
-            complete: true,
-            fingerprint,
+            data: Arc::new(ExactSurfaceDomainData {
+                core_required_leaves,
+                required_leaves,
+                ancestors_by_level,
+                core_complete,
+                prediction_complete,
+                core_fingerprint,
+                prediction_fingerprint,
+                fingerprint,
+            }),
         }
     }
 
-    pub const fn is_complete(&self) -> bool {
-        self.complete
+    fn incomplete() -> Self {
+        Self {
+            data: Arc::new(ExactSurfaceDomainData {
+                core_required_leaves: BTreeSet::new(),
+                required_leaves: BTreeSet::new(),
+                ancestors_by_level: vec![
+                    BTreeSet::new();
+                    usize::from(TERRAIN_COVERAGE_ROOT_LEVEL) + 1
+                ],
+                core_complete: false,
+                prediction_complete: false,
+                core_fingerprint: 0,
+                prediction_fingerprint: 0,
+                fingerprint: 0,
+            }),
+        }
     }
 
+    pub fn core_is_complete(&self) -> bool {
+        self.data.core_complete
+    }
+
+    pub fn prediction_is_complete(&self) -> bool {
+        self.data.prediction_complete
+    }
+
+    /// Whether both the mandatory current core and the optional motion prediction were enumerated.
+    pub fn is_complete(&self) -> bool {
+        self.data.core_complete && self.data.prediction_complete
+    }
+
+    pub fn core_required_leaf_count(&self) -> usize {
+        self.data.core_required_leaves.len()
+    }
+
+    pub fn prediction_required_leaf_count(&self) -> usize {
+        if self.data.prediction_complete {
+            self.data.required_leaves.len()
+        } else {
+            0
+        }
+    }
+
+    /// Number of leaves which must be exact for this domain's currently provable guarantee.
+    ///
+    /// This is the full swept prediction when it was bounded successfully, otherwise the
+    /// independently bounded current-position core.
     pub fn required_leaf_count(&self) -> usize {
-        self.required_leaves.len()
+        self.data.required_leaves.len()
     }
 
-    pub const fn fingerprint(&self) -> u64 {
-        self.fingerprint
+    pub fn core_fingerprint(&self) -> u64 {
+        self.data.core_fingerprint
+    }
+
+    pub fn prediction_fingerprint(&self) -> u64 {
+        self.data.prediction_fingerprint
+    }
+
+    pub fn fingerprint(&self) -> u64 {
+        self.data.fingerprint
     }
 
     pub fn required_leaves(&self) -> impl Iterator<Item = TerrainPageKey> + '_ {
-        self.required_leaves.iter().copied()
+        self.data.required_leaves.iter().copied()
+    }
+
+    pub fn core_required_leaves(&self) -> impl Iterator<Item = TerrainPageKey> + '_ {
+        self.data.core_required_leaves.iter().copied()
     }
 
     pub fn required_pages_at_level(&self, level: u8) -> impl Iterator<Item = TerrainPageKey> + '_ {
-        self.ancestors_by_level
+        self.data
+            .ancestors_by_level
             .get(usize::from(level))
             .into_iter()
             .flatten()
@@ -183,19 +257,21 @@ impl ExactSurfaceDomain {
     }
 
     pub fn intersects_page(&self, key: TerrainPageKey) -> bool {
-        self.complete
+        self.data.core_complete
             && key.is_surface()
             && self
+                .data
                 .ancestors_by_level
                 .get(usize::from(key.level))
                 .is_some_and(|pages| pages.contains(&key))
     }
 
     pub fn intersects_page_margin(&self, key: TerrainPageKey, margin_pages: i32) -> bool {
-        if !self.complete || !key.is_surface() || margin_pages < 0 {
+        if !self.data.core_complete || !key.is_surface() || margin_pages < 0 {
             return false;
         }
-        self.ancestors_by_level
+        self.data
+            .ancestors_by_level
             .get(usize::from(key.level))
             .is_some_and(|pages| {
                 (-margin_pages..=margin_pages).any(|z| {
@@ -215,6 +291,122 @@ impl ExactSurfaceDomain {
                 })
             })
     }
+
+    /// Clones share immutable enumeration storage. This is exposed for cache invariant tests.
+    pub fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.data, &other.data)
+    }
+}
+
+fn enumerate_horizontal_capsule_leaves(
+    start_metres: [f64; 3],
+    end_metres: [f64; 3],
+    radius_metres: f64,
+    max_required_leaves: usize,
+) -> Option<BTreeSet<TerrainPageKey>> {
+    if !start_metres.into_iter().all(f64::is_finite)
+        || !end_metres.into_iter().all(f64::is_finite)
+        || !radius_metres.is_finite()
+        || radius_metres < 0.0
+        || max_required_leaves == 0
+    {
+        return None;
+    }
+    let start = [start_metres[0], start_metres[2]];
+    let end = [end_metres[0], end_metres[2]];
+    let leaf_span_metres = f64::from(TERRAIN_PAGE_EDGE_SAMPLES) * 0.1;
+    let minimum = [
+        (start[0].min(end[0]) - radius_metres) / leaf_span_metres,
+        (start[1].min(end[1]) - radius_metres) / leaf_span_metres,
+    ];
+    let maximum = [
+        (start[0].max(end[0]) + radius_metres) / leaf_span_metres,
+        (start[1].max(end[1]) + radius_metres) / leaf_span_metres,
+    ];
+    let minimum = minimum.map(f64::floor);
+    // Page ownership is half-open. `floor` selects the unique owner at the lower capsule bound;
+    // at the upper bound it also includes the page owning that boundary point, while the page
+    // immediately below is included by the non-zero interior.
+    let maximum = maximum.map(f64::floor);
+    if minimum
+        .into_iter()
+        .chain(maximum)
+        .any(|value| value < f64::from(i32::MIN) || value > f64::from(i32::MAX))
+    {
+        return None;
+    }
+    let minimum = minimum.map(|value| value as i32);
+    let maximum = maximum.map(|value| value as i32);
+    let width = i64::from(maximum[0])
+        .checked_sub(i64::from(minimum[0]))
+        .and_then(|value| value.checked_add(1))?;
+    let height = i64::from(maximum[1])
+        .checked_sub(i64::from(minimum[1]))
+        .and_then(|value| value.checked_add(1))?;
+    let candidate_count = width
+        .checked_mul(height)
+        .and_then(|value| usize::try_from(value).ok())?;
+    if candidate_count > max_required_leaves {
+        return None;
+    }
+
+    let radius_squared = radius_metres * radius_metres;
+    let coordinate_scale = start
+        .into_iter()
+        .chain(end)
+        .chain([radius_metres])
+        .map(f64::abs)
+        .fold(1.0_f64, f64::max);
+    let conservative_roundoff =
+        f64::EPSILON * coordinate_scale * coordinate_scale * 128.0 + 1.0e-12;
+    let mut required_leaves = BTreeSet::new();
+    for z in minimum[1]..=maximum[1] {
+        for x in minimum[0]..=maximum[0] {
+            let key = TerrainPageKey::surface(0, x, z);
+            let [page_minimum, page_maximum] = key.horizontal_bounds()?;
+            let page_minimum = page_minimum.map(|value| f64::from(value) * 0.1);
+            let page_maximum = page_maximum.map(|value| f64::from(value) * 0.1);
+            if segment_aabb_distance_squared_2d(start, end, page_minimum, page_maximum)
+                <= radius_squared + conservative_roundoff
+            {
+                required_leaves.insert(key);
+            }
+        }
+    }
+    if required_leaves.is_empty() {
+        return None;
+    }
+    Some(required_leaves)
+}
+
+fn required_leaf_ancestors(
+    required_leaves: &BTreeSet<TerrainPageKey>,
+) -> Option<Vec<BTreeSet<TerrainPageKey>>> {
+    let mut ancestors_by_level =
+        vec![BTreeSet::new(); usize::from(TERRAIN_COVERAGE_ROOT_LEVEL) + 1];
+    for leaf in required_leaves {
+        for level in 0..=TERRAIN_COVERAGE_ROOT_LEVEL {
+            let ancestor = leaf.ancestor_at(level)?;
+            ancestors_by_level[usize::from(level)].insert(ancestor);
+        }
+    }
+    Some(ancestors_by_level)
+}
+
+fn required_leaf_fingerprint(required_leaves: &BTreeSet<TerrainPageKey>) -> u64 {
+    if required_leaves.is_empty() {
+        return 0;
+    }
+    let mut fingerprint = FINGERPRINT_OFFSET;
+    for leaf in required_leaves {
+        fingerprint ^= u64::from(leaf.level);
+        fingerprint = fingerprint.wrapping_mul(FINGERPRINT_PRIME);
+        for component in leaf.coord {
+            fingerprint ^= u64::from(component as u32);
+            fingerprint = fingerprint.wrapping_mul(FINGERPRINT_PRIME);
+        }
+    }
+    fingerprint
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -330,7 +522,7 @@ impl VirtualTerrainCut {
     /// Looking up the required set, rather than scanning selected pages, makes absent roots and
     /// unregistered gaps fail closed.
     pub fn exact_surface_coverage(&self, domain: &ExactSurfaceDomain) -> usize {
-        if !domain.is_complete()
+        if !domain.core_is_complete()
             || self
                 .selected_pages
                 .windows(2)
@@ -344,12 +536,27 @@ impl VirtualTerrainCut {
             .count()
     }
 
+    pub fn exact_surface_core_coverage(&self, domain: &ExactSurfaceDomain) -> usize {
+        if !domain.core_is_complete()
+            || self
+                .selected_pages
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return 0;
+        }
+        domain
+            .core_required_leaves()
+            .filter(|leaf| self.selected_pages.binary_search(leaf).is_ok())
+            .count()
+    }
+
     pub fn preserves_exact_surface_coverage(
         &self,
         committed: &Self,
         domain: &ExactSurfaceDomain,
     ) -> bool {
-        domain.is_complete()
+        domain.core_is_complete()
             && !self
                 .selected_pages
                 .windows(2)
@@ -365,7 +572,7 @@ impl VirtualTerrainCut {
     }
 
     pub fn covers_exact_surface_domain(&self, domain: &ExactSurfaceDomain) -> bool {
-        domain.is_complete()
+        domain.core_is_complete()
             && domain.required_leaf_count() > 0
             && self.exact_surface_coverage(domain) == domain.required_leaf_count()
     }
@@ -3406,21 +3613,24 @@ mod tests {
         assert!(forward.is_complete());
         assert_eq!(forward.required_leaves().collect::<BTreeSet<_>>(), expected);
         assert_eq!(
-            reverse, forward,
-            "capsule enumeration must not depend on travel direction"
+            reverse.required_leaves().collect::<BTreeSet<_>>(),
+            forward.required_leaves().collect::<BTreeSet<_>>(),
+            "prediction enumeration must not depend on travel direction"
+        );
+        assert_eq!(
+            reverse.prediction_fingerprint(),
+            forward.prediction_fingerprint()
         );
     }
 
     #[test]
-    fn exact_surface_domain_fails_closed_on_coordinate_or_enumeration_overflow() {
+    fn exact_surface_domain_fails_closed_when_the_stationary_core_is_invalid() {
         let coordinate_overflow = ExactSurfaceDomain::swept_horizontal_capsule(
             [1.0e30, 0.0, 0.0],
             [1.0e30, 0.0, 0.0],
             0.0,
             16,
         );
-        let enumeration_overflow =
-            ExactSurfaceDomain::swept_horizontal_capsule([0.1, 0.0, 0.1], [12.7, 0.0, 0.1], 0.0, 3);
         let invalid = ExactSurfaceDomain::swept_horizontal_capsule(
             [f64::NAN, 0.0, 0.0],
             [0.0, 0.0, 0.0],
@@ -3429,11 +3639,65 @@ mod tests {
         );
         let nominal = cut_with_selected(vec![TerrainPageKey::surface(0, 0, 0)]);
 
-        for domain in [coordinate_overflow, enumeration_overflow, invalid] {
+        for domain in [coordinate_overflow, invalid] {
+            assert!(!domain.core_is_complete());
             assert!(!domain.is_complete());
             assert_eq!(domain.required_leaf_count(), 0);
             assert!(!nominal.covers_exact_surface_domain(&domain));
         }
+    }
+
+    #[test]
+    fn exact_surface_domain_keeps_a_nonempty_core_when_prediction_overflows() {
+        let domain =
+            ExactSurfaceDomain::swept_horizontal_capsule([0.1, 0.0, 0.1], [12.7, 0.0, 0.1], 0.0, 3);
+        let nominal = cut_with_selected(vec![TerrainPageKey::surface(0, 0, 0)]);
+
+        assert!(domain.core_is_complete());
+        assert!(!domain.prediction_is_complete());
+        assert!(!domain.is_complete());
+        assert_eq!(domain.core_required_leaf_count(), 1);
+        assert_eq!(domain.prediction_required_leaf_count(), 0);
+        assert_eq!(domain.required_leaf_count(), 1);
+        assert_ne!(domain.fingerprint(), 0);
+        assert_eq!(domain.prediction_fingerprint(), 0);
+        assert!(nominal.covers_exact_surface_domain(&domain));
+    }
+
+    #[test]
+    fn exact_surface_domain_cache_reuses_only_identical_continuous_inputs() {
+        let mut cache = ExactSurfaceDomainCache::default();
+        let first = cache.resolve([0.1, 0.0, 0.1], [3.3, 0.0, 0.1], 0.0, 16);
+        let identical = cache.resolve([0.1, 0.0, 0.1], [3.3, 0.0, 0.1], 0.0, 16);
+        let moved_within_the_same_leaf = cache.resolve([0.2, 0.0, 0.1], [3.3, 0.0, 0.1], 0.0, 16);
+
+        assert_eq!(cache.rebuilds(), 2);
+        assert!(first.shares_storage_with(&identical));
+        assert!(!first.shares_storage_with(&moved_within_the_same_leaf));
+    }
+
+    #[test]
+    fn bounded_exact_prediction_can_span_seventeen_coverage_columns() {
+        const MAX_LEAVES: usize = 16_384;
+        let leaf_span = f64::from(TERRAIN_PAGE_EDGE_SAMPLES) * 0.1;
+        let first_leaf_x = (1_i32 << TERRAIN_COVERAGE_ROOT_LEVEL) - 1;
+        let last_leaf_x = first_leaf_x + i32::try_from(MAX_LEAVES).unwrap() - 1;
+        let domain = ExactSurfaceDomain::swept_horizontal_capsule(
+            [f64::from(first_leaf_x) * leaf_span + 0.1, 0.0, 0.1],
+            [f64::from(last_leaf_x) * leaf_span + 0.1, 0.0, 0.1],
+            0.0,
+            MAX_LEAVES,
+        );
+
+        assert!(domain.is_complete());
+        assert_eq!(domain.required_leaf_count(), MAX_LEAVES);
+        assert_eq!(
+            domain
+                .required_pages_at_level(TERRAIN_COVERAGE_ROOT_LEVEL)
+                .count(),
+            17,
+            "an exact proof domain is not bounded by the ordinary 16-column quality prefix"
+        );
     }
 
     #[test]

@@ -2990,6 +2990,18 @@ pub struct RenderDiagnostics {
     pub virtual_terrain_exact_domain_current_coverage: u32,
     /// Stable identity of the exact motion domain shared by selection and presentation.
     pub virtual_terrain_exact_domain_fingerprint: u64,
+    /// Whether the independently bounded current-position safety core is representable.
+    pub virtual_terrain_exact_core_complete: bool,
+    /// Mandatory current-position leaves which must remain exact even if prediction truncates.
+    pub virtual_terrain_exact_core_required_leaves: u32,
+    /// Mandatory current-position leaves owned by the committed cut.
+    pub virtual_terrain_exact_core_current_coverage: u32,
+    /// Whether the full swept prediction, rather than only its current core, was enumerated.
+    pub virtual_terrain_exact_prediction_complete: bool,
+    /// Full swept-prediction leaves, or zero when prediction was deliberately truncated.
+    pub virtual_terrain_exact_prediction_required_leaves: u32,
+    /// Full swept-prediction leaves owned by the committed cut.
+    pub virtual_terrain_exact_prediction_current_coverage: u32,
     /// Stable identity of the complete virtual hierarchy cut selected for presentation.
     pub virtual_terrain_cut_fingerprint: u64,
     /// Monotonic identity of the immutable GPU handle bank used by this presented frame.
@@ -7754,19 +7766,34 @@ impl Renderer {
             virtual_terrain_exact_domain_required_leaves,
             virtual_terrain_exact_domain_current_coverage,
             virtual_terrain_exact_domain_fingerprint,
-        ) = self
-            .virtual_terrain_exact_surface_domain
-            .as_ref()
-            .map_or((false, 0, 0, 0), |domain| {
+            virtual_terrain_exact_core_complete,
+            virtual_terrain_exact_core_required_leaves,
+            virtual_terrain_exact_core_current_coverage,
+            virtual_terrain_exact_prediction_complete,
+            virtual_terrain_exact_prediction_required_leaves,
+            virtual_terrain_exact_prediction_current_coverage,
+        ) = self.virtual_terrain_exact_surface_domain.as_ref().map_or(
+            (false, 0, 0, 0, false, 0, 0, false, 0, 0),
+            |domain| {
+                let committed = self.virtual_terrain_cut.as_ref();
                 (
                     domain.is_complete(),
                     domain.required_leaf_count(),
-                    self.virtual_terrain_cut
-                        .as_ref()
-                        .map_or(0, |cut| cut.exact_surface_coverage(domain)),
+                    committed.map_or(0, |cut| cut.exact_surface_coverage(domain)),
                     domain.fingerprint(),
+                    domain.core_is_complete(),
+                    domain.core_required_leaf_count(),
+                    committed.map_or(0, |cut| cut.exact_surface_core_coverage(domain)),
+                    domain.prediction_is_complete(),
+                    domain.prediction_required_leaf_count(),
+                    if domain.prediction_is_complete() {
+                        committed.map_or(0, |cut| cut.exact_surface_coverage(domain))
+                    } else {
+                        0
+                    },
                 )
-            });
+            },
+        );
         let virtual_terrain_cut_fingerprint = virtual_visible
             .then_some(self.virtual_terrain_cut.as_ref())
             .flatten()
@@ -7845,6 +7872,16 @@ impl Renderer {
             virtual_terrain_exact_domain_current_coverage:
                 virtual_terrain_exact_domain_current_coverage as u32,
             virtual_terrain_exact_domain_fingerprint,
+            virtual_terrain_exact_core_complete,
+            virtual_terrain_exact_core_required_leaves: virtual_terrain_exact_core_required_leaves
+                as u32,
+            virtual_terrain_exact_core_current_coverage: virtual_terrain_exact_core_current_coverage
+                as u32,
+            virtual_terrain_exact_prediction_complete,
+            virtual_terrain_exact_prediction_required_leaves:
+                virtual_terrain_exact_prediction_required_leaves as u32,
+            virtual_terrain_exact_prediction_current_coverage:
+                virtual_terrain_exact_prediction_current_coverage as u32,
             virtual_terrain_cut_fingerprint,
             virtual_terrain_presented_snapshot_generation,
             virtual_terrain_presented_snapshot_fingerprint,
@@ -10941,13 +10978,36 @@ fn screenshot_virtual_terrain_manifest_json(
             format!(
                 concat!(
                     r#"{{"complete":{},"requiredLeaves":{},"fingerprint":"{:016x}","#,
-                    r#""currentExactCoverage":{},"oracleExactCoverage":{}}}"#
+                    r#""currentExactCoverage":{},"oracleExactCoverage":{},"#,
+                    r#""coreComplete":{},"coreRequiredLeaves":{},"coreFingerprint":"{:016x}","#,
+                    r#""coreCurrentCoverage":{},"coreOracleCoverage":{},"#,
+                    r#""predictionComplete":{},"predictionRequiredLeaves":{},"#,
+                    r#""predictionFingerprint":"{:016x}","predictionCurrentCoverage":{},"#,
+                    r#""predictionOracleCoverage":{}}}"#
                 ),
                 domain.is_complete(),
                 domain.required_leaf_count(),
                 domain.fingerprint(),
                 published_cut.map_or(0, |cut| cut.exact_surface_coverage(domain)),
                 oracle_cut.map_or(0, |cut| cut.exact_surface_coverage(domain)),
+                domain.core_is_complete(),
+                domain.core_required_leaf_count(),
+                domain.core_fingerprint(),
+                published_cut.map_or(0, |cut| cut.exact_surface_core_coverage(domain)),
+                oracle_cut.map_or(0, |cut| cut.exact_surface_core_coverage(domain)),
+                domain.prediction_is_complete(),
+                domain.prediction_required_leaf_count(),
+                domain.prediction_fingerprint(),
+                if domain.prediction_is_complete() {
+                    published_cut.map_or(0, |cut| cut.exact_surface_coverage(domain))
+                } else {
+                    0
+                },
+                if domain.prediction_is_complete() {
+                    oracle_cut.map_or(0, |cut| cut.exact_surface_coverage(domain))
+                } else {
+                    0
+                },
             )
         },
     );
