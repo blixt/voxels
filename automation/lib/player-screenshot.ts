@@ -94,6 +94,12 @@ export interface PlayerScreenshotMetadata {
     readonly worldLabOpen: boolean;
     readonly geometrySourceDebug: boolean;
     readonly animationTimeSeconds: number;
+    readonly targetVolume: {
+      readonly minimumVoxel: readonly [number, number, number];
+      readonly maximumVoxel: readonly [number, number, number];
+      readonly anchorVoxel: readonly [number, number, number];
+      readonly shapeId: number;
+    } | null;
   };
   readonly attachments: {
     readonly terrainPixelOwnership: {
@@ -245,6 +251,9 @@ export function summarizeSurfaceCutAdjacency(
 
 export function assertPlayerScreenshotMetadata(metadata: unknown): PlayerScreenshotMetadata {
   const candidate = metadata as PlayerScreenshotMetadata;
+  const targetVolume = candidate.render?.targetVolume;
+  const validVoxelCoordinate = (coordinate: unknown): boolean =>
+    Array.isArray(coordinate) && coordinate.length === 3 && coordinate.every(Number.isSafeInteger);
   const exactSurfaceDomain = candidate.presentation?.virtualTerrain?.exactSurfaceDomain;
   const effectiveRequiredLeaves = exactSurfaceDomain?.predictionComplete
     ? exactSurfaceDomain.predictionRequiredLeaves
@@ -339,7 +348,13 @@ export function assertPlayerScreenshotMetadata(metadata: unknown): PlayerScreens
     candidate.camera.eyeMetres.length !== 3 ||
     !candidate.camera.eyeMetres.every(Number.isFinite) ||
     !Number.isFinite(candidate.render?.animationTimeSeconds) ||
-    candidate.render.animationTimeSeconds < 0
+    candidate.render.animationTimeSeconds < 0 ||
+    !Object.hasOwn(candidate.render, "targetVolume") ||
+    (targetVolume !== null &&
+      (!validVoxelCoordinate(targetVolume?.minimumVoxel) ||
+        !validVoxelCoordinate(targetVolume?.maximumVoxel) ||
+        !validVoxelCoordinate(targetVolume?.anchorVoxel) ||
+        ![0, 1].includes(targetVolume?.shapeId)))
   ) {
     throw new Error("player screenshot metadata contract is incomplete");
   }

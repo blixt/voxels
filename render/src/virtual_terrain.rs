@@ -3866,9 +3866,7 @@ mod tests {
         opened_boundary_voxel: Option<VoxelCoord>,
     ) -> TerrainPageV1 {
         build_exact_surface_terrain_page(identity(), key, 1, [-4, 4], |coord| {
-            if Some(coord) == opened_boundary_voxel {
-                Material::Air
-            } else if coord.y > 0 {
+            if Some(coord) == opened_boundary_voxel || coord.y > 0 {
                 Material::Air
             } else if coord.y == 0 {
                 Material::Grass

@@ -3059,6 +3059,7 @@ struct VirtualTerrainDrawLists {
 /// selected pages form a complete quadtree partition of its coverage root.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct VirtualTerrainOwnership {
+    surface_pages: BTreeSet<TerrainPageKey>,
     volumetric_pages: BTreeSet<TerrainPageKey>,
 }
 
@@ -3087,7 +3088,7 @@ impl VirtualTerrainOwnership {
                 return Err(VirtualTerrainRendererError::IncompleteRootPartition(*root));
             }
         }
-        let volumetric_pages = cut
+        let page_topologies = cut
             .selected_pages
             .iter()
             .copied()
@@ -3097,23 +3098,40 @@ impl VirtualTerrainOwnership {
                     .map(|topology| (key, topology))
                     .ok_or(VirtualTerrainRendererError::SelectedPageMissingGpu(key))
             })
-            .collect::<Result<Vec<_>, _>>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        let surface_pages = page_topologies.iter().map(|(key, _)| *key).collect();
+        let volumetric_pages = page_topologies
             .into_iter()
             .filter_map(|(key, topology)| {
                 (topology == voxels_world::TerrainTopologyClass::Volumetric).then_some(key)
             })
             .collect();
-        Ok(Self { volumetric_pages })
+        Ok(Self {
+            surface_pages,
+            volumetric_pages,
+        })
     }
 
-    fn covers_aabb(&self, minimum: glam::Vec3, maximum: glam::Vec3) -> bool {
+    fn covers_surface_aabb(&self, minimum: glam::Vec3, maximum: glam::Vec3) -> bool {
         let Some((minimum, maximum)) = voxel_bounds_from_metres(minimum, maximum) else {
             return false;
         };
-        self.covers_voxel_bounds(minimum, maximum)
+        self.pages_cover_voxel_bounds(&self.surface_pages, minimum, maximum)
     }
 
-    fn covers_voxel_bounds(&self, minimum: [i32; 3], maximum: [i32; 3]) -> bool {
+    fn covers_volume_aabb(&self, minimum: glam::Vec3, maximum: glam::Vec3) -> bool {
+        let Some((minimum, maximum)) = voxel_bounds_from_metres(minimum, maximum) else {
+            return false;
+        };
+        self.pages_cover_voxel_bounds(&self.volumetric_pages, minimum, maximum)
+    }
+
+    fn pages_cover_voxel_bounds(
+        &self,
+        pages: &BTreeSet<TerrainPageKey>,
+        minimum: [i32; 3],
+        maximum: [i32; 3],
+    ) -> bool {
         if minimum
             .into_iter()
             .zip(maximum)
@@ -3132,7 +3150,7 @@ impl VirtualTerrainOwnership {
                 let leaf = TerrainPageKey::surface(0, x, z);
                 (0..=TERRAIN_COVERAGE_ROOT_LEVEL).any(|level| {
                     leaf.ancestor_at(level)
-                        .is_some_and(|ancestor| self.volumetric_pages.contains(&ancestor))
+                        .is_some_and(|ancestor| pages.contains(&ancestor))
                 })
             })
         })
@@ -5076,6 +5094,9 @@ impl Renderer {
     }
 
     pub fn set_dig_target(&mut self, target: Option<([i32; 3], EditVolume)>) {
+        if self.virtual_terrain_reproduction_cut.is_some() {
+            return;
+        }
         self.target_voxel = target.map(|(hit, _)| hit);
         self.target_volume = target.map(|(_, volume)| volume);
     }
@@ -5690,6 +5711,22 @@ impl Renderer {
         .inverse()
         .to_cols_array();
         let representation_kinds = r#"{"canonicalExact":1,"steppedSurfaceResidual":2,"sparseVoxelBrick":3,"surfaceCluster":4,"triangleCluster":5,"heightfieldGrid":6,"exactVolumeFrontier":8}"#;
+        let target_volume = self.target_volume.map_or_else(
+            || "null".to_owned(),
+            |volume| {
+                format!(
+                    r#"{{"minimumVoxel":{:?},"maximumVoxel":{:?},"anchorVoxel":{:?},"shapeId":{}}}"#,
+                    [volume.min.x, volume.min.y, volume.min.z],
+                    [volume.max.x, volume.max.y, volume.max.z],
+                    [
+                        volume.centre().x,
+                        volume.centre().y,
+                        volume.centre().z
+                    ],
+                    volume.shape().id(),
+                )
+            },
+        );
         let attachment_manifest = format!(
             concat!(
                 r#"{{"terrainPixelOwnership":{{"chunkType":"vpDI","#,
@@ -5715,7 +5752,7 @@ impl Renderer {
                 r#""presentation":{{"publishedClientView":{{"presentationSerial":"{}","viewRevision":"{}","terrainRequest":{},"terrainGeneration":{},"revisionDigest":"{:016x}"}},"viewportFingerprint":"{:016x}","selectedCutFingerprint":"{:016x}","terrainHandleSnapshot":{{"generation":"{}","presentationFingerprint":"{:016x}","cutFingerprint":"{:016x}","matchesPublishedCut":{}}},"selectedCut":{},"virtualTerrain":{},"worldQuads":{},"waterQuads":{},"drawCalls":{},"waterDrawCalls":{},"surfaceWidth":{},"surfaceHeight":{}}},"#,
                 r#""streaming":{},"#,
                 r#""attachments":{},"#,
-                r#""render":{{"worldLabOpen":{},"features":{{"shadows":{},"voxelAmbientOcclusion":{},"screenSpaceAmbientOcclusion":{},"fog":{},"farTerrain":{},"water":{},"targetOutline":{},"materialDetail":{},"caveHeadlamp":{},"localLighting":{}}},"diagnosticSkyColor":{},"geometrySourceDebug":{},"viewDistanceMetres":{},"animationTimeSeconds":{}}}}}"#
+                r#""render":{{"worldLabOpen":{},"features":{{"shadows":{},"voxelAmbientOcclusion":{},"screenSpaceAmbientOcclusion":{},"fog":{},"farTerrain":{},"water":{},"targetOutline":{},"materialDetail":{},"caveHeadlamp":{},"localLighting":{}}},"diagnosticSkyColor":{},"geometrySourceDebug":{},"viewDistanceMetres":{},"animationTimeSeconds":{},"targetVolume":{}}}}}"#
             ),
             frame_id,
             runtime_identity,
@@ -5809,6 +5846,7 @@ impl Renderer {
             self.geometry_source_debug,
             self.runtime_config.view_distance_metres,
             animation_time_seconds,
+            target_volume,
         )
     }
 
@@ -5839,6 +5877,7 @@ impl Renderer {
         selected_pages: Vec<TerrainPageKey>,
         expected_fingerprint: u64,
         animation_time_seconds: f32,
+        target_volume: Option<EditVolume>,
     ) -> Result<(), VirtualTerrainRendererError> {
         let cut = self
             .virtual_terrain
@@ -5877,6 +5916,7 @@ impl Renderer {
         }
         self.virtual_terrain_reproduction_cut = Some(ScreenshotReproductionCut { cut, revisions });
         self.screenshot_reproduction_animation_time_seconds = Some(animation_time_seconds);
+        self.target_volume = target_volume;
         self.virtual_terrain_reproduction_invalidated = false;
         self.invalidate_virtual_terrain_desired_plan();
         Ok(())
@@ -5885,6 +5925,7 @@ impl Renderer {
     pub fn clear_screenshot_reproduction_cut(&mut self) {
         let changed = self.virtual_terrain_reproduction_cut.take().is_some();
         self.screenshot_reproduction_animation_time_seconds = None;
+        self.target_volume = None;
         if changed && self.virtual_terrain_publication.is_some() {
             // Symmetrically prevent a reproduction publication from binding to the restored live
             // view after the pin is removed.
@@ -5900,6 +5941,7 @@ impl Renderer {
             return false;
         }
         self.screenshot_reproduction_animation_time_seconds = None;
+        self.target_volume = None;
         if self.virtual_terrain_publication.is_some() {
             self.abort_virtual_terrain_publication();
         } else {
@@ -8100,17 +8142,17 @@ impl Renderer {
             .map(|presented| (presented.state.camera, presented.receipt))?;
         let camera = &camera;
         let dt = bounded_frame_delta(dt);
-        if self
+        let reproduction_active = self
             .presented_client_view
             .as_ref()
-            .is_some_and(|presented| presented.state.session == ClientViewSession::Reproduction)
-        {
-            self.time = self
-                .screenshot_reproduction_animation_time_seconds
-                .unwrap_or(self.time);
-        } else {
-            self.time += dt;
-        }
+            .is_some_and(|presented| presented.state.session == ClientViewSession::Reproduction);
+        let frame_time = frame_animation_time(
+            &mut self.time,
+            dt,
+            reproduction_active
+                .then_some(self.screenshot_reproduction_animation_time_seconds)
+                .flatten(),
+        );
         self.observer_world_xz_metres =
             [f64::from(camera.position.x), f64::from(camera.position.z)];
         if !self.refresh_effective_environment() {
@@ -8179,7 +8221,7 @@ impl Renderer {
         let uniform = frame_uniform(
             &self.config,
             camera,
-            self.time,
+            frame_time,
             self.target_volume,
             FrameState {
                 options: frame_options,
@@ -8314,16 +8356,22 @@ impl Renderer {
                     && key.0 == 0
                     && view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max)
             },
-            |_key, slice| {
+            |key, chunk, slice| {
                 slice.render_layer == RenderLayer::Translucent
-                    && !virtual_ownership.covers_aabb(slice.bounds_min, slice.bounds_max)
+                    && !canonical_bounds_owned_by_virtual(
+                        *key,
+                        chunk.activation_mask,
+                        slice.bounds_min,
+                        slice.bounds_max,
+                        &virtual_ownership,
+                    )
                     && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
             },
         );
         let cpu_cull_ms = (now_ms() - cull_started).max(0.0) as f32;
         let encode_started = now_ms();
         self.avatar_gpu
-            .prepare(&self.queue, &self.remote_avatars, self.time);
+            .prepare(&self.queue, &self.remote_avatars, frame_time);
         let avatar_instances = self.avatar_gpu.instance_count();
         let has_avatars = avatar_instances != 0;
         let refract_water = self.options.water
@@ -9490,7 +9538,7 @@ impl Renderer {
                 frame_id,
                 camera: *camera,
                 published,
-                animation_time_seconds: self.time,
+                animation_time_seconds: frame_time,
             },
         );
         if let Some(generation) = virtual_candidate_generation_to_submit {
@@ -9740,7 +9788,7 @@ impl Renderer {
         &self,
         chunks: &BTreeMap<MeshKey, ChunkMesh>,
         mut include_chunk: impl FnMut(&MeshKey, &ChunkMesh) -> bool,
-        mut include_slice: impl FnMut(&MeshKey, &MeshSlice) -> bool,
+        mut include_slice: impl FnMut(&MeshKey, &ChunkMesh, &MeshSlice) -> bool,
     ) -> DrawList {
         let mut items = Vec::new();
         let mut mesh_count = 0u32;
@@ -9756,7 +9804,7 @@ impl Renderer {
             let mut selected = false;
             for slice in &chunk.slices {
                 tested_slices = tested_slices.saturating_add(1);
-                if !include_slice(key, slice) {
+                if !include_slice(key, chunk, slice) {
                     continue;
                 }
                 selected_slices = selected_slices.saturating_add(1);
@@ -10301,8 +10349,13 @@ fn collect_opaque_draw_lists(
                 }
             }
             if slice.render_layer != RenderLayer::Opaque
-                || (*key != EXACT_VOLUME_FRONTIER_MESH_KEY
-                    && virtual_ownership.covers_aabb(slice.bounds_min, slice.bounds_max))
+                || canonical_bounds_owned_by_virtual(
+                    *key,
+                    chunk.activation_mask,
+                    slice.bounds_min,
+                    slice.bounds_max,
+                    virtual_ownership,
+                )
             {
                 continue;
             }
@@ -10340,6 +10393,30 @@ fn collect_opaque_draw_lists(
         std::array::from_fn(|_| WorldDrawLists::default())
     };
     (shadow_draw_lists, world_builder.finish())
+}
+
+fn canonical_bounds_owned_by_virtual(
+    key: MeshKey,
+    activation_mask: u8,
+    bounds_min: glam::Vec3,
+    bounds_max: glam::Vec3,
+    virtual_ownership: &VirtualTerrainOwnership,
+) -> bool {
+    if key == EXACT_VOLUME_FRONTIER_MESH_KEY {
+        return false;
+    }
+    if virtual_ownership.covers_volume_aabb(bounds_min, bounds_max) {
+        return true;
+    }
+    // A radial canonical chunk supplies collision and interaction data, but the complete virtual
+    // cut is the sole visible terrain-surface owner. Do not submit that same surface twice beneath
+    // a heightfield. Portal, interaction, and enclosed-view activation explicitly request 3D
+    // geometry which a single-run surface page cannot represent, so those slices remain visible.
+    let supplementary_mask = ChunkActivationReason::Portal as u8
+        | ChunkActivationReason::Interaction as u8
+        | ChunkActivationReason::EnclosedView as u8;
+    activation_mask & supplementary_mask == 0
+        && virtual_ownership.covers_surface_aabb(bounds_min, bounds_max)
 }
 
 const FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -11174,6 +11251,15 @@ fn bounded_frame_delta(dt: f32) -> f32 {
         dt.min(0.1)
     } else {
         0.0
+    }
+}
+
+fn frame_animation_time(live_time: &mut f32, dt: f32, reproduction_time: Option<f32>) -> f32 {
+    if let Some(reproduction_time) = reproduction_time {
+        reproduction_time
+    } else {
+        *live_time += dt;
+        *live_time
     }
 }
 
@@ -13477,6 +13563,14 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_reproduction_does_not_rewind_the_live_animation_clock() {
+        let mut live_time = 42.0;
+        assert_eq!(frame_animation_time(&mut live_time, 0.02, Some(7.0)), 7.0);
+        assert_eq!(live_time, 42.0);
+        assert_eq!(frame_animation_time(&mut live_time, 0.02, None), 42.02);
+    }
+
+    #[test]
     fn directional_shadows_remain_until_a_fully_enclosed_key_light_ray_is_blocked() {
         assert_eq!(interior_direct_light_visibility(0.0, false), 1.0);
         assert!(interior_direct_light_visibility(0.95, false) > 0.1);
@@ -15247,13 +15341,17 @@ mod tests {
             |_| Some(voxels_world::TerrainTopologyClass::Volumetric),
         )
         .unwrap();
-        assert!(ownership.covers_aabb(
+        assert!(ownership.covers_surface_aabb(
             glam::Vec3::new(-100.0, -10_000.0, 6_600.0),
             glam::Vec3::new(-50.0, 10_000.0, 6_650.0),
         ));
-        assert!(!ownership.covers_aabb(
+        assert!(!ownership.covers_surface_aabb(
             glam::Vec3::new(-1.0, -1.0, 6_600.0),
             glam::Vec3::new(1.0, 1.0, 6_650.0),
+        ));
+        assert!(ownership.covers_volume_aabb(
+            glam::Vec3::new(-100.0, -10_000.0, 6_600.0),
+            glam::Vec3::new(-50.0, 10_000.0, 6_650.0),
         ));
     }
 
@@ -15266,9 +15364,35 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!ownership.covers_aabb(
+        assert!(ownership.covers_surface_aabb(
             glam::Vec3::new(-100.0, -10_000.0, 6_600.0),
             glam::Vec3::new(-50.0, 10_000.0, 6_650.0),
         ));
+        assert!(!ownership.covers_volume_aabb(
+            glam::Vec3::new(-100.0, -10_000.0, 6_600.0),
+            glam::Vec3::new(-50.0, 10_000.0, 6_650.0),
+        ));
+        let minimum = glam::Vec3::new(-100.0, -10.0, 6_600.0);
+        let maximum = glam::Vec3::new(-50.0, 10.0, 6_650.0);
+        assert!(
+            canonical_bounds_owned_by_virtual(
+                (0, -1, 0, 66),
+                ChunkActivationReason::Radial as u8,
+                minimum,
+                maximum,
+                &ownership,
+            ),
+            "radial collision meshes must not redraw the virtual height surface"
+        );
+        assert!(
+            !canonical_bounds_owned_by_virtual(
+                (0, -1, 0, 66),
+                ChunkActivationReason::Radial as u8 | ChunkActivationReason::EnclosedView as u8,
+                minimum,
+                maximum,
+                &ownership,
+            ),
+            "height surfaces must preserve explicitly requested enclosed 3D geometry"
+        );
     }
 }

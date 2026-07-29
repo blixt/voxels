@@ -2044,6 +2044,16 @@ mod web {
         geometry_source_debug: bool,
         view_distance_metres: f32,
         animation_time_seconds: f32,
+        target_volume: Option<ReproductionTargetVolume>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionTargetVolume {
+        minimum_voxel: [i32; 3],
+        maximum_voxel: [i32; 3],
+        anchor_voxel: [i32; 3],
+        shape_id: u8,
     }
 
     #[derive(Deserialize)]
@@ -2434,6 +2444,30 @@ mod web {
             {
                 return Err("capture animation time is invalid".to_owned());
             }
+            let target_volume = reproduction
+                .render
+                .target_volume
+                .map(|target| {
+                    let shape = EditShape::from_id(target.shape_id)
+                        .ok_or_else(|| "capture target volume has an invalid shape".to_owned())?;
+                    let anchor = VoxelCoord::new(
+                        target.anchor_voxel[0],
+                        target.anchor_voxel[1],
+                        target.anchor_voxel[2],
+                    );
+                    let volume = EditVolume::for_hit(anchor, shape).ok_or_else(|| {
+                        "capture target volume overflows the voxel grid".to_owned()
+                    })?;
+                    if [volume.min.x, volume.min.y, volume.min.z] != target.minimum_voxel
+                        || [volume.max.x, volume.max.y, volume.max.z] != target.maximum_voxel
+                    {
+                        return Err(
+                            "capture target volume does not match its canonical stencil".to_owned()
+                        );
+                    }
+                    Ok(volume)
+                })
+                .transpose()?;
             let render_state = ScreenshotMutableRenderState {
                 world_lab_open: reproduction.render.world_lab_open,
                 diagnostic_sky_color: reproduction.render.diagnostic_sky_color,
@@ -2472,6 +2506,7 @@ mod web {
                     selected_pages,
                     expected_cut_fingerprint,
                     reproduction.render.animation_time_seconds,
+                    target_volume,
                 )
                 .map_err(|error| {
                     format!(

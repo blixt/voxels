@@ -68,6 +68,7 @@ pub const WORLD_WEBSOCKET_PATH: &str = "/v41/world";
 pub const PRESENCE_WEBSOCKET_PATH: &str = "/v41/presence";
 pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v41";
 pub const HEALTH_PATH: &str = "/healthz";
+pub const DEVELOPMENT_INSTANCE_NONCE_ENV: &str = "VOXELS_DEV_INSTANCE_NONCE";
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 const INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
@@ -193,8 +194,16 @@ impl WorldServer {
             generation_cancellations,
             process_shutdown: shutdown_rx,
         });
+        let development_instance_nonce =
+            std::env::var(DEVELOPMENT_INSTANCE_NONCE_ENV).unwrap_or_default();
         let router = Router::new()
-            .route(HEALTH_PATH, get(|| async { StatusCode::OK }))
+            .route(
+                HEALTH_PATH,
+                get(move || {
+                    let nonce = development_instance_nonce.clone();
+                    async move { (StatusCode::OK, nonce) }
+                }),
+            )
             .route(WORLD_WEBSOCKET_PATH, get(world_websocket_endpoint))
             .route(PRESENCE_WEBSOCKET_PATH, get(presence_websocket_endpoint))
             .with_state(state);

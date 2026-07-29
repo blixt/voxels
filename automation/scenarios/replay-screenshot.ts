@@ -45,6 +45,12 @@ interface ReproductionMetadata {
   readonly render: {
     readonly diagnosticSkyColor: readonly [number, number, number] | null;
     readonly animationTimeSeconds: number;
+    readonly targetVolume: {
+      readonly minimumVoxel: readonly [number, number, number];
+      readonly maximumVoxel: readonly [number, number, number];
+      readonly anchorVoxel: readonly [number, number, number];
+      readonly shapeId: number;
+    } | null;
     readonly features: {
       readonly shadows: boolean;
       readonly screenSpaceAmbientOcclusion: boolean;
@@ -116,6 +122,19 @@ function parseMetadata(text: string): ReproductionMetadata {
     value.render.animationTimeSeconds < 0
   ) {
     throw new Error("capture renderer animation time is invalid");
+  }
+  const targetVolume = value.render?.targetVolume;
+  const validVoxelCoordinate = (coordinate: unknown): boolean =>
+    Array.isArray(coordinate) && coordinate.length === 3 && coordinate.every(Number.isSafeInteger);
+  if (
+    !Object.hasOwn(value.render, "targetVolume") ||
+    (targetVolume !== null &&
+      (!validVoxelCoordinate(targetVolume?.minimumVoxel) ||
+        !validVoxelCoordinate(targetVolume?.maximumVoxel) ||
+        !validVoxelCoordinate(targetVolume?.anchorVoxel) ||
+        ![0, 1].includes(targetVolume?.shapeId)))
+  ) {
+    throw new Error("capture renderer target volume is invalid");
   }
   if (
     !/^[0-9a-f]{16}$/u.test(value.presentation?.selectedCutFingerprint) ||

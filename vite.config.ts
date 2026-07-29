@@ -1,6 +1,7 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
+import { get as httpGet } from "node:http";
 import { createConnection } from "node:net";
 import path from "node:path";
 import { defineConfig, type Plugin } from "vite-plus";
@@ -272,39 +273,47 @@ function canvasRuntimeReload(): Plugin {
   };
 }
 
-function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+function signalProcessIds(processIds: Iterable<number>, signal: NodeJS.Signals): void {
+  for (const pid of processIds) {
+    try {
+      process.kill(pid, signal);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  }
+}
+
+function signalProcessTree(
+  child: ChildProcess,
+  signal: NodeJS.Signals,
+  forceDirectFallback = false,
+): number[] {
+  if (child.exitCode !== null || child.signalCode !== null) return [];
+  const descendants =
+    process.platform === "win32" || child.pid === undefined
+      ? []
+      : ownedDescendantProcessIds(child.pid);
   try {
-    if (process.platform !== "win32" && child.pid !== undefined) {
+    if (!forceDirectFallback && process.platform !== "win32" && child.pid !== undefined) {
       process.kill(-child.pid, signal);
     } else {
       child.kill(signal);
+      signalProcessIds(descendants.reverse(), signal);
     }
+    return descendants;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ESRCH") return;
+    if (code === "ESRCH") return descendants;
     if (code === "EPERM") {
       // Some macOS launch contexts deny signalling the detached process group even though its
       // processes remain ours. Snapshot descendants before stopping the direct child, then signal
       // those exact owned processes leaf-first so Cargo cannot strand rustc/build-script children.
-      const descendants =
-        process.platform === "win32" || child.pid === undefined
-          ? []
-          : ownedDescendantProcessIds(child.pid);
       try {
         child.kill(signal);
-        for (const pid of descendants.reverse()) {
-          try {
-            process.kill(pid, signal);
-          } catch (descendantError) {
-            if ((descendantError as NodeJS.ErrnoException).code !== "ESRCH") {
-              throw descendantError;
-            }
-          }
-        }
-        return;
+        signalProcessIds(descendants.reverse(), signal);
+        return descendants;
       } catch (fallbackError) {
-        if ((fallbackError as NodeJS.ErrnoException).code === "ESRCH") return;
+        if ((fallbackError as NodeJS.ErrnoException).code === "ESRCH") return descendants;
         throw fallbackError;
       }
     }
@@ -342,14 +351,55 @@ function ownedDescendantProcessIds(rootPid: number): number[] {
   return descendants;
 }
 
-async function terminateProcessTree(child: ChildProcess, timeoutMs = 2_000): Promise<void> {
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function waitForProcessIdsExit(
+  processIds: Iterable<number>,
+  timeoutMs: number,
+): Promise<number[]> {
+  let survivors = [...new Set(processIds)].filter(processExists);
+  const deadline = Date.now() + timeoutMs;
+  while (survivors.length > 0 && Date.now() < deadline) {
+    await delay(Math.min(25, Math.max(1, deadline - Date.now())));
+    survivors = survivors.filter(processExists);
+  }
+  return survivors;
+}
+
+export async function terminateProcessTree(
+  child: ChildProcess,
+  timeoutMs = 2_000,
+  forceDirectFallback = false,
+): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-  signalProcessTree(child, "SIGTERM");
-  await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))]);
-  if (child.exitCode === null && child.signalCode === null) {
-    signalProcessTree(child, "SIGKILL");
-    await exited;
+  const descendants = signalProcessTree(child, "SIGTERM", forceDirectFallback);
+  const [, termSurvivors] = await Promise.all([
+    Promise.race([exited, delay(timeoutMs)]),
+    waitForProcessIdsExit(descendants, timeoutMs),
+  ]);
+  if ((child.exitCode === null && child.signalCode === null) || termSurvivors.length > 0) {
+    if (child.exitCode === null && child.signalCode === null) {
+      signalProcessTree(child, "SIGKILL", forceDirectFallback);
+    }
+    signalProcessIds(termSurvivors, "SIGKILL");
+    const [, killSurvivors] = await Promise.all([
+      child.exitCode === null && child.signalCode === null ? exited : Promise.resolve(),
+      waitForProcessIdsExit(termSurvivors, timeoutMs),
+    ]);
+    if (killSurvivors.length > 0) {
+      throw new Error(
+        `failed to terminate child processes ${killSurvivors.join(", ")} after SIGKILL`,
+      );
+    }
   }
 }
 
@@ -373,9 +423,41 @@ function portAcceptsConnections(host: string, port: number): Promise<boolean> {
   });
 }
 
+export function worldServiceHealthNonce(host: string, port: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    const request = httpGet(
+      {
+        hostname: host,
+        port,
+        path: "/healthz",
+        timeout: 250,
+      },
+      (response) => {
+        if (response.statusCode !== 200) {
+          response.resume();
+          resolve(null);
+          return;
+        }
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          if (body.length <= 256) body += chunk;
+        });
+        response.once("end", () => resolve(body.length <= 256 ? body : null));
+      },
+    );
+    request.once("timeout", () => {
+      request.destroy();
+      resolve(null);
+    });
+    request.once("error", () => resolve(null));
+  });
+}
+
 async function waitForWorldService(
   child: ChildProcess,
   configPath: string,
+  startupNonce: string,
   timeoutMs = 300_000,
 ): Promise<void> {
   const { host, port } = worldServiceListenAddress(readFileSync(configPath, "utf8"));
@@ -384,7 +466,7 @@ async function waitForWorldService(
     if (child.exitCode !== null || child.signalCode !== null) {
       throw new Error("native daemon exited before accepting connections");
     }
-    if (await portAcceptsConnections(host, port)) return;
+    if ((await worldServiceHealthNonce(host, port)) === startupNonce) return;
     await delay(75);
   }
   throw new Error(`native daemon did not listen on ${host}:${port} within ${timeoutMs}ms`);
@@ -501,6 +583,7 @@ function nativeWorldService(): Plugin {
 
       const launch = async (): Promise<void> => {
         await assertWorldServicePortAvailable(WORLD_SERVICE_CONFIG_SOURCE);
+        const startupNonce = randomUUID();
         const executable = path.resolve(
           process.env.CARGO_TARGET_DIR ?? "target",
           profile,
@@ -509,7 +592,10 @@ function nativeWorldService(): Plugin {
         server.config.logger.info("[voxels-world-service] starting native daemon");
         const child = spawn(executable, [WORLD_SERVICE_CONFIG_SOURCE], {
           cwd: process.cwd(),
-          env: process.env,
+          env: {
+            ...process.env,
+            VOXELS_DEV_INSTANCE_NONCE: startupNonce,
+          },
           stdio: "inherit",
           detached: process.platform !== "win32",
         });
@@ -534,7 +620,7 @@ function nativeWorldService(): Plugin {
             );
           }
         });
-        await waitForWorldService(child, WORLD_SERVICE_CONFIG_SOURCE);
+        await waitForWorldService(child, WORLD_SERVICE_CONFIG_SOURCE, startupNonce);
         if (daemonChild !== child) {
           throw new Error("native daemon was replaced before becoming ready");
         }
@@ -607,7 +693,11 @@ function nativeWorldService(): Plugin {
       handleSignal = (): void => {
         void stop()
           .then(() => server.close())
-          .finally(() => process.exit(0));
+          .then(() => process.exit(0))
+          .catch((error: unknown) => {
+            server.config.logger.error(`[voxels-world-service] shutdown failed: ${String(error)}`);
+            void server.close().finally(() => process.exit(1));
+          });
       };
 
       server.httpServer?.once("close", () => void stop());

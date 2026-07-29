@@ -1,6 +1,8 @@
+import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
-import { createServer } from "node:net";
+import { createServer as createTcpServer } from "node:net";
 import path from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import {
@@ -8,8 +10,10 @@ import {
   assertWorldServicePortAvailable,
   isNativeWorldServiceInput,
   pathBelongsTo,
+  terminateProcessTree,
   WatchedInputContentChanges,
   watchRustInputChanges,
+  worldServiceHealthNonce,
   worldServiceDevelopmentProfile,
   worldServiceListenAddress,
 } from "./vite.config.ts";
@@ -83,10 +87,76 @@ describe("Rust WASM development watcher", () => {
 });
 
 describe("native world-service development command", () => {
+  it("accepts readiness only from the daemon instance nonce it launched", async () => {
+    const server = createHttpServer((_request, response) => {
+      response.statusCode = 200;
+      response.end("owned-daemon");
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
+      });
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        throw new Error("test server did not expose a TCP address");
+      }
+      await expect(worldServiceHealthNonce("127.0.0.1", address.port)).resolves.toBe(
+        "owned-daemon",
+      );
+      await expect(worldServiceHealthNonce("127.0.0.1", address.port)).resolves.not.toBe(
+        "other-daemon",
+      );
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("waits for and escalates a stubborn descendant in direct-child fallback", async () => {
+    if (process.platform === "win32") return;
+    const grandchildSource = [
+      'process.on("SIGTERM", () => {});',
+      "setInterval(() => {}, 1_000);",
+    ].join("");
+    const parentSource = [
+      'const { spawn } = require("node:child_process");',
+      `const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchildSource)}],`,
+      '  { stdio: "ignore" });',
+      "process.stdout.write(String(child.pid));",
+      'process.on("SIGTERM", () => process.exit(0));',
+      "setInterval(() => {}, 1_000);",
+    ].join("");
+    const parent = spawn(process.execPath, ["-e", parentSource], {
+      detached: true,
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    let grandchildPid: number | undefined;
+    try {
+      grandchildPid = await new Promise<number>((resolve, reject) => {
+        parent.once("error", reject);
+        parent.stdout?.once("data", (chunk: Buffer) => resolve(Number(chunk.toString())));
+      });
+      expect(Number.isSafeInteger(grandchildPid)).toBe(true);
+
+      await terminateProcessTree(parent, 250, true);
+
+      expect(() => process.kill(grandchildPid as number, 0)).toThrow();
+    } finally {
+      if (parent.exitCode === null && parent.signalCode === null) parent.kill("SIGKILL");
+      if (grandchildPid !== undefined) {
+        try {
+          process.kill(grandchildPid, "SIGKILL");
+        } catch {
+          // The assertion above verifies the expected ESRCH path; cleanup remains best effort.
+        }
+      }
+    }
+  });
+
   it("rejects a stale listener instead of accepting the wrong daemon", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "voxels-world-port-"));
     const config = path.join(directory, "world-service.toml");
-    const server = createServer();
+    const server = createTcpServer();
     try {
       await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
