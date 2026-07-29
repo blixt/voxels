@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import path from "node:path";
 import { defineConfig, type Plugin } from "vite-plus";
@@ -119,6 +120,8 @@ function clientConfig(emitBuildAsset: boolean): Plugin {
       });
     },
     configureServer(server) {
+      const contentChanges = new WatchedInputContentChanges();
+      contentChanges.prime([CLIENT_CONFIG_SOURCE]);
       server.middlewares.use("/config/client.toml", (_request, response) => {
         response.statusCode = 200;
         response.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -127,7 +130,13 @@ function clientConfig(emitBuildAsset: boolean): Plugin {
       });
       server.watcher.add(CLIENT_CONFIG_SOURCE);
       server.watcher.on("change", (file) => {
-        if (path.resolve(file) === CLIENT_CONFIG_SOURCE) {
+        if (
+          path.resolve(file) === CLIENT_CONFIG_SOURCE &&
+          contentChanges.observe(file, "change", true)
+        ) {
+          server.config.logger.info(
+            `[voxels-client-config] change ${path.relative(process.cwd(), file)}`,
+          );
           server.ws.send({ type: "full-reload" });
         }
       });
@@ -137,9 +146,60 @@ function clientConfig(emitBuildAsset: boolean): Plugin {
 
 export function watchRustInputChanges(
   watcher: RustInputWatcher,
-  listener: (file: string) => void,
+  listener: (file: string, event: "add" | "change" | "unlink") => void,
 ): void {
-  for (const event of ["add", "change", "unlink"] as const) watcher.on(event, listener);
+  for (const event of ["add", "change", "unlink"] as const) {
+    watcher.on(event, (file) => listener(file, event));
+  }
+}
+
+type RustInputEvent = "add" | "change" | "unlink";
+
+function inputContentFingerprint(file: string, event: RustInputEvent): string | null {
+  if (event === "unlink") return null;
+  try {
+    return createHash("sha256").update(readFileSync(file)).digest("hex");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+/// Converts noisy filesystem notifications into actual source-content transitions.
+///
+/// macOS can report a watched temporary config as changed when the newly launched daemon merely
+/// reads it. Vite's shared watcher may already be ready when a plugin adds its paths, so each
+/// plugin primes an explicit content snapshot before subscribing. Later access-only events remain
+/// inert without delaying a real edit, add, or removal.
+export class WatchedInputContentChanges {
+  readonly #fingerprints = new Map<string, string | null>();
+
+  prime(inputs: Iterable<string>): void {
+    const visit = (input: string): void => {
+      let stats;
+      try {
+        stats = statSync(input);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
+      if (stats.isDirectory()) {
+        for (const entry of readdirSync(input)) visit(path.join(input, entry));
+      } else if (stats.isFile()) {
+        this.observe(input, "add", false);
+      }
+    };
+    for (const input of inputs) visit(path.resolve(input));
+  }
+
+  observe(file: string, event: RustInputEvent, armed: boolean): boolean {
+    const resolved = path.resolve(file);
+    const next = inputContentFingerprint(resolved, event);
+    const known = this.#fingerprints.has(resolved);
+    const previous = this.#fingerprints.get(resolved);
+    this.#fingerprints.set(resolved, next);
+    return armed && (!known || previous !== next);
+  }
 }
 
 function rustWasm(profile: WasmBuildProfile): Plugin {
@@ -161,14 +221,16 @@ function rustWasm(profile: WasmBuildProfile): Plugin {
       ensureWasmBuilt(profile);
     },
     configureServer(server) {
-      let initialWatchScanComplete = false;
-      server.watcher.once("ready", () => {
-        initialWatchScanComplete = true;
-      });
-      for (const input of [...directories, ...files]) server.watcher.add(input);
-      watchRustInputChanges(server.watcher, (file) => {
-        if (!initialWatchScanComplete) return;
+      const contentChanges = new WatchedInputContentChanges();
+      const inputs = [...directories, ...files];
+      contentChanges.prime(inputs);
+      for (const input of inputs) server.watcher.add(input);
+      watchRustInputChanges(server.watcher, (file, event) => {
         if (!isInput(file)) return;
+        if (!contentChanges.observe(file, event, true)) return;
+        server.config.logger.info(
+          `[voxels-rust-wasm] ${event} ${path.relative(process.cwd(), file)}`,
+        );
         nativeReloadWillFollow ||= isNativeWorldServiceInput(file);
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => {
@@ -219,7 +281,21 @@ function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
       child.kill(signal);
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return;
+    if (code === "EPERM") {
+      // Some macOS launch contexts deny signalling the detached process group even though the
+      // direct child remains ours. Fall back to the child handle so closing Vite cannot crash and
+      // strand the supervised daemon.
+      try {
+        child.kill(signal);
+        return;
+      } catch (fallbackError) {
+        if ((fallbackError as NodeJS.ErrnoException).code === "ESRCH") return;
+        throw fallbackError;
+      }
+    }
+    throw error;
   }
 }
 
@@ -295,14 +371,12 @@ function nativeWorldService(): Plugin {
     },
     configureServer(server) {
       let handleSignal: (() => void) | undefined;
-      let initialWatchScanComplete = false;
-      server.watcher.once("ready", () => {
-        initialWatchScanComplete = true;
-      });
+      const contentChanges = new WatchedInputContentChanges();
       const nativeInputs = [
         ...NATIVE_WORLD_SERVICE_SOURCE_DIRS,
         ...NATIVE_WORLD_SERVICE_INPUT_FILES,
       ];
+      contentChanges.prime(nativeInputs);
       const stop = async (): Promise<void> => {
         if (stopping) return;
         stopping = true;
@@ -479,9 +553,12 @@ function nativeWorldService(): Plugin {
       process.once("SIGINT", handleSignal);
       process.once("SIGTERM", handleSignal);
       for (const input of nativeInputs) server.watcher.add(input);
-      watchRustInputChanges(server.watcher, (file) => {
-        if (!initialWatchScanComplete) return;
+      watchRustInputChanges(server.watcher, (file, event) => {
         if (!isNativeWorldServiceInput(file)) return;
+        if (!contentChanges.observe(file, event, true)) return;
+        server.config.logger.info(
+          `[voxels-world-service] ${event} ${path.relative(process.cwd(), file)}`,
+        );
         crashAttempts = 0;
         scheduleRebuild(true);
       });

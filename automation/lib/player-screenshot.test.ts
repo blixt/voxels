@@ -35,6 +35,10 @@ describe("player screenshot surface-cut audit", () => {
       selectedCut: {
         kind: "virtualTerrain",
         cut: {
+          renderable: true,
+          feedbackOverflow: false,
+          selectionOverflow: false,
+          traversalOverflow: false,
           selectedPages: [],
           refinementRoots: [],
         },

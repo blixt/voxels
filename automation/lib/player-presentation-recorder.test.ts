@@ -109,6 +109,30 @@ describe("continuous player presentation invariant state", () => {
     expect(violation?.trace.map((frame) => frame.frameSequence)).toEqual([10, 11]);
   });
 
+  it("rejects an empty virtual frame even when canonical chunks are not the surface owner", () => {
+    const state = new PlayerPresentationInvariantState();
+    expect(state.observe(playableFrame(14), "travel")).toBeUndefined();
+
+    const violation = state.observe(
+      playableFrame(15, {
+        terrainReady: 0,
+        canonicalLatticePresented: 0,
+        collisionImmediateResident: 7,
+        collisionImmediateRequired: 8,
+        virtualTerrainPublishedPages: 0,
+        virtualTerrainPublishedExactPages: 0,
+        virtualTerrainCutFingerprintLow24: 0,
+        virtualTerrainPresentedSnapshotGenerationLow24: 0,
+        virtualTerrainPresentedSnapshotFingerprintLow24: 0,
+        virtualTerrainPresentedSnapshotMatchesCut: 0,
+      }),
+      "travel",
+    );
+
+    expect(violation?.reasons).toContain("published cut became empty");
+    expect(violation?.reasons).toContain("presented GPU bank does not match the published CPU cut");
+  });
+
   it("fails when the committed target loses exact core ownership for one frame", () => {
     const state = new PlayerPresentationInvariantState();
     expect(state.observe(playableFrame(20), "travel")).toBeUndefined();
@@ -149,6 +173,21 @@ describe("continuous player presentation invariant state", () => {
 
     expect(violation?.reasons).toContain(
       "presented gameplay camera is outside the committed exact envelope",
+    );
+  });
+
+  it("fails when the camera outruns the complete committed terrain horizon for one frame", () => {
+    const state = new PlayerPresentationInvariantState();
+
+    const violation = state.observe(
+      playableFrame(24, {
+        virtualTerrainPresentedCoverageGapFrames: 1,
+      }),
+      "spectator-travel",
+    );
+
+    expect(violation?.reasons).toContain(
+      "renderer accumulated 1 frame(s) outside its complete terrain horizon",
     );
   });
 

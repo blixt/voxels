@@ -202,9 +202,7 @@ fn exact_streaming_velocity(camera: &CameraState, streaming_velocity: glam::Vec3
 /// is still an active return destination. Other synthetic spectator cameras retain the previous
 /// collisionless behavior.
 #[cfg(any(target_arch = "wasm32", test))]
-fn canonical_collision_camera(
-    current: client_view::ClientViewState,
-) -> Option<CameraState> {
+fn canonical_collision_camera(current: client_view::ClientViewState) -> Option<CameraState> {
     if current.session_kind() == client_view::ClientViewSessionKind::Spectator {
         Some(current.gameplay_body())
     } else {
@@ -1428,7 +1426,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 8;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 58;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 60;
     const FRAME_SAMPLE_WIDTH: u32 = 22;
     const GPU_SAMPLE_WIDTH: u32 = 15;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -1449,7 +1447,7 @@ mod web {
         "longitudeDegrees,localSiderealAngleRadians,moonIlluminatedFraction,celestialRevision,sunDirectionX,sunDirectionY,sunDirectionZ,moonDirectionX,",
         "moonDirectionY,moonDirectionZ,shadowStrength,cloudOffsetX,cloudOffsetZ,cloudVelocityX,cloudVelocityZ,weatherRevision,",
         "weatherKind,weatherFraction,precipitation,storminess,lightning,cloudDensity,cloudBaseMetres,cloudTopMetres,",
-        "cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,canonicalLatticePresented,",
+        "cloudRenderWidth,cloudRenderHeight,cloudViewSteps,cloudLightSteps,fogDensity,outdoorExposure,spectatorActive,reproductionActive,reproductionInvalidated,canonicalLatticePresented,",
         "canonicalImmediateResident,canonicalImmediateRequired,terrainColumnCellsOwned,terrainColumnCellsRequired,generationQueued,generationInFlight,meshingQueued,meshingInFlight,",
         "uploadQueued,uploadInFlight,loadCompleted,loadInFlight,acceptedCompletions,collisionImmediateResident,collisionImmediateRequired,collisionLookaheadResident,",
         "collisionLookaheadRequired,collisionLookaheadSeconds,editCanonicalRequired,editCanonicalRenderable,editCanonicalOwned,enclosedViewResident,enclosedViewRequired,enclosedViewRenderable,",
@@ -1459,7 +1457,7 @@ mod web {
         "virtualTerrainSelectedPages,virtualTerrainRequestedPages,virtualTerrainOwnerlessRoots,virtualTerrainGpuMatchesCpuCut,virtualTerrainGpuEncodingOverflowFlags,virtualTerrainGpuEncodedPages,virtualTerrainGpuOwnerlessRoots,virtualTerrainStreamPending,virtualTerrainStreamInFlight,virtualTerrainCancellationWasteMiB,virtualTerrainCachePages,",
         "virtualTerrainCacheMiB,virtualTerrainColumns,virtualTerrainColumnInFlight,virtualTerrainColumnRevisionFloors,virtualTerrainCurrentColumnKnown,virtualTerrainCurrentColumnRoots,virtualTerrainCurrentColumnRegisteredRoots,virtualTerrainNearestRegisteredRootMetres,",
         "virtualTerrainColumnAccepted,virtualTerrainColumnSubmitDeferred,virtualTerrainColumnPreempted,virtualTerrainColumnTimedOut,virtualTerrainColumnOtherFailed,virtualTerrainDirectoryAccepted,virtualTerrainDirectorySubmitDeferred,virtualTerrainDirectoryPreempted,",
-        "virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,virtualTerrainPageSubmitDeferred,virtualTerrainPagePreempted,virtualTerrainPageTimedOut,virtualTerrainPageOtherFailed,virtualTerrainPageUnavailable,virtualTerrainPageStaleRevision,virtualTerrainPageGenerationFailed,virtualTerrainPageUploadFailed,virtualTerrainPublishedPages,virtualTerrainPublishedExactPages,virtualTerrainPublishedMinimumLevel,virtualTerrainPublishedMaximumLevel,virtualTerrainPublishedExactLodDiscontinuities,virtualTerrainCutFingerprintLow24,virtualTerrainCutFingerprintHigh24,virtualTerrainPresentedSnapshotGenerationLow24,virtualTerrainPresentedSnapshotGenerationHigh24,virtualTerrainPresentedSnapshotFingerprintLow24,virtualTerrainPresentedSnapshotFingerprintHigh24,virtualTerrainPresentedSnapshotMatchesCut,",
+        "virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,virtualTerrainPageSubmitDeferred,virtualTerrainPagePreempted,virtualTerrainPageTimedOut,virtualTerrainPageOtherFailed,virtualTerrainPageUnavailable,virtualTerrainPageStaleRevision,virtualTerrainPageGenerationFailed,virtualTerrainPageUploadFailed,virtualTerrainPublishedPages,virtualTerrainPublishedExactPages,virtualTerrainPublishedMinimumLevel,virtualTerrainPublishedMaximumLevel,virtualTerrainPublishedExactLodDiscontinuities,virtualTerrainCutFingerprintLow24,virtualTerrainCutFingerprintHigh24,virtualTerrainPresentedSnapshotGenerationLow24,virtualTerrainPresentedSnapshotGenerationHigh24,virtualTerrainPresentedSnapshotFingerprintLow24,virtualTerrainPresentedSnapshotFingerprintHigh24,virtualTerrainPresentedSnapshotMatchesCut,virtualTerrainPresentedCoverageGapFrames,",
         "virtualTerrainDesiredEnvelopeComplete,virtualTerrainDesiredEnvelopeFingerprintLow24,virtualTerrainDesiredEnvelopeFingerprintMid24,virtualTerrainDesiredEnvelopeFingerprintHigh16,virtualTerrainDesiredSafetyLeaves,virtualTerrainDesiredHorizonRoots,virtualTerrainDesiredLocusMinimumLeafX,virtualTerrainDesiredLocusMinimumLeafZ,virtualTerrainDesiredLocusMaximumLeafExclusiveX,virtualTerrainDesiredLocusMaximumLeafExclusiveZ,",
         "virtualTerrainCommittedEnvelopeFingerprintLow24,virtualTerrainCommittedEnvelopeFingerprintMid24,virtualTerrainCommittedEnvelopeFingerprintHigh16,virtualTerrainCommittedSafetyLeaves,virtualTerrainCommittedSafetyCoverage,virtualTerrainCommittedHorizonRoots,virtualTerrainCommittedHorizonCoverage,virtualTerrainCommittedLocusMinimumLeafX,virtualTerrainCommittedLocusMinimumLeafZ,virtualTerrainCommittedLocusMaximumLeafExclusiveX,virtualTerrainCommittedLocusMaximumLeafExclusiveZ,",
         "presentedCameraInsideCommittedEnvelope,presentationTargetX,presentationTargetY,presentationTargetZ,presentationGateActive,presentationGateStepsLow24,presentationGateStepsMid24,presentationGateStepsHigh16,presentationGateFramesLow24,presentationGateFramesMid24,presentationGateFramesHigh16,",
@@ -1485,12 +1483,14 @@ mod web {
     const VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME: usize = TERRAIN_PAGE_MAX_CHILDREN * 2;
     const VIRTUAL_TERRAIN_CACHE_UPLOAD_BYTES_PER_FRAME: usize = 8 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_CACHE_UPLOAD_CPU_MS: f64 = 2.0;
-    // Startup is hidden behind the loading surface, so use the same two-group microbatch as cache
-    // admission to build the first immutable owner promptly. Once any safe owner is visible,
-    // expand only one target page per frame: faster steady-state expansion can outrun travel,
-    // inflate the optional quality cut, and monopolize the browser renderer.
-    const VIRTUAL_TERRAIN_STARTUP_GPU_REBUILDS_PER_FRAME: usize = TERRAIN_PAGE_MAX_CHILDREN * 2;
-    const VIRTUAL_TERRAIN_STEADY_GPU_REBUILDS_PER_FRAME: usize = 1;
+    // Mandatory ownership work uses the same two-group microbatch as cache admission. This covers
+    // both startup and travel after the desired exact envelope leaves the committed one; forcing
+    // those handoffs through the optional one-page throttle makes an already-resident complete cut
+    // trail ordinary sprinting for seconds. Optional screen-error refinement remains deliberately
+    // incremental so it cannot monopolize the browser renderer.
+    const VIRTUAL_TERRAIN_MANDATORY_GPU_REBUILDS_PER_FRAME: usize =
+        TERRAIN_PAGE_MAX_CHILDREN * 2;
+    const VIRTUAL_TERRAIN_OPTIONAL_GPU_REBUILDS_PER_FRAME: usize = 1;
     const VIRTUAL_TERRAIN_MAX_EXACT_DOMAIN_LEAVES: usize = 16_384;
 
     const VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS: u64 = 1_000;
@@ -1940,6 +1940,11 @@ mod web {
             .map_err(|_| format!("capture {field} is not an unsigned 64-bit integer"))
     }
 
+    fn reproduction_hex_u64(value: &str, field: &str) -> Result<u64, String> {
+        u64::from_str_radix(value, 16)
+            .map_err(|_| format!("capture {field} is not a hexadecimal 64-bit integer"))
+    }
+
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct ReproductionV3 {
@@ -1950,6 +1955,7 @@ mod web {
         world: ReproductionWorld,
         environment: ReproductionEnvironment,
         render: ReproductionRender,
+        presentation: ReproductionPresentation,
     }
 
     #[derive(Deserialize)]
@@ -2038,6 +2044,30 @@ mod web {
         diagnostic_sky_color: Option<[f32; 3]>,
         geometry_source_debug: bool,
         view_distance_metres: f32,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionPresentation {
+        selected_cut_fingerprint: String,
+        selected_cut: ReproductionSelectedCut,
+    }
+
+    #[derive(Deserialize)]
+    struct ReproductionSelectedCut {
+        cut: Option<ReproductionVirtualCut>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionVirtualCut {
+        selected_pages: Vec<ReproductionTerrainPageKey>,
+    }
+
+    #[derive(Deserialize)]
+    struct ReproductionTerrainPageKey {
+        level: u8,
+        coord: [i32; 3],
     }
 
     #[derive(Deserialize)]
@@ -2406,6 +2436,24 @@ mod web {
                 geometry_source_debug: reproduction.render.geometry_source_debug,
                 material_detail: reproduction.render.features.material_detail,
             };
+            let expected_cut_fingerprint = reproduction_hex_u64(
+                &reproduction.presentation.selected_cut_fingerprint,
+                "selected cut fingerprint",
+            )?;
+            let selected_pages = reproduction
+                .presentation
+                .selected_cut
+                .cut
+                .ok_or_else(|| {
+                    "capture has no published virtual terrain cut to reproduce".to_owned()
+                })?
+                .selected_pages
+                .into_iter()
+                .map(|key| TerrainPageKey {
+                    level: key.level,
+                    coord: key.coord,
+                })
+                .collect();
             let mut client_view = self.client_view.borrow_mut();
             let target = client_view
                 .current()
@@ -2413,6 +2461,14 @@ mod web {
                 .ok_or_else(|| {
                     "cannot apply reproduction while another synthetic session owns the view"
                         .to_owned()
+                })?;
+            self.renderer
+                .borrow_mut()
+                .set_screenshot_reproduction_cut(selected_pages, expected_cut_fingerprint)
+                .map_err(|error| {
+                    format!(
+                        "capture terrain cut is unavailable from the current authoritative world: {error}"
+                    )
                 })?;
             client_view.replace_goal(ClientViewGoalKind::ReproductionApply, target);
             drop(client_view);
@@ -2426,11 +2482,23 @@ mod web {
         }
 
         fn clear_reproduction(&self) {
+            self.renderer
+                .borrow_mut()
+                .clear_screenshot_reproduction_cut();
+            self.cancel_or_restore_reproduction();
+            self.input.borrow_mut().clear();
+            self.simulation_accumulator.set(0.0);
+        }
+
+        fn cancel_or_restore_reproduction(&self) {
             let mut client_view = self.client_view.borrow_mut();
             if matches!(
                 client_view.current().session(),
                 ClientViewSession::Reproduction(_)
-            ) {
+            ) && client_view
+                .goal()
+                .is_none_or(|goal| goal.kind() != ClientViewGoalKind::ReproductionRestore)
+            {
                 let target = client_view.current().restore_interactive();
                 client_view.replace_goal(ClientViewGoalKind::ReproductionRestore, target);
             } else if let Some(goal) = client_view.goal()
@@ -2438,9 +2506,6 @@ mod web {
             {
                 client_view.cancel_goal(goal.version());
             }
-            drop(client_view);
-            self.input.borrow_mut().clear();
-            self.simulation_accumulator.set(0.0);
         }
 
         fn profile_step_relocation(
@@ -2790,10 +2855,7 @@ mod web {
                             match self
                                 .renderer
                                 .borrow_mut()
-                                .transition_client_view(
-                                    source,
-                                    target.presentation_state(),
-                                )
+                                .transition_client_view(source, target.presentation_state())
                             {
                                 Ok(published) => {
                                     if self
@@ -2965,9 +3027,10 @@ mod web {
                 .virtual_terrain_exact_surface_domain(&demand_camera, demand_streaming_velocity);
             let presentation_envelope =
                 self.virtual_terrain_presentation_envelope(presentation_target_position);
-            self.renderer
-                .borrow_mut()
-                .begin_virtual_terrain_presentation_envelope(&presentation_envelope);
+            self.renderer.borrow_mut().begin_virtual_terrain_presentation_envelope(
+                &presentation_envelope,
+                presentation_target_position.to_array(),
+            );
             let stream_breakdown = self.stream_world(
                 &camera,
                 source_streaming_velocity,
@@ -2976,6 +3039,16 @@ mod web {
                 &prediction_domain,
                 performance.as_ref(),
             );
+            if self
+                .renderer
+                .borrow()
+                .screenshot_reproduction_invalidated()
+            {
+                // Exact replay is impossible after an intersecting authoritative change. Cancel
+                // the pending handoff or restore the interactive session instead of allowing a
+                // normal terrain publication to satisfy the reproduction goal.
+                self.cancel_or_restore_reproduction();
+            }
             {
                 let client_view = self.client_view.borrow();
                 // A target may be streaming in an overlapping locus while the source presentation
@@ -3268,12 +3341,11 @@ mod web {
                     crate::canonical_collision_camera(client_view.current()),
                 )
             };
-            let (canonical_focus_camera, canonical_focus_velocity) =
-                crate::canonical_stream_focus(
-                    current_view,
-                    demand_camera,
-                    demand_streaming_velocity,
-                );
+            let (canonical_focus_camera, canonical_focus_velocity) = crate::canonical_stream_focus(
+                current_view,
+                demand_camera,
+                demand_streaming_velocity,
+            );
             let focus = world_to_chunk(predictive_stream_position(
                 canonical_focus_camera.position,
                 canonical_focus_velocity,
@@ -3306,14 +3378,14 @@ mod web {
             let demand_collision_interest = spatial_demand_camera
                 .filter(|camera| camera.locomotion() != LocomotionMode::Spectator)
                 .map(|_| {
-                let mut interest = self.collision_stream_interest(
-                    &demand_camera,
-                    crate::exact_streaming_velocity(&demand_camera, demand_streaming_velocity),
-                    self.config.stream_collision_lookahead_seconds,
-                );
-                interest.sort_unstable();
-                interest.dedup();
-                interest
+                    let mut interest = self.collision_stream_interest(
+                        &demand_camera,
+                        crate::exact_streaming_velocity(&demand_camera, demand_streaming_velocity),
+                        self.config.stream_collision_lookahead_seconds,
+                    );
+                    interest.sort_unstable();
+                    interest.dedup();
+                    interest
                 });
             let attempt_collision_interest =
                 client_view_attempt_target.map(|(_, target_camera)| {
@@ -3358,12 +3430,13 @@ mod web {
             let collision_interest_ms =
                 (performance_now(performance) - collision_interest_start) as f32;
             let enclosed_interest_start = performance_now(performance);
-            let source_enclosed_view_plan =
-                if current_view.session_kind() == ClientViewSessionKind::Spectator {
-                    EnclosedViewStreamPlan::default()
-                } else {
-                    self.enclosed_view_stream_plan(source_camera)
-                };
+            let source_enclosed_view_plan = if current_view.session_kind()
+                == crate::client_view::ClientViewSessionKind::Spectator
+            {
+                crate::EnclosedViewStreamPlan::default()
+            } else {
+                self.enclosed_view_stream_plan(source_camera)
+            };
             let demand_enclosed_view_plan = has_spatial_demand
                 .then(|| self.enclosed_view_stream_plan(&demand_camera))
                 .filter(|_| demand_camera.locomotion() != LocomotionMode::Spectator);
@@ -4109,22 +4182,35 @@ mod web {
                 &[ChunkCoord],
             )>,
         ) {
-            let (goal_version, target) = {
+            let (goal_version, target, terrain_only) = {
                 let mut client_view = self.client_view.borrow_mut();
                 match client_view.goal() {
-                    Some(goal) => (goal.version(), goal.target()),
+                    Some(goal) => (
+                        goal.version(),
+                        goal.target(),
+                        goal.kind() == ClientViewGoalKind::TerrainRepair,
+                    ),
                     None => {
                         let target = client_view.current();
                         let goal_version =
                             client_view.replace_goal(ClientViewGoalKind::TerrainRepair, target);
-                        (goal_version, target)
+                        (goal_version, target, true)
                     }
                 }
             };
-            let (collision, enclosed) = canonical_interests
-                .filter(|(plan_goal, _, _)| *plan_goal == goal_version)
-                .map(|(_, collision, enclosed)| (collision.to_vec(), enclosed.to_vec()))
-                .unwrap_or_else(|| self.relocation_canonical_interests(&target.camera()));
+            let (collision, enclosed) = if terrain_only {
+                // A terrain repair atomically replaces only the virtual ownership bank while the
+                // already-presented player state and canonical collision set stay authoritative.
+                // Waiting for a newly sampled collision/enclosure corridor here couples exact
+                // visual progress to unrelated background work and can hold a GPU-ready cut for
+                // seconds during ordinary movement.
+                (Vec::new(), Vec::new())
+            } else {
+                canonical_interests
+                    .filter(|(plan_goal, _, _)| *plan_goal == goal_version)
+                    .map(|(_, collision, enclosed)| (collision.to_vec(), enclosed.to_vec()))
+                    .unwrap_or_else(|| self.relocation_canonical_interests(&target.camera()))
+            };
             let installed = self.client_view.borrow_mut().install_attempt(
                 goal_version,
                 request,
@@ -4199,6 +4285,14 @@ mod web {
             let Some((goal_version, collision, enclosed)) = canonical_interests else {
                 return;
             };
+            if self.client_view.borrow().goal().is_some_and(|goal| {
+                goal.version() == goal_version && goal.kind() == ClientViewGoalKind::TerrainRepair
+            }) {
+                // TerrainRepair keeps the empty canonical certificate installed when its
+                // publication was bound. The continuously changing ordinary collision corridor
+                // is not part of a terrain-only transaction and must not be spliced back into it.
+                return;
+            }
             let rebased = self.client_view.borrow_mut().reconcile_attempt_interests(
                 goal_version,
                 collision,
@@ -4219,10 +4313,9 @@ mod web {
                 let Some(attempt) = client_view.attempt() else {
                     return;
                 };
-                let Some(canonical) = attempt.canonical().ready_receipt(
-                    &self.scheduler.borrow(),
-                    &self.edit_revisions.borrow(),
-                )
+                let Some(canonical) = attempt
+                    .canonical()
+                    .ready_receipt(&self.scheduler.borrow(), &self.edit_revisions.borrow())
                 else {
                     return;
                 };
@@ -4416,12 +4509,12 @@ mod web {
                 VIRTUAL_TERRAIN_MAX_DIRECTORY_BATCHES_IN_FLIGHT,
             );
 
-            let mut view = self.virtual_terrain_view(camera);
-            if !self
+            let committed_covers_desired_envelope = self
                 .renderer
                 .borrow()
-                .virtual_terrain_committed_covers_presentation_envelope(presentation_envelope)
-            {
+                .virtual_terrain_committed_covers_presentation_envelope(presentation_envelope);
+            let mut view = self.virtual_terrain_view(camera);
+            if !committed_covers_desired_envelope {
                 view = view.safety_only();
             }
             let mut cut = match self
@@ -4440,14 +4533,10 @@ mod web {
                 // already held by the renderer. Rebuild the selected target locally; putting these
                 // keys back through the transport scheduler creates a redundant round trip and can
                 // leave an otherwise complete cut behind an unrelated request lease.
-                let maximum_pages = if self
-                    .renderer
-                    .borrow()
-                    .virtual_terrain_committed_snapshot_is_valid()
-                {
-                    VIRTUAL_TERRAIN_STEADY_GPU_REBUILDS_PER_FRAME
+                let maximum_pages = if committed_covers_desired_envelope {
+                    VIRTUAL_TERRAIN_OPTIONAL_GPU_REBUILDS_PER_FRAME
                 } else {
-                    VIRTUAL_TERRAIN_STARTUP_GPU_REBUILDS_PER_FRAME
+                    VIRTUAL_TERRAIN_MANDATORY_GPU_REBUILDS_PER_FRAME
                 };
                 if let Err(error) = self
                     .renderer
@@ -6884,22 +6973,6 @@ mod web {
                 let fluid = camera.fluid_state();
                 let diagnostics = engine.scheduler.borrow().diagnostics();
                 let profile = *engine.profile.borrow();
-                let camera_voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
-                let camera_voxel_y = (camera.position.y / VOXEL_SIZE_METRES).floor() as i32;
-                let camera_voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
-                let (render, target, canonical_lattice_presented, terrain_column_ownership) = {
-                    let renderer = engine.renderer.borrow();
-                    (
-                        renderer.diagnostics(),
-                        renderer.target_voxel(),
-                        renderer.canonical_lattice_presented(
-                            camera_voxel_x,
-                            camera_voxel_y,
-                            camera_voxel_z,
-                        ),
-                        renderer.terrain_column_ownership_at(camera_voxel_x, camera_voxel_z),
-                    )
-                };
                 let streaming_velocity = if profile.running() {
                     camera.velocity
                 } else {
@@ -6907,6 +6980,43 @@ mod web {
                 };
                 let exact_streaming_velocity =
                     crate::exact_streaming_velocity(&camera, streaming_velocity);
+                let live_exact_surface_domain = ExactSurfaceDomain::swept_horizontal_capsule(
+                    camera.position.to_array().map(f64::from),
+                    (camera.position
+                        + exact_streaming_velocity
+                            * engine.config.stream_velocity_lookahead_seconds.max(0.0))
+                    .to_array()
+                    .map(f64::from),
+                    engine.virtual_terrain_exact_surface_radius_metres(),
+                    VIRTUAL_TERRAIN_MAX_EXACT_DOMAIN_LEAVES,
+                );
+                let camera_voxel_x = (camera.position.x / VOXEL_SIZE_METRES).floor() as i32;
+                let camera_voxel_y = (camera.position.y / VOXEL_SIZE_METRES).floor() as i32;
+                let camera_voxel_z = (camera.position.z / VOXEL_SIZE_METRES).floor() as i32;
+                let (
+                    render,
+                    target,
+                    reproduction_invalidated,
+                    canonical_lattice_presented,
+                    terrain_column_ownership,
+                    live_exact_surface_coverage,
+                ) = {
+                    let renderer = engine.renderer.borrow();
+                    (
+                        renderer.diagnostics(),
+                        renderer.target_voxel(),
+                        renderer.screenshot_reproduction_invalidated(),
+                        renderer.canonical_lattice_presented(
+                            camera_voxel_x,
+                            camera_voxel_y,
+                            camera_voxel_z,
+                        ),
+                        renderer.terrain_column_ownership_at(camera_voxel_x, camera_voxel_z),
+                        renderer.virtual_terrain_committed_exact_surface_coverage(
+                            &live_exact_surface_domain,
+                        ),
+                    )
+                };
                 let collision_immediate_interest =
                     engine.movement_collision_interest(&camera, exact_streaming_velocity, 0.1);
                 let collision_lookahead_seconds =
@@ -7115,15 +7225,12 @@ mod web {
                 let (presented_camera_inside_committed_envelope, presentation_gate_active) = {
                     let renderer = engine.renderer.borrow();
                     (
-                        renderer.virtual_terrain_committed_covers_position(
-                            camera.position.to_array(),
-                        ),
+                        renderer
+                            .virtual_terrain_committed_covers_position(camera.position.to_array()),
                         renderer
                             .virtual_terrain_committed_envelope()
                             .is_some_and(|envelope| {
-                                !envelope.horizon_covers_position(
-                                    presentation_target.to_array(),
-                                )
+                                !envelope.horizon_covers_position(presentation_target.to_array())
                             }),
                     )
                 };
@@ -7345,6 +7452,14 @@ mod web {
                     } else {
                         0.0
                     },
+                    if engine.client_view.borrow().current().session_kind()
+                        == crate::client_view::ClientViewSessionKind::Reproduction
+                    {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    if reproduction_invalidated { 1.0 } else { 0.0 },
                     if canonical_lattice_presented {
                         1.0
                     } else {
@@ -7376,30 +7491,34 @@ mod web {
                     enclosed_view_renderable as f32,
                     enclosed_view_owned as f32,
                     virtual_terrain_mode,
-                    if render.virtual_terrain_exact_domain_complete {
+                    if live_exact_surface_domain.is_complete() {
                         1.0
                     } else {
                         0.0
                     },
-                    render.virtual_terrain_exact_domain_required_leaves as f32,
-                    render.virtual_terrain_exact_domain_current_coverage as f32,
-                    (render.virtual_terrain_exact_domain_fingerprint & 0x00ff_ffff) as f32,
-                    ((render.virtual_terrain_exact_domain_fingerprint >> 24) & 0x00ff_ffff) as f32,
-                    ((render.virtual_terrain_exact_domain_fingerprint >> 48) & 0x0000_ffff) as f32,
-                    if render.virtual_terrain_exact_core_complete {
+                    live_exact_surface_domain.required_leaf_count() as f32,
+                    live_exact_surface_coverage.0 as f32,
+                    (live_exact_surface_domain.fingerprint() & 0x00ff_ffff) as f32,
+                    ((live_exact_surface_domain.fingerprint() >> 24) & 0x00ff_ffff) as f32,
+                    ((live_exact_surface_domain.fingerprint() >> 48) & 0x0000_ffff) as f32,
+                    if live_exact_surface_domain.core_is_complete() {
                         1.0
                     } else {
                         0.0
                     },
-                    render.virtual_terrain_exact_core_required_leaves as f32,
-                    render.virtual_terrain_exact_core_current_coverage as f32,
-                    if render.virtual_terrain_exact_prediction_complete {
+                    live_exact_surface_domain.core_required_leaf_count() as f32,
+                    live_exact_surface_coverage.1 as f32,
+                    if live_exact_surface_domain.prediction_is_complete() {
                         1.0
                     } else {
                         0.0
                     },
-                    render.virtual_terrain_exact_prediction_required_leaves as f32,
-                    render.virtual_terrain_exact_prediction_current_coverage as f32,
+                    live_exact_surface_domain.prediction_required_leaf_count() as f32,
+                    if live_exact_surface_domain.prediction_is_complete() {
+                        live_exact_surface_coverage.0 as f32
+                    } else {
+                        0.0
+                    },
                     virtual_terrain_registered_regions as f32,
                     virtual_terrain_directory_in_flight as f32,
                     virtual_terrain_directory_nodes as f32,
@@ -7465,6 +7584,7 @@ mod web {
                     } else {
                         0.0
                     },
+                    render.virtual_terrain_presented_coverage_gap_frames as f32,
                     if render.virtual_terrain_desired_envelope_complete {
                         1.0
                     } else {

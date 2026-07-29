@@ -5,7 +5,6 @@ import { ScenarioArguments } from "../lib/arguments.ts";
 import { snapshotValue } from "../lib/engine.ts";
 import { takePlayerScreenshot } from "../lib/player-screenshot.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
-import { startWorldStack, type WorldSource } from "../lib/world.ts";
 import { readPngText } from "../../web/png-metadata.ts";
 import type { WasmBuildProfile } from "../../scripts/build-wasm.ts";
 
@@ -71,19 +70,6 @@ function finite(value: unknown, field: string): number {
   return value;
 }
 
-function safeU64(value: string, field: string): number {
-  let parsed: bigint;
-  try {
-    parsed = BigInt(value);
-  } catch {
-    throw new Error(`capture ${field} is not an unsigned integer`);
-  }
-  if (parsed < 0n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error(`capture ${field} cannot be represented by the current fixture CLI`);
-  }
-  return Number(parsed);
-}
-
 function parseMetadata(text: string): ReproductionMetadata {
   const value = JSON.parse(text) as ReproductionMetadata;
   if (value.schema !== "voxels.reproduction.v3") {
@@ -137,10 +123,19 @@ function parseMetadata(text: string): ReproductionMetadata {
 async function run(context: ScenarioContext, raw: readonly string[]) {
   const arguments_ = new ScenarioArguments(raw);
   const input = arguments_.string("input");
-  const reuseBuild = arguments_.flag("reuse-build");
+  const url = arguments_.string("url");
   arguments_.assertEmpty();
   if (input === undefined) {
     throw new Error("replay-screenshot requires --input=/absolute/path/to/capture.png");
+  }
+  if (url === undefined) {
+    throw new Error(
+      "replay-screenshot requires --url=http://... for the same authoritative world; a PNG intentionally does not embed a mutable multiplayer database or credentials",
+    );
+  }
+  const parsedUrl = new URL(url);
+  if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+    throw new Error("replay-screenshot --url must use http or https");
   }
   const capture = await readFile(resolve(input));
   const metadataText = readPngText(capture, "voxels.reproduction");
@@ -148,60 +143,15 @@ async function run(context: ScenarioContext, raw: readonly string[]) {
     throw new Error("capture has no voxels.reproduction PNG metadata");
   }
   const metadata = parseMetadata(metadataText);
-  const source: WorldSource =
-    metadata.world.sourceKind === 1
-      ? "procedural-v16"
-      : metadata.world.sourceKind === 2
-        ? "terrain-diffusion-30m"
-        : (() => {
-            throw new Error(`capture has unknown world source kind ${metadata.world.sourceKind}`);
-          })();
-  const worldDayNumber = Math.floor(metadata.environment.worldDays);
-  const world = await startWorldStack(context, {
-    fixture: {
-      prefix: "voxels-reproduction-",
-      source,
-      dayLengthSeconds: 0,
-      worldDayNumberAtUnixEpoch: worldDayNumber,
-      dayFractionAtUnixEpoch: metadata.environment.dayFraction,
-      planetCircumferenceMetres: metadata.environment.planetCircumferenceMetres,
-      axialTiltDegrees: (metadata.environment.axialTiltRadians * 180) / Math.PI,
-      moonOrbitInclinationDegrees:
-        (metadata.environment.moonOrbitInclinationRadians * 180) / Math.PI,
-      celestialSeed: safeU64(metadata.environment.celestialSeed, "celestial seed"),
-      celestialRevision: safeU64(metadata.environment.celestialRevision, "celestial revision"),
-      weatherCycleSeconds: 0,
-      weatherFractionAtUnixEpoch: metadata.environment.weatherFraction,
-      cloudVelocityMetresPerSecond: metadata.environment.cloudVelocityMetresPerSecond,
-      cloudCoverage: metadata.environment.cloudCoverage,
-      cloudBaseMetres: metadata.environment.cloudBaseMetres,
-      cloudTopMetres: metadata.environment.cloudTopMetres,
-      cascadedShadows: metadata.render.features.shadows,
-      screenSpaceAmbientOcclusion: metadata.render.features.screenSpaceAmbientOcclusion,
-      ...(metadata.render.diagnosticSkyColor === null
-        ? {}
-        : {
-            diagnosticSkyRgb: metadata.render.diagnosticSkyColor.map((channel) =>
-              Math.round(channel * 255),
-            ) as [number, number, number],
-          }),
-    },
-    service: { metal: source === "terrain-diffusion-30m" },
-    web: {
-      build: !reuseBuild,
-      buildProfile: metadata.runtime.buildProfile,
-    },
-  });
   const browser = await BrowserCapability.start(context);
   const viewport = await browser.open({
-    url: world.url,
+    url: parsedUrl.href,
     label: "screenshot-reproduction",
     viewport: {
       width: metadata.image.cssWidth,
       height: metadata.image.cssHeight,
     },
     deviceScaleFactor: metadata.image.devicePixelRatio,
-    ...world.clientRoute,
   });
   await viewport.engine.applyReproduction(metadataText);
   const expectedCutLow48 =
@@ -221,7 +171,7 @@ async function run(context: ScenarioContext, raw: readonly string[]) {
     },
   );
   await viewport.engine.waitForFrameAfter(snapshotValue(applied, "frameSequence"));
-  const reproduced = await takePlayerScreenshot(viewport.page);
+  const reproduced = await takePlayerScreenshot(viewport.page, { timeoutMs: 45_000 });
   const expectedPages = metadata.presentation.selectedCut.cut?.selectedPages;
   const actualPages = reproduced.metadata.presentation.selectedCut.cut?.selectedPages;
   if (JSON.stringify(actualPages) !== JSON.stringify(expectedPages)) {
@@ -238,7 +188,7 @@ async function run(context: ScenarioContext, raw: readonly string[]) {
   browser.assertHealthy();
   return {
     summary:
-      "Restored and froze the exact v3 camera, projection, world, environment, and viewport.",
+      "Restored and froze the exact v3 camera, projection, environment, viewport, and terrain cut against the capture's authoritative world.",
     details: {
       input: resolve(input),
       artifact,
@@ -254,8 +204,8 @@ async function run(context: ScenarioContext, raw: readonly string[]) {
 export default defineScenario({
   id: "replay-screenshot",
   kind: "capture",
-  summary: "Replay an embedded voxels.reproduction.v3 screenshot state exactly.",
-  uses: { world: true, browser: true, viewport: "browser", screenshots: true },
-  timeoutMs: 180_000,
+  summary: "Replay embedded screenshot metadata against the same authoritative mutable world URL.",
+  uses: { browser: true, viewport: "browser", screenshots: true },
+  timeoutMs: 120_000,
   run,
 });

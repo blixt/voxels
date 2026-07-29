@@ -386,6 +386,12 @@ struct VirtualTerrainPublication {
     candidate_generation: Option<u64>,
 }
 
+#[derive(Clone, Debug)]
+struct ScreenshotReproductionCut {
+    cut: VirtualTerrainCut,
+    revisions: WorldRevisionFence,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CommittedVirtualTerrainPresentation {
     cut: VirtualTerrainCut,
@@ -486,18 +492,23 @@ fn virtual_terrain_promotion_decision(
     }
 }
 
-fn virtual_terrain_publication_is_superseded(
+fn virtual_terrain_publication_misses_target(
     publication: Option<&VirtualTerrainPublication>,
-    next_envelope: &PresentationEnvelope,
+    target_position_metres: [f32; 3],
 ) -> bool {
-    publication.is_some_and(|publication| publication.envelope != *next_envelope)
+    publication.is_some_and(|publication| {
+        !publication
+            .envelope
+            .exact_surface_domain()
+            .contains_position(target_position_metres)
+    })
 }
 
-fn take_superseded_virtual_terrain_publication(
+fn take_virtual_terrain_publication_missing_target(
     publication: &mut Option<VirtualTerrainPublication>,
-    next_envelope: &PresentationEnvelope,
+    target_position_metres: [f32; 3],
 ) -> bool {
-    if virtual_terrain_publication_is_superseded(publication.as_ref(), next_envelope) {
+    if virtual_terrain_publication_misses_target(publication.as_ref(), target_position_metres) {
         *publication = None;
         true
     } else {
@@ -2884,6 +2895,7 @@ struct VirtualTerrainGpuPage {
     revision: u64,
     content_fingerprint: [u8; 32],
     representation: TerrainPageRepresentationKind,
+    topology: voxels_world::TerrainTopologyClass,
     heightfield_finer_neighbor_sides: [bool; 4],
     heightfield_ground_corner_bits: [u32; 4],
     heightfield_ground_boundary_bits: [[u32; TERRAIN_PAGE_EDGE_SAMPLES as usize + 1]; 4],
@@ -3047,11 +3059,14 @@ struct VirtualTerrainDrawLists {
 /// selected pages form a complete quadtree partition of its coverage root.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct VirtualTerrainOwnership {
-    roots: BTreeSet<TerrainPageKey>,
+    volumetric_pages: BTreeSet<TerrainPageKey>,
 }
 
 impl VirtualTerrainOwnership {
-    fn from_cut(cut: &VirtualTerrainCut) -> Result<Self, VirtualTerrainRendererError> {
+    fn from_cut(
+        cut: &VirtualTerrainCut,
+        mut page_topology: impl FnMut(TerrainPageKey) -> Option<voxels_world::TerrainTopologyClass>,
+    ) -> Result<Self, VirtualTerrainRendererError> {
         let selected = cut.selected_pages.iter().copied().collect::<BTreeSet<_>>();
         let roots = cut
             .selected_pages
@@ -3072,7 +3087,23 @@ impl VirtualTerrainOwnership {
                 return Err(VirtualTerrainRendererError::IncompleteRootPartition(*root));
             }
         }
-        Ok(Self { roots })
+        let volumetric_pages = cut
+            .selected_pages
+            .iter()
+            .copied()
+            .filter(|key| key.is_surface())
+            .map(|key| {
+                page_topology(key)
+                    .map(|topology| (key, topology))
+                    .ok_or(VirtualTerrainRendererError::SelectedPageMissingGpu(key))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|(key, topology)| {
+                (topology == voxels_world::TerrainTopologyClass::Volumetric).then_some(key)
+            })
+            .collect();
+        Ok(Self { volumetric_pages })
     }
 
     fn covers_aabb(&self, minimum: glam::Vec3, maximum: glam::Vec3) -> bool {
@@ -3083,21 +3114,28 @@ impl VirtualTerrainOwnership {
     }
 
     fn covers_voxel_bounds(&self, minimum: [i32; 3], maximum: [i32; 3]) -> bool {
-        let Some(ranges) = terrain_surface_root_coords_for_bounds(minimum, maximum) else {
-            return false;
-        };
-        let required = ranges
-            .iter()
-            .map(|[minimum, maximum]| {
-                i64::from(*maximum)
-                    .saturating_sub(i64::from(*minimum))
-                    .saturating_add(1)
-            })
-            .try_fold(1_i64, i64::checked_mul);
-        if required.is_none_or(|required| required as usize > self.roots.len()) {
+        if minimum
+            .into_iter()
+            .zip(maximum)
+            .any(|(minimum, maximum)| minimum >= maximum)
+        {
             return false;
         }
-        terrain_surface_root_coords(ranges).all(|key| self.roots.contains(&key))
+        let edge = CHUNK_EDGE as i32;
+        let minimum_leaf = [minimum[0].div_euclid(edge), minimum[2].div_euclid(edge)];
+        let maximum_leaf = [
+            maximum[0].saturating_sub(1).div_euclid(edge),
+            maximum[2].saturating_sub(1).div_euclid(edge),
+        ];
+        (minimum_leaf[0]..=maximum_leaf[0]).all(|x| {
+            (minimum_leaf[1]..=maximum_leaf[1]).all(|z| {
+                let leaf = TerrainPageKey::surface(0, x, z);
+                (0..=TERRAIN_COVERAGE_ROOT_LEVEL).any(|level| {
+                    leaf.ancestor_at(level)
+                        .is_some_and(|ancestor| self.volumetric_pages.contains(&ancestor))
+                })
+            })
+        })
     }
 }
 
@@ -3148,33 +3186,6 @@ fn voxel_bounds_from_metres(
         .zip(maximum)
         .all(|(minimum, maximum)| minimum < maximum)
         .then_some((minimum, maximum))
-}
-
-fn terrain_surface_root_coords_for_bounds(
-    minimum: [i32; 3],
-    maximum: [i32; 3],
-) -> Option<[[i32; 2]; 2]> {
-    let root_span =
-        i32::try_from(32_u32.checked_shl(u32::from(TERRAIN_COVERAGE_ROOT_LEVEL))?).ok()?;
-    minimum
-        .into_iter()
-        .zip(maximum)
-        .all(|(minimum, maximum)| minimum < maximum)
-        .then(|| {
-            [0, 2].map(|axis| {
-                [
-                    minimum[axis].div_euclid(root_span),
-                    maximum[axis].saturating_sub(1).div_euclid(root_span),
-                ]
-            })
-        })
-}
-
-fn terrain_surface_root_coords(ranges: [[i32; 2]; 2]) -> impl Iterator<Item = TerrainPageKey> {
-    (ranges[0][0]..=ranges[0][1]).flat_map(move |x| {
-        (ranges[1][0]..=ranges[1][1])
-            .map(move |z| TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, x, z))
-    })
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -3351,8 +3362,7 @@ pub struct RenderDiagnostics {
     pub virtual_terrain_gpu_encoding_overflow_flags: u32,
     pub virtual_terrain_gpu_matches_cpu_cut: bool,
     pub virtual_terrain_gpu_match_failure_flags: u32,
-    /// The live camera outran the committed virtual horizon, so this frame uses canonical chunks.
-    pub virtual_terrain_coverage_fallback_active: bool,
+    pub virtual_terrain_presented_coverage_gap_frames: u64,
     pub virtual_terrain_published_pages: u32,
     pub virtual_terrain_published_ownerless_roots: u32,
     pub virtual_terrain_published_exact_pages: u32,
@@ -3982,11 +3992,15 @@ pub struct Renderer {
     next_view_revision: u64,
     /// Ephemeral quality/demand target selected from the latest view and resident directory.
     virtual_terrain_oracle_cut: Option<VirtualTerrainCut>,
+    /// Exact resident cut requested by an active screenshot reproduction.
+    virtual_terrain_reproduction_cut: Option<ScreenshotReproductionCut>,
+    virtual_terrain_reproduction_invalidated: bool,
     virtual_terrain_plan_event_serial: u32,
     virtual_terrain_plan_last_selection: u32,
     virtual_terrain_plan_last_invalidation: u32,
     virtual_terrain_plan_last_invalidation_line: u32,
     virtual_terrain_publication_last_abort_line: u32,
+    virtual_terrain_presented_coverage_gap_frames: u64,
     /// Immutable cut currently being encoded or awaiting GPU certification. Directory growth,
     /// cache arrivals, and a newer desired view may replace `virtual_terrain_oracle_cut`, but may
     /// not replace this transaction until it promotes or fails.
@@ -4923,11 +4937,14 @@ impl Renderer {
             next_presentation_serial: 1,
             next_view_revision: 1,
             virtual_terrain_oracle_cut: None,
+            virtual_terrain_reproduction_cut: None,
+            virtual_terrain_reproduction_invalidated: false,
             virtual_terrain_plan_event_serial: 0,
             virtual_terrain_plan_last_selection: 0,
             virtual_terrain_plan_last_invalidation: 0,
             virtual_terrain_plan_last_invalidation_line: 0,
             virtual_terrain_publication_last_abort_line: 0,
+            virtual_terrain_presented_coverage_gap_frames: 0,
             virtual_terrain_publication: None,
             next_virtual_terrain_request: 1,
             virtual_terrain_publication_abort_pending: false,
@@ -5811,6 +5828,87 @@ impl Renderer {
         }
     }
 
+    /// Pins the exact resident terrain partition named by a screenshot.
+    ///
+    /// Keys are resolved against the current authoritative hierarchy and the content-sensitive cut
+    /// fingerprint is recomputed. A capture from another world/revision therefore fails instead of
+    /// silently replaying a visually different opportunistic refinement.
+    pub fn set_screenshot_reproduction_cut(
+        &mut self,
+        selected_pages: Vec<TerrainPageKey>,
+        expected_fingerprint: u64,
+    ) -> Result<(), VirtualTerrainRendererError> {
+        let cut = self
+            .virtual_terrain
+            .cut_from_resident_selection(selected_pages)?;
+        if !cut.is_renderable() || cut.fingerprint != expected_fingerprint {
+            return Err(VirtualTerrainRendererError::NoRenderableCut);
+        }
+        let terrain_revisions = cut
+            .selected_pages
+            .iter()
+            .map(|key| {
+                self.virtual_terrain_pages
+                    .get(key)
+                    .filter(|page| {
+                        self.virtual_terrain
+                            .resident_page(*key)
+                            .is_some_and(|resident| {
+                                resident.revision == page.revision
+                                    && resident.content_fingerprint == page.content_fingerprint
+                            })
+                    })
+                    .map(|page| TerrainPageRevision {
+                        key: *key,
+                        revision: page.revision,
+                    })
+                    .ok_or(VirtualTerrainRendererError::SelectedPageMissingGpu(*key))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let revisions = WorldRevisionFence::new(std::iter::empty(), terrain_revisions)?;
+        self.virtual_terrain
+            .touch_resident_selection(&cut.selected_pages)?;
+        // A publication frozen for the ordinary live view must never be rebound to the new
+        // reproduction goal. The pin and publication are one transaction boundary.
+        if self.virtual_terrain_publication.is_some() {
+            self.abort_virtual_terrain_publication();
+        }
+        self.virtual_terrain_reproduction_cut =
+            Some(ScreenshotReproductionCut { cut, revisions });
+        self.virtual_terrain_reproduction_invalidated = false;
+        self.invalidate_virtual_terrain_desired_plan();
+        Ok(())
+    }
+
+    pub fn clear_screenshot_reproduction_cut(&mut self) {
+        let changed = self.virtual_terrain_reproduction_cut.take().is_some();
+        if changed && self.virtual_terrain_publication.is_some() {
+            // Symmetrically prevent a reproduction publication from binding to the restored live
+            // view after the pin is removed.
+            self.abort_virtual_terrain_publication();
+        } else if changed {
+            self.invalidate_virtual_terrain_desired_plan();
+        }
+        self.virtual_terrain_reproduction_invalidated = false;
+    }
+
+    fn invalidate_screenshot_reproduction_cut(&mut self) -> bool {
+        if self.virtual_terrain_reproduction_cut.take().is_none() {
+            return false;
+        }
+        if self.virtual_terrain_publication.is_some() {
+            self.abort_virtual_terrain_publication();
+        } else {
+            self.invalidate_virtual_terrain_desired_plan();
+        }
+        self.virtual_terrain_reproduction_invalidated = true;
+        true
+    }
+
+    pub fn screenshot_reproduction_invalidated(&self) -> bool {
+        self.virtual_terrain_reproduction_invalidated
+    }
+
     /// Installs the renderer's first truthful camera/session tuple over canonical terrain.
     ///
     /// Virtual selection and GPU certification may proceed independently after this point, but no
@@ -5848,8 +5946,8 @@ impl Renderer {
     /// Advances the live camera without rebuilding any spatial product.
     ///
     /// Terrain coverage is a rendering capability, never a legality boundary for player motion.
-    /// When the committed virtual bank does not cover this camera the renderer temporarily uses
-    /// the authoritative canonical chunk path while streaming a replacement virtual cut.
+    /// The last complete virtual bank remains the single surface owner while a camera-exact
+    /// replacement streams; local quality debt must never become a movement wall or a partial draw.
     pub fn advance_live_client_view(
         &mut self,
         active: PublishedClientViewReceipt,
@@ -6049,8 +6147,10 @@ impl Renderer {
 
     #[track_caller]
     fn invalidate_virtual_terrain_desired_plan(&mut self) {
-        self.virtual_terrain_plan_event_serial =
-            self.virtual_terrain_plan_event_serial.wrapping_add(1).max(1);
+        self.virtual_terrain_plan_event_serial = self
+            .virtual_terrain_plan_event_serial
+            .wrapping_add(1)
+            .max(1);
         self.virtual_terrain_plan_last_invalidation = self.virtual_terrain_plan_event_serial;
         self.virtual_terrain_plan_last_invalidation_line = std::panic::Location::caller().line();
         self.virtual_terrain_oracle_cut = None;
@@ -6076,14 +6176,19 @@ impl Renderer {
 
     /// Records the desired immutable presentation envelope before streaming can return early.
     ///
-    /// Until aggregate semantic intents own renderer requests, changing this envelope explicitly
-    /// supersedes a differently scoped publication. Its late GPU evidence remains generation
-    /// fenced and the shell's old request subsequently reports `Stale`.
-    pub fn begin_virtual_terrain_presentation_envelope(&mut self, envelope: &PresentationEnvelope) {
+    /// A newer desired envelope does not by itself revoke a useful frozen transaction. Adjacent
+    /// locomotion loci change every 6.4 m; canceling on inequality can restart a candidate faster
+    /// than it can encode. Preserve it while its exact domain still owns the live target and let it
+    /// promote as a useful intermediate cut. Revision invalidation remains an independent veto.
+    pub fn begin_virtual_terrain_presentation_envelope(
+        &mut self,
+        envelope: &PresentationEnvelope,
+        target_position_metres: [f32; 3],
+    ) {
         if self.virtual_terrain_desired_envelope.as_ref() != Some(envelope) {
-            if take_superseded_virtual_terrain_publication(
+            if take_virtual_terrain_publication_missing_target(
                 &mut self.virtual_terrain_publication,
-                envelope,
+                target_position_metres,
             ) {
                 self.discard_virtual_terrain_publication_resources();
             }
@@ -6541,6 +6646,7 @@ impl Renderer {
             revision: page.revision,
             content_fingerprint: page.content_fingerprint,
             representation: page.representation.kind(),
+            topology: page.topology,
             heightfield_finer_neighbor_sides,
             heightfield_ground_corner_bits,
             heightfield_ground_boundary_bits,
@@ -6573,6 +6679,43 @@ impl Renderer {
         presentation_envelope: &PresentationEnvelope,
     ) -> Result<VirtualTerrainCut, VirtualTerrainRendererError> {
         let exact_surface_domain = presentation_envelope.exact_surface_domain();
+        if let Some(pinned) = self.virtual_terrain_reproduction_cut.clone() {
+            let cut = match self
+                .virtual_terrain
+                .cut_from_resident_selection(pinned.cut.selected_pages.clone())
+            {
+                Ok(cut)
+                    if cut.fingerprint == pinned.cut.fingerprint
+                        && cut.covers_presentation_envelope(presentation_envelope)
+                        && self
+                            .virtual_terrain
+                            .selection_is_exact_partition_for_view(
+                                &cut.selected_pages,
+                                view,
+                                presentation_envelope,
+                            ) =>
+                {
+                    cut
+                }
+                _ => {
+                    self.invalidate_screenshot_reproduction_cut();
+                    return Err(VirtualTerrainRendererError::NoRenderableCut);
+                }
+            };
+            if self
+                .virtual_terrain
+                .touch_resident_selection(&cut.selected_pages)
+                .is_err()
+            {
+                self.invalidate_screenshot_reproduction_cut();
+                return Err(VirtualTerrainRendererError::NoRenderableCut);
+            }
+            self.virtual_terrain_requested_view = Some(view);
+            self.virtual_terrain_oracle_view = Some(view);
+            self.virtual_terrain_exact_surface_domain = Some(exact_surface_domain.clone());
+            self.virtual_terrain_oracle_cut = Some(cut.clone());
+            return Ok(cut);
+        }
         let known_fitting_scale = self.virtual_terrain_error_scale.max(1.0);
         let mut recovery_probe = false;
         if self.virtual_terrain_requested_view == Some(view)
@@ -6663,8 +6806,10 @@ impl Renderer {
         self.virtual_terrain_oracle_view = Some(oracle_view);
         self.virtual_terrain_exact_surface_domain = Some(exact_surface_domain.clone());
         self.virtual_terrain_oracle_cut = Some(cut.clone());
-        self.virtual_terrain_plan_event_serial =
-            self.virtual_terrain_plan_event_serial.wrapping_add(1).max(1);
+        self.virtual_terrain_plan_event_serial = self
+            .virtual_terrain_plan_event_serial
+            .wrapping_add(1)
+            .max(1);
         self.virtual_terrain_plan_last_selection = self.virtual_terrain_plan_event_serial;
         Ok(cut)
     }
@@ -6783,6 +6928,30 @@ impl Renderer {
             })
     }
 
+    /// Exact L0 ownership of a live motion domain in the immutable presented cut.
+    ///
+    /// The renderer's desired envelope is deliberately larger than the camera-local core so a
+    /// replacement can stream ahead. Diagnostics which claim to measure current 10 cm quality
+    /// must compare the independently constructed live domain against the committed cut, not
+    /// compare the committed cut with that larger future envelope.
+    pub fn virtual_terrain_committed_exact_surface_coverage(
+        &self,
+        domain: &ExactSurfaceDomain,
+    ) -> (usize, usize) {
+        if !self.virtual_terrain_committed_snapshot_is_valid() {
+            return (0, 0);
+        }
+        self.presented_virtual_terrain().map_or((0, 0), |committed| {
+            if !committed.revisions_current {
+                return (0, 0);
+            }
+            (
+                committed.cut.exact_surface_coverage(domain),
+                committed.cut.exact_surface_core_coverage(domain),
+            )
+        })
+    }
+
     fn synchronize_virtual_terrain_cut_seams(
         &mut self,
         cut: &VirtualTerrainCut,
@@ -6841,8 +7010,7 @@ impl Renderer {
                 if let Some(old) = self.virtual_terrain_pages.remove(&page.key) {
                     discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, old.mesh);
                 }
-                let rebuilt =
-                    self.upload_virtual_terrain_page_with_seams(page, finer_sides, false);
+                let rebuilt = self.upload_virtual_terrain_page_with_seams(page, finer_sides, false);
                 changed |= recover_candidate_only_seam_rebuild(rebuilt, || {
                     self.recover_failed_candidate_only_seam_geometry(page_key)
                 })?;
@@ -7149,8 +7317,7 @@ impl Renderer {
 
     #[track_caller]
     fn abort_virtual_terrain_publication(&mut self) {
-        self.virtual_terrain_publication_last_abort_line =
-            std::panic::Location::caller().line();
+        self.virtual_terrain_publication_last_abort_line = std::panic::Location::caller().line();
         self.virtual_terrain_publication = None;
         self.discard_virtual_terrain_publication_resources();
     }
@@ -7169,6 +7336,13 @@ impl Renderer {
     /// so keeping this snapshot cannot expose freed or repurposed geometry. The replacement still
     /// has to prove current authoritative revisions before it can atomically promote.
     pub fn invalidate_virtual_terrain_world_change(&mut self, change: &WorldChange) {
+        if self
+            .virtual_terrain_reproduction_cut
+            .as_ref()
+            .is_some_and(|pinned| change.invalidates(&pinned.revisions))
+        {
+            self.invalidate_screenshot_reproduction_cut();
+        }
         if take_invalidated_virtual_terrain_publication(
             &mut self.virtual_terrain_publication,
             change,
@@ -7193,6 +7367,7 @@ impl Renderer {
     /// metadata and advancing the feedback generation makes all pre-reset callbacks inert before
     /// their source allocations are retired.
     pub fn reset_virtual_terrain_world(&mut self) {
+        self.invalidate_screenshot_reproduction_cut();
         self.virtual_terrain_publication = None;
         let reset_presented = self
             .presented_client_view
@@ -7281,6 +7456,19 @@ impl Renderer {
         if invalidates_publication {
             self.abort_virtual_terrain_publication();
         }
+        if self
+            .virtual_terrain_reproduction_cut
+            .as_ref()
+            .is_some_and(|pinned| {
+                pinned
+                    .cut
+                    .selected_pages
+                    .iter()
+                    .any(|key| removed_pages.contains(key))
+            })
+        {
+            self.invalidate_screenshot_reproduction_cut();
+        }
         let published = self
             .committed_virtual_terrain_cut()
             .map(|cut| cut.selected_pages.iter().copied().collect::<BTreeSet<_>>())
@@ -7312,6 +7500,13 @@ impl Renderer {
     ) -> Result<bool, VirtualTerrainRendererError> {
         if !self.virtual_terrain.remove_page(key) {
             return Ok(false);
+        }
+        if self
+            .virtual_terrain_reproduction_cut
+            .as_ref()
+            .is_some_and(|pinned| pinned.cut.selected_pages.contains(&key))
+        {
+            self.invalidate_screenshot_reproduction_cut();
         }
         if self
             .virtual_terrain_publication
@@ -7719,19 +7914,36 @@ impl Renderer {
             voxel_y.div_euclid(CHUNK_EDGE as i32),
             voxel_z.div_euclid(CHUNK_EDGE as i32),
         );
-        if self.canonical_ready_chunks.contains(&chunk)
+        let leaf = TerrainPageKey::surface(0, chunk.0, chunk.2);
+        if self.virtual_terrain_mode_from_presented_view() == VirtualTerrainRenderMode::Visible
+            && self.virtual_terrain_committed_snapshot_is_valid()
+            && let Some(cut) = self.committed_virtual_terrain_cut()
+            && let Some(root) = leaf.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+            && cut
+                .selected_pages
+                .iter()
+                .any(|selected| selected.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL) == Some(root))
+        {
+            // A complete virtual root is the sole surface owner for its horizontal domain and
+            // suppresses canonical chunks there. Resident-but-culled canonical meshes do not count
+            // as a presented lattice.
+            let position_metres = [
+                (voxel_x as f32 + 0.5) * 0.1,
+                (voxel_y as f32 + 0.5) * 0.1,
+                (voxel_z as f32 + 0.5) * 0.1,
+            ];
+            return self
+                .committed_virtual_terrain_envelope()
+                .is_some_and(|envelope| {
+                    envelope
+                        .exact_surface_domain()
+                        .contains_position(position_metres)
+                })
+                && cut.selected_pages.contains(&leaf);
+        }
+        self.canonical_ready_chunks.contains(&chunk)
             || self.canonical_surface_ready_chunks.contains(&chunk)
             || self.enclosed_view_ready_chunks.contains(&chunk)
-        {
-            return true;
-        }
-        let leaf = TerrainPageKey::surface(0, chunk.0, chunk.2);
-        self.virtual_terrain_mode_from_presented_view() == VirtualTerrainRenderMode::Visible
-            && self.committed_virtual_terrain_cut().is_some_and(|cut| {
-                cut.selected_pages.iter().any(|selected| {
-                    selected.is_surface() && leaf.ancestor_at(selected.level) == Some(*selected)
-                })
-            })
     }
 
     /// Number of horizontal cells owned by the currently active exact canonical vertical band.
@@ -7975,24 +8187,14 @@ impl Renderer {
             .cascades
             .map(|cascade| AabbClipVolume::new(cascade.clip_from_world));
         let cull_started = now_ms();
-        let (virtual_visible, virtual_ownership, virtual_terrain_coverage_fallback_active) =
+        let (virtual_visible, virtual_ownership, committed_horizon_covers_camera) =
             if self.virtual_terrain_mode_from_presented_view() == VirtualTerrainRenderMode::Visible
             {
                 let (cut, envelope, _certificate) = self
                     .presented_virtual_terrain()
                     .map(|committed| (&committed.cut, &committed.envelope, committed.certificate))
                     .filter(|(_, _, certificate)| certificate.complete)?;
-                if !envelope
-                    .exact_surface_domain()
-                    .contains_position(camera.position.to_array())
-                {
-                    // Coverage is not a wall. A coarse horizon page is not evidence that the
-                    // camera's 10 cm surface page is present. Suppress the complete virtual bank
-                    // and render authoritative canonical chunks until a camera-exact cut can be
-                    // committed atomically. Default ownership guarantees the terrain paths never
-                    // overlap.
-                    (false, VirtualTerrainOwnership::default(), true)
-                } else if !self.virtual_terrain_gpu.presented_snapshot_matches(
+                if !self.virtual_terrain_gpu.presented_snapshot_matches(
                     virtual_terrain_snapshot_identity(
                         cut,
                         envelope,
@@ -8006,18 +8208,35 @@ impl Renderer {
                         "presented virtual terrain bank no longer matches its committed CPU cut",
                     );
                     return None;
-                } else {
-                    let Ok(ownership) = VirtualTerrainOwnership::from_cut(cut) else {
-                        (self.log_error)(
-                            "committed virtual terrain cut cannot construct canonical ownership",
-                        );
-                        return None;
-                    };
-                    (true, ownership, false)
                 }
+                let Ok(ownership) = VirtualTerrainOwnership::from_cut(cut, |key| {
+                    self.virtual_terrain_pages
+                        .get(&key)
+                        .or_else(|| self.virtual_terrain_retired_published_pages.get(&key))
+                        .map(|page| page.topology)
+                }) else {
+                    (self.log_error)(
+                        "committed virtual terrain cut cannot construct canonical ownership",
+                    );
+                    return None;
+                };
+                // A committed cut is a complete, certified partition. Keep that one owner visible
+                // while a newer camera-exact cut streams. Replacing the whole bank with whatever
+                // canonical chunks happen to be resident creates terrain islands and turns a
+                // quality handoff into a correctness hole.
+                (
+                    true,
+                    ownership,
+                    envelope.horizon_covers_position(camera.position.to_array()),
+                )
             } else {
-                (false, VirtualTerrainOwnership::default(), false)
+                (false, VirtualTerrainOwnership::default(), true)
             };
+        if !committed_horizon_covers_camera {
+            self.virtual_terrain_presented_coverage_gap_frames = self
+                .virtual_terrain_presented_coverage_gap_frames
+                .saturating_add(1);
+        }
         let virtual_candidate_work =
             self.virtual_terrain_publication
                 .as_ref()
@@ -8870,10 +9089,10 @@ impl Renderer {
                 as u32,
             virtual_terrain_plan_last_selection: self.virtual_terrain_plan_last_selection,
             virtual_terrain_plan_last_invalidation: self.virtual_terrain_plan_last_invalidation,
-            virtual_terrain_plan_last_invalidation_line:
-                self.virtual_terrain_plan_last_invalidation_line,
-            virtual_terrain_publication_last_abort_line:
-                self.virtual_terrain_publication_last_abort_line,
+            virtual_terrain_plan_last_invalidation_line: self
+                .virtual_terrain_plan_last_invalidation_line,
+            virtual_terrain_publication_last_abort_line: self
+                .virtual_terrain_publication_last_abort_line,
             virtual_terrain_gpu_selected_pages: gpu_virtual_feedback
                 .as_ref()
                 .map_or(0, |feedback| feedback.selected_pages.len() as u32),
@@ -8900,7 +9119,8 @@ impl Renderer {
                 .map_or(0, |feedback| feedback.encoding_overflow_flags),
             virtual_terrain_gpu_matches_cpu_cut: gpu_virtual_matches_cpu,
             virtual_terrain_gpu_match_failure_flags: gpu_virtual_match_failure_flags,
-            virtual_terrain_coverage_fallback_active,
+            virtual_terrain_presented_coverage_gap_frames: self
+                .virtual_terrain_presented_coverage_gap_frames,
             virtual_terrain_published_pages: published_virtual_pages.len() as u32,
             virtual_terrain_published_ownerless_roots: published_virtual_ownerless_roots as u32,
             virtual_terrain_published_exact_pages: published_virtual_exact_pages as u32,
@@ -10046,7 +10266,8 @@ fn collect_opaque_draw_lists(
                 }
             }
             if slice.render_layer != RenderLayer::Opaque
-                || virtual_ownership.covers_aabb(slice.bounds_min, slice.bounds_max)
+                || (*key != EXACT_VOLUME_FRONTIER_MESH_KEY
+                    && virtual_ownership.covers_aabb(slice.bounds_min, slice.bounds_max))
             {
                 continue;
             }
@@ -12465,6 +12686,7 @@ mod tests {
                 revision: 17,
                 content_fingerprint: [0xab; 32],
                 representation: TerrainPageRepresentationKind::SparseVoxelBrick,
+                topology: voxels_world::TerrainTopologyClass::Volumetric,
                 heightfield_finer_neighbor_sides: [false; 4],
                 heightfield_ground_corner_bits: [0; 4],
                 heightfield_ground_boundary_bits: [[0; TERRAIN_PAGE_EDGE_SAMPLES as usize + 1]; 4],
@@ -13539,10 +13761,10 @@ mod tests {
     }
 
     #[test]
-    fn presentation_reversal_supersedes_the_frozen_intermediate_request() {
+    fn presentation_reversal_keeps_a_frozen_request_while_it_still_covers_the_target() {
         let mut envelopes = crate::virtual_terrain::PresentationEnvelopeCache::default();
-        let envelope_a = envelopes.resolve([0.1, 0.0, 0.1], 0.0, 20.0, 64, 16);
-        let envelope_b = envelopes.resolve([9.7, 0.0, 0.1], 0.0, 20.0, 64, 16);
+        let envelope_a = envelopes.resolve([0.1, 0.0, 0.1], 12.8, 20.0, 256, 16);
+        let envelope_b = envelopes.resolve([9.7, 0.0, 0.1], 12.8, 20.0, 256, 16);
         assert_ne!(envelope_a, envelope_b);
         let request_b = VirtualTerrainRequestId(41);
         let publication_b = test_publication(
@@ -13552,14 +13774,28 @@ mod tests {
             Some(99),
         );
 
-        assert!(!virtual_terrain_publication_is_superseded(
+        assert!(!virtual_terrain_publication_misses_target(
             Some(&publication_b),
-            &envelope_b,
+            [9.7, 0.0, 0.1],
         ));
         let mut candidate = Some(publication_b);
         assert!(
-            take_superseded_virtual_terrain_publication(&mut candidate, &envelope_a),
-            "A to B to A must discard B before its late generation can be admitted",
+            !take_virtual_terrain_publication_missing_target(
+                &mut candidate,
+                [0.1, 0.0, 0.1],
+            ),
+            "overlapping exact domains must preserve useful work during A to B to A motion",
+        );
+        assert_eq!(
+            candidate.as_ref().map(|publication| publication.request),
+            Some(request_b),
+        );
+        assert!(
+            take_virtual_terrain_publication_missing_target(
+                &mut candidate,
+                [-30.0, 0.0, 0.1],
+            ),
+            "a target outside the frozen exact domain must supersede it",
         );
         assert!(candidate.is_none());
         assert_eq!(
@@ -14482,8 +14718,7 @@ mod tests {
             ridge: 0.0,
             route: None,
         };
-        let sampled_page =
-            |key: TerrainPageKey, axis: FaceAxis, lower_height, higher_height| {
+        let sampled_page = |key: TerrainPageKey, axis: FaceAxis, lower_height, higher_height| {
             let [[minimum_x, minimum_z], _] = key.horizontal_bounds().unwrap();
             let samples = (0..edge)
                 .flat_map(|z| {
@@ -14511,31 +14746,24 @@ mod tests {
             )
             .unwrap()
         };
-        let exact_page =
-            |key: TerrainPageKey, axis: FaceAxis, lower_height, higher_height| {
-            voxels_world::build_exact_surface_terrain_page(
-                source,
-                key,
-                1,
-                [-4, 16],
-                |coord| {
-                    let coordinate = match axis {
-                        FaceAxis::X => coord.x,
-                        FaceAxis::Z => coord.z,
-                        FaceAxis::Y => unreachable!(),
-                    };
-                    let (height, material) = if coordinate < 0 {
-                        (lower_height, Material::Stone)
-                    } else {
-                        (higher_height, Material::Dirt)
-                    };
-                    if coord.y <= height {
-                        material
-                    } else {
-                        Material::Air
-                    }
-                },
-            )
+        let exact_page = |key: TerrainPageKey, axis: FaceAxis, lower_height, higher_height| {
+            voxels_world::build_exact_surface_terrain_page(source, key, 1, [-4, 16], |coord| {
+                let coordinate = match axis {
+                    FaceAxis::X => coord.x,
+                    FaceAxis::Z => coord.z,
+                    FaceAxis::Y => unreachable!(),
+                };
+                let (height, material) = if coordinate < 0 {
+                    (lower_height, Material::Stone)
+                } else {
+                    (higher_height, Material::Dirt)
+                };
+                if coord.y <= height {
+                    material
+                } else {
+                    Material::Air
+                }
+            })
             .unwrap()
         };
         let seam_faces = |page_quads: [Vec<GpuQuad>; 2], axis: FaceAxis| {
@@ -14560,8 +14788,7 @@ mod tests {
                         FaceAxis::Z => 2,
                         FaceAxis::Y => unreachable!(),
                     };
-                    let plane =
-                        quad.origin[normal_axis] + i32::from(matches!(face, 0 | 4));
+                    let plane = quad.origin[normal_axis] + i32::from(matches!(face, 0 | 4));
                     if plane != 0 {
                         continue;
                     }
@@ -14617,8 +14844,7 @@ mod tests {
                                 lower_height,
                                 higher_height,
                             ))
-                            .unwrap()
-                            ,
+                            .unwrap(),
                             {
                                 let page =
                                     sampled_page(higher_key, axis, lower_height, higher_height);
@@ -14681,12 +14907,14 @@ mod tests {
                         usize::try_from((lower_height - higher_height).abs()).unwrap()
                             * TERRAIN_PAGE_EDGE_SAMPLES as usize
                     );
-                    assert!(faces.iter().all(
-                        |((_, _, face, material), count)| *face == expected_face
-                            && *material == expected_material
-                            && *count == 1
-                    ));
-                };
+                    assert!(
+                        faces
+                            .iter()
+                            .all(|((_, _, face, material), count)| *face == expected_face
+                                && *material == expected_material
+                                && *count == 1)
+                    );
+                }
             }
         }
     }
@@ -14975,7 +15203,10 @@ mod tests {
         let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 2);
         let incomplete = root.refinement_children().unwrap()[..2].to_vec();
         assert_eq!(
-            VirtualTerrainOwnership::from_cut(&virtual_cut_with_selected(incomplete)),
+            VirtualTerrainOwnership::from_cut(
+                &virtual_cut_with_selected(incomplete),
+                |_| Some(voxels_world::TerrainTopologyClass::Volumetric),
+            ),
             Err(VirtualTerrainRendererError::IncompleteRootPartition(root))
         );
     }
@@ -14983,9 +15214,10 @@ mod tests {
     #[test]
     fn virtual_ownership_covers_only_complete_half_open_surface_columns() {
         let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 2);
-        let ownership = VirtualTerrainOwnership::from_cut(&virtual_cut_with_selected(
-            root.refinement_children().unwrap(),
-        ))
+        let ownership = VirtualTerrainOwnership::from_cut(
+            &virtual_cut_with_selected(root.refinement_children().unwrap()),
+            |_| Some(voxels_world::TerrainTopologyClass::Volumetric),
+        )
         .unwrap();
         assert!(ownership.covers_aabb(
             glam::Vec3::new(-100.0, -10_000.0, 6_600.0),
@@ -14994,6 +15226,21 @@ mod tests {
         assert!(!ownership.covers_aabb(
             glam::Vec3::new(-1.0, -1.0, 6_600.0),
             glam::Vec3::new(1.0, 1.0, 6_650.0),
+        ));
+    }
+
+    #[test]
+    fn height_surface_ownership_does_not_hide_enclosed_canonical_volume() {
+        let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 2);
+        let ownership = VirtualTerrainOwnership::from_cut(
+            &virtual_cut_with_selected(root.refinement_children().unwrap()),
+            |_| Some(voxels_world::TerrainTopologyClass::SingleRunColumns),
+        )
+        .unwrap();
+
+        assert!(!ownership.covers_aabb(
+            glam::Vec3::new(-100.0, -10_000.0, 6_600.0),
+            glam::Vec3::new(-50.0, 10_000.0, 6_650.0),
         ));
     }
 }

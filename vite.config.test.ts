@@ -3,6 +3,7 @@ import {
   browserWasmProfile,
   isNativeWorldServiceInput,
   pathBelongsTo,
+  WatchedInputContentChanges,
   watchRustInputChanges,
   worldServiceDevelopmentProfile,
   worldServiceListenAddress,
@@ -15,17 +16,30 @@ import {
 describe("Rust WASM development watcher", () => {
   it("rebuilds for changed, added, and removed Rust inputs", () => {
     const registrations = new Map<string, (file: string) => void>();
-    const listener = (): void => undefined;
+    const observed: string[] = [];
 
     watchRustInputChanges(
       {
         on: (event, registered) => registrations.set(event, registered),
       },
-      listener,
+      (file, event) => observed.push(`${event}:${file}`),
     );
 
     expect([...registrations.keys()]).toEqual(["add", "change", "unlink"]);
-    expect([...registrations.values()]).toEqual([listener, listener, listener]);
+    registrations.get("add")?.("added.rs");
+    registrations.get("change")?.("changed.rs");
+    registrations.get("unlink")?.("removed.rs");
+    expect(observed).toEqual(["add:added.rs", "change:changed.rs", "unlink:removed.rs"]);
+  });
+
+  it("arms from initial content and rejects an unchanged watcher notification", () => {
+    const changes = new WatchedInputContentChanges();
+    const file = new URL("vite.config.test.ts", import.meta.url).pathname;
+
+    expect(changes.observe(file, "add", false)).toBe(false);
+    expect(changes.observe(file, "change", true)).toBe(false);
+    expect(changes.observe(file, "unlink", true)).toBe(true);
+    expect(changes.observe(file, "add", true)).toBe(true);
   });
 });
 

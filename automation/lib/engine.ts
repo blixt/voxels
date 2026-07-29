@@ -73,31 +73,49 @@ export class EngineClient {
     );
     const expected = JSON.parse(metadata) as {
       camera?: { eyeMetres?: number[]; yawRadians?: number; pitchRadians?: number };
+      presentation?: { selectedCutFingerprint?: string };
     };
     const eye = expected.camera?.eyeMetres;
+    const cutFingerprint = expected.presentation?.selectedCutFingerprint;
     if (
       eye?.length !== 3 ||
       !eye.every(Number.isFinite) ||
       !Number.isFinite(expected.camera?.yawRadians) ||
-      !Number.isFinite(expected.camera?.pitchRadians)
+      !Number.isFinite(expected.camera?.pitchRadians) ||
+      !/^[0-9a-f]{16}$/u.test(cutFingerprint ?? "")
     ) {
-      throw new Error("reproduction metadata omitted the exact camera pose");
+      throw new Error("reproduction metadata omitted the exact camera pose or terrain cut");
     }
-    return this.waitForSnapshot(
+    const fingerprint = BigInt(`0x${cutFingerprint}`);
+    const expectedLow24 = Number(fingerprint & 0xff_ff_ffn);
+    const expectedHigh24 = Number((fingerprint >> 24n) & 0xff_ff_ffn);
+    const snapshot = await this.waitForSnapshot(
       (snapshot) =>
-        Math.hypot(
-          snapshotValue(snapshot, "cameraX") - eye[0]!,
-          snapshotValue(snapshot, "cameraY") - eye[1]!,
-          snapshotValue(snapshot, "cameraZ") - eye[2]!,
-        ) <= 0.000_01 &&
-        Math.abs(snapshotValue(snapshot, "yaw") - expected.camera!.yawRadians!) <= 0.000_01 &&
-        Math.abs(snapshotValue(snapshot, "pitch") - expected.camera!.pitchRadians!) <= 0.000_01,
+        snapshotValue(snapshot, "reproductionInvalidated") === 1 ||
+        (snapshotValue(snapshot, "reproductionActive") === 1 &&
+          snapshotValue(snapshot, "clientViewGoalKind") === 0 &&
+          snapshotValue(snapshot, "terrainReady") === 1 &&
+          snapshotValue(snapshot, "virtualTerrainPresentedSnapshotMatchesCut") === 1 &&
+          snapshotValue(snapshot, "virtualTerrainCutFingerprintLow24") === expectedLow24 &&
+          snapshotValue(snapshot, "virtualTerrainCutFingerprintHigh24") === expectedHigh24 &&
+          Math.hypot(
+            snapshotValue(snapshot, "cameraX") - eye[0]!,
+            snapshotValue(snapshot, "cameraY") - eye[1]!,
+            snapshotValue(snapshot, "cameraZ") - eye[2]!,
+          ) <= 0.000_01 &&
+          Math.abs(snapshotValue(snapshot, "yaw") - expected.camera!.yawRadians!) <= 0.000_01 &&
+          Math.abs(snapshotValue(snapshot, "pitch") - expected.camera!.pitchRadians!) <= 0.000_01),
       {
         timeoutMs: 60_000,
         ...options,
-        description: options.description ?? "engine did not freeze the exact reproduction camera",
+        description:
+          options.description ?? "engine did not publish the exact reproduction camera and cut",
       },
     );
+    if (snapshotValue(snapshot, "reproductionInvalidated") === 1) {
+      throw new Error("authoritative world changes invalidated the screenshot reproduction cut");
+    }
+    return snapshot;
   }
 
   async clearReproduction(): Promise<void> {

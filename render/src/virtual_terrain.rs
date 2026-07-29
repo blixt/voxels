@@ -1169,6 +1169,7 @@ fn segment_aabb_distance_squared_2d(
 pub enum VirtualTerrainError {
     InvalidCapacity,
     InvalidView,
+    InvalidSelection,
     InvalidDirectory,
     DirectoryCapacity,
     DirectoryCollision(TerrainPageKey),
@@ -1190,6 +1191,9 @@ impl fmt::Display for VirtualTerrainError {
         match self {
             Self::InvalidCapacity => formatter.write_str("invalid virtual terrain capacity"),
             Self::InvalidView => formatter.write_str("invalid virtual terrain view"),
+            Self::InvalidSelection => {
+                formatter.write_str("invalid virtual terrain selected-page partition")
+            }
             Self::InvalidDirectory => formatter.write_str("invalid virtual terrain directory"),
             Self::DirectoryCapacity => {
                 formatter.write_str("virtual terrain directory capacity exceeded")
@@ -1312,6 +1316,178 @@ impl VirtualTerrainHierarchy {
             0,
             0,
         )
+    }
+
+    /// Reconstructs an immutable cut named by screenshot reproduction metadata.
+    ///
+    /// The page keys alone are not trusted: every owner must still be resident under the current
+    /// authoritative source, the selection must remain non-overlapping and balanced, and the
+    /// fingerprint is recomputed from current revisions/content. The caller separately proves the
+    /// selection is the exact active-root partition for the captured view before publication.
+    pub fn cut_from_resident_selection(
+        &self,
+        mut selected: Vec<TerrainPageKey>,
+    ) -> Result<VirtualTerrainCut, VirtualTerrainError> {
+        if selected.is_empty() {
+            return Err(VirtualTerrainError::InvalidSelection);
+        }
+        selected.sort_unstable();
+        if let Some(duplicate) = selected
+            .windows(2)
+            .find(|pair| pair[0] == pair[1])
+            .map(|pair| pair[0])
+        {
+            return Err(VirtualTerrainError::InvalidPage(duplicate));
+        }
+        if selected.len() > self.capacity.max_selected_pages {
+            return Err(VirtualTerrainError::ResidentPageCapacity);
+        }
+        for key in selected.iter().copied() {
+            if self.resident.get(&key).is_none() {
+                return Err(VirtualTerrainError::UnknownPage(key));
+            }
+        }
+        let selected_set = selected.iter().copied().collect::<BTreeSet<_>>();
+        for key in selected.iter().copied() {
+            let mut ancestor = key.parent();
+            while let Some(candidate) = ancestor {
+                if selected_set.contains(&candidate) {
+                    return Err(VirtualTerrainError::InvalidPage(candidate));
+                }
+                ancestor = candidate.parent();
+            }
+        }
+        let exact_surface_lod_discontinuities =
+            exact_surface_lod_discontinuity_edges(&selected);
+        let surface_handoff_mismatches =
+            level_zero_surface_handoff_audit(&selected, self).mismatches;
+        let mut selected_primitives = 0_usize;
+        let mut selected_encoded_bytes = 0_usize;
+        for key in &selected {
+            let resident = self
+                .resident
+                .get(key)
+                .expect("resident selection was validated above");
+            selected_primitives =
+                selected_primitives.saturating_add(resident.primitive_count);
+            selected_encoded_bytes =
+                selected_encoded_bytes.saturating_add(resident.encoded_bytes);
+        }
+        let fingerprint = self.selected_fingerprint(&selected);
+        Ok(VirtualTerrainCut {
+            selected_pages: selected,
+            requested_pages: Vec::new(),
+            refinement_roots: Vec::new(),
+            ownerless_roots: Vec::new(),
+            fingerprint,
+            visited_nodes: 0,
+            selected_primitives,
+            selected_encoded_bytes,
+            feedback_overflow: false,
+            selection_overflow: false,
+            traversal_overflow: false,
+            incoherent_replacement_groups: 0,
+            exact_surface_lod_discontinuities,
+            surface_handoff_mismatches,
+        })
+    }
+
+    pub(crate) fn touch_resident_selection(
+        &mut self,
+        selected: &[TerrainPageKey],
+    ) -> Result<(), VirtualTerrainError> {
+        if selected
+            .iter()
+            .any(|key| !self.resident.contains_key(key))
+        {
+            return Err(VirtualTerrainError::InvalidSelection);
+        }
+        self.frame = self.frame.wrapping_add(1).max(1);
+        let frame = self.frame;
+        for key in selected {
+            self.resident
+                .get_mut(key)
+                .expect("resident selection was validated above")
+                .last_selected_frame = frame;
+        }
+        Ok(())
+    }
+
+    /// Proves that `selected` exactly partitions every active root required by this view.
+    ///
+    /// This mirrors the normal cut builder's ownership measure instead of trusting screenshot
+    /// metadata to name every visible surface or volume owner.
+    pub fn selection_is_exact_partition_for_view(
+        &self,
+        selected: &[TerrainPageKey],
+        view: VirtualTerrainView,
+        envelope: &PresentationEnvelope,
+    ) -> bool {
+        if selected.is_empty()
+            || selected.windows(2).any(|pair| pair[0] >= pair[1])
+            || !envelope.is_complete()
+        {
+            return false;
+        }
+        let roots = self
+            .active_roots
+            .iter()
+            .copied()
+            .filter(|key| {
+                self.nodes.get(key).is_some_and(|node| {
+                    page_is_visible(node.bounds, view)
+                        || envelope.exact_surface_domain().intersects_page(*key)
+                        || envelope.requires_horizon_owner(*key)
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        if roots.is_empty() {
+            return false;
+        }
+        let selected_set = selected.iter().copied().collect::<BTreeSet<_>>();
+        if selected_set.len() != selected.len() {
+            return false;
+        }
+        let mut selected_measure = BTreeMap::<TerrainPageKey, u128>::new();
+        for key in selected_set {
+            let mut owner = None;
+            for level in key.level..=TERRAIN_COVERAGE_ROOT_LEVEL {
+                let Some(candidate) = key.ancestor_at(level) else {
+                    continue;
+                };
+                if roots.contains(&candidate) {
+                    owner = Some(candidate);
+                    break;
+                }
+            }
+            let Some(owner) = owner else {
+                return false;
+            };
+            if key.is_surface() != owner.is_surface() {
+                return false;
+            }
+            let branching = if owner.is_surface() { 4_u128 } else { 8_u128 };
+            let Some(measure) = branching.checked_pow(u32::from(key.level)) else {
+                return false;
+            };
+            let Some(total) = selected_measure
+                .get(&owner)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(measure)
+            else {
+                return false;
+            };
+            selected_measure.insert(owner, total);
+        }
+        roots.into_iter().all(|root| {
+            let branching = if root.is_surface() { 4_u128 } else { 8_u128 };
+            branching
+                .checked_pow(u32::from(root.level))
+                .is_some_and(|expected| {
+                    selected_measure.get(&root).copied().unwrap_or(0) == expected
+                })
+        })
     }
 
     pub fn nodes(&self) -> impl Iterator<Item = TerrainHierarchyNode> + '_ {
@@ -4695,6 +4871,67 @@ mod tests {
                 assert_ne!(right.ancestor_at(1), Some(*left));
             }
         }
+    }
+
+    #[test]
+    fn resident_selection_reconstructs_the_same_content_sensitive_cut() {
+        let (mut hierarchy, pages) = hierarchy();
+        for page in pages {
+            hierarchy.install_page(page).unwrap();
+        }
+        let selected_view = view(true);
+        let selected = select_cut(&mut hierarchy, selected_view).unwrap();
+        let reconstructed = hierarchy
+            .cut_from_resident_selection(selected.selected_pages.clone())
+            .unwrap();
+        let envelope = PresentationEnvelopeCache::default().resolve(
+            selected_view.camera_position_metres,
+            1.0,
+            selected_view.far_metres,
+            16_384,
+            16,
+        );
+
+        assert!(reconstructed.is_renderable());
+        assert_eq!(reconstructed.selected_pages, selected.selected_pages);
+        assert_eq!(reconstructed.fingerprint, selected.fingerprint);
+        assert_eq!(
+            reconstructed.selected_primitives,
+            selected.selected_primitives
+        );
+        assert_eq!(
+            reconstructed.selected_encoded_bytes,
+            selected.selected_encoded_bytes
+        );
+        assert!(hierarchy.selection_is_exact_partition_for_view(
+            &reconstructed.selected_pages,
+            selected_view,
+            &envelope,
+        ));
+        assert!(!hierarchy.selection_is_exact_partition_for_view(
+            &reconstructed.selected_pages[1..],
+            selected_view,
+            &envelope,
+        ));
+    }
+
+    #[test]
+    fn resident_selection_rejects_duplicate_and_overlapping_owners() {
+        let (mut hierarchy, pages) = hierarchy();
+        for page in &pages {
+            hierarchy.install_page(page.clone()).unwrap();
+        }
+        let child = pages.iter().find(|page| page.key.level == 0).unwrap().key;
+        let parent = child.parent().unwrap();
+
+        assert_eq!(
+            hierarchy.cut_from_resident_selection(vec![child, child]),
+            Err(VirtualTerrainError::InvalidPage(child))
+        );
+        assert_eq!(
+            hierarchy.cut_from_resident_selection(vec![parent, child]),
+            Err(VirtualTerrainError::InvalidPage(parent))
+        );
     }
 
     #[test]

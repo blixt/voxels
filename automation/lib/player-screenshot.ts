@@ -43,6 +43,10 @@ export interface PlayerScreenshotMetadata {
     readonly selectedCut: {
       readonly kind: "virtualTerrain";
       readonly cut: {
+        readonly renderable: boolean;
+        readonly feedbackOverflow: boolean;
+        readonly selectionOverflow: boolean;
+        readonly traversalOverflow: boolean;
         readonly selectedPages: readonly {
           readonly level: number;
           readonly coord: readonly [number, number, number];
@@ -274,6 +278,10 @@ export function assertPlayerScreenshotMetadata(metadata: unknown): PlayerScreens
         candidate.presentation.selectedCutFingerprint) ||
     !Array.isArray(candidate.presentation.selectedCut.cut?.selectedPages) ||
     !Array.isArray(candidate.presentation.selectedCut.cut?.refinementRoots) ||
+    typeof candidate.presentation.selectedCut.cut?.renderable !== "boolean" ||
+    typeof candidate.presentation.selectedCut.cut?.feedbackOverflow !== "boolean" ||
+    typeof candidate.presentation.selectedCut.cut?.selectionOverflow !== "boolean" ||
+    typeof candidate.presentation.selectedCut.cut?.traversalOverflow !== "boolean" ||
     typeof exactSurfaceDomain?.complete !== "boolean" ||
     !Number.isSafeInteger(exactSurfaceDomain.requiredLeaves) ||
     exactSurfaceDomain.requiredLeaves < 0 ||
@@ -363,10 +371,16 @@ async function completedDownload(download: Download): Promise<{
 }
 
 /** Uses the actual gameplay key binding and downloaded PNG, with World Lab remaining closed. */
-export async function takePlayerScreenshot(page: Page): Promise<PlayerScreenshot> {
+export async function takePlayerScreenshot(
+  page: Page,
+  { timeoutMs = 240_000 }: { readonly timeoutMs?: number } = {},
+): Promise<PlayerScreenshot> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("player screenshot timeout must be a positive integer");
+  }
   // The diagnostic attachment reads five full-resolution GPU channels and deflates them into the
   // PNG. SwiftShader in headless CI is deliberately much slower than a player's hardware GPU.
-  const pending = page.waitForEvent("download", { timeout: 240_000 });
+  const pending = page.waitForEvent("download", { timeout: timeoutMs });
   await page.keyboard.press("F2");
   const { filename, png } = await completedDownload(await pending);
   return readPlayerScreenshot(png, filename);

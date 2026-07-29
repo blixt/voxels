@@ -22,6 +22,7 @@ export interface PlayerPresentationTraceFrame {
   readonly frameSequence: number;
   readonly camera: readonly [number, number, number];
   readonly terrainReady: boolean;
+  readonly canonicalLatticePresented: boolean;
   readonly renderMode: number;
   readonly published: {
     readonly pages: number;
@@ -88,6 +89,7 @@ export interface PlayerPresentationTraceFrame {
     readonly locus: readonly [number, number, number, number];
   };
   readonly presentedCameraInsideCommittedEnvelope: boolean;
+  readonly presentedCoverageGapFrames: number;
   readonly presentationTarget: readonly [number, number, number];
   readonly presentationGate: {
     readonly active: boolean;
@@ -161,6 +163,7 @@ function traceFrame(
       snapshotValue(snapshot, "cameraZ"),
     ],
     terrainReady: snapshotValue(snapshot, "terrainReady") === 1,
+    canonicalLatticePresented: snapshotValue(snapshot, "canonicalLatticePresented") === 1,
     renderMode: snapshotValue(snapshot, "virtualTerrainMode"),
     published: {
       pages: snapshotValue(snapshot, "virtualTerrainPublishedPages"),
@@ -259,6 +262,7 @@ function traceFrame(
     },
     presentedCameraInsideCommittedEnvelope:
       snapshotValue(snapshot, "presentedCameraInsideCommittedEnvelope") === 1,
+    presentedCoverageGapFrames: snapshotValue(snapshot, "virtualTerrainPresentedCoverageGapFrames"),
     presentationTarget: [
       snapshotValue(snapshot, "presentationTargetX"),
       snapshotValue(snapshot, "presentationTargetY"),
@@ -339,6 +343,11 @@ function invalidCommittedPresentation(frame: PlayerPresentationTraceFrame): stri
   }
   if (frame.terrainReady && !frame.presentedCameraInsideCommittedEnvelope) {
     reasons.push("presented gameplay camera is outside the committed exact envelope");
+  }
+  if (frame.presentedCoverageGapFrames !== 0) {
+    reasons.push(
+      `renderer accumulated ${frame.presentedCoverageGapFrames} frame(s) outside its complete terrain horizon`,
+    );
   }
   if (
     frame.terrainReady &&

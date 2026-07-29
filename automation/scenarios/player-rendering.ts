@@ -1,12 +1,16 @@
 import type { Page } from "playwright";
 import { BrowserCapability } from "../lib/browser.ts";
 import { type EngineClient, snapshotValue } from "../lib/engine.ts";
-import { analyzeDiagnosticSky } from "../lib/image.ts";
+import { analyzeDiagnosticSky, compareRenderedImages } from "../lib/image.ts";
 import {
   PlayerPresentationRecorder,
   type PlayerPresentationViolation,
 } from "../lib/player-presentation-recorder.ts";
-import { summarizeSurfaceCutAdjacency, takePlayerScreenshot } from "../lib/player-screenshot.ts";
+import {
+  type PlayerScreenshot,
+  summarizeSurfaceCutAdjacency,
+  takePlayerScreenshot,
+} from "../lib/player-screenshot.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { startDevelopmentWorldStack } from "../lib/world.ts";
 
@@ -18,8 +22,10 @@ const STABLE_CUT_DURATION_MS = 10_000;
 const STABILITY_TIMEOUT_MS = 60_000;
 const MOVEMENT_PROGRESS_EPSILON_METRES = 0.005;
 const MAX_PLAYER_NO_PROGRESS_MS = 350;
+const MAX_PLAYER_EXACT_QUALITY_DEBT_MS = 1_500;
 const MAX_SPECTATOR_NO_PROGRESS_MS = 250;
-const SPECTATOR_TRAVEL_MS = 12_000;
+const SPECTATOR_TRAVEL_MS = 18_000;
+const JOURNEY_SCREENSHOT_TIMEOUT_MS = 45_000;
 
 interface AuditedCapture {
   readonly exactPages: number;
@@ -28,6 +34,7 @@ interface AuditedCapture {
   readonly terrainGeneration: number | null;
   readonly terrainRevisionDigest: string;
   readonly largestEnclosedSkyComponent: number;
+  readonly terrainInteriorSkyPixels: number;
   readonly settleMs: number;
 }
 
@@ -68,16 +75,28 @@ async function auditCapture(
   page: Page,
   engine: EngineClient,
   label: string,
-  frame: readonly number[],
   settleMs: number,
+  terrainInteriorY0 = 0.48,
+  requireVisibleNearField = true,
+  requireLowerTerrainCoverage = true,
 ): Promise<AuditedCapture> {
   const png = await page.screenshot({ type: "png" });
   await context.artifacts.write(label, `${label}.png`, png, "image/png");
-  const sky = await analyzeDiagnosticSky(page, png);
+  const [sky, terrainInteriorSky] = await Promise.all([
+    analyzeDiagnosticSky(page, png),
+    analyzeDiagnosticSky(page, png, {
+      x0: 0.04,
+      x1: 0.96,
+      y0: terrainInteriorY0,
+      y1: 0.98,
+    }),
+  ]);
   await engine.setGeometrySourceDebug(true);
   let diagnostic;
   try {
-    diagnostic = await takePlayerScreenshot(page);
+    diagnostic = await takePlayerScreenshot(page, {
+      timeoutMs: JOURNEY_SCREENSHOT_TIMEOUT_MS,
+    });
     if (!diagnostic.metadata.render.geometrySourceDebug) {
       throw new Error(`${label} source-ownership capture lost its requested renderer state`);
     }
@@ -103,7 +122,10 @@ async function auditCapture(
     );
   }
   const nearby = diagnostic.ownership?.summarizeNearby(diagnostic.metadata.camera.eyeMetres, 12.8);
-  if (nearby === undefined || nearby.nearbyOwnedPixels === 0) {
+  if (nearby === undefined || nearby.ownedPixels === 0) {
+    throw new Error(`${label} produced no machine-readable visible terrain ownership`);
+  }
+  if (requireVisibleNearField && nearby.nearbyOwnedPixels === 0) {
     throw new Error(`${label} produced no machine-readable nearby terrain ownership`);
   }
   if (nearby.nearbyCoarsePixels > 0) {
@@ -111,24 +133,34 @@ async function auditCapture(
       `${label} exposed ${nearby.nearbyCoarsePixels}/${nearby.nearbyOwnedPixels} coarse terrain pixels inside the exact 12.8m player vicinity; ${JSON.stringify(nearby)}`,
     );
   }
-  const exactPages = snapshotValue(frame, "virtualTerrainPublishedExactPages");
+  const cut = diagnostic.metadata.presentation.selectedCut.cut;
+  if (cut === null) {
+    throw new Error(`${label} capture omitted its published virtual terrain cut`);
+  }
+  const exactPages = cut.selectedPages.filter(
+    (page) => page.level === 0 && page.coord[1] === -2_147_483_648,
+  ).length;
+  const exactDomain = diagnostic.metadata.presentation.virtualTerrain.exactSurfaceDomain;
   if (
-    snapshotValue(frame, "terrainReady") !== 1 ||
-    snapshotValue(frame, "virtualTerrainGpuMatchesCpuCut") !== 1 ||
-    snapshotValue(frame, "virtualTerrainGpuEncodingOverflowFlags") !== 0 ||
-    snapshotValue(frame, "virtualTerrainPresentedSnapshotMatchesCut") !== 1 ||
+    diagnostic.metadata.presentation.virtualTerrain.mode !== "visible" ||
+    !cut.renderable ||
+    cut.ownerlessRoots.length !== 0 ||
+    cut.feedbackOverflow ||
+    cut.selectionOverflow ||
+    cut.traversalOverflow ||
     exactPages === 0 ||
-    snapshotValue(frame, "virtualTerrainPublishedMinimumLevel") !== 0
+    !exactDomain.coreComplete ||
+    exactDomain.coreRequiredLeaves === 0 ||
+    exactDomain.coreCurrentCoverage !== exactDomain.coreRequiredLeaves
   ) {
     throw new Error(`${label} did not retain its exact playable terrain vicinity`);
   }
-  if (snapshotValue(frame, "virtualTerrainPublishedExactLodDiscontinuities") !== 0) {
+  if (cut.exactSurfaceLodDiscontinuities !== 0) {
     throw new Error(
       `${label} published a skipped hierarchy level at the exact-player transition frontier`,
     );
   }
   if (sky.largestEnclosedComponentPixels > 0) {
-    const cut = diagnostic.metadata.presentation.selectedCut.cut;
     const firstHole = sky.enclosedSampleCoordinates[0];
     const machineEvidence = {
       exactSurfaceLodDiscontinuities: cut?.exactSurfaceLodDiscontinuities,
@@ -149,13 +181,19 @@ async function auditCapture(
       `${label} exposed a ${sky.largestEnclosedComponentPixels}-pixel enclosed magenta terrain hole at ${JSON.stringify(sky.enclosedSampleCoordinates)}; ${JSON.stringify(machineEvidence)}`,
     );
   }
+  if (requireLowerTerrainCoverage && terrainInteriorSky.diagnosticSkyPixels > 0) {
+    throw new Error(
+      `${label} exposed ${terrainInteriorSky.diagnosticSkyPixels} diagnostic-sky pixels below the conservative terrain silhouette at ${JSON.stringify(terrainInteriorSky.sampleCoordinates)}; boundary-connected cracks are terrain holes too`,
+    );
+  }
   return {
     exactPages,
-    cutFingerprint: `${snapshotValue(frame, "virtualTerrainCutFingerprintHigh24")}:${snapshotValue(frame, "virtualTerrainCutFingerprintLow24")}`,
+    cutFingerprint: diagnostic.metadata.presentation.selectedCutFingerprint,
     terrainRequest: diagnostic.metadata.presentation.publishedClientView.terrainRequest,
     terrainGeneration: diagnostic.metadata.presentation.publishedClientView.terrainGeneration,
     terrainRevisionDigest: diagnostic.metadata.presentation.publishedClientView.revisionDigest,
     largestEnclosedSkyComponent: sky.largestEnclosedComponentPixels,
+    terrainInteriorSkyPixels: terrainInteriorSky.diagnosticSkyPixels,
     settleMs,
   };
 }
@@ -193,8 +231,16 @@ async function walkBeyondProtectedPedestal(
   readonly distanceMetres: number;
   readonly longestNoProgressMs: number;
   readonly longestFrameWaitMs: number;
+  readonly longestExactQualityDebtMs: number;
+  readonly longestExactQualityDebtMetres: number;
 }> {
   const before = recorder.latestSnapshot;
+  const forward = [
+    Math.sin(snapshotValue(before, "yaw")),
+    -Math.cos(snapshotValue(before, "yaw")),
+  ] as const;
+  const right = [-forward[1], forward[0]] as const;
+  const coverageGapBaseline = snapshotValue(before, "virtualTerrainPresentedCoverageGapFrames");
   await page.keyboard.down("ShiftLeft");
   await page.keyboard.down("KeyW");
   let distance = 0;
@@ -203,6 +249,10 @@ async function walkBeyondProtectedPedestal(
   let lastProgressAt = performance.now();
   let longestNoProgressMs = 0;
   let longestFrameWaitMs = 0;
+  let exactQualityDebtStartedAt: number | undefined;
+  let exactQualityDebtStartedMetres = 0;
+  let longestExactQualityDebtMs = 0;
+  let longestExactQualityDebtMetres = 0;
   try {
     const deadline = performance.now() + 20_000;
     let previousFrame = snapshotValue(recorder.latestSnapshot, "frameSequence");
@@ -215,27 +265,60 @@ async function walkBeyondProtectedPedestal(
       longestFrameWaitMs = Math.max(longestFrameWaitMs, performance.now() - frameWaitStarted);
       previousFrame = snapshotValue(current, "frameSequence");
       const observedAt = performance.now();
-      const stepDistance = Math.hypot(
-        snapshotValue(current, "cameraX") - snapshotValue(previous, "cameraX"),
-        snapshotValue(current, "cameraZ") - snapshotValue(previous, "cameraZ"),
-      );
-      if (stepDistance >= MOVEMENT_PROGRESS_EPSILON_METRES) {
+      const stepX = snapshotValue(current, "cameraX") - snapshotValue(previous, "cameraX");
+      const stepZ = snapshotValue(current, "cameraZ") - snapshotValue(previous, "cameraZ");
+      const forwardStep = stepX * forward[0] + stepZ * forward[1];
+      if (forwardStep >= MOVEMENT_PROGRESS_EPSILON_METRES) {
         lastProgressAt = observedAt;
       } else {
         longestNoProgressMs = Math.max(longestNoProgressMs, observedAt - lastProgressAt);
       }
       previous = current;
-      distance = Math.hypot(
-        snapshotValue(current, "cameraX") - snapshotValue(before, "cameraX"),
-        snapshotValue(current, "cameraZ") - snapshotValue(before, "cameraZ"),
-      );
+      const displacementX = snapshotValue(current, "cameraX") - snapshotValue(before, "cameraX");
+      const displacementZ = snapshotValue(current, "cameraZ") - snapshotValue(before, "cameraZ");
+      distance = displacementX * forward[0] + displacementZ * forward[1];
+      if (
+        snapshotValue(current, "virtualTerrainExactCoreComplete") === 1 &&
+        snapshotValue(current, "virtualTerrainExactCoreRequiredLeaves") > 0 &&
+        snapshotValue(current, "virtualTerrainExactCoreCurrentCoverage") ===
+          snapshotValue(current, "virtualTerrainExactCoreRequiredLeaves")
+      ) {
+        if (exactQualityDebtStartedAt !== undefined) {
+          longestExactQualityDebtMs = Math.max(
+            longestExactQualityDebtMs,
+            observedAt - exactQualityDebtStartedAt,
+          );
+          longestExactQualityDebtMetres = Math.max(
+            longestExactQualityDebtMetres,
+            distance - exactQualityDebtStartedMetres,
+          );
+          exactQualityDebtStartedAt = undefined;
+        }
+      } else {
+        if (exactQualityDebtStartedAt === undefined) {
+          exactQualityDebtStartedAt = observedAt;
+          exactQualityDebtStartedMetres = distance;
+        }
+      }
+      if (
+        snapshotValue(current, "virtualTerrainPresentedCoverageGapFrames") > coverageGapBaseline
+      ) {
+        throw new Error(
+          `renderer presented ${snapshotValue(current, "virtualTerrainPresentedCoverageGapFrames") - coverageGapBaseline} frame(s) after the camera outran its complete terrain horizon`,
+        );
+      }
       if (performance.now() >= nextPixelAudit) {
         const png = await page.screenshot({ type: "png" });
-        const [magenta, black] = await Promise.all([
+        const [magenta, terrainInteriorSky, black] = await Promise.all([
           analyzeDiagnosticSky(page, png),
+          analyzeDiagnosticSky(page, png, { x0: 0.04, x1: 0.96, y0: 0.58, y1: 0.98 }),
           analyzeDiagnosticSky(page, png, { x0: 0.05, x1: 0.95, y0: 0.08, y1: 0.58 }, "black"),
         ]);
-        if (magenta.largestEnclosedComponentPixels > 0 || black.largestComponentPixels >= 16) {
+        if (
+          magenta.largestEnclosedComponentPixels > 0 ||
+          terrainInteriorSky.diagnosticSkyPixels > 0 ||
+          black.largestComponentPixels >= 16
+        ) {
           await context.artifacts.write(
             "transient terrain hole during sprint",
             "during-sprint-transient-hole.png",
@@ -245,6 +328,7 @@ async function walkBeyondProtectedPedestal(
           throw new Error(
             `terrain exposed a transient hole after ${distance.toFixed(2)}m of sprinting: ` +
               `${magenta.largestEnclosedComponentPixels} enclosed magenta pixels, ` +
+              `${terrainInteriorSky.diagnosticSkyPixels} below-silhouette magenta pixels, ` +
               `${black.largestComponentPixels} contiguous black pixels`,
           );
         }
@@ -255,6 +339,16 @@ async function walkBeyondProtectedPedestal(
   } finally {
     await page.keyboard.up("KeyW");
     await page.keyboard.up("ShiftLeft");
+  }
+  if (exactQualityDebtStartedAt !== undefined) {
+    longestExactQualityDebtMs = Math.max(
+      longestExactQualityDebtMs,
+      performance.now() - exactQualityDebtStartedAt,
+    );
+    longestExactQualityDebtMetres = Math.max(
+      longestExactQualityDebtMetres,
+      distance - exactQualityDebtStartedMetres,
+    );
   }
   if (distance < targetMetres) {
     const evidence = {
@@ -272,6 +366,16 @@ async function walkBeyondProtectedPedestal(
       `player moved only ${distance.toFixed(2)}m of the requested ${targetMetres.toFixed(2)}m travel: ${JSON.stringify(recorder.latestFrame)}`,
     );
   }
+  const finalDisplacementX = snapshotValue(previous, "cameraX") - snapshotValue(before, "cameraX");
+  const finalDisplacementZ = snapshotValue(previous, "cameraZ") - snapshotValue(before, "cameraZ");
+  const lateralDriftMetres = Math.abs(
+    finalDisplacementX * right[0] + finalDisplacementZ * right[1],
+  );
+  if (lateralDriftMetres > 2) {
+    throw new Error(
+      `held forward sprint drifted ${lateralDriftMetres.toFixed(2)}m laterally while making ${distance.toFixed(2)}m forward progress`,
+    );
+  }
   if (longestNoProgressMs > MAX_PLAYER_NO_PROGRESS_MS) {
     throw new Error(
       `player stopped progressing for ${longestNoProgressMs.toFixed(1)}ms while sprint input remained held`,
@@ -282,7 +386,36 @@ async function walkBeyondProtectedPedestal(
       `renderer produced no frame for ${longestFrameWaitMs.toFixed(1)}ms during held sprint input`,
     );
   }
-  return { distanceMetres: distance, longestNoProgressMs, longestFrameWaitMs };
+  if (longestExactQualityDebtMs > MAX_PLAYER_EXACT_QUALITY_DEBT_MS) {
+    await context.artifacts.writeJson(
+      "camera-local exact terrain debt trace",
+      "player-exact-quality-debt.json",
+      {
+        longestExactQualityDebtMs,
+        longestExactQualityDebtMetres,
+        travelledMetres: distance,
+        latest: recorder.latestFrame,
+        trace: recorder.trace(),
+      },
+    );
+    const png = await page.screenshot({ type: "png" });
+    await context.artifacts.write(
+      "camera-local exact terrain debt view",
+      "player-exact-quality-debt.png",
+      png,
+      "image/png",
+    );
+    throw new Error(
+      `camera-local 10 cm terrain ownership fell behind for ${longestExactQualityDebtMs.toFixed(1)}ms / ${longestExactQualityDebtMetres.toFixed(2)}m during ordinary sprint`,
+    );
+  }
+  return {
+    distanceMetres: distance,
+    longestNoProgressMs,
+    longestFrameWaitMs,
+    longestExactQualityDebtMs,
+    longestExactQualityDebtMetres,
+  };
 }
 
 async function jumpAndLand(page: Page, recorder: PlayerPresentationRecorder): Promise<number> {
@@ -317,6 +450,11 @@ async function sustainedSpectatorTravel(
   readonly frames: number;
 }> {
   const before = recorder.latestSnapshot;
+  const yaw = snapshotValue(before, "yaw");
+  const pitch = snapshotValue(before, "pitch");
+  const cosPitch = Math.cos(pitch);
+  const forward = [Math.sin(yaw) * cosPitch, Math.sin(pitch), -Math.cos(yaw) * cosPitch] as const;
+  const coverageGapBaseline = snapshotValue(before, "virtualTerrainPresentedCoverageGapFrames");
   let previous = before;
   let previousFrame = snapshotValue(before, "frameSequence");
   let lastProgressAt = performance.now();
@@ -336,25 +474,37 @@ async function sustainedSpectatorTravel(
       previousFrame = snapshotValue(current, "frameSequence");
       frames += 1;
       const observedAt = performance.now();
-      const stepDistance = Math.hypot(
-        snapshotValue(current, "cameraX") - snapshotValue(previous, "cameraX"),
-        snapshotValue(current, "cameraY") - snapshotValue(previous, "cameraY"),
-        snapshotValue(current, "cameraZ") - snapshotValue(previous, "cameraZ"),
-      );
-      if (stepDistance >= MOVEMENT_PROGRESS_EPSILON_METRES) {
+      const forwardStep =
+        (snapshotValue(current, "cameraX") - snapshotValue(previous, "cameraX")) * forward[0] +
+        (snapshotValue(current, "cameraY") - snapshotValue(previous, "cameraY")) * forward[1] +
+        (snapshotValue(current, "cameraZ") - snapshotValue(previous, "cameraZ")) * forward[2];
+      if (forwardStep >= MOVEMENT_PROGRESS_EPSILON_METRES) {
         lastProgressAt = observedAt;
       } else {
         longestNoProgressMs = Math.max(longestNoProgressMs, observedAt - lastProgressAt);
       }
       previous = current;
+      if (
+        snapshotValue(current, "virtualTerrainPresentedCoverageGapFrames") > coverageGapBaseline
+      ) {
+        throw new Error(
+          `spectator outran the complete committed terrain horizon for ${snapshotValue(current, "virtualTerrainPresentedCoverageGapFrames") - coverageGapBaseline} frame(s)`,
+        );
+      }
     }
   } finally {
     await page.keyboard.up("KeyW");
   }
-  const distanceMetres = Math.hypot(
+  const displacement = [
     snapshotValue(previous, "cameraX") - snapshotValue(before, "cameraX"),
     snapshotValue(previous, "cameraY") - snapshotValue(before, "cameraY"),
     snapshotValue(previous, "cameraZ") - snapshotValue(before, "cameraZ"),
+  ] as const;
+  const distanceMetres =
+    displacement[0] * forward[0] + displacement[1] * forward[1] + displacement[2] * forward[2];
+  const totalDisplacement = Math.hypot(...displacement);
+  const lateralDriftMetres = Math.sqrt(
+    Math.max(0, totalDisplacement * totalDisplacement - distanceMetres * distanceMetres),
   );
   if (distanceMetres < 100) {
     throw new Error(
@@ -371,6 +521,11 @@ async function sustainedSpectatorTravel(
       `renderer produced no frame for ${longestFrameWaitMs.toFixed(1)}ms during held spectator input`,
     );
   }
+  if (lateralDriftMetres > 2) {
+    throw new Error(
+      `held spectator-forward input drifted ${lateralDriftMetres.toFixed(2)}m away from its commanded ray`,
+    );
+  }
   return { distanceMetres, longestNoProgressMs, longestFrameWaitMs, frames };
 }
 
@@ -379,8 +534,9 @@ async function waitForInventoryRevision(
   recorder: PlayerPresentationRecorder,
   previousRevision: number,
   description: string,
+  timeoutMs = 20_000,
 ): Promise<readonly number[]> {
-  const deadline = performance.now() + 20_000;
+  const deadline = performance.now() + timeoutMs;
   let sequence = snapshotValue(recorder.latestSnapshot, "frameSequence");
   while (performance.now() < deadline) {
     const inventory = await recorder.guard(engine.inventory());
@@ -410,6 +566,110 @@ function mostStockedMaterial(inventory: readonly number[]): {
   return { materialId, count };
 }
 
+async function verifyCaptureReplayAgainstCurrentWorld(
+  context: ScenarioContext,
+  page: Page,
+  engine: EngineClient,
+  recorder: PlayerPresentationRecorder,
+  capture: PlayerScreenshot,
+): Promise<number> {
+  const metadataText = JSON.stringify(capture.metadata);
+  const expectedFingerprint = BigInt(`0x${capture.metadata.presentation.selectedCutFingerprint}`);
+  const expectedLow24 = Number(expectedFingerprint & 0xff_ff_ffn);
+  const expectedHigh24 = Number((expectedFingerprint >> 24n) & 0xff_ff_ffn);
+  const before = recorder.latestSnapshot;
+  let applied = false;
+  try {
+    await recorder.guard(
+      engine.applyReproduction(metadataText, {
+        timeoutMs: 30_000,
+        description: "current authoritative world did not accept its own screenshot metadata",
+      }),
+    );
+    applied = true;
+    const committed = await recorder.waitFor(
+      (snapshot) =>
+        snapshotValue(snapshot, "clientViewGoalKind") === 0 &&
+        snapshotValue(snapshot, "reproductionActive") === 1 &&
+        snapshotValue(snapshot, "terrainReady") === 1 &&
+        snapshotValue(snapshot, "virtualTerrainPresentedSnapshotMatchesCut") === 1 &&
+        snapshotValue(snapshot, "virtualTerrainCutFingerprintLow24") === expectedLow24 &&
+        snapshotValue(snapshot, "virtualTerrainCutFingerprintHigh24") === expectedHigh24,
+      {
+        timeoutMs: 30_000,
+        description:
+          "screenshot metadata did not restore its exact cut in the same authoritative world",
+      },
+    );
+    await recorder.waitForFrameAfter(snapshotValue(committed, "frameSequence"), {
+      timeoutMs: 5_000,
+      description: "renderer did not present a frame from the restored screenshot state",
+    });
+    const replayed = await recorder.guard(
+      takePlayerScreenshot(page, { timeoutMs: JOURNEY_SCREENSHOT_TIMEOUT_MS }),
+    );
+    if (
+      replayed.metadata.presentation.selectedCutFingerprint !==
+        capture.metadata.presentation.selectedCutFingerprint ||
+      JSON.stringify(replayed.metadata.presentation.selectedCut.cut?.selectedPages) !==
+        JSON.stringify(capture.metadata.presentation.selectedCut.cut?.selectedPages)
+    ) {
+      throw new Error(
+        "same-world screenshot replay restored a different cut or selected-page identity",
+      );
+    }
+    const imageComparison = await compareRenderedImages(page, capture.png, replayed.png, {
+      region: { x0: 0.03, x1: 0.97, y0: 0.06, y1: 0.9 },
+      footprintPixels: 4,
+      diagnosticGeometry: true,
+    });
+    await context.artifacts.writeJson(
+      "same-world screenshot replay comparison",
+      "same-world-replay-comparison.json",
+      imageComparison,
+    );
+    await context.artifacts.write(
+      "same-world screenshot metadata replay",
+      "same-world-replayed.png",
+      replayed.png,
+      "image/png",
+    );
+    const geometry = imageComparison.diagnosticGeometry;
+    if (
+      geometry === null ||
+      geometry.largestDisagreementComponentPixels > 16 ||
+      geometry.occupancyJaccard < 0.9999 ||
+      imageComparison.meanAbsoluteLinearLumaDelta > 0.02
+    ) {
+      throw new Error(
+        `same-world screenshot replay changed rendered geometry or appearance: ${JSON.stringify(imageComparison)}`,
+      );
+    }
+    return replayed.png.byteLength;
+  } finally {
+    if (applied) {
+      const sequence = snapshotValue(recorder.latestSnapshot, "frameSequence");
+      await recorder.guard(engine.clearReproduction());
+      await recorder.waitFor(
+        (snapshot) =>
+          snapshotValue(snapshot, "frameSequence") > sequence &&
+          snapshotValue(snapshot, "clientViewGoalKind") === 0 &&
+          snapshotValue(snapshot, "reproductionActive") === 0 &&
+          snapshotValue(snapshot, "terrainReady") === 1 &&
+          Math.hypot(
+            snapshotValue(snapshot, "cameraX") - snapshotValue(before, "cameraX"),
+            snapshotValue(snapshot, "cameraY") - snapshotValue(before, "cameraY"),
+            snapshotValue(snapshot, "cameraZ") - snapshotValue(before, "cameraZ"),
+          ) <= 0.001,
+        {
+          timeoutMs: 30_000,
+          description: "clearing screenshot replay did not restore the live player view",
+        },
+      );
+    }
+  }
+}
+
 async function stablePhaseCapture(
   context: ScenarioContext,
   page: Page,
@@ -422,8 +682,21 @@ async function stablePhaseCapture(
   let stableSince: number | undefined;
   let lastLog = 0;
   let previousFingerprint = "";
-  let previousFlow = "";
   let previousFrame = snapshotValue(recorder.latestSnapshot, "frameSequence");
+  const failureBaseline = {
+    columnOtherFailed: snapshotValue(recorder.latestSnapshot, "virtualTerrainColumnOtherFailed"),
+    directoryOtherFailed: snapshotValue(
+      recorder.latestSnapshot,
+      "virtualTerrainDirectoryOtherFailed",
+    ),
+    pageOtherFailed: snapshotValue(recorder.latestSnapshot, "virtualTerrainPageOtherFailed"),
+    pageUnavailable: snapshotValue(recorder.latestSnapshot, "virtualTerrainPageUnavailable"),
+    pageGenerationFailed: snapshotValue(
+      recorder.latestSnapshot,
+      "virtualTerrainPageGenerationFailed",
+    ),
+    pageUploadFailed: snapshotValue(recorder.latestSnapshot, "virtualTerrainPageUploadFailed"),
+  };
   while (performance.now() - started < STABILITY_TIMEOUT_MS) {
     const current = await recorder.waitForFrameAfter(previousFrame, {
       timeoutMs: Math.max(1, STABILITY_TIMEOUT_MS - (performance.now() - started)),
@@ -499,24 +772,6 @@ async function stablePhaseCapture(
       editCanonicalRenderable: snapshotValue(current, "editCanonicalRenderable"),
       editCanonicalOwned: snapshotValue(current, "editCanonicalOwned"),
     };
-    const flow = [
-      state.columnSubmitDeferred,
-      state.columnPreempted,
-      state.columnTimedOut,
-      state.columnOtherFailed,
-      state.directorySubmitDeferred,
-      state.directoryPreempted,
-      state.directoryTimedOut,
-      state.directoryOtherFailed,
-      state.pageSubmitDeferred,
-      state.pagePreempted,
-      state.pageTimedOut,
-      state.pageOtherFailed,
-      state.pageUnavailable,
-      state.pageStaleRevision,
-      state.pageGenerationFailed,
-      state.pageUploadFailed,
-    ].join(":");
     if (performance.now() - lastLog >= 5_000) {
       context.log(`${phase} convergence ${JSON.stringify(state)}`);
       lastLog = performance.now();
@@ -535,23 +790,22 @@ async function stablePhaseCapture(
       state.columnRevisionFloors === 0 &&
       state.currentColumnRegisteredRoots > 0 &&
       state.editCanonicalRenderable >= state.editCanonicalRequired &&
-      state.editCanonicalOwned >= state.editCanonicalRequired;
-    if (
-      !presentable ||
-      fingerprint !== previousFingerprint ||
-      (previousFlow !== "" && flow !== previousFlow)
-    ) {
+      state.editCanonicalOwned >= state.editCanonicalRequired &&
+      state.columnOtherFailed === failureBaseline.columnOtherFailed &&
+      state.directoryOtherFailed === failureBaseline.directoryOtherFailed &&
+      state.pageOtherFailed === failureBaseline.pageOtherFailed &&
+      state.pageUnavailable === failureBaseline.pageUnavailable &&
+      state.pageGenerationFailed === failureBaseline.pageGenerationFailed &&
+      state.pageUploadFailed === failureBaseline.pageUploadFailed;
+    if (!presentable || fingerprint !== previousFingerprint) {
       stableSince = undefined;
     } else {
       stableSince ??= performance.now();
     }
     previousFingerprint = fingerprint;
-    previousFlow = flow;
     if (stableSince !== undefined && performance.now() - stableSince >= STABLE_CUT_DURATION_MS) {
       const settleMs = performance.now() - started;
-      const capture = await recorder.guard(
-        auditCapture(context, page, engine, phase, current, settleMs),
-      );
+      const capture = await recorder.guard(auditCapture(context, page, engine, phase, settleMs));
       assertHealthy();
       return capture;
     }
@@ -809,30 +1063,65 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
     if (snapshotValue(recorder.latestSnapshot, "placementMaterial") !== placementMaterial) {
       throw new Error(`real inventory input could not select material ${placementMaterial}`);
     }
-    // The dig ray points into the newly carved bowl. Reusing it can select a vertical cavity wall,
-    // whose outward metre-scale placement stencil correctly intersects untouched terrain. Turn
-    // across the player's body and use a steep ray so this is a real, valid top-face placement on
-    // undisturbed ground rather than an automation-only edit shortcut.
-    await recorder.guard(engine.setCameraLook(Math.PI / 2, -1));
-    await recorder.waitFor(
-      (snapshot) =>
-        snapshotValue(snapshot, "targetPresent") === 1 &&
-        (snapshotValue(snapshot, "targetVoxelX") !== snapshotValue(targeted, "targetVoxelX") ||
-          snapshotValue(snapshot, "targetVoxelZ") !== snapshotValue(targeted, "targetVoxelZ")),
-      { timeoutMs: 15_000, description: "ordinary player could not target terrain to place" },
-    );
-    const inventoryBeforePlace = await recorder.guard(engine.inventory());
-    const placementRevisionBefore = inventoryBeforePlace[0] ?? 0;
+    // Placement is a player action, not an automation edit shortcut. Search a small set of real
+    // view directions because the metre-scale sphere can legitimately intersect the player or
+    // occupied terrain on one slope. Every attempt still goes through targeting, right-button
+    // input, server validation, and authoritative inventory debit.
+    const placementYaws = [
+      Math.PI / 2,
+      -Math.PI / 2,
+      Math.PI,
+      Math.PI / 4,
+      -Math.PI / 4,
+      (3 * Math.PI) / 4,
+      (-3 * Math.PI) / 4,
+      0,
+    ];
+    let inventoryBeforePlace: readonly number[] | undefined;
+    let inventoryAfterPlace: readonly number[] | undefined;
+    for (const yaw of placementYaws) {
+      await recorder.guard(engine.setCameraLook(yaw, -0.55));
+      await recorder.waitFor(
+        (snapshot) =>
+          snapshotValue(snapshot, "targetPresent") === 1 &&
+          snapshotValue(snapshot, "canonicalImmediateRequired") > 0 &&
+          snapshotValue(snapshot, "canonicalImmediateResident") >=
+            snapshotValue(snapshot, "canonicalImmediateRequired") &&
+          (snapshotValue(snapshot, "targetVoxelX") !== snapshotValue(targeted, "targetVoxelX") ||
+            snapshotValue(snapshot, "targetVoxelZ") !== snapshotValue(targeted, "targetVoxelZ")),
+        { timeoutMs: 5_000, description: "ordinary player could not target terrain to place" },
+      );
+      const candidateInventory = await recorder.guard(engine.inventory());
+      const candidateRevision = candidateInventory[0] ?? 0;
+      const attemptDescription = `real secondary-button placement at yaw ${yaw.toFixed(3)} did not become authoritative`;
+      await recorder.guard(page.mouse.down({ button: "right" }));
+      try {
+        await recorder.guard(page.waitForTimeout(100));
+      } finally {
+        await recorder.guard(page.mouse.up({ button: "right" }));
+      }
+      try {
+        inventoryAfterPlace = await waitForInventoryRevision(
+          engine,
+          recorder,
+          candidateRevision,
+          attemptDescription,
+          3_000,
+        );
+        inventoryBeforePlace = candidateInventory;
+        break;
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.startsWith(attemptDescription)) {
+          throw error;
+        }
+      }
+    }
+    if (inventoryBeforePlace === undefined || inventoryAfterPlace === undefined) {
+      throw new Error(
+        `real secondary-button placement was rejected in every unobstructed view direction: ${JSON.stringify(recorder.latestFrame)}`,
+      );
+    }
     const placementCountBefore = inventoryBeforePlace[placementMaterial + 1] ?? 0;
-    await recorder.guard(
-      page.mouse.click(VIEWPORT.width / 2, VIEWPORT.height / 2, { button: "right" }),
-    );
-    const inventoryAfterPlace = await waitForInventoryRevision(
-      engine,
-      recorder,
-      placementRevisionBefore,
-      "real secondary-button placement did not become authoritative",
-    );
     const placementCountAfter = inventoryAfterPlace[placementMaterial + 1] ?? 0;
     if (placementCountBefore - placementCountAfter !== requiredPlacementStock) {
       throw new Error(
@@ -857,12 +1146,21 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
         "the authoritative player placement never promoted a newly requested, newly encoded terrain revision",
       );
     }
-    const reproductionCapture = await recorder.guard(takePlayerScreenshot(page));
+    const reproductionCapture = await recorder.guard(
+      takePlayerScreenshot(page, { timeoutMs: JOURNEY_SCREENSHOT_TIMEOUT_MS }),
+    );
     await context.artifacts.write(
       "F2 gameplay capture with reproduction metadata",
       reproductionCapture.filename,
       reproductionCapture.png,
       "image/png",
+    );
+    const reproductionReplayScreenshotBytes = await verifyCaptureReplayAgainstCurrentWorld(
+      context,
+      page,
+      engine,
+      recorder,
+      reproductionCapture,
     );
     browser.assertHealthy();
 
@@ -874,7 +1172,10 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
     const spectatorStartY = snapshotValue(recorder.latestSnapshot, "cameraY");
     await page.keyboard.down("Space");
     try {
-      await recorder.guard(page.waitForTimeout(350));
+      // Gain enough altitude that the long collisionless route exercises terrain streaming above
+      // the landscape instead of ending inside a mountain where a lower-screen silhouette has no
+      // useful meaning.
+      await recorder.guard(page.waitForTimeout(2_000));
     } finally {
       await page.keyboard.up("Space");
     }
@@ -884,14 +1185,35 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
     );
     const spectatorAscentMetres = snapshotValue(spectatorAscended, "cameraY") - spectatorStartY;
     recorder.setPhase("spectator-travel");
-    await recorder.guard(engine.setCameraLook(0, -0.1));
+    await recorder.guard(engine.setCameraLook(0, 0));
     const spectatorMotion = await sustainedSpectatorTravel(page, recorder);
-    const spectatorPng = await recorder.guard(page.screenshot({ type: "png" }));
-    await context.artifacts.write(
-      "uninterrupted maximum-speed spectator endpoint",
-      "after-spectator-flight.png",
-      spectatorPng,
-      "image/png",
+    const spectatorReady = await recorder.waitFor(
+      (snapshot) =>
+        snapshotValue(snapshot, "terrainReady") === 1 &&
+        snapshotValue(snapshot, "virtualTerrainGpuMatchesCpuCut") === 1 &&
+        snapshotValue(snapshot, "virtualTerrainPresentedSnapshotMatchesCut") === 1 &&
+        snapshotValue(snapshot, "virtualTerrainExactCoreComplete") === 1 &&
+        snapshotValue(snapshot, "virtualTerrainExactCoreCurrentCoverage") ===
+          snapshotValue(snapshot, "virtualTerrainExactCoreRequiredLeaves"),
+      {
+        timeoutMs: 30_000,
+        description: "spectator endpoint never acquired an exact camera-local terrain presentation",
+      },
+    );
+    await recorder.guard(engine.setCameraLook(0, -0.62));
+    await recorder.waitForFrameAfter(snapshotValue(spectatorReady, "frameSequence"), {
+      timeoutMs: 5_000,
+      description: "spectator endpoint did not present its downward terrain audit view",
+    });
+    const spectator = await auditCapture(
+      context,
+      page,
+      engine,
+      "after-spectator-flight",
+      0,
+      0.55,
+      false,
+      true,
     );
     recorder.setPhase("spectator-restore");
     const restoredBody = await recorder.guard(engine.setSpectator(false));
@@ -905,8 +1227,23 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
         `leaving spectator restored the player body ${bodyRestoreErrorMetres.toFixed(4)}m from its saved position`,
       );
     }
-    await recorder.guard(engine.setCameraLook(Math.PI, -0.22));
+    await recorder.guard(engine.setCameraLook(Math.PI, -0.48));
+    await recorder.waitFor(
+      (snapshot) =>
+        snapshotValue(snapshot, "terrainReady") === 1 &&
+        snapshotValue(snapshot, "canonicalImmediateRequired") > 0 &&
+        snapshotValue(snapshot, "canonicalImmediateResident") >=
+          snapshotValue(snapshot, "canonicalImmediateRequired") &&
+        snapshotValue(snapshot, "grounded") === 1 &&
+        snapshotValue(snapshot, "targetPresent") === 1,
+      {
+        timeoutMs: 30_000,
+        description:
+          "restored gameplay body did not regain exact terrain, collision, grounding, and targeting",
+      },
+    );
     const postSpectatorStepMetres = await shortPlayerStep(page, recorder);
+    const postSpectatorJumpAscentMetres = await jumpAndLand(page, recorder);
     browser.assertHealthy();
 
     return {
@@ -916,6 +1253,8 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
         walkedMetres: travelMotion.distanceMetres,
         playerLongestNoProgressMs: travelMotion.longestNoProgressMs,
         playerLongestFrameWaitMs: travelMotion.longestFrameWaitMs,
+        playerLongestExactQualityDebtMs: travelMotion.longestExactQualityDebtMs,
+        playerLongestExactQualityDebtMetres: travelMotion.longestExactQualityDebtMetres,
         jumpAscentMetres,
         digPasses,
         spectatorAscentMetres,
@@ -923,8 +1262,10 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
         spectatorLongestNoProgressMs: spectatorMotion.longestNoProgressMs,
         spectatorLongestFrameWaitMs: spectatorMotion.longestFrameWaitMs,
         spectatorTravelFrames: spectatorMotion.frames,
+        spectatorExactPages: spectator.exactPages,
         spectatorBodyRestoreErrorMetres: bodyRestoreErrorMetres,
         postSpectatorStepMetres,
+        postSpectatorJumpAscentMetres,
         pedestalStepMetres,
         pedestalExactPages: pedestal.exactPages,
         editedExactPages: edited.exactPages,
@@ -940,12 +1281,18 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
         travelTerrainRevisionDigest: travel.terrainRevisionDigest,
         editedTerrainRevisionDigest: edited.terrainRevisionDigest,
         largestEnclosedSkyComponent: Math.max(
-          ...[pedestal, travel, edited, placed].map((entry) => entry.largestEnclosedSkyComponent),
+          ...[pedestal, travel, edited, placed, spectator].map(
+            (entry) => entry.largestEnclosedSkyComponent,
+          ),
+        ),
+        largestTerrainInteriorSkyPixels: Math.max(
+          ...[pedestal, travel, edited, placed].map((entry) => entry.terrainInteriorSkyPixels),
         ),
         exactLodDiscontinuities: 0,
         continuousRendererFrames: recorder.observedFrames,
         firstPlayableFrameSequence: recorder.firstPlayableFrameSequence ?? 0,
         reproductionScreenshotBytes: reproductionCapture.png.byteLength,
+        reproductionReplayScreenshotBytes,
         coldStartMs,
         pedestalSettleMs: pedestal.settleMs,
         travelSettleMs: travel.settleMs,
