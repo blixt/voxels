@@ -442,7 +442,7 @@ fn build_coverage_region(
     let stride = 1u32
         .checked_shl(u32::from(root.level.saturating_sub(1)))
         .ok_or(VirtualTerrainError::InvalidRoot)?;
-    let mut samples = source
+    let samples = source
         .surface_sample_lattice(
             priority,
             [minimum_x, minimum_z],
@@ -455,11 +455,7 @@ fn build_coverage_region(
     let has_edits = !snapshot.edits.is_empty();
     let exact_scan = if root.level == 1 && has_edits {
         Some(sample_exact_surface_edits(
-            source,
-            root,
-            &mut samples,
-            &snapshot,
-            priority,
+            source, root, &samples, &snapshot, priority,
         )?)
     } else {
         None
@@ -618,7 +614,7 @@ impl ExactSurfaceScan {
 fn sample_exact_surface_edits(
     source: &dyn WorldSourceEngine,
     root: TerrainPageKey,
-    samples: &mut [voxels_world::SurfaceSample],
+    samples: &[voxels_world::SurfaceSample],
     snapshot: &TerrainEditSnapshot,
     priority: WorldProductPriority,
 ) -> Result<ExactSurfaceScan, VirtualTerrainError> {
@@ -871,28 +867,6 @@ fn sample_exact_surface_edits(
         }
     }
 
-    for (x, z) in edited_columns {
-        let local_x =
-            usize::try_from(x - minimum_x).map_err(|_| VirtualTerrainError::InvalidRoot)?;
-        let local_z =
-            usize::try_from(z - minimum_z).map_err(|_| VirtualTerrainError::InvalidRoot)?;
-        let index = local_x + local_z * SAMPLE_EDGE;
-        let original_height = samples[index].height;
-        let ground = (minimum_y..=original_height).rev().find_map(|y| {
-            let material = exact.sample(VoxelCoord::new(x, y, z));
-            (material != Material::Water && material.is_renderable()).then_some((y, material))
-        });
-        let Some((height, material)) = ground else {
-            return Err(VirtualTerrainError::Build(
-                "edited surface scan did not find supporting terrain".to_owned(),
-            ));
-        };
-        samples[index].height = height;
-        samples[index].material = material;
-        samples[index].water_level = (height..maximum_y)
-            .rev()
-            .find(|y| exact.sample(VoxelCoord::new(x, *y, z)) == Material::Water);
-    }
     Ok(exact)
 }
 
@@ -1177,6 +1151,67 @@ mod tests {
             .find(|page| page.key == child_root)
             .expect("independent child");
         assert_eq!(independent, embedded);
+    }
+
+    #[test]
+    fn edited_surface_page_identity_is_independent_of_discovery_depth() {
+        let source = ProceduralWorldSource::new(17);
+        let parent_root = TerrainPageKey::surface(2, -1, 0);
+        let child_root = parent_root.refinement_children().unwrap()[1];
+        let [[minimum_x, minimum_z], _] = child_root.horizontal_bounds().unwrap();
+
+        for tangent_offset in [5, 6] {
+            let surface = source
+                .surface_sample_lattice(
+                    WorldProductPriority::VirtualTerrain,
+                    [minimum_x, minimum_z + tangent_offset],
+                    [1, 1],
+                    1,
+                )
+                .unwrap()[0];
+            let mut edits = voxels_world::EditMap::default();
+            edits.insert_override(
+                VoxelCoord::new(minimum_x, surface.height + 3, minimum_z + tangent_offset),
+                Material::Basalt,
+            );
+            let snapshot = TerrainEditSnapshot {
+                edits,
+                revision: 31,
+            };
+            let parent = build_coverage_region(
+                &source,
+                parent_root,
+                snapshot.clone(),
+                source.source_identity_hash(),
+                WorldProductPriority::VirtualTerrain,
+                |key| Some(if key == child_root { 37 } else { 31 }),
+            )
+            .expect("parent coverage");
+            let child = build_coverage_region(
+                &source,
+                child_root,
+                snapshot,
+                source.source_identity_hash(),
+                WorldProductPriority::VirtualTerrain,
+                |key| Some(if key == child_root { 37 } else { 31 }),
+            )
+            .expect("child coverage");
+
+            let embedded = parent
+                .pages
+                .iter()
+                .find(|page| page.key == child_root)
+                .expect("embedded child");
+            let independent = child
+                .pages
+                .iter()
+                .find(|page| page.key == child_root)
+                .expect("independent child");
+            assert_eq!(
+                independent, embedded,
+                "an outer-edge edit at {tangent_offset} changed L1 identity with discovery depth"
+            );
+        }
     }
 
     #[test]
