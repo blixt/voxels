@@ -6,7 +6,6 @@ mod avatar;
 pub mod clouds;
 pub mod environment;
 mod material_detail;
-pub mod reference;
 pub mod renderer;
 mod shader;
 pub mod shadow;
