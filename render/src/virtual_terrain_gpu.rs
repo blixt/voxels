@@ -2,8 +2,10 @@
 //!
 //! The CPU hierarchy is the sole selection authority. A candidate cut is supplied explicitly,
 //! assigned deterministic stream destinations, and expanded into 32-bit geometry handles in the
-//! inactive bank. A second GPU pass compares every destination and value exactly. The published
-//! bank is never written. Promotion is a CPU-side bank swap only after the exact candidate
+//! inactive bank. Independent GPU passes certify descriptor structure and compare every destination
+//! and value exactly. The uploaded descriptors are also read back and reconstructed against
+//! canonical CPU ranges, so encoder and validator agreement cannot authenticate corrupt input. The
+//! published bank is never written. Promotion is a CPU-side bank swap only after the exact candidate
 //! generation, fingerprint, page count, geometry counts, bounds, and indirect commands are read
 //! back.
 
@@ -95,9 +97,10 @@ const _: () = assert!(size_of::<GpuSnapshotCounters>() == 64);
 
 const GPU_SNAPSHOT_INDIRECT_WORDS: usize = 16;
 const GPU_SNAPSHOT_INDIRECT_BYTES: u64 = (GPU_SNAPSHOT_INDIRECT_WORDS * size_of::<u32>()) as u64;
-const GPU_SNAPSHOT_READBACK_BYTES: u64 =
+const GPU_SNAPSHOT_READBACK_PREFIX_BYTES: u64 =
     size_of::<GpuSnapshotCounters>() as u64 + GPU_SNAPSHOT_INDIRECT_BYTES;
 
+const VALIDATION_DESCRIPTOR_MISMATCH: u32 = 1 << 8;
 const VALIDATION_INDIRECT_MISMATCH: u32 = 1 << 10;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -169,6 +172,7 @@ struct SnapshotMetadata {
     selected_pages: Vec<TerrainPageKey>,
     ownerless_roots: u32,
     expected_counts: [u32; STREAM_COUNT],
+    expected_ranges: Vec<[[u32; 2]; STREAM_COUNT]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -186,10 +190,11 @@ struct PendingSnapshotFeedback {
     state: SnapshotPendingState,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct GpuSnapshotReadback {
     counters: GpuSnapshotCounters,
     indirect_commands: [u32; GPU_SNAPSHOT_INDIRECT_WORDS],
+    candidate_pages: Vec<GpuCandidatePage>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -229,10 +234,12 @@ pub(crate) struct VirtualTerrainGpuControl {
     capacity: VirtualTerrainCapacity,
     geometries: BTreeMap<TerrainPageKey, VirtualTerrainGpuGeometry>,
     candidate_pages: Buffer,
+    candidate_page_tokens: Buffer,
     source_buffers: [Buffer; 2],
     source_element_capacities: [u32; 2],
     bound_source_count: usize,
     render_layout: wgpu::BindGroupLayout,
+    structural_pipeline: ComputePipeline,
     encode_pipeline: ComputePipeline,
     validate_pipeline: ComputePipeline,
     banks: [SnapshotBank; 2],
@@ -254,8 +261,14 @@ impl VirtualTerrainGpuControl {
     ) -> Result<Self, VirtualTerrainGpuError> {
         let maximum_storage = u64::from(device.limits().max_storage_buffer_binding_size);
         let candidate_bytes = buffer_bytes::<GpuCandidatePage>(capacity.max_selected_pages)?;
+        let candidate_token_bytes = buffer_bytes::<u32>(capacity.max_selected_pages)?;
+        let readback_bytes = GPU_SNAPSHOT_READBACK_PREFIX_BYTES
+            .checked_add(candidate_bytes)
+            .ok_or(VirtualTerrainGpuError::DeviceLimit)?;
         if VIRTUAL_TERRAIN_HANDLE_BANK_BYTES > maximum_storage
             || candidate_bytes > maximum_storage
+            || candidate_token_bytes > maximum_storage
+            || readback_bytes > device.limits().max_buffer_size
             || device.limits().max_storage_buffers_per_shader_stage < 4
         {
             return Err(VirtualTerrainGpuError::DeviceLimit);
@@ -263,6 +276,12 @@ impl VirtualTerrainGpuControl {
         let candidate_pages = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bounded virtual terrain CPU-selected candidate pages"),
             size: candidate_bytes,
+            usage: candidate_page_buffer_usage(),
+            mapped_at_creation: false,
+        });
+        let candidate_page_tokens = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bounded virtual terrain GPU page validation tokens"),
+            size: candidate_token_bytes,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -292,6 +311,15 @@ impl VirtualTerrainGpuControl {
         });
         let shader =
             device.create_shader_module(wgpu::include_wgsl!("shaders/virtual_terrain.wgsl"));
+        let structural_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("validate virtual terrain candidate descriptor structure"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("validate_candidate_structure"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let encode_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("encode CPU-selected virtual terrain handles"),
             layout: Some(&pipeline_layout),
@@ -336,7 +364,7 @@ impl VirtualTerrainGpuControl {
                 &candidate_pages,
                 &handles,
                 &counters,
-                &indirect,
+                &candidate_page_tokens,
             );
             let render_bind_group =
                 create_render_bind_group(device, &render_layout, &handles, &source_buffers);
@@ -354,7 +382,7 @@ impl VirtualTerrainGpuControl {
             .map(|_| SnapshotReadbackSlot {
                 buffer: device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("virtual terrain snapshot feedback readback"),
-                    size: GPU_SNAPSHOT_READBACK_BYTES,
+                    size: readback_bytes,
                     usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                     mapped_at_creation: false,
                 }),
@@ -365,10 +393,12 @@ impl VirtualTerrainGpuControl {
             capacity,
             geometries: BTreeMap::new(),
             candidate_pages,
+            candidate_page_tokens,
             source_buffers,
             source_element_capacities: [1, 1],
             bound_source_count: 0,
             render_layout,
+            structural_pipeline,
             encode_pipeline,
             validate_pipeline,
             banks,
@@ -642,11 +672,11 @@ impl VirtualTerrainGpuControl {
         if !pages.is_empty() {
             queue.write_buffer(&self.candidate_pages, 0, bytemuck::cast_slice(&pages));
         }
+        let expected_ranges = pages.iter().map(|page| page.ranges).collect();
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
         let counters = GpuSnapshotCounters {
             element_counts: expected_counts,
-            encoded_pages: identity.selected_pages.len() as u32,
             generation: split_u64(generation),
             fingerprint: split_u64(identity.fingerprint),
             selected_count: identity.selected_pages.len() as u32,
@@ -671,6 +701,7 @@ impl VirtualTerrainGpuControl {
             selected_pages: identity.selected_pages.to_vec(),
             ownerless_roots: identity.ownerless_roots,
             expected_counts,
+            expected_ranges,
         });
         self.pending_bank = Some(inactive);
         if let Ok(mut pending) = self.pending_feedback.lock() {
@@ -681,6 +712,24 @@ impl VirtualTerrainGpuControl {
         }
         if let Ok(mut minimum) = self.minimum_feedback_generation.lock() {
             *minimum = generation;
+        }
+        if !pages.is_empty() {
+            encoder.clear_buffer(
+                &self.candidate_page_tokens,
+                0,
+                Some(pages.len() as u64 * size_of::<u32>() as u64),
+            );
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("validate virtual terrain candidate descriptor structure"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.structural_pipeline);
+            pass.set_bind_group(0, &self.banks[inactive].encode_bind_group, &[]);
+            if !pages.is_empty() {
+                pass.dispatch_workgroups(pages.len() as u32, 1, 1);
+            }
         }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -740,6 +789,17 @@ impl VirtualTerrainGpuControl {
                 .as_ref()
                 .is_some_and(|metadata| metadata.generation == generation)
         }) else {
+            return;
+        };
+        let Some(descriptor_count) = self.banks[bank]
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.expected_ranges.len())
+        else {
+            return;
+        };
+        let Some(descriptor_bytes) = descriptor_count.checked_mul(size_of::<GpuCandidatePage>())
+        else {
             return;
         };
         let should_schedule = self.pending_feedback.lock().is_ok_and(|mut pending| {
@@ -805,43 +865,63 @@ impl VirtualTerrainGpuControl {
             size_of::<GpuSnapshotCounters>() as u64,
             GPU_SNAPSHOT_INDIRECT_BYTES,
         );
+        if descriptor_bytes > 0 {
+            encoder.copy_buffer_to_buffer(
+                &self.candidate_pages,
+                0,
+                &slot.buffer,
+                GPU_SNAPSHOT_READBACK_PREFIX_BYTES,
+                descriptor_bytes as u64,
+            );
+        }
         let callback_buffer = slot.buffer.clone();
         let available = Arc::clone(&slot.available);
         let feedback = Arc::clone(&self.latest_raw_feedback);
         let minimum = Arc::clone(&self.minimum_feedback_generation);
         let pending = Arc::clone(&self.pending_feedback);
         encoder.map_buffer_on_submit(&slot.buffer, wgpu::MapMode::Read, .., move |result| {
-            let parsed = result.is_ok().then(|| {
+            let parsed = result.is_ok().then(|| -> Option<GpuSnapshotReadback> {
                 let mapped = callback_buffer.get_mapped_range(..).ok()?;
                 let counters = bytemuck::try_from_bytes::<GpuSnapshotCounters>(
                     mapped.get(..size_of::<GpuSnapshotCounters>())?,
                 )
                 .ok()
                 .copied()?;
-                let indirect_commands = bytemuck::try_cast_slice::<u8, u32>(
-                    mapped.get(size_of::<GpuSnapshotCounters>()..)?,
+                let indirect_start = size_of::<GpuSnapshotCounters>();
+                let indirect_end = indirect_start + GPU_SNAPSHOT_INDIRECT_BYTES as usize;
+                let indirect_commands =
+                    bytemuck::try_cast_slice::<u8, u32>(mapped.get(indirect_start..indirect_end)?)
+                        .ok()?
+                        .try_into()
+                        .ok()?;
+                let descriptor_end = GPU_SNAPSHOT_READBACK_PREFIX_BYTES as usize + descriptor_bytes;
+                let candidate_pages = bytemuck::try_cast_slice::<u8, GpuCandidatePage>(
+                    mapped.get(GPU_SNAPSHOT_READBACK_PREFIX_BYTES as usize..descriptor_end)?,
                 )
                 .ok()?
-                .try_into()
-                .ok()?;
+                .to_vec();
                 Some(GpuSnapshotReadback {
                     counters,
                     indirect_commands,
+                    candidate_pages,
                 })
             });
             let parsed = parsed.flatten();
             let succeeded = parsed.is_some_and(|parsed| {
-                join_u64(parsed.counters.generation) == generation
-                    && minimum.lock().is_ok_and(|minimum| generation >= *minimum)
-                    && feedback.lock().is_ok_and(|mut destination| {
-                        let is_newer = destination.as_ref().is_none_or(|current| {
-                            generation > join_u64(current.counters.generation)
-                        });
-                        if is_newer {
-                            *destination = Some(parsed);
-                        }
-                        is_newer
-                    })
+                if join_u64(parsed.counters.generation) != generation
+                    || !minimum.lock().is_ok_and(|minimum| generation >= *minimum)
+                {
+                    return false;
+                }
+                feedback.lock().is_ok_and(|mut destination| {
+                    let is_newer = destination
+                        .as_ref()
+                        .is_none_or(|current| generation > join_u64(current.counters.generation));
+                    if is_newer {
+                        *destination = Some(parsed);
+                    }
+                    is_newer
+                })
             });
             callback_buffer.unmap();
             record_readback_completion(&pending, generation, succeeded);
@@ -858,8 +938,9 @@ impl VirtualTerrainGpuControl {
     }
 
     pub(crate) fn latest_feedback(&self) -> Option<GpuVirtualTerrainFeedback> {
-        let raw = *self.latest_raw_feedback.lock().ok()?.as_ref()?;
-        let metadata = self.feedback_metadata(&raw)?;
+        let raw = self.latest_raw_feedback.lock().ok()?;
+        let raw = raw.as_ref()?;
+        let metadata = self.feedback_metadata(raw)?;
         let counters = raw.counters;
         Some(GpuVirtualTerrainFeedback {
             submission_id: metadata.generation,
@@ -872,7 +953,7 @@ impl VirtualTerrainGpuControl {
             encoded_water_triangle_handles: counters.element_counts[STREAM_WATER_TRIANGLE],
             encoded_pages: counters.encoded_pages,
             encoding_overflow_flags: counters.overflow_flags
-                | snapshot_validation_failure_flags(&raw, metadata),
+                | snapshot_validation_failure_flags(raw, metadata),
         })
     }
 
@@ -892,16 +973,9 @@ impl VirtualTerrainGpuControl {
         let Some(feedback) = feedback.as_ref() else {
             return false;
         };
-        let feedback = *feedback;
         let counters = feedback.counters;
         snapshot_metadata_matches(Some(metadata), identity)
-            && join_u64(counters.generation) == metadata.generation
-            && join_u64(counters.fingerprint) == metadata.fingerprint
-            && counters.selected_count == metadata.selected_pages.len() as u32
-            && counters.ownerless_roots == metadata.ownerless_roots
-            && counters.encoded_pages == metadata.selected_pages.len() as u32
-            && counters.element_counts == metadata.expected_counts
-            && counters.overflow_flags == 0
+            && snapshot_counter_evidence_matches(counters, metadata)
             && snapshot_validation_failure_flags(&feedback, metadata) == 0
     }
 
@@ -1004,23 +1078,67 @@ fn expected_indirect_commands(counts: [u32; STREAM_COUNT]) -> [u32; GPU_SNAPSHOT
     ]
 }
 
+fn candidate_descriptors_match_canonical(
+    candidate_pages: &[GpuCandidatePage],
+    expected_ranges: &[[[u32; 2]; STREAM_COUNT]],
+    expected_counts: [u32; STREAM_COUNT],
+) -> bool {
+    if candidate_pages.len() != expected_ranges.len() {
+        return false;
+    }
+    let mut prefixes = [0; STREAM_COUNT];
+    for (candidate, ranges) in candidate_pages.iter().zip(expected_ranges) {
+        let Ok(expected) = assign_candidate_page_destinations(
+            *ranges,
+            &mut prefixes,
+            VIRTUAL_TERRAIN_HANDLE_CAPACITIES,
+        ) else {
+            return false;
+        };
+        if candidate != &expected {
+            return false;
+        }
+    }
+    prefixes == expected_counts
+}
+
+fn snapshot_counter_evidence_matches(
+    counters: GpuSnapshotCounters,
+    metadata: &SnapshotMetadata,
+) -> bool {
+    join_u64(counters.generation) == metadata.generation
+        && join_u64(counters.fingerprint) == metadata.fingerprint
+        && counters.selected_count == metadata.selected_pages.len() as u32
+        && counters.ownerless_roots == metadata.ownerless_roots
+        && counters.encoded_pages == metadata.selected_pages.len() as u32
+        && counters.element_counts == metadata.expected_counts
+        && counters.overflow_flags == 0
+}
+
 fn snapshot_validation_failure_flags(
     readback: &GpuSnapshotReadback,
     metadata: &SnapshotMetadata,
 ) -> u32 {
-    u32::from(readback.indirect_commands != expected_indirect_commands(metadata.expected_counts))
-        * VALIDATION_INDIRECT_MISMATCH
+    u32::from(!candidate_descriptors_match_canonical(
+        &readback.candidate_pages,
+        &metadata.expected_ranges,
+        metadata.expected_counts,
+    )) * VALIDATION_DESCRIPTOR_MISMATCH
+        | u32::from(
+            readback.indirect_commands != expected_indirect_commands(metadata.expected_counts),
+        ) * VALIDATION_INDIRECT_MISMATCH
 }
 
 fn snapshot_counter_buffer_usage() -> wgpu::BufferUsages {
     wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC
 }
 
+fn candidate_page_buffer_usage() -> wgpu::BufferUsages {
+    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC
+}
+
 fn snapshot_indirect_buffer_usage() -> wgpu::BufferUsages {
-    wgpu::BufferUsages::STORAGE
-        | wgpu::BufferUsages::INDIRECT
-        | wgpu::BufferUsages::COPY_DST
-        | wgpu::BufferUsages::COPY_SRC
+    wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC
 }
 
 #[cfg(test)]
@@ -1176,7 +1294,7 @@ fn create_encode_bind_group(
     candidates: &Buffer,
     handles: &Buffer,
     counters: &Buffer,
-    indirect: &Buffer,
+    page_tokens: &Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("virtual terrain inactive snapshot encoder"),
@@ -1185,7 +1303,7 @@ fn create_encode_bind_group(
             entire_entry(0, candidates),
             entire_entry(1, handles),
             entire_entry(2, counters),
-            entire_entry(3, indirect),
+            entire_entry(3, page_tokens),
         ],
     })
 }
@@ -1239,6 +1357,30 @@ const fn handle_stream_byte_range(stream: usize) -> Range<u64> {
 mod tests {
     use super::*;
 
+    fn block_on_native<F: std::future::Future>(future: F) -> F::Output {
+        struct ThreadWake(std::thread::Thread);
+
+        impl std::task::Wake for ThreadWake {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+
+        let waker = std::task::Waker::from(Arc::new(ThreadWake(std::thread::current())));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(output) => return output,
+                std::task::Poll::Pending => std::thread::park(),
+            }
+        }
+    }
+
     fn metadata(
         generation: u64,
         fingerprint: u64,
@@ -1252,6 +1394,7 @@ mod tests {
             selected_pages,
             ownerless_roots,
             expected_counts,
+            expected_ranges: Vec::new(),
         }
     }
 
@@ -1310,22 +1453,33 @@ mod tests {
         .validate(&module)
         .expect("virtual terrain snapshot shader must pass Naga validation");
         assert!(shader.contains("fn encode_snapshot"));
+        assert!(shader.contains("fn validate_candidate_structure"));
         assert!(shader.contains("fn validate_snapshot"));
         assert!(shader.contains("handles[destination + element] = first_handle + element"));
         assert!(shader.contains("if handles[destination + element] != first_handle + element"));
         assert!(shader.contains("page.destinations[stream]"));
+        assert!(shader.contains("page_tokens[page_index] = 1u"));
         for line in shader
             .lines()
             .filter(|line| line.contains("atomic") && !line.trim_start().starts_with("//"))
         {
             assert!(
-                line.contains("overflow_flags: atomic<u32>") || line.contains("atomicOr"),
-                "the only shader atomic may OR a failure into the overflow word: {line}"
+                line.contains("overflow_flags: atomic<u32>")
+                    || line.contains("encoded_pages: atomic<u32>")
+                    || line.contains("atomicOr")
+                    || line.contains("atomicAdd(&counters.encoded_pages, 1u)"),
+                "only failure flags and one bounded page completion may be atomic: {line}"
             );
         }
+        assert_eq!(
+            shader.matches("atomicAdd").count(),
+            1,
+            "there is exactly one completion atomic in the page validator and none per handle"
+        );
         assert!(!shader.contains("fingerprint_sum"));
         assert!(!shader.contains("fingerprint_square"));
         assert!(!shader.contains("finalize_snapshot"));
+        assert!(!shader.contains("indirect_commands"));
         assert!(!shader.contains("traverse"));
         assert!(!shader.contains("geometry_source"));
         assert!(!shader.contains("compact_surfaces"));
@@ -1334,8 +1488,131 @@ mod tests {
     #[test]
     fn snapshot_feedback_buffers_remain_copyable_for_exact_readback() {
         assert!(snapshot_counter_buffer_usage().contains(wgpu::BufferUsages::COPY_SRC));
+        assert!(candidate_page_buffer_usage().contains(wgpu::BufferUsages::COPY_SRC));
         assert!(snapshot_indirect_buffer_usage().contains(wgpu::BufferUsages::COPY_SRC));
         assert!(snapshot_indirect_buffer_usage().contains(wgpu::BufferUsages::INDIRECT));
+        assert!(!snapshot_indirect_buffer_usage().contains(wgpu::BufferUsages::STORAGE));
+    }
+
+    #[test]
+    #[ignore = "requires an actual native WGPU adapter; browser automation must run this path"]
+    fn real_wgpu_executes_structure_encode_exact_validation_and_readback() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = block_on_native(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+            apply_limit_buckets: false,
+        }))
+        .expect("the explicit hardware test requires a real WGPU adapter");
+        let (device, queue) = block_on_native(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: wgpu::Limits::default(),
+            required_features: wgpu::Features::empty(),
+            ..Default::default()
+        }))
+        .expect("the explicit hardware test requires a WGPU device");
+
+        let mut control =
+            VirtualTerrainGpuControl::new(&device, VirtualTerrainCapacity::DEVELOPMENT_128_MIB)
+                .expect("the real device must support the production snapshot layout");
+        let source = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("exact snapshot hardware-test source"),
+            size: GPU_GEOMETRY_ELEMENT_BYTES * 8,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        control
+            .bind_geometry_sources(&device, &[source])
+            .expect("hardware-test geometry source");
+        let key = TerrainPageKey::surface(0, 0, 0);
+        control
+            .update_page_geometry(
+                key,
+                VirtualTerrainGpuGeometry {
+                    opaque_surface: VirtualTerrainGpuGeometryRange {
+                        source_segment: 0,
+                        source_offset_bytes: 0,
+                        element_count: 3,
+                    },
+                    opaque_triangle: VirtualTerrainGpuGeometryRange {
+                        source_segment: 0,
+                        source_offset_bytes: GPU_GEOMETRY_ELEMENT_BYTES * 3,
+                        element_count: 2,
+                    },
+                    ..VirtualTerrainGpuGeometry::default()
+                },
+            )
+            .expect("hardware-test geometry");
+        let identity = VirtualTerrainSnapshotIdentity {
+            fingerprint: 0x1234_5678_9abc_def0,
+            selected_pages: &[key],
+            ownerless_roots: 0,
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("exact snapshot hardware-test encoder"),
+        });
+        let generation = match control
+            .encode_candidate(&queue, &mut encoder, identity, None)
+            .expect("hardware-test candidate encoding")
+        {
+            VirtualTerrainCandidateEncodeOutcome::Encoded(generation) => generation,
+            VirtualTerrainCandidateEncodeOutcome::ReadbackOnly(_) => {
+                panic!("a new hardware-test candidate must encode")
+            }
+        };
+        control.submit_pending_readback(&mut encoder, generation);
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("hardware-test submission");
+
+        let feedback = control.latest_feedback().expect("hardware-test feedback");
+        assert_eq!(feedback.encoding_overflow_flags, 0);
+        assert_eq!(feedback.encoded_pages, 1);
+        assert_eq!(feedback.encoded_surface_handles, 3);
+        assert_eq!(feedback.encoded_triangle_handles, 2);
+        assert!(control.candidate_is_certified(identity));
+
+        control.invalidate_candidate();
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("self-referential descriptor rejection hardware-test encoder"),
+        });
+        let generation = match control
+            .encode_candidate(&queue, &mut encoder, identity, None)
+            .expect("second hardware-test candidate encoding")
+        {
+            VirtualTerrainCandidateEncodeOutcome::Encoded(generation) => generation,
+            VirtualTerrainCandidateEncodeOutcome::ReadbackOnly(_) => {
+                panic!("the invalidated hardware-test candidate must encode again")
+            }
+        };
+        let self_consistent_but_wrong = GpuCandidatePage {
+            ranges: [[1, 3], [3, 2], [0, 0], [0, 0]],
+            destinations: [0; STREAM_COUNT],
+        };
+        queue.write_buffer(
+            &control.candidate_pages,
+            0,
+            bytemuck::bytes_of(&self_consistent_but_wrong),
+        );
+        control.submit_pending_readback(&mut encoder, generation);
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("self-referential descriptor rejection submission");
+
+        let feedback = control
+            .latest_feedback()
+            .expect("self-referential descriptor rejection feedback");
+        assert_ne!(
+            feedback.encoding_overflow_flags & VALIDATION_DESCRIPTOR_MISMATCH,
+            0,
+            "GPU encode and exact validation agreeing with a corrupted descriptor cannot certify it against canonical CPU metadata",
+        );
+        assert!(!control.candidate_is_certified(identity));
     }
 
     #[test]
@@ -1514,10 +1791,25 @@ mod tests {
 
     #[test]
     fn readback_validates_actual_indirect_arguments() {
-        let metadata = metadata(5, 8, vec![], 0, [3, 2, 1, 0]);
+        let ranges = vec![[[17, 3], [29, 2], [41, 1], [0, 0]]];
+        let mut counts = [0; STREAM_COUNT];
+        let candidate_pages = ranges
+            .iter()
+            .map(|ranges| {
+                assign_candidate_page_destinations(
+                    *ranges,
+                    &mut counts,
+                    VIRTUAL_TERRAIN_HANDLE_CAPACITIES,
+                )
+                .unwrap()
+            })
+            .collect();
+        let mut metadata = metadata(5, 8, vec![], 0, counts);
+        metadata.expected_ranges = ranges;
         let mut readback = GpuSnapshotReadback {
             counters: GpuSnapshotCounters::default(),
             indirect_commands: expected_indirect_commands(metadata.expected_counts),
+            candidate_pages,
         };
         assert_eq!(snapshot_validation_failure_flags(&readback, &metadata), 0);
         readback.indirect_commands[1] = 2;
@@ -1592,6 +1884,143 @@ mod tests {
         .unwrap();
         assert_eq!(page.destinations, [3, 0, 0, 0]);
         assert_eq!(prefixes, [4, 0, 0, 0]);
+    }
+
+    #[test]
+    fn readback_descriptors_must_match_canonical_ranges_and_prefixes_exactly() {
+        let expected_ranges = vec![
+            [[10, 2], [20, 1], [0, 0], [40, 1]],
+            [[12, 2], [21, 0], [30, 1], [41, 2]],
+        ];
+        let mut expected_counts = [0; STREAM_COUNT];
+        let canonical = expected_ranges
+            .iter()
+            .map(|ranges| {
+                assign_candidate_page_destinations(
+                    *ranges,
+                    &mut expected_counts,
+                    VIRTUAL_TERRAIN_HANDLE_CAPACITIES,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(candidate_descriptors_match_canonical(
+            &canonical,
+            &expected_ranges,
+            expected_counts,
+        ));
+        let mut metadata = metadata(4, 5, vec![], 0, expected_counts);
+        metadata.expected_ranges = expected_ranges.clone();
+        let mut readback = GpuSnapshotReadback {
+            counters: GpuSnapshotCounters::default(),
+            indirect_commands: expected_indirect_commands(expected_counts),
+            candidate_pages: canonical.clone(),
+        };
+        assert_eq!(snapshot_validation_failure_flags(&readback, &metadata), 0);
+
+        let mut wrong_first = canonical.clone();
+        wrong_first[0].ranges[0][0] += 1;
+        assert!(!candidate_descriptors_match_canonical(
+            &wrong_first,
+            &expected_ranges,
+            expected_counts,
+        ));
+        readback.candidate_pages = wrong_first.clone();
+        assert_ne!(
+            snapshot_validation_failure_flags(&readback, &metadata)
+                & VALIDATION_DESCRIPTOR_MISMATCH,
+            0
+        );
+
+        let mut wrong_count_zero = canonical.clone();
+        wrong_count_zero[1].ranges[0][1] = 0;
+        assert!(!candidate_descriptors_match_canonical(
+            &wrong_count_zero,
+            &expected_ranges,
+            expected_counts,
+        ));
+
+        let mut destination_gap = canonical.clone();
+        destination_gap[1].destinations[0] += 1;
+        assert!(!candidate_descriptors_match_canonical(
+            &destination_gap,
+            &expected_ranges,
+            expected_counts,
+        ));
+
+        let mut destination_overlap = canonical.clone();
+        destination_overlap[1].destinations[0] -= 1;
+        assert!(!candidate_descriptors_match_canonical(
+            &destination_overlap,
+            &expected_ranges,
+            expected_counts,
+        ));
+
+        let mut stale_descriptor = canonical.clone();
+        stale_descriptor[1].ranges = canonical[0].ranges;
+        assert!(!candidate_descriptors_match_canonical(
+            &stale_descriptor,
+            &expected_ranges,
+            expected_counts,
+        ));
+        assert!(!candidate_descriptors_match_canonical(
+            &canonical[..1],
+            &expected_ranges,
+            expected_counts,
+        ));
+    }
+
+    #[test]
+    fn canonical_empty_page_is_evidence_bearing_and_cannot_be_skipped() {
+        let selected_pages = vec![
+            TerrainPageKey::surface(0, 0, 0),
+            TerrainPageKey::surface(0, 1, 0),
+            TerrainPageKey::surface(0, 2, 0),
+        ];
+        let expected_ranges = vec![
+            [[10, 1], [0, 0], [0, 0], [0, 0]],
+            [[0, 0], [0, 0], [0, 0], [0, 0]],
+            [[11, 1], [0, 0], [0, 0], [0, 0]],
+        ];
+        let mut expected_counts = [0; STREAM_COUNT];
+        let descriptors = expected_ranges
+            .iter()
+            .map(|ranges| {
+                assign_candidate_page_destinations(
+                    *ranges,
+                    &mut expected_counts,
+                    VIRTUAL_TERRAIN_HANDLE_CAPACITIES,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut metadata = metadata(9, 17, selected_pages, 0, expected_counts);
+        metadata.expected_ranges = expected_ranges;
+        assert!(candidate_descriptors_match_canonical(
+            &descriptors,
+            &metadata.expected_ranges,
+            metadata.expected_counts,
+        ));
+
+        let complete = GpuSnapshotCounters {
+            element_counts: expected_counts,
+            encoded_pages: 3,
+            generation: split_u64(metadata.generation),
+            fingerprint: split_u64(metadata.fingerprint),
+            selected_count: 3,
+            ..GpuSnapshotCounters::default()
+        };
+        assert!(snapshot_counter_evidence_matches(complete, &metadata));
+        assert!(
+            !snapshot_counter_evidence_matches(
+                GpuSnapshotCounters {
+                    encoded_pages: 2,
+                    ..complete
+                },
+                &metadata,
+            ),
+            "skipping even a zero-handle page dispatch must withhold publication"
+        );
     }
 
     #[test]
