@@ -383,51 +383,73 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
   });
   const { engine, page } = viewport;
   let lastProgressLog = 0;
-  const ready = await engine.waitForSnapshot(
-    (snapshot) =>
-      snapshotValue(snapshot, "terrainReady") === 1 &&
-      snapshotValue(snapshot, "canonicalImmediateRequired") > 0 &&
-      snapshotValue(snapshot, "canonicalImmediateResident") >=
-        snapshotValue(snapshot, "canonicalImmediateRequired") &&
-      snapshotValue(snapshot, "grounded") === 1 &&
-      snapshotValue(snapshot, "pendingJobs") === 0 &&
-      snapshotValue(snapshot, "frameSequence") > 0,
-    {
-      timeoutMs: COLD_START_BUDGET_MS,
-      description: "default player never received a playable terrain presentation",
-      onSnapshot: (snapshot) => {
-        browser.assertHealthy();
-        if (performance.now() - lastProgressLog < 10_000) return;
-        lastProgressLog = performance.now();
-        context.log(
-          JSON.stringify({
-            exactPages: snapshotValue(snapshot, "virtualTerrainPublishedExactPages"),
-            minimumLevel: snapshotValue(snapshot, "virtualTerrainPublishedMinimumLevel"),
-            maximumLevel: snapshotValue(snapshot, "virtualTerrainPublishedMaximumLevel"),
-            residentPages: snapshotValue(snapshot, "virtualTerrainResidentPages"),
-            selectedPages: snapshotValue(snapshot, "virtualTerrainSelectedPages"),
-            requestedPages: snapshotValue(snapshot, "virtualTerrainRequestedPages"),
-            pendingPages: snapshotValue(snapshot, "virtualTerrainStreamPending"),
-            inFlightPages: snapshotValue(snapshot, "virtualTerrainStreamInFlight"),
-            columns: snapshotValue(snapshot, "virtualTerrainColumns"),
-            columnInFlight: snapshotValue(snapshot, "virtualTerrainColumnInFlight"),
-            columnRevisionFloors: snapshotValue(snapshot, "virtualTerrainColumnRevisionFloors"),
-            currentColumnKnown: snapshotValue(snapshot, "virtualTerrainCurrentColumnKnown"),
-            currentColumnRoots: snapshotValue(snapshot, "virtualTerrainCurrentColumnRoots"),
-            currentColumnRegisteredRoots: snapshotValue(
-              snapshot,
-              "virtualTerrainCurrentColumnRegisteredRoots",
-            ),
-            directoryInFlight: snapshotValue(snapshot, "virtualTerrainDirectoryInFlight"),
-            columnOtherFailed: snapshotValue(snapshot, "virtualTerrainColumnOtherFailed"),
-            directoryOtherFailed: snapshotValue(snapshot, "virtualTerrainDirectoryOtherFailed"),
-            pageOtherFailed: snapshotValue(snapshot, "virtualTerrainPageOtherFailed"),
-            pageUploadFailed: snapshotValue(snapshot, "virtualTerrainPageUploadFailed"),
-          }),
-        );
+  let latestStartupSnapshot: readonly number[] | undefined;
+  let ready: readonly number[];
+  try {
+    ready = await engine.waitForSnapshot(
+      (snapshot) =>
+        snapshotValue(snapshot, "terrainReady") === 1 &&
+        snapshotValue(snapshot, "canonicalImmediateRequired") > 0 &&
+        snapshotValue(snapshot, "canonicalImmediateResident") >=
+          snapshotValue(snapshot, "canonicalImmediateRequired") &&
+        snapshotValue(snapshot, "grounded") === 1 &&
+        snapshotValue(snapshot, "pendingJobs") === 0 &&
+        snapshotValue(snapshot, "frameSequence") > 0,
+      {
+        timeoutMs: COLD_START_BUDGET_MS,
+        description: "default player never received a playable terrain presentation",
+        onSnapshot: (snapshot) => {
+          latestStartupSnapshot = snapshot;
+          browser.assertHealthy();
+          if (performance.now() - lastProgressLog < 10_000) return;
+          lastProgressLog = performance.now();
+          context.log(
+            JSON.stringify({
+              exactPages: snapshotValue(snapshot, "virtualTerrainPublishedExactPages"),
+              minimumLevel: snapshotValue(snapshot, "virtualTerrainPublishedMinimumLevel"),
+              maximumLevel: snapshotValue(snapshot, "virtualTerrainPublishedMaximumLevel"),
+              residentPages: snapshotValue(snapshot, "virtualTerrainResidentPages"),
+              selectedPages: snapshotValue(snapshot, "virtualTerrainSelectedPages"),
+              requestedPages: snapshotValue(snapshot, "virtualTerrainRequestedPages"),
+              pendingPages: snapshotValue(snapshot, "virtualTerrainStreamPending"),
+              inFlightPages: snapshotValue(snapshot, "virtualTerrainStreamInFlight"),
+              columns: snapshotValue(snapshot, "virtualTerrainColumns"),
+              columnInFlight: snapshotValue(snapshot, "virtualTerrainColumnInFlight"),
+              columnRevisionFloors: snapshotValue(snapshot, "virtualTerrainColumnRevisionFloors"),
+              currentColumnKnown: snapshotValue(snapshot, "virtualTerrainCurrentColumnKnown"),
+              currentColumnRoots: snapshotValue(snapshot, "virtualTerrainCurrentColumnRoots"),
+              currentColumnRegisteredRoots: snapshotValue(
+                snapshot,
+                "virtualTerrainCurrentColumnRegisteredRoots",
+              ),
+              directoryInFlight: snapshotValue(snapshot, "virtualTerrainDirectoryInFlight"),
+              columnOtherFailed: snapshotValue(snapshot, "virtualTerrainColumnOtherFailed"),
+              directoryOtherFailed: snapshotValue(snapshot, "virtualTerrainDirectoryOtherFailed"),
+              pageOtherFailed: snapshotValue(snapshot, "virtualTerrainPageOtherFailed"),
+              pageUploadFailed: snapshotValue(snapshot, "virtualTerrainPageUploadFailed"),
+            }),
+          );
+        },
       },
-    },
-  );
+    );
+  } catch (error) {
+    const screenshot = await page.screenshot({ type: "png" });
+    await context.artifacts.write(
+      "cold-start failure player view",
+      "cold-start-failure.png",
+      screenshot,
+      "image/png",
+    );
+    await context.artifacts.writeJson(
+      "cold-start failure engine snapshot",
+      "cold-start-failure-snapshot.json",
+      {
+        error: error instanceof Error ? error.message : String(error),
+        snapshot: latestStartupSnapshot,
+      },
+    );
+    throw error;
+  }
   const coldStartMs = performance.now() - coldStartStarted;
   await engine.setCameraLook(snapshotValue(ready, "yaw"), -0.48);
   const pedestalStepMetres = await shortPlayerStep(page, () => engine.snapshot());
