@@ -32,3 +32,19 @@ Changing it requires a gameplay decision: picking and visibility can use the cur
 or a conservative supercover rule can visit every tied neighbor. Define the expected behavior for
 placing, digging, and occlusion at exact grid corners, then add symmetric positive/negative tie
 fixtures before changing traversal.
+
+## Prove cross-directory terrain root coherence
+
+The `world-lab` procedural-v16 fixture can fill the encoded cache while the exact terrain envelope
+remains at zero coverage. A bounded publication-frontier prototype made the next blocker explicit:
+the renderer rejected the level-3 children of surface root
+`TerrainPageKey { level: 4, coord: [-1, i32::MIN, -1] }` as an incoherent replacement. At that
+point the CPU cut reported one ownerless root and three skipped-level edges, so publishing the
+candidate would violate the single-cut ownership contract.
+
+Do not solve this by admitting the children independently or weakening replacement validation.
+First add a world-service fixture that generates the parent and all four child-root pages through
+their real directory requests, then compare their persisted schema-v7 boundary witnesses and
+reconstructed shared edges. The eventual fix belongs in generation/persistence if those products
+disagree; renderer admission should continue failing closed. Re-run `world-lab` through exact
+coverage and GPU certification before revisiting bounded staging retention.
