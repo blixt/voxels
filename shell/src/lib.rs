@@ -1234,43 +1234,6 @@ fn virtual_terrain_root_working_set(
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-fn virtual_terrain_edit_revision_keys(
-    affected_chunks: &[voxels_world::ChunkCoord],
-) -> (
-    std::collections::BTreeSet<voxels_world::TerrainPageKey>,
-    std::collections::BTreeSet<voxels_world::TerrainPageKey>,
-) {
-    let leaves = affected_chunks
-        .iter()
-        .flat_map(|coord| {
-            // Surface pages own a positive boundary lattice sample. An edit in chunk (x, z)
-            // therefore changes not only that page, but also the positive edge/corner of the
-            // three pages immediately negative of it. Retaining those old directories gives two
-            // sides of the same 10 cm boundary different revisions.
-            [(0, 0), (-1, 0), (0, -1), (-1, -1)].map(|(offset_x, offset_z)| {
-                voxels_world::TerrainPageKey::surface(
-                    0,
-                    coord.x.saturating_add(offset_x),
-                    coord.z.saturating_add(offset_z),
-                )
-            })
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    let roots = leaves
-        .iter()
-        .filter_map(|leaf| leaf.ancestor_at(voxels_world::TERRAIN_COVERAGE_ROOT_LEVEL))
-        .collect::<std::collections::BTreeSet<_>>();
-    let revision_keys = leaves
-        .into_iter()
-        .flat_map(|leaf| {
-            (1..=voxels_world::TERRAIN_COVERAGE_ROOT_LEVEL)
-                .filter_map(move |level| leaf.ancestor_at(level))
-        })
-        .collect();
-    (roots, revision_keys)
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const ATMOSPHERE_MOTION_PERIOD_SECONDS: f64 = 4_096.0;
@@ -1438,7 +1401,7 @@ mod web {
     };
     use voxels_runtime::{
         AuthoritativeEditRevisions, ChunkState, CompletionStatus, DirectionalStreamPriority,
-        FrameBudget, StreamConfig, StreamScheduler, revision_satisfies,
+        FrameBudget, StreamConfig, StreamScheduler, WorldChange, revision_satisfies,
     };
     use voxels_world::protocol::{
         BrowserUserId, EDIT_CUBE_EDGE_VOXELS, EDIT_CUBE_VOLUME_VOXELS, EDIT_SPHERE_RADIUS_VOXELS,
@@ -4759,7 +4722,7 @@ mod web {
                     .get(&item.column)
                     .copied()
                     .unwrap_or(0);
-                if column.revision < minimum_revision {
+                if !revision_satisfies(column.revision, minimum_revision) {
                     state.stats.column_other_failed =
                         state.stats.column_other_failed.saturating_add(1);
                     state.column_retry_after_ms.insert(item.column, now_ms);
@@ -4883,7 +4846,7 @@ mod web {
                     .iter()
                     .find(|node| node.key == root && node.is_root)
                     .map_or(0, |node| node.revision);
-                if directory_revision < minimum_revision {
+                if !revision_satisfies(directory_revision, minimum_revision) {
                     let mut state = self.virtual_terrain.borrow_mut();
                     state.stats.directory_other_failed =
                         state.stats.directory_other_failed.saturating_add(1);
@@ -4967,16 +4930,26 @@ mod web {
             }
         }
 
-        fn invalidate_virtual_terrain_regions(
-            &self,
-            affected_chunks: &[ChunkCoord],
-            minimum_revision: Option<u64>,
-        ) {
-            let (invalid_roots, revision_keys) =
-                crate::virtual_terrain_edit_revision_keys(affected_chunks);
+        fn invalidate_virtual_terrain_regions(&self, change: &WorldChange) {
+            let invalid_roots = change
+                .invalidated_terrain_roots()
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
             if invalid_roots.is_empty() {
                 return;
             }
+            let revision_floors = {
+                let revisions = self.edit_revisions.borrow();
+                change
+                    .terrain_directory_keys()
+                    .map(|key| (key, revisions.terrain_page_floor(key)))
+                    .collect::<Vec<_>>()
+            };
+            let change_revision = revision_floors
+                .first()
+                .map(|(_, revision)| *revision)
+                .unwrap_or(1);
             let invalid_columns = invalid_roots
                 .iter()
                 .map(|root| [root.coord[0], root.coord[2]])
@@ -5048,13 +5021,9 @@ mod web {
             for column in invalid_columns {
                 state.columns.remove(&column);
                 state.column_retry_after_ms.remove(&column);
-                if let Some(revision) = minimum_revision {
-                    state
-                        .minimum_column_revisions
-                        .entry(column)
-                        .and_modify(|minimum| *minimum = (*minimum).max(revision))
-                        .or_insert(revision);
-                }
+                state
+                    .minimum_column_revisions
+                    .insert(column, change_revision);
             }
             state
                 .registered_roots
@@ -5071,14 +5040,8 @@ mod web {
                 key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
                     .is_none_or(|root| !invalid_roots.contains(&root))
             });
-            for key in revision_keys {
-                if let Some(revision) = minimum_revision {
-                    state
-                        .minimum_region_revisions
-                        .entry(key)
-                        .and_modify(|minimum| *minimum = (*minimum).max(revision))
-                        .or_insert(revision);
-                }
+            for (key, revision) in revision_floors {
+                state.minimum_region_revisions.insert(key, revision);
             }
         }
 
@@ -5824,11 +5787,12 @@ mod web {
                 .iter()
                 .map(|mutation| mutation.coord)
                 .collect::<Vec<_>>();
-            let apply_values = self.edit_revisions.borrow_mut().observe_commit_batch(
+            let observed_change = self.edit_revisions.borrow_mut().observe_world_change_batch(
                 &coords,
                 server_revision,
                 affected_chunks,
             );
+            let (apply_values, world_change) = observed_change.into_parts();
             let accepted_mutations = mutations
                 .iter()
                 .copied()
@@ -5872,7 +5836,9 @@ mod web {
                     }
                 }
                 self.last_enclosure_probe.set(f64::NEG_INFINITY);
-                self.invalidate_virtual_terrain_regions(affected_chunks, Some(server_revision));
+            }
+            if !world_change.is_empty() {
+                self.invalidate_virtual_terrain_regions(&world_change);
             }
             let canonical: Vec<CanonicalRequirement> = {
                 let mut scheduler = self.scheduler.borrow_mut();
@@ -8452,49 +8418,6 @@ mod tests {
         let keep = virtual_terrain_root_working_set(&[root(4)], registered, root(4), 3);
 
         assert_eq!(keep, BTreeSet::from([root(2), root(3), root(4)]));
-    }
-
-    #[test]
-    fn edit_revision_floors_follow_only_affected_surface_ancestor_chains() {
-        use voxels_world::{ChunkCoord, TERRAIN_COVERAGE_ROOT_LEVEL, TerrainPageKey};
-
-        let affected = [ChunkCoord::new(13, 4, -7), ChunkCoord::new(1_024, 4, -7)];
-        let (roots, revision_keys) = virtual_terrain_edit_revision_keys(&affected);
-        let first_leaf = TerrainPageKey::surface(0, 13, -7);
-        let second_leaf = TerrainPageKey::surface(0, 1_024, -7);
-
-        assert_eq!(
-            roots,
-            BTreeSet::from([
-                first_leaf.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL).unwrap(),
-                second_leaf
-                    .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
-                    .unwrap(),
-            ])
-        );
-        assert!(
-            (1..=TERRAIN_COVERAGE_ROOT_LEVEL)
-                .all(|level| revision_keys.contains(&first_leaf.ancestor_at(level).unwrap()))
-        );
-        for neighbor in [
-            TerrainPageKey::surface(0, 12, -7),
-            TerrainPageKey::surface(0, 13, -8),
-            TerrainPageKey::surface(0, 12, -8),
-        ] {
-            assert!(
-                (1..=TERRAIN_COVERAGE_ROOT_LEVEL)
-                    .all(|level| revision_keys.contains(&neighbor.ancestor_at(level).unwrap())),
-                "every page that owns the edited chunk's positive boundary sample must advance"
-            );
-        }
-        assert!(
-            (1..=TERRAIN_COVERAGE_ROOT_LEVEL)
-                .all(|level| revision_keys.contains(&second_leaf.ancestor_at(level).unwrap()))
-        );
-        assert!(
-            !revision_keys.contains(&TerrainPageKey::surface(1, 7, -4)),
-            "an unedited sibling must keep its own older spatial revision"
-        );
     }
 
     #[test]

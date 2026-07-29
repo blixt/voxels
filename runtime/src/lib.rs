@@ -7,7 +7,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use voxels_world::{CHUNK_EDGE, ChunkCoord, EditMap, VOXEL_SIZE_METRES, VoxelCoord};
+use voxels_world::{
+    CHUNK_EDGE, ChunkCoord, EditMap, TERRAIN_COVERAGE_ROOT_LEVEL, TerrainPageKey,
+    VOXEL_SIZE_METRES, VoxelCoord,
+};
 
 /// Physical edge length of a full-resolution chunk.
 pub const CHUNK_EDGE_METRES: f32 = CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
@@ -28,6 +31,287 @@ pub const fn revision_satisfies(candidate: u64, requested: u64) -> bool {
     candidate == requested || candidate.wrapping_sub(requested) < (1u64 << 63)
 }
 
+/// One exact chunk product accepted by a presentation snapshot.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ChunkRevision {
+    pub coord: ChunkCoord,
+    pub revision: u64,
+}
+
+/// One exact terrain-page product accepted by a presentation snapshot.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct TerrainPageRevision {
+    pub key: TerrainPageKey,
+    pub revision: u64,
+}
+
+/// Invalid dependency declarations cannot form an exact revision fence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RevisionFenceError {
+    ZeroRevision,
+    ConflictingChunkRevision(ChunkCoord),
+    ConflictingTerrainPageRevision(TerrainPageKey),
+}
+
+/// Canonical, immutable dependencies of one accepted world presentation.
+///
+/// The digest is a deterministic lookup identity, not a correctness proof. Equality still compares
+/// every dependency, so a digest collision cannot make two fences interchangeable.
+#[derive(Clone, Debug)]
+pub struct WorldRevisionFence {
+    chunks: Vec<ChunkRevision>,
+    terrain_pages: Vec<TerrainPageRevision>,
+    digest: u64,
+}
+
+impl WorldRevisionFence {
+    pub fn new(
+        chunks: impl IntoIterator<Item = ChunkRevision>,
+        terrain_pages: impl IntoIterator<Item = TerrainPageRevision>,
+    ) -> Result<Self, RevisionFenceError> {
+        let chunks = canonical_chunk_revisions(chunks)?;
+        let terrain_pages = canonical_terrain_page_revisions(terrain_pages)?;
+        let digest = revision_fence_digest(&chunks, &terrain_pages);
+        Ok(Self {
+            chunks,
+            terrain_pages,
+            digest,
+        })
+    }
+
+    pub fn chunks(&self) -> &[ChunkRevision] {
+        &self.chunks
+    }
+
+    pub fn terrain_pages(&self) -> &[TerrainPageRevision] {
+        &self.terrain_pages
+    }
+
+    pub const fn digest(&self) -> u64 {
+        self.digest
+    }
+
+    /// Checks accepted revisions against the durable authoritative floors.
+    ///
+    /// This is intended for admission or revalidation, not a per-frame poll. Once admitted, callers
+    /// invalidate the fence incrementally with each [`WorldChange`].
+    pub fn is_current(&self, revisions: &AuthoritativeEditRevisions) -> bool {
+        revisions.fence_is_current(self)
+    }
+}
+
+impl PartialEq for WorldRevisionFence {
+    fn eq(&self, other: &Self) -> bool {
+        self.chunks == other.chunks && self.terrain_pages == other.terrain_pages
+    }
+}
+
+impl Eq for WorldRevisionFence {}
+
+fn canonical_chunk_revisions(
+    revisions: impl IntoIterator<Item = ChunkRevision>,
+) -> Result<Vec<ChunkRevision>, RevisionFenceError> {
+    let mut revisions = revisions.into_iter().collect::<Vec<_>>();
+    revisions.sort_unstable_by_key(|dependency| dependency.coord);
+    let mut canonical = Vec::<ChunkRevision>::with_capacity(revisions.len());
+    for dependency in revisions {
+        if dependency.revision == 0 {
+            return Err(RevisionFenceError::ZeroRevision);
+        }
+        if let Some(previous) = canonical.last()
+            && previous.coord == dependency.coord
+        {
+            if previous.revision != dependency.revision {
+                return Err(RevisionFenceError::ConflictingChunkRevision(
+                    dependency.coord,
+                ));
+            }
+            continue;
+        }
+        canonical.push(dependency);
+    }
+    Ok(canonical)
+}
+
+fn canonical_terrain_page_revisions(
+    revisions: impl IntoIterator<Item = TerrainPageRevision>,
+) -> Result<Vec<TerrainPageRevision>, RevisionFenceError> {
+    let mut revisions = revisions.into_iter().collect::<Vec<_>>();
+    revisions.sort_unstable_by_key(|dependency| dependency.key);
+    let mut canonical = Vec::<TerrainPageRevision>::with_capacity(revisions.len());
+    for dependency in revisions {
+        if dependency.revision == 0 {
+            return Err(RevisionFenceError::ZeroRevision);
+        }
+        if let Some(previous) = canonical.last()
+            && previous.key == dependency.key
+        {
+            if previous.revision != dependency.revision {
+                return Err(RevisionFenceError::ConflictingTerrainPageRevision(
+                    dependency.key,
+                ));
+            }
+            continue;
+        }
+        canonical.push(dependency);
+    }
+    Ok(canonical)
+}
+
+const REVISION_FENCE_DIGEST_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const REVISION_FENCE_DIGEST_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn revision_fence_digest(chunks: &[ChunkRevision], terrain_pages: &[TerrainPageRevision]) -> u64 {
+    let mut digest = REVISION_FENCE_DIGEST_OFFSET;
+    digest_bytes(&mut digest, b"world-revision-fence-v1");
+    digest_bytes(&mut digest, &(chunks.len() as u64).to_le_bytes());
+    for dependency in chunks {
+        digest_bytes(&mut digest, &dependency.coord.x.to_le_bytes());
+        digest_bytes(&mut digest, &dependency.coord.y.to_le_bytes());
+        digest_bytes(&mut digest, &dependency.coord.z.to_le_bytes());
+        digest_bytes(&mut digest, &dependency.revision.to_le_bytes());
+    }
+    digest_bytes(&mut digest, &(terrain_pages.len() as u64).to_le_bytes());
+    for dependency in terrain_pages {
+        digest_bytes(&mut digest, &[dependency.key.level]);
+        for coordinate in dependency.key.coord {
+            digest_bytes(&mut digest, &coordinate.to_le_bytes());
+        }
+        digest_bytes(&mut digest, &dependency.revision.to_le_bytes());
+    }
+    digest
+}
+
+fn digest_bytes(digest: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *digest ^= u64::from(*byte);
+        *digest = digest.wrapping_mul(REVISION_FENCE_DIGEST_PRIME);
+    }
+}
+
+/// Immutable authoritative products whose revision floors advanced in one observed edit batch.
+///
+/// Dependencies and roots are sorted and deduplicated. A stale or duplicate edit produces no
+/// changed dependency and therefore cannot invalidate or revive a fence.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WorldChange {
+    chunks: Vec<ChunkRevision>,
+    terrain_pages: Vec<TerrainPageRevision>,
+    invalidated_terrain_roots: Vec<TerrainPageKey>,
+}
+
+impl WorldChange {
+    pub fn chunks(&self) -> &[ChunkRevision] {
+        &self.chunks
+    }
+
+    pub fn terrain_pages(&self) -> &[TerrainPageRevision] {
+        &self.terrain_pages
+    }
+
+    /// Coverage roots whose directories contain a changed surface dependency.
+    pub fn invalidated_terrain_roots(&self) -> &[TerrainPageKey] {
+        &self.invalidated_terrain_roots
+    }
+
+    /// Surface directory keys that must be reacquired after this change.
+    ///
+    /// Level-zero leaves are included in `terrain_pages` for exact fence invalidation but omitted
+    /// here because directory requests start at their first ancestor.
+    pub fn terrain_directory_keys(&self) -> impl Iterator<Item = TerrainPageKey> + '_ {
+        self.terrain_pages
+            .iter()
+            .map(|dependency| dependency.key)
+            .filter(|key| key.level > 0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty() && self.terrain_pages.is_empty()
+    }
+
+    /// Uses merge walks over canonical dependency vectors; it never scans unrelated world floors.
+    pub fn intersects(&self, fence: &WorldRevisionFence) -> bool {
+        sorted_keys_intersect(&self.chunks, fence.chunks(), |dependency| dependency.coord)
+            || sorted_keys_intersect(&self.terrain_pages, fence.terrain_pages(), |dependency| {
+                dependency.key
+            })
+    }
+
+    /// Returns whether this change makes any accepted dependency of `fence` stale.
+    pub fn invalidates(&self, fence: &WorldRevisionFence) -> bool {
+        sorted_revisions_invalidate(
+            &self.chunks,
+            fence.chunks(),
+            |dependency| dependency.coord,
+            |dependency| dependency.revision,
+        ) || sorted_revisions_invalidate(
+            &self.terrain_pages,
+            fence.terrain_pages(),
+            |dependency| dependency.key,
+            |dependency| dependency.revision,
+        )
+    }
+}
+
+fn sorted_keys_intersect<T, K: Ord + Copy>(left: &[T], right: &[T], key: impl Fn(&T) -> K) -> bool {
+    let (mut left_index, mut right_index) = (0, 0);
+    while let (Some(left_value), Some(right_value)) = (left.get(left_index), right.get(right_index))
+    {
+        match key(left_value).cmp(&key(right_value)) {
+            std::cmp::Ordering::Less => left_index += 1,
+            std::cmp::Ordering::Equal => return true,
+            std::cmp::Ordering::Greater => right_index += 1,
+        }
+    }
+    false
+}
+
+fn sorted_revisions_invalidate<T, K: Ord + Copy>(
+    changed: &[T],
+    accepted: &[T],
+    key: impl Fn(&T) -> K,
+    revision: impl Fn(&T) -> u64,
+) -> bool {
+    let (mut changed_index, mut accepted_index) = (0, 0);
+    while let (Some(changed_value), Some(accepted_value)) =
+        (changed.get(changed_index), accepted.get(accepted_index))
+    {
+        match key(changed_value).cmp(&key(accepted_value)) {
+            std::cmp::Ordering::Less => changed_index += 1,
+            std::cmp::Ordering::Equal => {
+                if !revision_satisfies(revision(accepted_value), revision(changed_value)) {
+                    return true;
+                }
+                changed_index += 1;
+                accepted_index += 1;
+            }
+            std::cmp::Ordering::Greater => accepted_index += 1,
+        }
+    }
+    false
+}
+
+/// Result of atomically observing a durable edit batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservedWorldChange {
+    applied_values: Vec<bool>,
+    change: WorldChange,
+}
+
+impl ObservedWorldChange {
+    pub fn applied_values(&self) -> &[bool] {
+        &self.applied_values
+    }
+
+    pub fn into_parts(self) -> (Vec<bool>, WorldChange) {
+        (self.applied_values, self.change)
+    }
+
+    pub fn change(&self) -> &WorldChange {
+        &self.change
+    }
+}
+
 /// Client-side floors for server-authored edit products. Different world connections may finish
 /// concurrent commands out of global revision order, so voxel values and product floors advance
 /// independently and never regress when an older commit arrives later.
@@ -35,6 +319,7 @@ pub const fn revision_satisfies(candidate: u64, requested: u64) -> bool {
 pub struct AuthoritativeEditRevisions {
     voxels: BTreeMap<VoxelCoord, u64>,
     chunks: BTreeMap<ChunkCoord, u64>,
+    terrain_pages: BTreeMap<TerrainPageKey, u64>,
 }
 
 impl AuthoritativeEditRevisions {
@@ -59,24 +344,106 @@ impl AuthoritativeEditRevisions {
         revision: u64,
         affected_chunks: &[ChunkCoord],
     ) -> Vec<bool> {
+        self.observe_world_change_batch(coords, revision, affected_chunks)
+            .applied_values
+    }
+
+    /// Records an atomic edit and returns the exact product floors that advanced.
+    pub fn observe_world_change_batch(
+        &mut self,
+        coords: &[VoxelCoord],
+        revision: u64,
+        affected_chunks: &[ChunkCoord],
+    ) -> ObservedWorldChange {
         let apply_values = coords
             .iter()
             .map(|&coord| advance_revision(&mut self.voxels, coord, revision))
             .collect();
-        for &chunk in affected_chunks {
-            advance_revision(&mut self.chunks, chunk, revision);
+        let affected_chunks = affected_chunks.iter().copied().collect::<BTreeSet<_>>();
+        let chunks = affected_chunks
+            .iter()
+            .copied()
+            .filter_map(|coord| {
+                advance_revision(&mut self.chunks, coord, revision)
+                    .then_some(ChunkRevision { coord, revision })
+            })
+            .collect();
+        let (terrain_page_keys, mut invalidated_terrain_roots) =
+            surface_edit_dependencies(&affected_chunks);
+        let terrain_pages = terrain_page_keys
+            .into_iter()
+            .filter_map(|key| {
+                advance_revision(&mut self.terrain_pages, key, revision)
+                    .then_some(TerrainPageRevision { key, revision })
+            })
+            .collect::<Vec<_>>();
+        if terrain_pages.is_empty() {
+            invalidated_terrain_roots.clear();
         }
-        apply_values
+        ObservedWorldChange {
+            applied_values: apply_values,
+            change: WorldChange {
+                chunks,
+                terrain_pages,
+                invalidated_terrain_roots,
+            },
+        }
     }
 
     pub fn chunk_floor(&self, coord: ChunkCoord) -> u64 {
         self.chunks.get(&coord).copied().unwrap_or(1)
     }
 
+    pub fn terrain_page_floor(&self, key: TerrainPageKey) -> u64 {
+        self.terrain_pages.get(&key).copied().unwrap_or(1)
+    }
+
+    pub fn fence_is_current(&self, fence: &WorldRevisionFence) -> bool {
+        fence.chunks.iter().all(|dependency| {
+            revision_satisfies(dependency.revision, self.chunk_floor(dependency.coord))
+        }) && fence.terrain_pages.iter().all(|dependency| {
+            revision_satisfies(dependency.revision, self.terrain_page_floor(dependency.key))
+        })
+    }
+
     pub fn clear(&mut self) {
         self.voxels.clear();
         self.chunks.clear();
+        self.terrain_pages.clear();
     }
+}
+
+fn surface_edit_dependencies(
+    affected_chunks: &BTreeSet<ChunkCoord>,
+) -> (BTreeSet<TerrainPageKey>, Vec<TerrainPageKey>) {
+    let leaves = affected_chunks
+        .iter()
+        .flat_map(|coord| {
+            // Surface pages own a positive boundary lattice sample. An edit in chunk (x, z)
+            // therefore changes that page and the positive edge/corner of the three pages
+            // immediately negative of it.
+            [(0, 0), (-1, 0), (0, -1), (-1, -1)].map(|(offset_x, offset_z)| {
+                TerrainPageKey::surface(
+                    0,
+                    coord.x.saturating_add(offset_x),
+                    coord.z.saturating_add(offset_z),
+                )
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    let invalidated_terrain_roots = leaves
+        .iter()
+        .filter_map(|leaf| leaf.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let terrain_pages = leaves
+        .into_iter()
+        .flat_map(|leaf| {
+            (0..=TERRAIN_COVERAGE_ROOT_LEVEL).filter_map(move |level| leaf.ancestor_at(level))
+        })
+        .collect();
+    (terrain_pages, invalidated_terrain_roots)
 }
 
 fn advance_revision<K: Ord>(revisions: &mut BTreeMap<K, u64>, key: K, candidate: u64) -> bool {
@@ -2029,6 +2396,260 @@ mod tests {
         );
         assert_eq!(revisions.chunk_floor(chunks[0]), 9);
         assert_eq!(revisions.chunk_floor(chunks[1]), 9);
+    }
+
+    #[test]
+    fn world_change_contains_the_exact_positive_surface_boundary_closure() {
+        let voxel = VoxelCoord::new(13 * CHUNK_EDGE as i32, 4, -7 * CHUNK_EDGE as i32);
+        let affected = ChunkCoord::new(13, 4, -7);
+        let mut revisions = AuthoritativeEditRevisions::default();
+
+        let observed = revisions.observe_world_change_batch(&[voxel], 9, &[affected, affected]);
+        let change = observed.change();
+        assert_eq!(
+            change.chunks(),
+            &[ChunkRevision {
+                coord: affected,
+                revision: 9
+            }]
+        );
+        for leaf in [
+            TerrainPageKey::surface(0, 13, -7),
+            TerrainPageKey::surface(0, 12, -7),
+            TerrainPageKey::surface(0, 13, -8),
+            TerrainPageKey::surface(0, 12, -8),
+        ] {
+            assert!(
+                (0..=TERRAIN_COVERAGE_ROOT_LEVEL).all(|level| {
+                    change.terrain_pages().contains(&TerrainPageRevision {
+                        key: leaf.ancestor_at(level).unwrap(),
+                        revision: 9,
+                    })
+                }),
+                "the edited sample and every positive-boundary owner need one ancestor chain"
+            );
+        }
+        assert!(
+            !change.terrain_pages().contains(&TerrainPageRevision {
+                key: TerrainPageKey::surface(1, 7, -4),
+                revision: 9,
+            }),
+            "an unedited sibling must retain its independent floor"
+        );
+        assert_eq!(
+            change.invalidated_terrain_roots(),
+            &[TerrainPageKey::surface(0, 13, -7)
+                .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                .unwrap()]
+        );
+        assert!(change.terrain_directory_keys().all(|key| key.level > 0));
+    }
+
+    #[test]
+    fn unrelated_world_change_does_not_intersect_or_invalidate_a_fence() {
+        let dependency = ChunkCoord::new(2, 3, 4);
+        let page = TerrainPageKey::surface(3, 5, 6);
+        let fence = WorldRevisionFence::new(
+            [ChunkRevision {
+                coord: dependency,
+                revision: 7,
+            }],
+            [TerrainPageRevision {
+                key: page,
+                revision: 7,
+            }],
+        )
+        .unwrap();
+        let mut revisions = AuthoritativeEditRevisions::default();
+        let unrelated = revisions.observe_world_change_batch(
+            &[VoxelCoord::new(
+                40 * CHUNK_EDGE as i32,
+                0,
+                40 * CHUNK_EDGE as i32,
+            )],
+            8,
+            &[ChunkCoord::new(40, 0, 40)],
+        );
+
+        assert!(!unrelated.change().intersects(&fence));
+        assert!(!unrelated.change().invalidates(&fence));
+    }
+
+    #[test]
+    fn newer_edit_invalidates_a_fence_and_older_edit_cannot_revive_it() {
+        let chunk = ChunkCoord::new(7, 0, -3);
+        let leaf = TerrainPageKey::surface(0, chunk.x, chunk.z);
+        let fence = WorldRevisionFence::new(
+            [ChunkRevision {
+                coord: chunk,
+                revision: 9,
+            }],
+            [TerrainPageRevision {
+                key: leaf,
+                revision: 9,
+            }],
+        )
+        .unwrap();
+        let mut revisions = AuthoritativeEditRevisions::default();
+        revisions.observe_world_change_batch(&[], 9, &[chunk]);
+        assert!(fence.is_current(&revisions));
+
+        let newer = revisions.observe_world_change_batch(&[], 10, &[chunk]);
+        assert!(newer.change().intersects(&fence));
+        assert!(newer.change().invalidates(&fence));
+        assert!(!fence.is_current(&revisions));
+
+        let older = revisions.observe_world_change_batch(&[], 8, &[chunk]);
+        assert!(older.change().is_empty());
+        assert!(older.change().invalidated_terrain_roots().is_empty());
+        assert_eq!(revisions.chunk_floor(chunk), 10);
+        assert_eq!(revisions.terrain_page_floor(leaf), 10);
+        assert!(!fence.is_current(&revisions));
+    }
+
+    #[test]
+    fn revision_fences_accept_exact_or_newer_products_and_reject_lower_products() {
+        let chunk = ChunkCoord::new(-1, 2, 3);
+        let page = TerrainPageKey::surface(2, -4, 5);
+        let mut revisions = AuthoritativeEditRevisions::default();
+        revisions.observe_world_change_batch(&[], 12, &[chunk]);
+        // This page is unrelated to the chunk closure, so establish its floor with its own leaf.
+        let page_chunk =
+            ChunkCoord::new(page.coord[0] << page.level, 0, page.coord[2] << page.level);
+        revisions.observe_world_change_batch(&[], 12, &[page_chunk]);
+
+        let fence = |revision| {
+            WorldRevisionFence::new(
+                [ChunkRevision {
+                    coord: chunk,
+                    revision,
+                }],
+                [TerrainPageRevision {
+                    key: page,
+                    revision,
+                }],
+            )
+            .unwrap()
+        };
+        assert!(fence(12).is_current(&revisions));
+        assert!(fence(13).is_current(&revisions));
+        assert!(!fence(11).is_current(&revisions));
+    }
+
+    #[test]
+    fn revision_floors_and_invalidation_obey_wrapping_serial_order() {
+        let chunk = ChunkCoord::new(3, 0, 3);
+        let page = TerrainPageKey::surface(0, 3, 3);
+        let before_wrap = WorldRevisionFence::new(
+            [ChunkRevision {
+                coord: chunk,
+                revision: u64::MAX,
+            }],
+            [TerrainPageRevision {
+                key: page,
+                revision: u64::MAX,
+            }],
+        )
+        .unwrap();
+        let mut revisions = AuthoritativeEditRevisions::default();
+        revisions.observe_world_change_batch(&[], u64::MAX, &[chunk]);
+        assert!(before_wrap.is_current(&revisions));
+
+        let after_wrap = revisions.observe_world_change_batch(&[], 1, &[chunk]);
+        assert!(after_wrap.change().invalidates(&before_wrap));
+        assert_eq!(revisions.chunk_floor(chunk), 1);
+        assert_eq!(revisions.terrain_page_floor(page), 1);
+
+        let stale = revisions.observe_world_change_batch(&[], u64::MAX, &[chunk]);
+        assert!(stale.change().is_empty());
+        assert_eq!(revisions.chunk_floor(chunk), 1);
+    }
+
+    #[test]
+    fn revision_fence_order_and_digest_are_deterministic_but_conflicts_are_rejected() {
+        let chunk_a = ChunkCoord::new(-2, 0, 4);
+        let chunk_b = ChunkCoord::new(8, 1, -3);
+        let page_a = TerrainPageKey::surface(1, -5, 7);
+        let page_b = TerrainPageKey::surface(4, 2, -1);
+        let forward = WorldRevisionFence::new(
+            [
+                ChunkRevision {
+                    coord: chunk_a,
+                    revision: 11,
+                },
+                ChunkRevision {
+                    coord: chunk_b,
+                    revision: 12,
+                },
+                ChunkRevision {
+                    coord: chunk_a,
+                    revision: 11,
+                },
+            ],
+            [
+                TerrainPageRevision {
+                    key: page_a,
+                    revision: 13,
+                },
+                TerrainPageRevision {
+                    key: page_b,
+                    revision: 14,
+                },
+            ],
+        )
+        .unwrap();
+        let reverse = WorldRevisionFence::new(
+            [
+                ChunkRevision {
+                    coord: chunk_b,
+                    revision: 12,
+                },
+                ChunkRevision {
+                    coord: chunk_a,
+                    revision: 11,
+                },
+            ],
+            [
+                TerrainPageRevision {
+                    key: page_b,
+                    revision: 14,
+                },
+                TerrainPageRevision {
+                    key: page_a,
+                    revision: 13,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.digest(), reverse.digest());
+        assert_eq!(
+            WorldRevisionFence::new(
+                [
+                    ChunkRevision {
+                        coord: chunk_a,
+                        revision: 11
+                    },
+                    ChunkRevision {
+                        coord: chunk_a,
+                        revision: 12
+                    },
+                ],
+                [],
+            ),
+            Err(RevisionFenceError::ConflictingChunkRevision(chunk_a))
+        );
+        assert_eq!(
+            WorldRevisionFence::new(
+                [],
+                [TerrainPageRevision {
+                    key: page_a,
+                    revision: 0
+                }],
+            ),
+            Err(RevisionFenceError::ZeroRevision)
+        );
     }
 
     #[test]
