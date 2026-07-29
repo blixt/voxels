@@ -17,6 +17,369 @@ use voxels_world::{
 const FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
 const NORMAL_ERROR_PIXELS_PER_RADIAN: f64 = 0.25;
+const PRESENTATION_LOCUS_EDGE_LEAVES: i32 = 4;
+const PRESENTATION_LOCUS_STRIDE_LEAVES: i32 = 2;
+
+/// A snapped, overlapping horizontal region in which a committed terrain presentation is safe.
+///
+/// Adjacent loci overlap by two level-0 pages. This lets a replacement promote while the camera
+/// is still valid in both the old and new presentation; the simulation only has to wait at the
+/// outer half-open boundary when publication loses the race.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct PresentationLocus {
+    minimum_leaf: [i32; 2],
+    maximum_leaf_exclusive: [i32; 2],
+}
+
+impl PresentationLocus {
+    pub fn containing_position(position_metres: [f64; 3]) -> Option<Self> {
+        if !position_metres.into_iter().all(f64::is_finite) {
+            return None;
+        }
+        let leaf_span_metres = f64::from(TERRAIN_PAGE_EDGE_SAMPLES) * 0.1;
+        let camera_leaf = [position_metres[0], position_metres[2]].map(|coordinate| {
+            let leaf = (coordinate / leaf_span_metres).floor();
+            (leaf >= f64::from(i32::MIN) && leaf <= f64::from(i32::MAX)).then_some(leaf as i32)
+        });
+        let [Some(camera_leaf_x), Some(camera_leaf_z)] = camera_leaf else {
+            return None;
+        };
+        let anchor = [camera_leaf_x, camera_leaf_z].map(|coordinate| {
+            coordinate.div_euclid(PRESENTATION_LOCUS_STRIDE_LEAVES)
+                * PRESENTATION_LOCUS_STRIDE_LEAVES
+        });
+        let minimum_leaf = [anchor[0].checked_sub(1)?, anchor[1].checked_sub(1)?];
+        let maximum_leaf_exclusive = [
+            anchor[0].checked_add(PRESENTATION_LOCUS_EDGE_LEAVES - 1)?,
+            anchor[1].checked_add(PRESENTATION_LOCUS_EDGE_LEAVES - 1)?,
+        ];
+        Some(Self {
+            minimum_leaf,
+            maximum_leaf_exclusive,
+        })
+    }
+
+    pub const fn minimum_leaf(self) -> [i32; 2] {
+        self.minimum_leaf
+    }
+
+    pub const fn maximum_leaf_exclusive(self) -> [i32; 2] {
+        self.maximum_leaf_exclusive
+    }
+
+    pub fn horizontal_bounds_metres(self) -> [[f64; 2]; 2] {
+        let leaf_span_metres = f64::from(TERRAIN_PAGE_EDGE_SAMPLES) * 0.1;
+        [
+            self.minimum_leaf
+                .map(|coordinate| f64::from(coordinate) * leaf_span_metres),
+            self.maximum_leaf_exclusive
+                .map(|coordinate| f64::from(coordinate) * leaf_span_metres),
+        ]
+    }
+
+    /// Half-open membership used by both simulation gating and presentation diagnostics.
+    pub fn contains_position(self, position_metres: [f32; 3]) -> bool {
+        if !position_metres.into_iter().all(f32::is_finite) {
+            return false;
+        }
+        let [minimum, maximum] = self.horizontal_bounds_metres();
+        let position = [position_metres[0], position_metres[2]];
+        (minimum[0] as f32..maximum[0] as f32).contains(&position[0])
+            && (minimum[1] as f32..maximum[1] as f32).contains(&position[1])
+    }
+
+    /// Clamps horizontal motion to this convex half-open locus while preserving vertical motion.
+    ///
+    /// The maximum representable `f32` below the exclusive edge is used instead of an arbitrary
+    /// epsilon, so repeated blocked steps cannot drift outside or leave a visible dead strip.
+    pub fn clamp_position(self, mut position_metres: [f32; 3]) -> [f32; 3] {
+        let [minimum, maximum] = self.horizontal_bounds_metres();
+        for (world_axis, horizontal_axis) in [(0, 0), (2, 1)] {
+            let minimum = minimum[horizontal_axis] as f32;
+            let maximum = next_down_f32(maximum[horizontal_axis] as f32);
+            position_metres[world_axis] = position_metres[world_axis].clamp(minimum, maximum);
+        }
+        position_metres
+    }
+}
+
+fn next_down_f32(value: f32) -> f32 {
+    if value.is_nan() || value == f32::NEG_INFINITY {
+        return value;
+    }
+    if value == 0.0 {
+        return -f32::from_bits(1);
+    }
+    let bits = value.to_bits();
+    f32::from_bits(if value > 0.0 { bits - 1 } else { bits + 1 })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PresentationEnvelopeInput {
+    locus: PresentationLocus,
+    exact_radius_bits: u64,
+    view_distance_bits: u64,
+    max_exact_leaves: usize,
+    max_horizon_roots: usize,
+}
+
+/// Immutable reuse while the desired camera remains in one snapped locus.
+#[derive(Clone, Debug, Default)]
+pub struct PresentationEnvelopeCache {
+    entry: Option<(PresentationEnvelopeInput, PresentationEnvelope)>,
+    rebuilds: u64,
+}
+
+impl PresentationEnvelopeCache {
+    pub fn resolve(
+        &mut self,
+        camera_position_metres: [f64; 3],
+        exact_radius_metres: f64,
+        view_distance_metres: f64,
+        max_exact_leaves: usize,
+        max_horizon_roots: usize,
+    ) -> PresentationEnvelope {
+        let Some(locus) = PresentationLocus::containing_position(camera_position_metres) else {
+            return PresentationEnvelope::incomplete();
+        };
+        let input = PresentationEnvelopeInput {
+            locus,
+            exact_radius_bits: exact_radius_metres.to_bits(),
+            view_distance_bits: view_distance_metres.to_bits(),
+            max_exact_leaves,
+            max_horizon_roots,
+        };
+        if let Some((cached_input, envelope)) = &self.entry
+            && *cached_input == input
+        {
+            return envelope.clone();
+        }
+        let envelope = PresentationEnvelope::build(
+            locus,
+            exact_radius_metres,
+            view_distance_metres,
+            max_exact_leaves,
+            max_horizon_roots,
+        );
+        self.rebuilds = self.rebuilds.saturating_add(1);
+        self.entry = Some((input, envelope.clone()));
+        envelope
+    }
+
+    pub const fn rebuilds(&self) -> u64 {
+        self.rebuilds
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PresentationEnvelope {
+    data: Arc<PresentationEnvelopeData>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PresentationEnvelopeData {
+    locus: Option<PresentationLocus>,
+    exact_surface_domain: ExactSurfaceDomain,
+    horizon_roots: BTreeSet<TerrainPageKey>,
+    complete: bool,
+    fingerprint: u64,
+}
+
+impl PresentationEnvelope {
+    fn build(
+        locus: PresentationLocus,
+        exact_radius_metres: f64,
+        view_distance_metres: f64,
+        max_exact_leaves: usize,
+        max_horizon_roots: usize,
+    ) -> Self {
+        if !exact_radius_metres.is_finite()
+            || exact_radius_metres < 0.0
+            || !view_distance_metres.is_finite()
+            || view_distance_metres <= 0.0
+        {
+            return Self::incomplete();
+        }
+        let Some(exact_leaves) =
+            enumerate_locus_dilation_pages(locus, 0, exact_radius_metres, max_exact_leaves)
+        else {
+            return Self::incomplete();
+        };
+        let Some(horizon_roots) = enumerate_locus_dilation_pages(
+            locus,
+            TERRAIN_COVERAGE_ROOT_LEVEL,
+            view_distance_metres,
+            max_horizon_roots,
+        ) else {
+            return Self::incomplete();
+        };
+        let exact_surface_domain =
+            ExactSurfaceDomain::from_parts(exact_leaves.clone(), Some(exact_leaves));
+        if !exact_surface_domain.is_complete() || horizon_roots.is_empty() {
+            return Self::incomplete();
+        }
+        let mut fingerprint = FINGERPRINT_OFFSET;
+        for coordinate in locus
+            .minimum_leaf
+            .into_iter()
+            .chain(locus.maximum_leaf_exclusive)
+        {
+            fingerprint = fingerprint_value(fingerprint, coordinate as u32 as u64);
+        }
+        fingerprint = fingerprint_value(fingerprint, exact_surface_domain.fingerprint());
+        for root in &horizon_roots {
+            fingerprint = fingerprint_page_key(fingerprint, *root);
+        }
+        Self {
+            data: Arc::new(PresentationEnvelopeData {
+                locus: Some(locus),
+                exact_surface_domain,
+                horizon_roots,
+                complete: true,
+                fingerprint,
+            }),
+        }
+    }
+
+    fn incomplete() -> Self {
+        Self {
+            data: Arc::new(PresentationEnvelopeData {
+                locus: None,
+                exact_surface_domain: ExactSurfaceDomain::incomplete(),
+                horizon_roots: BTreeSet::new(),
+                complete: false,
+                fingerprint: 0,
+            }),
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.data.complete
+    }
+
+    pub fn locus(&self) -> Option<PresentationLocus> {
+        self.data.locus
+    }
+
+    pub fn exact_surface_domain(&self) -> &ExactSurfaceDomain {
+        &self.data.exact_surface_domain
+    }
+
+    pub fn required_horizon_roots(&self) -> impl Iterator<Item = TerrainPageKey> + '_ {
+        self.data.horizon_roots.iter().copied()
+    }
+
+    pub fn required_horizon_root_count(&self) -> usize {
+        self.data.horizon_roots.len()
+    }
+
+    pub fn fingerprint(&self) -> u64 {
+        self.data.fingerprint
+    }
+
+    pub fn contains_position(&self, position_metres: [f32; 3]) -> bool {
+        self.data
+            .locus
+            .is_some_and(|locus| locus.contains_position(position_metres))
+    }
+
+    pub fn clamp_position(&self, position_metres: [f32; 3]) -> Option<[f32; 3]> {
+        self.data
+            .locus
+            .map(|locus| locus.clamp_position(position_metres))
+    }
+
+    pub fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.data, &other.data)
+    }
+}
+
+fn enumerate_locus_dilation_pages(
+    locus: PresentationLocus,
+    level: u8,
+    radius_metres: f64,
+    maximum_pages: usize,
+) -> Option<BTreeSet<TerrainPageKey>> {
+    if level > TERRAIN_COVERAGE_ROOT_LEVEL
+        || !radius_metres.is_finite()
+        || radius_metres < 0.0
+        || maximum_pages == 0
+    {
+        return None;
+    }
+    let [locus_minimum, locus_maximum] = locus.horizontal_bounds_metres();
+    let page_span_metres = f64::from(TERRAIN_PAGE_EDGE_SAMPLES) * 0.1 * f64::from(1_u32 << level);
+    let minimum =
+        locus_minimum.map(|coordinate| ((coordinate - radius_metres) / page_span_metres).floor());
+    let maximum =
+        locus_maximum.map(|coordinate| ((coordinate + radius_metres) / page_span_metres).floor());
+    if minimum
+        .into_iter()
+        .chain(maximum)
+        .any(|value| value < f64::from(i32::MIN) || value > f64::from(i32::MAX))
+    {
+        return None;
+    }
+    let minimum = minimum.map(|coordinate| coordinate as i32);
+    let maximum = maximum.map(|coordinate| coordinate as i32);
+    let width = i64::from(maximum[0])
+        .checked_sub(i64::from(minimum[0]))?
+        .checked_add(1)?;
+    let height = i64::from(maximum[1])
+        .checked_sub(i64::from(minimum[1]))?
+        .checked_add(1)?;
+    let candidate_count = usize::try_from(width.checked_mul(height)?).ok()?;
+    if candidate_count > maximum_pages {
+        return None;
+    }
+    let radius_squared = radius_metres * radius_metres;
+    let conservative_roundoff = f64::EPSILON
+        * locus_minimum
+            .into_iter()
+            .chain(locus_maximum)
+            .chain([radius_metres])
+            .map(f64::abs)
+            .fold(1.0_f64, f64::max)
+            .powi(2)
+        * 128.0
+        + 1.0e-12;
+    let mut pages = BTreeSet::new();
+    for z in minimum[1]..=maximum[1] {
+        for x in minimum[0]..=maximum[0] {
+            let key = TerrainPageKey::surface(level, x, z);
+            let [page_minimum, page_maximum] = key.horizontal_bounds()?;
+            let page_minimum = page_minimum.map(|value| f64::from(value) * 0.1);
+            let page_maximum = page_maximum.map(|value| f64::from(value) * 0.1);
+            let distance_squared = (0..2)
+                .map(|axis| {
+                    if page_maximum[axis] < locus_minimum[axis] {
+                        (locus_minimum[axis] - page_maximum[axis]).powi(2)
+                    } else if locus_maximum[axis] < page_minimum[axis] {
+                        (page_minimum[axis] - locus_maximum[axis]).powi(2)
+                    } else {
+                        0.0
+                    }
+                })
+                .sum::<f64>();
+            if distance_squared <= radius_squared + conservative_roundoff {
+                pages.insert(key);
+            }
+        }
+    }
+    (!pages.is_empty()).then_some(pages)
+}
+
+fn fingerprint_value(fingerprint: u64, value: u64) -> u64 {
+    (fingerprint ^ value).wrapping_mul(FINGERPRINT_PRIME)
+}
+
+fn fingerprint_page_key(mut fingerprint: u64, key: TerrainPageKey) -> u64 {
+    fingerprint = fingerprint_value(fingerprint, u64::from(key.level));
+    for coordinate in key.coord {
+        fingerprint = fingerprint_value(fingerprint, coordinate as u32 as u64);
+    }
+    fingerprint
+}
 
 /// The exact 10 cm surface tiles required by one player-motion prediction.
 ///
@@ -575,6 +938,47 @@ impl VirtualTerrainCut {
         domain.core_is_complete()
             && domain.required_leaf_count() > 0
             && self.exact_surface_coverage(domain) == domain.required_leaf_count()
+    }
+
+    /// Whether this cut is the complete, exact owner required by one presentation envelope.
+    ///
+    /// Horizon coverage is explicit: an unregistered coverage root contributes no selected area
+    /// and fails even when every root which happened to reach the local directory is internally
+    /// complete. Weighted leaf area avoids recursively expanding a missing level-10 root into
+    /// more than a million leaves.
+    pub fn covers_presentation_envelope(&self, envelope: &PresentationEnvelope) -> bool {
+        if !envelope.is_complete()
+            || !self.is_renderable()
+            || !self.covers_exact_surface_domain(envelope.exact_surface_domain())
+            || self
+                .selected_pages
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return false;
+        }
+        let selected = self.selected_pages.iter().copied().collect::<BTreeSet<_>>();
+        if selected.iter().any(|key| {
+            (key.level.saturating_add(1)..=TERRAIN_COVERAGE_ROOT_LEVEL).any(|level| {
+                key.ancestor_at(level)
+                    .is_some_and(|ancestor| selected.contains(&ancestor))
+            })
+        }) {
+            return false;
+        }
+        let required_leaf_area = 1_u64 << (2 * u32::from(TERRAIN_COVERAGE_ROOT_LEVEL));
+        envelope.required_horizon_roots().all(|root| {
+            self.selected_pages
+                .iter()
+                .filter(|selected| {
+                    selected.is_surface()
+                        && selected.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL) == Some(root)
+                })
+                .try_fold(0_u64, |covered, selected| {
+                    covered.checked_add(1_u64 << (2 * u32::from(selected.level)))
+                })
+                == Some(required_leaf_area)
+        })
     }
 }
 
@@ -2421,6 +2825,152 @@ mod tests {
             incoherent_replacement_groups: 0,
             exact_surface_lod_discontinuities: 0,
         }
+    }
+
+    fn complete_envelope_cut(envelope: &PresentationEnvelope) -> VirtualTerrainCut {
+        fn partition(
+            key: TerrainPageKey,
+            exact: &BTreeSet<TerrainPageKey>,
+            selected: &mut Vec<TerrainPageKey>,
+        ) {
+            let intersects_exact = exact
+                .iter()
+                .any(|leaf| leaf.ancestor_at(key.level) == Some(key));
+            if key.level == 0 || !intersects_exact {
+                selected.push(key);
+                return;
+            }
+            for child in key.refinement_children().unwrap() {
+                partition(child, exact, selected);
+            }
+        }
+
+        let exact = envelope
+            .exact_surface_domain()
+            .required_leaves()
+            .collect::<BTreeSet<_>>();
+        let mut selected = Vec::new();
+        for root in envelope.required_horizon_roots() {
+            partition(root, &exact, &mut selected);
+        }
+        selected.sort_unstable();
+        cut_with_selected(selected)
+    }
+
+    #[test]
+    fn presentation_loci_are_half_open_snapped_and_overlap_at_negative_coordinates() {
+        let first = PresentationLocus::containing_position([-0.1, 0.0, -0.1]).unwrap();
+        let next = PresentationLocus::containing_position([3.2, 0.0, -0.1]).unwrap();
+
+        assert_eq!(first.minimum_leaf(), [-3, -3]);
+        assert_eq!(first.maximum_leaf_exclusive(), [1, 1]);
+        assert_eq!(next.minimum_leaf(), [-1, -3]);
+        assert_eq!(next.maximum_leaf_exclusive(), [3, 1]);
+        assert!(first.contains_position([-9.6, 0.0, -9.6]));
+        assert!(!first.contains_position([3.2, 0.0, 0.0]));
+        assert!(next.contains_position([3.2, 0.0, 0.0]));
+
+        let clamped = first.clamp_position([3.2, 7.0, -20.0]);
+        assert!(first.contains_position(clamped));
+        assert_eq!(clamped[1], 7.0);
+        assert_eq!(clamped[2], -9.6);
+        assert!(clamped[0] < 3.2);
+    }
+
+    #[test]
+    fn presentation_envelope_cache_depends_on_locus_not_subcell_motion_or_velocity() {
+        let mut cache = PresentationEnvelopeCache::default();
+        let first = cache.resolve([0.1, 0.0, 0.1], 12.8, 3_200.0, 16_384, 16);
+        let moved_inside = cache.resolve([2.9, 40.0, 2.9], 12.8, 3_200.0, 16_384, 16);
+        let adjacent = cache.resolve([9.7, 0.0, 0.1], 12.8, 3_200.0, 16_384, 16);
+
+        assert!(first.is_complete());
+        assert!(first.shares_storage_with(&moved_inside));
+        assert!(!first.shares_storage_with(&adjacent));
+        assert_eq!(cache.rebuilds(), 2);
+        assert_eq!(first.required_horizon_root_count(), 4);
+    }
+
+    #[test]
+    fn every_stationary_core_inside_the_locus_is_a_subset_of_safety_leaves() {
+        let mut cache = PresentationEnvelopeCache::default();
+        let envelope = cache.resolve([0.1, 0.0, 0.1], 12.8, 3_200.0, 16_384, 16);
+        let safety = envelope
+            .exact_surface_domain()
+            .required_leaves()
+            .collect::<BTreeSet<_>>();
+        let [minimum, maximum] = envelope.locus().unwrap().horizontal_bounds_metres();
+        let probes = [
+            [minimum[0], 0.0, minimum[1]],
+            [maximum[0] - 1.0e-6, 0.0, minimum[1]],
+            [minimum[0], 0.0, maximum[1] - 1.0e-6],
+            [maximum[0] - 1.0e-6, 0.0, maximum[1] - 1.0e-6],
+            [
+                (minimum[0] + maximum[0]) * 0.5,
+                0.0,
+                (minimum[1] + maximum[1]) * 0.5,
+            ],
+        ];
+        for probe in probes {
+            let core = ExactSurfaceDomain::swept_horizontal_capsule(probe, probe, 12.8, 16_384);
+            assert!(
+                core.required_leaves().all(|leaf| safety.contains(&leaf)),
+                "stationary core at {probe:?} escaped the locus safety set",
+            );
+        }
+    }
+
+    #[test]
+    fn presentation_cut_requires_every_exact_leaf_and_explicit_horizon_root() {
+        let envelope = PresentationEnvelopeCache::default().resolve(
+            [-0.1, 0.0, -0.1],
+            3.2,
+            3_200.0,
+            16_384,
+            16,
+        );
+        let complete = complete_envelope_cut(&envelope);
+        assert!(complete.covers_presentation_envelope(&envelope));
+
+        let missing_leaf = envelope
+            .exact_surface_domain()
+            .required_leaves()
+            .next()
+            .unwrap();
+        let mut incomplete_exact = complete.clone();
+        incomplete_exact
+            .selected_pages
+            .retain(|selected| *selected != missing_leaf);
+        assert!(!incomplete_exact.covers_presentation_envelope(&envelope));
+
+        let missing_root = envelope.required_horizon_roots().next().unwrap();
+        let mut incomplete_horizon = complete.clone();
+        incomplete_horizon.selected_pages.retain(|selected| {
+            selected.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL) != Some(missing_root)
+        });
+        assert!(!incomplete_horizon.covers_presentation_envelope(&envelope));
+
+        let mut equal_count_swap = complete;
+        let removed = equal_count_swap
+            .selected_pages
+            .iter()
+            .position(|selected| *selected == missing_leaf)
+            .unwrap();
+        equal_count_swap.selected_pages[removed] =
+            TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, i32::MAX, i32::MAX);
+        equal_count_swap.selected_pages.sort_unstable();
+        assert!(!equal_count_swap.covers_presentation_envelope(&envelope));
+    }
+
+    #[test]
+    fn presentation_envelope_fails_closed_when_exact_or_horizon_bounds_overflow() {
+        let exact_overflow =
+            PresentationEnvelopeCache::default().resolve([0.0, 0.0, 0.0], 12.8, 3_200.0, 1, 16);
+        let horizon_overflow =
+            PresentationEnvelopeCache::default().resolve([0.0, 0.0, 0.0], 12.8, 3_200.0, 16_384, 1);
+
+        assert!(!exact_overflow.is_complete());
+        assert!(!horizon_overflow.is_complete());
     }
 
     #[test]

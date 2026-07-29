@@ -17,8 +17,8 @@ use crate::ui::{Color, InventoryItem, LiveStats, MissionControlUi, UiAction, UiK
 pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
 use crate::ui_gpu::{SCENE_FORMAT, UiGpu};
 use crate::virtual_terrain::{
-    ExactSurfaceDomain, VirtualTerrainCapacity, VirtualTerrainCut, VirtualTerrainError,
-    VirtualTerrainHierarchy, VirtualTerrainView,
+    ExactSurfaceDomain, PresentationEnvelope, PresentationLocus, VirtualTerrainCapacity,
+    VirtualTerrainCut, VirtualTerrainError, VirtualTerrainHierarchy, VirtualTerrainView,
 };
 use crate::virtual_terrain_gpu::{
     GpuVirtualTerrainFeedback, VIRTUAL_TERRAIN_SURFACE_HANDLE_SOURCE_BYTES,
@@ -241,6 +241,12 @@ enum VirtualTerrainPublicationAdvance {
     PromoteCertified,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VirtualTerrainPublication {
+    cut: VirtualTerrainCut,
+    envelope: PresentationEnvelope,
+}
+
 const fn virtual_terrain_publication_advance(
     has_transaction: bool,
     active_matches: bool,
@@ -267,14 +273,6 @@ const fn virtual_terrain_committed_snapshot_is_safe(
     active_bank_matches_committed: bool,
 ) -> bool {
     has_committed_cut && committed_cut_is_renderable && active_bank_matches_committed
-}
-
-fn virtual_terrain_cut_preserves_exact_domain(
-    committed: Option<&VirtualTerrainCut>,
-    candidate: &VirtualTerrainCut,
-    domain: &ExactSurfaceDomain,
-) -> bool {
-    committed.is_none_or(|committed| candidate.preserves_exact_surface_coverage(committed, domain))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3585,12 +3583,14 @@ pub struct Renderer {
     /// Last GPU-certified ownership cut. This is the only virtual-terrain cut that may be
     /// presented; it deliberately does not track the latest view-quality target.
     virtual_terrain_cut: Option<VirtualTerrainCut>,
+    /// Safety and horizon proof committed with `virtual_terrain_cut` and the active handle bank.
+    virtual_terrain_committed_envelope: Option<PresentationEnvelope>,
     /// Ephemeral quality/demand target selected from the latest view and resident directory.
     virtual_terrain_oracle_cut: Option<VirtualTerrainCut>,
     /// Immutable cut currently being encoded or awaiting GPU certification. Directory growth,
     /// cache arrivals, and a newer desired view may replace `virtual_terrain_oracle_cut`, but may
     /// not replace this transaction until it promotes or fails.
-    virtual_terrain_publication_cut: Option<VirtualTerrainCut>,
+    virtual_terrain_publication: Option<VirtualTerrainPublication>,
     /// Geometry admitted for the next legal cut. This includes every complete replacement group
     /// and any already-resident balance dependencies selected while accumulating the microbatch.
     /// The fence survives oracle invalidation and an empty retention request; it is released only
@@ -3608,6 +3608,8 @@ pub struct Renderer {
     virtual_terrain_oracle_view: Option<VirtualTerrainView>,
     /// Exact discrete motion domain used by selection, publication, and presentation readiness.
     virtual_terrain_exact_surface_domain: Option<ExactSurfaceDomain>,
+    /// Latest desired presentation proof. It may change while a frozen publication is in flight.
+    virtual_terrain_desired_envelope: Option<PresentationEnvelope>,
     virtual_terrain_pages: BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
     virtual_terrain_retired_published_pages: BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
     virtual_terrain_heightfield_samples: BTreeMap<TerrainPageKey, CachedVirtualHeightfieldSamples>,
@@ -4518,8 +4520,9 @@ impl Renderer {
             virtual_terrain_gpu,
             virtual_terrain_mode: VirtualTerrainRenderMode::Disabled,
             virtual_terrain_cut: None,
+            virtual_terrain_committed_envelope: None,
             virtual_terrain_oracle_cut: None,
-            virtual_terrain_publication_cut: None,
+            virtual_terrain_publication: None,
             virtual_terrain_staging_frontier: BTreeSet::new(),
             virtual_terrain_publication_abort_pending: false,
             virtual_terrain_error_scale: 1.0,
@@ -4527,6 +4530,7 @@ impl Renderer {
             virtual_terrain_requested_view: None,
             virtual_terrain_oracle_view: None,
             virtual_terrain_exact_surface_domain: None,
+            virtual_terrain_desired_envelope: None,
             virtual_terrain_pages: BTreeMap::new(),
             virtual_terrain_retired_published_pages: BTreeMap::new(),
             virtual_terrain_heightfield_samples: BTreeMap::new(),
@@ -5381,18 +5385,17 @@ impl Renderer {
         self.virtual_terrain_headroom_frames = 0;
     }
 
-    /// Records the immutable exact domain before any streaming work can return early.
+    /// Records the desired immutable presentation envelope before streaming can return early.
     ///
-    /// Screenshot and startup diagnostics must still identify the failed proof input when
-    /// discovery, selection, or publication cannot complete. A changed domain also invalidates the
-    /// cached oracle so selection cannot reuse a cut derived for the previous motion sweep.
-    pub fn begin_virtual_terrain_exact_surface_domain(
-        &mut self,
-        exact_surface_domain: &ExactSurfaceDomain,
-    ) {
-        if self.virtual_terrain_exact_surface_domain.as_ref() != Some(exact_surface_domain) {
+    /// The desired envelope may advance while an older publication is frozen. Screenshot and
+    /// startup diagnostics still identify that debt, while the transaction retains its own exact
+    /// safety and horizon proof.
+    pub fn begin_virtual_terrain_presentation_envelope(&mut self, envelope: &PresentationEnvelope) {
+        if self.virtual_terrain_desired_envelope.as_ref() != Some(envelope) {
             self.invalidate_virtual_terrain_desired_plan();
-            self.virtual_terrain_exact_surface_domain = Some(exact_surface_domain.clone());
+            self.virtual_terrain_exact_surface_domain =
+                Some(envelope.exact_surface_domain().clone());
+            self.virtual_terrain_desired_envelope = Some(envelope.clone());
         }
     }
 
@@ -6053,23 +6056,60 @@ impl Renderer {
     /// with the ephemeral quality target.
     pub fn virtual_terrain_committed_snapshot_is_valid(&self) -> bool {
         let committed = self.virtual_terrain_cut.as_ref();
+        let envelope = self.virtual_terrain_committed_envelope.as_ref();
         virtual_terrain_committed_snapshot_is_safe(
-            committed.is_some(),
-            committed.is_some_and(VirtualTerrainCut::is_renderable),
-            committed.is_some_and(|committed| {
-                self.virtual_terrain_gpu
-                    .presented_snapshot_matches(virtual_terrain_snapshot_identity(committed))
-            }),
+            committed.is_some() && envelope.is_some(),
+            committed.is_some_and(VirtualTerrainCut::is_renderable)
+                && committed
+                    .zip(envelope)
+                    .is_some_and(|(cut, envelope)| cut.covers_presentation_envelope(envelope)),
+            committed
+                .zip(envelope)
+                .is_some_and(|(committed, envelope)| {
+                    self.virtual_terrain_gpu.presented_snapshot_matches(
+                        virtual_terrain_snapshot_identity(committed, envelope),
+                    )
+                }),
         )
     }
 
-    pub fn virtual_terrain_committed_covers_exact_domain(
+    pub fn virtual_terrain_committed_covers_presentation_envelope(
         &self,
-        domain: &ExactSurfaceDomain,
+        envelope: &PresentationEnvelope,
     ) -> bool {
-        self.virtual_terrain_cut
+        self.virtual_terrain_committed_snapshot_is_valid()
+            && self.virtual_terrain_committed_envelope.as_ref() == Some(envelope)
+    }
+
+    pub fn virtual_terrain_committed_envelope(&self) -> Option<&PresentationEnvelope> {
+        self.virtual_terrain_committed_envelope.as_ref()
+    }
+
+    pub fn virtual_terrain_committed_locus(&self) -> Option<PresentationLocus> {
+        self.virtual_terrain_committed_envelope
             .as_ref()
-            .is_some_and(|cut| cut.covers_exact_surface_domain(domain))
+            .and_then(PresentationEnvelope::locus)
+    }
+
+    pub fn virtual_terrain_committed_contains_position(&self, position_metres: [f32; 3]) -> bool {
+        self.virtual_terrain_committed_snapshot_is_valid()
+            && self
+                .virtual_terrain_committed_envelope
+                .as_ref()
+                .is_some_and(|envelope| envelope.contains_position(position_metres))
+    }
+
+    pub fn clamp_to_virtual_terrain_committed_locus(
+        &self,
+        position_metres: [f32; 3],
+    ) -> Option<[f32; 3]> {
+        self.virtual_terrain_committed_snapshot_is_valid()
+            .then(|| {
+                self.virtual_terrain_committed_envelope
+                    .as_ref()
+                    .and_then(|envelope| envelope.clamp_position(position_metres))
+            })
+            .flatten()
     }
 
     fn synchronize_virtual_terrain_cut_seams(
@@ -6174,7 +6214,7 @@ impl Renderer {
     pub fn prepare_virtual_terrain_publication(
         &mut self,
     ) -> Result<bool, VirtualTerrainRendererError> {
-        if !virtual_terrain_publication_can_stage(self.virtual_terrain_publication_cut.is_some()) {
+        if !virtual_terrain_publication_can_stage(self.virtual_terrain_publication.is_some()) {
             return Ok(false);
         }
         let Some(cut) = self
@@ -6185,15 +6225,15 @@ impl Renderer {
         else {
             return Ok(false);
         };
-        if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible
-            && !virtual_terrain_cut_preserves_exact_domain(
-                self.virtual_terrain_cut.as_ref(),
-                &cut,
-                self.virtual_terrain_exact_surface_domain
-                    .as_ref()
-                    .expect("a selected cut always records its exact surface domain"),
-            )
-        {
+        let Some(envelope) = self
+            .virtual_terrain_desired_envelope
+            .as_ref()
+            .filter(|envelope| envelope.is_complete())
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        if !cut.covers_presentation_envelope(&envelope) {
             return Ok(false);
         }
         if let Some(missing) = cut
@@ -6207,22 +6247,28 @@ impl Renderer {
         }
         self.synchronize_virtual_terrain_cut_seams(&cut)?;
         self.virtual_terrain_cut_fits_snapshot(&cut)?;
+        let publication = VirtualTerrainPublication { cut, envelope };
         if self
             .virtual_terrain_gpu
-            .active_snapshot_matches(virtual_terrain_snapshot_identity(&cut))
+            .active_snapshot_matches(virtual_terrain_snapshot_identity(
+                &publication.cut,
+                &publication.envelope,
+            ))
         {
             if self
                 .virtual_terrain_cut
                 .as_ref()
-                .is_none_or(|committed| committed != &cut)
+                .is_none_or(|committed| committed != &publication.cut)
+                || self.virtual_terrain_committed_envelope.as_ref() != Some(&publication.envelope)
             {
-                self.virtual_terrain_cut = Some(cut);
+                self.virtual_terrain_cut = Some(publication.cut);
+                self.virtual_terrain_committed_envelope = Some(publication.envelope);
             }
             self.virtual_terrain_staging_frontier.clear();
             self.invalidate_virtual_terrain_desired_plan();
             return Ok(false);
         }
-        self.virtual_terrain_publication_cut = Some(cut);
+        self.virtual_terrain_publication = Some(publication);
         Ok(true)
     }
 
@@ -6232,26 +6278,22 @@ impl Renderer {
     /// certified cuts while canonical terrain remains the sole visible owner.
     pub fn advance_virtual_terrain_publication(
         &mut self,
-        exact_surface_domain: &ExactSurfaceDomain,
     ) -> Result<bool, VirtualTerrainRendererError> {
         if self.virtual_terrain_publication_abort_pending {
             self.retain_virtual_terrain_pages(std::iter::empty())?;
             self.virtual_terrain_publication_abort_pending = false;
         }
-        let Some(cut) = self.virtual_terrain_publication_cut.as_ref().cloned() else {
+        let Some(publication) = self.virtual_terrain_publication.as_ref().cloned() else {
             return Ok(false);
         };
-        if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible
-            && !virtual_terrain_cut_preserves_exact_domain(
-                self.virtual_terrain_cut.as_ref(),
-                &cut,
-                exact_surface_domain,
-            )
+        if !publication
+            .cut
+            .covers_presentation_envelope(&publication.envelope)
         {
             self.abort_virtual_terrain_publication();
             return Ok(false);
         }
-        let identity = virtual_terrain_snapshot_identity(&cut);
+        let identity = virtual_terrain_snapshot_identity(&publication.cut, &publication.envelope);
         match virtual_terrain_publication_advance(
             true,
             self.virtual_terrain_gpu.active_snapshot_matches(identity),
@@ -6267,8 +6309,9 @@ impl Renderer {
             | VirtualTerrainPublicationAdvance::Idle => return Ok(false),
         }
         self.discard_retired_virtual_terrain_pages();
-        self.virtual_terrain_cut = Some(cut);
-        self.virtual_terrain_publication_cut = None;
+        self.virtual_terrain_cut = Some(publication.cut);
+        self.virtual_terrain_committed_envelope = Some(publication.envelope);
+        self.virtual_terrain_publication = None;
         self.virtual_terrain_staging_frontier.clear();
         // The unchanged-view cache was selected against the old committed overlap/capacity. Force
         // the next frame to derive demand and admission from the cut that actually promoted.
@@ -6277,19 +6320,19 @@ impl Renderer {
     }
 
     pub const fn virtual_terrain_publication_in_flight(&self) -> bool {
-        self.virtual_terrain_publication_cut.is_some()
+        self.virtual_terrain_publication.is_some()
     }
 
     /// Whether source geometry is fenced by either a frozen publication or an accumulating
     /// microbatch. Region retirement must not invalidate either owner.
     pub fn virtual_terrain_publication_owns_geometry(&self) -> bool {
-        self.virtual_terrain_publication_cut.is_some()
+        self.virtual_terrain_publication.is_some()
             || !self.virtual_terrain_staging_frontier.is_empty()
     }
 
     fn abort_virtual_terrain_publication(&mut self) {
         self.virtual_terrain_gpu.invalidate_candidate();
-        self.virtual_terrain_publication_cut = None;
+        self.virtual_terrain_publication = None;
         self.virtual_terrain_staging_frontier.clear();
         self.virtual_terrain_publication_abort_pending = true;
         self.invalidate_virtual_terrain_desired_plan();
@@ -6346,10 +6389,12 @@ impl Renderer {
             removed_pages.extend(self.virtual_terrain.remove_region_directory(root));
         }
         let invalidates_publication =
-            self.virtual_terrain_publication_cut
+            self.virtual_terrain_publication
                 .as_ref()
-                .is_some_and(|cut| {
-                    cut.selected_pages
+                .is_some_and(|publication| {
+                    publication
+                        .cut
+                        .selected_pages
                         .iter()
                         .any(|key| removed_pages.contains(key))
                 })
@@ -6395,9 +6440,9 @@ impl Renderer {
             return Ok(false);
         }
         if self
-            .virtual_terrain_publication_cut
+            .virtual_terrain_publication
             .as_ref()
-            .is_some_and(|cut| cut.selected_pages.contains(&key))
+            .is_some_and(|publication| publication.cut.selected_pages.contains(&key))
             || self.virtual_terrain_staging_frontier.contains(&key)
         {
             self.abort_virtual_terrain_publication();
@@ -6442,8 +6487,8 @@ impl Renderer {
         if let Some(cut) = &self.virtual_terrain_oracle_cut {
             keep.extend(cut.selected_pages.iter().copied());
         }
-        if let Some(cut) = &self.virtual_terrain_publication_cut {
-            keep.extend(cut.selected_pages.iter().copied());
+        if let Some(publication) = &self.virtual_terrain_publication {
+            keep.extend(publication.cut.selected_pages.iter().copied());
         }
         keep.extend(self.virtual_terrain_staging_frontier.iter().copied());
         // Keep exactly one nearest real ancestor per active/candidate page. That is sufficient for
@@ -7055,16 +7100,19 @@ impl Renderer {
         let cull_started = now_ms();
         let (virtual_visible, virtual_ownership) =
             if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible {
-                let Some(cut) = self
+                let Some((cut, envelope)) = self
                     .virtual_terrain_cut
                     .as_ref()
-                    .filter(|cut| cut.is_renderable())
+                    .zip(self.virtual_terrain_committed_envelope.as_ref())
+                    .filter(|(cut, envelope)| {
+                        cut.is_renderable() && cut.covers_presentation_envelope(envelope)
+                    })
                 else {
                     return false;
                 };
                 if !self
                     .virtual_terrain_gpu
-                    .presented_snapshot_matches(virtual_terrain_snapshot_identity(cut))
+                    .presented_snapshot_matches(virtual_terrain_snapshot_identity(cut, envelope))
                 {
                     // A visible frame has exactly one terrain generation. Never combine a CPU
                     // ownership cut or diagnostic sidecar with handles from another bank.
@@ -7078,11 +7126,14 @@ impl Renderer {
                 (false, VirtualTerrainOwnership::default())
             };
         let virtual_candidate_work =
-            self.virtual_terrain_publication_cut
+            self.virtual_terrain_publication
                 .as_ref()
-                .and_then(|candidate| {
+                .and_then(|publication| {
                     self.virtual_terrain_gpu
-                        .candidate_work(virtual_terrain_snapshot_identity(candidate))
+                        .candidate_work(virtual_terrain_snapshot_identity(
+                            &publication.cut,
+                            &publication.envelope,
+                        ))
                 });
         let (shadow_draw_lists, world_draw_list) = collect_opaque_draw_lists(
             &mut self.chunks,
@@ -7156,10 +7207,13 @@ impl Renderer {
                 label: Some("frame encoder"),
             });
         let virtual_candidate = if virtual_candidate_work.is_some() {
-            let Some(publication_cut) = self.virtual_terrain_publication_cut.as_ref() else {
+            let Some(publication) = self.virtual_terrain_publication.as_ref() else {
                 return false;
             };
-            Some(virtual_terrain_snapshot_identity(publication_cut))
+            Some(virtual_terrain_snapshot_identity(
+                &publication.cut,
+                &publication.envelope,
+            ))
         } else {
             None
         };
@@ -7703,15 +7757,25 @@ impl Renderer {
                 });
         let gpu_virtual_feedback = self.virtual_terrain_gpu.latest_feedback();
         let certification_cut = self
-            .virtual_terrain_publication_cut
+            .virtual_terrain_publication
             .as_ref()
-            .or(self.virtual_terrain_cut.as_ref());
-        let gpu_virtual_matches_cpu = gpu_virtual_feedback
-            .as_ref()
-            .is_some_and(|feedback| gpu_feedback_matches_cut(feedback, certification_cut));
+            .map(|publication| (&publication.cut, &publication.envelope))
+            .or_else(|| {
+                self.virtual_terrain_cut
+                    .as_ref()
+                    .zip(self.virtual_terrain_committed_envelope.as_ref())
+            });
+        let gpu_virtual_matches_cpu = gpu_virtual_feedback.as_ref().is_some_and(|feedback| {
+            gpu_feedback_matches_cut(
+                feedback,
+                certification_cut.map(|(cut, _)| cut),
+                certification_cut.map(|(_, envelope)| envelope),
+            )
+        });
         let gpu_virtual_match_failure_flags = gpu_feedback_match_failure_flags(
             gpu_virtual_feedback.as_ref(),
-            certification_cut,
+            certification_cut.map(|(cut, _)| cut),
+            certification_cut.map(|(_, envelope)| envelope),
             virtual_candidate_encode_failed,
         );
         let oracle_virtual_selected_pages = self
@@ -7806,10 +7870,15 @@ impl Renderer {
             virtual_terrain_presented_snapshot_fingerprint,
         ) = presented_snapshot_identity.unwrap_or((0, 0));
         let virtual_terrain_presented_snapshot_matches_cut = virtual_visible
-            && self.virtual_terrain_cut.as_ref().is_some_and(|cut| {
-                self.virtual_terrain_gpu
-                    .presented_snapshot_matches(virtual_terrain_snapshot_identity(cut))
-            });
+            && self
+                .virtual_terrain_cut
+                .as_ref()
+                .zip(self.virtual_terrain_committed_envelope.as_ref())
+                .is_some_and(|(cut, envelope)| {
+                    self.virtual_terrain_gpu.presented_snapshot_matches(
+                        virtual_terrain_snapshot_identity(cut, envelope),
+                    )
+                });
         self.diagnostics = RenderDiagnostics {
             resident_chunks: (self.chunks.len()
                 + usize::from(virtual_visible) * self.virtual_terrain_pages.len())
@@ -9898,28 +9967,37 @@ fn view_projection(
     projection * view
 }
 
-fn virtual_terrain_snapshot_identity(
-    cut: &VirtualTerrainCut,
-) -> VirtualTerrainSnapshotIdentity<'_> {
+fn virtual_terrain_snapshot_identity<'cut>(
+    cut: &'cut VirtualTerrainCut,
+    envelope: &PresentationEnvelope,
+) -> VirtualTerrainSnapshotIdentity<'cut> {
     VirtualTerrainSnapshotIdentity {
-        fingerprint: cut.fingerprint,
+        fingerprint: virtual_terrain_presentation_fingerprint(cut, envelope),
         selected_pages: &cut.selected_pages,
         ownerless_roots: cut.ownerless_roots.len() as u32,
     }
 }
 
+fn virtual_terrain_presentation_fingerprint(
+    cut: &VirtualTerrainCut,
+    envelope: &PresentationEnvelope,
+) -> u64 {
+    (cut.fingerprint ^ envelope.fingerprint().rotate_left(23)).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
 fn gpu_feedback_matches_cut(
     feedback: &GpuVirtualTerrainFeedback,
     cut: Option<&VirtualTerrainCut>,
+    envelope: Option<&PresentationEnvelope>,
 ) -> bool {
-    let Some(cut) = cut else {
+    let Some((cut, envelope)) = cut.zip(envelope) else {
         return feedback.selected_pages.is_empty()
             && feedback.ownerless_roots == 0
             && !feedback.ownership_overflowed();
     };
     if feedback.submission_id == 0
         || feedback.ownership_overflowed()
-        || feedback.oracle_fingerprint != cut.fingerprint
+        || feedback.oracle_fingerprint != virtual_terrain_presentation_fingerprint(cut, envelope)
         || feedback.ownerless_roots != cut.ownerless_roots.len() as u32
         || feedback.encoded_pages != cut.selected_pages.len() as u32
         || cut.selection_overflow
@@ -9936,6 +10014,7 @@ fn gpu_feedback_matches_cut(
 fn gpu_feedback_match_failure_flags(
     feedback: Option<&GpuVirtualTerrainFeedback>,
     cut: Option<&VirtualTerrainCut>,
+    envelope: Option<&PresentationEnvelope>,
     candidate_encode_failed: bool,
 ) -> u32 {
     const MISSING_FEEDBACK: u32 = 1 << 0;
@@ -9952,13 +10031,15 @@ fn gpu_feedback_match_failure_flags(
     let Some(feedback) = feedback else {
         return MISSING_FEEDBACK | u32::from(candidate_encode_failed) * CANDIDATE_ENCODE_FAILED;
     };
-    let Some(cut) = cut else {
+    let Some((cut, envelope)) = cut.zip(envelope) else {
         return MISSING_CUT | u32::from(candidate_encode_failed) * CANDIDATE_ENCODE_FAILED;
     };
     let mut failures = 0;
     failures |= u32::from(feedback.submission_id == 0) * INVALID_SUBMISSION;
     failures |= u32::from(feedback.ownership_overflowed()) * OWNERSHIP_OVERFLOW;
-    failures |= u32::from(feedback.oracle_fingerprint != cut.fingerprint) * FINGERPRINT_MISMATCH;
+    failures |= u32::from(
+        feedback.oracle_fingerprint != virtual_terrain_presentation_fingerprint(cut, envelope),
+    ) * FINGERPRINT_MISMATCH;
     failures |= u32::from(feedback.ownerless_roots != cut.ownerless_roots.len() as u32)
         * OWNERLESS_MISMATCH;
     failures |= u32::from(feedback.encoded_pages != cut.selected_pages.len() as u32)
@@ -11310,7 +11391,7 @@ mod tests {
             "without a certified published bank there is no virtual owner to present"
         );
         assert_ne!(
-            gpu_feedback_match_failure_flags(None, None, true) & (1 << 9),
+            gpu_feedback_match_failure_flags(None, None, None, true) & (1 << 9),
             0,
             "the fail-open presentation path still surfaces the candidate encoding failure"
         );
@@ -11977,6 +12058,13 @@ mod tests {
 
     #[test]
     fn virtual_gpu_cut_requires_exact_submission_certificate() {
+        let envelope = crate::virtual_terrain::PresentationEnvelopeCache::default().resolve(
+            [0.0, 0.0, 0.0],
+            0.0,
+            1.0,
+            64,
+            16,
+        );
         let key = TerrainPageKey {
             level: 2,
             coord: [-3, 1, 4],
@@ -11998,24 +12086,40 @@ mod tests {
         };
         let certified = GpuVirtualTerrainFeedback {
             submission_id: 9,
-            oracle_fingerprint: cut.fingerprint,
+            oracle_fingerprint: virtual_terrain_presentation_fingerprint(&cut, &envelope),
             selected_pages: vec![key],
             encoded_pages: 1,
             ..GpuVirtualTerrainFeedback::default()
         };
-        assert!(gpu_feedback_matches_cut(&certified, Some(&cut)));
+        assert!(gpu_feedback_matches_cut(
+            &certified,
+            Some(&cut),
+            Some(&envelope)
+        ));
 
         let mut ownership_overflow = certified.clone();
         ownership_overflow.encoding_overflow_flags = 1;
-        assert!(!gpu_feedback_matches_cut(&ownership_overflow, Some(&cut)));
+        assert!(!gpu_feedback_matches_cut(
+            &ownership_overflow,
+            Some(&cut),
+            Some(&envelope)
+        ));
 
         let mut stale = certified.clone();
         stale.oracle_fingerprint ^= 1;
-        assert!(!gpu_feedback_matches_cut(&stale, Some(&cut)));
+        assert!(!gpu_feedback_matches_cut(
+            &stale,
+            Some(&cut),
+            Some(&envelope)
+        ));
 
         let mut incomplete = certified;
         incomplete.encoded_pages = 0;
-        assert!(!gpu_feedback_matches_cut(&incomplete, Some(&cut)));
+        assert!(!gpu_feedback_matches_cut(
+            &incomplete,
+            Some(&cut),
+            Some(&envelope)
+        ));
     }
 
     #[test]
