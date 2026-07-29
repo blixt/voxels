@@ -1407,7 +1407,8 @@ mod web {
         RendererConfig, RendererFeatureConfig, ScreenshotCanonicalPageState, ScreenshotCapture,
         ScreenshotFeatureState, ScreenshotMutableRenderState, ScreenshotReproductionIdentity,
         ScreenshotStreamingManifest, ScreenshotVirtualColumnState, ScreenshotVirtualRegionState,
-        VirtualTerrainRenderMode, VirtualTerrainRendererError, VolumetricCloudConfig,
+        VirtualTerrainPromotionStatus, VirtualTerrainRenderMode, VirtualTerrainRendererError,
+        VirtualTerrainRequestId, VolumetricCloudConfig,
     };
     use voxels_render::shadow::DirectionalShadowConfig;
     use voxels_render::ui::{LiveStats, NavigationTelemetry};
@@ -1604,6 +1605,7 @@ mod web {
         directory_retry_after_ms: BTreeMap<TerrainPageKey, u64>,
         page_upload_retry_after_ms: BTreeMap<TerrainPageTransferIdentity, u64>,
         minimum_region_revisions: BTreeMap<TerrainPageKey, u64>,
+        publication_request: Option<VirtualTerrainRequestId>,
         nodes: BTreeMap<TerrainPageKey, TerrainHierarchyNode>,
         stats: VirtualTerrainRequestStats,
     }
@@ -1622,6 +1624,7 @@ mod web {
     fn virtual_terrain_upload_failure_kind(error: &VirtualTerrainRendererError) -> u8 {
         match error {
             VirtualTerrainRendererError::Hierarchy(_) => 1,
+            VirtualTerrainRendererError::RevisionFence(_) => 8,
             VirtualTerrainRendererError::UnsupportedRepresentation(_) => 2,
             VirtualTerrainRendererError::InvalidSurfaceCluster(_) => 3,
             VirtualTerrainRendererError::InvalidTriangleCluster(_) => 4,
@@ -3950,15 +3953,31 @@ mod web {
                 return;
             }
             let exact_surface_domain = presentation_envelope.exact_surface_domain();
-            // Certification and promotion are the first renderer mutation of the frame. A cache
-            // arrival or directory update may change the next desired cut, but cannot invalidate
-            // the immutable transaction that was encoded by an earlier frame.
-            if let Err(error) = self
-                .renderer
-                .borrow_mut()
-                .advance_virtual_terrain_publication()
-            {
-                log_gpu_error(&format!("advance virtual terrain publication: {error}"));
+            // Explicit admission of the exact shell-held request is the first renderer mutation of
+            // the frame. Cache, directory, and source-geometry mutations happen only afterward.
+            let publication_request = self.virtual_terrain.borrow().publication_request;
+            if let Some(request) = publication_request {
+                let status = {
+                    let revisions = self.edit_revisions.borrow();
+                    self.renderer
+                        .borrow_mut()
+                        .try_promote_virtual_terrain(request, &revisions)
+                };
+                match status {
+                    Ok(VirtualTerrainPromotionStatus::Pending) => {}
+                    Ok(
+                        VirtualTerrainPromotionStatus::Promoted(_)
+                        | VirtualTerrainPromotionStatus::Stale,
+                    ) => {
+                        let mut state = self.virtual_terrain.borrow_mut();
+                        if state.publication_request == Some(request) {
+                            state.publication_request = None;
+                        }
+                    }
+                    Err(error) => {
+                        log_gpu_error(&format!("promote virtual terrain publication: {error}"));
+                    }
+                }
             }
             let (publication_in_flight, publication_owns_geometry) = {
                 let renderer = self.renderer.borrow();
@@ -4135,19 +4154,24 @@ mod web {
                 );
             }
 
-            if !publication_in_flight
-                && let Err(error) = self
+            if !publication_in_flight {
+                match self
                     .renderer
                     .borrow_mut()
                     .prepare_virtual_terrain_publication()
-            {
-                match error {
-                    VirtualTerrainRendererError::GpuCutNotCertified
-                    | VirtualTerrainRendererError::NoRenderableCut
-                    | VirtualTerrainRendererError::SelectedPageMissingGpu(_) => {}
-                    error => {
-                        log_gpu_error(&format!("prepare virtual terrain publication: {error}"));
+                {
+                    Ok(Some(request)) => {
+                        self.virtual_terrain.borrow_mut().publication_request = Some(request);
                     }
+                    Ok(None) => {}
+                    Err(error) => match error {
+                        VirtualTerrainRendererError::GpuCutNotCertified
+                        | VirtualTerrainRendererError::NoRenderableCut
+                        | VirtualTerrainRendererError::SelectedPageMissingGpu(_) => {}
+                        error => {
+                            log_gpu_error(&format!("prepare virtual terrain publication: {error}"));
+                        }
+                    },
                 }
             }
 
@@ -4959,17 +4983,18 @@ mod web {
                 .terrain_directory_revisions()
                 .map(|dependency| (dependency.key, dependency.revision))
                 .collect::<Vec<_>>();
-            let invalid_columns = invalid_roots
+            let Some(invalid_columns) = invalid_roots
                 .iter()
                 .map(|root| {
-                    (
-                        [root.coord[0], root.coord[2]],
-                        change
-                            .terrain_revalidation_revision(*root)
-                            .expect("invalidated root must carry its durable revision floor"),
-                    )
+                    change
+                        .terrain_revalidation_revision(*root)
+                        .map(|revision| ([root.coord[0], root.coord[2]], revision))
                 })
-                .collect::<BTreeMap<_, _>>();
+                .collect::<Option<BTreeMap<_, _>>>()
+            else {
+                log_gpu_error("invalidated terrain root omitted its durable revision floor");
+                return;
+            };
             let keep = {
                 let state = self.virtual_terrain.borrow();
                 state
@@ -5825,6 +5850,13 @@ mod web {
                 return EditRequirements::default();
             };
             let (apply_values, world_change) = observed_change.into_parts();
+            if !world_change.is_empty() {
+                // Revision floors now exist. Revoke intersecting candidate and committed renderer
+                // proofs before applying voxel values or retiring/mutating any geometry source.
+                self.renderer
+                    .borrow_mut()
+                    .invalidate_virtual_terrain_world_change(&world_change);
+            }
             let accepted_mutations = mutations
                 .iter()
                 .copied()

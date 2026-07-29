@@ -3649,6 +3649,7 @@ dependencies = [
  "glam",
  "hashbrown 0.16.1",
  "voxels-core",
+ "voxels-runtime",
  "voxels-world",
  "wgpu",
  "wgpu_text",

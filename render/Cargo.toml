@@ -13,6 +13,7 @@ name = "voxels_render"
 
 [dependencies]
 voxels-core = { path = "../core" }
+voxels-runtime = { path = "../runtime" }
 voxels-world = { path = "../world" }
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }

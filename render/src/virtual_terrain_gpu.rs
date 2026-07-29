@@ -613,6 +613,15 @@ impl VirtualTerrainGpuControl {
             && snapshot_metadata_matches(self.banks[self.active_bank].metadata.as_ref(), identity)
     }
 
+    pub(crate) fn matching_active_generation(
+        &self,
+        identity: VirtualTerrainSnapshotIdentity<'_>,
+    ) -> Option<u64> {
+        self.active_snapshot_matches(identity)
+            .then(|| self.active_generation())
+            .flatten()
+    }
+
     /// Whether the immutable active bank still represents the already-published cut.
     ///
     /// Candidate geometry may have changed under the same logical key/fingerprint while the old
@@ -980,6 +989,7 @@ impl VirtualTerrainGpuControl {
     pub(crate) fn candidate_is_certified(
         &self,
         identity: VirtualTerrainSnapshotIdentity<'_>,
+        generation: u64,
     ) -> bool {
         let Some(bank) = self.pending_bank else {
             return false;
@@ -994,7 +1004,9 @@ impl VirtualTerrainGpuControl {
             return false;
         };
         let counters = feedback.counters;
-        snapshot_metadata_matches(Some(metadata), identity)
+        metadata.generation == generation
+            && join_u64(counters.generation) == generation
+            && snapshot_metadata_matches(Some(metadata), identity)
             && snapshot_counter_evidence_matches(counters, metadata)
             && snapshot_validation_failure_flags(feedback, metadata) == 0
     }
@@ -1002,8 +1014,9 @@ impl VirtualTerrainGpuControl {
     pub(crate) fn promote_certified_candidate(
         &mut self,
         identity: VirtualTerrainSnapshotIdentity<'_>,
+        generation: u64,
     ) -> Result<u64, VirtualTerrainGpuError> {
-        if !self.candidate_is_certified(identity) {
+        if !self.candidate_is_certified(identity, generation) {
             return Err(VirtualTerrainGpuError::CandidateNotCertified);
         }
         let bank = self
@@ -1021,6 +1034,12 @@ impl VirtualTerrainGpuControl {
 
     pub(crate) fn invalidate_candidate(&mut self) {
         self.active_geometry_dirty = true;
+        self.discard_pending_candidate();
+    }
+
+    /// Discards only the inactive request. The active bank remains a valid encoding of its
+    /// immutable retained allocations; canceling or superseding candidate work must not dirty it.
+    pub(crate) fn discard_candidate(&mut self) {
         self.discard_pending_candidate();
     }
 
@@ -1624,7 +1643,11 @@ mod tests {
         assert_eq!(feedback.encoded_pages, 1);
         assert_eq!(feedback.encoded_surface_handles, 3);
         assert_eq!(feedback.encoded_triangle_handles, 2);
-        assert!(control.candidate_is_certified(identity));
+        assert!(control.candidate_is_certified(identity, generation));
+        assert!(
+            !control.candidate_is_certified(identity, generation.wrapping_add(1)),
+            "matching cut metadata and feedback cannot certify a different request generation",
+        );
 
         control.invalidate_candidate();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1662,7 +1685,7 @@ mod tests {
             0,
             "GPU encode and exact validation agreeing with a corrupted descriptor cannot certify it against canonical CPU metadata",
         );
-        assert!(!control.candidate_is_certified(identity));
+        assert!(!control.candidate_is_certified(identity, generation));
 
         control.invalidate_candidate();
         let second_key = TerrainPageKey::surface(0, 1, 0);
@@ -1730,7 +1753,7 @@ mod tests {
             feedback.encoded_pages, 1,
             "only the structurally valid first page may contribute completion evidence",
         );
-        assert!(!control.candidate_is_certified(two_page_identity));
+        assert!(!control.candidate_is_certified(two_page_identity, generation));
 
         control.invalidate_candidate();
         control.test_handle_clear_before_validation = Some(
@@ -1766,7 +1789,7 @@ mod tests {
             feedback.encoded_pages, 1,
             "the corrupted page cannot contribute completion evidence",
         );
-        assert!(!control.candidate_is_certified(two_page_identity));
+        assert!(!control.candidate_is_certified(two_page_identity, generation));
     }
 
     #[test]
