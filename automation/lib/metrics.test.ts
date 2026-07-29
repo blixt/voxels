@@ -28,6 +28,19 @@ describe("shared harness metrics", () => {
     });
   });
 
+  it("summarizes distributions larger than the JavaScript argument limit", () => {
+    const values = Array.from({ length: 125_000 }, (_, index) => index - 62_500);
+    expect(numericSummary(values)).toEqual({
+      samples: 125_000,
+      min: -62_500,
+      p50: -1,
+      p95: 56_249,
+      p99: 61_249,
+      max: 62_499,
+      mean: -0.5,
+    });
+  });
+
   it("rejects invalid distribution and rounding parameters", () => {
     expect(() => percentile([1], -0.1)).toThrow("between zero and one");
     expect(() => percentile([1], 1.1)).toThrow("between zero and one");

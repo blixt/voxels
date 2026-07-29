@@ -64,14 +64,22 @@ export function numericSummary(values: readonly number[], digits = 3): NumericSu
   if (values.length === 0) {
     return { samples: 0, min: 0, p50: 0, p95: 0, p99: 0, max: 0, mean: 0 };
   }
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  let sum = 0;
+  for (const value of values) {
+    min = Math.min(min, value);
+    max = Math.max(max, value);
+    sum += value;
+  }
   return {
     samples: values.length,
-    min: rounded(Math.min(...values), digits),
+    min: rounded(min, digits),
     p50: rounded(percentile(values, 0.5), digits),
     p95: rounded(percentile(values, 0.95), digits),
     p99: rounded(percentile(values, 0.99), digits),
-    max: rounded(Math.max(...values), digits),
-    mean: rounded(values.reduce((sum, value) => sum + value, 0) / values.length, digits),
+    max: rounded(max, digits),
+    mean: rounded(sum / values.length, digits),
   };
 }
 
