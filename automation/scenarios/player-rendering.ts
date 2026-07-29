@@ -43,6 +43,18 @@ async function auditCapture(
   } finally {
     await engine.setGeometrySourceDebug(false);
   }
+  const handleSnapshot = diagnostic.metadata.presentation.terrainHandleSnapshot;
+  if (
+    !handleSnapshot.matchesPublishedCut ||
+    handleSnapshot.generation === "0" ||
+    handleSnapshot.cutFingerprint !== diagnostic.metadata.presentation.selectedCutFingerprint
+  ) {
+    throw new Error(
+      `${label} capture did not embed one self-consistent committed terrain presentation: ` +
+        `${JSON.stringify(handleSnapshot)} versus selected ` +
+        `${diagnostic.metadata.presentation.selectedCutFingerprint}`,
+    );
+  }
   const nearby = diagnostic.ownership?.summarizeNearby(diagnostic.metadata.camera.eyeMetres, 12.8);
   if (nearby === undefined || nearby.nearbyOwnedPixels === 0) {
     throw new Error(`${label} produced no machine-readable nearby terrain ownership`);
@@ -56,7 +68,8 @@ async function auditCapture(
   if (
     snapshotValue(frame, "terrainReady") !== 1 ||
     snapshotValue(frame, "virtualTerrainGpuMatchesCpuCut") !== 1 ||
-    snapshotValue(frame, "virtualTerrainGpuOverflowFlags") !== 0 ||
+    snapshotValue(frame, "virtualTerrainGpuEncodingOverflowFlags") !== 0 ||
+    snapshotValue(frame, "virtualTerrainPresentedSnapshotMatchesCut") !== 1 ||
     snapshotValue(frame, "virtualTerrainRequestedPages") !== 0 ||
     exactPages === 0 ||
     snapshotValue(frame, "virtualTerrainPublishedMinimumLevel") !== 0
@@ -145,7 +158,8 @@ async function walkBeyondProtectedPedestal(
         snapshotValue(current, "virtualTerrainPublishedExactPages") === 0 ||
         snapshotValue(current, "virtualTerrainPublishedMinimumLevel") !== 0 ||
         snapshotValue(current, "virtualTerrainPublishedExactLodDiscontinuities") !== 0 ||
-        snapshotValue(current, "virtualTerrainGpuOverflowFlags") !== 0;
+        snapshotValue(current, "virtualTerrainGpuEncodingOverflowFlags") !== 0 ||
+        snapshotValue(current, "virtualTerrainPresentedSnapshotMatchesCut") !== 1;
       if (presentationInvalid) {
         const png = await page.screenshot({ type: "png" });
         await context.artifacts.write(
@@ -164,10 +178,7 @@ async function walkBeyondProtectedPedestal(
           analyzeDiagnosticSky(page, png),
           analyzeDiagnosticSky(page, png, { x0: 0.05, x1: 0.95, y0: 0.08, y1: 0.58 }, "black"),
         ]);
-        if (
-          magenta.largestEnclosedComponentPixels > 0 ||
-          black.largestEnclosedComponentPixels >= 16
-        ) {
+        if (magenta.largestEnclosedComponentPixels > 0 || black.largestComponentPixels >= 16) {
           await context.artifacts.write(
             "transient terrain hole during sprint",
             "during-sprint-transient-hole.png",
@@ -177,7 +188,7 @@ async function walkBeyondProtectedPedestal(
           throw new Error(
             `terrain exposed a transient hole after ${distance.toFixed(2)}m of sprinting: ` +
               `${magenta.largestEnclosedComponentPixels} enclosed magenta pixels, ` +
-              `${black.largestEnclosedComponentPixels} enclosed black pixels`,
+              `${black.largestComponentPixels} contiguous black pixels`,
           );
         }
         nextPixelAudit = performance.now() + 250;
@@ -212,7 +223,14 @@ async function stablePhaseCapture(
     const current = await engine.snapshot();
     assertHealthy();
     const exactPages = snapshotValue(current, "virtualTerrainPublishedExactPages");
-    const fingerprint = `${snapshotValue(current, "virtualTerrainCutFingerprintHigh24")}:${snapshotValue(current, "virtualTerrainCutFingerprintLow24")}`;
+    const fingerprint = [
+      snapshotValue(current, "virtualTerrainCutFingerprintHigh24"),
+      snapshotValue(current, "virtualTerrainCutFingerprintLow24"),
+      snapshotValue(current, "virtualTerrainPresentedSnapshotGenerationHigh24"),
+      snapshotValue(current, "virtualTerrainPresentedSnapshotGenerationLow24"),
+      snapshotValue(current, "virtualTerrainPresentedSnapshotFingerprintHigh24"),
+      snapshotValue(current, "virtualTerrainPresentedSnapshotFingerprintLow24"),
+    ].join(":");
     const state = {
       frameSequence: snapshotValue(current, "frameSequence"),
       terrainReady: snapshotValue(current, "terrainReady"),
@@ -244,7 +262,8 @@ async function stablePhaseCapture(
         "virtualTerrainNearestRegisteredRootMetres",
       ),
       gpuMatchesCpu: snapshotValue(current, "virtualTerrainGpuMatchesCpuCut"),
-      gpuOverflow: snapshotValue(current, "virtualTerrainGpuOverflowFlags"),
+      gpuOverflow: snapshotValue(current, "virtualTerrainGpuEncodingOverflowFlags"),
+      presentedMatchesCut: snapshotValue(current, "virtualTerrainPresentedSnapshotMatchesCut"),
       columnSubmitDeferred: snapshotValue(current, "virtualTerrainColumnSubmitDeferred"),
       columnPreempted: snapshotValue(current, "virtualTerrainColumnPreempted"),
       columnTimedOut: snapshotValue(current, "virtualTerrainColumnTimedOut"),
@@ -299,6 +318,7 @@ async function stablePhaseCapture(
       state.directoryInFlight === 0 &&
       state.gpuMatchesCpu === 1 &&
       state.gpuOverflow === 0 &&
+      state.presentedMatchesCut === 1 &&
       state.columnRevisionFloors === 0 &&
       state.currentColumnRegisteredRoots > 0 &&
       state.editCanonicalRenderable >= state.editCanonicalRequired &&

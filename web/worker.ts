@@ -23,7 +23,7 @@ let screenshotDeadline = 0;
 let screenshotEncoding = false;
 let disposal: Promise<void> | null = null;
 const pending: Exclude<ToWorker, InitMessage>[] = [];
-const STARTUP_PROGRESS_VERSION = 3;
+const STARTUP_PROGRESS_VERSION = 4;
 const STARTUP_PROGRESS_WORDS = 61;
 const STARTUP_SCHEMA_MISMATCH_TIMEOUT_MS = 5_000;
 
@@ -39,14 +39,15 @@ function bitmaskLabels(flags: number, labels: ReadonlyArray<readonly [number, st
 function gpuMatchFailureLabels(flags: number): string {
   return bitmaskLabels(flags, [
     [1, "feedback-missing"],
-    [2, "candidate-missing"],
-    [4, "submission-stale"],
+    [2, "oracle-cut-missing"],
+    [4, "invalid-submission"],
     [8, "ownership-overflow"],
     [16, "fingerprint"],
     [32, "ownerless"],
-    [64, "compacted-count"],
+    [64, "encoded-count"],
     [128, "cpu-overflow"],
     [256, "selected-pages"],
+    [512, "candidate-encode-failed"],
   ]);
 }
 
@@ -60,8 +61,8 @@ function uploadFailureLabel(kind: number): string {
       "triangle-cluster",
       "page-too-large",
       "source-capacity",
-      "gpu-traversal",
-      "compact-capacity",
+      "gpu-snapshot",
+      "snapshot-capacity",
       "no-renderable-cut",
       "selected-page-missing",
       "gpu-not-certified",
@@ -138,10 +139,10 @@ function monitorReadiness(engine: EngineHandle): void {
       cpuOwnerless = 0,
       cpuDiscontinuities = 0,
       gpuSelected = 0,
-      gpuRequested = 0,
+      gpuEncodedPages = 0,
       gpuOwnerless = 0,
-      gpuOverflow = 0,
-      gpuCompacted = 0,
+      gpuEncodingOverflow = 0,
+      presentedMatchesCut = 0,
       gpuMatchFailures = 0,
       streamPending = 0,
       streamInFlight = 0,
@@ -199,10 +200,10 @@ function monitorReadiness(engine: EngineHandle): void {
       cpuOwnerless,
       cpuDiscontinuities,
       gpuSelected,
-      gpuRequested,
+      gpuEncodedPages,
       gpuOwnerless,
-      gpuOverflow,
-      gpuCompacted,
+      gpuEncodingOverflow,
+      presentedMatchesCut,
       gpuMatchFailures,
       streamPending,
       streamInFlight,
@@ -255,7 +256,7 @@ function monitorReadiness(engine: EngineHandle): void {
       previous = key;
       if (detailed) lastDetailedPost = now;
       const detail = detailed
-        ? `Terrain cut: CPU ${cpuSelected} pages/${cpuRequested} requested/${cpuRefinementRoots} refinement roots/${cpuOwnerless} ownerless/${cpuDiscontinuities} skipped-level edges; GPU ${gpuSelected} pages/${gpuCompacted} compacted/${gpuRequested} requested/${gpuOwnerless} ownerless/overflow ${gpuOverflow}; match ${gpuMatchesCpu === 1 ? "yes" : `no (${gpuMatchFailureLabels(gpuMatchFailures)})`}; discovery ${columns} columns/${columnInFlight} in flight/${columnRevisionFloors} column revision floors/${regionRevisionFloors} region revision floors/current ${currentColumnKnown === 1 ? `${currentColumnRegisteredRoots}/${currentColumnRoots} roots registered` : "column unknown"}, flow ${columnAccepted} accepted/${columnSubmitDeferred} deferred/${columnPreempted} preempted/${columnTimedOut} timed out/${columnOtherFailed} errors; directories ${directoryAccepted} accepted/${directorySubmitDeferred} deferred/${directoryPreempted} preempted/${directoryTimedOut} timed out/${directoryOtherFailed} errors/${directoryInFlight} in flight; stream ${streamPending} pending/${streamInFlight} in flight/${streamFailed} failed/${streamUsefulKiB} KiB useful, cache ${cachePages}, resident ${residentPages}, GPU ${gpuAllocatedMiB}/${gpuCapacityMiB} MiB; page flow ${pageSubmitDeferred} deferred/${pagePreempted} preempted/${pageTimedOut} timed out/${pageOtherFailed} transport errors; products ${pageUnavailable} unavailable/${pageStaleRevision} stale/${pageGenerationFailed} generation/${pageUploadFailed} upload (last ${uploadFailureLabel(lastPageUploadFailureKind)})${lastPageFailureKind === 0 ? "" : `, last product ${pageFailureLabel(lastPageFailureKind)}@L${lastPageFailureLevel}(${lastPageFailureX | 0},${lastPageFailureY | 0},${lastPageFailureZ | 0})`}; published ${publishedPages} pages (${publishedExactPages} exact, ${publishedDiscontinuities} skipped-level edges), terrain ${terrainReady === 1 ? "ready" : "pending"}.`
+        ? `Terrain cut: CPU ${cpuSelected} pages/${cpuRequested} requested/${cpuRefinementRoots} refinement roots/${cpuOwnerless} ownerless/${cpuDiscontinuities} skipped-level edges; GPU ${gpuSelected} selected/${gpuEncodedPages} encoded pages/${gpuOwnerless} ownerless/encoding overflow ${gpuEncodingOverflow}; candidate match ${gpuMatchesCpu === 1 ? "yes" : `no (${gpuMatchFailureLabels(gpuMatchFailures)})`}, presented cut match ${presentedMatchesCut === 1 ? "yes" : "no"}; discovery ${columns} columns/${columnInFlight} in flight/${columnRevisionFloors} column revision floors/${regionRevisionFloors} region revision floors/current ${currentColumnKnown === 1 ? `${currentColumnRegisteredRoots}/${currentColumnRoots} roots registered` : "column unknown"}, flow ${columnAccepted} accepted/${columnSubmitDeferred} deferred/${columnPreempted} preempted/${columnTimedOut} timed out/${columnOtherFailed} errors; directories ${directoryAccepted} accepted/${directorySubmitDeferred} deferred/${directoryPreempted} preempted/${directoryTimedOut} timed out/${directoryOtherFailed} errors/${directoryInFlight} in flight; stream ${streamPending} pending/${streamInFlight} in flight/${streamFailed} failed/${streamUsefulKiB} KiB useful, cache ${cachePages}, resident ${residentPages}, GPU ${gpuAllocatedMiB}/${gpuCapacityMiB} MiB; page flow ${pageSubmitDeferred} deferred/${pagePreempted} preempted/${pageTimedOut} timed out/${pageOtherFailed} transport errors; products ${pageUnavailable} unavailable/${pageStaleRevision} stale/${pageGenerationFailed} generation/${pageUploadFailed} upload (last ${uploadFailureLabel(lastPageUploadFailureKind)})${lastPageFailureKind === 0 ? "" : `, last product ${pageFailureLabel(lastPageFailureKind)}@L${lastPageFailureLevel}(${lastPageFailureX | 0},${lastPageFailureY | 0},${lastPageFailureZ | 0})`}; published ${publishedPages} pages (${publishedExactPages} exact, ${publishedDiscontinuities} skipped-level edges), terrain ${terrainReady === 1 ? "ready" : "pending"}.`
         : undefined;
       scope.postMessage({ kind: "loading", stage: "vicinity", resident, required, detail });
     }

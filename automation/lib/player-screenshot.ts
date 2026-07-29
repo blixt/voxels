@@ -27,6 +27,11 @@ export interface PlayerScreenshotMetadata {
   };
   readonly presentation: {
     readonly selectedCutFingerprint: string;
+    readonly terrainHandleSnapshot: {
+      readonly generation: string;
+      readonly cutFingerprint: string;
+      readonly matchesPublishedCut: boolean;
+    };
     readonly selectedCut: {
       readonly kind: "virtualTerrain";
       readonly cut: {
@@ -213,6 +218,9 @@ function parseMetadata(png: Uint8Array): PlayerScreenshotMetadata {
     metadata.schema !== "voxels.reproduction.v2" ||
     metadata.attachments?.terrainPixelOwnership?.schema !== "voxels.terrain-pixel-ownership.v1" ||
     metadata.presentation?.selectedCut?.kind !== "virtualTerrain" ||
+    typeof metadata.presentation?.terrainHandleSnapshot?.matchesPublishedCut !== "boolean" ||
+    typeof metadata.presentation.terrainHandleSnapshot.generation !== "string" ||
+    typeof metadata.presentation.terrainHandleSnapshot.cutFingerprint !== "string" ||
     !Array.isArray(metadata.presentation.selectedCut.cut?.selectedPages) ||
     !Array.isArray(metadata.presentation.selectedCut.cut?.refinementRoots) ||
     !Array.isArray(metadata.camera?.eyeMetres) ||
