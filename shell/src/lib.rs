@@ -1234,6 +1234,22 @@ fn virtual_terrain_root_working_set(
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn advance_transient_revision_floor<K: Ord>(
+    floors: &mut std::collections::BTreeMap<K, u64>,
+    key: K,
+    candidate: u64,
+) {
+    floors
+        .entry(key)
+        .and_modify(|floor| {
+            if candidate != *floor && voxels_runtime::revision_satisfies(candidate, *floor) {
+                *floor = candidate;
+            }
+        })
+        .or_insert(candidate);
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const ATMOSPHERE_MOTION_PERIOD_SECONDS: f64 = 4_096.0;
@@ -5021,9 +5037,11 @@ mod web {
             for column in invalid_columns {
                 state.columns.remove(&column);
                 state.column_retry_after_ms.remove(&column);
-                state
-                    .minimum_column_revisions
-                    .insert(column, change_revision);
+                crate::advance_transient_revision_floor(
+                    &mut state.minimum_column_revisions,
+                    column,
+                    change_revision,
+                );
             }
             state
                 .registered_roots
@@ -5041,7 +5059,11 @@ mod web {
                     .is_none_or(|root| !invalid_roots.contains(&root))
             });
             for (key, revision) in revision_floors {
-                state.minimum_region_revisions.insert(key, revision);
+                crate::advance_transient_revision_floor(
+                    &mut state.minimum_region_revisions,
+                    key,
+                    revision,
+                );
             }
         }
 
@@ -8418,6 +8440,24 @@ mod tests {
         let keep = virtual_terrain_root_working_set(&[root(4)], registered, root(4), 3);
 
         assert_eq!(keep, BTreeSet::from([root(2), root(3), root(4)]));
+    }
+
+    #[test]
+    fn transient_revision_floors_never_regress_across_unrelated_edit_arrivals() {
+        let mut floors = BTreeMap::new();
+
+        advance_transient_revision_floor(&mut floors, [3, -7], 12);
+        advance_transient_revision_floor(&mut floors, [3, -7], 9);
+        assert_eq!(floors[&[3, -7]], 12);
+
+        advance_transient_revision_floor(&mut floors, [3, -7], u64::MAX);
+        assert_eq!(floors[&[3, -7]], 12);
+
+        let mut wrapping = BTreeMap::from([([8, 4], u64::MAX)]);
+        advance_transient_revision_floor(&mut wrapping, [8, 4], 1);
+        assert_eq!(wrapping[&[8, 4]], 1);
+        advance_transient_revision_floor(&mut wrapping, [8, 4], u64::MAX);
+        assert_eq!(wrapping[&[8, 4]], 1);
     }
 
     #[test]

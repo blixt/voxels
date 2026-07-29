@@ -17,6 +17,9 @@ voxels-core = { path = "../core" }
 voxels-world = { path = "../world" }
 glam = "0.33"
 
+[dev-dependencies]
+voxels-runtime = { path = "../runtime" }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 voxels-client-config = { path = "../client-config" }
 voxels-render = { path = "../render" }
