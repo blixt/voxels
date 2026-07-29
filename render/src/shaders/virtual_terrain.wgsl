@@ -157,30 +157,28 @@ fn validate_snapshot(
   @builtin(local_invocation_id) local: vec3<u32>,
 ) {
   let page_index = workgroup.x;
+  var lane_failed = 1u;
   if page_index >= counters.selected_count
       || page_index >= arrayLength(&candidates)
       || page_index >= arrayLength(&page_tokens) {
     if local.x == 0u {
       atomicOr(&counters.overflow_flags, OVERFLOW_DIRECTORY);
     }
-    return;
-  }
-  if page_tokens[page_index] != 1u {
+  } else if page_tokens[page_index] != 1u {
     if local.x == 0u {
       atomicOr(&counters.overflow_flags, OVERFLOW_STRUCTURE);
     }
-    return;
-  }
-
-  let page = candidates[page_index];
-  var lane_failed = 0u;
-  for (var stream = 0u; stream < 4u; stream += 1u) {
-    let first_handle = page.ranges[stream].x;
-    let count = page.ranges[stream].y;
-    let destination = STREAM_OFFSETS[stream] + page.destinations[stream];
-    for (var element = local.x; element < count; element += 64u) {
-      if handles[destination + element] != first_handle + element {
-        lane_failed = 1u;
+  } else {
+    lane_failed = 0u;
+    let page = candidates[page_index];
+    for (var stream = 0u; stream < 4u; stream += 1u) {
+      let first_handle = page.ranges[stream].x;
+      let count = page.ranges[stream].y;
+      let destination = STREAM_OFFSETS[stream] + page.destinations[stream];
+      for (var element = local.x; element < count; element += 64u) {
+        if handles[destination + element] != first_handle + element {
+          lane_failed = 1u;
+        }
       }
     }
   }

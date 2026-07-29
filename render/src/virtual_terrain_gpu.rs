@@ -1493,6 +1493,15 @@ mod tests {
         assert!(shader.contains("if handles[destination + element] != first_handle + element"));
         assert!(shader.contains("page.destinations[stream]"));
         assert!(shader.contains("page_tokens[page_index] = 1u"));
+        let validation_before_barrier = shader
+            .split_once("fn validate_snapshot")
+            .and_then(|(_, validation)| validation.split_once("workgroupBarrier();"))
+            .map(|(before_barrier, _)| before_barrier)
+            .expect("snapshot validation must converge at one workgroup barrier");
+        assert!(
+            !validation_before_barrier.contains("return;"),
+            "every validation lane must reach the workgroup barrier"
+        );
         for line in shader
             .lines()
             .filter(|line| line.contains("atomic") && !line.trim_start().starts_with("//"))
