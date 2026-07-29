@@ -2,6 +2,7 @@
 
 mod presence;
 mod profile;
+mod view;
 
 pub use presence::{
     PresenceInterpolationConfig, REMOTE_POSE_DISCONTINUITY, REMOTE_POSE_FLYING,
@@ -9,6 +10,13 @@ pub use presence::{
     RemotePresenceDelta, RemotePresenceTimeline,
 };
 pub use profile::{ProfileAutomation, ProfileConfig, ProfilePhase, ProfilePose, ProfileRoute};
+pub use view::{
+    ActivePresentation, AuthoritativeBody, AuthorityLease, ContractIdentity, ContractRevision,
+    DesiredIntent, IntentId, MovementAdmission, PreparedCompletion, PresentationContract,
+    PresentationGeneration, PresentationToken, ProfileSession, ProfileSessionPhase, ReducerEffect,
+    SceneToken, StagingToken, ViewController, ViewDescriptor, ViewDestination, ViewError,
+    ViewEvent, ViewOwner, ViewSession,
+};
 
 use glam::{Vec2, Vec3};
 
@@ -361,7 +369,7 @@ impl InputState {
 /// The camera position is the player's eye position in metres. Terrain collision uses a vertical
 /// capsule: its rounded foot rides continuously over small voxel ledges while its round horizontal
 /// footprint avoids snagging on corners. Collision stays deterministic and allocation-free.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraState {
     pub position: Vec3,
     pub yaw: f32,
