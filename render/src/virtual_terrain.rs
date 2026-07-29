@@ -177,6 +177,118 @@ impl VirtualTerrainCut {
         }
         intersecting_pages > 0
     }
+
+    /// Returns whether every surface owner intersecting a swept horizontal player corridor is an
+    /// exact 10 cm leaf.
+    ///
+    /// This is an analytic segment-to-page-AABB proof, not sampled motion. A thin coarse sliver
+    /// crossed between sample points therefore cannot become visible during high-speed travel.
+    pub fn has_exact_surface_corridor(
+        &self,
+        start_metres: [f64; 3],
+        end_metres: [f64; 3],
+        radius_metres: f64,
+    ) -> bool {
+        if !start_metres.into_iter().all(f64::is_finite)
+            || !end_metres.into_iter().all(f64::is_finite)
+            || !radius_metres.is_finite()
+            || radius_metres < 0.0
+        {
+            return false;
+        }
+        let start = [start_metres[0], start_metres[2]];
+        let end = [end_metres[0], end_metres[2]];
+        let mut intersecting_pages = 0usize;
+        for key in self.selected_pages.iter().filter(|key| key.is_surface()) {
+            let Some([minimum, maximum]) = key.horizontal_bounds() else {
+                return false;
+            };
+            let minimum = minimum.map(|value| f64::from(value) * 0.1);
+            let maximum = maximum.map(|value| f64::from(value) * 0.1);
+            if segment_aabb_distance_squared_2d(start, end, minimum, maximum)
+                > radius_metres * radius_metres
+            {
+                continue;
+            }
+            intersecting_pages += 1;
+            if key.level != 0 {
+                return false;
+            }
+        }
+        intersecting_pages > 0
+    }
+}
+
+fn segment_aabb_distance_squared_2d(
+    start: [f64; 2],
+    end: [f64; 2],
+    minimum: [f64; 2],
+    maximum: [f64; 2],
+) -> f64 {
+    let direction = [end[0] - start[0], end[1] - start[1]];
+    let mut entry = 0.0_f64;
+    let mut exit = 1.0_f64;
+    for axis in 0..2 {
+        if direction[axis].abs() <= f64::EPSILON {
+            if start[axis] < minimum[axis] || start[axis] > maximum[axis] {
+                exit = -1.0;
+                break;
+            }
+            continue;
+        }
+        let inverse = 1.0 / direction[axis];
+        let first = (minimum[axis] - start[axis]) * inverse;
+        let second = (maximum[axis] - start[axis]) * inverse;
+        entry = entry.max(first.min(second));
+        exit = exit.min(first.max(second));
+    }
+    if entry <= exit && exit >= 0.0 && entry <= 1.0 {
+        return 0.0;
+    }
+
+    let point_aabb_distance_squared = |point: [f64; 2]| {
+        (0..2)
+            .map(|axis| {
+                let distance = if point[axis] < minimum[axis] {
+                    minimum[axis] - point[axis]
+                } else if point[axis] > maximum[axis] {
+                    point[axis] - maximum[axis]
+                } else {
+                    0.0
+                };
+                distance * distance
+            })
+            .sum::<f64>()
+    };
+    let length_squared = direction[0] * direction[0] + direction[1] * direction[1];
+    let point_segment_distance_squared = |point: [f64; 2]| {
+        if length_squared <= f64::EPSILON {
+            return (point[0] - start[0]).powi(2) + (point[1] - start[1]).powi(2);
+        }
+        let projection = ((point[0] - start[0]) * direction[0]
+            + (point[1] - start[1]) * direction[1])
+            / length_squared;
+        let projection = projection.clamp(0.0, 1.0);
+        let nearest = [
+            start[0] + direction[0] * projection,
+            start[1] + direction[1] * projection,
+        ];
+        (point[0] - nearest[0]).powi(2) + (point[1] - nearest[1]).powi(2)
+    };
+    let corners = [
+        minimum,
+        [minimum[0], maximum[1]],
+        [maximum[0], minimum[1]],
+        maximum,
+    ];
+    point_aabb_distance_squared(start)
+        .min(point_aabb_distance_squared(end))
+        .min(
+            corners
+                .into_iter()
+                .map(point_segment_distance_squared)
+                .fold(f64::INFINITY, f64::min),
+        )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1966,6 +2078,24 @@ mod tests {
         }
     }
 
+    fn cut_with_selected(selected_pages: Vec<TerrainPageKey>) -> VirtualTerrainCut {
+        VirtualTerrainCut {
+            selected_pages,
+            requested_pages: Vec::new(),
+            refinement_roots: Vec::new(),
+            ownerless_roots: Vec::new(),
+            fingerprint: 1,
+            visited_nodes: 1,
+            selected_primitives: 1,
+            selected_encoded_bytes: 1,
+            feedback_overflow: false,
+            selection_overflow: false,
+            traversal_overflow: false,
+            incoherent_replacement_groups: 0,
+            exact_surface_lod_discontinuities: 0,
+        }
+    }
+
     #[test]
     fn cut_identity_includes_exact_ownerless_roots_and_failure_state() {
         let base = 0x1234_5678_9abc_def0;
@@ -3006,6 +3136,39 @@ mod tests {
         assert!(cut.selected_pages.iter().all(|key| key.level == 0));
         assert!(cut.requested_pages.is_empty());
         assert!(cut.has_exact_surface_vicinity(exact_view.camera_position_metres, 4.0));
+    }
+
+    #[test]
+    fn exact_surface_corridor_rejects_a_coarse_owner_crossed_between_endpoints() {
+        let current = TerrainPageKey::surface(0, 0, 0);
+        let coarse_ahead = TerrainPageKey::surface(1, 1, 0);
+        let cut = cut_with_selected(vec![current, coarse_ahead]);
+        assert!(cut.has_exact_surface_corridor([0.5, 3.0, 0.5], [2.5, 3.0, 0.5], 0.0));
+        assert!(
+            !cut.has_exact_surface_corridor([0.5, 3.0, 0.5], [10.0, 3.0, 0.5], 0.0),
+            "a coarse page crossed only in the middle of motion must revoke virtual ownership"
+        );
+
+        let exact = cut_with_selected((0..=3).map(|x| TerrainPageKey::surface(0, x, 0)).collect());
+        assert!(exact.has_exact_surface_corridor([0.5, 3.0, 0.5], [10.0, 3.0, 0.5], 0.0));
+    }
+
+    #[test]
+    fn segment_aabb_distance_detects_corner_crossings_and_radius() {
+        let minimum = [0.0, 0.0];
+        let maximum = [1.0, 1.0];
+        assert_eq!(
+            segment_aabb_distance_squared_2d([-1.0, -1.0], [2.0, 2.0], minimum, maximum),
+            0.0
+        );
+        assert_eq!(
+            segment_aabb_distance_squared_2d([-1.0, 0.5], [-0.25, 0.5], minimum, maximum),
+            0.25 * 0.25
+        );
+        assert_eq!(
+            segment_aabb_distance_squared_2d([-1.0, -1.0], [-0.5, -0.5], minimum, maximum),
+            0.5
+        );
     }
 
     #[test]

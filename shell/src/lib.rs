@@ -153,6 +153,17 @@ fn predictive_stream_position(
     position + glam::Vec3::new(lead.x, 0.0, lead.y)
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn virtual_terrain_has_relevant_revision_floor<'a>(
+    floors: impl IntoIterator<Item = &'a voxels_world::TerrainPageKey>,
+    relevant_roots: &std::collections::BTreeSet<voxels_world::TerrainPageKey>,
+) -> bool {
+    floors.into_iter().any(|key| {
+        key.ancestor_at(voxels_world::TERRAIN_COVERAGE_ROOT_LEVEL)
+            .is_some_and(|root| relevant_roots.contains(&root))
+    })
+}
+
 /// Canonical chunks intersecting the current body/support, intended movement sweep, or view/edit
 /// corridor. This bounded secondary interest is both scheduled and transported as collision
 /// critical, keeping physics and rendering ahead of running, gliding, swimming, and edits.
@@ -1258,7 +1269,8 @@ mod web {
     };
     use crate::{
         ChunkPortalMask, predictive_stream_position, virtual_terrain_column_corridor,
-        virtual_terrain_column_working_set, virtual_terrain_root_working_set, world_environment_at,
+        virtual_terrain_column_working_set, virtual_terrain_has_relevant_revision_floor,
+        virtual_terrain_root_working_set, world_environment_at,
     };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
@@ -1356,7 +1368,11 @@ mod web {
     const VIRTUAL_TERRAIN_MAX_DIRECTORY_BATCHES_IN_FLIGHT: usize = 2;
     const VIRTUAL_TERRAIN_MAX_REFINEMENT_DIRECTORY_BATCHES_IN_FLIGHT: usize = 2;
     const VIRTUAL_TERRAIN_PAGE_COMPLETIONS_PER_FRAME: usize = 1;
-    const VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME: usize = TERRAIN_PAGE_MAX_CHILDREN;
+    // A microbatch can admit two adjacent surface replacement groups before choosing one balanced
+    // cut. This avoids publishing the first group only to coarsen it when its neighbor arrives.
+    const VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME: usize = TERRAIN_PAGE_MAX_CHILDREN * 2;
+    const VIRTUAL_TERRAIN_CACHE_UPLOAD_BYTES_PER_FRAME: usize = 8 * 1_024 * 1_024;
+    const VIRTUAL_TERRAIN_CACHE_UPLOAD_CPU_MS: f64 = 2.0;
     const VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS: u64 = 1_000;
     const VIRTUAL_TERRAIN_PAGE_CACHE_BYTES: usize = 128 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_REFINE_ABOVE_PIXELS: f64 = 0.75;
@@ -1476,7 +1492,6 @@ mod web {
             VirtualTerrainRendererError::SelectedPageMissingGpu(_) => 10,
             VirtualTerrainRendererError::GpuCutNotCertified => 11,
             VirtualTerrainRendererError::IncompleteRootPartition(_) => 12,
-            VirtualTerrainRendererError::SelectedCutSourceCapacity { .. } => 13,
         }
     }
 
@@ -1561,6 +1576,7 @@ mod web {
             identity,
             projected_error_millipixels,
             time_to_exposure_ms,
+            distance_millimetres: (page_distance * 1_000.0).clamp(0.0, f64::from(u32::MAX)) as u32,
             occlusion_confidence_millis: 0,
             // The first publishable owner requires complete L0 coverage around the player.
             // Every surface ancestor intersecting that disk is on the dependency chain to those
@@ -2516,13 +2532,18 @@ mod web {
             let render = renderer.diagnostics();
             let virtual_terrain_revision_ready = {
                 let state = self.virtual_terrain.borrow();
-                let current_root_registered = {
-                    let camera_chunk = world_to_chunk(camera.position);
-                    TerrainPageKey::surface(0, camera_chunk.x, camera_chunk.z)
-                        .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
-                        .is_some_and(|root| state.registered_roots.contains(&root))
-                };
-                current_root_registered && state.minimum_region_revisions.is_empty()
+                let camera_chunk = world_to_chunk(camera.position);
+                let current_root = TerrainPageKey::surface(0, camera_chunk.x, camera_chunk.z)
+                    .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL);
+                let current_root_registered =
+                    current_root.is_some_and(|root| state.registered_roots.contains(&root));
+                let mut relevant_roots = renderer.virtual_terrain_relevant_region_roots();
+                relevant_roots.extend(current_root);
+                current_root_registered
+                    && !virtual_terrain_has_relevant_revision_floor(
+                        state.minimum_region_revisions.keys(),
+                        &relevant_roots,
+                    )
             };
             // A player is not ready merely because one coarse parent covers the viewport. The
             // initial frame must already own the complete 10 cm surface vicinity that walking,
@@ -2532,13 +2553,11 @@ mod web {
                 == VirtualTerrainRenderMode::Visible
                 && virtual_terrain_revision_ready
                 && renderer.virtual_terrain_committed_snapshot_is_valid()
-                && renderer.virtual_terrain_cut().is_some_and(|cut| {
-                    cut.is_renderable()
-                        && cut.has_exact_surface_vicinity(
-                            camera.position.to_array().map(f64::from),
-                            self.virtual_terrain_exact_surface_radius_metres(),
-                        )
-                });
+                && self.virtual_terrain_committed_covers_exact_corridor(
+                    &renderer,
+                    camera.position,
+                    streaming_velocity,
+                );
             self.terrain_ready.set(terrain_ready);
             let render_start = performance_now(performance.as_ref());
             let chunks = self.chunks.borrow();
@@ -3187,6 +3206,27 @@ mod web {
                 * f64::from(VOXEL_SIZE_METRES)
         }
 
+        fn virtual_terrain_committed_covers_exact_corridor(
+            &self,
+            renderer: &Renderer,
+            position: Vec3,
+            velocity: Vec3,
+        ) -> bool {
+            let velocity = velocity.is_finite().then_some(velocity).unwrap_or_default();
+            let endpoint =
+                position + velocity * self.config.stream_velocity_lookahead_seconds.max(0.0);
+            let committed = renderer
+                .virtual_terrain_cut()
+                .filter(|cut| cut.is_renderable());
+            committed.is_some_and(|cut| {
+                cut.has_exact_surface_corridor(
+                    position.to_array().map(f64::from),
+                    endpoint.to_array().map(f64::from),
+                    self.virtual_terrain_exact_surface_radius_metres(),
+                )
+            })
+        }
+
         fn virtual_terrain_view(&self, camera: &CameraState) -> VirtualTerrainView {
             let [width, height] = self.viewport_size.get();
             let height = height.max(1);
@@ -3375,10 +3415,30 @@ mod web {
             {
                 log_gpu_error(&format!("advance virtual terrain publication: {error}"));
             }
-            let publication_in_flight = self
-                .renderer
-                .borrow()
-                .virtual_terrain_publication_in_flight();
+            let (publication_in_flight, publication_owns_geometry, committed_covers_corridor) = {
+                let renderer = self.renderer.borrow();
+                (
+                    renderer.virtual_terrain_publication_in_flight(),
+                    renderer.virtual_terrain_publication_owns_geometry(),
+                    self.virtual_terrain_committed_covers_exact_corridor(
+                        &renderer,
+                        camera.position,
+                        streaming_velocity,
+                    ),
+                )
+            };
+            if !committed_covers_corridor
+                && self.renderer.borrow().virtual_terrain_render_mode()
+                    == VirtualTerrainRenderMode::Visible
+                && let Err(error) = self
+                    .renderer
+                    .borrow_mut()
+                    .set_virtual_terrain_render_mode(VirtualTerrainRenderMode::Shadow)
+            {
+                log_gpu_error(&format!(
+                    "restore canonical terrain ownership outside exact corridor: {error}"
+                ));
+            }
             let now_ms = self.last_time.get().max(0.0) as u64;
             let prioritized_columns =
                 self.desired_virtual_terrain_columns(camera, streaming_velocity);
@@ -3425,7 +3485,7 @@ mod web {
                     .copied()
                     .collect::<BTreeSet<_>>()
             };
-            if !removed_roots.is_empty() && !publication_in_flight {
+            if !removed_roots.is_empty() && !publication_owns_geometry {
                 if let Err(error) = self
                     .renderer
                     .borrow_mut()
@@ -3485,22 +3545,31 @@ mod web {
                     return;
                 }
             };
-            if !publication_in_flight && self.hydrate_virtual_terrain_from_cache(&cut, now_ms) {
-                match self.renderer.borrow_mut().select_virtual_terrain_cut(view) {
-                    Ok(reselected) => cut = reselected,
-                    Err(error) => {
-                        log_gpu_error(&format!("reselect cached virtual terrain cut: {error}"));
-                        return;
-                    }
-                }
+            if !publication_in_flight
+                && let Err(error) = self.hydrate_virtual_terrain_from_cache(
+                    &mut cut,
+                    view,
+                    streaming_velocity.length(),
+                    now_ms,
+                )
+            {
+                log_gpu_error(&format!("hydrate cached virtual terrain: {error}"));
+                return;
             }
 
-            if self
-                .virtual_terrain
+            let mut relevant_roots = self
+                .renderer
                 .borrow()
-                .minimum_region_revisions
-                .is_empty()
-            {
+                .virtual_terrain_relevant_region_roots();
+            relevant_roots.insert(camera_root);
+            let relevant_revision_pending = {
+                let state = self.virtual_terrain.borrow();
+                virtual_terrain_has_relevant_revision_floor(
+                    state.minimum_region_revisions.keys(),
+                    &relevant_roots,
+                )
+            };
+            if !relevant_revision_pending {
                 // Directory metadata and encoded cache arrivals are not GPU ownership mutations.
                 // Continue fetching them while a frozen publication awaits certification; only
                 // admission into source geometry is serialized behind that transaction.
@@ -3599,18 +3668,15 @@ mod web {
                 }
             }
 
-            let committed_is_exact =
-                self.renderer
-                    .borrow()
-                    .virtual_terrain_cut()
-                    .is_some_and(|committed| {
-                        committed.is_renderable()
-                            && committed.has_exact_surface_vicinity(
-                                camera.position.to_array().map(f64::from),
-                                view.exact_surface_radius_metres,
-                            )
-                    });
-            if committed_is_exact {
+            let committed_covers_corridor = {
+                let renderer = self.renderer.borrow();
+                self.virtual_terrain_committed_covers_exact_corridor(
+                    &renderer,
+                    camera.position,
+                    streaming_velocity,
+                )
+            };
+            if committed_covers_corridor {
                 match self
                     .renderer
                     .borrow_mut()
@@ -3841,69 +3907,106 @@ mod web {
             }
         }
 
-        fn hydrate_virtual_terrain_from_cache(&self, cut: &VirtualTerrainCut, now_ms: u64) -> bool {
-            let requested = cut.requested_pages.iter().copied().collect::<BTreeSet<_>>();
-            self.virtual_terrain
-                .borrow_mut()
-                .page_upload_retry_after_ms
-                .retain(|identity, _| requested.contains(identity));
+        fn hydrate_virtual_terrain_from_cache(
+            &self,
+            cut: &mut VirtualTerrainCut,
+            view: VirtualTerrainView,
+            speed_metres_per_second: f32,
+            now_ms: u64,
+        ) -> Result<bool, VirtualTerrainRendererError> {
             if self
                 .renderer
                 .borrow()
                 .virtual_terrain_publication_in_flight()
             {
-                return false;
+                return Ok(false);
             }
 
-            let replacement_groups = terrain_page_replacement_groups(&cut.requested_pages);
-            let grouped = replacement_groups
-                .iter()
-                .flat_map(|(_, identities)| identities.iter().map(|identity| identity.key))
-                .collect::<BTreeSet<_>>();
-            let mut remaining_page_budget = VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME;
+            let started_ms = js_sys::Date::now();
+            let mut remaining_pages = VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME;
+            let mut remaining_bytes = VIRTUAL_TERRAIN_CACHE_UPLOAD_BYTES_PER_FRAME;
             let mut uploaded = false;
-            for (parent, identities) in replacement_groups {
-                debug_assert!(identities.len() <= VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME);
-                if identities.len() > remaining_page_budget {
-                    continue;
+            loop {
+                if remaining_pages == 0
+                    || remaining_bytes == 0
+                    || js_sys::Date::now() - started_ms >= VIRTUAL_TERRAIN_CACHE_UPLOAD_CPU_MS
+                {
+                    break;
                 }
-                if identities.iter().any(|identity| {
-                    self.virtual_terrain
-                        .borrow()
-                        .page_upload_retry_after_ms
-                        .get(identity)
-                        .is_some_and(|retry_at| *retry_at > now_ms)
-                }) {
-                    continue;
+                let requested = cut.requested_pages.iter().copied().collect::<BTreeSet<_>>();
+                self.virtual_terrain
+                    .borrow_mut()
+                    .page_upload_retry_after_ms
+                    .retain(|identity, _| requested.contains(identity));
+
+                // Cache-ready work follows the same topology/deadline/error ordering as transport.
+                // BTree identity order is only a final deterministic tie-breaker.
+                let mut groups =
+                    self.virtual_terrain_demand_groups(cut, view, speed_metres_per_second);
+                groups.sort_by(TerrainDemandGroup::compare_priority);
+
+                let mut ready = None;
+                for group in groups {
+                    let identities = group
+                        .pages
+                        .iter()
+                        .map(|page| page.identity)
+                        .collect::<Vec<_>>();
+                    if identities.len() > remaining_pages
+                        || identities.iter().any(|identity| {
+                            self.virtual_terrain
+                                .borrow()
+                                .page_upload_retry_after_ms
+                                .get(identity)
+                                .is_some_and(|retry_at| *retry_at > now_ms)
+                        })
+                    {
+                        continue;
+                    }
+                    let encoded = identities
+                        .iter()
+                        .map(|identity| {
+                            self.virtual_terrain_cache
+                                .borrow_mut()
+                                .get_encoded(*identity)
+                        })
+                        .collect::<Option<Vec<_>>>();
+                    let Some(encoded) = encoded else {
+                        continue;
+                    };
+                    let encoded_bytes = encoded.iter().map(Vec::len).sum::<usize>();
+                    if encoded_bytes > remaining_bytes {
+                        continue;
+                    }
+                    ready = Some((group.replacement_parent, identities, encoded, encoded_bytes));
+                    break;
                 }
-                let pages = identities
+                let Some((parent, identities, encoded, encoded_bytes)) = ready else {
+                    break;
+                };
+                let pages = encoded
                     .iter()
-                    .map(|identity| {
-                        let encoded = self
-                            .virtual_terrain_cache
-                            .borrow_mut()
-                            .get_encoded(*identity)?;
-                        decode_terrain_page(&encoded, self.source_identity_hash()).ok()
-                    })
+                    .map(|encoded| decode_terrain_page(encoded, self.source_identity_hash()).ok())
                     .collect::<Option<Vec<_>>>();
                 let Some(pages) = pages else {
-                    continue;
+                    break;
                 };
-                let page_count = pages.len();
-                match self
-                    .renderer
-                    .borrow_mut()
-                    .upload_virtual_terrain_replacement_group(parent, pages)
-                {
+                let result = if let Some(parent) = parent {
+                    self.renderer
+                        .borrow_mut()
+                        .upload_virtual_terrain_replacement_group(parent, pages)
+                } else {
+                    debug_assert_eq!(pages.len(), 1);
+                    let Some(page) = pages.into_iter().next() else {
+                        break;
+                    };
+                    self.renderer.borrow_mut().upload_virtual_terrain_page(page)
+                };
+                match result {
                     Ok(()) => {
                         let mut state = self.virtual_terrain.borrow_mut();
-                        for identity in identities {
-                            state.page_upload_retry_after_ms.remove(&identity);
-                        }
-                        remaining_page_budget = remaining_page_budget.saturating_sub(page_count);
-                        uploaded = true;
-                        if remaining_page_budget == 0 {
-                            return true;
+                        for identity in &identities {
+                            state.page_upload_retry_after_ms.remove(identity);
                         }
                     }
                     Err(error) => {
@@ -3914,73 +4017,40 @@ mod web {
                             .saturating_add(identities.len() as u64);
                         state.stats.last_page_upload_failure_kind =
                             virtual_terrain_upload_failure_kind(&error);
-                        for identity in identities {
-                            state.page_upload_retry_after_ms.insert(
-                                identity,
-                                now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
-                            );
+                        // Capacity is a current admission fact. A timed retry hides progress made by
+                        // eviction or publication and can stall the exact group after space opens.
+                        if !matches!(error, VirtualTerrainRendererError::GpuPoolCapacity) {
+                            for identity in &identities {
+                                state.page_upload_retry_after_ms.insert(
+                                    *identity,
+                                    now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
+                                );
+                            }
                         }
                         drop(state);
                         log_gpu_error(&format!(
-                            "upload cached virtual terrain replacement group {parent:?}: {error}"
+                            "admit cached virtual terrain group {:?}: {error}",
+                            parent.or_else(|| identities.first().and_then(|identity| {
+                                identity.key.parent().or(Some(identity.key))
+                            }))
                         ));
-                        return uploaded;
+                        // Preserve any earlier admitted groups and let a legal current cut freeze.
+                        // Returning from the whole stream here would retry the blocker forever
+                        // before publication or transport reconciliation could make progress.
+                        break;
                     }
                 }
-            }
-
-            for identity in &cut.requested_pages {
-                if remaining_page_budget == 0 {
-                    break;
-                }
-                if grouped.contains(&identity.key) {
-                    continue;
-                }
-                if self
-                    .virtual_terrain
-                    .borrow()
-                    .page_upload_retry_after_ms
-                    .get(identity)
-                    .is_some_and(|retry_at| *retry_at > now_ms)
-                {
-                    continue;
-                }
-                let encoded = self
-                    .virtual_terrain_cache
+                remaining_pages = remaining_pages.saturating_sub(identities.len());
+                remaining_bytes = remaining_bytes.saturating_sub(encoded_bytes);
+                uploaded = true;
+                // Every admitted group can alter balance closure. Reselect immediately so the next
+                // group is ranked against the true legal frontier, not a stale request list.
+                *cut = self
+                    .renderer
                     .borrow_mut()
-                    .get_encoded(*identity);
-                let Some(encoded) = encoded else {
-                    continue;
-                };
-                let Ok(page) = decode_terrain_page(&encoded, self.source_identity_hash()) else {
-                    continue;
-                };
-                match self.renderer.borrow_mut().upload_virtual_terrain_page(page) {
-                    Ok(()) => {
-                        self.virtual_terrain
-                            .borrow_mut()
-                            .page_upload_retry_after_ms
-                            .remove(identity);
-                        remaining_page_budget = remaining_page_budget.saturating_sub(1);
-                        uploaded = true;
-                    }
-                    Err(error) => {
-                        let mut state = self.virtual_terrain.borrow_mut();
-                        state.stats.page_upload_failed =
-                            state.stats.page_upload_failed.saturating_add(1);
-                        state.stats.last_page_upload_failure_kind =
-                            virtual_terrain_upload_failure_kind(&error);
-                        state.page_upload_retry_after_ms.insert(
-                            *identity,
-                            now_ms.saturating_add(VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS),
-                        );
-                        drop(state);
-                        log_gpu_error(&format!("upload cached virtual terrain page: {error}"));
-                        return uploaded;
-                    }
-                }
+                    .select_virtual_terrain_cut(view)?;
             }
-            uploaded
+            Ok(uploaded)
         }
 
         fn virtual_terrain_demand_groups(
@@ -4546,10 +4616,17 @@ mod web {
                         continue;
                     }
                 };
-                let _ = self
+                let useful = self
                     .virtual_terrain_scheduler
                     .borrow_mut()
-                    .complete(identity, encoded.len());
+                    .complete(identity, encoded.len())
+                    .unwrap_or(false);
+                if !useful {
+                    // The exact identity became cache-resident while this transfer was in flight.
+                    // Do not refresh/repopulate it from an obsolete response after accounting the
+                    // duplicate bytes as cancellation waste.
+                    continue;
+                }
                 if let Err(error) = self
                     .virtual_terrain_cache
                     .borrow_mut()
@@ -6250,7 +6327,7 @@ mod web {
                         sample.weather_ms,
                         sample.ui_ms,
                         sample.virtual_terrain_snapshot_encode_ms,
-                        sample.virtual_terrain_snapshot_finalize_ms,
+                        sample.virtual_terrain_snapshot_validation_ms,
                     ]);
                 }
             }
@@ -6646,6 +6723,26 @@ mod tests {
 
     fn test_view_cone_tangent() -> f32 {
         viewport_view_cone_tangent(55.0, CAMERA_VERTICAL_FOV_RADIANS, 1_920, 1_080).unwrap()
+    }
+
+    #[test]
+    fn unrelated_revision_floor_does_not_block_the_current_publication_root() {
+        let current =
+            voxels_world::TerrainPageKey::surface(voxels_world::TERRAIN_COVERAGE_ROOT_LEVEL, 0, 0);
+        let unrelated = voxels_world::TerrainPageKey::surface(
+            voxels_world::TERRAIN_COVERAGE_ROOT_LEVEL,
+            40,
+            -40,
+        );
+        let relevant = [current].into_iter().collect::<BTreeSet<_>>();
+        assert!(!virtual_terrain_has_relevant_revision_floor(
+            [&unrelated],
+            &relevant
+        ));
+        assert!(virtual_terrain_has_relevant_revision_floor(
+            [&unrelated, &current],
+            &relevant
+        ));
     }
 
     #[test]

@@ -66,6 +66,7 @@ pub struct TerrainPageDemand {
     pub identity: TerrainPageTransferIdentity,
     pub projected_error_millipixels: u32,
     pub time_to_exposure_ms: u32,
+    pub distance_millimetres: u32,
     /// Zero means certainly visible; 1,000 means confidently occluded.
     pub occlusion_confidence_millis: u16,
     pub topology_critical: bool,
@@ -138,6 +139,11 @@ impl TerrainDemandGroup {
             return Err(TerrainStreamError::InvalidDemandGroup);
         }
         Ok(group)
+    }
+
+    /// The canonical ordering shared by transport and cache-to-GPU admission.
+    pub fn compare_priority(&self, other: &Self) -> Ordering {
+        compare_demand_groups(self, other)
     }
 
     fn validates(&self) -> bool {
@@ -288,9 +294,10 @@ impl TerrainStreamScheduler {
         if groups.iter().any(|group| !group.validates()) {
             return Err(TerrainStreamError::InvalidDemandGroup);
         }
-        let demanded = groups
+        let demanded_missing = groups
             .iter()
             .flat_map(|group| group.pages.iter().map(|page| page.identity))
+            .filter(|identity| !available.contains(identity))
             .collect::<BTreeSet<_>>();
         groups.sort_by(compare_demand_groups);
         let mut admitted = BTreeMap::new();
@@ -332,7 +339,7 @@ impl TerrainStreamScheduler {
         );
         self.pending = admitted;
         for (identity, entry) in &mut self.in_flight {
-            entry.obsolete = !demanded.contains(identity);
+            entry.obsolete = !demanded_missing.contains(identity);
         }
         Ok(())
     }
@@ -533,6 +540,7 @@ fn compare_demands(left: &TerrainPageDemand, right: &TerrainPageDemand) -> Order
     demand_priority(right)
         .cmp(&demand_priority(left))
         .then_with(|| left.time_to_exposure_ms.cmp(&right.time_to_exposure_ms))
+        .then_with(|| left.distance_millimetres.cmp(&right.distance_millimetres))
         .then_with(|| left.identity.cmp(&right.identity))
 }
 
@@ -747,6 +755,7 @@ mod tests {
             identity,
             projected_error_millipixels: error,
             time_to_exposure_ms: 1_000,
+            distance_millimetres: 1_000,
             occlusion_confidence_millis: 0,
             topology_critical: false,
             silhouette_critical: false,
@@ -896,6 +905,50 @@ mod tests {
         assert_eq!(batch.pages.len(), 2);
         assert!(!batch.pages.contains(&first));
         assert!(!batch.pages.contains(&second));
+    }
+
+    #[test]
+    fn cache_arrival_obsoletes_the_same_identity_already_in_flight() {
+        let parent = TerrainPageKey::surface(1, 2, -3);
+        let pages = parent
+            .refinement_children()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| {
+                demand(
+                    TerrainPageTransferIdentity {
+                        key,
+                        revision: 11,
+                        content_fingerprint: [index as u8 + 1; 32],
+                    },
+                    100,
+                )
+            })
+            .collect::<Vec<_>>();
+        let cached_while_in_flight = pages[0].identity;
+        let group = TerrainDemandGroup::replacement(parent, pages).unwrap();
+        let mut scheduler =
+            TerrainStreamScheduler::new(TerrainStreamConfig::INTERACTIVE_CLIENT).unwrap();
+        scheduler.reconcile([group.clone()]).unwrap();
+        let batch = scheduler.peek_batch(0).unwrap();
+        scheduler.commit_batch(&batch).unwrap();
+
+        scheduler
+            .reconcile_with_available([group], [cached_while_in_flight])
+            .unwrap();
+        assert_eq!(scheduler.stats().obsolete_in_flight_pages, 1);
+        assert!(
+            !scheduler.complete(cached_while_in_flight, 4096).unwrap(),
+            "the late duplicate must not be installed or counted as useful"
+        );
+        assert_eq!(scheduler.stats().cancellation_waste_bytes, 4096);
+        assert!(
+            scheduler
+                .peek_batch(0)
+                .is_none_or(|batch| !batch.pages.contains(&cached_while_in_flight)),
+            "a cached identity is never retransmitted"
+        );
     }
 
     #[test]
