@@ -103,6 +103,10 @@ describe("engine automation contract", () => {
       "clientViewAttemptCanonicalReady",
       "clientViewAttemptTerrainStatus",
       "virtualTerrainPublicationInFlight",
+      "virtualTerrainPlanLastSelection",
+      "virtualTerrainPlanLastInvalidation",
+      "virtualTerrainPlanLastInvalidationLine",
+      "virtualTerrainPublicationLastAbortLine",
     ]);
     expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.schemaVersion]).toBe("schemaVersion");
   });
