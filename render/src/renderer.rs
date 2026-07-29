@@ -811,12 +811,50 @@ struct VirtualHeightfieldSamples {
     finer_neighbor_sides: [bool; 4],
 }
 
-#[derive(Clone, Debug)]
-struct CachedVirtualHeightfieldSamples {
-    revision: u64,
-    content_fingerprint: [u8; 32],
-    ancestor_fingerprint: u64,
-    samples: VirtualHeightfieldSamples,
+#[derive(Clone, Copy, Debug)]
+struct VirtualHeightfieldBoundaryMidpoints {
+    refined: [bool; 4],
+    ground: [Option<f32>; 4],
+    water: [Option<f32>; 4],
+}
+
+fn virtual_heightfield_boundary_midpoints(
+    grid: &voxels_world::TerrainHeightfieldGrid,
+    x: usize,
+    z: usize,
+    refined: [bool; 4],
+    key: TerrainPageKey,
+) -> Result<VirtualHeightfieldBoundaryMidpoints, VirtualTerrainRendererError> {
+    let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+    // The cell polygon is negative Z, positive X, positive Z, negative X. Persisted witnesses are
+    // negative X, positive X, negative Z, positive Z, with their tangent coordinate increasing.
+    let persisted = [(2, x), (1, z), (3, x), (0, z)];
+    let mut ground = [None; 4];
+    let mut water = [None; 4];
+    for side in 0..4 {
+        if !refined[side] {
+            continue;
+        }
+        let (persisted_side, offset) = persisted[side];
+        let index = persisted_side * cells + offset;
+        ground[side] = Some(
+            *grid
+                .boundary_midpoint_ground_heights
+                .get(index)
+                .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(key))?
+                as f32,
+        );
+        let water_height = *grid
+            .boundary_midpoint_water_heights
+            .get(index)
+            .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(key))?;
+        water[side] = (water_height != i32::MIN).then_some(water_height as f32);
+    }
+    Ok(VirtualHeightfieldBoundaryMidpoints {
+        refined,
+        ground,
+        water,
+    })
 }
 
 fn virtual_triangle_gpu_vertices(
@@ -943,10 +981,18 @@ fn virtual_triangle_gpu_vertices(
                         x == 0 && negative_x,
                     ];
                     if refined_sides.into_iter().any(|refined| refined) {
+                        let midpoints = virtual_heightfield_boundary_midpoints(
+                            grid,
+                            x,
+                            z,
+                            refined_sides,
+                            page.key,
+                        )?;
                         push_virtual_heightfield_boundary_cell(
                             &mut vertices,
                             positions,
                             refined_sides,
+                            midpoints.ground,
                             page.key.level == 1,
                             material,
                             page.key,
@@ -977,14 +1023,15 @@ fn virtual_triangle_gpu_vertices(
 /// Emits one non-overlapping coarse boundary cell with the midpoint required by the next-finer
 /// heightfield.
 ///
-/// Recursive edge constraints make that midpoint identical on both owners. At the L1/L0 boundary,
-/// the two half-edges instead follow the exact lower-coordinate voxel-height convention. The cell
-/// fans once to its ordinary coarse center, so this is a conforming triangulation rather than an
-/// overlapping seam cover.
+/// Schema-v7 replacement validation makes the persisted midpoint identical to the next-finer
+/// owner's ordinary source sample. At the L1/L0 boundary, the two half-edges instead follow the
+/// exact lower-coordinate voxel-height convention. The cell fans once to its ordinary coarse
+/// center, so this is a conforming triangulation rather than an overlapping seam cover.
 fn push_virtual_heightfield_boundary_cell(
     vertices: &mut Vec<GpuTerrainVertex>,
     positions: [[f32; 3]; 4],
     refined: [bool; 4],
+    midpoint_heights: [Option<f32>; 4],
     exact_staircase: bool,
     material: Material,
     key: TerrainPageKey,
@@ -1001,26 +1048,31 @@ fn push_virtual_heightfield_boundary_cell(
             segments.push([start, end]);
             continue;
         }
+        let midpoint_height = midpoint_heights[side]
+            .ok_or(VirtualTerrainRendererError::InvalidTriangleCluster(key))?;
+        let horizontal_axis = if start[0] != end[0] { 0 } else { 2 };
+        let forward = start[horizontal_axis] < end[horizontal_axis];
         for offset in 0..2 {
             let fraction = offset as f32 * 0.5;
             let next_fraction = (offset + 1) as f32 * 0.5;
-            let horizontal_axis = if start[0] != end[0] { 0 } else { 2 };
             // The exact L0 surface assigns each 10 cm top cell the sample at its
             // lower X/Z coordinate. Two sides of the clockwise coarse polygon run
             // in the opposite direction, so using traversal order here shifts the
             // staircase by one voxel on positive-Z and negative-X boundaries.
-            let canonical_fraction = if start[horizontal_axis] < end[horizontal_axis] {
-                fraction
-            } else {
-                next_fraction
-            };
-            let height_at = |height_fraction: f32| {
-                let height = start[1] + (end[1] - start[1]) * height_fraction;
-                if exact_staircase {
-                    height.round()
+            let height = if !exact_staircase {
+                if offset == 0 {
+                    [start[1], midpoint_height]
                 } else {
-                    height
+                    [midpoint_height, end[1]]
                 }
+            } else if forward {
+                [if offset == 0 {
+                    start[1]
+                } else {
+                    midpoint_height
+                }; 2]
+            } else {
+                [if offset == 0 { midpoint_height } else { end[1] }; 2]
             };
             let interpolate_position = |amount: f32, height: f32| {
                 [
@@ -1029,19 +1081,9 @@ fn push_virtual_heightfield_boundary_cell(
                     start[2] + (end[2] - start[2]) * amount,
                 ]
             };
-            let start_height = height_at(if exact_staircase {
-                canonical_fraction
-            } else {
-                fraction
-            });
-            let end_height = height_at(if exact_staircase {
-                canonical_fraction
-            } else {
-                next_fraction
-            });
             segments.push([
-                interpolate_position(fraction, start_height),
-                interpolate_position(next_fraction, end_height),
+                interpolate_position(fraction, height[0]),
+                interpolate_position(next_fraction, height[1]),
             ]);
         }
     }
@@ -1061,6 +1103,111 @@ fn push_virtual_heightfield_boundary_cell(
     }
     if previous != first[0] {
         push_virtual_triangle(vertices, [previous, center, first[0]], material, key)?;
+    }
+    Ok(())
+}
+
+fn virtual_heightfield_cell_side(from: usize, to: usize) -> Option<(usize, bool)> {
+    match (from, to) {
+        (0, 1) => Some((0, false)),
+        (1, 0) => Some((0, true)),
+        (1, 2) => Some((1, false)),
+        (2, 1) => Some((1, true)),
+        (2, 3) => Some((2, false)),
+        (3, 2) => Some((2, true)),
+        (3, 0) => Some((3, false)),
+        (0, 3) => Some((3, true)),
+        _ => None,
+    }
+}
+
+fn virtual_heightfield_side_segments(
+    start: [f32; 3],
+    end: [f32; 3],
+    midpoint_height: f32,
+    exact_staircase: bool,
+) -> [[[f32; 3]; 2]; 2] {
+    let horizontal_axis = if start[0] != end[0] { 0 } else { 2 };
+    let forward = start[horizontal_axis] < end[horizontal_axis];
+    let midpoint = |height| [(start[0] + end[0]) * 0.5, height, (start[2] + end[2]) * 0.5];
+    if !exact_staircase {
+        let witness = midpoint(midpoint_height);
+        return [[start, witness], [witness, end]];
+    }
+    let [first_height, second_height] = if forward {
+        [start[1], midpoint_height]
+    } else {
+        [midpoint_height, end[1]]
+    };
+    [
+        [[start[0], first_height, start[2]], midpoint(first_height)],
+        [midpoint(second_height), [end[0], second_height, end[2]]],
+    ]
+}
+
+fn push_virtual_heightfield_water_triangle(
+    vertices: &mut Vec<GpuTerrainVertex>,
+    positions: [Option<[f32; 3]>; 4],
+    triangle: [usize; 3],
+    midpoints: VirtualHeightfieldBoundaryMidpoints,
+    material: Material,
+    key: TerrainPageKey,
+) -> Result<(), VirtualTerrainRendererError> {
+    let [Some(left), Some(middle), Some(right)] = triangle.map(|index| positions[index]) else {
+        return Ok(());
+    };
+    let triangle_positions = [left, middle, right];
+    let center = std::array::from_fn(|axis| {
+        triangle_positions
+            .iter()
+            .map(|position| position[axis])
+            .sum::<f32>()
+            / 3.0
+    });
+    for edge in 0..3 {
+        let from = triangle[edge];
+        let to = triangle[(edge + 1) % 3];
+        let start = triangle_positions[edge];
+        let end = triangle_positions[(edge + 1) % 3];
+        let Some((side, reverse)) = virtual_heightfield_cell_side(from, to) else {
+            push_virtual_triangle(vertices, [start, end, center], material, key)?;
+            continue;
+        };
+        if !midpoints.refined[side] {
+            push_virtual_triangle(vertices, [start, end, center], material, key)?;
+            continue;
+        }
+        let Some(midpoint_height) = midpoints.water[side] else {
+            // A dry finer midpoint has no shared water edge. Keep the coarse interior wet, but do
+            // not claim an outer edge that the finer owner cannot match.
+            continue;
+        };
+        let canonical_sides = [[0, 1], [1, 2], [2, 3], [3, 0]];
+        let [Some(canonical_start), Some(canonical_end)] =
+            canonical_sides[side].map(|index| positions[index])
+        else {
+            return Err(VirtualTerrainRendererError::InvalidTriangleCluster(key));
+        };
+        let mut segments = virtual_heightfield_side_segments(
+            canonical_start,
+            canonical_end,
+            midpoint_height,
+            false,
+        );
+        if reverse {
+            segments.reverse();
+            for segment in &mut segments {
+                segment.reverse();
+            }
+        }
+        for [segment_start, segment_end] in segments {
+            push_virtual_triangle(
+                vertices,
+                [segment_start, segment_end, center],
+                material,
+                key,
+            )?;
+        }
     }
     Ok(())
 }
@@ -1113,6 +1260,28 @@ fn push_virtual_heightfield_water(
                     position
                 })
             });
+            let [negative_x, positive_x, negative_z, positive_z] = heightfield.finer_neighbor_sides;
+            let refined_sides = [
+                z == 0 && negative_z,
+                x + 1 == cells && positive_x,
+                z + 1 == cells && positive_z,
+                x == 0 && negative_x,
+            ];
+            if refined_sides.into_iter().any(|refined| refined) {
+                let midpoints =
+                    virtual_heightfield_boundary_midpoints(grid, x, z, refined_sides, page.key)?;
+                for triangle in [[0, 2, 1], [0, 3, 2]] {
+                    push_virtual_heightfield_water_triangle(
+                        vertices,
+                        water_positions,
+                        triangle,
+                        midpoints,
+                        material,
+                        page.key,
+                    )?;
+                }
+                continue;
+            }
             let flat_height = water_positions
                 .iter()
                 .copied()
@@ -1836,6 +2005,14 @@ fn push_virtual_flat_water_rectangles(
     let mut flat_heights = vec![None; cells * cells];
     for z in 0..cells {
         for x in 0..cells {
+            let [negative_x, positive_x, negative_z, positive_z] = heightfield.finer_neighbor_sides;
+            if (z == 0 && negative_z)
+                || (x + 1 == cells && positive_x)
+                || (z + 1 == cells && positive_z)
+                || (x == 0 && negative_x)
+            {
+                continue;
+            }
             let samples = [
                 x + z * edge,
                 x + 1 + z * edge,
@@ -1981,46 +2158,12 @@ fn cut_exact_neighbor_sides(selected: &BTreeSet<TerrainPageKey>, key: TerrainPag
 
 fn restore_exact_neighbor_heightfield_boundaries(
     page: &TerrainPageV1,
-    grid: &voxels_world::TerrainHeightfieldGrid,
-    constrained: &VirtualHeightfieldSamples,
+    samples: &VirtualHeightfieldSamples,
     exact_sides: [bool; 4],
 ) -> VirtualHeightfieldSamples {
-    let raw = unconstrained_virtual_heightfield_samples(grid);
-    let mut restored = constrained.clone();
-    let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
-    let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
     debug_assert_eq!(page.key.level, 0);
+    let mut restored = samples.clone();
     restored.exact_neighbor_sides = exact_sides;
-    for offset in 0..edge {
-        let samples = [
-            offset * edge,
-            cells + offset * edge,
-            offset,
-            offset + cells * edge,
-        ];
-        for (exact, sample) in exact_sides.into_iter().zip(samples) {
-            if !exact {
-                continue;
-            }
-            restored.ground[sample] = raw.ground[sample];
-            restored.water[sample] = raw.water[sample];
-        }
-    }
-    // A corner belongs to both incident boundaries. Raw exact-neighbor restoration is valid only
-    // when both boundaries have exact owners; otherwise the parent-constrained value is the sole
-    // value shared with the adjacent coarse page. Letting either exact side win independently
-    // creates a raised corner and a vertical pinhole at four-page L0/L1 junctions.
-    for (sample, exact) in [
-        (0, exact_sides[0] && exact_sides[2]),
-        (cells, exact_sides[1] && exact_sides[2]),
-        (cells + cells * edge, exact_sides[1] && exact_sides[3]),
-        (cells * edge, exact_sides[0] && exact_sides[3]),
-    ] {
-        if !exact {
-            restored.ground[sample] = constrained.ground[sample];
-            restored.water[sample] = constrained.water[sample];
-        }
-    }
     restored
 }
 
@@ -2029,12 +2172,12 @@ fn constrained_virtual_heightfield_samples(
     hierarchy: &VirtualTerrainHierarchy,
     page: &TerrainPageV1,
 ) -> Result<VirtualHeightfieldSamples, VirtualTerrainRendererError> {
-    let samples = parent_constrained_virtual_heightfield_samples(hierarchy, page)?;
     let TerrainPageRepresentation::HeightfieldGrid(grid) = &page.representation else {
         return Err(VirtualTerrainRendererError::UnsupportedRepresentation(
             page.representation.kind(),
         ));
     };
+    let samples = unconstrained_virtual_heightfield_samples(grid);
     if page.key.level == 0 {
         let selected = [(-1, 0), (1, 0), (0, -1), (0, 1)]
             .into_iter()
@@ -2050,159 +2193,12 @@ fn constrained_virtual_heightfield_samples(
             .collect::<BTreeSet<_>>();
         Ok(restore_exact_neighbor_heightfield_boundaries(
             page,
-            grid,
             &samples,
             cut_exact_neighbor_sides(&selected, page.key),
         ))
     } else {
         Ok(samples)
     }
-}
-
-/// Returns only the recursively parent-constrained samples.
-///
-/// Exact-neighbor restoration depends on the current directory set and must be reapplied whenever
-/// a neighboring refinement arrives. Caching that restored edge made geometry depend on response
-/// order and left adjacent L0 pages with different values for the same boundary.
-fn heightfield_ancestor_fingerprint(
-    hierarchy: &VirtualTerrainHierarchy,
-    mut key: TerrainPageKey,
-) -> Option<u64> {
-    let mut fingerprint = FINGERPRINT_OFFSET;
-    loop {
-        let node = hierarchy.directory_node(key)?;
-        fingerprint = fingerprint_value(fingerprint, u64::from(key.level));
-        fingerprint = fingerprint_value(fingerprint, key.coord[0] as u64);
-        fingerprint = fingerprint_value(fingerprint, key.coord[2] as u64);
-        fingerprint = fingerprint_value(fingerprint, node.revision);
-        for chunk in node.content_fingerprint.chunks_exact(8) {
-            fingerprint =
-                fingerprint_value(fingerprint, u64::from_le_bytes(chunk.try_into().ok()?));
-        }
-        let Some(parent) = key.parent() else {
-            break;
-        };
-        if hierarchy.directory_node(parent).is_none() {
-            break;
-        }
-        key = parent;
-    }
-    Some(fingerprint)
-}
-
-#[cfg(test)]
-fn parent_constrained_virtual_heightfield_samples(
-    hierarchy: &VirtualTerrainHierarchy,
-    page: &TerrainPageV1,
-) -> Result<VirtualHeightfieldSamples, VirtualTerrainRendererError> {
-    parent_constrained_virtual_heightfield_samples_with_cache(hierarchy, &BTreeMap::new(), page)
-        .map(|(samples, _)| samples)
-}
-
-fn parent_constrained_virtual_heightfield_samples_with_cache(
-    hierarchy: &VirtualTerrainHierarchy,
-    cache: &BTreeMap<TerrainPageKey, CachedVirtualHeightfieldSamples>,
-    page: &TerrainPageV1,
-) -> Result<(VirtualHeightfieldSamples, bool), VirtualTerrainRendererError> {
-    let TerrainPageRepresentation::HeightfieldGrid(grid) = &page.representation else {
-        return Err(VirtualTerrainRendererError::UnsupportedRepresentation(
-            page.representation.kind(),
-        ));
-    };
-    let mut samples = unconstrained_virtual_heightfield_samples(grid);
-    let Some(parent_key) = page.key.parent() else {
-        return Ok((samples, true));
-    };
-    let expected_parent_ancestor_fingerprint =
-        heightfield_ancestor_fingerprint(hierarchy, parent_key);
-    let (parent_samples, complete) = if let Some(cached) = cache.get(&parent_key).filter(|cached| {
-        hierarchy.directory_node(parent_key).is_some_and(|node| {
-            node.revision == cached.revision
-                && node.content_fingerprint == cached.content_fingerprint
-                && expected_parent_ancestor_fingerprint == Some(cached.ancestor_fingerprint)
-        })
-    }) {
-        (cached.samples.clone(), true)
-    } else if let Some(parent) = hierarchy.resident_page(parent_key) {
-        if !matches!(
-            parent.representation,
-            TerrainPageRepresentation::HeightfieldGrid(_)
-        ) {
-            return Ok((samples, false));
-        }
-        parent_constrained_virtual_heightfield_samples_with_cache(hierarchy, cache, parent)?
-    } else {
-        return Ok((samples, false));
-    };
-    let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
-    let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
-    if samples.ground.len() != edge * edge
-        || samples.water.len() != edge * edge
-        || parent_samples.ground.len() != edge * edge
-        || parent_samples.water.len() != edge * edge
-    {
-        return Err(VirtualTerrainRendererError::InvalidTriangleCluster(
-            page.key,
-        ));
-    }
-    let quadrant_x = usize::try_from(page.key.coord[0].rem_euclid(2))
-        .map_err(|_| VirtualTerrainRendererError::InvalidTriangleCluster(page.key))?;
-    let quadrant_z = usize::try_from(page.key.coord[2].rem_euclid(2))
-        .map_err(|_| VirtualTerrainRendererError::InvalidTriangleCluster(page.key))?;
-    let interpolate_ground = |fixed: usize, combined: usize, row: bool| {
-        let coarse = combined / 2;
-        let first = if row {
-            coarse + fixed * edge
-        } else {
-            fixed + coarse * edge
-        };
-        if combined.is_multiple_of(2) {
-            parent_samples.ground[first]
-        } else {
-            let second = if row { first + 1 } else { first + edge };
-            (parent_samples.ground[first] + parent_samples.ground[second]) * 0.5
-        }
-    };
-    let interpolate_water = |fixed: usize, combined: usize, row: bool| {
-        let coarse = combined / 2;
-        let first = if row {
-            coarse + fixed * edge
-        } else {
-            fixed + coarse * edge
-        };
-        if combined.is_multiple_of(2) {
-            parent_samples.water[first]
-        } else {
-            let second = if row { first + 1 } else { first + edge };
-            parent_samples.water[first]
-                .zip(parent_samples.water[second])
-                .map(|(left, right)| (left + right) * 0.5)
-        }
-    };
-    for offset in 0..=cells {
-        if quadrant_z == 0 {
-            let combined = quadrant_x * cells + offset;
-            samples.ground[offset] = interpolate_ground(0, combined, true);
-            samples.water[offset] = interpolate_water(0, combined, true);
-        } else {
-            let combined = quadrant_x * cells + offset;
-            let child = offset + cells * edge;
-            samples.ground[child] = interpolate_ground(cells, combined, true);
-            samples.water[child] = interpolate_water(cells, combined, true);
-        }
-        if quadrant_x == 0 {
-            let combined = quadrant_z * cells + offset;
-            let child = offset * edge;
-            samples.ground[child] = interpolate_ground(0, combined, false);
-            samples.water[child] = interpolate_water(0, combined, false);
-        } else {
-            let combined = quadrant_z * cells + offset;
-            let child = cells + offset * edge;
-            samples.ground[child] = interpolate_ground(cells, combined, false);
-            samples.water[child] = interpolate_water(cells, combined, false);
-        }
-    }
-    Ok((samples, complete))
 }
 
 fn push_virtual_triangle_i32(
@@ -3670,7 +3666,6 @@ pub struct Renderer {
     virtual_terrain_desired_envelope: Option<PresentationEnvelope>,
     virtual_terrain_pages: BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
     virtual_terrain_retired_published_pages: BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
-    virtual_terrain_heightfield_samples: BTreeMap<TerrainPageKey, CachedVirtualHeightfieldSamples>,
     virtual_terrain_arena: ArenaAllocator,
     virtual_terrain_arena_buffers: Vec<Buffer>,
     canonical_ready_chunks: HashSet<(i32, i32, i32)>,
@@ -4592,7 +4587,6 @@ impl Renderer {
             virtual_terrain_desired_envelope: None,
             virtual_terrain_pages: BTreeMap::new(),
             virtual_terrain_retired_published_pages: BTreeMap::new(),
-            virtual_terrain_heightfield_samples: BTreeMap::new(),
             virtual_terrain_arena,
             virtual_terrain_arena_buffers: Vec::new(),
             canonical_ready_chunks: HashSet::new(),
@@ -5615,7 +5609,6 @@ impl Renderer {
                 Ok(true) => staged.push(page.key),
                 Ok(false) => {}
                 Err(error) => {
-                    self.virtual_terrain_heightfield_samples.remove(&page.key);
                     self.rollback_virtual_terrain_replacement_geometry(&staged);
                     return Err(error);
                 }
@@ -5640,7 +5633,6 @@ impl Renderer {
 
     fn rollback_virtual_terrain_replacement_geometry(&mut self, staged: &[TerrainPageKey]) {
         for key in staged.iter().rev() {
-            self.virtual_terrain_heightfield_samples.remove(key);
             self.virtual_terrain_gpu.remove_page_geometry(*key);
             if let Some(page) = self.virtual_terrain_pages.remove(key) {
                 discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
@@ -5655,44 +5647,18 @@ impl Renderer {
         finer_neighbor_sides: [bool; 4],
         install_page: bool,
     ) -> Result<bool, VirtualTerrainRendererError> {
-        let (base_heightfield, heightfield_ancestors_complete) = if matches!(
-            page.representation,
-            TerrainPageRepresentation::HeightfieldGrid(_)
-        ) {
-            let (samples, complete) = parent_constrained_virtual_heightfield_samples_with_cache(
-                &self.virtual_terrain,
-                &self.virtual_terrain_heightfield_samples,
-                &page,
-            )?;
-            (Some(samples), complete)
-        } else {
-            (None, false)
-        };
-        if page.key.level > 0 && heightfield_ancestors_complete {
-            if let (Some(samples), Some(ancestor_fingerprint)) = (
-                base_heightfield.as_ref(),
-                heightfield_ancestor_fingerprint(&self.virtual_terrain, page.key),
-            ) {
-                self.virtual_terrain_heightfield_samples.insert(
-                    page.key,
-                    CachedVirtualHeightfieldSamples {
-                        revision: page.revision,
-                        content_fingerprint: page.content_fingerprint,
-                        ancestor_fingerprint,
-                        samples: samples.clone(),
-                    },
-                );
+        let base_heightfield = match &page.representation {
+            TerrainPageRepresentation::HeightfieldGrid(grid) => {
+                Some(unconstrained_virtual_heightfield_samples(grid))
             }
-        } else {
-            self.virtual_terrain_heightfield_samples.remove(&page.key);
-        }
+            _ => None,
+        };
         let mut constrained_heightfield = match (&page.representation, base_heightfield) {
-            (TerrainPageRepresentation::HeightfieldGrid(grid), Some(samples))
+            (TerrainPageRepresentation::HeightfieldGrid(_), Some(samples))
                 if page.key.level == 0 =>
             {
                 Some(restore_exact_neighbor_heightfield_boundaries(
                     &page,
-                    grid,
                     &samples,
                     exact_neighbor_sides,
                 ))
@@ -6265,7 +6231,6 @@ impl Renderer {
     }
 
     fn recover_failed_candidate_only_seam_page(&mut self, key: TerrainPageKey) {
-        self.virtual_terrain_heightfield_samples.remove(&key);
         let _ = self.virtual_terrain.remove_page(key);
         self.virtual_terrain_gpu.remove_page_geometry(key);
         if let Some(page) = self.virtual_terrain_pages.remove(&key) {
@@ -6496,7 +6461,6 @@ impl Renderer {
             .map(|cut| cut.selected_pages.iter().copied().collect::<BTreeSet<_>>())
             .unwrap_or_default();
         for key in &removed_pages {
-            self.virtual_terrain_heightfield_samples.remove(key);
             // Remove the candidate-directory handle before the backing allocation can be freed or
             // reused. A published allocation is retained separately until a new bank promotes.
             self.virtual_terrain_gpu.remove_page_geometry(*key);
@@ -6591,18 +6555,6 @@ impl Renderer {
                 ancestor = parent.parent();
             }
         }
-        // Keep constrained ancestor samples for rebuilding conforming child boundaries without
-        // retaining unrelated travel history.
-        let mut sample_keep = BTreeSet::new();
-        for key in keep.iter().copied() {
-            let mut ancestor = key.parent();
-            while let Some(parent) = ancestor {
-                sample_keep.insert(parent);
-                ancestor = parent.parent();
-            }
-        }
-        self.virtual_terrain_heightfield_samples
-            .retain(|key, _| key.level > 0 && sample_keep.contains(key));
         let remove = self
             .virtual_terrain_pages
             .keys()
@@ -12776,6 +12728,118 @@ mod tests {
     }
 
     #[test]
+    fn coarse_heightfield_ground_fan_uses_the_persisted_boundary_midpoint() {
+        let key = TerrainPageKey::surface(2, 0, 0);
+        let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+        let edge = cells + 1;
+        let sample = |height| voxels_world::SurfaceSample {
+            height,
+            material: Material::Grass,
+            water_level: None,
+            region: SurfaceRegion::VerdantForest,
+            moisture: 0.5,
+            temperature: 0.5,
+            ridge: 0.0,
+            route: None,
+        };
+        let mut midpoints = vec![sample(0); voxels_world::TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS];
+        midpoints[2 * cells] = sample(100);
+        let page = voxels_world::build_sampled_heightfield_terrain_page(
+            voxels_world::WorldSourceIdentityHash::from_bytes([42; 32]),
+            key,
+            1,
+            &vec![sample(0); edge * edge],
+            &midpoints,
+            voxels_world::TerrainErrorBounds::EXACT,
+        )
+        .unwrap();
+        let TerrainPageRepresentation::HeightfieldGrid(grid) = &page.representation else {
+            panic!("sampled surface must remain a heightfield");
+        };
+        let mut heightfield = unconstrained_virtual_heightfield_samples(grid);
+        heightfield.finer_neighbor_sides[2] = true;
+
+        let vertices = virtual_triangle_gpu_vertices(&page, Some(&heightfield)).unwrap();
+        let minimum_x = page.bounds.min.x as f32;
+        let minimum_z = page.bounds.min.z as f32;
+        let midpoint_x = minimum_x + grid.sample_stride_voxels as f32 * 0.5;
+        let end_x = minimum_x + grid.sample_stride_voxels as f32;
+        let has_boundary_edge = |left: [f32; 3], right: [f32; 3]| {
+            vertices.chunks_exact(3).any(|triangle| {
+                triangle.iter().any(|vertex| vertex.position == left)
+                    && triangle.iter().any(|vertex| vertex.position == right)
+            })
+        };
+        assert!(has_boundary_edge(
+            [minimum_x, 1.0, minimum_z],
+            [midpoint_x, 101.0, minimum_z],
+        ));
+        assert!(has_boundary_edge(
+            [midpoint_x, 101.0, minimum_z],
+            [end_x, 1.0, minimum_z],
+        ));
+    }
+
+    #[test]
+    fn level_one_water_fan_uses_the_persisted_boundary_midpoint() {
+        let key = TerrainPageKey::surface(1, 0, 0);
+        let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+        let edge = cells + 1;
+        let sample = |water_level| voxels_world::SurfaceSample {
+            height: 0,
+            material: Material::Grass,
+            water_level: Some(water_level),
+            region: SurfaceRegion::VerdantForest,
+            moisture: 0.5,
+            temperature: 0.5,
+            ridge: 0.0,
+            route: None,
+        };
+        let mut midpoints = vec![sample(10); voxels_world::TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS];
+        midpoints[2 * cells] = sample(100);
+        let page = voxels_world::build_sampled_heightfield_terrain_page(
+            voxels_world::WorldSourceIdentityHash::from_bytes([43; 32]),
+            key,
+            1,
+            &vec![sample(10); edge * edge],
+            &midpoints,
+            voxels_world::TerrainErrorBounds::EXACT,
+        )
+        .unwrap();
+        let TerrainPageRepresentation::HeightfieldGrid(grid) = &page.representation else {
+            panic!("sampled surface must remain a heightfield");
+        };
+        let mut heightfield = unconstrained_virtual_heightfield_samples(grid);
+        heightfield.finer_neighbor_sides[2] = true;
+        let mut vertices = Vec::new();
+        push_virtual_heightfield_water(&mut vertices, &page, grid, &heightfield, Material::Water)
+            .unwrap();
+
+        let minimum_x = page.bounds.min.x as f32;
+        let minimum_z = page.bounds.min.z as f32;
+        let midpoint_x = minimum_x + 1.0;
+        let end_x = minimum_x + 2.0;
+        let has_boundary_edge = |left: [f32; 3], right: [f32; 3]| {
+            vertices.chunks_exact(3).any(|triangle| {
+                triangle.iter().any(|vertex| vertex.position == left)
+                    && triangle.iter().any(|vertex| vertex.position == right)
+            })
+        };
+        assert!(has_boundary_edge(
+            [minimum_x, 11.0, minimum_z],
+            [midpoint_x, 101.0, minimum_z],
+        ));
+        assert!(has_boundary_edge(
+            [midpoint_x, 101.0, minimum_z],
+            [end_x, 11.0, minimum_z],
+        ));
+        assert!(!has_boundary_edge(
+            [minimum_x, 11.0, minimum_z],
+            [end_x, 11.0, minimum_z],
+        ));
+    }
+
+    #[test]
     fn level_one_boundary_cell_exposes_ten_centimetre_shared_vertices() {
         let key = TerrainPageKey::surface(1, 1, -1);
         let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
@@ -12827,6 +12891,7 @@ mod tests {
                 ],
             ],
             [true, false, false, false],
+            [Some(5.0), None, None, None],
             true,
             Material::Grass,
             key,
@@ -12869,6 +12934,7 @@ mod tests {
                 [0.0, 0.0, 2.0],
             ],
             [false, false, true, false],
+            [None, None, Some(7.0), None],
             true,
             Material::Grass,
             key,
@@ -12890,7 +12956,7 @@ mod tests {
                         .any(|vertex| vertex[0] == right_x && vertex[1] == height)
             })
         };
-        assert!(has_boundary_edge(2.0, 1.0, 2.0));
+        assert!(has_boundary_edge(2.0, 1.0, 7.0));
         assert!(has_boundary_edge(1.0, 0.0, 0.0));
         assert!(
             !has_boundary_edge(2.0, 1.0, 4.0),
@@ -12899,28 +12965,30 @@ mod tests {
     }
 
     #[test]
-    fn child_heightfield_outer_vertices_use_the_recursive_parent_edge_equation() {
+    fn child_heightfield_preserves_a_validated_parent_boundary_witness() {
         let source = voxels_world::WorldSourceIdentityHash::from_bytes([31; 32]);
-        let parent_key = TerrainPageKey::surface(1, 0, 0);
-        let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
-        let parent_samples = (0..edge * edge)
-            .map(|index| voxels_world::SurfaceSample {
-                height: if index % edge == 0 { 0 } else { 1 },
-                material: Material::Grass,
-                water_level: None,
-                region: SurfaceRegion::VerdantForest,
-                moisture: 0.5,
-                temperature: 0.5,
-                ridge: 0.0,
-                route: None,
-            })
-            .collect::<Vec<_>>();
+        let parent_key = TerrainPageKey::surface(2, 0, 0);
+        let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+        let edge = cells + 1;
+        let sample = |height| voxels_world::SurfaceSample {
+            height,
+            material: Material::Grass,
+            water_level: None,
+            region: SurfaceRegion::VerdantForest,
+            moisture: 0.5,
+            temperature: 0.5,
+            ridge: 0.0,
+            route: None,
+        };
+        let mut parent_midpoints =
+            vec![sample(0); voxels_world::TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS];
+        parent_midpoints[2 * cells] = sample(100);
         let parent = voxels_world::build_sampled_heightfield_terrain_page(
             source,
             parent_key,
             1,
-            &parent_samples,
-            &test_heightfield_boundary_midpoints(parent_key, parent_samples[0]),
+            &vec![sample(0); edge * edge],
+            &parent_midpoints,
             voxels_world::TerrainErrorBounds::EXACT,
         )
         .unwrap();
@@ -12928,30 +12996,24 @@ mod tests {
             .refinement_children()
             .unwrap()
             .into_iter()
-            .map(|key| {
+            .enumerate()
+            .map(|(index, key)| {
+                let mut samples = vec![sample(0); edge * edge];
+                if index == 0 {
+                    samples[1] = sample(100);
+                }
                 voxels_world::build_sampled_heightfield_terrain_page(
                     source,
                     key,
                     1,
-                    &vec![
-                        voxels_world::SurfaceSample {
-                            height: 9,
-                            material: Material::Grass,
-                            water_level: None,
-                            region: SurfaceRegion::VerdantForest,
-                            moisture: 0.5,
-                            temperature: 0.5,
-                            ridge: 0.0,
-                            route: None,
-                        };
-                        edge * edge
-                    ],
-                    &[],
+                    &samples,
+                    &test_heightfield_boundary_midpoints(key, sample(0)),
                     voxels_world::TerrainErrorBounds::EXACT,
                 )
                 .unwrap()
             })
             .collect::<Vec<_>>();
+        voxels_world::validate_terrain_replacement(&parent, &children).unwrap();
         let pages = children
             .iter()
             .cloned()
@@ -12968,12 +13030,12 @@ mod tests {
 
         let constrained =
             constrained_virtual_heightfield_samples(&hierarchy, &children[0]).unwrap();
-        assert_eq!(constrained.ground[1], 1.5);
-        assert_eq!(constrained.ground[1 + edge], 10.0);
+        assert_eq!(constrained.ground[1], 101.0);
+        assert_eq!(constrained.ground[1 + edge], 1.0);
     }
 
     #[test]
-    fn level_zero_heightfield_restores_only_the_boundary_owned_with_an_exact_neighbor() {
+    fn level_zero_heightfield_keeps_raw_boundaries_for_coarse_and_exact_neighbors() {
         let source = voxels_world::WorldSourceIdentityHash::from_bytes([32; 32]);
         let parent_key = TerrainPageKey::surface(1, 0, 0);
         let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
@@ -12991,7 +13053,7 @@ mod tests {
             source,
             parent_key,
             1,
-            &vec![sample(2); edge * edge],
+            &vec![sample(9); edge * edge],
             &test_heightfield_boundary_midpoints(parent_key, sample(9)),
             voxels_world::TerrainErrorBounds::EXACT,
         )
@@ -13050,38 +13112,17 @@ mod tests {
         let constrained =
             constrained_virtual_heightfield_samples(&hierarchy, &heightfield).unwrap();
         assert_eq!(constrained.exact_neighbor_sides, [false, true, false, true]);
-        assert_eq!(constrained.ground[edge - 1], 3.0);
-        for z in 1..edge {
-            assert_eq!(constrained.ground[(edge - 1) + z * edge], 10.0);
-        }
-        assert_eq!(constrained.ground[(edge - 1) * edge], 3.0);
-        for x in 1..edge {
-            assert_eq!(constrained.ground[x + (edge - 1) * edge], 10.0);
-        }
-        assert_eq!(constrained.ground[0], 3.0);
-
-        let TerrainPageRepresentation::HeightfieldGrid(grid) = &heightfield.representation else {
-            panic!("sampled child must be a heightfield");
-        };
-        let parent_edge = VirtualHeightfieldSamples {
-            ground: vec![3.0; edge * edge],
-            water: vec![None; edge * edge],
-            exact_neighbor_sides: [false; 4],
-            finer_neighbor_sides: [false; 4],
-        };
+        assert!(constrained.ground.iter().all(|height| *height == 10.0));
         let mixed_corner = restore_exact_neighbor_heightfield_boundaries(
             &heightfield,
-            grid,
-            &parent_edge,
+            &constrained,
             [false, true, false, false],
         );
-        assert_eq!(mixed_corner.ground[(edge - 1) + edge], 10.0);
         assert_eq!(
-            mixed_corner.ground[edge - 1],
-            3.0,
-            "an exact X side must not overwrite the corner owned by a coarse Z transition"
+            mixed_corner.exact_neighbor_sides,
+            [false, true, false, false]
         );
-        assert_eq!(mixed_corner.ground[(edge - 1) + (edge - 1) * edge], 3.0);
+        assert!(mixed_corner.ground.iter().all(|height| *height == 10.0));
     }
 
     #[test]
