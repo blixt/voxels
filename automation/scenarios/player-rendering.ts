@@ -433,21 +433,29 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
       },
     );
   } catch (error) {
-    const screenshot = await page.screenshot({ type: "png" });
-    await context.artifacts.write(
-      "cold-start failure player view",
-      "cold-start-failure.png",
-      screenshot,
-      "image/png",
-    );
-    await context.artifacts.writeJson(
-      "cold-start failure engine snapshot",
-      "cold-start-failure-snapshot.json",
-      {
-        error: error instanceof Error ? error.message : String(error),
-        snapshot: latestStartupSnapshot,
-      },
-    );
+    try {
+      await context.artifacts.writeJson(
+        "cold-start failure engine snapshot",
+        "cold-start-failure-snapshot.json",
+        {
+          error: error instanceof Error ? error.message : String(error),
+          snapshot: latestStartupSnapshot,
+        },
+      );
+    } catch (artifactError) {
+      context.log(`could not preserve cold-start snapshot evidence: ${String(artifactError)}`);
+    }
+    try {
+      const screenshot = await page.screenshot({ type: "png" });
+      await context.artifacts.write(
+        "cold-start failure player view",
+        "cold-start-failure.png",
+        screenshot,
+        "image/png",
+      );
+    } catch (artifactError) {
+      context.log(`could not preserve cold-start screenshot evidence: ${String(artifactError)}`);
+    }
     throw error;
   }
   const coldStartMs = performance.now() - coldStartStarted;
