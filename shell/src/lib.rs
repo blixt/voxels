@@ -4955,21 +4955,21 @@ mod web {
             if invalid_roots.is_empty() {
                 return;
             }
-            let revision_floors = {
-                let revisions = self.edit_revisions.borrow();
-                change
-                    .terrain_directory_keys()
-                    .map(|key| (key, revisions.terrain_page_floor(key)))
-                    .collect::<Vec<_>>()
-            };
-            let change_revision = revision_floors
-                .first()
-                .map(|(_, revision)| *revision)
-                .unwrap_or(1);
+            let revision_floors = change
+                .terrain_directory_revisions()
+                .map(|dependency| (dependency.key, dependency.revision))
+                .collect::<Vec<_>>();
             let invalid_columns = invalid_roots
                 .iter()
-                .map(|root| [root.coord[0], root.coord[2]])
-                .collect::<BTreeSet<_>>();
+                .map(|root| {
+                    (
+                        [root.coord[0], root.coord[2]],
+                        change
+                            .terrain_revalidation_revision(*root)
+                            .expect("invalidated root must carry its durable revision floor"),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
             let keep = {
                 let state = self.virtual_terrain.borrow();
                 state
@@ -4992,7 +4992,7 @@ mod web {
                     .map(|(_, request_id)| *request_id)
                     .chain(
                         invalid_columns
-                            .iter()
+                            .keys()
                             .filter_map(|column| state.column_in_flight.get(column).copied()),
                     )
                     .collect::<BTreeSet<_>>();
@@ -5034,13 +5034,13 @@ mod web {
                 return;
             }
             let mut state = self.virtual_terrain.borrow_mut();
-            for column in invalid_columns {
+            for (column, revision) in invalid_columns {
                 state.columns.remove(&column);
                 state.column_retry_after_ms.remove(&column);
                 crate::advance_transient_revision_floor(
                     &mut state.minimum_column_revisions,
                     column,
-                    change_revision,
+                    revision,
                 );
             }
             state
@@ -5755,6 +5755,13 @@ mod web {
             for event in self.remote.drain_edit_events() {
                 match event {
                     RemoteEditEvent::Commit(commit) => {
+                        if !self
+                            .edit_revisions
+                            .borrow()
+                            .commit_is_after_resync(commit.revision)
+                        {
+                            continue;
+                        }
                         if let Some(inventory) = commit.editor_inventory {
                             self.inventory.set(inventory);
                             self.renderer
@@ -5809,11 +5816,14 @@ mod web {
                 .iter()
                 .map(|mutation| mutation.coord)
                 .collect::<Vec<_>>();
-            let observed_change = self.edit_revisions.borrow_mut().observe_world_change_batch(
+            let Ok(observed_change) = self.edit_revisions.borrow_mut().observe_world_change_batch(
                 &coords,
                 server_revision,
                 affected_chunks,
-            );
+            ) else {
+                log_gpu_error("authoritative edit named an unrepresentable terrain dependency");
+                return EditRequirements::default();
+            };
             let (apply_values, world_change) = observed_change.into_parts();
             let accepted_mutations = mutations
                 .iter()
@@ -5900,11 +5910,13 @@ mod web {
         }
 
         fn resynchronize_world_products(&self, revision: u64) {
+            if !self.edit_revisions.borrow_mut().reset_to_revision(revision) {
+                return;
+            }
             log_gpu_error(&format!(
                 "edit stream overflowed at revision {revision}; reconciling retained world products"
             ));
             *self.edits.borrow_mut() = EditMap::default();
-            self.edit_revisions.borrow_mut().clear();
             self.pending_meshes.borrow_mut().clear();
             self.pending_uploads.borrow_mut().clear();
             self.canonical_publications.borrow_mut().clear();

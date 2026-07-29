@@ -53,6 +53,11 @@ pub enum RevisionFenceError {
     ConflictingTerrainPageRevision(TerrainPageKey),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorldChangeError {
+    UnrepresentableTerrainDependency(ChunkCoord),
+}
+
 /// Canonical, immutable dependencies of one accepted world presentation.
 ///
 /// The digest is a deterministic lookup identity, not a correctness proof. Equality still compares
@@ -197,6 +202,7 @@ fn digest_bytes(digest: &mut u64, bytes: &[u8]) {
 pub struct WorldChange {
     chunks: Vec<ChunkRevision>,
     terrain_pages: Vec<TerrainPageRevision>,
+    terrain_revalidation_pages: Vec<TerrainPageRevision>,
     invalidated_terrain_roots: Vec<TerrainPageKey>,
 }
 
@@ -209,20 +215,29 @@ impl WorldChange {
         &self.terrain_pages
     }
 
+    /// Current durable floors for the complete surface dependency chains that must be reacquired.
+    pub fn terrain_revalidation_pages(&self) -> &[TerrainPageRevision] {
+        &self.terrain_revalidation_pages
+    }
+
+    pub fn terrain_revalidation_revision(&self, key: TerrainPageKey) -> Option<u64> {
+        self.terrain_revalidation_pages
+            .binary_search_by_key(&key, |dependency| dependency.key)
+            .ok()
+            .map(|index| self.terrain_revalidation_pages[index].revision)
+    }
+
     /// Coverage roots whose directories contain a changed surface dependency.
     pub fn invalidated_terrain_roots(&self) -> &[TerrainPageKey] {
         &self.invalidated_terrain_roots
     }
 
-    /// Surface directory keys that must be reacquired after this change.
-    ///
-    /// Level-zero leaves are included in `terrain_pages` for exact fence invalidation but omitted
-    /// here because directory requests start at their first ancestor.
-    pub fn terrain_directory_keys(&self) -> impl Iterator<Item = TerrainPageKey> + '_ {
-        self.terrain_pages
+    /// Current floors for surface directories that must be reacquired after this change.
+    pub fn terrain_directory_revisions(&self) -> impl Iterator<Item = TerrainPageRevision> + '_ {
+        self.terrain_revalidation_pages
             .iter()
-            .map(|dependency| dependency.key)
-            .filter(|key| key.level > 0)
+            .copied()
+            .filter(|dependency| dependency.key.level > 0)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -317,6 +332,7 @@ impl ObservedWorldChange {
 /// independently and never regress when an older commit arrives later.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AuthoritativeEditRevisions {
+    resync_watermark: Option<u64>,
     voxels: BTreeMap<VoxelCoord, u64>,
     chunks: BTreeMap<ChunkCoord, u64>,
     terrain_pages: BTreeMap<TerrainPageKey, u64>,
@@ -344,8 +360,10 @@ impl AuthoritativeEditRevisions {
         revision: u64,
         affected_chunks: &[ChunkCoord],
     ) -> Vec<bool> {
-        self.observe_world_change_batch(coords, revision, affected_chunks)
-            .applied_values
+        match self.observe_world_change_batch(coords, revision, affected_chunks) {
+            Ok(observed) => observed.applied_values,
+            Err(_) => vec![false; coords.len()],
+        }
     }
 
     /// Records an atomic edit and returns the exact product floors that advanced.
@@ -354,12 +372,19 @@ impl AuthoritativeEditRevisions {
         coords: &[VoxelCoord],
         revision: u64,
         affected_chunks: &[ChunkCoord],
-    ) -> ObservedWorldChange {
+    ) -> Result<ObservedWorldChange, WorldChangeError> {
+        if !self.commit_is_after_resync(revision) {
+            return Ok(ObservedWorldChange {
+                applied_values: vec![false; coords.len()],
+                change: WorldChange::default(),
+            });
+        }
+        let affected_chunks = affected_chunks.iter().copied().collect::<BTreeSet<_>>();
+        let terrain_page_keys = surface_edit_dependencies(&affected_chunks)?;
         let apply_values = coords
             .iter()
             .map(|&coord| advance_revision(&mut self.voxels, coord, revision))
             .collect();
-        let affected_chunks = affected_chunks.iter().copied().collect::<BTreeSet<_>>();
         let chunks = affected_chunks
             .iter()
             .copied()
@@ -368,26 +393,39 @@ impl AuthoritativeEditRevisions {
                     .then_some(ChunkRevision { coord, revision })
             })
             .collect();
-        let (terrain_page_keys, mut invalidated_terrain_roots) =
-            surface_edit_dependencies(&affected_chunks);
         let terrain_pages = terrain_page_keys
-            .into_iter()
+            .iter()
+            .copied()
             .filter_map(|key| {
                 advance_revision(&mut self.terrain_pages, key, revision)
                     .then_some(TerrainPageRevision { key, revision })
             })
             .collect::<Vec<_>>();
-        if terrain_pages.is_empty() {
-            invalidated_terrain_roots.clear();
-        }
-        ObservedWorldChange {
+        let invalidated_terrain_roots = terrain_pages
+            .iter()
+            .filter(|dependency| dependency.key.level == TERRAIN_COVERAGE_ROOT_LEVEL)
+            .map(|dependency| dependency.key)
+            .collect::<Vec<_>>();
+        let terrain_revalidation_pages = terrain_page_keys
+            .into_iter()
+            .filter(|key| {
+                key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                    .is_some_and(|root| invalidated_terrain_roots.binary_search(&root).is_ok())
+            })
+            .map(|key| TerrainPageRevision {
+                key,
+                revision: self.terrain_page_floor(key),
+            })
+            .collect();
+        Ok(ObservedWorldChange {
             applied_values: apply_values,
             change: WorldChange {
                 chunks,
                 terrain_pages,
+                terrain_revalidation_pages,
                 invalidated_terrain_roots,
             },
-        }
+        })
     }
 
     pub fn chunk_floor(&self, coord: ChunkCoord) -> u64 {
@@ -407,43 +445,66 @@ impl AuthoritativeEditRevisions {
     }
 
     pub fn clear(&mut self) {
+        self.resync_watermark = None;
         self.voxels.clear();
         self.chunks.clear();
         self.terrain_pages.clear();
+    }
+
+    /// Clears per-product history after a full authoritative resync while retaining a separate
+    /// global commit watermark. Product revisions remain spatial and default independently to one;
+    /// the watermark only prevents transport reordering from replaying commits already represented
+    /// by the regenerated world state.
+    pub fn reset_to_revision(&mut self, revision: u64) -> bool {
+        assert_ne!(revision, 0, "authoritative revisions skip zero");
+        if self.resync_watermark.is_some_and(|watermark| {
+            revision == watermark || !revision_satisfies(revision, watermark)
+        }) {
+            return false;
+        }
+        self.resync_watermark = Some(revision);
+        self.voxels.clear();
+        self.chunks.clear();
+        self.terrain_pages.clear();
+        true
+    }
+
+    /// Whether a possibly reordered commit is newer than the last full resync it could follow.
+    pub fn commit_is_after_resync(&self, revision: u64) -> bool {
+        self.resync_watermark.is_none_or(|watermark| {
+            revision != watermark && revision_satisfies(revision, watermark)
+        })
     }
 }
 
 fn surface_edit_dependencies(
     affected_chunks: &BTreeSet<ChunkCoord>,
-) -> (BTreeSet<TerrainPageKey>, Vec<TerrainPageKey>) {
-    let leaves = affected_chunks
-        .iter()
-        .flat_map(|coord| {
-            // Surface pages own a positive boundary lattice sample. An edit in chunk (x, z)
-            // therefore changes that page and the positive edge/corner of the three pages
-            // immediately negative of it.
-            [(0, 0), (-1, 0), (0, -1), (-1, -1)].map(|(offset_x, offset_z)| {
-                TerrainPageKey::surface(
-                    0,
-                    coord.x.saturating_add(offset_x),
-                    coord.z.saturating_add(offset_z),
-                )
-            })
-        })
-        .collect::<BTreeSet<_>>();
-    let invalidated_terrain_roots = leaves
-        .iter()
-        .filter_map(|leaf| leaf.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let terrain_pages = leaves
+) -> Result<BTreeSet<TerrainPageKey>, WorldChangeError> {
+    let mut leaves = BTreeSet::new();
+    for coord in affected_chunks {
+        if !coord.is_world_representable() {
+            return Err(WorldChangeError::UnrepresentableTerrainDependency(*coord));
+        }
+        for (offset_x, offset_z) in [(0, 0), (-1, 0), (0, -1), (-1, -1)] {
+            let Some(x) = coord.x.checked_add(offset_x) else {
+                return Err(WorldChangeError::UnrepresentableTerrainDependency(*coord));
+            };
+            let Some(z) = coord.z.checked_add(offset_z) else {
+                return Err(WorldChangeError::UnrepresentableTerrainDependency(*coord));
+            };
+            let leaf = TerrainPageKey::surface(0, x, z);
+            if leaf.horizontal_bounds().is_none() {
+                return Err(WorldChangeError::UnrepresentableTerrainDependency(*coord));
+            }
+            leaves.insert(leaf);
+        }
+    }
+    Ok(leaves
         .into_iter()
         .flat_map(|leaf| {
             (0..=TERRAIN_COVERAGE_ROOT_LEVEL).filter_map(move |level| leaf.ancestor_at(level))
         })
-        .collect();
-    (terrain_pages, invalidated_terrain_roots)
+        .collect())
 }
 
 fn advance_revision<K: Ord>(revisions: &mut BTreeMap<K, u64>, key: K, candidate: u64) -> bool {
@@ -2399,12 +2460,66 @@ mod tests {
     }
 
     #[test]
+    fn resync_watermark_rejects_reordered_stale_commits_for_unknown_products() {
+        let stale_voxel = VoxelCoord::new(320, 8, -64);
+        let stale_chunk = stale_voxel.chunk();
+        let stale_page = TerrainPageKey::surface(0, stale_chunk.x, stale_chunk.z);
+        let mut revisions = AuthoritativeEditRevisions::default();
+        assert!(revisions.reset_to_revision(10));
+        assert!(!revisions.reset_to_revision(10));
+        assert!(!revisions.reset_to_revision(8));
+        assert!(!revisions.commit_is_after_resync(9));
+
+        let stale = revisions
+            .observe_world_change_batch(&[stale_voxel], 8, &[stale_chunk])
+            .unwrap();
+        assert_eq!(stale.applied_values(), &[false]);
+        assert!(stale.change().is_empty());
+        assert_eq!(revisions.chunk_floor(stale_chunk), 1);
+        assert_eq!(revisions.terrain_page_floor(stale_page), 1);
+
+        let duplicate = revisions
+            .observe_world_change_batch(&[stale_voxel], 10, &[stale_chunk])
+            .unwrap();
+        assert_eq!(duplicate.applied_values(), &[false]);
+        assert!(duplicate.change().is_empty());
+
+        let current = revisions
+            .observe_world_change_batch(&[stale_voxel], 11, &[stale_chunk])
+            .unwrap();
+        assert_eq!(current.applied_values(), &[true]);
+        assert_eq!(revisions.chunk_floor(stale_chunk), 11);
+        assert_eq!(revisions.terrain_page_floor(stale_page), 11);
+    }
+
+    #[test]
+    fn resync_watermark_obeys_nonzero_revision_wrap() {
+        let chunk = ChunkCoord::new(4, 0, 5);
+        let mut revisions = AuthoritativeEditRevisions::default();
+        revisions.reset_to_revision(u64::MAX);
+
+        let after_wrap = revisions
+            .observe_world_change_batch(&[], 1, &[chunk])
+            .unwrap();
+        assert!(!after_wrap.change().is_empty());
+        assert_eq!(revisions.chunk_floor(chunk), 1);
+
+        let reordered = revisions
+            .observe_world_change_batch(&[], u64::MAX, &[ChunkCoord::new(8, 0, 9)])
+            .unwrap();
+        assert!(reordered.change().is_empty());
+        assert_eq!(revisions.chunk_floor(ChunkCoord::new(8, 0, 9)), 1);
+    }
+
+    #[test]
     fn world_change_contains_the_exact_positive_surface_boundary_closure() {
         let voxel = VoxelCoord::new(13 * CHUNK_EDGE as i32, 4, -7 * CHUNK_EDGE as i32);
         let affected = ChunkCoord::new(13, 4, -7);
         let mut revisions = AuthoritativeEditRevisions::default();
 
-        let observed = revisions.observe_world_change_batch(&[voxel], 9, &[affected, affected]);
+        let observed = revisions
+            .observe_world_change_batch(&[voxel], 9, &[affected, affected])
+            .unwrap();
         let change = observed.change();
         assert_eq!(
             change.chunks(),
@@ -2442,7 +2557,11 @@ mod tests {
                 .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
                 .unwrap()]
         );
-        assert!(change.terrain_directory_keys().all(|key| key.level > 0));
+        assert!(
+            change
+                .terrain_directory_revisions()
+                .all(|dependency| dependency.key.level > 0)
+        );
     }
 
     #[test]
@@ -2461,15 +2580,17 @@ mod tests {
         )
         .unwrap();
         let mut revisions = AuthoritativeEditRevisions::default();
-        let unrelated = revisions.observe_world_change_batch(
-            &[VoxelCoord::new(
-                40 * CHUNK_EDGE as i32,
-                0,
-                40 * CHUNK_EDGE as i32,
-            )],
-            8,
-            &[ChunkCoord::new(40, 0, 40)],
-        );
+        let unrelated = revisions
+            .observe_world_change_batch(
+                &[VoxelCoord::new(
+                    40 * CHUNK_EDGE as i32,
+                    0,
+                    40 * CHUNK_EDGE as i32,
+                )],
+                8,
+                &[ChunkCoord::new(40, 0, 40)],
+            )
+            .unwrap();
 
         assert!(!unrelated.change().intersects(&fence));
         assert!(!unrelated.change().invalidates(&fence));
@@ -2491,15 +2612,21 @@ mod tests {
         )
         .unwrap();
         let mut revisions = AuthoritativeEditRevisions::default();
-        revisions.observe_world_change_batch(&[], 9, &[chunk]);
+        revisions
+            .observe_world_change_batch(&[], 9, &[chunk])
+            .unwrap();
         assert!(fence.is_current(&revisions));
 
-        let newer = revisions.observe_world_change_batch(&[], 10, &[chunk]);
+        let newer = revisions
+            .observe_world_change_batch(&[], 10, &[chunk])
+            .unwrap();
         assert!(newer.change().intersects(&fence));
         assert!(newer.change().invalidates(&fence));
         assert!(!fence.is_current(&revisions));
 
-        let older = revisions.observe_world_change_batch(&[], 8, &[chunk]);
+        let older = revisions
+            .observe_world_change_batch(&[], 8, &[chunk])
+            .unwrap();
         assert!(older.change().is_empty());
         assert!(older.change().invalidated_terrain_roots().is_empty());
         assert_eq!(revisions.chunk_floor(chunk), 10);
@@ -2508,15 +2635,116 @@ mod tests {
     }
 
     #[test]
+    fn partially_stale_batch_invalidates_only_the_coverage_root_that_advanced() {
+        let established = ChunkCoord::new(0, 0, 0);
+        let unseen = ChunkCoord::new(2_048, 0, 0);
+        let established_root = TerrainPageKey::surface(0, established.x, established.z)
+            .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+            .unwrap();
+        let unseen_roots = [(0, 0), (-1, 0), (0, -1), (-1, -1)]
+            .into_iter()
+            .map(|(offset_x, offset_z)| {
+                TerrainPageKey::surface(0, unseen.x + offset_x, unseen.z + offset_z)
+                    .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+                    .unwrap()
+            })
+            .collect::<BTreeSet<_>>();
+        let mut revisions = AuthoritativeEditRevisions::default();
+        revisions
+            .observe_world_change_batch(&[], 10, &[established])
+            .unwrap();
+
+        let partial = revisions
+            .observe_world_change_batch(&[], 8, &[established, unseen])
+            .unwrap();
+
+        assert_eq!(
+            partial
+                .change()
+                .invalidated_terrain_roots()
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            unseen_roots
+        );
+        assert!(
+            !partial
+                .change()
+                .terrain_revalidation_pages()
+                .iter()
+                .any(|dependency| dependency.key == established_root)
+        );
+        assert!(
+            unseen_roots
+                .into_iter()
+                .all(|root| { partial.change().terrain_revalidation_revision(root) == Some(8) })
+        );
+    }
+
+    #[test]
+    fn older_leaf_only_change_keeps_the_newer_coverage_root_registered() {
+        let established = ChunkCoord::new(0, 0, 0);
+        let unseen_leaf = ChunkCoord::new(512, 0, 0);
+        let root = TerrainPageKey::surface(0, established.x, established.z)
+            .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
+            .unwrap();
+        let unseen_key = TerrainPageKey::surface(0, unseen_leaf.x, unseen_leaf.z);
+        let mut revisions = AuthoritativeEditRevisions::default();
+        revisions
+            .observe_world_change_batch(&[], 10, &[established])
+            .unwrap();
+
+        let leaf_only = revisions
+            .observe_world_change_batch(&[], 8, &[unseen_leaf])
+            .unwrap();
+
+        assert!(leaf_only.change().invalidated_terrain_roots().is_empty());
+        assert!(leaf_only.change().terrain_revalidation_pages().is_empty());
+        assert!(
+            leaf_only
+                .change()
+                .terrain_pages()
+                .contains(&TerrainPageRevision {
+                    key: unseen_key,
+                    revision: 8,
+                })
+        );
+        assert_eq!(revisions.terrain_page_floor(root), 10);
+    }
+
+    #[test]
+    fn unrepresentable_surface_boundary_fails_before_advancing_any_floor() {
+        let minimum_axis = i32::MIN.div_euclid(CHUNK_EDGE as i32);
+        let maximum_axis = i32::MAX.div_euclid(CHUNK_EDGE as i32);
+        let voxel = VoxelCoord::new(0, 0, 0);
+        let mut revisions = AuthoritativeEditRevisions::default();
+
+        for boundary in [
+            ChunkCoord::new(minimum_axis, 0, 0),
+            ChunkCoord::new(maximum_axis, 0, 0),
+        ] {
+            assert_eq!(
+                revisions.observe_world_change_batch(&[voxel], 12, &[boundary]),
+                Err(WorldChangeError::UnrepresentableTerrainDependency(boundary))
+            );
+        }
+        assert_eq!(revisions, AuthoritativeEditRevisions::default());
+    }
+
+    #[test]
     fn revision_fences_accept_exact_or_newer_products_and_reject_lower_products() {
         let chunk = ChunkCoord::new(-1, 2, 3);
         let page = TerrainPageKey::surface(2, -4, 5);
         let mut revisions = AuthoritativeEditRevisions::default();
-        revisions.observe_world_change_batch(&[], 12, &[chunk]);
+        revisions
+            .observe_world_change_batch(&[], 12, &[chunk])
+            .unwrap();
         // This page is unrelated to the chunk closure, so establish its floor with its own leaf.
         let page_chunk =
             ChunkCoord::new(page.coord[0] << page.level, 0, page.coord[2] << page.level);
-        revisions.observe_world_change_batch(&[], 12, &[page_chunk]);
+        revisions
+            .observe_world_change_batch(&[], 12, &[page_chunk])
+            .unwrap();
 
         let fence = |revision| {
             WorldRevisionFence::new(
@@ -2552,15 +2780,21 @@ mod tests {
         )
         .unwrap();
         let mut revisions = AuthoritativeEditRevisions::default();
-        revisions.observe_world_change_batch(&[], u64::MAX, &[chunk]);
+        revisions
+            .observe_world_change_batch(&[], u64::MAX, &[chunk])
+            .unwrap();
         assert!(before_wrap.is_current(&revisions));
 
-        let after_wrap = revisions.observe_world_change_batch(&[], 1, &[chunk]);
+        let after_wrap = revisions
+            .observe_world_change_batch(&[], 1, &[chunk])
+            .unwrap();
         assert!(after_wrap.change().invalidates(&before_wrap));
         assert_eq!(revisions.chunk_floor(chunk), 1);
         assert_eq!(revisions.terrain_page_floor(page), 1);
 
-        let stale = revisions.observe_world_change_batch(&[], u64::MAX, &[chunk]);
+        let stale = revisions
+            .observe_world_change_batch(&[], u64::MAX, &[chunk])
+            .unwrap();
         assert!(stale.change().is_empty());
         assert_eq!(revisions.chunk_floor(chunk), 1);
     }

@@ -705,6 +705,9 @@ impl BotRuntime {
             }
         } else if kind == edit_commit_kind() {
             let commit = decode_edit_commit(bytes)?;
+            if !self.edit_revisions.commit_is_after_resync(commit.revision) {
+                return Ok(());
+            }
             apply_authoritative_mutations(
                 &mut self.cache,
                 &mut self.edit_revisions,
@@ -770,9 +773,12 @@ impl BotRuntime {
                 self.record_error(format!("request {request_id}: {message}"));
             }
         } else if kind == resync_required_kind() {
-            let _ = decode_resync_required(bytes)?;
+            let resync = decode_resync_required(bytes)?;
+            if !self.edit_revisions.reset_to_revision(resync.revision) {
+                return Ok(());
+            }
             self.cache.clear();
-            self.edit_revisions.clear();
+            self.pending_edits.clear();
             self.chunk_requests.reset_after_resync();
             self.report.resyncs = self.report.resyncs.saturating_add(1);
         } else {
@@ -1480,6 +1486,40 @@ mod tests {
             12,
             &revisions
         ));
+    }
+
+    #[test]
+    fn resync_watermark_blocks_reordered_stale_bot_mutations() {
+        let coord = VoxelCoord::new(4, 5, 6);
+        let chunk = coord.chunk();
+        let mut cache = ChunkCache::new(1);
+        cache.insert(Chunk::filled(chunk, Material::Dirt));
+        let mut revisions = AuthoritativeEditRevisions::default();
+        assert!(revisions.reset_to_revision(10));
+
+        apply_authoritative_mutations(
+            &mut cache,
+            &mut revisions,
+            8,
+            &[VoxelMutation {
+                coord,
+                material: Material::Stone,
+            }],
+            &[chunk],
+        );
+        assert_eq!(cache.material(coord), Some(Material::Dirt));
+
+        apply_authoritative_mutations(
+            &mut cache,
+            &mut revisions,
+            11,
+            &[VoxelMutation {
+                coord,
+                material: Material::Wood,
+            }],
+            &[chunk],
+        );
+        assert_eq!(cache.material(coord), Some(Material::Wood));
     }
 
     #[test]
