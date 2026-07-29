@@ -62,7 +62,10 @@ export class EngineClient {
     return assertSnapshotSchema(await this.#page.evaluate(() => globalThis.__VOXELS__!.snapshot()));
   }
 
-  async applyReproduction(metadata: string): Promise<readonly number[]> {
+  async applyReproduction(
+    metadata: string,
+    options: SnapshotWaitOptions = {},
+  ): Promise<readonly number[]> {
     if (metadata.length === 0) throw new Error("reproduction metadata must not be empty");
     await this.#page.evaluate(
       (reproduction) => globalThis.__VOXELS__!.applyReproduction(reproduction),
@@ -89,7 +92,11 @@ export class EngineClient {
         ) <= 0.000_01 &&
         Math.abs(snapshotValue(snapshot, "yaw") - expected.camera!.yawRadians!) <= 0.000_01 &&
         Math.abs(snapshotValue(snapshot, "pitch") - expected.camera!.pitchRadians!) <= 0.000_01,
-      { description: "engine did not freeze the exact reproduction camera" },
+      {
+        timeoutMs: 60_000,
+        ...options,
+        description: options.description ?? "engine did not freeze the exact reproduction camera",
+      },
     );
   }
 

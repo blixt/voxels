@@ -2062,9 +2062,6 @@ mod web {
         viewport_size: Cell<[u32; 2]>,
         camera: RefCell<CameraState>,
         pending_look: Cell<Vec2>,
-        reproduction_camera: Cell<Option<CameraState>>,
-        reproduction_presentation_target: Cell<Option<Vec3>>,
-        reproduction_restore_camera: Cell<Option<CameraState>>,
         pending_relocation: Cell<Option<crate::PendingRelocation>>,
         input: RefCell<InputState>,
         remote: RemoteWorldClient,
@@ -2419,6 +2416,10 @@ mod web {
                 })?;
             client_view.replace_goal(ClientViewGoalKind::ReproductionApply, target);
             drop(client_view);
+            // A reproduction is a spatial handoff. Make its captured camera the streaming demand
+            // immediately; otherwise the interactive source camera remains the demand until the
+            // reproduction commits, while that commit waits for terrain at the captured camera.
+            self.presentation_target_position.set(camera.position);
             self.input.borrow_mut().clear();
             self.simulation_accumulator.set(0.0);
             Ok(())
@@ -5847,11 +5848,6 @@ mod web {
             if let Some(restore) = self.profile_restore_camera.take() {
                 *self.camera.borrow_mut() = restore;
             }
-            self.reproduction_camera.set(None);
-            self.reproduction_presentation_target.set(None);
-            if let Some(restore) = self.reproduction_restore_camera.take() {
-                *self.camera.borrow_mut() = restore;
-            }
             self.stopped.set(true);
             let id = self.frame_id.replace(0);
             if id != 0 {
@@ -7768,9 +7764,6 @@ mod web {
             viewport_size: Cell::new([width, height]),
             camera: RefCell::new(camera),
             pending_look: Cell::new(Vec2::ZERO),
-            reproduction_camera: Cell::new(None),
-            reproduction_presentation_target: Cell::new(None),
-            reproduction_restore_camera: Cell::new(None),
             pending_relocation: Cell::new(None),
             input: RefCell::new(InputState::default()),
             remote,

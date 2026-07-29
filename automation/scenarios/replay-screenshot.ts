@@ -6,9 +6,13 @@ import { snapshotValue } from "../lib/engine.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { startWorldStack, type WorldSource } from "../lib/world.ts";
 import { readPngText } from "../../web/png-metadata.ts";
+import type { WasmBuildProfile } from "../../scripts/build-wasm.ts";
 
 interface ReproductionMetadata {
   readonly schema: string;
+  readonly runtime: {
+    readonly buildProfile: WasmBuildProfile;
+  };
   readonly image: {
     readonly pixelWidth: number;
     readonly pixelHeight: number;
@@ -65,6 +69,11 @@ function parseMetadata(text: string): ReproductionMetadata {
   if (value.schema !== "voxels.reproduction.v3") {
     throw new Error(`unsupported screenshot reproduction schema ${String(value.schema)}`);
   }
+  if (!["debug", "wasm-dev", "release"].includes(value.runtime?.buildProfile)) {
+    throw new Error(
+      `capture build profile ${String(value.runtime?.buildProfile)} is not reproducible`,
+    );
+  }
   const cssWidth = finite(value.image?.cssWidth, "CSS width");
   const cssHeight = finite(value.image?.cssHeight, "CSS height");
   const dpr = finite(value.image?.devicePixelRatio, "device pixel ratio");
@@ -93,6 +102,7 @@ function parseMetadata(text: string): ReproductionMetadata {
 async function run(context: ScenarioContext, raw: readonly string[]) {
   const arguments_ = new ScenarioArguments(raw);
   const input = arguments_.string("input");
+  const reuseBuild = arguments_.flag("reuse-build");
   arguments_.assertEmpty();
   if (input === undefined) {
     throw new Error("replay-screenshot requires --input=/absolute/path/to/capture.png");
@@ -133,6 +143,10 @@ async function run(context: ScenarioContext, raw: readonly string[]) {
       cloudTopMetres: metadata.environment.cloudTopMetres,
     },
     service: { metal: source === "terrain-diffusion-30m" },
+    web: {
+      build: !reuseBuild,
+      buildProfile: metadata.runtime.buildProfile,
+    },
   });
   const browser = await BrowserCapability.start(context);
   const viewport = await browser.open({
