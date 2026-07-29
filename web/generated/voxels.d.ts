@@ -5,7 +5,7 @@ export class EngineHandle {
     private constructor();
     free(): void;
     /**
-     * Applies one embedded `voxels.reproduction.v2` document atomically. An empty return
+     * Applies one embedded `voxels.reproduction.v3` document atomically. An empty return
      * value means success; a non-empty value explains the exact identity or state mismatch.
      */
     apply_reproduction(metadata: string): string;

@@ -87,6 +87,7 @@ describe("engine automation contract", () => {
       "virtualTerrainCommittedLocusMinimumLeafZ",
       "virtualTerrainCommittedLocusMaximumLeafExclusiveX",
       "virtualTerrainCommittedLocusMaximumLeafExclusiveZ",
+      "presentedCameraInsideCommittedEnvelope",
       "presentationTargetX",
       "presentationTargetY",
       "presentationTargetZ",

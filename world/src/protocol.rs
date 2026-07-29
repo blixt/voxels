@@ -8,19 +8,18 @@ use crate::{
     ChunkCoord, ChunkSnapshot, Material, MeshingHalo, ModelIdentity, SourceDeviceRequirement,
     SurfaceRegion, TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError,
     TerrainHierarchyDirectoryV1, TerrainPageBatchRequestV1, TerrainPageBatchResultV1,
-    TerrainPageCodecError, TerrainPageKey, TerrainPageTransferCodecError, TerrainPageV1,
-    VOXEL_SIZE_METRES, VoxelCoord, WorldId, WorldManifest, WorldProductPriority, WorldSourceError,
+    TerrainPageCodecError, TerrainPageKey, TerrainPageTransferCodecError, VOXEL_SIZE_METRES,
+    VoxelCoord, WorldId, WorldManifest, WorldProductPriority, WorldSourceError,
     WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind, codec, decode_terrain_directory,
-    decode_terrain_page, decode_terrain_page_batch_request, decode_terrain_page_batch_result,
-    encode_terrain_directory, encode_terrain_page, encode_terrain_page_batch_request,
-    encode_terrain_page_batch_result,
+    decode_terrain_page_batch_request, decode_terrain_page_batch_result, encode_terrain_directory,
+    encode_terrain_page_batch_request, encode_terrain_page_batch_result,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 40;
+pub const PROTOCOL_VERSION: u16 = 41;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -443,16 +442,9 @@ pub enum TerrainDirectoryFailure {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TerrainDirectoryBootstrap {
-    pub directory: TerrainHierarchyDirectoryV1,
-    /// Mandatory last-resident owner for this directory's fixed root.
-    pub root_page: TerrainPageV1,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TerrainDirectoryBatchItem {
     pub root: TerrainPageKey,
-    pub result: Result<TerrainDirectoryBootstrap, TerrainDirectoryFailure>,
+    pub result: Result<TerrainHierarchyDirectoryV1, TerrainDirectoryFailure>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1422,20 +1414,16 @@ pub fn encode_terrain_directory_batch_result(
     for item in &result.items {
         encode_terrain_page_key(&mut payload, item.root);
         match &item.result {
-            Ok(bootstrap) => {
-                let encoded_directory = encode_terrain_directory(&bootstrap.directory)?;
-                let encoded_root = encode_terrain_page(&bootstrap.root_page)?;
+            Ok(directory) => {
+                let encoded_directory = encode_terrain_directory(directory)?;
                 payload.push(0);
                 payload.extend_from_slice(&[0; 3]);
                 push_u32(&mut payload, encoded_directory.len() as u32);
-                push_u32(&mut payload, encoded_root.len() as u32);
                 payload.extend_from_slice(&encoded_directory);
-                payload.extend_from_slice(&encoded_root);
             }
             Err(failure) => {
                 payload.push(*failure as u8);
                 payload.extend_from_slice(&[0; 3]);
-                push_u32(&mut payload, 0);
                 push_u32(&mut payload, 0);
             }
         }
@@ -1478,9 +1466,7 @@ pub fn decode_terrain_directory_batch_result(
             ));
         }
         let directory_len = cursor.u32()? as usize;
-        let root_len = cursor.u32()? as usize;
         let directory_body = cursor.bytes(directory_len)?;
-        let root_body = cursor.bytes(root_len)?;
         let result = match status {
             0 => {
                 let directory = decode_terrain_directory(directory_body, source_identity_hash)?;
@@ -1502,20 +1488,12 @@ pub fn decode_terrain_directory_batch_result(
                         "terrain directory does not partition its requested root",
                     ));
                 }
-                let root_page = decode_terrain_page(root_body, source_identity_hash)?;
-                Ok(TerrainDirectoryBootstrap {
-                    directory,
-                    root_page,
-                })
+                Ok(directory)
             }
-            1 if directory_body.is_empty() && root_body.is_empty() => {
-                Err(TerrainDirectoryFailure::Unavailable)
-            }
-            2 if directory_body.is_empty() && root_body.is_empty() => {
-                Err(TerrainDirectoryFailure::GenerationFailed)
-            }
+            1 if directory_body.is_empty() => Err(TerrainDirectoryFailure::Unavailable),
+            2 if directory_body.is_empty() => Err(TerrainDirectoryFailure::GenerationFailed),
             value => {
-                return Err(if directory_body.is_empty() && root_body.is_empty() {
+                return Err(if directory_body.is_empty() {
                     ProtocolError::UnknownEnum("terrain directory failure", u64::from(value))
                 } else {
                     ProtocolError::InvalidPayload("terrain directory failure carries a payload")
@@ -1814,24 +1792,12 @@ fn validate_terrain_directory_result(
         .collect::<Vec<_>>();
     validate_terrain_directory_roots(result.request_id, &roots)?;
     for item in &result.items {
-        if let Ok(bootstrap) = &item.result {
-            let root_node = bootstrap.directory.node(item.root);
-            if bootstrap.directory.source_identity_hash != result.source_identity_hash
-                || bootstrap
-                    .directory
-                    .roots()
-                    .map(|node| node.key)
-                    .collect::<Vec<_>>()
-                    != [item.root]
-                || bootstrap.root_page.source_identity_hash != result.source_identity_hash
-                || bootstrap.root_page.key != item.root
-                || root_node.is_none_or(|node| {
-                    node.revision != bootstrap.root_page.revision
-                        || node.content_fingerprint != bootstrap.root_page.content_fingerprint
-                })
+        if let Ok(directory) = &item.result {
+            if directory.source_identity_hash != result.source_identity_hash
+                || directory.roots().map(|node| node.key).collect::<Vec<_>>() != [item.root]
             {
                 return Err(ProtocolError::InvalidPayload(
-                    "terrain directory bootstrap identity mismatch",
+                    "terrain directory identity mismatch",
                 ));
             }
         }
@@ -4983,7 +4949,7 @@ mod tests {
         fn exact_subtree(
             source: WorldSourceIdentityHash,
             key: TerrainPageKey,
-        ) -> Vec<TerrainPageV1> {
+        ) -> Vec<crate::TerrainPageV1> {
             if key.level == 0 {
                 let split_y = key
                     .ancestor_at(TERRAIN_REGION_ROOT_LEVEL)
@@ -5016,17 +4982,13 @@ mod tests {
         let pages = exact_subtree(source, ready_root);
         let directory =
             TerrainHierarchyDirectoryV1::from_region_pages(&pages).expect("bootstrap directory");
-        let root_page = pages.last().cloned().expect("root page");
         let result = TerrainDirectoryBatchResult {
             request_id: 72,
             source_identity_hash: source,
             items: vec![
                 TerrainDirectoryBatchItem {
                     root: ready_root,
-                    result: Ok(TerrainDirectoryBootstrap {
-                        directory,
-                        root_page,
-                    }),
+                    result: Ok(directory),
                 },
                 TerrainDirectoryBatchItem {
                     root: missing_root,
@@ -5087,21 +5049,12 @@ mod tests {
             },
         )
         .expect("coverage root");
-        let root_page = build
-            .pages
-            .iter()
-            .find(|page| page.key == root)
-            .cloned()
-            .expect("root page");
         let result = TerrainDirectoryBatchResult {
             request_id: 73,
             source_identity_hash,
             items: vec![TerrainDirectoryBatchItem {
                 root,
-                result: Ok(TerrainDirectoryBootstrap {
-                    directory: build.directory,
-                    root_page,
-                }),
+                result: Ok(build.directory),
             }],
         };
 

@@ -35,6 +35,18 @@ export interface PlayerPresentationTraceFrame {
     readonly presentedBankFingerprint: string;
     readonly presentedBankMatchesCut: boolean;
   };
+  readonly streaming: {
+    readonly selectedPages: number;
+    readonly requestedPages: number;
+    readonly directoryNodes: number;
+    readonly directoriesAccepted: number;
+    readonly directoriesInFlight: number;
+    readonly residentPages: number;
+    readonly cachePages: number;
+    readonly pageBatchesPending: number;
+    readonly pageBatchesInFlight: number;
+    readonly pageUploadFailures: number;
+  };
   readonly exactCore: {
     readonly complete: boolean;
     readonly requiredLeaves: number;
@@ -55,6 +67,7 @@ export interface PlayerPresentationTraceFrame {
     readonly horizonCoverage: number;
     readonly locus: readonly [number, number, number, number];
   };
+  readonly presentedCameraInsideCommittedEnvelope: boolean;
   readonly presentationTarget: readonly [number, number, number];
   readonly presentationGate: {
     readonly active: boolean;
@@ -152,6 +165,18 @@ function traceFrame(
       presentedBankMatchesCut:
         snapshotValue(snapshot, "virtualTerrainPresentedSnapshotMatchesCut") === 1,
     },
+    streaming: {
+      selectedPages: snapshotValue(snapshot, "virtualTerrainSelectedPages"),
+      requestedPages: snapshotValue(snapshot, "virtualTerrainRequestedPages"),
+      directoryNodes: snapshotValue(snapshot, "virtualTerrainDirectoryNodes"),
+      directoriesAccepted: snapshotValue(snapshot, "virtualTerrainDirectoryAccepted"),
+      directoriesInFlight: snapshotValue(snapshot, "virtualTerrainDirectoryInFlight"),
+      residentPages: snapshotValue(snapshot, "virtualTerrainResidentPages"),
+      cachePages: snapshotValue(snapshot, "virtualTerrainCachePages"),
+      pageBatchesPending: snapshotValue(snapshot, "virtualTerrainStreamPending"),
+      pageBatchesInFlight: snapshotValue(snapshot, "virtualTerrainStreamInFlight"),
+      pageUploadFailures: snapshotValue(snapshot, "virtualTerrainPageUploadFailed"),
+    },
     exactCore: {
       complete: snapshotValue(snapshot, "virtualTerrainExactCoreComplete") === 1,
       requiredLeaves: snapshotValue(snapshot, "virtualTerrainExactCoreRequiredLeaves"),
@@ -190,6 +215,8 @@ function traceFrame(
         snapshotValue(snapshot, "virtualTerrainCommittedLocusMaximumLeafExclusiveZ"),
       ],
     },
+    presentedCameraInsideCommittedEnvelope:
+      snapshotValue(snapshot, "presentedCameraInsideCommittedEnvelope") === 1,
     presentationTarget: [
       snapshotValue(snapshot, "presentationTargetX"),
       snapshotValue(snapshot, "presentationTargetY"),
@@ -260,7 +287,13 @@ function invalidCommittedPresentation(frame: PlayerPresentationTraceFrame): stri
   if (maximumX <= minimumX || maximumZ <= minimumZ) {
     reasons.push(`committed presentation locus is empty: ${committed.locus.join(",")}`);
   }
-  if (frame.terrainReady) {
+  if (frame.terrainReady && !frame.presentedCameraInsideCommittedEnvelope) {
+    reasons.push("presented gameplay camera is outside the committed exact envelope");
+  }
+  if (
+    frame.terrainReady &&
+    frame.desiredEnvelope.fingerprint === frame.committedEnvelope.fingerprint
+  ) {
     const core = frame.exactCore;
     if (
       !core.complete ||
@@ -268,7 +301,7 @@ function invalidCommittedPresentation(frame: PlayerPresentationTraceFrame): stri
       core.currentCoverage !== core.requiredLeaves
     ) {
       reasons.push(
-        `admitted gameplay position has exact core ${core.currentCoverage}/${core.requiredLeaves}, complete=${core.complete}`,
+        `committed target has exact core ${core.currentCoverage}/${core.requiredLeaves}, complete=${core.complete}`,
       );
     }
   }

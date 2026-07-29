@@ -413,7 +413,7 @@ async function encodeScreenshot(capture: MissionControlScreenshot): Promise<void
       );
       // Big-endian framing makes the attachment self-describing without relying on JS typed-array
       // host endianness. The compressed payload itself expands to the little-endian RGBA32Uint
-      // rows described by voxels.reproduction.v2.
+      // rows described by voxels.reproduction.v3.
       const headerBytes = 20;
       const diagnosticPayload = new Uint8Array(headerBytes + compressedDiagnostic.byteLength);
       diagnosticPayload.set([0x56, 0x54, 0x50, 0x31], 0); // "VTP1"

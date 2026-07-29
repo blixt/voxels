@@ -212,7 +212,7 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
   };
   const eye = reproduction.camera?.eyeMetres;
   if (
-    reproduction.schema !== "voxels.reproduction.v2" ||
+    reproduction.schema !== "voxels.reproduction.v3" ||
     !/^[0-9a-f]{40}$/u.test(reproduction.runtime?.buildCommit ?? "") ||
     typeof reproduction.runtime?.buildDirty !== "boolean" ||
     !["debug", "wasm-dev", "release"].includes(reproduction.runtime?.buildProfile ?? "") ||

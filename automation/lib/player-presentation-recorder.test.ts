@@ -34,7 +34,7 @@ function playableFrame(
     virtualTerrainPresentedSnapshotFingerprintLow24: 3,
     virtualTerrainPresentedSnapshotMatchesCut: 1,
     virtualTerrainDesiredEnvelopeComplete: 1,
-    virtualTerrainDesiredEnvelopeFingerprintLow24: 4,
+    virtualTerrainDesiredEnvelopeFingerprintLow24: 5,
     virtualTerrainDesiredSafetyLeaves: 9,
     virtualTerrainDesiredHorizonRoots: 4,
     virtualTerrainDesiredLocusMinimumLeafX: -2,
@@ -50,6 +50,7 @@ function playableFrame(
     virtualTerrainCommittedLocusMinimumLeafZ: -2,
     virtualTerrainCommittedLocusMaximumLeafExclusiveX: 2,
     virtualTerrainCommittedLocusMaximumLeafExclusiveZ: 2,
+    presentedCameraInsideCommittedEnvelope: 1,
     ...values,
   });
 }
@@ -108,7 +109,7 @@ describe("continuous player presentation invariant state", () => {
     expect(violation?.trace.map((frame) => frame.frameSequence)).toEqual([10, 11]);
   });
 
-  it("fails when admitted gameplay loses exact core ownership for one frame", () => {
+  it("fails when the committed target loses exact core ownership for one frame", () => {
     const state = new PlayerPresentationInvariantState();
     expect(state.observe(playableFrame(20), "travel")).toBeUndefined();
 
@@ -119,9 +120,36 @@ describe("continuous player presentation invariant state", () => {
       "travel",
     );
 
-    expect(violation?.reasons).toEqual([
-      "admitted gameplay position has exact core 8/9, complete=true",
-    ]);
+    expect(violation?.reasons).toEqual(["committed target has exact core 8/9, complete=true"]);
+  });
+
+  it("allows an overlapping desired envelope to stream while the presented camera stays certified", () => {
+    const state = new PlayerPresentationInvariantState();
+
+    const violation = state.observe(
+      playableFrame(22, {
+        virtualTerrainDesiredEnvelopeFingerprintLow24: 6,
+        virtualTerrainExactCoreCurrentCoverage: 8,
+      }),
+      "pedestal-step",
+    );
+
+    expect(violation).toBeUndefined();
+  });
+
+  it("fails when the presented camera leaves the committed exact envelope", () => {
+    const state = new PlayerPresentationInvariantState();
+
+    const violation = state.observe(
+      playableFrame(23, {
+        presentedCameraInsideCommittedEnvelope: 0,
+      }),
+      "travel",
+    );
+
+    expect(violation?.reasons).toContain(
+      "presented gameplay camera is outside the committed exact envelope",
+    );
   });
 
   it("fails on one unsafe published GPU bank without confusing it with an in-flight candidate", () => {

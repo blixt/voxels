@@ -153,19 +153,6 @@ impl ArenaAllocator {
             .is_none_or(|maximum| current_capacity.saturating_add(u64::from(capacity)) <= maximum)
     }
 
-    /// Simulates a whole allocation transaction against the exact current free ranges.
-    ///
-    /// Sizes are simulated in caller order because admission must prove the exact sequence used by
-    /// the real uploader. Reordering only the proof can accept a transaction that later fails when
-    /// an early small allocation consumes the final bounded page slot.
-    pub fn can_allocate_batch(&self, requested_sizes: impl IntoIterator<Item = u32>) -> bool {
-        let mut simulation = self.clone();
-        requested_sizes
-            .into_iter()
-            .filter(|size| *size > 0)
-            .all(|size| simulation.allocate(size).is_some())
-    }
-
     pub fn aligned_allocation_size(&self, requested_size: u32) -> Option<u32> {
         (requested_size > 0)
             .then(|| align_up(requested_size, self.alignment))
@@ -273,37 +260,6 @@ mod tests {
             (0, 0, 64)
         );
         Ok(())
-    }
-
-    #[test]
-    fn batch_preflight_accounts_for_fragmentation_without_mutation() {
-        let mut arena = ArenaAllocator::new_bounded(64, 8, 64, 1).unwrap();
-        let a = arena.allocate(16).unwrap();
-        let _b = arena.allocate(16).unwrap();
-        let c = arena.allocate(16).unwrap();
-        let _d = arena.allocate(16).unwrap();
-        assert!(arena.free(a));
-        assert!(arena.free(c));
-        let before = arena.stats();
-
-        assert!(!arena.can_allocate_batch([24]));
-        assert_eq!(arena.stats(), before);
-        assert!(arena.can_allocate_batch([16, 16]));
-        assert_eq!(arena.stats(), before);
-    }
-
-    #[test]
-    fn batch_preflight_matches_real_allocation_order_at_the_page_limit() {
-        let arena = ArenaAllocator::new_bounded(16, 8, 32, 1).unwrap();
-        assert!(
-            !arena.can_allocate_batch([8, 24]),
-            "the first small allocation creates the final 16-byte page"
-        );
-        assert!(
-            arena.can_allocate_batch([24, 8]),
-            "the actual reverse order creates one 24-byte page with room for both"
-        );
-        assert_eq!(arena.stats().pages, 0, "preflight is non-mutating");
     }
 
     #[test]

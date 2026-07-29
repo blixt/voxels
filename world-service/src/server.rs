@@ -40,18 +40,17 @@ use voxels_world::protocol::{
     BrowserUserId, ChunkBatchItem, ChunkBatchRequest, EditSessionId, EditVolume,
     EncodedChunkBatchItem, FRAME_FRAGMENT_OVERHEAD_BYTES, PlayerId, PlayerIdentity, PlayerResume,
     PresenceOpened, PresencePong, ResyncRequired, SpawnPoint, TerrainDirectoryBatchItem,
-    TerrainDirectoryBatchRequest, TerrainDirectoryBatchResult, TerrainDirectoryBootstrap,
-    TerrainDirectoryFailure, TerrainRegionColumn, TerrainRegionColumnBatchItem,
-    TerrainRegionColumnBatchRequest, TerrainRegionColumnBatchResult, TerrainRegionColumnFailure,
-    VirtualTerrainPageBatchRequest, VirtualTerrainPageBatchResult, VoxelMutation,
-    WorldCapabilities, WorldEnvironmentSnapshot, WorldOpened, cancel_kind, chunk_batch_kind,
-    clone_message_with_request_id, decode_cancel, decode_chunk_batch, decode_edit_command,
-    decode_open_presence, decode_open_world, decode_player_pose, decode_presence_ping,
-    decode_terrain_directory_batch, decode_terrain_region_column_batch,
-    decode_virtual_terrain_page_batch, edit_command_kind, encode_chunk_batch_item,
-    encode_chunk_batch_result_from_items, encode_edit_commit, encode_error, encode_frame_fragment,
-    encode_frame_fragment_abort, encode_presence_opened, encode_presence_pong,
-    encode_resync_required, encode_terrain_directory_batch_result,
+    TerrainDirectoryBatchRequest, TerrainDirectoryBatchResult, TerrainDirectoryFailure,
+    TerrainRegionColumn, TerrainRegionColumnBatchItem, TerrainRegionColumnBatchRequest,
+    TerrainRegionColumnBatchResult, TerrainRegionColumnFailure, VirtualTerrainPageBatchRequest,
+    VirtualTerrainPageBatchResult, VoxelMutation, WorldCapabilities, WorldEnvironmentSnapshot,
+    WorldOpened, cancel_kind, chunk_batch_kind, clone_message_with_request_id, decode_cancel,
+    decode_chunk_batch, decode_edit_command, decode_open_presence, decode_open_world,
+    decode_player_pose, decode_presence_ping, decode_terrain_directory_batch,
+    decode_terrain_region_column_batch, decode_virtual_terrain_page_batch, edit_command_kind,
+    encode_chunk_batch_item, encode_chunk_batch_result_from_items, encode_edit_commit,
+    encode_error, encode_frame_fragment, encode_frame_fragment_abort, encode_presence_opened,
+    encode_presence_pong, encode_resync_required, encode_terrain_directory_batch_result,
     encode_terrain_region_column_batch_result, encode_virtual_terrain_page_batch_result,
     encode_world_opened, message_kind, message_request_id, open_presence_kind, open_world_kind,
     player_pose_kind, presence_ping_kind, terrain_directory_batch_kind,
@@ -65,9 +64,9 @@ use voxels_world::{
     WorldProductRequest, WorldSourceEngine, WorldSourceError,
 };
 
-pub const WORLD_WEBSOCKET_PATH: &str = "/v40/world";
-pub const PRESENCE_WEBSOCKET_PATH: &str = "/v40/presence";
-pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v40";
+pub const WORLD_WEBSOCKET_PATH: &str = "/v41/world";
+pub const PRESENCE_WEBSOCKET_PATH: &str = "/v41/presence";
+pub const WORLD_WEBSOCKET_PROTOCOL: &str = "voxels.world.v41";
 pub const HEALTH_PATH: &str = "/healthz";
 const PREFETCH_WORKER_DIVISOR: usize = 4;
 const CLOUD_PERIOD_METRES: f64 = 1_280_000.0;
@@ -2552,16 +2551,7 @@ async fn serve_virtual_terrain_directories(
             generated = authority.ensure_region(root, request.priority) => generated,
         };
         let result = match generated {
-            Ok(region) => match region.root_page() {
-                Ok(root_page) => Ok(TerrainDirectoryBootstrap {
-                    directory: region.directory.clone(),
-                    root_page,
-                }),
-                Err(error) => {
-                    eprintln!("virtual terrain root page recovery failed for {root:?}: {error}");
-                    Err(TerrainDirectoryFailure::GenerationFailed)
-                }
-            },
+            Ok(region) => Ok(region.directory.clone()),
             Err(VirtualTerrainError::InvalidRoot) => Err(TerrainDirectoryFailure::Unavailable),
             Err(error) => {
                 eprintln!("virtual terrain directory build failed for {root:?}: {error}");
@@ -3921,32 +3911,17 @@ mod tests {
             voxels_world::protocol::decode_terrain_directory_batch_result(&directory_frame.bytes)
                 .expect("decode directory response");
         assert_eq!(directory_result.items.len(), 1);
-        let bootstrap = directory_result.items[0]
+        let directory = directory_result.items[0]
             .result
             .as_ref()
             .expect("directory");
-        assert_eq!(bootstrap.directory, built.directory);
-        let built_root_page = built
-            .page(
-                built
-                    .directory
-                    .node(root)
-                    .map(|node| voxels_world::TerrainPageTransferIdentity {
-                        key: node.key,
-                        revision: node.revision,
-                        content_fingerprint: node.content_fingerprint,
-                    })
-                    .expect("built root identity"),
-            )
-            .expect("decode built root")
-            .expect("built root page");
-        assert_eq!(bootstrap.root_page, built_root_page);
+        assert_eq!(*directory, built.directory);
         directory_frame
             .tracked
             .expect("terminal directory request")
             .finish();
 
-        let node = bootstrap.directory.node(root).expect("root node");
+        let node = directory.node(root).expect("root node");
         let identity = voxels_world::TerrainPageTransferIdentity {
             key: node.key,
             revision: node.revision,
@@ -4992,7 +4967,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v40, test-local-token"),
+            HeaderValue::from_static("voxels.world.v41, test-local-token"),
         );
         let (socket, response) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -5882,7 +5857,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v40, test-local-token"),
+            HeaderValue::from_static("voxels.world.v41, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);
@@ -5916,7 +5891,7 @@ mod tests {
             .insert(ORIGIN, HeaderValue::from_static("http://test.local"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static("voxels.world.v40, test-local-token"),
+            HeaderValue::from_static("voxels.world.v41, test-local-token"),
         );
         let (socket, _) = connect_async(request).await?;
         let mut socket = TestClient::new(socket);

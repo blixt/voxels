@@ -96,19 +96,6 @@ impl PreparedTerrainRegion {
         }
         Ok(Some(page))
     }
-
-    pub(crate) fn root_page(&self) -> Result<TerrainPageV1, VirtualTerrainError> {
-        let node = self
-            .directory
-            .node(self.root)
-            .ok_or_else(|| VirtualTerrainError::Build("region root is absent".to_owned()))?;
-        self.page(TerrainPageTransferIdentity {
-            key: node.key,
-            revision: node.revision,
-            content_fingerprint: node.content_fingerprint,
-        })?
-        .ok_or_else(|| VirtualTerrainError::Build("region root payload is absent".to_owned()))
-    }
 }
 
 struct CachedRegion {

@@ -15,11 +15,13 @@ function page(level: number, x: number, z: number) {
 
 describe("player screenshot surface-cut audit", () => {
   const reproducibleMetadata = {
-    schema: "voxels.reproduction.v2",
+    schema: "voxels.reproduction.v3",
     camera: { eyeMetres: [1, 2, 3] },
     presentation: {
+      selectedCutFingerprint: "0000000000001234",
       terrainHandleSnapshot: {
         generation: "7",
+        presentationFingerprint: "0000000000005678",
         cutFingerprint: "0000000000001234",
         matchesPublishedCut: true,
       },
@@ -88,6 +90,18 @@ describe("player screenshot surface-cut audit", () => {
         },
       }),
     ).not.toThrow();
+    expect(() =>
+      assertPlayerScreenshotMetadata({
+        ...reproducibleMetadata,
+        presentation: {
+          ...reproducibleMetadata.presentation,
+          terrainHandleSnapshot: {
+            ...reproducibleMetadata.presentation.terrainHandleSnapshot,
+            cutFingerprint: "0000000000009999",
+          },
+        },
+      }),
+    ).toThrow();
     expect(() =>
       assertPlayerScreenshotMetadata({
         ...reproducibleMetadata,

@@ -3840,11 +3840,6 @@ pub struct Renderer {
     /// not replace this transaction until it promotes or fails.
     virtual_terrain_publication: Option<VirtualTerrainPublication>,
     next_virtual_terrain_request: u64,
-    /// Geometry admitted for the next legal cut. This includes every complete replacement group
-    /// and any already-resident balance dependencies selected while accumulating the microbatch.
-    /// The fence survives oracle invalidation and an empty retention request; it is released only
-    /// when a cut promotes or the transaction explicitly aborts.
-    virtual_terrain_staging_frontier: BTreeSet<TerrainPageKey>,
     /// An encode failure releases the transaction immediately, but expanded candidate geometry is
     /// reclaimed at the next streaming boundary rather than while frame draw lists borrow it.
     virtual_terrain_publication_abort_pending: bool,
@@ -4778,7 +4773,6 @@ impl Renderer {
             virtual_terrain_oracle_cut: None,
             virtual_terrain_publication: None,
             next_virtual_terrain_request: 1,
-            virtual_terrain_staging_frontier: BTreeSet::new(),
             virtual_terrain_publication_abort_pending: false,
             virtual_terrain_error_scale: 1.0,
             virtual_terrain_headroom_frames: 0,
@@ -5535,7 +5529,7 @@ impl Renderer {
                 r#""pixelWidth":{},"pixelHeight":{},"cssWidth":{},"cssHeight":{},"devicePixelRatio":{}}},"#,
                 r#""camera":{{"eyeMetres":{:?},"velocityMetresPerSecond":{:?},"yawRadians":{},"pitchRadians":{},"headingDegrees":{},"verticalFovRadians":{},"nearPlaneMetres":0.05,"farPlaneMetres":{},"grounded":{},"locomotion":"{}","fluid":{{"immersion":{},"eyeDepthMetres":{},"signedEyeDepthMetres":{},"surfaceYMetres":{},"surfaceKnown":{},"eyesSubmerged":{},"swimming":{}}}}},"#,
                 r#""world":{},"environment":{{"serverTimeSeconds":{},"worldDays":{},"dayFraction":{},"yearFraction":{},"moonOrbitFraction":{},"twinklePhase":{},"planetCircumferenceMetres":{},"axialTiltRadians":{},"moonOrbitInclinationRadians":{},"celestialSeed":"{}","celestialRevision":"{}","weatherFraction":{},"weatherCycleSeconds":{},"cloudOffsetMetres":{:?},"cloudVelocityMetresPerSecond":{:?},"cloudCoverage":{},"cloudBaseMetres":{},"cloudTopMetres":{},"weatherSeed":"{}","weatherRevision":"{}","sunDirection":{:?},"moonDirection":{:?},"debugDayFraction":{},"debugWeatherFraction":{},"reproductionOverride":{},"surfaceRegion":{}}},"#,
-                r#""presentation":{{"publishedClientView":{{"presentationSerial":"{}","viewRevision":"{}","terrainRequest":{},"terrainGeneration":{},"revisionDigest":"{:016x}"}},"viewportFingerprint":"{:016x}","selectedCutFingerprint":"{:016x}","terrainHandleSnapshot":{{"generation":"{}","cutFingerprint":"{:016x}","matchesPublishedCut":{}}},"selectedCut":{},"virtualTerrain":{},"worldQuads":{},"waterQuads":{},"drawCalls":{},"waterDrawCalls":{},"surfaceWidth":{},"surfaceHeight":{}}},"#,
+                r#""presentation":{{"publishedClientView":{{"presentationSerial":"{}","viewRevision":"{}","terrainRequest":{},"terrainGeneration":{},"revisionDigest":"{:016x}"}},"viewportFingerprint":"{:016x}","selectedCutFingerprint":"{:016x}","terrainHandleSnapshot":{{"generation":"{}","presentationFingerprint":"{:016x}","cutFingerprint":"{:016x}","matchesPublishedCut":{}}},"selectedCut":{},"virtualTerrain":{},"worldQuads":{},"waterQuads":{},"drawCalls":{},"waterDrawCalls":{},"surfaceWidth":{},"surfaceHeight":{}}},"#,
                 r#""streaming":{},"#,
                 r#""attachments":{},"#,
                 r#""render":{{"worldLabOpen":{},"features":{{"shadows":{},"voxelAmbientOcclusion":{},"screenSpaceAmbientOcclusion":{},"fog":{},"farTerrain":{},"water":{},"targetOutline":{},"materialDetail":{},"caveHeadlamp":{},"localLighting":{}}},"diagnosticSkyColor":{},"geometrySourceDebug":{},"viewDistanceMetres":{}}}}}"#
@@ -5604,6 +5598,7 @@ impl Renderer {
                 .virtual_terrain_presented_snapshot_generation,
             self.diagnostics
                 .virtual_terrain_presented_snapshot_fingerprint,
+            cut_fingerprint,
             self.diagnostics
                 .virtual_terrain_presented_snapshot_matches_cut,
             cut_manifest,
@@ -5989,6 +5984,11 @@ impl Renderer {
         &mut self,
         page: TerrainPageV1,
     ) -> Result<(), VirtualTerrainRendererError> {
+        if self.virtual_terrain.resident_page(page.key).is_none() {
+            self.virtual_terrain.install_page(page)?;
+            self.invalidate_virtual_terrain_desired_plan();
+            return Ok(());
+        }
         let finer_neighbor_sides = self
             .virtual_terrain_pages
             .get(&page.key)
@@ -6039,28 +6039,25 @@ impl Renderer {
             }
         }
 
-        // Reclaim unrelated travel history once, then prove that every missing sibling can coexist
-        // with the immutable committed owner. This is a transaction-local free-range simulation;
-        // future requested groups remain encoded in the shell cache and do not affect admission.
-        self.retain_virtual_terrain_pages(std::iter::empty())?;
-        let allocation_sizes = pages
+        let logical_replacement_missing = pages
             .iter()
-            .filter(|page| !self.virtual_terrain_pages.contains_key(&page.key))
-            .map(|page| {
-                self.virtual_terrain
-                    .directory_node(page.key)
-                    .map(|node| node.source_geometry_bytes)
-                    .ok_or(VirtualTerrainRendererError::SelectedPageMissingGpu(
-                        page.key,
-                    ))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if !self
-            .virtual_terrain_arena
-            .can_allocate_batch(allocation_sizes)
-        {
-            return Err(VirtualTerrainRendererError::GpuPoolCapacity);
+            .any(|page| self.virtual_terrain.resident_page(page.key).is_none());
+        if logical_replacement_missing {
+            install_virtual_terrain_replacement_pages(
+                &mut self.virtual_terrain,
+                parent,
+                &pages,
+                |_| Ok(()),
+            )?;
+            self.invalidate_virtual_terrain_desired_plan();
+            return Ok(());
         }
+
+        // Reclaim unrelated travel history once. Each sibling is then prepared from its exact CPU
+        // geometry; an allocation failure rolls the complete group back below. Directory
+        // `source_geometry_bytes` is an intentionally conservative transport bound and must not be
+        // used as a GPU admission size because it can reject heightfields whose real mesh fits.
+        self.retain_virtual_terrain_gpu_pages(std::iter::empty())?;
 
         let mut staged = Vec::new();
         for page in &pages {
@@ -6086,9 +6083,6 @@ impl Renderer {
             self.rollback_virtual_terrain_replacement_geometry(&staged);
             return Err(error.into());
         }
-        self.virtual_terrain_staging_frontier.insert(parent);
-        self.virtual_terrain_staging_frontier
-            .extend(expected.iter().copied());
         self.invalidate_virtual_terrain_desired_plan();
         Ok(())
     }
@@ -6157,9 +6151,7 @@ impl Renderer {
             && existing.heightfield_ground_boundary_bits == heightfield_ground_boundary_bits
         {
             if install_page {
-                let key = page.key;
                 self.virtual_terrain.install_page(page)?;
-                self.virtual_terrain_staging_frontier.insert(key);
             }
             return Ok(false);
         }
@@ -6374,7 +6366,6 @@ impl Renderer {
                 discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, mesh);
                 return Err(error.into());
             }
-            self.virtual_terrain_staging_frontier.insert(page.key);
             // Residency can make a complete child replacement selectable without changing the
             // view. Invalidate the CPU demand oracle before encoding another handle snapshot.
             self.invalidate_virtual_terrain_desired_plan();
@@ -6483,6 +6474,13 @@ impl Renderer {
             let capacity = self.virtual_terrain_cut_fits_snapshot(&candidate);
             match capacity {
                 Ok(()) => break (candidate_view, candidate),
+                Err(VirtualTerrainRendererError::SelectedPageMissingGpu(_)) => {
+                    // The hierarchy can prove a complete target after its expanded geometry has
+                    // been evicted. Rehydrate that exact target first; once every selected source
+                    // record exists, the ordinary per-stream capacity proof runs before freezing a
+                    // publication. Missing geometry is appended to this cut's demand below.
+                    break (candidate_view, candidate);
+                }
                 Err(VirtualTerrainRendererError::SelectedCutSnapshotCapacity { .. })
                     if recovery_probe && error_scale < known_fitting_scale =>
                 {
@@ -6501,25 +6499,54 @@ impl Renderer {
             self.virtual_terrain_headroom_frames = 0;
         }
         self.virtual_terrain_error_scale = error_scale;
-        if !self.virtual_terrain_staging_frontier.is_empty() {
-            self.virtual_terrain_staging_frontier.extend(
-                cut.selected_pages
-                    .iter()
-                    .copied()
-                    .filter(|key| self.virtual_terrain_pages.contains_key(key)),
-            );
-            self.virtual_terrain_staging_frontier.extend(
-                cut.requested_pages
-                    .iter()
-                    .map(|identity| identity.key)
-                    .filter(|key| self.virtual_terrain_pages.contains_key(key)),
-            );
-        }
         self.virtual_terrain_requested_view = Some(view);
         self.virtual_terrain_oracle_view = Some(oracle_view);
         self.virtual_terrain_exact_surface_domain = Some(exact_surface_domain.clone());
         self.virtual_terrain_oracle_cut = Some(cut.clone());
         Ok(cut)
+    }
+
+    /// Rebuilds expanded draw geometry directly from validated logical pages already owned by the
+    /// hierarchy.
+    ///
+    /// Hierarchy/coherence residency and GPU geometry residency are deliberately independent. The
+    /// former must converge monotonically while a legal cut is discovered; the latter is an
+    /// evictable derived cache. Routing a selected logical page back through `requested_pages`
+    /// conflates those states and can deadlock publication behind a redundant network request even
+    /// though the complete `TerrainPageV1` is already resident here.
+    ///
+    /// The caller bounds work per frame. Successfully rebuilt pages remain candidate-only until
+    /// the ordinary immutable publication proof promotes the complete selected cut.
+    pub fn rebuild_selected_virtual_terrain_gpu_pages(
+        &mut self,
+        cut: &VirtualTerrainCut,
+        maximum_pages: usize,
+    ) -> Result<usize, VirtualTerrainRendererError> {
+        if maximum_pages == 0 {
+            return Ok(0);
+        }
+        let pages = cut
+            .selected_pages
+            .iter()
+            .filter(|key| !self.virtual_terrain_pages.contains_key(key))
+            .take(maximum_pages)
+            .map(|key| {
+                self.virtual_terrain
+                    .resident_page(*key)
+                    .cloned()
+                    .ok_or(VirtualTerrainRendererError::SelectedPageMissingGpu(*key))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if pages.is_empty() {
+            return Ok(0);
+        }
+        self.retain_virtual_terrain_gpu_pages(std::iter::empty())?;
+        let mut rebuilt = 0;
+        for page in pages {
+            rebuilt +=
+                usize::from(self.upload_virtual_terrain_page_with_seams(page, [false; 4], false)?);
+        }
+        Ok(rebuilt)
     }
 
     pub fn virtual_terrain_cut(&self) -> Option<&VirtualTerrainCut> {
@@ -6678,7 +6705,7 @@ impl Renderer {
             return Ok(None);
         }
         if self.virtual_terrain_publication_abort_pending {
-            self.retain_virtual_terrain_pages(std::iter::empty())?;
+            self.retain_virtual_terrain_gpu_pages(std::iter::empty())?;
             self.virtual_terrain_publication_abort_pending = false;
         }
         let Some(cut) = self
@@ -6885,10 +6912,10 @@ impl Renderer {
         });
         self.apply_presented_client_view_state();
         self.discard_retired_virtual_terrain_pages();
-        self.virtual_terrain_staging_frontier.clear();
         // The unchanged-view cache was selected against the old committed overlap/capacity. Force
         // the next frame to derive demand and admission from the cut that actually promoted.
         self.invalidate_virtual_terrain_desired_plan();
+        self.discard_unselected_virtual_terrain_logical_pages();
         Ok(receipt)
     }
 
@@ -6896,11 +6923,9 @@ impl Renderer {
         self.virtual_terrain_publication.is_some()
     }
 
-    /// Whether source geometry is fenced by either a frozen publication or an accumulating
-    /// microbatch. Region retirement must not invalidate either owner.
-    pub fn virtual_terrain_publication_owns_geometry(&self) -> bool {
+    /// Whether a frozen publication currently owns immutable source geometry.
+    pub const fn virtual_terrain_publication_owns_geometry(&self) -> bool {
         self.virtual_terrain_publication.is_some()
-            || !self.virtual_terrain_staging_frontier.is_empty()
     }
 
     fn abort_virtual_terrain_publication(&mut self) {
@@ -6910,7 +6935,6 @@ impl Renderer {
 
     fn discard_virtual_terrain_publication_resources(&mut self) {
         self.virtual_terrain_gpu.discard_candidate();
-        self.virtual_terrain_staging_frontier.clear();
         self.virtual_terrain_publication_abort_pending = true;
         self.invalidate_virtual_terrain_desired_plan();
     }
@@ -6961,7 +6985,6 @@ impl Renderer {
             }
         }
         self.virtual_terrain_gpu.reset_world();
-        self.virtual_terrain_staging_frontier.clear();
         self.virtual_terrain_publication_abort_pending = false;
         self.invalidate_virtual_terrain_desired_plan();
         self.virtual_terrain_desired_envelope = None;
@@ -7036,11 +7059,7 @@ impl Renderer {
                         .selected_pages
                         .iter()
                         .any(|key| removed_pages.contains(key))
-                })
-                || self
-                    .virtual_terrain_staging_frontier
-                    .iter()
-                    .any(|key| removed_pages.contains(key));
+                });
         if invalidates_publication {
             self.abort_virtual_terrain_publication();
         }
@@ -7080,7 +7099,6 @@ impl Renderer {
             .virtual_terrain_publication
             .as_ref()
             .is_some_and(|publication| publication.cut.selected_pages.contains(&key))
-            || self.virtual_terrain_staging_frontier.contains(&key)
         {
             self.abort_virtual_terrain_publication();
         }
@@ -7107,12 +7125,14 @@ impl Renderer {
         Ok(true)
     }
 
-    /// Retains only pages that can contribute to the current or next certified ownership cut.
+    /// Retains only expanded GPU geometry that can contribute to a certified ownership cut.
     ///
-    /// Immutable encoded pages remain in the shell's memory cache and directory nodes remain on
-    /// the GPU, so an evicted page can be restored without rebuilding hierarchy metadata. This
-    /// bounds expanded GPU geometry independently from the much smaller encoded-page budget.
-    pub fn retain_virtual_terrain_pages(
+    /// Validated CPU pages and their replacement-coherence proofs remain in
+    /// [`VirtualTerrainHierarchy`]. Removing them together with draw geometry made legal-cut
+    /// discovery non-monotonic: admitting one balance group could evict a previously proved group,
+    /// causing the same groups to alternate forever. The encoded shell cache remains the source for
+    /// rebuilding only the expanded geometry selected by a later cut.
+    pub fn retain_virtual_terrain_gpu_pages(
         &mut self,
         keep: impl IntoIterator<Item = TerrainPageKey>,
     ) -> Result<usize, VirtualTerrainRendererError> {
@@ -7126,22 +7146,6 @@ impl Renderer {
         if let Some(publication) = &self.virtual_terrain_publication {
             keep.extend(publication.cut.selected_pages.iter().copied());
         }
-        keep.extend(self.virtual_terrain_staging_frontier.iter().copied());
-        // Keep exactly one nearest real ancestor per active/candidate page. That is sufficient for
-        // the conforming coarsen fallback if a neighboring replacement is incomplete; retaining
-        // the entire expanded chain wastes the source budget, while retaining none makes the next
-        // refinement arrival oscillate between conforming and unrepairable cuts.
-        let ancestry_sources = keep.iter().copied().collect::<Vec<_>>();
-        for key in ancestry_sources {
-            let mut ancestor = key.parent();
-            while let Some(parent) = ancestor {
-                if self.virtual_terrain_pages.contains_key(&parent) {
-                    keep.insert(parent);
-                    break;
-                }
-                ancestor = parent.parent();
-            }
-        }
         let remove = self
             .virtual_terrain_pages
             .keys()
@@ -7149,9 +7153,6 @@ impl Renderer {
             .copied()
             .collect::<Vec<_>>();
         for key in &remove {
-            if !self.virtual_terrain.remove_page(*key) {
-                continue;
-            }
             self.virtual_terrain_gpu.remove_page_geometry(*key);
             if let Some(page) = self.virtual_terrain_pages.remove(key) {
                 discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
@@ -7167,6 +7168,35 @@ impl Renderer {
         }
     }
 
+    /// Ends one monotonic transition epoch after its complete cut promotes.
+    ///
+    /// Logical pages are retained while a replacement/balance component is unresolved so sibling
+    /// groups cannot oscillate. Once the immutable cut commits, pages outside that owner and its
+    /// resident ancestor spine are only historical staging data: keeping them forever turns
+    /// ordinary stationary refinement into an unbounded decoded-page heap. The spine is mandatory
+    /// because every subsequent cut traversal starts at its active roots; retaining leaves alone
+    /// would make the next frame refetch its own committed ancestry. Directory identities remain
+    /// registered and the encoded shell cache can supply a future transition.
+    fn discard_unselected_virtual_terrain_logical_pages(&mut self) -> usize {
+        let selected = self
+            .committed_virtual_terrain_cut()
+            .map(|cut| cut.selected_pages.clone())
+            .unwrap_or_default();
+        let keep = resident_virtual_terrain_ancestry(&selected, |key| {
+            self.virtual_terrain.resident_page(key).is_some()
+        });
+        let remove = self
+            .virtual_terrain
+            .resident_page_keys()
+            .filter(|key| !keep.contains(key))
+            .collect::<Vec<_>>();
+        for key in &remove {
+            let removed = self.virtual_terrain.remove_page(*key);
+            debug_assert!(removed);
+        }
+        remove.len()
+    }
+
     fn ensure_virtual_terrain_gpu_allocation(
         &mut self,
         requested_bytes: u32,
@@ -7174,7 +7204,7 @@ impl Renderer {
         if requested_bytes == 0 || self.virtual_terrain_arena.can_allocate(requested_bytes) {
             return Ok(());
         }
-        self.retain_virtual_terrain_pages(std::iter::empty())?;
+        self.retain_virtual_terrain_gpu_pages(std::iter::empty())?;
         if self.virtual_terrain_arena.can_allocate(requested_bytes) {
             return Ok(());
         }
@@ -9409,6 +9439,23 @@ impl Renderer {
             primitive_count,
         })
     }
+}
+
+fn resident_virtual_terrain_ancestry(
+    selected: &[TerrainPageKey],
+    mut is_resident: impl FnMut(TerrainPageKey) -> bool,
+) -> BTreeSet<TerrainPageKey> {
+    let mut keep = BTreeSet::new();
+    for selected in selected {
+        let mut ancestor = Some(*selected);
+        while let Some(key) = ancestor {
+            if is_resident(key) {
+                keep.insert(key);
+            }
+            ancestor = key.parent();
+        }
+    }
+    keep
 }
 
 fn install_virtual_terrain_replacement_pages(
@@ -14152,6 +14199,27 @@ mod tests {
         assert!(
             recovered,
             "an allocation failure after releasing candidate-only geometry must invalidate that candidate"
+        );
+    }
+
+    #[test]
+    fn committed_leaf_retention_keeps_its_resident_traversal_spine() {
+        let leaf = TerrainPageKey {
+            level: 0,
+            coord: [-7, 3, 5],
+        };
+        let parent = leaf.parent().unwrap();
+        let root = parent.parent().unwrap();
+        let unrelated = TerrainPageKey {
+            level: 0,
+            coord: [99, 99, 99],
+        };
+        let resident = BTreeSet::from([leaf, parent, root, unrelated]);
+
+        assert_eq!(
+            resident_virtual_terrain_ancestry(&[leaf], |key| resident.contains(&key)),
+            BTreeSet::from([leaf, parent, root]),
+            "the next cut must be able to traverse from its root to the committed leaf without refetching"
         );
     }
 

@@ -1,19 +1,25 @@
 //! Browser/WASM leaf for Voxels. The worker owns the renderer, clock, and input semantics.
 
 #[cfg(any(target_arch = "wasm32", test))]
+mod client_view;
+
+#[cfg(any(target_arch = "wasm32", test))]
 use voxels_core::CameraState;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg(any(target_arch = "wasm32", test))]
 enum PendingRelocationKind {
     ProfileStep,
-    ProfileRestore,
-    SpectatorExit,
-    ReproductionApply,
-    ReproductionRestore,
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(
+    test,
+    allow(
+        dead_code,
+        reason = "the native tests construct only the relocation fields needed by pure readiness checks; the WASM host consumes the full transaction"
+    )
+)]
 #[cfg(any(target_arch = "wasm32", test))]
 struct PendingRelocation {
     kind: PendingRelocationKind,
@@ -54,57 +60,6 @@ fn take_ready_relocation(
             .is_some_and(|relocation| relocation.destination_resolved))
     .then(|| pending.take())
     .flatten()
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-const fn profile_drain_can_complete(
-    has_pending_relocation: bool,
-    readiness: RelocationReadiness,
-    frame_submitted: bool,
-) -> bool {
-    !has_pending_relocation && readiness.is_ready() && frame_submitted
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-const fn profile_owns_camera(
-    profile_running: bool,
-    restore_camera_pending: bool,
-    relocation_kind: Option<PendingRelocationKind>,
-) -> bool {
-    profile_running
-        || restore_camera_pending
-        || matches!(
-            relocation_kind,
-            Some(PendingRelocationKind::ProfileStep | PendingRelocationKind::ProfileRestore)
-        )
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn spectator_exit_destination(
-    current: CameraState,
-    saved_body: Option<CameraState>,
-) -> CameraState {
-    saved_body.unwrap_or_else(|| {
-        let mut destination = current;
-        destination.set_locomotion(voxels_core::LocomotionMode::Walking);
-        destination
-    })
-}
-
-/// A capture made while the presentation gate is blocked contains source camera A and proposed
-/// target B. If B's immutable envelope cannot present A, replay must finish the captured handoff
-/// to B rather than publishing B underneath an out-of-envelope A and permanently withholding
-/// frames.
-#[cfg(any(target_arch = "wasm32", test))]
-fn reproduction_relocation_destination(
-    mut captured_camera: CameraState,
-    presentation_target: glam::Vec3,
-    target_envelope_contains_camera: bool,
-) -> CameraState {
-    if !target_envelope_contains_camera {
-        captured_camera.position = presentation_target;
-    }
-    captured_camera
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -1378,6 +1333,9 @@ pub mod remote;
 mod request_window;
 #[cfg(target_arch = "wasm32")]
 mod web {
+    use crate::client_view::{
+        ClientViewCoordinator, ClientViewGoalKind, ClientViewSession, ClientViewState,
+    };
     use crate::presence_remote::RemotePresenceClient;
     use crate::remote::{
         RemoteChunkCompletion, RemoteEditEvent, RemoteRequestId, RemoteTerrainDirectoryCompletion,
@@ -1403,12 +1361,13 @@ mod web {
     };
     use voxels_render::environment::WorldEnvironmentState;
     use voxels_render::renderer::{
-        ChunkActivationReason, HostUiAction, LocalLightVisibility, MissionControlConfig, Renderer,
-        RendererConfig, RendererFeatureConfig, ScreenshotCanonicalPageState, ScreenshotCapture,
-        ScreenshotFeatureState, ScreenshotMutableRenderState, ScreenshotReproductionIdentity,
-        ScreenshotStreamingManifest, ScreenshotVirtualColumnState, ScreenshotVirtualRegionState,
-        VirtualTerrainPromotionStatus, VirtualTerrainRenderMode, VirtualTerrainRendererError,
-        VirtualTerrainRequestId, VolumetricCloudConfig,
+        ChunkActivationReason, HostUiAction, LocalLightVisibility, MissionControlConfig,
+        PublishedClientViewReceipt, Renderer, RendererConfig, RendererFeatureConfig,
+        ScreenshotCanonicalPageState, ScreenshotCapture, ScreenshotFeatureState,
+        ScreenshotMutableRenderState, ScreenshotReproductionIdentity, ScreenshotStreamingManifest,
+        ScreenshotVirtualColumnState, ScreenshotVirtualRegionState, VirtualTerrainReadyStatus,
+        VirtualTerrainRenderMode, VirtualTerrainRendererError, VirtualTerrainRequestId,
+        VolumetricCloudConfig,
     };
     use voxels_render::shadow::DirectionalShadowConfig;
     use voxels_render::ui::{LiveStats, NavigationTelemetry};
@@ -1441,9 +1400,12 @@ mod web {
     use wasm_bindgen::prelude::*;
     use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
+    type ActiveClientView =
+        ClientViewCoordinator<VirtualTerrainRequestId, PublishedClientViewReceipt>;
+
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 8;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 54;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 55;
     const FRAME_SAMPLE_WIDTH: u32 = 22;
     const GPU_SAMPLE_WIDTH: u32 = 15;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -1477,7 +1439,7 @@ mod web {
         "virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,virtualTerrainPageSubmitDeferred,virtualTerrainPagePreempted,virtualTerrainPageTimedOut,virtualTerrainPageOtherFailed,virtualTerrainPageUnavailable,virtualTerrainPageStaleRevision,virtualTerrainPageGenerationFailed,virtualTerrainPageUploadFailed,virtualTerrainPublishedPages,virtualTerrainPublishedExactPages,virtualTerrainPublishedMinimumLevel,virtualTerrainPublishedMaximumLevel,virtualTerrainPublishedExactLodDiscontinuities,virtualTerrainCutFingerprintLow24,virtualTerrainCutFingerprintHigh24,virtualTerrainPresentedSnapshotGenerationLow24,virtualTerrainPresentedSnapshotGenerationHigh24,virtualTerrainPresentedSnapshotFingerprintLow24,virtualTerrainPresentedSnapshotFingerprintHigh24,virtualTerrainPresentedSnapshotMatchesCut,",
         "virtualTerrainDesiredEnvelopeComplete,virtualTerrainDesiredEnvelopeFingerprintLow24,virtualTerrainDesiredEnvelopeFingerprintMid24,virtualTerrainDesiredEnvelopeFingerprintHigh16,virtualTerrainDesiredSafetyLeaves,virtualTerrainDesiredHorizonRoots,virtualTerrainDesiredLocusMinimumLeafX,virtualTerrainDesiredLocusMinimumLeafZ,virtualTerrainDesiredLocusMaximumLeafExclusiveX,virtualTerrainDesiredLocusMaximumLeafExclusiveZ,",
         "virtualTerrainCommittedEnvelopeFingerprintLow24,virtualTerrainCommittedEnvelopeFingerprintMid24,virtualTerrainCommittedEnvelopeFingerprintHigh16,virtualTerrainCommittedSafetyLeaves,virtualTerrainCommittedSafetyCoverage,virtualTerrainCommittedHorizonRoots,virtualTerrainCommittedHorizonCoverage,virtualTerrainCommittedLocusMinimumLeafX,virtualTerrainCommittedLocusMinimumLeafZ,virtualTerrainCommittedLocusMaximumLeafExclusiveX,virtualTerrainCommittedLocusMaximumLeafExclusiveZ,",
-        "presentationTargetX,presentationTargetY,presentationTargetZ,presentationGateActive,presentationGateStepsLow24,presentationGateStepsMid24,presentationGateStepsHigh16,presentationGateFramesLow24,presentationGateFramesMid24,presentationGateFramesHigh16,",
+        "presentedCameraInsideCommittedEnvelope,presentationTargetX,presentationTargetY,presentationTargetZ,presentationGateActive,presentationGateStepsLow24,presentationGateStepsMid24,presentationGateStepsHigh16,presentationGateFramesLow24,presentationGateFramesMid24,presentationGateFramesHigh16,",
         "frameSequence,schemaVersion,",
         "sampleCount,droppedSamples",
     );
@@ -1498,6 +1460,10 @@ mod web {
     const VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME: usize = TERRAIN_PAGE_MAX_CHILDREN * 2;
     const VIRTUAL_TERRAIN_CACHE_UPLOAD_BYTES_PER_FRAME: usize = 8 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_CACHE_UPLOAD_CPU_MS: f64 = 2.0;
+    // GPU expansion can reconstruct thousands of exact microvoxels from one logical page. Build
+    // one immutable-target page per frame so optional quality never turns into a multi-page frame
+    // hitch; publication remains atomic after the whole target is ready.
+    const VIRTUAL_TERRAIN_GPU_REBUILDS_PER_FRAME: usize = 1;
     const VIRTUAL_TERRAIN_MAX_EXACT_DOMAIN_LEAVES: usize = 16_384;
 
     /// Applies the committed half-open presentation boundary after one simulation proposal.
@@ -1605,7 +1571,6 @@ mod web {
         directory_retry_after_ms: BTreeMap<TerrainPageKey, u64>,
         page_upload_retry_after_ms: BTreeMap<TerrainPageTransferIdentity, u64>,
         minimum_region_revisions: BTreeMap<TerrainPageKey, u64>,
-        publication_request: Option<VirtualTerrainRequestId>,
         nodes: BTreeMap<TerrainPageKey, TerrainHierarchyNode>,
         stats: VirtualTerrainRequestStats,
     }
@@ -1965,7 +1930,7 @@ mod web {
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct ReproductionV2 {
+    struct ReproductionV3 {
         schema: String,
         runtime: ReproductionRuntime,
         image: ReproductionImage,
@@ -1973,8 +1938,6 @@ mod web {
         world: ReproductionWorld,
         environment: ReproductionEnvironment,
         render: ReproductionRender,
-        #[serde(default)]
-        streaming: Option<ReproductionStreaming>,
     }
 
     #[derive(Deserialize)]
@@ -2032,18 +1995,6 @@ mod web {
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct ReproductionStreaming {
-        presentation_gate: ReproductionPresentationGate,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct ReproductionPresentationGate {
-        target_position_f32_bits: [u32; 3],
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
     struct ReproductionEnvironment {
         server_time_seconds: f32,
         world_days: f64,
@@ -2095,12 +2046,13 @@ mod web {
     struct Engine {
         config: EngineConfig,
         renderer: RefCell<Renderer>,
+        client_view: RefCell<ActiveClientView>,
         viewport_size: Cell<[u32; 2]>,
         camera: RefCell<CameraState>,
+        pending_look: Cell<Vec2>,
         reproduction_camera: Cell<Option<CameraState>>,
         reproduction_presentation_target: Cell<Option<Vec3>>,
         reproduction_restore_camera: Cell<Option<CameraState>>,
-        spectator_body: Cell<Option<CameraState>>,
         pending_relocation: Cell<Option<crate::PendingRelocation>>,
         input: RefCell<InputState>,
         remote: RemoteWorldClient,
@@ -2193,6 +2145,20 @@ mod web {
                 .request_animation_frame(callback.as_ref().unchecked_ref())?;
             self.frame_id.set(id);
             Ok(())
+        }
+
+        fn synchronize_client_view_from_renderer(&self) -> bool {
+            let Some((state, published)) = ({
+                let renderer = self.renderer.borrow();
+                renderer
+                    .active_client_view_state()
+                    .zip(renderer.active_client_view_receipt())
+            }) else {
+                return false;
+            };
+            self.client_view
+                .borrow_mut()
+                .synchronize_renderer_presentation(state, published)
         }
 
         fn source_identity_hash(&self) -> WorldSourceIdentityHash {
@@ -2297,21 +2263,9 @@ mod web {
         }
 
         fn apply_reproduction(&self, metadata: &str) -> Result<(), String> {
-            let reproduction: ReproductionV2 = serde_json::from_str(metadata)
-                .map_err(|error| format!("parse voxels.reproduction.v2: {error}"))?;
-            let reproduction_presentation_target =
-                reproduction.streaming.as_ref().map(|streaming| {
-                    Vec3::from_array(
-                        streaming
-                            .presentation_gate
-                            .target_position_f32_bits
-                            .map(f32::from_bits),
-                    )
-                });
-            if reproduction_presentation_target.is_some_and(|target| !target.is_finite()) {
-                return Err("capture presentation target contains invalid values".to_owned());
-            }
-            if reproduction.schema != "voxels.reproduction.v2" {
+            let reproduction: ReproductionV3 = serde_json::from_str(metadata)
+                .map_err(|error| format!("parse voxels.reproduction.v3: {error}"))?;
+            if reproduction.schema != "voxels.reproduction.v3" {
                 return Err(format!(
                     "unsupported reproduction schema {}",
                     reproduction.schema
@@ -2437,73 +2391,43 @@ mod web {
             {
                 return Err("capture diagnostic sky color is invalid".to_owned());
             }
-            let mut renderer = self.renderer.borrow_mut();
-            if !renderer.set_reproduction_environment(Some(environment))
-                || !renderer.set_reproduction_render_state(ScreenshotMutableRenderState {
-                    world_lab_open: reproduction.render.world_lab_open,
-                    diagnostic_sky_color: reproduction.render.diagnostic_sky_color,
-                    geometry_source_debug: reproduction.render.geometry_source_debug,
-                    material_detail: reproduction.render.features.material_detail,
-                })
-            {
-                return Err("capture renderer state is invalid".to_owned());
-            }
-            drop(renderer);
-            if self.reproduction_restore_camera.get().is_none() {
-                self.reproduction_restore_camera
-                    .set(Some(*self.camera.borrow()));
-            }
-            let presentation_target = reproduction_presentation_target.unwrap_or(camera.position);
-            let target_envelope = self.virtual_terrain_presentation_envelope(presentation_target);
-            let destination = crate::reproduction_relocation_destination(
-                camera,
-                presentation_target,
-                target_envelope.contains_position(camera.position.to_array()),
-            );
-            self.reproduction_camera.set(Some(destination));
-            self.reproduction_presentation_target
-                .set(Some(presentation_target));
-            self.begin_relocation(crate::PendingRelocation {
-                kind: crate::PendingRelocationKind::ReproductionApply,
-                destination,
-                presentation_target,
-                profile_after_commit: None,
-                destination_resolved: true,
-            });
+            let render_state = ScreenshotMutableRenderState {
+                world_lab_open: reproduction.render.world_lab_open,
+                diagnostic_sky_color: reproduction.render.diagnostic_sky_color,
+                geometry_source_debug: reproduction.render.geometry_source_debug,
+                material_detail: reproduction.render.features.material_detail,
+            };
+            let mut client_view = self.client_view.borrow_mut();
+            let target = client_view
+                .current()
+                .begin_reproduction(camera, environment, render_state)
+                .ok_or_else(|| {
+                    "cannot apply reproduction while another synthetic session owns the view"
+                        .to_owned()
+                })?;
+            client_view.replace_goal(ClientViewGoalKind::ReproductionApply, target);
+            drop(client_view);
+            self.input.borrow_mut().clear();
             self.simulation_accumulator.set(0.0);
             Ok(())
         }
 
         fn clear_reproduction(&self) {
-            self.reproduction_camera.set(None);
-            self.reproduction_presentation_target.set(None);
-            if let Some(camera) = self.reproduction_restore_camera.take() {
-                self.begin_relocation(crate::PendingRelocation {
-                    kind: crate::PendingRelocationKind::ReproductionRestore,
-                    destination: camera,
-                    presentation_target: camera.position,
-                    profile_after_commit: None,
-                    destination_resolved: true,
-                });
-            } else if self.pending_relocation.get().is_some_and(|relocation| {
-                relocation.kind == crate::PendingRelocationKind::ReproductionApply
-            }) {
-                self.pending_relocation.set(None);
+            let mut client_view = self.client_view.borrow_mut();
+            if matches!(
+                client_view.current().session(),
+                ClientViewSession::Reproduction(_)
+            ) {
+                let target = client_view.current().restore_interactive();
+                client_view.replace_goal(ClientViewGoalKind::ReproductionRestore, target);
+            } else if let Some(goal) = client_view.goal()
+                && goal.kind() == ClientViewGoalKind::ReproductionApply
+            {
+                client_view.cancel_goal(goal.version());
             }
-            _ = self
-                .renderer
-                .borrow_mut()
-                .set_reproduction_environment(None);
-            self.simulation_accumulator.set(0.0);
-        }
-
-        fn begin_relocation(&self, relocation: crate::PendingRelocation) {
-            // A new explicit destination supersedes an older transaction as one indivisible
-            // intent. The old destination never becomes observable after this write.
-            self.pending_relocation.set(Some(relocation));
-            self.presentation_target_position
-                .set(relocation.presentation_target);
+            drop(client_view);
             self.input.borrow_mut().clear();
+            self.simulation_accumulator.set(0.0);
         }
 
         fn profile_step_relocation(
@@ -2613,33 +2537,6 @@ mod web {
             }
         }
 
-        fn try_commit_pending_relocation(
-            &self,
-            camera: &mut CameraState,
-        ) -> Option<crate::PendingRelocation> {
-            let relocation = self
-                .pending_relocation
-                .get()
-                .map(|relocation| self.refresh_profile_relocation(relocation))?;
-            let envelope =
-                self.virtual_terrain_presentation_envelope(relocation.presentation_target);
-            let readiness = self.relocation_readiness(relocation, &envelope);
-            let mut pending = Some(relocation);
-            let committed = crate::take_ready_relocation(&mut pending, readiness);
-            self.pending_relocation.set(pending);
-            let relocation = committed?;
-            *camera = relocation.destination;
-            if let Some(profile) = relocation.profile_after_commit {
-                *self.profile.borrow_mut() = profile;
-            }
-            if relocation.kind == crate::PendingRelocationKind::ProfileStep {
-                self.simulation_accumulator.set(
-                    (self.simulation_accumulator.get() - self.config.fixed_step_seconds).max(0.0),
-                );
-            }
-            Some(relocation)
-        }
-
         fn start_profile(&self, profile_id: u32) -> bool {
             match profile_id {
                 1 => self.start_stream_profile(ProfileRoute::Loop),
@@ -2652,19 +2549,50 @@ mod web {
         }
 
         fn start_stream_profile(&self, route: ProfileRoute) -> bool {
-            if self.pending_relocation.get().is_some() || self.reproduction_camera.get().is_some() {
+            if self.pending_relocation.get().is_some()
+                || self.client_view.borrow().current().session_kind()
+                    == crate::client_view::ClientViewSessionKind::Reproduction
+            {
                 log_gpu_error("cannot start a streaming profile during an exceptional relocation");
                 return false;
             }
             self.input.borrow_mut().clear();
-            let camera = *self.camera.borrow();
+            let camera = self.client_view.borrow().camera();
             let position = camera.position;
-            self.profile_restore_camera.set(Some(camera));
-            self.profile.borrow_mut().start_route_at_speed(
+            let mut automation = *self.profile.borrow();
+            automation.start_route_at_speed(
                 position,
                 route,
                 (route == ProfileRoute::Straight).then_some(PLAYER_SPRINT_SPEED_METRES_PER_SECOND),
             );
+            let (source, target) = {
+                let client_view = self.client_view.borrow();
+                let Some(target) = client_view.current().begin_profile(camera, automation) else {
+                    log_gpu_error("cannot start a profile while a synthetic session owns the view");
+                    return false;
+                };
+                (client_view.published(), target)
+            };
+            let published = match self
+                .renderer
+                .borrow_mut()
+                .transition_client_view_in_locus(source, target.presentation_state())
+            {
+                Ok(published) => published,
+                Err(error) => {
+                    log_gpu_error(&format!("start profile client view: {error}"));
+                    return false;
+                }
+            };
+            if !self
+                .client_view
+                .borrow_mut()
+                .commit_in_locus(source, target, published)
+            {
+                log_gpu_error("profile start lost the exact source presentation");
+                return false;
+            }
+            *self.profile.borrow_mut() = automation;
             self.profile_tracked_high.set(0);
             self.profile_pending_high.set(0);
             self.profile_pending_mesh_high.set(0);
@@ -2680,6 +2608,11 @@ mod web {
             self.frame_sequence.set(frame_sequence);
             let performance = self.scope.performance();
             let cpu_start = performance_now(performance.as_ref());
+            if !self.synchronize_client_view_from_renderer() {
+                log_gpu_error("renderer/client-view session identity diverged");
+                self.stopped.set(true);
+                return;
+            }
             self.apply_server_edits();
             let last = self.last_time.replace(time);
             let dt = if last <= 0.0 {
@@ -2694,6 +2627,14 @@ mod web {
             let spectator_available = self.spectator_available();
             let gliding_available = self.gliding_available();
             let mut camera = self.camera.borrow_mut();
+            *camera = self.client_view.borrow().camera();
+            let pending_look = self.pending_look.replace(Vec2::ZERO);
+            if matches!(
+                self.client_view.borrow().current().session(),
+                ClientViewSession::Interactive(_)
+            ) {
+                camera.look(pending_look);
+            }
             let committed_locus = self.renderer.borrow().virtual_terrain_committed_locus();
             let retained_target = self.presentation_target_position.get();
             let mut presentation_gate_active = committed_locus
@@ -2703,75 +2644,68 @@ mod web {
             } else {
                 camera.position
             };
-            if self.profile.borrow().phase() == ProfilePhase::Complete
-                && self.pending_relocation.get().is_none()
-                && self.reproduction_camera.get().is_none()
-                && let Some(restore) = self.profile_restore_camera.take()
+            if self
+                .client_view
+                .borrow()
+                .current()
+                .profile()
+                .is_some_and(|profile| profile.automation.phase() == ProfilePhase::Complete)
+                && self.client_view.borrow().goal().is_none()
             {
-                self.begin_relocation(crate::PendingRelocation {
-                    kind: crate::PendingRelocationKind::ProfileRestore,
-                    destination: restore,
-                    presentation_target: restore.position,
-                    profile_after_commit: None,
-                    destination_resolved: true,
-                });
+                let target = self.client_view.borrow().current().restore_interactive();
+                self.client_view
+                    .borrow_mut()
+                    .replace_goal(ClientViewGoalKind::ProfileRestore, target);
                 self.simulation_accumulator.set(0.0);
             }
             camera.set_gliding_available(gliding_available);
-            let reproducing = self.reproduction_camera.get().is_some();
-            if !reproducing
-                && !spectator_available
-                && camera.locomotion() == LocomotionMode::Spectator
-                && self.pending_relocation.get().is_none()
+            let reproducing = self.client_view.borrow().current().session_kind()
+                == crate::client_view::ClientViewSessionKind::Reproduction;
+            if !spectator_available
+                && self.client_view.borrow().current().session_kind()
+                    == crate::client_view::ClientViewSessionKind::Spectator
+                && self.client_view.borrow().goal().is_none()
             {
-                let destination =
-                    crate::spectator_exit_destination(*camera, self.spectator_body.take());
-                self.begin_relocation(crate::PendingRelocation {
-                    kind: crate::PendingRelocationKind::SpectatorExit,
-                    destination,
-                    presentation_target: destination.position,
-                    profile_after_commit: None,
-                    destination_resolved: true,
-                });
-                self.simulation_accumulator.set(0.0);
+                let _ = self.set_spectator(false);
+                *camera = self.client_view.borrow().camera();
             }
 
             if let Some(relocation) = self.pending_relocation.get() {
+                let relocation = self.refresh_profile_relocation(relocation);
+                self.pending_relocation.set(Some(relocation));
                 presentation_target_position = relocation.presentation_target;
-                if let Some(relocation) = self.try_commit_pending_relocation(&mut camera) {
-                    presentation_target_position = relocation.presentation_target;
-                    presentation_gate_active = false;
-                } else {
-                    presentation_target_position = self
-                        .pending_relocation
-                        .get()
-                        .map(|relocation| relocation.presentation_target)
-                        .unwrap_or(presentation_target_position);
-                    presentation_gate_active = true;
+                if self.client_view.borrow().goal().is_none()
+                    && relocation.destination_resolved
+                    && relocation.kind == crate::PendingRelocationKind::ProfileStep
+                    && let Some(profile) = relocation.profile_after_commit
+                    && let Some(target) = self
+                        .client_view
+                        .borrow()
+                        .current()
+                        .with_profile_step(relocation.destination, profile)
+                {
+                    self.client_view
+                        .borrow_mut()
+                        .replace_goal(ClientViewGoalKind::ProfileStep, target);
                 }
+                presentation_gate_active = true;
             }
 
             let relocation_pending = self.pending_relocation.get().is_some();
-            if !relocation_pending && let Some(reproduction_camera) = self.reproduction_camera.get()
-            {
-                *camera = reproduction_camera;
-                presentation_target_position = self
-                    .reproduction_presentation_target
-                    .get()
-                    .unwrap_or(reproduction_camera.position);
+            if !relocation_pending && reproducing {
+                *camera = self.client_view.borrow().camera();
+                presentation_target_position = camera.position;
                 presentation_gate_active = committed_locus.is_some_and(|locus| {
                     !locus.contains_position(presentation_target_position.to_array())
                 });
                 self.input.borrow_mut().clear();
             }
-            let profiling = !reproducing
-                && crate::profile_owns_camera(
-                    self.profile.borrow().running(),
-                    self.profile_restore_camera.get().is_some(),
-                    self.pending_relocation
-                        .get()
-                        .map(|relocation| relocation.kind),
-                );
+            let active_profile = self.client_view.borrow().current().profile();
+            let profiling = active_profile.is_some();
+            debug_assert_eq!(
+                active_profile.map(|profile| profile.automation.phase()),
+                profiling.then(|| self.profile.borrow().phase())
+            );
             let mut accumulator = if relocation_pending {
                 self.simulation_accumulator.get()
             } else if reproducing {
@@ -2802,6 +2736,22 @@ mod web {
                     next_profile.advance_fixed_step();
                     if let Some(relocation) = self.profile_step_relocation(*camera, next_profile) {
                         presentation_target_position = relocation.presentation_target;
+                        if next_profile.phase() == ProfilePhase::Drain {
+                            if relocation.destination_resolved
+                                && let Some(target) = self
+                                    .client_view
+                                    .borrow()
+                                    .current()
+                                    .with_profile_step(relocation.destination, next_profile)
+                            {
+                                self.client_view
+                                    .borrow_mut()
+                                    .replace_goal(ClientViewGoalKind::ProfileStep, target);
+                            }
+                            self.pending_relocation.set(Some(relocation));
+                            presentation_gate_active = true;
+                            break;
+                        }
                         let envelope = self
                             .virtual_terrain_presentation_envelope(relocation.presentation_target);
                         let readiness = self.relocation_readiness(relocation, &envelope);
@@ -2809,9 +2759,57 @@ mod web {
                         if let Some(relocation) =
                             crate::take_ready_relocation(&mut pending, readiness)
                         {
-                            *camera = relocation.destination;
-                            *self.profile.borrow_mut() = next_profile;
+                            let (source, target) = {
+                                let client_view = self.client_view.borrow();
+                                let Some(target) = client_view
+                                    .current()
+                                    .with_profile_step(relocation.destination, next_profile)
+                                else {
+                                    log_gpu_error(
+                                        "profile step lost ownership of the client-view session",
+                                    );
+                                    break;
+                                };
+                                (client_view.published(), target)
+                            };
+                            match self.renderer.borrow_mut().transition_client_view_in_locus(
+                                source,
+                                target.presentation_state(),
+                            ) {
+                                Ok(published) => {
+                                    if self
+                                        .client_view
+                                        .borrow_mut()
+                                        .commit_in_locus(source, target, published)
+                                    {
+                                        *camera = relocation.destination;
+                                        *self.profile.borrow_mut() = next_profile;
+                                    } else {
+                                        log_gpu_error(
+                                            "profile step lost the exact source presentation",
+                                        );
+                                        break;
+                                    }
+                                }
+                                Err(error) => {
+                                    log_gpu_error(&format!(
+                                        "publish in-locus profile step: {error}"
+                                    ));
+                                    break;
+                                }
+                            }
                         } else {
+                            if relocation.destination_resolved
+                                && let Some(target) = self
+                                    .client_view
+                                    .borrow()
+                                    .current()
+                                    .with_profile_step(relocation.destination, next_profile)
+                            {
+                                self.client_view
+                                    .borrow_mut()
+                                    .replace_goal(ClientViewGoalKind::ProfileStep, target);
+                            }
                             self.pending_relocation.set(pending);
                             presentation_gate_active = true;
                             break;
@@ -2869,6 +2867,38 @@ mod web {
             }
             self.presentation_target_position
                 .set(presentation_target_position);
+            if !relocation_pending {
+                let (source, next) = {
+                    let client_view = self.client_view.borrow();
+                    (
+                        client_view.published(),
+                        client_view.current().with_camera(*camera),
+                    )
+                };
+                match self
+                    .renderer
+                    .borrow_mut()
+                    .advance_client_view_in_locus(source, *camera)
+                {
+                    Ok(published) => {
+                        let committed = self
+                            .client_view
+                            .borrow_mut()
+                            .commit_in_locus(source, next, published);
+                        debug_assert!(committed);
+                    }
+                    Err(
+                        voxels_render::renderer::ClientViewCommitError::CameraOutsidePresentationLocus,
+                    ) => {
+                        self.client_view
+                            .borrow_mut()
+                            .replace_goal(ClientViewGoalKind::Recenter, next);
+                    }
+                    Err(error) => {
+                        log_gpu_error(&format!("advance client view in locus: {error}"));
+                    }
+                }
+            }
             if time - self.last_enclosure_probe.get() >= self.config.enclosure_probe_interval_ms {
                 let probe_start = performance_now(performance.as_ref());
                 let key_light_direction = self.renderer.borrow().key_light_direction();
@@ -2937,26 +2967,39 @@ mod web {
                 &prediction_domain,
                 performance.as_ref(),
             );
-            if self.pending_relocation.get().is_some() {
-                if let Some(relocation) = self.try_commit_pending_relocation(&mut camera) {
-                    presentation_target_position = relocation.presentation_target;
-                } else if let Some(relocation) = self.pending_relocation.get() {
-                    presentation_target_position = relocation.presentation_target;
+            {
+                let client_view = self.client_view.borrow();
+                // A target may be streaming in an overlapping locus while the source presentation
+                // remains active. Reconcile every shell-side consumer to that actual source camera;
+                // only the explicit presentation target may observe the pending goal.
+                *camera = client_view.camera();
+                if client_view.goal().is_none() {
+                    let committed = client_view.current();
+                    if let Some(profile) = committed.profile() {
+                        *self.profile.borrow_mut() = profile.automation;
+                    }
+                    if self.pending_relocation.get().is_some_and(|relocation| {
+                        relocation.kind == crate::PendingRelocationKind::ProfileStep
+                    }) {
+                        self.pending_relocation.set(None);
+                    }
                 }
-                self.presentation_target_position
-                    .set(presentation_target_position);
+                presentation_target_position = client_view.target_camera().position;
             }
+            self.presentation_target_position
+                .set(presentation_target_position);
             let presence_start = performance_now(performance.as_ref());
             if let Some(opened) = self.remote.world_opened() {
                 self.presence.ensure_session(&opened, time);
                 self.environment_snapshot.set(opened.environment);
             }
-            // The streaming profiler moves a synthetic camera outside gameplay simulation. It may
-            // stream/render that route, but it must never update authoritative player position or
-            // gain edit reach from benchmark-only motion.
-            let remote_avatars =
-                self.presence
-                    .update(&camera, time, dt, !profiling && !reproducing);
+            let presence_camera = self.client_view.borrow().current().presence_camera();
+            let remote_avatars = self.presence.update(
+                presence_camera.as_ref().unwrap_or(&camera),
+                time,
+                dt,
+                presence_camera.is_some(),
+            );
             if let Some(error) = self.presence.take_error() {
                 log_gpu_error(&format!("player presence: {error}"));
             }
@@ -2965,32 +3008,17 @@ mod web {
             let stream_ms = (performance_now(performance.as_ref()) - stream_start) as f32;
             self.stream_milliseconds
                 .set(smoothed_ms(self.stream_milliseconds.get(), stream_ms));
-            let target = if reproducing || camera.locomotion() == LocomotionMode::Spectator {
+            let target = if !self.client_view.borrow().current().can_edit() {
                 None
             } else {
                 let shape = self.renderer.borrow().edit_shape();
                 self.dig_target(&camera, shape)
-            };
-            let profile_drain_readiness = if self.profile.borrow().phase() == ProfilePhase::Drain {
-                self.relocation_readiness(
-                    crate::PendingRelocation {
-                        kind: crate::PendingRelocationKind::ProfileStep,
-                        destination: *camera,
-                        presentation_target: camera.position,
-                        profile_after_commit: None,
-                        destination_resolved: true,
-                    },
-                    &presentation_envelope,
-                )
-            } else {
-                crate::RelocationReadiness::default()
             };
             let mut renderer = self.renderer.borrow_mut();
             if renderer.screenshot_pending() {
                 renderer.set_screenshot_streaming_manifest(self.screenshot_streaming_manifest());
             }
             renderer.set_spectator_available(spectator_available);
-            renderer.set_spectator_active(camera.locomotion() == LocomotionMode::Spectator);
             renderer.set_remote_avatars(&remote_avatars);
             renderer.set_dig_target(target.map(|(hit, volume)| (hit.voxel, volume)));
             let server_time_ms = self.presence.estimated_server_time_ms(time);
@@ -3034,7 +3062,6 @@ mod web {
             let submitted = renderer.render(
                 frame_sequence,
                 dt,
-                &camera,
                 LiveStats {
                     navigation: NavigationTelemetry {
                         eye_position_metres: camera.position.to_array(),
@@ -3110,7 +3137,7 @@ mod web {
                 },
                 || performance_now(performance.as_ref()),
             );
-            if submitted
+            if submitted.is_some()
                 && terrain_ready
                 && self
                     .scheduler
@@ -3123,7 +3150,7 @@ mod web {
             drop(chunks);
             let rendered = renderer.diagnostics();
             drop(renderer);
-            self.update_edit_convergence(time, submitted);
+            self.update_edit_convergence(time, submitted.is_some());
             if self.profile.borrow().phase() != ProfilePhase::Idle {
                 let pending = stream.generation.queued
                     + stream.generation.in_flight
@@ -3147,14 +3174,17 @@ mod web {
                 );
                 self.profile_wasm_high
                     .set(self.profile_wasm_high.get().max(wasm_committed_bytes()));
-                if self.profile.borrow().phase() == ProfilePhase::Drain
-                    && crate::profile_drain_can_complete(
-                        self.pending_relocation.get().is_some(),
-                        profile_drain_readiness,
-                        submitted,
-                    )
+                let terminal_completed = {
+                    let mut client_view = self.client_view.borrow_mut();
+                    client_view.terminal_profile_attempt().is_some()
+                        && client_view.observe_terminal_submission(|published| {
+                            submitted.is_some_and(|frame| frame.matches(published))
+                        })
+                };
+                if terminal_completed
+                    && let Some(profile) = self.client_view.borrow().current().profile()
                 {
-                    self.profile.borrow_mut().complete_drain();
+                    *self.profile.borrow_mut() = profile.automation;
                 }
             }
             let render_ms = (performance_now(performance.as_ref()) - render_start) as f32;
@@ -3942,6 +3972,77 @@ mod web {
             roots
         }
 
+        fn try_commit_client_view_attempt(&self) {
+            let ready_attempt = {
+                let client_view = self.client_view.borrow();
+                let Some(goal) = client_view.goal() else {
+                    return;
+                };
+                let Some(attempt) = client_view.attempt() else {
+                    return;
+                };
+                let Some(canonical) = attempt.canonical().ready_receipt(&self.scheduler.borrow())
+                else {
+                    return;
+                };
+                (
+                    goal.version(),
+                    goal.target(),
+                    attempt.key(),
+                    *attempt.request(),
+                    canonical,
+                )
+            };
+            let (goal_version, target, key, request, canonical) = ready_attempt;
+            if canonical.key() != key
+                || !canonical.fence().is_current(&self.edit_revisions.borrow())
+            {
+                self.client_view.borrow_mut().discard_attempt(key);
+                return;
+            }
+            let ready = match self.renderer.borrow().poll_virtual_terrain_ready(request) {
+                VirtualTerrainReadyStatus::Pending => return,
+                VirtualTerrainReadyStatus::Stale => {
+                    self.client_view.borrow_mut().discard_attempt(key);
+                    return;
+                }
+                VirtualTerrainReadyStatus::Ready(ready) => ready,
+            };
+            let still_exact = {
+                let client_view = self.client_view.borrow();
+                client_view
+                    .goal()
+                    .is_some_and(|goal| goal.version() == goal_version)
+                    && client_view
+                        .attempt()
+                        .is_some_and(|attempt| attempt.key() == key)
+            };
+            if !still_exact {
+                return;
+            }
+            let committed = {
+                let revisions = self.edit_revisions.borrow();
+                self.renderer.borrow_mut().commit_virtual_client_view(
+                    ready,
+                    &revisions,
+                    target.presentation_state(),
+                )
+            };
+            match committed {
+                Ok(published) => {
+                    if !self.client_view.borrow_mut().commit_attempt(key, published) {
+                        log_gpu_error(
+                            "client-view commit completed for a superseded coordinator attempt",
+                        );
+                    }
+                }
+                Err(error) => {
+                    self.client_view.borrow_mut().discard_attempt(key);
+                    log_gpu_error(&format!("commit client-view publication: {error}"));
+                }
+            }
+        }
+
         fn stream_virtual_terrain(
             &self,
             camera: &CameraState,
@@ -3953,32 +4054,8 @@ mod web {
                 return;
             }
             let exact_surface_domain = presentation_envelope.exact_surface_domain();
-            // Explicit admission of the exact shell-held request is the first renderer mutation of
-            // the frame. Cache, directory, and source-geometry mutations happen only afterward.
-            let publication_request = self.virtual_terrain.borrow().publication_request;
-            if let Some(request) = publication_request {
-                let status = {
-                    let revisions = self.edit_revisions.borrow();
-                    self.renderer
-                        .borrow_mut()
-                        .try_promote_virtual_terrain(request, &revisions)
-                };
-                match status {
-                    Ok(VirtualTerrainPromotionStatus::Pending) => {}
-                    Ok(
-                        VirtualTerrainPromotionStatus::Promoted(_)
-                        | VirtualTerrainPromotionStatus::Stale,
-                    ) => {
-                        let mut state = self.virtual_terrain.borrow_mut();
-                        if state.publication_request == Some(request) {
-                            state.publication_request = None;
-                        }
-                    }
-                    Err(error) => {
-                        log_gpu_error(&format!("promote virtual terrain publication: {error}"));
-                    }
-                }
-            }
+            // The exact attempt is the only owner allowed to replace the presented tuple.
+            self.try_commit_client_view_attempt();
             let (publication_in_flight, publication_owns_geometry) = {
                 let renderer = self.renderer.borrow();
                 (
@@ -4091,7 +4168,10 @@ mod web {
                 VIRTUAL_TERRAIN_MAX_DIRECTORY_BATCHES_IN_FLIGHT,
             );
 
-            let view = self.virtual_terrain_view(camera);
+            let mut view = self.virtual_terrain_view(camera);
+            if self.renderer.borrow().virtual_terrain_cut().is_none() {
+                view = view.ownership_only();
+            }
             let mut cut = match self
                 .renderer
                 .borrow_mut()
@@ -4103,6 +4183,25 @@ mod web {
                     return;
                 }
             };
+            if !publication_in_flight && cut.is_renderable() {
+                // Expanded GPU meshes are an evictable derivative of the validated logical pages
+                // already held by the renderer. Rebuild the selected target locally; putting these
+                // keys back through the transport scheduler creates a redundant round trip and can
+                // leave an otherwise complete cut behind an unrelated request lease.
+                if let Err(error) = self
+                    .renderer
+                    .borrow_mut()
+                    .rebuild_selected_virtual_terrain_gpu_pages(
+                        &cut,
+                        VIRTUAL_TERRAIN_GPU_REBUILDS_PER_FRAME,
+                    )
+                {
+                    log_gpu_error(&format!(
+                        "rebuild selected virtual terrain GPU pages: {error}"
+                    ));
+                    return;
+                }
+            }
             if !publication_in_flight
                 && let Err(error) = self.hydrate_virtual_terrain_from_cache(
                     &mut cut,
@@ -4161,7 +4260,28 @@ mod web {
                     .prepare_virtual_terrain_publication()
                 {
                     Ok(Some(request)) => {
-                        self.virtual_terrain.borrow_mut().publication_request = Some(request);
+                        let mut client_view = self.client_view.borrow_mut();
+                        let goal_version = client_view.goal().map_or_else(
+                            || {
+                                let target = client_view.current();
+                                client_view.replace_goal(ClientViewGoalKind::Recenter, target)
+                            },
+                            |goal| goal.version(),
+                        );
+                        if client_view.attempt().is_none() {
+                            let target = client_view
+                                .goal()
+                                .map(|goal| goal.target())
+                                .unwrap_or_else(|| client_view.current());
+                            let (collision, enclosed) =
+                                self.relocation_canonical_interests(&target.camera());
+                            let _ = client_view.install_attempt(
+                                goal_version,
+                                request,
+                                collision,
+                                enclosed,
+                            );
+                        }
                     }
                     Ok(None) => {}
                     Err(error) => match error {
@@ -4240,31 +4360,7 @@ mod web {
                 }
             }
 
-            let committed_covers_domain = {
-                let renderer = self.renderer.borrow();
-                renderer
-                    .virtual_terrain_committed_covers_presentation_envelope(presentation_envelope)
-            };
-            if committed_covers_domain
-                && self.renderer.borrow().virtual_terrain_render_mode()
-                    != VirtualTerrainRenderMode::Visible
-            {
-                match self
-                    .renderer
-                    .borrow_mut()
-                    .set_virtual_terrain_render_mode(VirtualTerrainRenderMode::Visible)
-                {
-                    Ok(()) => {}
-                    Err(
-                        VirtualTerrainRendererError::GpuCutNotCertified
-                        | VirtualTerrainRendererError::NoRenderableCut
-                        | VirtualTerrainRendererError::SelectedPageMissingGpu(_),
-                    ) => {}
-                    Err(error) => {
-                        log_gpu_error(&format!("publish virtual terrain cut: {error}"));
-                    }
-                }
-            }
+            self.try_commit_client_view_attempt();
         }
 
         fn request_virtual_terrain_columns(&self, desired_columns: &[[i32; 2]], now_ms: u64) {
@@ -4856,8 +4952,8 @@ mod web {
                     continue;
                 }
                 let is_refinement = root.is_surface() && root.level < TERRAIN_COVERAGE_ROOT_LEVEL;
-                let bootstrap = match item.result {
-                    Ok(bootstrap) => bootstrap,
+                let directory = match item.result {
+                    Ok(directory) => directory,
                     Err(error) => {
                         let mut state = self.virtual_terrain.borrow_mut();
                         state.stats.directory_other_failed =
@@ -4880,8 +4976,7 @@ mod web {
                     .get(&root)
                     .copied()
                     .unwrap_or(0);
-                let directory_revision = bootstrap
-                    .directory
+                let directory_revision = directory
                     .nodes
                     .iter()
                     .find(|node| node.key == root && node.is_root)
@@ -4902,36 +4997,16 @@ mod web {
                 let publication = {
                     let mut renderer = self.renderer.borrow_mut();
                     if is_refinement {
-                        renderer.register_virtual_terrain_refinement_directory(&bootstrap.directory)
+                        renderer.register_virtual_terrain_refinement_directory(&directory)
                     } else {
-                        // Directory completion publishes metadata and encoded cache state only.
-                        // Geometry admission is serialized by `stream_virtual_terrain` after any
-                        // frozen GPU transaction has promoted.
-                        renderer.register_virtual_terrain_directory(&bootstrap.directory)
+                        // Directory completion publishes topology only. Geometry admission is
+                        // serialized by `stream_virtual_terrain` after any frozen GPU transaction
+                        // has promoted.
+                        renderer.register_virtual_terrain_directory(&directory)
                     }
                 };
                 match publication {
                     Ok(()) => {
-                        if !is_refinement {
-                            match encode_terrain_page(&bootstrap.root_page) {
-                                Ok(encoded) => {
-                                    if let Err(error) = self
-                                        .virtual_terrain_cache
-                                        .borrow_mut()
-                                        .insert(encoded, false)
-                                    {
-                                        log_gpu_error(&format!(
-                                            "cache virtual terrain bootstrap root: {error}"
-                                        ));
-                                    }
-                                }
-                                Err(error) => {
-                                    log_gpu_error(&format!(
-                                        "encode virtual terrain bootstrap root: {error}"
-                                    ));
-                                }
-                            }
-                        }
                         let mut state = self.virtual_terrain.borrow_mut();
                         if is_refinement {
                             state.registered_refinements.insert(root);
@@ -4942,7 +5017,7 @@ mod web {
                             state.stats.directory_accepted.saturating_add(1);
                         state.directory_retry_after_ms.remove(&root);
                         state.minimum_region_revisions.remove(&root);
-                        for mut node in bootstrap.directory.nodes {
+                        for mut node in directory.nodes {
                             if is_refinement {
                                 node.is_root = false;
                             }
@@ -5524,48 +5599,69 @@ mod web {
             let Some(HostUiAction::SpectatorRequested(requested)) = action else {
                 return;
             };
+            if !self.synchronize_client_view_from_renderer() {
+                log_gpu_error("cannot apply UI action to a divergent client view");
+                return;
+            }
             self.set_spectator(requested);
         }
 
         fn set_spectator(&self, requested: bool) -> bool {
             let active = requested && self.spectator_available();
             self.input.borrow_mut().clear();
-            let mut camera = self.camera.borrow_mut();
-            let was_active = camera.locomotion() == LocomotionMode::Spectator;
-            if active && !was_active {
-                self.spectator_body.set(Some(*camera));
-                camera.set_locomotion(LocomotionMode::Spectator);
-            } else if !active && was_active {
-                if self.pending_relocation.get().is_none_or(|relocation| {
-                    relocation.kind != crate::PendingRelocationKind::SpectatorExit
-                }) {
-                    let destination =
-                        crate::spectator_exit_destination(*camera, self.spectator_body.take());
-                    self.begin_relocation(crate::PendingRelocation {
-                        kind: crate::PendingRelocationKind::SpectatorExit,
-                        destination,
-                        presentation_target: destination.position,
-                        profile_after_commit: None,
-                        destination_resolved: true,
-                    });
-                    self.simulation_accumulator.set(0.0);
-                }
-            } else if active
-                && was_active
-                && let Some(relocation) = self.pending_relocation.get()
-                && relocation.kind == crate::PendingRelocationKind::SpectatorExit
-            {
-                // Re-enabling spectator before the atomic exit commits cancels that exact
-                // transaction and restores its saved body as the next possible exit target.
-                self.spectator_body.set(Some(relocation.destination));
-                self.pending_relocation.set(None);
-                self.presentation_target_position.set(camera.position);
+            let (source, target, kind, was_active) = {
+                let client_view = self.client_view.borrow();
+                let source = client_view.published();
+                let current = client_view.current();
+                let was_active = matches!(
+                    current.session(),
+                    ClientViewSession::Interactive(
+                        crate::client_view::InteractiveView::Spectator { .. }
+                    )
+                );
+                let target = if active {
+                    current.enter_spectator()
+                } else {
+                    current.leave_spectator()
+                };
+                let kind = if active {
+                    ClientViewGoalKind::SpectatorEnter
+                } else {
+                    ClientViewGoalKind::SpectatorExit
+                };
+                (source, target, kind, was_active)
+            };
+            if active == was_active {
+                return was_active;
             }
-            let active = camera.locomotion() == LocomotionMode::Spectator;
-            self.presence.send_pose_now(&camera, self.last_time.get());
-            drop(camera);
-            self.renderer.borrow_mut().set_spectator_active(active);
-            active
+            let transitioned = self
+                .renderer
+                .borrow_mut()
+                .transition_client_view_in_locus(source, target.presentation_state());
+            match transitioned {
+                Ok(published) => {
+                    let committed = self
+                        .client_view
+                        .borrow_mut()
+                        .commit_in_locus(source, target, published);
+                    debug_assert!(committed);
+                }
+                Err(
+                    voxels_render::renderer::ClientViewCommitError::CameraOutsidePresentationLocus,
+                ) => {
+                    self.client_view.borrow_mut().replace_goal(kind, target);
+                }
+                Err(error) => {
+                    log_gpu_error(&format!("transition spectator client view: {error}"));
+                    return was_active;
+                }
+            }
+            self.simulation_accumulator.set(0.0);
+            let current = self.client_view.borrow().current();
+            if let Some(camera) = current.presence_camera() {
+                self.presence.send_pose_now(&camera, self.last_time.get());
+            }
+            current.session_kind() == crate::client_view::ClientViewSessionKind::Spectator
         }
 
         fn feed_input(&self, bytes: &[u8]) -> bool {
@@ -5636,9 +5732,13 @@ mod web {
                                 .borrow_mut()
                                 .handle_ui_pointer_move(record.x, record.y);
                         } else {
-                            self.camera
-                                .borrow_mut()
-                                .look(Vec2::new(record.dx, record.dy));
+                            let delta = Vec2::new(record.dx, record.dy);
+                            let pending = self.pending_look.get();
+                            self.pending_look.set(if (pending + delta).is_finite() {
+                                pending + delta
+                            } else {
+                                Vec2::ZERO
+                            });
                         }
                     }
                     KIND_WHEEL => {
@@ -5809,7 +5909,7 @@ mod web {
         }
 
         fn submit_local_edit(&self, action: EditAction) -> [usize; 2] {
-            if self.camera.borrow().locomotion() == LocomotionMode::Spectator {
+            if !self.client_view.borrow().current().can_edit() {
                 return [0, 0];
             }
             match self.remote.submit_edit(action) {
@@ -6122,7 +6222,7 @@ mod web {
             )
         }
 
-        /// Applies one embedded `voxels.reproduction.v2` document atomically. An empty return
+        /// Applies one embedded `voxels.reproduction.v3` document atomically. An empty return
         /// value means success; a non-empty value explains the exact identity or state mismatch.
         pub fn apply_reproduction(&self, metadata: &str) -> String {
             let Some(engine) = self.engine.as_ref() else {
@@ -6713,11 +6813,19 @@ mod web {
                     (cache.len(), cache.resident_bytes())
                 };
                 let presentation_target = engine.presentation_target_position.get();
-                let presentation_gate_active = engine
-                    .renderer
-                    .borrow()
-                    .virtual_terrain_committed_locus()
-                    .is_some_and(|locus| !locus.contains_position(presentation_target.to_array()));
+                let (presented_camera_inside_committed_envelope, presentation_gate_active) = {
+                    let renderer = engine.renderer.borrow();
+                    (
+                        renderer.virtual_terrain_committed_contains_position(
+                            camera.position.to_array(),
+                        ),
+                        renderer
+                            .virtual_terrain_committed_locus()
+                            .is_some_and(|locus| {
+                                !locus.contains_position(presentation_target.to_array())
+                            }),
+                    )
+                };
                 let presentation_gate_steps = engine.presentation_gate_steps.get();
                 let presentation_gate_frames = engine.presentation_gate_frames.get();
                 values.extend_from_slice(&[
@@ -7045,6 +7153,11 @@ mod web {
                     render.virtual_terrain_committed_locus_minimum_leaf[1] as f32,
                     render.virtual_terrain_committed_locus_maximum_leaf_exclusive[0] as f32,
                     render.virtual_terrain_committed_locus_maximum_leaf_exclusive[1] as f32,
+                    if presented_camera_inside_committed_envelope {
+                        1.0
+                    } else {
+                        0.0
+                    },
                     presentation_target.x,
                     presentation_target.y,
                     presentation_target.z,
@@ -7278,6 +7391,12 @@ mod web {
             protocol_version: voxels_world::protocol::PROTOCOL_VERSION,
             client_config_hash,
         });
+        let initial_client_view =
+            ClientViewState::gameplay(camera, renderer.current_mutable_render_state());
+        let initial_client_view_receipt = renderer
+            .initialize_client_view(initial_client_view.presentation_state())
+            .map_err(|error| JsValue::from_str(&format!("initialize client view: {error}")))?;
+        let client_view = ActiveClientView::new(initial_client_view, initial_client_view_receipt);
         let scheduler = StreamScheduler::new(StreamConfig {
             load_radius_chunks: streaming.load_radius_chunks as i32,
             vertical_radius_chunks: streaming.vertical_radius_chunks as i32,
@@ -7301,12 +7420,13 @@ mod web {
         let engine = Rc::new(Engine {
             config: engine_config,
             renderer: RefCell::new(renderer),
+            client_view: RefCell::new(client_view),
             viewport_size: Cell::new([width, height]),
             camera: RefCell::new(camera),
+            pending_look: Cell::new(Vec2::ZERO),
             reproduction_camera: Cell::new(None),
             reproduction_presentation_target: Cell::new(None),
             reproduction_restore_camera: Cell::new(None),
-            spectator_body: Cell::new(None),
             pending_relocation: Cell::new(None),
             input: RefCell::new(InputState::default()),
             remote,
@@ -7502,7 +7622,7 @@ mod tests {
         let source = CameraState::spawn(glam::Vec3::new(1.0, 8.0, 1.0));
         let destination = CameraState::spawn(glam::Vec3::new(129.0, 12.0, -65.0));
         let mut pending = Some(pending_relocation(
-            PendingRelocationKind::ProfileRestore,
+            PendingRelocationKind::ProfileStep,
             destination,
             destination.position,
         ));
@@ -7583,198 +7703,6 @@ mod tests {
             .is_none()
         );
         assert!(pending.is_some());
-    }
-
-    #[test]
-    fn latest_relocation_supersedes_a_blocked_target_without_reversal_oscillation() {
-        let camera_b = CameraState::spawn(glam::Vec3::new(128.0, 8.0, 0.0));
-        let camera_a = CameraState::spawn(glam::Vec3::new(0.0, 8.0, 0.0));
-        let mut pending = Some(pending_relocation(
-            PendingRelocationKind::ReproductionApply,
-            camera_b,
-            camera_b.position,
-        ));
-        assert_eq!(
-            pending.as_ref().map(|relocation| relocation.kind),
-            Some(PendingRelocationKind::ReproductionApply)
-        );
-
-        pending = Some(pending_relocation(
-            PendingRelocationKind::ReproductionRestore,
-            camera_a,
-            camera_a.position,
-        ));
-        let committed = take_ready_relocation(
-            &mut pending,
-            RelocationReadiness {
-                presentation_envelope_committed: true,
-                destination_presentable: true,
-                canonical_destination_ready: true,
-            },
-        )
-        .expect("the replacement intent commits");
-        assert_eq!(committed.presentation_target, camera_a.position);
-        assert!(pending.is_none());
-    }
-
-    #[test]
-    fn profile_time_distance_and_drain_wait_for_terminal_pose_admission() {
-        let config = voxels_core::ProfileConfig {
-            fixed_step_seconds: 0.25,
-            speed_metres_per_second: 8.0,
-            warmup_seconds: 0.25,
-            measure_seconds: 0.0,
-        };
-        let mut admitted = voxels_core::ProfileAutomation::with_config(config);
-        admitted.start_route(glam::Vec3::ZERO, voxels_core::ProfileRoute::Straight);
-        let mut candidate = admitted;
-        candidate.advance_fixed_step();
-        assert_eq!(candidate.phase(), voxels_core::ProfilePhase::Drain);
-        assert_eq!(
-            candidate
-                .admission_pose()
-                .expect("Drain owns the exact terminal route pose")
-                .position_xz,
-            glam::Vec2::new(0.0, -2.0)
-        );
-
-        let destination = CameraState::spawn(glam::Vec3::new(0.0, 8.0, -2.0));
-        let mut relocation = pending_relocation(
-            PendingRelocationKind::ProfileStep,
-            destination,
-            destination.position,
-        );
-        relocation.profile_after_commit = Some(candidate);
-        let mut pending = Some(relocation);
-        assert!(
-            take_ready_relocation(
-                &mut pending,
-                RelocationReadiness {
-                    presentation_envelope_committed: false,
-                    destination_presentable: true,
-                    canonical_destination_ready: true,
-                },
-            )
-            .is_none()
-        );
-        assert_eq!(admitted.elapsed_seconds(), 0.0);
-        assert_eq!(admitted.distance_metres(), 0.0);
-        assert!(!profile_drain_can_complete(
-            true,
-            RelocationReadiness {
-                presentation_envelope_committed: true,
-                destination_presentable: true,
-                canonical_destination_ready: true,
-            },
-            true,
-        ));
-
-        let committed = take_ready_relocation(
-            &mut pending,
-            RelocationReadiness {
-                presentation_envelope_committed: true,
-                destination_presentable: true,
-                canonical_destination_ready: true,
-            },
-        )
-        .expect("terminal pose becomes observable only with its complete certificate");
-        admitted = committed
-            .profile_after_commit
-            .expect("profile state and camera hand off atomically");
-        assert_eq!(admitted.elapsed_seconds(), 0.25);
-        assert_eq!(admitted.distance_metres(), 2.0);
-        assert!(!profile_drain_can_complete(
-            false,
-            RelocationReadiness {
-                presentation_envelope_committed: false,
-                destination_presentable: true,
-                canonical_destination_ready: true,
-            },
-            true,
-        ));
-        assert!(!profile_drain_can_complete(
-            false,
-            RelocationReadiness {
-                presentation_envelope_committed: true,
-                destination_presentable: true,
-                canonical_destination_ready: true,
-            },
-            false,
-        ));
-        assert!(profile_drain_can_complete(
-            false,
-            RelocationReadiness {
-                presentation_envelope_committed: true,
-                destination_presentable: true,
-                canonical_destination_ready: true,
-            },
-            true,
-        ));
-        assert!(profile_owns_camera(
-            false,
-            false,
-            Some(PendingRelocationKind::ProfileRestore),
-        ));
-        assert!(
-            !profile_owns_camera(false, false, None),
-            "authority returns to gameplay only after the restore transaction commits"
-        );
-    }
-
-    #[test]
-    fn manual_spectator_exit_restores_saved_body_or_certifies_current_position() {
-        let mut spectator = CameraState::spawn(glam::Vec3::new(90.0, 40.0, -20.0));
-        spectator.set_locomotion(voxels_core::LocomotionMode::Spectator);
-        let body = CameraState::spawn(glam::Vec3::new(2.0, 8.0, 3.0));
-
-        let restored = spectator_exit_destination(spectator, Some(body));
-        assert_eq!(restored.position, body.position);
-        assert_eq!(restored.locomotion(), voxels_core::LocomotionMode::Walking);
-        let exit = pending_relocation(
-            PendingRelocationKind::SpectatorExit,
-            restored,
-            restored.position,
-        );
-        assert_eq!(exit.kind, PendingRelocationKind::SpectatorExit);
-
-        let in_place = spectator_exit_destination(spectator, None);
-        assert_eq!(in_place.position, spectator.position);
-        assert_eq!(in_place.locomotion(), voxels_core::LocomotionMode::Walking);
-    }
-
-    #[test]
-    fn gated_capture_replay_never_publishes_target_b_under_out_of_envelope_camera_a() {
-        let camera_a = CameraState::spawn(glam::Vec3::new(0.0, 8.0, 0.0));
-        let target_b = glam::Vec3::new(256.0, 8.0, -256.0);
-
-        let overlapping = reproduction_relocation_destination(camera_a, target_b, true);
-        assert_eq!(overlapping.position, camera_a.position);
-
-        let disjoint = reproduction_relocation_destination(camera_a, target_b, false);
-        assert_eq!(disjoint.position, target_b);
-        let mut pending = Some(pending_relocation(
-            PendingRelocationKind::ReproductionApply,
-            disjoint,
-            target_b,
-        ));
-        assert!(
-            take_ready_relocation(
-                &mut pending,
-                RelocationReadiness {
-                    presentation_envelope_committed: false,
-                    destination_presentable: false,
-                    canonical_destination_ready: false,
-                },
-            )
-            .is_none()
-        );
-        assert_eq!(
-            pending
-                .expect("replay retains B until publication")
-                .destination
-                .position,
-            target_b
-        );
     }
 
     #[test]

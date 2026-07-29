@@ -670,32 +670,6 @@ impl ExactSurfaceDomain {
                 .is_some_and(|pages| pages.contains(&key))
     }
 
-    pub fn intersects_page_margin(&self, key: TerrainPageKey, margin_pages: i32) -> bool {
-        if !self.data.core_complete || !key.is_surface() || margin_pages < 0 {
-            return false;
-        }
-        self.data
-            .ancestors_by_level
-            .get(usize::from(key.level))
-            .is_some_and(|pages| {
-                (-margin_pages..=margin_pages).any(|z| {
-                    (-margin_pages..=margin_pages).any(|x| {
-                        let Some(candidate_x) = key.coord[0].checked_add(x) else {
-                            return false;
-                        };
-                        let Some(candidate_z) = key.coord[2].checked_add(z) else {
-                            return false;
-                        };
-                        pages.contains(&TerrainPageKey::surface(
-                            key.level,
-                            candidate_x,
-                            candidate_z,
-                        ))
-                    })
-                })
-            })
-    }
-
     /// Clones share immutable enumeration storage. This is exposed for cache invariant tests.
     pub fn shares_storage_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.data, &other.data)
@@ -870,6 +844,17 @@ pub struct VirtualTerrainView {
 }
 
 impl VirtualTerrainView {
+    /// Preserves exact-domain and ownership refinement while disabling projected-error quality.
+    ///
+    /// Cold start uses this to publish the first mathematically complete cut before spending
+    /// bandwidth on optional visible detail. The ordinary view replaces it immediately after that
+    /// first cut commits.
+    pub fn ownership_only(mut self) -> Self {
+        self.refine_above_pixels = f64::MAX;
+        self.coarsen_below_pixels = f64::MAX / 2.0;
+        self
+    }
+
     pub fn validates(self) -> bool {
         self.camera_position_metres
             .into_iter()
@@ -1610,6 +1595,10 @@ impl VirtualTerrainHierarchy {
 
     pub fn resident_page(&self, key: TerrainPageKey) -> Option<&TerrainPageV1> {
         self.resident.get(&key).map(|resident| &resident.page)
+    }
+
+    pub fn resident_page_keys(&self) -> impl Iterator<Item = TerrainPageKey> + '_ {
+        self.resident.keys().copied()
     }
 
     pub fn resident_usage(&self) -> (usize, usize, usize) {
@@ -2493,9 +2482,6 @@ impl CutBuilder<'_> {
             return;
         };
         let exact_surface = self.exact_surface_domain.intersects_page(key);
-        let graded_surface = key.is_surface()
-            && key.level > 0
-            && self.exact_surface_domain.intersects_page_margin(key, 2);
         let required_horizon_owner = self
             .presentation_envelope
             .is_some_and(|envelope| envelope.requires_horizon_owner(key));
@@ -2550,10 +2536,10 @@ impl CutBuilder<'_> {
             self.view.refine_above_pixels
         };
         let projected_error = projected_page_error_pixels(&node, self.view);
+        let quality_visible = page_is_visible(node.bounds, self.view);
         let wants_more_detail = self.view.force_exact_leaves
             || exact_surface
-            || graded_surface
-            || projected_error > threshold;
+            || (quality_visible && projected_error > threshold);
         if wants_more_detail && !node.has_children && key.is_surface() && key.level > 0 {
             if self.refinement_requests.len() < self.hierarchy.capacity.max_feedback_pages {
                 self.refinement_requests.insert(key);
@@ -3089,20 +3075,18 @@ mod tests {
     #[test]
     fn presentation_selection_visits_required_horizon_owners_behind_the_camera() {
         let behind_root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -2, 0);
-        let page = surface_page(behind_root);
-        let directory = TerrainHierarchyDirectoryV1::from_pages(std::slice::from_ref(&page))
-            .expect("single complete coverage root directory");
+        let (directory, pages) = surface_segment(behind_root);
         let mut hierarchy =
             VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
         hierarchy.register_region_directory(&directory).unwrap();
-        hierarchy.install_page(page).unwrap();
+        for page in pages {
+            hierarchy.install_page(page).unwrap();
+        }
 
         let mut east_facing_view = view(false);
         east_facing_view.camera_position_metres = [10.0, 20.0, 1_000.0];
         east_facing_view.camera_forward = [1.0, 0.0, 0.0];
         east_facing_view.far_metres = 100.0;
-        east_facing_view.refine_above_pixels = 1.0e30;
-        east_facing_view.coarsen_below_pixels = 5.0e29;
         let envelope = PresentationEnvelopeCache::default().resolve(
             east_facing_view.camera_position_metres,
             0.0,
@@ -3135,6 +3119,14 @@ mod tests {
             .unwrap();
         assert!(presentation.selected_pages.contains(&behind_root));
         assert!(
+            behind_root
+                .refinement_children()
+                .unwrap()
+                .into_iter()
+                .all(|child| !presentation.selected_pages.contains(&child)),
+            "horizon ownership must not spend projected-error quality on pages behind the camera",
+        );
+        assert!(
             !presentation.ownerless_roots.contains(&behind_root),
             "the selected behind-camera horizon root is a real owner, not missing coverage debt",
         );
@@ -3142,6 +3134,22 @@ mod tests {
             !presentation.covers_presentation_envelope(&envelope),
             "the still-unregistered forward root must prevent publication",
         );
+    }
+
+    #[test]
+    fn ownership_only_view_is_valid_and_disables_optional_pixel_refinement() {
+        let ordinary = view(false);
+        let ownership = ordinary.ownership_only();
+
+        assert!(ownership.validates());
+        assert_eq!(
+            ownership.camera_position_metres,
+            ordinary.camera_position_metres
+        );
+        assert_eq!(ownership.camera_forward, ordinary.camera_forward);
+        assert_eq!(ownership.force_exact_leaves, ordinary.force_exact_leaves);
+        assert!(ownership.coarsen_below_pixels > ordinary.refine_above_pixels);
+        assert!(ownership.refine_above_pixels > ownership.coarsen_below_pixels);
     }
 
     #[test]

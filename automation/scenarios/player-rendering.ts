@@ -10,7 +10,9 @@ import { summarizeSurfaceCutAdjacency, takePlayerScreenshot } from "../lib/playe
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { startDevelopmentWorldStack } from "../lib/world.ts";
 
-const VIEWPORT = { width: 960, height: 540 };
+// Match the full-size browser viewport used for player reports. A small 960×540 harness can hide
+// selection/capacity failures because projected-error refinement requests materially fewer pages.
+const VIEWPORT = { width: 1324, height: 1118 };
 const COLD_START_BUDGET_MS = 60_000;
 const STABLE_CUT_DURATION_MS = 10_000;
 const STABILITY_TIMEOUT_MS = 60_000;
@@ -105,7 +107,6 @@ async function auditCapture(
     snapshotValue(frame, "virtualTerrainGpuMatchesCpuCut") !== 1 ||
     snapshotValue(frame, "virtualTerrainGpuEncodingOverflowFlags") !== 0 ||
     snapshotValue(frame, "virtualTerrainPresentedSnapshotMatchesCut") !== 1 ||
-    snapshotValue(frame, "virtualTerrainRequestedPages") !== 0 ||
     exactPages === 0 ||
     snapshotValue(frame, "virtualTerrainPublishedMinimumLevel") !== 0
   ) {
@@ -336,14 +337,14 @@ async function stablePhaseCapture(
       context.log(`${phase} convergence ${JSON.stringify(state)}`);
       lastLog = performance.now();
     }
-    const quiescent =
+    // Player readiness is a property of the immutable presented cut, not of speculative quality
+    // work outside it. Requiring every directory/page queue to become globally empty made this
+    // "real player" scenario wait behind far-detail prefetch that the actual loading gate does not
+    // own. The fingerprint must still remain unchanged for the full stability window, and the
+    // continuous recorder independently rejects any ownership/core regression on every frame.
+    const presentable =
       state.terrainReady === 1 &&
       state.exactPages > 0 &&
-      state.requestedPages === 0 &&
-      state.pendingPages === 0 &&
-      state.inFlightPages === 0 &&
-      state.columnInFlight === 0 &&
-      state.directoryInFlight === 0 &&
       state.gpuMatchesCpu === 1 &&
       state.gpuOverflow === 0 &&
       state.presentedMatchesCut === 1 &&
@@ -352,7 +353,7 @@ async function stablePhaseCapture(
       state.editCanonicalRenderable >= state.editCanonicalRequired &&
       state.editCanonicalOwned >= state.editCanonicalRequired;
     if (
-      !quiescent ||
+      !presentable ||
       fingerprint !== previousFingerprint ||
       (previousFlow !== "" && flow !== previousFlow)
     ) {
@@ -428,6 +429,7 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
           cut: frame.published.cutFingerprint,
           bankGeneration: frame.gpu.presentedBankGeneration,
           bankMatchesCut: frame.gpu.presentedBankMatchesCut,
+          streaming: frame.streaming,
           committedEnvelope: frame.committedEnvelope.fingerprint,
           committedSafety: `${frame.committedEnvelope.safetyCoverage}/${frame.committedEnvelope.safetyLeaves}`,
           committedHorizon: `${frame.committedEnvelope.horizonCoverage}/${frame.committedEnvelope.horizonRoots}`,

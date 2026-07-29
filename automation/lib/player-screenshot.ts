@@ -11,7 +11,7 @@ const PIXEL_BYTES = ATTACHMENT_CHANNELS * 4;
 const LEVEL_ZERO_SURFACE_PAGE_METRES = 3.2;
 
 export interface PlayerScreenshotMetadata {
-  readonly schema: "voxels.reproduction.v2";
+  readonly schema: "voxels.reproduction.v3";
   readonly frameSequence: number;
   readonly image: {
     readonly pixelWidth: number;
@@ -29,6 +29,7 @@ export interface PlayerScreenshotMetadata {
     readonly selectedCutFingerprint: string;
     readonly terrainHandleSnapshot: {
       readonly generation: string;
+      readonly presentationFingerprint: string;
       readonly cutFingerprint: string;
       readonly matchesPublishedCut: boolean;
     };
@@ -243,7 +244,7 @@ export function assertPlayerScreenshotMetadata(metadata: unknown): PlayerScreens
     ? exactSurfaceDomain.predictionOracleCoverage
     : exactSurfaceDomain?.coreOracleCoverage;
   if (
-    candidate.schema !== "voxels.reproduction.v2" ||
+    candidate.schema !== "voxels.reproduction.v3" ||
     candidate.attachments?.terrainPixelOwnership?.schema !== "voxels.terrain-pixel-ownership.v1" ||
     candidate.presentation?.selectedCut?.kind !== "virtualTerrain" ||
     !["disabled", "shadow", "visible"].includes(
@@ -251,7 +252,12 @@ export function assertPlayerScreenshotMetadata(metadata: unknown): PlayerScreens
     ) ||
     typeof candidate.presentation?.terrainHandleSnapshot?.matchesPublishedCut !== "boolean" ||
     typeof candidate.presentation.terrainHandleSnapshot.generation !== "string" ||
-    typeof candidate.presentation.terrainHandleSnapshot.cutFingerprint !== "string" ||
+    !/^[0-9a-f]{16}$/.test(candidate.presentation.terrainHandleSnapshot.presentationFingerprint) ||
+    !/^[0-9a-f]{16}$/.test(candidate.presentation.terrainHandleSnapshot.cutFingerprint) ||
+    !/^[0-9a-f]{16}$/.test(candidate.presentation.selectedCutFingerprint) ||
+    (candidate.presentation.terrainHandleSnapshot.matchesPublishedCut &&
+      candidate.presentation.terrainHandleSnapshot.cutFingerprint !==
+        candidate.presentation.selectedCutFingerprint) ||
     !Array.isArray(candidate.presentation.selectedCut.cut?.selectedPages) ||
     !Array.isArray(candidate.presentation.selectedCut.cut?.refinementRoots) ||
     typeof exactSurfaceDomain?.complete !== "boolean" ||

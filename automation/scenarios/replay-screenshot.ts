@@ -62,7 +62,7 @@ function safeU64(value: string, field: string): number {
 
 function parseMetadata(text: string): ReproductionMetadata {
   const value = JSON.parse(text) as ReproductionMetadata;
-  if (value.schema !== "voxels.reproduction.v2") {
+  if (value.schema !== "voxels.reproduction.v3") {
     throw new Error(`unsupported screenshot reproduction schema ${String(value.schema)}`);
   }
   const cssWidth = finite(value.image?.cssWidth, "CSS width");
@@ -177,7 +177,7 @@ async function run(context: ScenarioContext, raw: readonly string[]) {
 export default defineScenario({
   id: "replay-screenshot",
   kind: "capture",
-  summary: "Replay an embedded voxels.reproduction.v2 screenshot state exactly.",
+  summary: "Replay an embedded voxels.reproduction.v3 screenshot state exactly.",
   uses: { world: true, browser: true, viewport: "browser", screenshots: true },
   timeoutMs: 180_000,
   run,
