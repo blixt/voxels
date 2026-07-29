@@ -14421,6 +14421,223 @@ mod tests {
     }
 
     #[test]
+    fn mixed_exact_and_heightfield_pages_emit_every_shared_riser_exactly_once() {
+        let source = voxels_world::WorldSourceIdentityHash::from_bytes([33; 32]);
+        let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+        let sample = |height, material| voxels_world::SurfaceSample {
+            height,
+            material,
+            water_level: None,
+            region: SurfaceRegion::VerdantForest,
+            moisture: 0.5,
+            temperature: 0.5,
+            ridge: 0.0,
+            route: None,
+        };
+        let sampled_page =
+            |key: TerrainPageKey, axis: FaceAxis, lower_height, higher_height| {
+            let [[minimum_x, minimum_z], _] = key.horizontal_bounds().unwrap();
+            let samples = (0..edge)
+                .flat_map(|z| {
+                    (0..edge).map(move |x| {
+                        let coordinate = match axis {
+                            FaceAxis::X => minimum_x + x as i32,
+                            FaceAxis::Z => minimum_z + z as i32,
+                            FaceAxis::Y => unreachable!(),
+                        };
+                        if coordinate < 0 {
+                            sample(lower_height, Material::Stone)
+                        } else {
+                            sample(higher_height, Material::Dirt)
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            voxels_world::build_sampled_heightfield_terrain_page(
+                source,
+                key,
+                1,
+                &samples,
+                &[],
+                voxels_world::TerrainErrorBounds::EXACT,
+            )
+            .unwrap()
+        };
+        let exact_page =
+            |key: TerrainPageKey, axis: FaceAxis, lower_height, higher_height| {
+            voxels_world::build_exact_surface_terrain_page(
+                source,
+                key,
+                1,
+                [-4, 16],
+                |coord| {
+                    let coordinate = match axis {
+                        FaceAxis::X => coord.x,
+                        FaceAxis::Z => coord.z,
+                        FaceAxis::Y => unreachable!(),
+                    };
+                    let (height, material) = if coordinate < 0 {
+                        (lower_height, Material::Stone)
+                    } else {
+                        (higher_height, Material::Dirt)
+                    };
+                    if coord.y <= height {
+                        material
+                    } else {
+                        Material::Air
+                    }
+                },
+            )
+            .unwrap()
+        };
+        let seam_faces = |quads: Vec<GpuQuad>, axis: FaceAxis| {
+            let mut faces = BTreeMap::<(i32, i32, u8, u16), usize>::new();
+            let mut rectangles = BTreeSet::new();
+            for quad in quads {
+                let face = ((quad.material_face & GPU_FACE_MASK) >> GPU_FACE_SHIFT) as u8;
+                let expected_axis_faces = match axis {
+                    FaceAxis::X => [0, 1],
+                    FaceAxis::Z => [4, 5],
+                    FaceAxis::Y => unreachable!(),
+                };
+                if !expected_axis_faces.contains(&face) {
+                    continue;
+                }
+                let normal_axis = match axis {
+                    FaceAxis::X => 0,
+                    FaceAxis::Z => 2,
+                    FaceAxis::Y => unreachable!(),
+                };
+                let plane = quad.origin[normal_axis] + i32::from(matches!(face, 0 | 4));
+                if plane != 0 {
+                    continue;
+                }
+                let material = (quad.material_face & 0xffff) as u16;
+                let extent = if quad.extent_voxels[0] & CANONICAL_TRIANGLE_FLAG != 0 {
+                    quad.extent_voxels.map(|encoded| {
+                        (((encoded >> CANONICAL_TRIANGLE_EXTENT_SHIFT) & 31)
+                            | ((encoded >> (CANONICAL_TRIANGLE_EXTENT_SHIFT + 4)) & 32))
+                            + 1
+                    })
+                } else {
+                    quad.extent_voxels
+                };
+                rectangles.insert((quad.origin, extent, face, material));
+            }
+            for (origin, extent, face, material) in rectangles {
+                for tangent in 0..i32::from(extent[0]) {
+                    for y in 0..i32::from(extent[1]) {
+                        let tangent_origin = match axis {
+                            FaceAxis::X => origin[2],
+                            FaceAxis::Z => origin[0],
+                            FaceAxis::Y => unreachable!(),
+                        };
+                        *faces
+                            .entry((origin[1] + y, tangent_origin + tangent, face, material))
+                            .or_default() += 1;
+                    }
+                }
+            }
+            faces
+        };
+
+        for axis in [FaceAxis::X, FaceAxis::Z] {
+            let (lower_key, higher_key) = match axis {
+                FaceAxis::X => (
+                    TerrainPageKey::surface(0, -1, 0),
+                    TerrainPageKey::surface(0, 0, 0),
+                ),
+                FaceAxis::Z => (
+                    TerrainPageKey::surface(0, 0, -1),
+                    TerrainPageKey::surface(0, 0, 0),
+                ),
+                FaceAxis::Y => unreachable!(),
+            };
+            for (lower_height, higher_height) in [(9, 11), (11, 9)] {
+                for exact_is_lower in [false, true] {
+                    let (lower, higher) = if exact_is_lower {
+                        (
+                            virtual_surface_gpu_quads(&exact_page(
+                                lower_key,
+                                axis,
+                                lower_height,
+                                higher_height,
+                            ))
+                            .unwrap()
+                            ,
+                            {
+                                let page =
+                                    sampled_page(higher_key, axis, lower_height, higher_height);
+                                let TerrainPageRepresentation::HeightfieldGrid(grid) =
+                                    &page.representation
+                                else {
+                                    unreachable!()
+                                };
+                                virtual_microvoxel_gpu_quads(
+                                    &page,
+                                    grid,
+                                    &unconstrained_virtual_heightfield_samples(grid),
+                                )
+                                .unwrap()
+                                .unwrap()
+                            },
+                        )
+                    } else {
+                        (
+                            {
+                                let page =
+                                    sampled_page(lower_key, axis, lower_height, higher_height);
+                                let TerrainPageRepresentation::HeightfieldGrid(grid) =
+                                    &page.representation
+                                else {
+                                    unreachable!()
+                                };
+                                virtual_microvoxel_gpu_quads(
+                                    &page,
+                                    grid,
+                                    &unconstrained_virtual_heightfield_samples(grid),
+                                )
+                                .unwrap()
+                                .unwrap()
+                            },
+                            virtual_surface_gpu_quads(&exact_page(
+                                higher_key,
+                                axis,
+                                lower_height,
+                                higher_height,
+                            ))
+                            .unwrap(),
+                        )
+                    };
+                    let faces = seam_faces(lower.into_iter().chain(higher).collect(), axis);
+                    let expected_face = match (axis, lower_height < higher_height) {
+                        (FaceAxis::X, false) => 0,
+                        (FaceAxis::X, true) => 1,
+                        (FaceAxis::Z, false) => 4,
+                        (FaceAxis::Z, true) => 5,
+                        (FaceAxis::Y, _) => unreachable!(),
+                    };
+                    let expected_material = if lower_height > higher_height {
+                        Material::Stone.id()
+                    } else {
+                        Material::Dirt.id()
+                    };
+                    assert_eq!(
+                        faces.len(),
+                        usize::try_from((lower_height - higher_height).abs()).unwrap()
+                            * TERRAIN_PAGE_EDGE_SAMPLES as usize
+                    );
+                    assert!(faces.iter().all(
+                        |((_, _, face, material), count)| *face == expected_face
+                            && *material == expected_material
+                            && *count == 1
+                    ));
+                };
+            }
+        }
+    }
+
+    #[test]
     fn virtual_geometry_partition_keeps_water_in_the_same_page_but_a_distinct_stream() {
         let quad = |material: Material| GpuQuad {
             origin: [0; 3],

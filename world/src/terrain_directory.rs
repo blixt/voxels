@@ -324,41 +324,6 @@ impl TerrainHierarchyDirectoryV1 {
             .and_then(|index| self.nodes.get(index))
     }
 
-    /// Returns the coarse sides whose replacement by exact volumetric surface children requires
-    /// an exact neighbor at the same level.
-    ///
-    /// A heightfield boundary is a single-valued curve. An exact surface column may instead own
-    /// caves, overhangs, floating components, multiple material runs, or vertical steps at that
-    /// boundary. The compact heightfield payload cannot certify those topologies. Until a richer
-    /// boundary certificate exists, all four sides of an exact L0 replacement are therefore
-    /// conservatively closed by exact neighbors. This rule is derived entirely from persisted
-    /// directory nodes, so it is stable across cache and discovery order.
-    pub fn surface_exact_refinement_closure_sides(&self, key: TerrainPageKey) -> [bool; 4] {
-        let Some(parent) = self.node(key).filter(|node| {
-            node.key.is_surface()
-                && node.key.level == 1
-                && node.has_children
-                && node.errors.unresolved_topology
-                && node.representation == TerrainPageRepresentationKind::HeightfieldGrid
-        }) else {
-            return [false; 4];
-        };
-        let Some(children) = parent.key.refinement_children() else {
-            return [false; 4];
-        };
-        if children.into_iter().all(|child| {
-            self.node(child).is_some_and(|node| {
-                node.key.level == 0
-                    && node.errors == TerrainErrorBounds::EXACT
-                    && node.topology == TerrainTopologyClass::Volumetric
-                    && node.representation == TerrainPageRepresentationKind::SurfaceCluster
-            })
-        }) {
-            [true; 4]
-        } else {
-            [false; 4]
-        }
-    }
 }
 
 fn terrain_page_source_geometry_bytes(page: &TerrainPageV1) -> Result<u32, TerrainDirectoryError> {
@@ -971,27 +936,6 @@ mod tests {
             directory
         );
         assert_eq!(encode_terrain_directory(&directory).unwrap(), encoded);
-    }
-
-    #[test]
-    fn exact_surface_refinement_persists_a_conservative_four_side_closure_rule() {
-        let root = TerrainPageKey::surface(1, -1, 0);
-        let directory = TerrainHierarchyDirectoryV1::from_surface_refinement_pages(
-            root,
-            &exact_surface_refinement_pages(true),
-        )
-        .unwrap();
-        assert_eq!(
-            directory.surface_exact_refinement_closure_sides(root),
-            [true; 4]
-        );
-        let decoded =
-            decode_terrain_directory(&encode_terrain_directory(&directory).unwrap(), identity())
-                .unwrap();
-        assert_eq!(
-            decoded.surface_exact_refinement_closure_sides(root),
-            [true; 4]
-        );
     }
 
     #[test]

@@ -127,6 +127,7 @@ pub use terrain_transport::{
 pub use virtual_surface::{
     BoundaryCertificate, BoundarySide, BoundarySideCertificate, CanonicalBoundarySample,
     CanonicalFaceKey, FaceAxis, VoxelBounds, canonical_exposed_faces,
+    directionally_owned_surface_faces,
 };
 pub use visibility::{
     MAX_VISIBILITY_CELLS, MAX_VISIBILITY_PORTALS, PortalState, VisibilityCellId, VisibilityGraph,

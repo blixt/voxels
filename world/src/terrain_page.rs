@@ -7,6 +7,7 @@
 use crate::{
     BoundaryCertificate, BoundarySide, CanonicalFaceKey, FaceAxis, Material, SurfaceSample,
     VoxelBounds, VoxelCoord, WorldSourceIdentityHash, canonical_exposed_faces,
+    directionally_owned_surface_faces,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -15,7 +16,7 @@ use std::io::Read;
 #[cfg(feature = "terrain-page-builder")]
 use crate::terrain_error::certify_bidirectional_surface_error;
 
-pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 7;
+pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 8;
 pub const TERRAIN_PAGE_EDGE_SAMPLES: u32 = 32;
 pub const TERRAIN_HEIGHTFIELD_BOUNDARY_SIDES: usize = 4;
 pub const TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS: usize =
@@ -33,7 +34,7 @@ pub const TERRAIN_PAGE_TARGET_COMPRESSED_BYTES: usize = 65_536;
 pub const TERRAIN_PAGE_MAX_COMPRESSED_BYTES: usize = 262_144;
 pub const TERRAIN_PAGE_MAX_PAYLOAD_BYTES: usize = 2_097_152;
 const SPARSE_BRICK_EDGE: u8 = 8;
-const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v7\0";
+const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v8\0";
 const PARENT_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-parent-boundary-v1\0";
 const HEIGHTFIELD_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-heightfield-boundary-v3\0";
 const PAGE_MAGIC: &[u8; 4] = b"VXTP";
@@ -841,7 +842,7 @@ pub fn build_exact_surface_terrain_page(
         halo_shape,
         materials: sampled,
     };
-    let faces = canonical_exposed_faces(bounds, |coord| samples.sample(coord));
+    let faces = directionally_owned_surface_faces(bounds, |coord| samples.sample(coord));
     let certificate = BoundaryCertificate::build(bounds, |coord| samples.sample(coord));
     let boundary_fingerprints =
         std::array::from_fn(|index| certificate.side(BoundarySide::ALL[index]).fingerprint);
@@ -2370,6 +2371,11 @@ fn material_coverage(
     for face in faces {
         *exposed.entry(face.material_id).or_default() += 1;
     }
+    // A horizontal max-plane face is owned by this page even when its material belongs to the
+    // neighboring solid voxel. Keep that material in the palette with zero interior occupancy.
+    for id in exposed.keys() {
+        occupied.entry(*id).or_default();
+    }
     let mut palette_indices = BTreeMap::new();
     let mut materials = Vec::with_capacity(occupied.len());
     for (index, (id, occupied_voxels)) in occupied.into_iter().enumerate() {
@@ -3006,7 +3012,7 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
             quad.width > 0
                 && quad.height > 0
                 && usize::from(quad.material_index) < palette_len
-                && quad_inside_bounds(*quad, page.bounds)
+                && quad_inside_bounds(*quad, page.bounds, page.key.is_surface())
         }),
         TerrainPageRepresentation::TriangleCluster(cluster) => {
             triangle_cluster_validation_error(cluster, page.bounds, palette_len).is_ok()
@@ -3079,21 +3085,29 @@ fn boundary_quads_are_valid(
     palette_len: usize,
 ) -> bool {
     quads.iter().all(|quad| {
-        quad.width > 0
+            quad.width > 0
             && quad.height > 0
             && usize::from(quad.material_index) < palette_len
-            && quad_inside_bounds(*quad, page.bounds)
+            && quad_inside_bounds(*quad, page.bounds, page.key.is_surface())
             && surface_quad_is_on_boundary(*quad, page.bounds)
     })
 }
 
-fn quad_inside_bounds(quad: TerrainSurfaceQuad, bounds: VoxelBounds) -> bool {
+fn quad_inside_bounds(
+    quad: TerrainSurfaceQuad,
+    bounds: VoxelBounds,
+    directional_horizontal_owner: bool,
+) -> bool {
     let width = i32::from(quad.width);
     let height = i32::from(quad.height);
     match quad.axis {
         FaceAxis::X => {
-            ((quad.positive && (bounds.min.x + 1..=bounds.max.x).contains(&quad.plane))
-                || (!quad.positive && (bounds.min.x..bounds.max.x).contains(&quad.plane)))
+            (if directional_horizontal_owner {
+                (bounds.min.x + 1..=bounds.max.x).contains(&quad.plane)
+            } else {
+                (quad.positive && (bounds.min.x + 1..=bounds.max.x).contains(&quad.plane))
+                    || (!quad.positive && (bounds.min.x..bounds.max.x).contains(&quad.plane))
+            })
                 && quad.u >= bounds.min.y
                 && quad.v >= bounds.min.z
                 && quad.u.saturating_add(width) <= bounds.max.y
@@ -3108,8 +3122,12 @@ fn quad_inside_bounds(quad: TerrainSurfaceQuad, bounds: VoxelBounds) -> bool {
                 && quad.v.saturating_add(height) <= bounds.max.z
         }
         FaceAxis::Z => {
-            ((quad.positive && (bounds.min.z + 1..=bounds.max.z).contains(&quad.plane))
-                || (!quad.positive && (bounds.min.z..bounds.max.z).contains(&quad.plane)))
+            (if directional_horizontal_owner {
+                (bounds.min.z + 1..=bounds.max.z).contains(&quad.plane)
+            } else {
+                (quad.positive && (bounds.min.z + 1..=bounds.max.z).contains(&quad.plane))
+                    || (!quad.positive && (bounds.min.z..bounds.max.z).contains(&quad.plane))
+            })
                 && quad.u >= bounds.min.x
                 && quad.v >= bounds.min.y
                 && quad.u.saturating_add(width) <= bounds.max.x
@@ -4106,6 +4124,47 @@ mod tests {
 
         let encoded = encode_terrain_page(&page).unwrap();
         assert_eq!(decode_terrain_page(&encoded, identity()).unwrap(), page);
+    }
+
+    #[test]
+    fn exact_surface_column_uses_directional_horizontal_boundary_ownership() {
+        let key = TerrainPageKey::surface(0, -1, 0);
+        let material_at = |coord: VoxelCoord| {
+            let (height, material) = if coord.x < 0 {
+                (0, Material::Stone)
+            } else {
+                (2, Material::Dirt)
+            };
+            if coord.y <= height {
+                material
+            } else {
+                Material::Air
+            }
+        };
+        let page =
+            build_exact_surface_terrain_page(identity(), key, 24, [-4, 5], material_at).unwrap();
+        let TerrainPageRepresentation::SurfaceCluster(quads) = &page.representation else {
+            panic!("exact surface column did not produce a clustered surface");
+        };
+        let faces = surface_face_set(&page, quads);
+        assert!(faces.iter().any(|face| {
+            face.axis == FaceAxis::X
+                && face.plane == 0
+                && face.solid_side.x == 0
+                && face.material_id == Material::Dirt.id()
+        }));
+        assert!(
+            faces
+                .iter()
+                .all(|face| face.axis != FaceAxis::X || face.plane != page.bounds.min.x),
+            "the higher-coordinate owner must emit no minimum-X boundary faces"
+        );
+        assert!(page.materials.iter().any(|coverage| {
+            coverage.material == Material::Dirt
+                && coverage.occupied_voxels == 0
+                && coverage.exposed_unit_faces > 0
+        }));
+        assert!(page.validates_identity());
     }
 
     #[test]

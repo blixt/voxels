@@ -184,6 +184,66 @@ pub fn canonical_exposed_faces(
     faces
 }
 
+/// Enumerates exact surface-column faces under the same horizontal half-open ownership used by
+/// sampled heightfields.
+///
+/// The lower-coordinate page owns every X/Z interface: it emits its ordinary positive boundary
+/// face when the inside voxel is solid, or the neighboring voxel's negative-facing material when
+/// the inside voxel is air. The higher-coordinate page emits no face on its minimum X/Z plane.
+/// This makes ownership independent of whether either page is encoded as exact clusters or a
+/// heightfield, while the canonical two-sided occupancy still determines the one visible face.
+pub fn directionally_owned_surface_faces(
+    bounds: VoxelBounds,
+    mut material_at: impl FnMut(VoxelCoord) -> Material,
+) -> Vec<CanonicalFaceKey> {
+    let mut faces = canonical_exposed_faces(bounds, |coord| material_at(coord));
+    faces.retain(|face| {
+        !matches!(
+            face.axis,
+            FaceAxis::X if face.plane == bounds.min.x
+        ) && !matches!(
+            face.axis,
+            FaceAxis::Z if face.plane == bounds.min.z
+        )
+    });
+
+    for z in bounds.min.z..bounds.max.z {
+        for y in bounds.min.y..bounds.max.y {
+            let inside = VoxelCoord::new(bounds.max.x - 1, y, z);
+            let outside = VoxelCoord::new(bounds.max.x, y, z);
+            let inside_material = material_at(inside);
+            let outside_material = material_at(outside);
+            if !inside_material.is_renderable() && outside_material.is_renderable() {
+                faces.push(CanonicalFaceKey::exposed(
+                    outside,
+                    outside_material,
+                    FaceAxis::X,
+                    false,
+                ));
+            }
+        }
+    }
+    for x in bounds.min.x..bounds.max.x {
+        for y in bounds.min.y..bounds.max.y {
+            let inside = VoxelCoord::new(x, y, bounds.max.z - 1);
+            let outside = VoxelCoord::new(x, y, bounds.max.z);
+            let inside_material = material_at(inside);
+            let outside_material = material_at(outside);
+            if !inside_material.is_renderable() && outside_material.is_renderable() {
+                faces.push(CanonicalFaceKey::exposed(
+                    outside,
+                    outside_material,
+                    FaceAxis::Z,
+                    false,
+                ));
+            }
+        }
+    }
+    faces.sort_unstable();
+    faces.dedup();
+    faces
+}
+
 /// Canonical two-sided occupancy/material state for one 10 cm square on a page boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CanonicalBoundarySample {
@@ -496,5 +556,52 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([Material::Dirt.id(), Material::Stone.id()])
         );
+    }
+
+    #[test]
+    fn directional_surface_pages_own_both_shared_boundary_orientations_from_the_lower_side() {
+        let left =
+            VoxelBounds::new(VoxelCoord::new(-2, -2, -1), VoxelCoord::new(0, 4, 1)).unwrap();
+        let right =
+            VoxelBounds::new(VoxelCoord::new(0, -2, -1), VoxelCoord::new(2, 4, 1)).unwrap();
+        let combined =
+            VoxelBounds::new(VoxelCoord::new(-2, -2, -1), VoxelCoord::new(2, 4, 1)).unwrap();
+
+        for (left_height, right_height) in [(0, 2), (2, 0)] {
+            let material_at = |coord: VoxelCoord| {
+                let height = if coord.x < 0 {
+                    left_height
+                } else {
+                    right_height
+                };
+                if coord.y <= height {
+                    if coord.x < 0 {
+                        Material::Stone
+                    } else {
+                        Material::Dirt
+                    }
+                } else {
+                    Material::Air
+                }
+            };
+            let expected = canonical_exposed_faces(combined, material_at)
+                .into_iter()
+                .filter(|face| face.axis == FaceAxis::X && face.plane == 0)
+                .collect::<BTreeSet<_>>();
+            let left_owned = directionally_owned_surface_faces(left, material_at)
+                .into_iter()
+                .filter(|face| face.axis == FaceAxis::X && face.plane == 0)
+                .collect::<BTreeSet<_>>();
+            let right_owned = directionally_owned_surface_faces(right, material_at)
+                .into_iter()
+                .filter(|face| face.axis == FaceAxis::X && face.plane == 0)
+                .collect::<BTreeSet<_>>();
+
+            assert_eq!(left_owned, expected);
+            assert!(
+                right_owned.is_empty(),
+                "the higher-coordinate page must never duplicate the shared plane"
+            );
+        }
     }
 }
