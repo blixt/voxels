@@ -160,13 +160,20 @@ pub fn build_terrain_coverage_root(
     child_boundary_midpoints: &BTreeMap<TerrainPageKey, Vec<SurfaceSample>>,
     errors: TerrainErrorBounds,
 ) -> Result<TerrainRegionBuildV1, TerrainRegionBuildError> {
+    let child_errors = TerrainErrorBounds {
+        geometric_millivoxels: errors.geometric_millivoxels / 2,
+        silhouette_millivoxels: errors.silhouette_millivoxels / 2,
+        material_boundary_millivoxels: errors.material_boundary_millivoxels / 2,
+        normal_milliradians: errors.normal_milliradians,
+        unresolved_topology: errors.unresolved_topology,
+    };
     build_terrain_coverage_root_with_revisions(
         source_identity_hash,
         root,
         |_| Some(revision),
+        |key| if key == root { errors } else { child_errors },
         samples,
         child_boundary_midpoints,
-        errors,
     )
 }
 
@@ -180,9 +187,9 @@ pub fn build_terrain_coverage_root_with_revisions(
     source_identity_hash: WorldSourceIdentityHash,
     root: TerrainPageKey,
     mut revision_at: impl FnMut(TerrainPageKey) -> Option<u64>,
+    mut errors_at: impl FnMut(TerrainPageKey) -> TerrainErrorBounds,
     samples: &[SurfaceSample],
     child_boundary_midpoints: &BTreeMap<TerrainPageKey, Vec<SurfaceSample>>,
-    errors: TerrainErrorBounds,
 ) -> Result<TerrainRegionBuildV1, TerrainRegionBuildError> {
     if root.level == 0
         || root.level > TERRAIN_COVERAGE_ROOT_LEVEL
@@ -221,13 +228,7 @@ pub fn build_terrain_coverage_root_with_revisions(
                     .get(&key)
                     .map(Vec::as_slice)
                     .unwrap_or_default(),
-                TerrainErrorBounds {
-                    geometric_millivoxels: errors.geometric_millivoxels / 2,
-                    silhouette_millivoxels: errors.silhouette_millivoxels / 2,
-                    material_boundary_millivoxels: errors.material_boundary_millivoxels / 2,
-                    normal_milliradians: errors.normal_milliradians,
-                    unresolved_topology: errors.unresolved_topology,
-                },
+                errors_at(key),
             )?;
             ensure_publication_budget(&page)?;
             Ok(page)
@@ -264,7 +265,7 @@ pub fn build_terrain_coverage_root_with_revisions(
         revision_at(root).ok_or(TerrainRegionBuildError::MissingRevision(root))?,
         &root_samples,
         &boundary_midpoints,
-        errors,
+        errors_at(root),
     )?;
     ensure_publication_budget(&sampled_root)?;
     let pages = children

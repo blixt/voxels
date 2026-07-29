@@ -452,7 +452,7 @@ fn build_coverage_region(
         .map_err(|error| VirtualTerrainError::Source(error.to_string()))?;
     let child_boundary_midpoints =
         sample_child_heightfield_boundary_midpoints(source, root, priority)?;
-    let has_edits = !snapshot.edits.is_empty();
+    let has_edits = surface_page_has_edits(&snapshot, root);
     let exact_scan = if root.level == 1 && has_edits {
         Some(sample_exact_surface_edits(
             source, root, &samples, &snapshot, priority,
@@ -464,18 +464,21 @@ fn build_coverage_region(
         source_identity_hash,
         root,
         &mut revision_at,
-        &samples,
-        &child_boundary_midpoints,
-        TerrainErrorBounds {
-            geometric_millivoxels: stride.saturating_mul(2_000),
-            silhouette_millivoxels: stride.saturating_mul(2_000),
+        |key| TerrainErrorBounds {
+            geometric_millivoxels: 1_000_u32
+                .checked_shl(u32::from(key.level))
+                .unwrap_or(u32::MAX),
+            silhouette_millivoxels: 1_000_u32
+                .checked_shl(u32::from(key.level))
+                .unwrap_or(u32::MAX),
             material_boundary_millivoxels: 0,
             normal_milliradians: 0,
-            // A heightfield cannot certify a cave, overhang, or floating edit. Infinite topology
-            // error forces refinement to the finest surface segment, where one exact
-            // surface-column page owns the arbitrary voxel topology instead of averaging it away.
-            unresolved_topology: has_edits,
+            // Topology uncertainty belongs to the spatial page whose canonical halo intersects
+            // an edit. It must not depend on which larger directory happened to reveal the page.
+            unresolved_topology: surface_page_has_edits(&snapshot, key),
         },
+        &samples,
+        &child_boundary_midpoints,
     )
     .map_err(|error| VirtualTerrainError::Build(error.to_string()))?;
     if let Some(exact_scan) = exact_scan {
@@ -516,6 +519,24 @@ fn build_coverage_region(
                 .map_err(|error| VirtualTerrainError::Build(error.to_string()))?;
     }
     Ok(built)
+}
+
+fn surface_page_has_edits(snapshot: &TerrainEditSnapshot, key: TerrainPageKey) -> bool {
+    let Some([[minimum_x, minimum_z], [maximum_x, maximum_z]]) = key.horizontal_bounds() else {
+        return false;
+    };
+    let minimum_x = minimum_x.saturating_sub(1);
+    let minimum_z = minimum_z.saturating_sub(1);
+    snapshot.edits.edited_chunks().into_iter().any(|chunk| {
+        snapshot
+            .edits
+            .chunk_overrides(chunk)
+            .into_iter()
+            .any(|(coord, _)| {
+                (minimum_x..=maximum_x).contains(&coord.x)
+                    && (minimum_z..=maximum_z).contains(&coord.z)
+            })
+    })
 }
 
 fn sample_child_heightfield_boundary_midpoints(
@@ -1170,9 +1191,14 @@ mod tests {
                 )
                 .unwrap()[0];
             let mut edits = voxels_world::EditMap::default();
+            let material = if tangent_offset % 2 == 0 {
+                Material::Basalt
+            } else {
+                Material::Air
+            };
             edits.insert_override(
-                VoxelCoord::new(minimum_x, surface.height + 3, minimum_z + tangent_offset),
-                Material::Basalt,
+                VoxelCoord::new(minimum_x, surface.height, minimum_z + tangent_offset),
+                material,
             );
             let snapshot = TerrainEditSnapshot {
                 edits,
@@ -1212,6 +1238,70 @@ mod tests {
                 "an outer-edge edit at {tangent_offset} changed L1 identity with discovery depth"
             );
         }
+    }
+
+    #[test]
+    fn an_edit_does_not_change_unaffected_sibling_identity() {
+        let source = ProceduralWorldSource::new(17);
+        let parent_root = TerrainPageKey::surface(2, 0, -1);
+        let children = parent_root.refinement_children().unwrap();
+        let edited_root = children[0];
+        let untouched_root = children[3];
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] =
+            edited_root.horizontal_bounds().unwrap();
+        let [edit_x, edit_z] = [
+            minimum_x + (maximum_x - minimum_x) / 2,
+            minimum_z + (maximum_z - minimum_z) / 2,
+        ];
+        let surface = source
+            .surface_sample_lattice(
+                WorldProductPriority::VirtualTerrain,
+                [edit_x, edit_z],
+                [1, 1],
+                1,
+            )
+            .unwrap()[0];
+        let mut edits = voxels_world::EditMap::default();
+        edits.insert_override(
+            VoxelCoord::new(edit_x, surface.height, edit_z),
+            Material::Air,
+        );
+        let snapshot = TerrainEditSnapshot {
+            edits,
+            revision: 43,
+        };
+        let revision_at = |key| Some(if key == untouched_root { 47 } else { 43 });
+        let parent = build_coverage_region(
+            &source,
+            parent_root,
+            snapshot.clone(),
+            source.source_identity_hash(),
+            WorldProductPriority::VirtualTerrain,
+            revision_at,
+        )
+        .expect("parent coverage");
+        let child = build_coverage_region(
+            &source,
+            untouched_root,
+            snapshot,
+            source.source_identity_hash(),
+            WorldProductPriority::VirtualTerrain,
+            revision_at,
+        )
+        .expect("unaffected child coverage");
+
+        let embedded = parent
+            .pages
+            .iter()
+            .find(|page| page.key == untouched_root)
+            .expect("embedded unaffected child");
+        let independent = child
+            .pages
+            .iter()
+            .find(|page| page.key == untouched_root)
+            .expect("independent unaffected child");
+        assert!(!embedded.errors.unresolved_topology);
+        assert_eq!(independent, embedded);
     }
 
     #[test]
