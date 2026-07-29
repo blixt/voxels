@@ -58,4 +58,16 @@ describe("automation artifacts", () => {
     ).rejects.toThrow("non-finite number");
     expect(store.records).toEqual([]);
   });
+
+  it("accepts dot-prefixed children without weakening directory containment", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "voxels-artifacts-"));
+    temporaryDirectories.push(root);
+    const store = await ArtifactStore.create("example", { root, runId: "run-1" });
+
+    expect(store.resolve("..capture.png")).toBe(path.join(store.directory, "..capture.png"));
+    expect(store.resolve("...capture.png")).toBe(path.join(store.directory, "...capture.png"));
+    expect(() => store.record("outside", path.join(store.directory, "..", "outside.png"))).toThrow(
+      "is outside",
+    );
+  });
 });

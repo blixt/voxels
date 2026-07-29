@@ -40,6 +40,14 @@ function jsonDocument(value: unknown): string {
   return `${serialized}\n`;
 }
 
+function isOutsideDirectory(relativePath: string): boolean {
+  return (
+    relativePath === ".." ||
+    relativePath.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativePath)
+  );
+}
+
 export class ArtifactStore {
   readonly directory: string;
   readonly scenarioDirectory: string;
@@ -76,7 +84,7 @@ export class ArtifactStore {
   resolve(...segments: readonly string[]): string {
     const resolved = path.join(this.directory, ...segments.map(safeSegment));
     const relative = path.relative(this.directory, resolved);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    if (isOutsideDirectory(relative)) {
       throw new Error("artifact path escaped its scenario run directory");
     }
     return resolved;
@@ -92,7 +100,7 @@ export class ArtifactStore {
     this.#assertWritable();
     const absolute = path.resolve(artifactPath);
     const relative = path.relative(this.directory, absolute);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    if (isOutsideDirectory(relative)) {
       throw new Error(`artifact ${absolute} is outside ${this.directory}`);
     }
     this.#records.push(
