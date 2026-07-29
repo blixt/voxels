@@ -2968,20 +2968,20 @@ mod web {
                 let shape = self.renderer.borrow().edit_shape();
                 self.dig_target(&camera, shape)
             };
-            let profile_drain_readiness = (self.profile.borrow().phase() == ProfilePhase::Drain)
-                .then(|| {
-                    self.relocation_readiness(
-                        crate::PendingRelocation {
-                            kind: crate::PendingRelocationKind::ProfileStep,
-                            destination: *camera,
-                            presentation_target: camera.position,
-                            profile_after_commit: None,
-                            destination_resolved: true,
-                        },
-                        &presentation_envelope,
-                    )
-                })
-                .unwrap_or_default();
+            let profile_drain_readiness = if self.profile.borrow().phase() == ProfilePhase::Drain {
+                self.relocation_readiness(
+                    crate::PendingRelocation {
+                        kind: crate::PendingRelocationKind::ProfileStep,
+                        destination: *camera,
+                        presentation_target: camera.position,
+                        profile_after_commit: None,
+                        destination_resolved: true,
+                    },
+                    &presentation_envelope,
+                )
+            } else {
+                crate::RelocationReadiness::default()
+            };
             let mut renderer = self.renderer.borrow_mut();
             if renderer.screenshot_pending() {
                 renderer.set_screenshot_streaming_manifest(self.screenshot_streaming_manifest());
