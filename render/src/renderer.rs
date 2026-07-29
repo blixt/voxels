@@ -236,6 +236,7 @@ pub enum VirtualTerrainRenderMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VirtualTerrainPublicationAdvance {
     Idle,
+    AbortStale,
     AwaitCertificate,
     CommitActive,
     PromoteCertified,
@@ -249,11 +250,14 @@ struct VirtualTerrainPublication {
 
 const fn virtual_terrain_publication_advance(
     has_transaction: bool,
+    transaction_is_relevant: bool,
     active_matches: bool,
     candidate_certified: bool,
 ) -> VirtualTerrainPublicationAdvance {
     if !has_transaction {
         VirtualTerrainPublicationAdvance::Idle
+    } else if !transaction_is_relevant {
+        VirtualTerrainPublicationAdvance::AbortStale
     } else if active_matches {
         VirtualTerrainPublicationAdvance::CommitActive
     } else if candidate_certified {
@@ -265,6 +269,13 @@ const fn virtual_terrain_publication_advance(
 
 const fn virtual_terrain_publication_can_stage(has_transaction: bool) -> bool {
     !has_transaction
+}
+
+fn virtual_terrain_publication_is_relevant(
+    publication: &PresentationEnvelope,
+    desired: Option<&PresentationEnvelope>,
+) -> bool {
+    desired == Some(publication)
 }
 
 const fn virtual_terrain_committed_snapshot_is_safe(
@@ -3000,6 +3011,21 @@ pub struct RenderDiagnostics {
     pub virtual_terrain_exact_prediction_required_leaves: u32,
     /// Full swept-prediction leaves owned by the committed cut.
     pub virtual_terrain_exact_prediction_current_coverage: u32,
+    /// Stable desired presentation proof selected by the shell.
+    pub virtual_terrain_desired_envelope_fingerprint: u64,
+    pub virtual_terrain_desired_envelope_complete: bool,
+    pub virtual_terrain_desired_safety_leaves: u32,
+    pub virtual_terrain_desired_horizon_roots: u32,
+    pub virtual_terrain_desired_locus_minimum_leaf: [i32; 2],
+    pub virtual_terrain_desired_locus_maximum_leaf_exclusive: [i32; 2],
+    /// Exact presentation proof paired with the active immutable handle bank.
+    pub virtual_terrain_committed_envelope_fingerprint: u64,
+    pub virtual_terrain_committed_safety_leaves: u32,
+    pub virtual_terrain_committed_safety_coverage: u32,
+    pub virtual_terrain_committed_horizon_roots: u32,
+    pub virtual_terrain_committed_horizon_coverage: u32,
+    pub virtual_terrain_committed_locus_minimum_leaf: [i32; 2],
+    pub virtual_terrain_committed_locus_maximum_leaf_exclusive: [i32; 2],
     /// Stable identity of the complete virtual hierarchy cut selected for presentation.
     pub virtual_terrain_cut_fingerprint: u64,
     /// Monotonic identity of the immutable GPU handle bank used by this presented frame.
@@ -5938,8 +5964,9 @@ impl Renderer {
     pub fn select_virtual_terrain_cut(
         &mut self,
         view: VirtualTerrainView,
-        exact_surface_domain: &ExactSurfaceDomain,
+        presentation_envelope: &PresentationEnvelope,
     ) -> Result<VirtualTerrainCut, VirtualTerrainRendererError> {
+        let exact_surface_domain = presentation_envelope.exact_surface_domain();
         let known_fitting_scale = self.virtual_terrain_error_scale.max(1.0);
         let mut recovery_probe = false;
         if self.virtual_terrain_requested_view == Some(view)
@@ -5997,7 +6024,7 @@ impl Renderer {
             }
             let candidate = self
                 .virtual_terrain
-                .select_cut(candidate_view, exact_surface_domain)?;
+                .select_presentation_cut(candidate_view, presentation_envelope)?;
             let capacity = self.virtual_terrain_cut_fits_snapshot(&candidate);
             match capacity {
                 Ok(()) => break (candidate_view, candidate),
@@ -6286,6 +6313,10 @@ impl Renderer {
         let Some(publication) = self.virtual_terrain_publication.as_ref().cloned() else {
             return Ok(false);
         };
+        let publication_is_relevant = virtual_terrain_publication_is_relevant(
+            &publication.envelope,
+            self.virtual_terrain_desired_envelope.as_ref(),
+        );
         if !publication
             .cut
             .covers_presentation_envelope(&publication.envelope)
@@ -6296,9 +6327,14 @@ impl Renderer {
         let identity = virtual_terrain_snapshot_identity(&publication.cut, &publication.envelope);
         match virtual_terrain_publication_advance(
             true,
+            publication_is_relevant,
             self.virtual_terrain_gpu.active_snapshot_matches(identity),
             self.virtual_terrain_gpu.candidate_is_certified(identity),
         ) {
+            VirtualTerrainPublicationAdvance::AbortStale => {
+                self.abort_virtual_terrain_publication();
+                return Ok(false);
+            }
             VirtualTerrainPublicationAdvance::PromoteCertified => {
                 self.virtual_terrain_gpu
                     .promote_certified_candidate(identity)
@@ -7110,6 +7146,12 @@ impl Renderer {
                 else {
                     return false;
                 };
+                if !envelope.contains_position(camera.position.to_array()) {
+                    // Exceptional relocation and a lost publication race retain the last submitted
+                    // frame. Never render a camera outside the exact/horizon proof paired with the
+                    // active handle bank.
+                    return false;
+                }
                 if !self
                     .virtual_terrain_gpu
                     .presented_snapshot_matches(virtual_terrain_snapshot_identity(cut, envelope))
@@ -7858,6 +7900,53 @@ impl Renderer {
                 )
             },
         );
+        let (
+            virtual_terrain_desired_envelope_fingerprint,
+            virtual_terrain_desired_envelope_complete,
+            virtual_terrain_desired_safety_leaves,
+            virtual_terrain_desired_horizon_roots,
+            virtual_terrain_desired_locus_minimum_leaf,
+            virtual_terrain_desired_locus_maximum_leaf_exclusive,
+        ) = self.virtual_terrain_desired_envelope.as_ref().map_or(
+            (0, false, 0, 0, [0; 2], [0; 2]),
+            |envelope| {
+                let locus = envelope.locus();
+                (
+                    envelope.fingerprint(),
+                    envelope.is_complete(),
+                    envelope.exact_surface_domain().required_leaf_count(),
+                    envelope.required_horizon_root_count(),
+                    locus.map_or([0; 2], PresentationLocus::minimum_leaf),
+                    locus.map_or([0; 2], PresentationLocus::maximum_leaf_exclusive),
+                )
+            },
+        );
+        let (
+            virtual_terrain_committed_envelope_fingerprint,
+            virtual_terrain_committed_safety_leaves,
+            virtual_terrain_committed_safety_coverage,
+            virtual_terrain_committed_horizon_roots,
+            virtual_terrain_committed_horizon_coverage,
+            virtual_terrain_committed_locus_minimum_leaf,
+            virtual_terrain_committed_locus_maximum_leaf_exclusive,
+        ) = self.virtual_terrain_committed_envelope.as_ref().map_or(
+            (0, 0, 0, 0, 0, [0; 2], [0; 2]),
+            |envelope| {
+                let cut = self.virtual_terrain_cut.as_ref();
+                let locus = envelope.locus();
+                (
+                    envelope.fingerprint(),
+                    envelope.exact_surface_domain().required_leaf_count(),
+                    cut.map_or(0, |cut| {
+                        cut.exact_surface_coverage(envelope.exact_surface_domain())
+                    }),
+                    envelope.required_horizon_root_count(),
+                    cut.map_or(0, |cut| cut.presentation_horizon_coverage(envelope)),
+                    locus.map_or([0; 2], PresentationLocus::minimum_leaf),
+                    locus.map_or([0; 2], PresentationLocus::maximum_leaf_exclusive),
+                )
+            },
+        );
         let virtual_terrain_cut_fingerprint = virtual_visible
             .then_some(self.virtual_terrain_cut.as_ref())
             .flatten()
@@ -7951,6 +8040,21 @@ impl Renderer {
                 virtual_terrain_exact_prediction_required_leaves as u32,
             virtual_terrain_exact_prediction_current_coverage:
                 virtual_terrain_exact_prediction_current_coverage as u32,
+            virtual_terrain_desired_envelope_fingerprint,
+            virtual_terrain_desired_envelope_complete,
+            virtual_terrain_desired_safety_leaves: virtual_terrain_desired_safety_leaves as u32,
+            virtual_terrain_desired_horizon_roots: virtual_terrain_desired_horizon_roots as u32,
+            virtual_terrain_desired_locus_minimum_leaf,
+            virtual_terrain_desired_locus_maximum_leaf_exclusive,
+            virtual_terrain_committed_envelope_fingerprint,
+            virtual_terrain_committed_safety_leaves: virtual_terrain_committed_safety_leaves as u32,
+            virtual_terrain_committed_safety_coverage: virtual_terrain_committed_safety_coverage
+                as u32,
+            virtual_terrain_committed_horizon_roots: virtual_terrain_committed_horizon_roots as u32,
+            virtual_terrain_committed_horizon_coverage: virtual_terrain_committed_horizon_coverage
+                as u32,
+            virtual_terrain_committed_locus_minimum_leaf,
+            virtual_terrain_committed_locus_maximum_leaf_exclusive,
             virtual_terrain_cut_fingerprint,
             virtual_terrain_presented_snapshot_generation,
             virtual_terrain_presented_snapshot_fingerprint,
@@ -12120,6 +12224,45 @@ mod tests {
             Some(&cut),
             Some(&envelope)
         ));
+    }
+
+    #[test]
+    fn delayed_adjacent_publication_aborts_when_desired_locus_reverses() {
+        let mut envelopes = crate::virtual_terrain::PresentationEnvelopeCache::default();
+        let locus_a = envelopes.resolve([0.1, 0.0, 0.1], 0.0, 20.0, 64, 16);
+        let locus_b = envelopes.resolve([9.7, 0.0, 0.1], 0.0, 20.0, 64, 16);
+        assert_ne!(locus_a, locus_b);
+
+        assert_eq!(
+            virtual_terrain_publication_advance(
+                true,
+                virtual_terrain_publication_is_relevant(&locus_b, Some(&locus_b)),
+                false,
+                false,
+            ),
+            VirtualTerrainPublicationAdvance::AwaitCertificate,
+            "B remains frozen while it is relevant but not yet certified",
+        );
+        assert_eq!(
+            virtual_terrain_publication_advance(
+                true,
+                virtual_terrain_publication_is_relevant(&locus_b, Some(&locus_a)),
+                false,
+                true,
+            ),
+            VirtualTerrainPublicationAdvance::AbortStale,
+            "a late B certificate cannot promote after desired presentation reverses to A",
+        );
+        assert_eq!(
+            virtual_terrain_publication_advance(
+                true,
+                virtual_terrain_publication_is_relevant(&locus_a, Some(&locus_a)),
+                false,
+                true,
+            ),
+            VirtualTerrainPublicationAdvance::PromoteCertified,
+            "the currently desired A transaction may still promote",
+        );
     }
 
     #[test]

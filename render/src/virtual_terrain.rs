@@ -273,6 +273,15 @@ impl PresentationEnvelope {
         self.data.horizon_roots.len()
     }
 
+    fn requires_horizon_owner(&self, key: TerrainPageKey) -> bool {
+        key.is_surface()
+            && self
+                .data
+                .horizon_roots
+                .iter()
+                .any(|root| terrain_page_keys_overlap(key, *root))
+    }
+
     pub fn fingerprint(&self) -> u64 {
         self.data.fingerprint
     }
@@ -966,19 +975,34 @@ impl VirtualTerrainCut {
         }) {
             return false;
         }
+        self.presentation_horizon_coverage(envelope) == envelope.required_horizon_root_count()
+    }
+
+    pub fn presentation_horizon_coverage(&self, envelope: &PresentationEnvelope) -> usize {
+        if !envelope.is_complete()
+            || self
+                .selected_pages
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return 0;
+        }
         let required_leaf_area = 1_u64 << (2 * u32::from(TERRAIN_COVERAGE_ROOT_LEVEL));
-        envelope.required_horizon_roots().all(|root| {
-            self.selected_pages
-                .iter()
-                .filter(|selected| {
-                    selected.is_surface()
-                        && selected.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL) == Some(root)
-                })
-                .try_fold(0_u64, |covered, selected| {
-                    covered.checked_add(1_u64 << (2 * u32::from(selected.level)))
-                })
-                == Some(required_leaf_area)
-        })
+        envelope
+            .required_horizon_roots()
+            .filter(|root| {
+                self.selected_pages
+                    .iter()
+                    .filter(|selected| {
+                        selected.is_surface()
+                            && selected.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL) == Some(*root)
+                    })
+                    .try_fold(0_u64, |covered, selected| {
+                        covered.checked_add(1_u64 << (2 * u32::from(selected.level)))
+                    })
+                    == Some(required_leaf_area)
+            })
+            .count()
     }
 }
 
@@ -1635,6 +1659,29 @@ impl VirtualTerrainHierarchy {
         view: VirtualTerrainView,
         exact_surface_domain: &ExactSurfaceDomain,
     ) -> Result<VirtualTerrainCut, VirtualTerrainError> {
+        self.select_cut_internal(view, exact_surface_domain, None)
+    }
+
+    /// Selects a cut whose traversal is complete for a frozen presentation envelope.
+    ///
+    /// Ordinary view selection may ignore region roots behind the camera. Publication selection
+    /// may not: every active root inside the envelope horizon is a mandatory owner even when it is
+    /// currently outside the frustum, because the player can turn anywhere inside the committed
+    /// locus without waiting for a new terrain transaction.
+    pub fn select_presentation_cut(
+        &mut self,
+        view: VirtualTerrainView,
+        envelope: &PresentationEnvelope,
+    ) -> Result<VirtualTerrainCut, VirtualTerrainError> {
+        self.select_cut_internal(view, envelope.exact_surface_domain(), Some(envelope))
+    }
+
+    fn select_cut_internal(
+        &mut self,
+        view: VirtualTerrainView,
+        exact_surface_domain: &ExactSurfaceDomain,
+        presentation_envelope: Option<&PresentationEnvelope>,
+    ) -> Result<VirtualTerrainCut, VirtualTerrainError> {
         if !view.validates() {
             return Err(VirtualTerrainError::InvalidView);
         }
@@ -1646,6 +1693,7 @@ impl VirtualTerrainHierarchy {
             hierarchy: self,
             view,
             exact_surface_domain,
+            presentation_envelope,
             frame,
             prior_refined: &prior_refined,
             prior_balanced_selected_blockers,
@@ -1674,7 +1722,10 @@ impl VirtualTerrainHierarchy {
             .copied()
             .filter(|key| {
                 builder.hierarchy.nodes.get(key).is_some_and(|node| {
-                    page_is_visible(node.bounds, view) || exact_surface_domain.intersects_page(*key)
+                    page_is_visible(node.bounds, view)
+                        || exact_surface_domain.intersects_page(*key)
+                        || presentation_envelope
+                            .is_some_and(|envelope| envelope.requires_horizon_owner(*key))
                 })
             })
             .collect::<Vec<_>>();
@@ -1689,12 +1740,20 @@ impl VirtualTerrainHierarchy {
             builder.visit(root, true, root);
         }
         builder.balance_surface_lod();
+        if let Some(envelope) = presentation_envelope {
+            for root in envelope.required_horizon_roots() {
+                if !builder.fully_covers_horizon_root(root) {
+                    builder.ownerless_roots.push(root);
+                }
+            }
+        }
         if builder.ownerless_roots.is_empty() && !builder.selection_is_exact_active_root_partition()
         {
             builder.traversal_overflow = true;
         }
         builder.selected.sort_unstable();
         builder.ownerless_roots.sort_unstable();
+        builder.ownerless_roots.dedup();
         let exact_surface_lod_discontinuities =
             exact_surface_lod_discontinuity_edges(&builder.selected);
         let mut requested_pages = builder.requests.into_iter().collect::<Vec<_>>();
@@ -1882,6 +1941,7 @@ struct CutBuilder<'a> {
     hierarchy: &'a mut VirtualTerrainHierarchy,
     view: VirtualTerrainView,
     exact_surface_domain: &'a ExactSurfaceDomain,
+    presentation_envelope: Option<&'a PresentationEnvelope>,
     frame: u64,
     prior_refined: &'a BTreeSet<TerrainPageKey>,
     prior_balanced_selected_blockers: BTreeMap<TerrainPageKey, BTreeSet<TerrainPageKey>>,
@@ -1905,6 +1965,20 @@ struct CutBuilder<'a> {
 }
 
 impl CutBuilder<'_> {
+    fn fully_covers_horizon_root(&self, root: TerrainPageKey) -> bool {
+        let required_leaf_area = 1_u128 << (2 * u32::from(TERRAIN_COVERAGE_ROOT_LEVEL));
+        self.selected
+            .iter()
+            .filter(|selected| {
+                selected.is_surface()
+                    && selected.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL) == Some(root)
+            })
+            .try_fold(0_u128, |covered, selected| {
+                covered.checked_add(1_u128 << (2 * u32::from(selected.level)))
+            })
+            == Some(required_leaf_area)
+    }
+
     /// Makes every surface edge differ by at most one level without adding seam geometry.
     ///
     /// Replacing a coarse page with its complete coherent child group preserves the complete
@@ -2390,7 +2464,14 @@ impl CutBuilder<'_> {
         let graded_surface = key.is_surface()
             && key.level > 0
             && self.exact_surface_domain.intersects_page_margin(key, 2);
-        if root && !page_is_visible(node.bounds, self.view) && !exact_surface {
+        let required_horizon_owner = self
+            .presentation_envelope
+            .is_some_and(|envelope| envelope.requires_horizon_owner(key));
+        if root
+            && !page_is_visible(node.bounds, self.view)
+            && !exact_surface
+            && !required_horizon_owner
+        {
             return;
         }
         if self.visited_nodes >= self.hierarchy.capacity.max_traversal_nodes {
@@ -2974,6 +3055,64 @@ mod tests {
     }
 
     #[test]
+    fn presentation_selection_visits_required_horizon_owners_behind_the_camera() {
+        let behind_root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -2, 0);
+        let page = surface_page(behind_root);
+        let directory = TerrainHierarchyDirectoryV1::from_pages(std::slice::from_ref(&page))
+            .expect("single complete coverage root directory");
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        hierarchy.register_region_directory(&directory).unwrap();
+        hierarchy.install_page(page).unwrap();
+
+        let mut east_facing_view = view(false);
+        east_facing_view.camera_position_metres = [10.0, 20.0, 1_000.0];
+        east_facing_view.camera_forward = [1.0, 0.0, 0.0];
+        east_facing_view.far_metres = 100.0;
+        east_facing_view.refine_above_pixels = 1.0e30;
+        east_facing_view.coarsen_below_pixels = 5.0e29;
+        let envelope = PresentationEnvelopeCache::default().resolve(
+            east_facing_view.camera_position_metres,
+            0.0,
+            3_300.0,
+            64,
+            16,
+        );
+        assert!(envelope.is_complete());
+        assert!(
+            envelope
+                .required_horizon_roots()
+                .any(|root| root == behind_root),
+            "the frozen horizon must include the adjacent root behind the east-facing camera",
+        );
+        assert!(
+            !page_is_visible(
+                hierarchy.directory_node(behind_root).unwrap().bounds,
+                east_facing_view,
+            ),
+            "the fixture must actually be rejected by ordinary frustum traversal",
+        );
+
+        let ordinary = hierarchy
+            .select_cut(east_facing_view, envelope.exact_surface_domain())
+            .unwrap();
+        assert!(!ordinary.selected_pages.contains(&behind_root));
+
+        let presentation = hierarchy
+            .select_presentation_cut(east_facing_view, &envelope)
+            .unwrap();
+        assert!(presentation.selected_pages.contains(&behind_root));
+        assert!(
+            !presentation.ownerless_roots.contains(&behind_root),
+            "the selected behind-camera horizon root is a real owner, not missing coverage debt",
+        );
+        assert!(
+            !presentation.covers_presentation_envelope(&envelope),
+            "the still-unregistered forward root must prevent publication",
+        );
+    }
+
+    #[test]
     fn cut_identity_includes_exact_ownerless_roots_and_failure_state() {
         let base = 0x1234_5678_9abc_def0;
         let first = TerrainPageKey::surface(3, -2, 7);
@@ -3120,6 +3259,7 @@ mod tests {
             hierarchy,
             view: view(false),
             exact_surface_domain,
+            presentation_envelope: None,
             frame: 1,
             prior_refined,
             prior_balanced_selected_blockers: BTreeMap::new(),
