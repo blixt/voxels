@@ -6776,7 +6776,10 @@ impl Renderer {
         self.virtual_terrain_committed_snapshot_is_valid()
             && self.presented_virtual_terrain().is_some_and(|committed| {
                 committed.revisions_current
-                    && committed.envelope.horizon_covers_position(position_metres)
+                    && committed
+                        .envelope
+                        .exact_surface_domain()
+                        .contains_position(position_metres)
             })
     }
 
@@ -6905,8 +6908,24 @@ impl Renderer {
                 *missing,
             ));
         }
-        self.synchronize_virtual_terrain_cut_seams(&cut)?;
-        self.virtual_terrain_cut_fits_snapshot(&cut)?;
+        let seams_changed = match self.synchronize_virtual_terrain_cut_seams(&cut) {
+            Ok(changed) => changed,
+            Err(error) => {
+                // Seam expansion mutates derived geometry after the logical cut was selected.
+                // Once that starts, neither the cached fit proof nor its oracle cut may be reused.
+                self.invalidate_virtual_terrain_desired_plan();
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.virtual_terrain_cut_fits_snapshot(&cut) {
+            if seams_changed {
+                // Selection costed the pre-seam source geometry. Re-enter selection so its
+                // ordinary error-scale solver measures this exact expanded geometry and chooses a
+                // genuinely fitting cut; repeatedly retrying the cached cut cannot make it fit.
+                self.invalidate_virtual_terrain_desired_plan();
+            }
+            return Err(error);
+        }
         let terrain_revisions = cut
             .selected_pages
             .iter()
@@ -7015,7 +7034,8 @@ impl Renderer {
                     || !publication.certificate.complete
                     || !publication
                         .envelope
-                        .horizon_covers_position(state.camera.position.to_array())
+                        .exact_surface_domain()
+                        .contains_position(state.camera.position.to_array())
                 {
                     return Err(ClientViewCommitError::StaleTerrainReadyReceipt);
                 }
@@ -7962,10 +7982,15 @@ impl Renderer {
                     .presented_virtual_terrain()
                     .map(|committed| (&committed.cut, &committed.envelope, committed.certificate))
                     .filter(|(_, _, certificate)| certificate.complete)?;
-                if !envelope.horizon_covers_position(camera.position.to_array()) {
-                    // Coverage is not a wall. Suppress the complete virtual bank and render the
-                    // authoritative canonical chunks until a camera-covering cut can be committed
-                    // atomically. Default ownership guarantees the two terrain paths never overlap.
+                if !envelope
+                    .exact_surface_domain()
+                    .contains_position(camera.position.to_array())
+                {
+                    // Coverage is not a wall. A coarse horizon page is not evidence that the
+                    // camera's 10 cm surface page is present. Suppress the complete virtual bank
+                    // and render authoritative canonical chunks until a camera-exact cut can be
+                    // committed atomically. Default ownership guarantees the terrain paths never
+                    // overlap.
                     (false, VirtualTerrainOwnership::default(), true)
                 } else if !self.virtual_terrain_gpu.presented_snapshot_matches(
                     virtual_terrain_snapshot_identity(

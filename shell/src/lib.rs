@@ -185,9 +185,8 @@ fn movement_stream_interest(
 }
 
 /// Spectators are collisionless and read-only, so their high cruise velocity must not turn a
-/// several-hundred-metre flight path into collision-critical exact-chunk traffic. Their current
-/// focus still updates normally, and the full velocity continues to prioritize forward desired
-/// work; walking, swimming, and gliding retain their swept collision corridor.
+/// several-hundred-metre flight path into collision-critical exact-chunk traffic. Walking,
+/// swimming, and gliding retain their swept collision corridor.
 #[cfg(any(target_arch = "wasm32", test))]
 fn exact_streaming_velocity(camera: &CameraState, streaming_velocity: glam::Vec3) -> glam::Vec3 {
     if camera.locomotion() == voxels_core::LocomotionMode::Spectator {
@@ -211,6 +210,24 @@ fn canonical_collision_camera(
     } else {
         let camera = current.camera();
         (camera.locomotion() != voxels_core::LocomotionMode::Spectator).then_some(camera)
+    }
+}
+
+/// Separates the visual terrain demand camera from the canonical simulation focus.
+///
+/// Virtual surface pages follow a spectator camera. Canonical chunks remain centered on the saved
+/// gameplay body, which is the only collision-bearing state and the exact return destination.
+#[cfg(any(target_arch = "wasm32", test))]
+fn canonical_stream_focus(
+    current: client_view::ClientViewState,
+    visual_demand_camera: CameraState,
+    visual_demand_velocity: glam::Vec3,
+) -> (CameraState, glam::Vec3) {
+    if current.session_kind() == client_view::ClientViewSessionKind::Spectator {
+        let body = current.gameplay_body();
+        (body, body.velocity)
+    } else {
+        (visual_demand_camera, visual_demand_velocity)
     }
 }
 
@@ -3239,15 +3256,10 @@ mod web {
                 .map(|camera| camera.velocity)
                 .unwrap_or(source_streaming_velocity);
             let has_spatial_demand = spatial_demand_camera.is_some();
-            let focus = world_to_chunk(predictive_stream_position(
-                demand_camera.position,
-                demand_streaming_velocity,
-                self.config.stream_velocity_lookahead_seconds,
-                exact_lead_metres,
-            ));
-            let (client_view_attempt_target, collision_camera) = {
+            let (current_view, client_view_attempt_target, collision_camera) = {
                 let client_view = self.client_view.borrow();
                 (
+                    client_view.current(),
                     client_view.goal().and_then(|goal| {
                         client_view
                             .attempt()
@@ -3256,6 +3268,18 @@ mod web {
                     crate::canonical_collision_camera(client_view.current()),
                 )
             };
+            let (canonical_focus_camera, canonical_focus_velocity) =
+                crate::canonical_stream_focus(
+                    current_view,
+                    demand_camera,
+                    demand_streaming_velocity,
+                );
+            let focus = world_to_chunk(predictive_stream_position(
+                canonical_focus_camera.position,
+                canonical_focus_velocity,
+                self.config.stream_velocity_lookahead_seconds,
+                exact_lead_metres,
+            ));
             let attempt_target_matches_source =
                 client_view_attempt_target.is_some_and(|(_, target_camera)| {
                     crate::canonical_interest_camera_matches(source_camera, &target_camera)
@@ -3267,8 +3291,8 @@ mod web {
             let collision_interest_start = performance_now(performance);
             let mut source_collision_interest = if let Some(body) = collision_camera {
                 // Spectator motion is collisionless, but its saved gameplay body remains a live
-                // return destination. Keep that one bounded collision corridor resident while the
-                // visual focus follows the spectator so leaving spectator is immediately playable.
+                // return destination. Keep the scheduler and this bounded collision corridor on
+                // the body while virtual surface demand follows the spectator.
                 self.collision_stream_interest(
                     &body,
                     crate::exact_streaming_velocity(&body, body.velocity),
@@ -3279,7 +3303,9 @@ mod web {
             };
             source_collision_interest.sort_unstable();
             source_collision_interest.dedup();
-            let demand_collision_interest = spatial_demand_camera.map(|_| {
+            let demand_collision_interest = spatial_demand_camera
+                .filter(|camera| camera.locomotion() != LocomotionMode::Spectator)
+                .map(|_| {
                 let mut interest = self.collision_stream_interest(
                     &demand_camera,
                     crate::exact_streaming_velocity(&demand_camera, demand_streaming_velocity),
@@ -3288,9 +3314,12 @@ mod web {
                 interest.sort_unstable();
                 interest.dedup();
                 interest
-            });
+                });
             let attempt_collision_interest =
                 client_view_attempt_target.map(|(_, target_camera)| {
+                    if target_camera.locomotion() == LocomotionMode::Spectator {
+                        return Vec::new();
+                    }
                     let source_stream_matches =
                         source_streaming_velocity.to_array().map(f32::to_bits)
                             == target_camera.velocity.to_array().map(f32::to_bits);
@@ -3329,9 +3358,15 @@ mod web {
             let collision_interest_ms =
                 (performance_now(performance) - collision_interest_start) as f32;
             let enclosed_interest_start = performance_now(performance);
-            let source_enclosed_view_plan = self.enclosed_view_stream_plan(source_camera);
+            let source_enclosed_view_plan =
+                if current_view.session_kind() == ClientViewSessionKind::Spectator {
+                    EnclosedViewStreamPlan::default()
+                } else {
+                    self.enclosed_view_stream_plan(source_camera)
+                };
             let demand_enclosed_view_plan = has_spatial_demand
-                .then(|| self.enclosed_view_stream_plan(&demand_camera));
+                .then(|| self.enclosed_view_stream_plan(&demand_camera))
+                .filter(|_| demand_camera.locomotion() != LocomotionMode::Spectator);
             let (attempt_enclosed_interest, independent_attempt_enclosed_plan) =
                 match client_view_attempt_target {
                     Some(_) if attempt_target_matches_source => {
@@ -3346,10 +3381,13 @@ mod web {
                         ),
                         None,
                     ),
-                    Some((_, target_camera)) => {
+                    Some((_, target_camera))
+                        if target_camera.locomotion() != LocomotionMode::Spectator =>
+                    {
                         let plan = self.enclosed_view_stream_plan(&target_camera);
                         (Some(plan.chunks.clone()), Some(plan))
                     }
+                    Some(_) => (Some(Vec::new()), None),
                     None => (None, None),
                 };
             let mut enclosed_view_plan = source_enclosed_view_plan;
@@ -3383,8 +3421,8 @@ mod web {
             urgent_interest.dedup();
             let interest = urgent_interest.clone();
             let priority_hint = directional_stream_priority(
-                &demand_camera,
-                demand_streaming_velocity,
+                &canonical_focus_camera,
+                canonical_focus_velocity,
                 CHUNK_EDGE as f32 * VOXEL_SIZE_METRES,
                 self.config.stream_velocity_lookahead_seconds,
                 self.config.stream_view_cone_half_angle_degrees,
@@ -8227,6 +8265,10 @@ mod tests {
             retained.locomotion(),
             voxels_core::LocomotionMode::Spectator
         );
+        let (focus, velocity) =
+            canonical_stream_focus(spectator, far_camera, glam::Vec3::new(128.0, 0.0, 0.0));
+        assert_eq!(focus.position, body.position);
+        assert_eq!(velocity, body.velocity);
     }
 
     #[test]

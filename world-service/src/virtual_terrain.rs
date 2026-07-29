@@ -519,8 +519,13 @@ fn surface_page_has_edits(snapshot: &TerrainEditSnapshot, key: TerrainPageKey) -
             .chunk_overrides(chunk)
             .into_iter()
             .any(|(coord, _)| {
-                (minimum_x..=maximum_x).contains(&coord.x)
-                    && (minimum_z..=maximum_z).contains(&coord.z)
+                let interior = (minimum_x..maximum_x).contains(&coord.x)
+                    && (minimum_z..maximum_z).contains(&coord.z);
+                let positive_x_face =
+                    coord.x == maximum_x && (minimum_z..maximum_z).contains(&coord.z);
+                let positive_z_face =
+                    coord.z == maximum_z && (minimum_x..maximum_x).contains(&coord.x);
+                interior || positive_x_face || positive_z_face
             })
     })
 }
@@ -1104,10 +1109,25 @@ mod tests {
             &snapshot_at(minimum_x, minimum_z),
             key
         ));
-        assert!(surface_page_has_edits(
-            &snapshot_at(maximum_x, maximum_z),
-            key
-        ));
+        assert!(
+            surface_page_has_edits(&snapshot_at(maximum_x, minimum_z), key),
+            "the lower-coordinate page owns its positive X face"
+        );
+        assert!(
+            surface_page_has_edits(&snapshot_at(minimum_x, maximum_z), key),
+            "the lower-coordinate page owns its positive Z face"
+        );
+        assert!(
+            !surface_page_has_edits(&snapshot_at(maximum_x, maximum_z), key),
+            "the diagonal positive corner belongs to the diagonal page, not either face"
+        );
+        assert!(
+            surface_page_has_edits(
+                &snapshot_at(maximum_x, maximum_z),
+                TerrainPageKey::surface(key.level, key.coord[0] + 1, key.coord[2] + 1)
+            ),
+            "the diagonal page must discover its own minimum corner"
+        );
         assert!(
             !surface_page_has_edits(&snapshot_at(minimum_x - 1, minimum_z), key),
             "the negative neighbor owns its own interface edit"

@@ -690,6 +690,37 @@ impl ExactSurfaceDomain {
             .copied()
     }
 
+    /// Whether the unique level-0 surface page owning `position_metres` is part of this exact
+    /// domain.
+    ///
+    /// This is the discrete ownership predicate used by selection, so presentation never infers
+    /// 10 cm coverage from the much larger coarse-horizon halo. Vertical position is irrelevant
+    /// for a surface-page domain.
+    pub fn contains_position(&self, position_metres: [f32; 3]) -> bool {
+        if !self.data.core_complete || !position_metres.into_iter().all(f32::is_finite) {
+            return false;
+        }
+        // Use the same f32 lattice as camera positions. Promoting the numerator but rebuilding the
+        // nominal 3.2 m denominator as f64 moves exact negative f32 boundaries just below their
+        // page and violates half-open ownership.
+        let leaf_span_metres = TERRAIN_PAGE_EDGE_SAMPLES as f32 * 0.1;
+        let leaf_coordinates =
+            [position_metres[0], position_metres[2]].map(|coordinate| {
+                (coordinate / leaf_span_metres).floor()
+            });
+        if leaf_coordinates
+            .into_iter()
+            .any(|coordinate| coordinate < i32::MIN as f32 || coordinate > i32::MAX as f32)
+        {
+            return false;
+        }
+        self.data.required_leaves.contains(&TerrainPageKey::surface(
+            0,
+            leaf_coordinates[0] as i32,
+            leaf_coordinates[1] as i32,
+        ))
+    }
+
     pub fn intersects_page(&self, key: TerrainPageKey) -> bool {
         self.data.core_complete
             && key.is_surface()
@@ -4758,6 +4789,8 @@ mod tests {
             domain.required_pages_at_level(1).collect::<Vec<_>>(),
             vec![TerrainPageKey::surface(1, 0, 0)]
         );
+        assert!(domain.contains_position([0.25, -4_000.0, 0.5]));
+        assert!(!domain.contains_position([3.2, 7.0, 0.5]));
     }
 
     #[test]
@@ -4784,6 +4817,9 @@ mod tests {
             vec![TerrainPageKey::surface(0, -1, -1)],
             "an exact negative page boundary belongs to the half-open page on its positive side"
         );
+        assert!(just_negative.contains_position([-0.01, 90.0, -0.01]));
+        assert!(!just_negative.contains_position([0.0, 90.0, 0.0]));
+        assert!(negative_boundary.contains_position([-3.2, 90.0, -3.2]));
     }
 
     #[test]
