@@ -17,7 +17,7 @@ pub(crate) struct ArenaStats {
     pub largest_free_range_bytes: u64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Page {
     capacity: u32,
     free: Vec<(u32, u32)>,
@@ -25,6 +25,7 @@ struct Page {
 
 /// Best-fit, coalescing allocator for fixed-size GPU buffer pages. Allocation metadata is portable
 /// and host-tested; the renderer owns the corresponding WGPU buffers.
+#[derive(Clone)]
 pub(crate) struct ArenaAllocator {
     default_page_size: u32,
     alignment: u32,
@@ -152,6 +153,22 @@ impl ArenaAllocator {
             .is_none_or(|maximum| current_capacity.saturating_add(u64::from(capacity)) <= maximum)
     }
 
+    /// Simulates a whole allocation transaction against the exact current free ranges.
+    ///
+    /// Largest-first ordering is deterministic and avoids admitting a group merely because its
+    /// byte sum fits while no legal placement exists in the bounded source segments.
+    pub fn can_allocate_batch(&self, requested_sizes: impl IntoIterator<Item = u32>) -> bool {
+        let mut requested_sizes = requested_sizes
+            .into_iter()
+            .filter(|size| *size > 0)
+            .collect::<Vec<_>>();
+        requested_sizes.sort_unstable_by(|left, right| right.cmp(left));
+        let mut simulation = self.clone();
+        requested_sizes
+            .into_iter()
+            .all(|size| simulation.allocate(size).is_some())
+    }
+
     pub fn aligned_allocation_size(&self, requested_size: u32) -> Option<u32> {
         (requested_size > 0)
             .then(|| align_up(requested_size, self.alignment))
@@ -259,6 +276,23 @@ mod tests {
             (0, 0, 64)
         );
         Ok(())
+    }
+
+    #[test]
+    fn batch_preflight_accounts_for_fragmentation_without_mutation() {
+        let mut arena = ArenaAllocator::new_bounded(64, 8, 64, 1).unwrap();
+        let a = arena.allocate(16).unwrap();
+        let _b = arena.allocate(16).unwrap();
+        let c = arena.allocate(16).unwrap();
+        let _d = arena.allocate(16).unwrap();
+        assert!(arena.free(a));
+        assert!(arena.free(c));
+        let before = arena.stats();
+
+        assert!(!arena.can_allocate_batch([24]));
+        assert_eq!(arena.stats(), before);
+        assert!(arena.can_allocate_batch([16, 16]));
+        assert_eq!(arena.stats(), before);
     }
 
     #[test]

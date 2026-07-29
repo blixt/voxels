@@ -42,10 +42,9 @@ use voxels_world::protocol::{EditShape, EditVolume};
 use voxels_world::{
     AtmosphereSample, CHUNK_EDGE, CelestialObservation, Chunk, ChunkCoord, FaceAxis, Material,
     MeshedChunk, Quad, RenderLayer, SurfaceRegion, TERRAIN_COVERAGE_ROOT_LEVEL,
-    TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_PAGE_MAX_SOURCE_GEOMETRY_BYTES, TERRAIN_REGION_ROOT_LEVEL,
-    TerrainHierarchyDirectoryV1, TerrainPageKey, TerrainPageRepresentation,
-    TerrainPageRepresentationKind, TerrainPageTransferIdentity, TerrainPageV1, VOXEL_SIZE_METRES,
-    WorldManifest, reconstruct_exact_terrain_surface,
+    TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_REGION_ROOT_LEVEL, TerrainHierarchyDirectoryV1,
+    TerrainPageKey, TerrainPageRepresentation, TerrainPageRepresentationKind, TerrainPageV1,
+    VOXEL_SIZE_METRES, WorldManifest, reconstruct_exact_terrain_surface,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -232,6 +231,42 @@ pub enum VirtualTerrainRenderMode {
     Disabled,
     Shadow,
     Visible,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VirtualTerrainPublicationAdvance {
+    Idle,
+    AwaitCertificate,
+    CommitActive,
+    PromoteCertified,
+}
+
+const fn virtual_terrain_publication_advance(
+    has_transaction: bool,
+    active_matches: bool,
+    candidate_certified: bool,
+) -> VirtualTerrainPublicationAdvance {
+    if !has_transaction {
+        VirtualTerrainPublicationAdvance::Idle
+    } else if active_matches {
+        VirtualTerrainPublicationAdvance::CommitActive
+    } else if candidate_certified {
+        VirtualTerrainPublicationAdvance::PromoteCertified
+    } else {
+        VirtualTerrainPublicationAdvance::AwaitCertificate
+    }
+}
+
+const fn virtual_terrain_publication_can_stage(has_transaction: bool) -> bool {
+    !has_transaction
+}
+
+const fn virtual_terrain_committed_snapshot_is_safe(
+    has_committed_cut: bool,
+    committed_cut_is_renderable: bool,
+    active_bank_matches_committed: bool,
+) -> bool {
+    has_committed_cut && committed_cut_is_renderable && active_bank_matches_committed
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3529,8 +3564,15 @@ pub struct Renderer {
     virtual_terrain_gpu: VirtualTerrainGpuControl,
     virtual_terrain_mode: VirtualTerrainRenderMode,
     virtual_terrain_initial_cut_certified: bool,
+    /// Last GPU-certified ownership cut. This is the only virtual-terrain cut that may be
+    /// presented; it deliberately does not track the latest view-quality target.
     virtual_terrain_cut: Option<VirtualTerrainCut>,
+    /// Ephemeral quality/demand target selected from the latest view and resident directory.
     virtual_terrain_oracle_cut: Option<VirtualTerrainCut>,
+    /// Immutable cut currently being encoded or awaiting GPU certification. Directory growth,
+    /// cache arrivals, and a newer desired view may replace `virtual_terrain_oracle_cut`, but may
+    /// not replace this transaction until it promotes or fails.
+    virtual_terrain_publication_cut: Option<VirtualTerrainCut>,
     /// Hysteretic screen-error scale selected by the compact-output capacity solver.
     virtual_terrain_error_scale: f64,
     virtual_terrain_headroom_frames: u16,
@@ -4450,6 +4492,7 @@ impl Renderer {
             virtual_terrain_initial_cut_certified: false,
             virtual_terrain_cut: None,
             virtual_terrain_oracle_cut: None,
+            virtual_terrain_publication_cut: None,
             virtual_terrain_error_scale: 1.0,
             virtual_terrain_headroom_frames: 0,
             virtual_terrain_requested_view: None,
@@ -5414,6 +5457,29 @@ impl Renderer {
             }
         }
 
+        // Reclaim unrelated travel history once, then prove that every missing sibling can coexist
+        // with the immutable committed owner. This is a transaction-local free-range simulation;
+        // future requested groups remain encoded in the shell cache and do not affect admission.
+        self.retain_virtual_terrain_pages(std::iter::empty())?;
+        let allocation_sizes = pages
+            .iter()
+            .filter(|page| !self.virtual_terrain_pages.contains_key(&page.key))
+            .map(|page| {
+                self.virtual_terrain
+                    .directory_node(page.key)
+                    .map(|node| node.source_geometry_bytes)
+                    .ok_or(VirtualTerrainRendererError::SelectedPageMissingGpu(
+                        page.key,
+                    ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !self
+            .virtual_terrain_arena
+            .can_allocate_batch(allocation_sizes)
+        {
+            return Err(VirtualTerrainRendererError::GpuPoolCapacity);
+        }
+
         let mut staged = Vec::new();
         for page in &pages {
             if self.virtual_terrain_pages.contains_key(&page.key) {
@@ -5921,34 +5987,21 @@ impl Renderer {
         self.virtual_terrain_cut.as_ref()
     }
 
-    /// Whether the CPU oracle, published hierarchy cut, and immutable presented handle bank are
-    /// the same complete generation.
+    /// Whether the immutable active handle bank is the last committed ownership cut.
     ///
-    /// This is deliberately stronger than candidate certification: a certified inactive bank is
-    /// not current until its generation is promoted and used for presentation.
-    pub fn virtual_terrain_presented_cut_is_current(&self) -> bool {
-        if self.virtual_terrain_mode != VirtualTerrainRenderMode::Visible {
-            return false;
-        }
-        let (Some(published), Some(oracle)) = (
-            self.virtual_terrain_cut.as_ref(),
-            self.virtual_terrain_oracle_cut.as_ref(),
-        ) else {
-            return false;
-        };
-        published.fingerprint == oracle.fingerprint
-            && published.selected_pages == oracle.selected_pages
-            && published
-                .selected_pages
-                .iter()
-                .all(|key| self.virtual_terrain_pages.contains_key(key))
-            && published.fingerprint
-                == self
-                    .virtual_terrain
-                    .selected_fingerprint(&published.selected_pages)
-            && self
-                .virtual_terrain_gpu
-                .active_snapshot_matches(virtual_terrain_snapshot_identity(published))
+    /// A newer desired cut or an in-flight publication is expected during travel and does not make
+    /// the committed snapshot unsafe. Presentation readiness therefore never depends on agreement
+    /// with the ephemeral quality target.
+    pub fn virtual_terrain_committed_snapshot_is_valid(&self) -> bool {
+        let committed = self.virtual_terrain_cut.as_ref();
+        virtual_terrain_committed_snapshot_is_safe(
+            committed.is_some(),
+            committed.is_some_and(VirtualTerrainCut::is_renderable),
+            committed.is_some_and(|committed| {
+                self.virtual_terrain_gpu
+                    .presented_snapshot_matches(virtual_terrain_snapshot_identity(committed))
+            }),
+        )
     }
 
     fn synchronize_virtual_terrain_cut_seams(
@@ -6045,47 +6098,98 @@ impl Renderer {
         self.virtual_terrain_oracle_view = None;
     }
 
+    /// Freezes the latest desired cut as the next publication transaction.
+    ///
+    /// This is intentionally separate from selection: directory and cache state may continue to
+    /// change while the frozen cut is encoded and certified. Only one transaction can own the
+    /// inactive bank at a time.
+    pub fn prepare_virtual_terrain_publication(
+        &mut self,
+    ) -> Result<bool, VirtualTerrainRendererError> {
+        if !virtual_terrain_publication_can_stage(self.virtual_terrain_publication_cut.is_some()) {
+            return Ok(false);
+        }
+        let Some(cut) = self
+            .virtual_terrain_oracle_cut
+            .as_ref()
+            .filter(|cut| cut.is_renderable())
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        if let Some(missing) = cut
+            .selected_pages
+            .iter()
+            .find(|key| !self.virtual_terrain_pages.contains_key(key))
+        {
+            return Err(VirtualTerrainRendererError::SelectedPageMissingGpu(
+                *missing,
+            ));
+        }
+        self.synchronize_virtual_terrain_cut_seams(&cut)?;
+        self.virtual_terrain_cut_fits_snapshot(&cut)?;
+        if self
+            .virtual_terrain_gpu
+            .active_snapshot_matches(virtual_terrain_snapshot_identity(&cut))
+        {
+            if self
+                .virtual_terrain_cut
+                .as_ref()
+                .is_none_or(|committed| committed != &cut)
+            {
+                self.virtual_terrain_cut = Some(cut);
+                self.virtual_terrain_initial_cut_certified = true;
+            }
+            return Ok(false);
+        }
+        self.virtual_terrain_publication_cut = Some(cut);
+        Ok(true)
+    }
+
+    /// Promotes a certified frozen transaction before any new geometry mutation.
+    ///
+    /// Promotion is valid in Shadow mode. This lets cold start progress through several locally
+    /// certified cuts while canonical terrain remains the sole visible owner.
+    pub fn advance_virtual_terrain_publication(
+        &mut self,
+    ) -> Result<bool, VirtualTerrainRendererError> {
+        let Some(cut) = self.virtual_terrain_publication_cut.as_ref().cloned() else {
+            return Ok(false);
+        };
+        let identity = virtual_terrain_snapshot_identity(&cut);
+        match virtual_terrain_publication_advance(
+            true,
+            self.virtual_terrain_gpu.active_snapshot_matches(identity),
+            self.virtual_terrain_gpu.candidate_is_certified(identity),
+        ) {
+            VirtualTerrainPublicationAdvance::PromoteCertified => {
+                self.virtual_terrain_gpu
+                    .promote_certified_candidate(identity)
+                    .map_err(|_| VirtualTerrainRendererError::GpuCutNotCertified)?;
+            }
+            VirtualTerrainPublicationAdvance::CommitActive => {}
+            VirtualTerrainPublicationAdvance::AwaitCertificate
+            | VirtualTerrainPublicationAdvance::Idle => return Ok(false),
+        }
+        self.discard_retired_virtual_terrain_pages();
+        self.virtual_terrain_cut = Some(cut);
+        self.virtual_terrain_publication_cut = None;
+        self.virtual_terrain_initial_cut_certified = true;
+        Ok(true)
+    }
+
+    pub const fn virtual_terrain_publication_in_flight(&self) -> bool {
+        self.virtual_terrain_publication_cut.is_some()
+    }
+
     pub fn set_virtual_terrain_render_mode(
         &mut self,
         mode: VirtualTerrainRenderMode,
     ) -> Result<(), VirtualTerrainRendererError> {
-        if mode == VirtualTerrainRenderMode::Visible {
-            let Some(cut) = self
-                .virtual_terrain_oracle_cut
-                .as_ref()
-                .filter(|cut| cut.is_renderable())
-                .cloned()
-            else {
-                return Err(VirtualTerrainRendererError::NoRenderableCut);
-            };
-            if let Some(missing) = cut
-                .selected_pages
-                .iter()
-                .find(|key| !self.virtual_terrain_pages.contains_key(key))
-            {
-                return Err(VirtualTerrainRendererError::SelectedPageMissingGpu(
-                    *missing,
-                ));
-            }
-            self.synchronize_virtual_terrain_cut_seams(&cut)?;
-            self.virtual_terrain_cut_fits_snapshot(&cut)?;
-            let active_matches = self
-                .virtual_terrain_gpu
-                .active_snapshot_matches(virtual_terrain_snapshot_identity(&cut));
-            let certified = self
-                .virtual_terrain_gpu
-                .candidate_is_certified(virtual_terrain_snapshot_identity(&cut));
-            if !active_matches && !certified {
-                return Err(VirtualTerrainRendererError::GpuCutNotCertified);
-            }
-            if !active_matches {
-                self.virtual_terrain_gpu
-                    .promote_certified_candidate(virtual_terrain_snapshot_identity(&cut))
-                    .map_err(|_| VirtualTerrainRendererError::GpuCutNotCertified)?;
-            }
-            self.discard_retired_virtual_terrain_pages();
-            self.virtual_terrain_cut = Some(cut);
-            self.virtual_terrain_initial_cut_certified = true;
+        if mode == VirtualTerrainRenderMode::Visible
+            && !self.virtual_terrain_committed_snapshot_is_valid()
+        {
+            return Err(VirtualTerrainRendererError::GpuCutNotCertified);
         }
         self.virtual_terrain_mode = mode;
         Ok(())
@@ -6095,19 +6199,11 @@ impl Renderer {
         self.virtual_terrain_mode
     }
 
-    /// Returns whether the latest GPU snapshot encoding certifies the current CPU candidate cut.
+    /// Returns whether no frozen publication transaction is waiting on the GPU.
     ///
-    /// Directory growth must be paced behind this fence. Extending the directory again while the
-    /// prior candidate is still being traversed can invalidate feedback faster than readback can
-    /// complete, preventing a valid published cut from ever converging to its replacement.
+    /// This is a staging boundary, not an agreement test between committed and desired cuts.
     pub fn virtual_terrain_candidate_is_gpu_certified(&self) -> bool {
-        self.virtual_terrain_oracle_cut.as_ref().is_some_and(|cut| {
-            self.virtual_terrain_gpu
-                .candidate_is_certified(virtual_terrain_snapshot_identity(cut))
-                || self
-                    .virtual_terrain_gpu
-                    .active_snapshot_matches(virtual_terrain_snapshot_identity(cut))
-        })
+        self.virtual_terrain_publication_cut.is_none()
     }
 
     pub fn virtual_terrain_region_roots(&self) -> Vec<TerrainPageKey> {
@@ -6143,6 +6239,18 @@ impl Renderer {
         for root in remove {
             removed_pages.extend(self.virtual_terrain.remove_region_directory(root));
         }
+        if self
+            .virtual_terrain_publication_cut
+            .as_ref()
+            .is_some_and(|cut| {
+                cut.selected_pages
+                    .iter()
+                    .any(|key| removed_pages.contains(key))
+            })
+        {
+            self.virtual_terrain_gpu.invalidate_candidate();
+            self.virtual_terrain_publication_cut = None;
+        }
         let published = self
             .virtual_terrain_cut
             .as_ref()
@@ -6176,6 +6284,14 @@ impl Renderer {
     ) -> Result<bool, VirtualTerrainRendererError> {
         if !self.virtual_terrain.remove_page(key) {
             return Ok(false);
+        }
+        if self
+            .virtual_terrain_publication_cut
+            .as_ref()
+            .is_some_and(|cut| cut.selected_pages.contains(&key))
+        {
+            self.virtual_terrain_gpu.invalidate_candidate();
+            self.virtual_terrain_publication_cut = None;
         }
         self.virtual_terrain_oracle_cut = None;
         self.virtual_terrain_requested_view = None;
@@ -6216,16 +6332,9 @@ impl Renderer {
         }
         if let Some(cut) = &self.virtual_terrain_oracle_cut {
             keep.extend(cut.selected_pages.iter().copied());
-            for identity in &cut.requested_pages {
-                keep.insert(identity.key);
-                if let Some(children) = identity
-                    .key
-                    .parent()
-                    .and_then(TerrainPageKey::refinement_children)
-                {
-                    keep.extend(children);
-                }
-            }
+        }
+        if let Some(cut) = &self.virtual_terrain_publication_cut {
+            keep.extend(cut.selected_pages.iter().copied());
         }
         // Keep exactly one nearest real ancestor per active/candidate page. That is sufficient for
         // the conforming coarsen fallback if a neighboring replacement is incomplete; retaining
@@ -6350,7 +6459,6 @@ impl Renderer {
     ) -> Result<u64, VirtualTerrainRendererError> {
         let keep = virtual_terrain_transition_keep_keys(
             &cut.selected_pages,
-            &cut.requested_pages,
             self.virtual_terrain_cut
                 .as_ref()
                 .map_or(&[], |published| published.selected_pages.as_slice()),
@@ -6374,17 +6482,15 @@ impl Renderer {
                     .map_or(0, |allocation| u64::from(allocation.size)),
             );
         }
-        for identity in &cut.requested_pages {
-            let node = self.virtual_terrain.directory_node(identity.key).ok_or(
-                VirtualTerrainRendererError::SelectedPageMissingGpu(identity.key),
-            )?;
-            debug_assert!(node.source_geometry_bytes <= TERRAIN_PAGE_MAX_SOURCE_GEOMETRY_BYTES);
-            required_bytes = required_bytes.saturating_add(u64::from(node.source_geometry_bytes));
-        }
+        // Requested transfers remain encoded in the independently bounded cache until a complete
+        // replacement group is admitted. Charging every future request here makes a valid coarse
+        // committed cut look impossible and globally degrades LOD before any GPU allocation is
+        // attempted. This budget contains only geometry already resident in the transition.
 
-        // Publishing a cut may rebuild one selected heightfield with conforming edge samples.
-        // Candidate-only meshes are released before rebuilding. A currently published owner must
-        // stay live until its conforming replacement is fully installed.
+        // Publishing a cut may rebuild several selected heightfields with conforming edge samples.
+        // Candidate-only meshes are released before rebuilding. Every currently published owner
+        // must stay live until all of its conforming replacements are installed, so the overlap is
+        // the sum of the rebuilds, not merely the largest one.
         let published = self
             .virtual_terrain_cut
             .as_ref()
@@ -6397,8 +6503,7 @@ impl Renderer {
             .filter_map(|key| self.virtual_terrain.directory_node(*key))
             .filter(|node| node.representation == TerrainPageRepresentationKind::HeightfieldGrid)
             .map(|node| u64::from(node.source_geometry_bytes))
-            .max()
-            .unwrap_or(0);
+            .fold(0_u64, u64::saturating_add);
         Ok(required_bytes.saturating_add(seam_rebuild_reserve))
     }
 
@@ -6928,7 +7033,7 @@ impl Renderer {
                 (false, VirtualTerrainOwnership::default())
             };
         let virtual_candidate_work =
-            self.virtual_terrain_oracle_cut
+            self.virtual_terrain_publication_cut
                 .as_ref()
                 .and_then(|candidate| {
                     self.virtual_terrain_gpu
@@ -7006,10 +7111,10 @@ impl Renderer {
                 label: Some("frame encoder"),
             });
         let virtual_candidate = if virtual_candidate_work.is_some() {
-            let Some(oracle_cut) = self.virtual_terrain_oracle_cut.as_ref() else {
+            let Some(publication_cut) = self.virtual_terrain_publication_cut.as_ref() else {
                 return false;
             };
-            Some(virtual_terrain_snapshot_identity(oracle_cut))
+            Some(virtual_terrain_snapshot_identity(publication_cut))
         } else {
             None
         };
@@ -7551,12 +7656,16 @@ impl Renderer {
                     0
                 });
         let gpu_virtual_feedback = self.virtual_terrain_gpu.latest_feedback();
-        let gpu_virtual_matches_cpu = gpu_virtual_feedback.as_ref().is_some_and(|feedback| {
-            gpu_feedback_matches_cut(feedback, self.virtual_terrain_oracle_cut.as_ref())
-        });
+        let certification_cut = self
+            .virtual_terrain_publication_cut
+            .as_ref()
+            .or(self.virtual_terrain_cut.as_ref());
+        let gpu_virtual_matches_cpu = gpu_virtual_feedback
+            .as_ref()
+            .is_some_and(|feedback| gpu_feedback_matches_cut(feedback, certification_cut));
         let gpu_virtual_match_failure_flags = gpu_feedback_match_failure_flags(
             gpu_virtual_feedback.as_ref(),
-            self.virtual_terrain_oracle_cut.as_ref(),
+            certification_cut,
             virtual_candidate_encode_failed,
         );
         let oracle_virtual_selected_pages = self
@@ -10754,7 +10863,6 @@ fn json_optional_u64(value: Option<u64>) -> String {
 
 fn virtual_terrain_transition_keep_keys(
     candidate_selected: &[TerrainPageKey],
-    requested: &[TerrainPageTransferIdentity],
     published_selected: &[TerrainPageKey],
     mut is_resident: impl FnMut(TerrainPageKey) -> bool,
 ) -> BTreeSet<TerrainPageKey> {
@@ -10763,16 +10871,6 @@ fn virtual_terrain_transition_keep_keys(
         .chain(published_selected)
         .copied()
         .collect::<BTreeSet<_>>();
-    for identity in requested {
-        keep.insert(identity.key);
-        if let Some(siblings) = identity
-            .key
-            .parent()
-            .and_then(TerrainPageKey::refinement_children)
-        {
-            keep.extend(siblings);
-        }
-    }
     let ancestry_sources = keep.iter().copied().collect::<Vec<_>>();
     for key in ancestry_sources {
         let mut ancestor = key.parent();
@@ -10957,33 +11055,83 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transition_working_set_keeps_outgoing_owner_complete_siblings_and_nearest_ancestor() {
+    fn continuous_arrivals_cannot_starve_shadow_publication() {
+        for _unrelated_cache_arrival in 0..8 {
+            assert_eq!(
+                virtual_terrain_publication_advance(true, false, false),
+                VirtualTerrainPublicationAdvance::AwaitCertificate
+            );
+        }
+        assert_eq!(
+            virtual_terrain_publication_advance(true, false, true),
+            VirtualTerrainPublicationAdvance::PromoteCertified
+        );
+    }
+
+    #[test]
+    fn multiple_certified_groups_make_monotonic_publication_progress() {
+        let mut committed_groups = 0;
+        for _ in 0..6 {
+            assert!(virtual_terrain_publication_can_stage(false));
+            assert_eq!(
+                virtual_terrain_publication_advance(true, false, true),
+                VirtualTerrainPublicationAdvance::PromoteCertified
+            );
+            committed_groups += 1;
+        }
+        assert_eq!(committed_groups, 6);
+    }
+
+    #[test]
+    fn committed_desired_mismatch_does_not_block_next_staging() {
+        let committed_fingerprint = 7_u64;
+        let desired_fingerprint = 11_u64;
+        assert_ne!(committed_fingerprint, desired_fingerprint);
+        assert!(virtual_terrain_publication_can_stage(false));
+    }
+
+    #[test]
+    fn unrelated_arrival_cannot_replace_frozen_transaction() {
+        let frozen_fingerprint = 41_u64;
+        let mut desired_fingerprint = 43_u64;
+        for arrival in 0..32 {
+            desired_fingerprint = desired_fingerprint.wrapping_add(arrival);
+            assert_eq!(frozen_fingerprint, 41);
+            assert_eq!(
+                virtual_terrain_publication_advance(true, false, false),
+                VirtualTerrainPublicationAdvance::AwaitCertificate
+            );
+        }
+        assert_ne!(desired_fingerprint, frozen_fingerprint);
+    }
+
+    #[test]
+    fn invisible_far_transition_keeps_committed_snapshot_safe() {
+        assert!(virtual_terrain_committed_snapshot_is_safe(true, true, true));
+        assert!(!virtual_terrain_publication_can_stage(true));
+    }
+
+    #[test]
+    fn transition_working_set_excludes_future_requests_and_keeps_real_owners() {
         let outgoing = TerrainPageKey::surface(1, -2, 0);
         let incoming_parent = TerrainPageKey::surface(1, 3, -1);
         let incoming_children = incoming_parent.refinement_children().unwrap();
-        let requested = incoming_children
-            .iter()
-            .enumerate()
-            .map(|(index, key)| TerrainPageTransferIdentity {
-                key: *key,
-                revision: 9,
-                content_fingerprint: [index as u8 + 1; 32],
-            })
-            .collect::<Vec<_>>();
         let grandparent = incoming_parent.parent().unwrap();
         let resident = [outgoing, incoming_parent, grandparent]
             .into_iter()
             .collect::<BTreeSet<_>>();
-        let keep = virtual_terrain_transition_keep_keys(
-            &[incoming_children[0]],
-            &requested,
-            &[outgoing],
-            |key| resident.contains(&key),
-        );
+        let keep =
+            virtual_terrain_transition_keep_keys(&[incoming_children[0]], &[outgoing], |key| {
+                resident.contains(&key)
+            });
         assert!(keep.contains(&outgoing), "outgoing published ownership");
         assert!(
-            incoming_children.iter().all(|key| keep.contains(key)),
-            "complete incoming replacement"
+            keep.contains(&incoming_children[0]),
+            "selected incoming owner"
+        );
+        assert!(
+            incoming_children[1..].iter().all(|key| !keep.contains(key)),
+            "future requests stay in the encoded cache until admitted"
         );
         assert!(keep.contains(&incoming_parent), "nearest real fallback");
         assert!(

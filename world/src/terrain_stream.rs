@@ -269,6 +269,21 @@ impl TerrainStreamScheduler {
         &mut self,
         groups: impl IntoIterator<Item = TerrainDemandGroup>,
     ) -> Result<(), TerrainStreamError> {
+        self.reconcile_with_available(groups, std::iter::empty())
+    }
+
+    /// Reconciles complete logical demand groups while omitting identities already available in
+    /// the encoded cache.
+    ///
+    /// A partially cached sibling group remains one topology dependency, but only its missing
+    /// members are pending transport work. Publication still waits for the complete group in the
+    /// cache; successful siblings are never retransmitted merely to preserve request batching.
+    pub fn reconcile_with_available(
+        &mut self,
+        groups: impl IntoIterator<Item = TerrainDemandGroup>,
+        available: impl IntoIterator<Item = TerrainPageTransferIdentity>,
+    ) -> Result<(), TerrainStreamError> {
+        let available = available.into_iter().collect::<BTreeSet<_>>();
         let mut groups = groups.into_iter().collect::<Vec<_>>();
         if groups.iter().any(|group| !group.validates()) {
             return Err(TerrainStreamError::InvalidDemandGroup);
@@ -283,13 +298,18 @@ impl TerrainStreamScheduler {
             let new_pages = group
                 .pages
                 .iter()
-                .filter(|page| !self.in_flight.contains_key(&page.identity))
+                .filter(|page| {
+                    !available.contains(&page.identity)
+                        && !self.in_flight.contains_key(&page.identity)
+                })
                 .count();
             if admitted.len().saturating_add(new_pages) > self.config.max_pending_pages {
                 continue;
             }
             for demand in group.pages {
-                if self.in_flight.contains_key(&demand.identity) {
+                if available.contains(&demand.identity)
+                    || self.in_flight.contains_key(&demand.identity)
+                {
                     continue;
                 }
                 let prior = self.pending.get(&demand.identity);
@@ -317,7 +337,10 @@ impl TerrainStreamScheduler {
         Ok(())
     }
 
-    /// Selects the next complete replacement group without moving it to in-flight.
+    /// Selects the next atomic transport batch without moving it to in-flight.
+    ///
+    /// When siblings already exist in the encoded cache this contains only the missing members of
+    /// their complete logical replacement group.
     ///
     /// Transport submission is the capability boundary. Callers commit only after the transport
     /// has accepted the batch, so window pressure and socket backpressure cannot manufacture
@@ -659,6 +682,10 @@ impl TerrainPageMemoryCache {
         Some(entry.encoded.clone())
     }
 
+    pub fn contains(&self, identity: TerrainPageTransferIdentity) -> bool {
+        self.by_identity.contains_key(&identity)
+    }
+
     pub fn set_pinned(&mut self, identity: TerrainPageTransferIdentity, pinned: bool) -> bool {
         let Some(fingerprint) = self.by_identity.get(&identity).copied() else {
             return false;
@@ -828,6 +855,47 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             first_keys
         );
+    }
+
+    #[test]
+    fn partial_cached_replacement_is_not_retransmitted() {
+        let parent = TerrainPageKey::surface(1, 2, -3);
+        let pages = parent
+            .refinement_children()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| {
+                demand(
+                    TerrainPageTransferIdentity {
+                        key,
+                        revision: 11,
+                        content_fingerprint: [index as u8 + 1; 32],
+                    },
+                    100,
+                )
+            })
+            .collect::<Vec<_>>();
+        let first = pages[0].identity;
+        let second = pages[1].identity;
+        let group = TerrainDemandGroup::replacement(parent, pages.clone()).unwrap();
+        let mut scheduler =
+            TerrainStreamScheduler::new(TerrainStreamConfig::INTERACTIVE_CLIENT).unwrap();
+
+        scheduler
+            .reconcile_with_available([group.clone()], [first])
+            .unwrap();
+        let batch = scheduler.peek_batch(0).unwrap();
+        assert_eq!(batch.pages.len(), 3);
+        assert!(!batch.pages.contains(&first));
+
+        scheduler
+            .reconcile_with_available([group], [first, second])
+            .unwrap();
+        let batch = scheduler.peek_batch(0).unwrap();
+        assert_eq!(batch.pages.len(), 2);
+        assert!(!batch.pages.contains(&first));
+        assert!(!batch.pages.contains(&second));
     }
 
     #[test]

@@ -315,7 +315,15 @@ impl VirtualTerrainHierarchy {
     }
 
     pub fn selected_fingerprint(&self, selected: &[TerrainPageKey]) -> u64 {
-        cut_fingerprint(selected, self)
+        cut_state_fingerprint(
+            cut_fingerprint(selected, self),
+            &[],
+            false,
+            false,
+            false,
+            0,
+            0,
+        )
     }
 
     pub fn nodes(&self) -> impl Iterator<Item = TerrainHierarchyNode> + '_ {
@@ -817,12 +825,20 @@ impl VirtualTerrainHierarchy {
         let mut requested_pages = builder.requests.into_iter().collect::<Vec<_>>();
         requested_pages.sort_unstable_by_key(|identity| identity.key);
         let refinement_roots = builder.refinement_requests.into_iter().collect();
-        let fingerprint = cut_fingerprint(&builder.selected, builder.hierarchy);
         let renderable = !builder.selected.is_empty()
             && builder.ownerless_roots.is_empty()
             && !builder.selection_overflow
             && !builder.traversal_overflow
             && exact_surface_lod_discontinuities == 0;
+        let fingerprint = cut_state_fingerprint(
+            cut_fingerprint(&builder.selected, builder.hierarchy),
+            &builder.ownerless_roots,
+            builder.feedback_overflow,
+            builder.selection_overflow,
+            builder.traversal_overflow,
+            builder.incoherent_replacement_groups,
+            exact_surface_lod_discontinuities,
+        );
         if renderable {
             builder.hierarchy.refined_last_cut = builder.next_refined.clone();
             builder.hierarchy.balanced_selected_blockers =
@@ -1820,6 +1836,45 @@ fn cut_fingerprint(selected: &[TerrainPageKey], hierarchy: &VirtualTerrainHierar
     fingerprint
 }
 
+fn cut_state_fingerprint(
+    mut fingerprint: u64,
+    ownerless_roots: &[TerrainPageKey],
+    feedback_overflow: bool,
+    selection_overflow: bool,
+    traversal_overflow: bool,
+    incoherent_replacement_groups: usize,
+    exact_surface_lod_discontinuities: usize,
+) -> u64 {
+    // Selected owners alone do not identify an incomplete desired plan: two traversals may retain
+    // the same fallback owners while missing different active roots. Keep the exact sorted blocker
+    // set and every publication-relevant failure state in the identity passed to GPU certification.
+    fingerprint = fingerprint_byte(fingerprint, 0xff);
+    for key in ownerless_roots {
+        fingerprint = fingerprint_byte(fingerprint, key.level);
+        for component in key.coord {
+            for byte in component.to_le_bytes() {
+                fingerprint = fingerprint_byte(fingerprint, byte);
+            }
+        }
+    }
+    for byte in (ownerless_roots.len() as u64).to_le_bytes() {
+        fingerprint = fingerprint_byte(fingerprint, byte);
+    }
+    let flags = u8::from(feedback_overflow)
+        | (u8::from(selection_overflow) << 1)
+        | (u8::from(traversal_overflow) << 2);
+    fingerprint = fingerprint_byte(fingerprint, flags);
+    for value in [
+        incoherent_replacement_groups as u64,
+        exact_surface_lod_discontinuities as u64,
+    ] {
+        for byte in value.to_le_bytes() {
+            fingerprint = fingerprint_byte(fingerprint, byte);
+        }
+    }
+    fingerprint
+}
+
 fn fingerprint_byte(fingerprint: u64, byte: u8) -> u64 {
     (fingerprint ^ u64::from(byte)).wrapping_mul(FINGERPRINT_PRIME)
 }
@@ -1909,6 +1964,19 @@ mod tests {
             exact_surface_radius_metres: 0.0,
             force_exact_leaves,
         }
+    }
+
+    #[test]
+    fn cut_identity_includes_exact_ownerless_roots_and_failure_state() {
+        let base = 0x1234_5678_9abc_def0;
+        let first = TerrainPageKey::surface(3, -2, 7);
+        let second = TerrainPageKey::surface(3, 3, 7);
+        let first_missing = cut_state_fingerprint(base, &[first], false, false, false, 0, 0);
+        let second_missing = cut_state_fingerprint(base, &[second], false, false, false, 0, 0);
+        let overflowed = cut_state_fingerprint(base, &[first], false, true, false, 0, 0);
+
+        assert_ne!(first_missing, second_missing);
+        assert_ne!(first_missing, overflowed);
     }
 
     #[test]
