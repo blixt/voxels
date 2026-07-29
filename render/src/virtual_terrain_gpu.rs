@@ -1043,6 +1043,21 @@ impl VirtualTerrainGpuControl {
         self.discard_pending_candidate();
     }
 
+    /// Clears every world-derived snapshot identity and generation fence.
+    ///
+    /// Renderer-owned source allocations are retired by the caller after bank identity is cleared.
+    /// Advancing the minimum feedback generation first makes callbacks from pre-reset command
+    /// buffers observationally inert throughout that retirement.
+    pub(crate) fn reset_world(&mut self) {
+        self.discard_pending_candidate();
+        self.geometries.clear();
+        for bank in &mut self.banks {
+            bank.metadata = None;
+        }
+        self.active_bank = 0;
+        self.active_geometry_dirty = false;
+    }
+
     fn discard_pending_candidate(&mut self) {
         if let Some(bank) = self.pending_bank.take() {
             self.banks[bank].metadata = None;
@@ -1648,6 +1663,65 @@ mod tests {
             !control.candidate_is_certified(identity, generation.wrapping_add(1)),
             "matching cut metadata and feedback cannot certify a different request generation",
         );
+        assert_eq!(
+            control
+                .promote_certified_candidate(identity, generation)
+                .expect("exact certified generation promotes"),
+            generation,
+        );
+        assert_eq!(
+            control.matching_active_generation(identity),
+            Some(generation),
+        );
+
+        control
+            .update_page_geometry(
+                key,
+                VirtualTerrainGpuGeometry {
+                    opaque_surface: VirtualTerrainGpuGeometryRange {
+                        source_segment: 0,
+                        source_offset_bytes: GPU_GEOMETRY_ELEMENT_BYTES,
+                        element_count: 2,
+                    },
+                    opaque_triangle: VirtualTerrainGpuGeometryRange {
+                        source_segment: 0,
+                        source_offset_bytes: GPU_GEOMETRY_ELEMENT_BYTES * 3,
+                        element_count: 2,
+                    },
+                    ..VirtualTerrainGpuGeometry::default()
+                },
+            )
+            .expect("same-owner edited geometry");
+        assert_eq!(
+            control.matching_active_generation(identity),
+            None,
+            "an edit must dirty a byte-identical logical snapshot before republish",
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("same-owner republish hardware-test encoder"),
+        });
+        let revised_generation = match control
+            .encode_candidate(&queue, &mut encoder, identity, None)
+            .expect("same-owner candidate encoding")
+        {
+            VirtualTerrainCandidateEncodeOutcome::Encoded(generation) => generation,
+            VirtualTerrainCandidateEncodeOutcome::ReadbackOnly(_) => {
+                panic!("dirty active geometry must encode a fresh generation")
+            }
+        };
+        control.submit_pending_readback(&mut encoder, revised_generation);
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("same-owner republish submission");
+        assert!(control.candidate_is_certified(identity, revised_generation));
+        assert_eq!(
+            control
+                .promote_certified_candidate(identity, revised_generation)
+                .expect("same-owner revised generation promotes"),
+            revised_generation,
+        );
+        assert_ne!(generation, revised_generation);
 
         control.invalidate_candidate();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1790,6 +1864,31 @@ mod tests {
             "the corrupted page cannot contribute completion evidence",
         );
         assert!(!control.candidate_is_certified(two_page_identity, generation));
+
+        control.invalidate_candidate();
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("pre-reset late-callback hardware-test encoder"),
+        });
+        let pre_reset_generation = match control
+            .encode_candidate(&queue, &mut encoder, two_page_identity, None)
+            .expect("pre-reset candidate encoding")
+        {
+            VirtualTerrainCandidateEncodeOutcome::Encoded(generation) => generation,
+            VirtualTerrainCandidateEncodeOutcome::ReadbackOnly(_) => {
+                panic!("discarded generation must encode before reset")
+            }
+        };
+        control.submit_pending_readback(&mut encoder, pre_reset_generation);
+        queue.submit([encoder.finish()]);
+        control.reset_world();
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("pre-reset late callback completion");
+        assert_eq!(control.active_snapshot_identity(), None);
+        assert_eq!(control.latest_feedback(), None);
+        assert_eq!(control.allocated_handle_bytes(), 0);
+        control.reset_world();
+        assert_eq!(control.active_snapshot_identity(), None);
     }
 
     #[test]

@@ -424,6 +424,41 @@ fn revoke_invalidated_committed_virtual_terrain(
     }
 }
 
+fn reset_virtual_terrain_presentation_state(
+    publication: &mut Option<VirtualTerrainPublication>,
+    committed: &mut Option<CommittedVirtualTerrainPresentation>,
+) -> bool {
+    let changed = publication.is_some() || committed.is_some();
+    *publication = None;
+    *committed = None;
+    changed
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VirtualTerrainRevisionAdmission {
+    Stale,
+    Pending,
+    Ready(VirtualTerrainPromotionDecision),
+}
+
+fn revalidate_ready_virtual_terrain_publication(
+    decision: VirtualTerrainPromotionDecision,
+    is_current: impl FnOnce() -> bool,
+) -> VirtualTerrainRevisionAdmission {
+    match decision {
+        VirtualTerrainPromotionDecision::Stale => VirtualTerrainRevisionAdmission::Stale,
+        VirtualTerrainPromotionDecision::Pending => VirtualTerrainRevisionAdmission::Pending,
+        VirtualTerrainPromotionDecision::CommitActive(_)
+        | VirtualTerrainPromotionDecision::PromoteCandidate(_) => {
+            if is_current() {
+                VirtualTerrainRevisionAdmission::Ready(decision)
+            } else {
+                VirtualTerrainRevisionAdmission::Stale
+            }
+        }
+    }
+}
+
 const fn virtual_terrain_committed_snapshot_is_safe(
     has_committed_cut: bool,
     committed_cut_is_renderable: bool,
@@ -6376,51 +6411,75 @@ impl Renderer {
         request: VirtualTerrainRequestId,
         authoritative_revisions: &AuthoritativeEditRevisions,
     ) -> Result<VirtualTerrainPromotionStatus, VirtualTerrainRendererError> {
-        let Some(publication) =
-            exact_virtual_terrain_publication(self.virtual_terrain_publication.as_ref(), request)
-                .cloned()
-        else {
-            return Ok(VirtualTerrainPromotionStatus::Stale);
+        let admission = {
+            let Some(publication) = exact_virtual_terrain_publication(
+                self.virtual_terrain_publication.as_ref(),
+                request,
+            ) else {
+                return Ok(VirtualTerrainPromotionStatus::Stale);
+            };
+            if !publication.certificate.complete {
+                VirtualTerrainRevisionAdmission::Stale
+            } else {
+                let identity =
+                    virtual_terrain_snapshot_identity(&publication.cut, &publication.envelope);
+                let active_generation = self
+                    .virtual_terrain_gpu
+                    .matching_active_generation(identity);
+                let candidate_certified =
+                    publication.candidate_generation.is_some_and(|generation| {
+                        self.virtual_terrain_gpu
+                            .candidate_is_certified(identity, generation)
+                    });
+                let decision = virtual_terrain_promotion_decision(
+                    Some(publication.request),
+                    request,
+                    active_generation.is_some(),
+                    active_generation,
+                    candidate_certified,
+                    publication.candidate_generation,
+                );
+                revalidate_ready_virtual_terrain_publication(decision, || {
+                    publication.revisions.is_current(authoritative_revisions)
+                })
+            }
         };
-        if !publication.certificate.complete
-            || !publication.revisions.is_current(authoritative_revisions)
-        {
-            self.abort_virtual_terrain_publication();
-            return Ok(VirtualTerrainPromotionStatus::Stale);
-        }
-        let identity = virtual_terrain_snapshot_identity(&publication.cut, &publication.envelope);
-        let active_generation = self
-            .virtual_terrain_gpu
-            .matching_active_generation(identity);
-        let candidate_certified = publication.candidate_generation.is_some_and(|generation| {
-            self.virtual_terrain_gpu
-                .candidate_is_certified(identity, generation)
-        });
-        let generation = match virtual_terrain_promotion_decision(
-            Some(publication.request),
-            request,
-            active_generation.is_some(),
-            active_generation,
-            candidate_certified,
-            publication.candidate_generation,
-        ) {
-            VirtualTerrainPromotionDecision::Stale => {
+        let ready = match admission {
+            VirtualTerrainRevisionAdmission::Stale => {
+                self.abort_virtual_terrain_publication();
                 return Ok(VirtualTerrainPromotionStatus::Stale);
             }
-            VirtualTerrainPromotionDecision::PromoteCandidate(generation) => self
-                .virtual_terrain_gpu
-                .promote_certified_candidate(identity, generation)
-                .map_err(|_| VirtualTerrainRendererError::GpuCutNotCertified)?,
-            VirtualTerrainPromotionDecision::CommitActive(generation) => generation,
-            VirtualTerrainPromotionDecision::Pending => {
+            VirtualTerrainRevisionAdmission::Pending => {
                 return Ok(VirtualTerrainPromotionStatus::Pending);
+            }
+            VirtualTerrainRevisionAdmission::Ready(ready) => ready,
+        };
+        let Some(publication) = self.virtual_terrain_publication.take() else {
+            unreachable!("ready admission retains the exact publication")
+        };
+        let identity = virtual_terrain_snapshot_identity(&publication.cut, &publication.envelope);
+        let generation = match ready {
+            VirtualTerrainPromotionDecision::PromoteCandidate(generation) => {
+                match self
+                    .virtual_terrain_gpu
+                    .promote_certified_candidate(identity, generation)
+                {
+                    Ok(generation) => generation,
+                    Err(_) => {
+                        self.virtual_terrain_publication = Some(publication);
+                        return Err(VirtualTerrainRendererError::GpuCutNotCertified);
+                    }
+                }
+            }
+            VirtualTerrainPromotionDecision::CommitActive(generation) => generation,
+            VirtualTerrainPromotionDecision::Stale | VirtualTerrainPromotionDecision::Pending => {
+                unreachable!("ready admission")
             }
         };
         let (committed, receipt) =
             CommittedVirtualTerrainPresentation::from_publication(publication, generation);
         self.discard_retired_virtual_terrain_pages();
         self.virtual_terrain_committed = Some(committed);
-        self.virtual_terrain_publication = None;
         self.virtual_terrain_staging_frontier.clear();
         // The unchanged-view cache was selected against the old committed overlap/capacity. Force
         // the next frame to derive demand and admission from the cut that actually promoted.
@@ -6472,6 +6531,43 @@ impl Renderer {
         }
     }
 
+    /// Revokes every world-derived virtual-terrain presentation during a full authoritative resync.
+    ///
+    /// The shell calls this before advancing its resync watermark. Clearing the aggregate proof
+    /// first prevents retention from preserving the formerly committed pages; clearing GPU bank
+    /// metadata and advancing the feedback generation makes all pre-reset callbacks inert before
+    /// their source allocations are retired.
+    pub fn reset_virtual_terrain_world(&mut self) {
+        reset_virtual_terrain_presentation_state(
+            &mut self.virtual_terrain_publication,
+            &mut self.virtual_terrain_committed,
+        );
+        self.virtual_terrain_gpu.reset_world();
+        self.virtual_terrain_staging_frontier.clear();
+        self.virtual_terrain_publication_abort_pending = false;
+        if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible {
+            self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
+        }
+        self.invalidate_virtual_terrain_desired_plan();
+        self.virtual_terrain_desired_envelope = None;
+        self.virtual_terrain_exact_surface_domain = None;
+        self.discard_retired_virtual_terrain_pages();
+        self.retain_virtual_terrain_regions_infallible(BTreeSet::new());
+        let residual_pages = self
+            .virtual_terrain_pages
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for key in residual_pages {
+            let _ = self.virtual_terrain.remove_page(key);
+            if let Some(page) = self.virtual_terrain_pages.remove(&key) {
+                discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
+            }
+        }
+        debug_assert!(self.virtual_terrain_pages.is_empty());
+        debug_assert!(self.virtual_terrain_retired_published_pages.is_empty());
+    }
+
     pub fn set_virtual_terrain_render_mode(
         &mut self,
         mode: VirtualTerrainRenderMode,
@@ -6507,13 +6603,20 @@ impl Renderer {
         keep: impl IntoIterator<Item = TerrainPageKey>,
     ) -> Result<usize, VirtualTerrainRendererError> {
         let keep = keep.into_iter().collect::<BTreeSet<_>>();
+        Ok(self.retain_virtual_terrain_regions_infallible(keep))
+    }
+
+    fn retain_virtual_terrain_regions_infallible(
+        &mut self,
+        keep: BTreeSet<TerrainPageKey>,
+    ) -> usize {
         let remove = self
             .virtual_terrain
             .registered_roots()
             .filter(|root| !keep.contains(root))
             .collect::<Vec<_>>();
         if remove.is_empty() {
-            return Ok(0);
+            return 0;
         }
         self.virtual_terrain_oracle_cut = None;
         self.virtual_terrain_requested_view = None;
@@ -6561,7 +6664,7 @@ impl Renderer {
                 discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
             }
         }
-        Ok(removed_pages.len())
+        removed_pages.len()
     }
 
     pub fn remove_virtual_terrain_page(
@@ -12551,6 +12654,85 @@ mod tests {
         assert_eq!(receipt.generation, 77);
         assert_eq!(committed.envelope, envelope);
         assert!(committed.certificate.complete);
+    }
+
+    #[test]
+    fn pending_publication_does_not_scan_revisions_but_ready_publication_scans_once() {
+        let scans = std::cell::Cell::new(0);
+        let pending = revalidate_ready_virtual_terrain_publication(
+            VirtualTerrainPromotionDecision::Pending,
+            || {
+                scans.set(scans.get() + 1);
+                true
+            },
+        );
+        assert_eq!(pending, VirtualTerrainRevisionAdmission::Pending);
+        assert_eq!(scans.get(), 0);
+
+        let ready = revalidate_ready_virtual_terrain_publication(
+            VirtualTerrainPromotionDecision::PromoteCandidate(17),
+            || {
+                scans.set(scans.get() + 1);
+                true
+            },
+        );
+        assert_eq!(
+            ready,
+            VirtualTerrainRevisionAdmission::Ready(
+                VirtualTerrainPromotionDecision::PromoteCandidate(17)
+            )
+        );
+        assert_eq!(scans.get(), 1);
+    }
+
+    #[test]
+    fn full_world_reset_revokes_active_and_candidate_idempotently() {
+        let mut envelopes = crate::virtual_terrain::PresentationEnvelopeCache::default();
+        let candidate_envelope = envelopes.resolve([0.0, 0.0, 0.0], 0.0, 20.0, 64, 16);
+        let committed_envelope = envelopes.resolve([9.6, 0.0, 0.0], 0.0, 20.0, 64, 16);
+        let mut candidate = Some(test_publication(
+            VirtualTerrainRequestId(35),
+            candidate_envelope,
+            WorldRevisionFence::new([], []).expect("empty candidate fence"),
+            Some(44),
+        ));
+        let committed_publication = test_publication(
+            VirtualTerrainRequestId(34),
+            committed_envelope,
+            WorldRevisionFence::new([], []).expect("empty committed fence"),
+            None,
+        );
+        let (active, _) =
+            CommittedVirtualTerrainPresentation::from_publication(committed_publication, 43);
+        let former_selected = active.cut.selected_pages.clone();
+        let mut committed = Some(active);
+
+        assert!(reset_virtual_terrain_presentation_state(
+            &mut candidate,
+            &mut committed
+        ));
+        assert!(candidate.is_none());
+        assert!(committed.is_none());
+        let pages_preserved_by_presentation = candidate
+            .iter()
+            .flat_map(|candidate| candidate.cut.selected_pages.iter())
+            .chain(
+                committed
+                    .iter()
+                    .flat_map(|committed| committed.cut.selected_pages.iter()),
+            )
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert!(
+            former_selected
+                .iter()
+                .all(|key| !pages_preserved_by_presentation.contains(key)),
+            "reset presentation state cannot preserve former selected pages through retention",
+        );
+        assert!(!reset_virtual_terrain_presentation_state(
+            &mut candidate,
+            &mut committed
+        ));
     }
 
     #[test]

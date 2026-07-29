@@ -5105,13 +5105,6 @@ mod web {
             for request_id in request_ids {
                 self.remote.cancel(request_id);
             }
-            if let Err(error) = self
-                .renderer
-                .borrow_mut()
-                .retain_virtual_terrain_regions(std::iter::empty())
-            {
-                log_gpu_error(&format!("reset virtual terrain regions: {error}"));
-            }
             *self.virtual_terrain.borrow_mut() = VirtualTerrainStreamingState::default();
             if let Err(error) = self
                 .virtual_terrain_scheduler
@@ -5942,7 +5935,24 @@ mod web {
         }
 
         fn resynchronize_world_products(&self, revision: u64) {
-            if !self.edit_revisions.borrow_mut().reset_to_revision(revision) {
+            if revision == 0 {
+                log_gpu_error("edit resync named reserved zero revision");
+                return;
+            }
+            if !self
+                .edit_revisions
+                .borrow()
+                .commit_is_after_resync(revision)
+            {
+                return;
+            }
+            self.renderer.borrow_mut().reset_virtual_terrain_world();
+            let reset = self.edit_revisions.borrow_mut().reset_to_revision(revision);
+            debug_assert!(
+                reset,
+                "single-threaded resync preflight and commit must agree"
+            );
+            if !reset {
                 return;
             }
             log_gpu_error(&format!(
