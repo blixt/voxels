@@ -23,8 +23,8 @@ let screenshotDeadline = 0;
 let screenshotEncoding = false;
 let disposal: Promise<void> | null = null;
 const pending: Exclude<ToWorker, InitMessage>[] = [];
-const STARTUP_PROGRESS_VERSION = 6;
-const STARTUP_PROGRESS_WORDS = 72;
+const STARTUP_PROGRESS_VERSION = 7;
+const STARTUP_PROGRESS_WORDS = 99;
 const STARTUP_SCHEMA_MISMATCH_TIMEOUT_MS = 5_000;
 
 function bitmaskLabels(flags: number, labels: ReadonlyArray<readonly [number, string]>): string {
@@ -198,6 +198,33 @@ function monitorReadiness(engine: EngineHandle): void {
       exactPredictionComplete = 0,
       exactPredictionRequiredLeaves = 0,
       exactPredictionCurrentCoverage = 0,
+      desiredEnvelopeComplete = 0,
+      desiredEnvelopeFingerprintLow = 0,
+      desiredEnvelopeFingerprintHigh = 0,
+      desiredSafetyLeaves = 0,
+      desiredHorizonRoots = 0,
+      desiredLocusMinimumX = 0,
+      desiredLocusMinimumZ = 0,
+      desiredLocusMaximumX = 0,
+      desiredLocusMaximumZ = 0,
+      committedEnvelopeFingerprintLow = 0,
+      committedEnvelopeFingerprintHigh = 0,
+      committedSafetyLeaves = 0,
+      committedSafetyCoverage = 0,
+      committedHorizonRoots = 0,
+      committedHorizonCoverage = 0,
+      committedLocusMinimumX = 0,
+      committedLocusMinimumZ = 0,
+      committedLocusMaximumX = 0,
+      committedLocusMaximumZ = 0,
+      presentationTargetXBits = 0,
+      presentationTargetYBits = 0,
+      presentationTargetZBits = 0,
+      presentationGateActive = 0,
+      presentationGateStepsLow = 0,
+      presentationGateStepsHigh = 0,
+      presentationGateFramesLow = 0,
+      presentationGateFramesHigh = 0,
     ] = progress;
     const key = [
       resident,
@@ -270,6 +297,33 @@ function monitorReadiness(engine: EngineHandle): void {
       exactPredictionComplete,
       exactPredictionRequiredLeaves,
       exactPredictionCurrentCoverage,
+      desiredEnvelopeComplete,
+      desiredEnvelopeFingerprintLow,
+      desiredEnvelopeFingerprintHigh,
+      desiredSafetyLeaves,
+      desiredHorizonRoots,
+      desiredLocusMinimumX,
+      desiredLocusMinimumZ,
+      desiredLocusMaximumX,
+      desiredLocusMaximumZ,
+      committedEnvelopeFingerprintLow,
+      committedEnvelopeFingerprintHigh,
+      committedSafetyLeaves,
+      committedSafetyCoverage,
+      committedHorizonRoots,
+      committedHorizonCoverage,
+      committedLocusMinimumX,
+      committedLocusMinimumZ,
+      committedLocusMaximumX,
+      committedLocusMaximumZ,
+      presentationTargetXBits,
+      presentationTargetYBits,
+      presentationTargetZBits,
+      presentationGateActive,
+      presentationGateStepsLow,
+      presentationGateStepsHigh,
+      presentationGateFramesLow,
+      presentationGateFramesHigh,
     ].join("/");
     if (key !== previous) {
       const now = performance.now();
@@ -278,7 +332,7 @@ function monitorReadiness(engine: EngineHandle): void {
       previous = key;
       if (detailed) lastDetailedPost = now;
       const detail = detailed
-        ? `Terrain cut: CPU ${cpuSelected} pages/${cpuRequested} requested/${cpuRefinementRoots} refinement roots/${cpuOwnerless} ownerless/${cpuDiscontinuities} skipped-level edges; GPU ${gpuSelected} selected/${gpuEncodedPages} encoded pages/${gpuOwnerless} ownerless/encoding overflow ${gpuEncodingOverflow}; candidate match ${gpuMatchesCpu === 1 ? "yes" : `no (${gpuMatchFailureLabels(gpuMatchFailures)})`}, presented cut match ${presentedMatchesCut === 1 ? "yes" : "no"}; exact guarantee ${exactDomainComplete === 1 ? "full prediction" : "current core"} ${exactDomainCurrentCoverage}/${exactDomainRequiredLeaves} leaves fingerprint ${exactDomainFingerprintHigh.toString(16).padStart(8, "0")}${exactDomainFingerprintLow.toString(16).padStart(8, "0")}; core ${exactCoreComplete === 1 ? "complete" : "invalid"} ${exactCoreCurrentCoverage}/${exactCoreRequiredLeaves}; prediction ${exactPredictionComplete === 1 ? "complete" : "truncated"} ${exactPredictionCurrentCoverage}/${exactPredictionRequiredLeaves}; discovery ${columns} columns/${columnInFlight} in flight/${columnRevisionFloors} column revision floors/${regionRevisionFloors} region revision floors/current ${currentColumnKnown === 1 ? `${currentColumnRegisteredRoots}/${currentColumnRoots} roots registered` : "column unknown"}, flow ${columnAccepted} accepted/${columnSubmitDeferred} deferred/${columnPreempted} preempted/${columnTimedOut} timed out/${columnOtherFailed} errors; directories ${directoryAccepted} accepted/${directorySubmitDeferred} deferred/${directoryPreempted} preempted/${directoryTimedOut} timed out/${directoryOtherFailed} errors/${directoryInFlight} in flight; stream ${streamPending} pending/${streamInFlight} in flight/${streamFailed} failed/${streamUsefulKiB} KiB useful, cache ${cachePages}, resident ${residentPages}, GPU ${gpuAllocatedMiB}/${gpuCapacityMiB} MiB; page flow ${pageSubmitDeferred} deferred/${pagePreempted} preempted/${pageTimedOut} timed out/${pageOtherFailed} transport errors; products ${pageUnavailable} unavailable/${pageStaleRevision} stale/${pageGenerationFailed} generation/${pageUploadFailed} upload (last ${uploadFailureLabel(lastPageUploadFailureKind)})${lastPageFailureKind === 0 ? "" : `, last product ${pageFailureLabel(lastPageFailureKind)}@L${lastPageFailureLevel}(${lastPageFailureX | 0},${lastPageFailureY | 0},${lastPageFailureZ | 0})`}; published ${publishedPages} pages (${publishedExactPages} exact, ${publishedDiscontinuities} skipped-level edges), terrain ${terrainReady === 1 ? "ready" : "pending"}.`
+        ? `Terrain cut: CPU ${cpuSelected} pages/${cpuRequested} requested/${cpuRefinementRoots} refinement roots/${cpuOwnerless} ownerless/${cpuDiscontinuities} skipped-level edges; GPU ${gpuSelected} selected/${gpuEncodedPages} encoded pages/${gpuOwnerless} ownerless/encoding overflow ${gpuEncodingOverflow}; candidate match ${gpuMatchesCpu === 1 ? "yes" : `no (${gpuMatchFailureLabels(gpuMatchFailures)})`}, presented cut match ${presentedMatchesCut === 1 ? "yes" : "no"}; envelope ${desiredEnvelopeComplete === 1 ? "complete" : "invalid"} desired S ${desiredSafetyLeaves}/H ${desiredHorizonRoots} at [${desiredLocusMinimumX | 0},${desiredLocusMinimumZ | 0})..[${desiredLocusMaximumX | 0},${desiredLocusMaximumZ | 0}), committed S ${committedSafetyCoverage}/${committedSafetyLeaves}, H ${committedHorizonCoverage}/${committedHorizonRoots} at [${committedLocusMinimumX | 0},${committedLocusMinimumZ | 0})..[${committedLocusMaximumX | 0},${committedLocusMaximumZ | 0}), gate ${presentationGateActive === 1 ? "blocked" : "open"} ${presentationGateStepsHigh * 0x1_0000_0000 + presentationGateStepsLow} steps/${presentationGateFramesHigh * 0x1_0000_0000 + presentationGateFramesLow} frames; exact guarantee ${exactDomainComplete === 1 ? "full prediction" : "current core"} ${exactDomainCurrentCoverage}/${exactDomainRequiredLeaves} leaves fingerprint ${exactDomainFingerprintHigh.toString(16).padStart(8, "0")}${exactDomainFingerprintLow.toString(16).padStart(8, "0")}; core ${exactCoreComplete === 1 ? "complete" : "invalid"} ${exactCoreCurrentCoverage}/${exactCoreRequiredLeaves}; prediction ${exactPredictionComplete === 1 ? "complete" : "truncated"} ${exactPredictionCurrentCoverage}/${exactPredictionRequiredLeaves}; discovery ${columns} columns/${columnInFlight} in flight/${columnRevisionFloors} column revision floors/${regionRevisionFloors} region revision floors/current ${currentColumnKnown === 1 ? `${currentColumnRegisteredRoots}/${currentColumnRoots} roots registered` : "column unknown"}, flow ${columnAccepted} accepted/${columnSubmitDeferred} deferred/${columnPreempted} preempted/${columnTimedOut} timed out/${columnOtherFailed} errors; directories ${directoryAccepted} accepted/${directorySubmitDeferred} deferred/${directoryPreempted} preempted/${directoryTimedOut} timed out/${directoryOtherFailed} errors/${directoryInFlight} in flight; stream ${streamPending} pending/${streamInFlight} in flight/${streamFailed} failed/${streamUsefulKiB} KiB useful, cache ${cachePages}, resident ${residentPages}, GPU ${gpuAllocatedMiB}/${gpuCapacityMiB} MiB; page flow ${pageSubmitDeferred} deferred/${pagePreempted} preempted/${pageTimedOut} timed out/${pageOtherFailed} transport errors; products ${pageUnavailable} unavailable/${pageStaleRevision} stale/${pageGenerationFailed} generation/${pageUploadFailed} upload (last ${uploadFailureLabel(lastPageUploadFailureKind)})${lastPageFailureKind === 0 ? "" : `, last product ${pageFailureLabel(lastPageFailureKind)}@L${lastPageFailureLevel}(${lastPageFailureX | 0},${lastPageFailureY | 0},${lastPageFailureZ | 0})`}; published ${publishedPages} pages (${publishedExactPages} exact, ${publishedDiscontinuities} skipped-level edges), terrain ${terrainReady === 1 ? "ready" : "pending"}.`
         : undefined;
       scope.postMessage({ kind: "loading", stage: "vicinity", resident, required, detail });
     }

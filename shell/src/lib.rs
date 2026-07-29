@@ -18,6 +18,27 @@ const SKY_ESCAPE_MIN_FACE_CELLS: u32 =
 const COLLISION_READINESS_RESERVE_SECONDS: f32 = 1.0;
 #[cfg(any(target_arch = "wasm32", test))]
 const INVENTORY_SWIPE_THRESHOLD_CSS_PIXELS: f32 = 34.0;
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn apply_presentation_gate(
+    camera: &mut CameraState,
+    proposed_is_inside: bool,
+    clamped: glam::Vec3,
+) -> Option<glam::Vec3> {
+    let proposed = camera.position;
+    if proposed_is_inside {
+        return None;
+    }
+    if clamped.x != proposed.x {
+        camera.velocity.x = 0.0;
+    }
+    if clamped.z != proposed.z {
+        camera.velocity.z = 0.0;
+    }
+    camera.position = clamped;
+    Some(proposed)
+}
+
 #[cfg(any(target_arch = "wasm32", test))]
 fn presence_heartbeat_expired(
     local_time_ms: f64,
@@ -1282,7 +1303,8 @@ mod web {
     use voxels_render::shadow::DirectionalShadowConfig;
     use voxels_render::ui::{LiveStats, NavigationTelemetry};
     use voxels_render::virtual_terrain::{
-        ExactSurfaceDomain, ExactSurfaceDomainCache, VirtualTerrainCut, VirtualTerrainView,
+        ExactSurfaceDomain, ExactSurfaceDomainCache, PresentationEnvelope,
+        PresentationEnvelopeCache, PresentationLocus, VirtualTerrainCut, VirtualTerrainView,
     };
     use voxels_runtime::{
         AuthoritativeEditRevisions, ChunkState, CompletionStatus, DirectionalStreamPriority,
@@ -1311,7 +1333,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 8;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 53;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 54;
     const FRAME_SAMPLE_WIDTH: u32 = 22;
     const GPU_SAMPLE_WIDTH: u32 = 15;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -1343,6 +1365,9 @@ mod web {
         "virtualTerrainCacheMiB,virtualTerrainColumns,virtualTerrainColumnInFlight,virtualTerrainColumnRevisionFloors,virtualTerrainCurrentColumnKnown,virtualTerrainCurrentColumnRoots,virtualTerrainCurrentColumnRegisteredRoots,virtualTerrainNearestRegisteredRootMetres,",
         "virtualTerrainColumnAccepted,virtualTerrainColumnSubmitDeferred,virtualTerrainColumnPreempted,virtualTerrainColumnTimedOut,virtualTerrainColumnOtherFailed,virtualTerrainDirectoryAccepted,virtualTerrainDirectorySubmitDeferred,virtualTerrainDirectoryPreempted,",
         "virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,virtualTerrainPageSubmitDeferred,virtualTerrainPagePreempted,virtualTerrainPageTimedOut,virtualTerrainPageOtherFailed,virtualTerrainPageUnavailable,virtualTerrainPageStaleRevision,virtualTerrainPageGenerationFailed,virtualTerrainPageUploadFailed,virtualTerrainPublishedPages,virtualTerrainPublishedExactPages,virtualTerrainPublishedMinimumLevel,virtualTerrainPublishedMaximumLevel,virtualTerrainPublishedExactLodDiscontinuities,virtualTerrainCutFingerprintLow24,virtualTerrainCutFingerprintHigh24,virtualTerrainPresentedSnapshotGenerationLow24,virtualTerrainPresentedSnapshotGenerationHigh24,virtualTerrainPresentedSnapshotFingerprintLow24,virtualTerrainPresentedSnapshotFingerprintHigh24,virtualTerrainPresentedSnapshotMatchesCut,",
+        "virtualTerrainDesiredEnvelopeComplete,virtualTerrainDesiredEnvelopeFingerprintLow24,virtualTerrainDesiredEnvelopeFingerprintMid24,virtualTerrainDesiredEnvelopeFingerprintHigh16,virtualTerrainDesiredSafetyLeaves,virtualTerrainDesiredHorizonRoots,virtualTerrainDesiredLocusMinimumLeafX,virtualTerrainDesiredLocusMinimumLeafZ,virtualTerrainDesiredLocusMaximumLeafExclusiveX,virtualTerrainDesiredLocusMaximumLeafExclusiveZ,",
+        "virtualTerrainCommittedEnvelopeFingerprintLow24,virtualTerrainCommittedEnvelopeFingerprintMid24,virtualTerrainCommittedEnvelopeFingerprintHigh16,virtualTerrainCommittedSafetyLeaves,virtualTerrainCommittedSafetyCoverage,virtualTerrainCommittedHorizonRoots,virtualTerrainCommittedHorizonCoverage,virtualTerrainCommittedLocusMinimumLeafX,virtualTerrainCommittedLocusMinimumLeafZ,virtualTerrainCommittedLocusMaximumLeafExclusiveX,virtualTerrainCommittedLocusMaximumLeafExclusiveZ,",
+        "presentationTargetX,presentationTargetY,presentationTargetZ,presentationGateActive,presentationGateStepsLow24,presentationGateStepsMid24,presentationGateStepsHigh16,presentationGateFramesLow24,presentationGateFramesMid24,presentationGateFramesHigh16,",
         "frameSequence,schemaVersion,",
         "sampleCount,droppedSamples",
     );
@@ -1364,6 +1389,22 @@ mod web {
     const VIRTUAL_TERRAIN_CACHE_UPLOAD_BYTES_PER_FRAME: usize = 8 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_CACHE_UPLOAD_CPU_MS: f64 = 2.0;
     const VIRTUAL_TERRAIN_MAX_EXACT_DOMAIN_LEAVES: usize = 16_384;
+
+    /// Applies the committed half-open presentation boundary after one simulation proposal.
+    ///
+    /// The unclamped position is returned as streaming demand. Horizontal velocity into a blocked
+    /// edge is cleared while vertical physics remains authoritative.
+    fn gate_camera_to_presentation_locus(
+        camera: &mut CameraState,
+        locus: Option<PresentationLocus>,
+    ) -> Option<Vec3> {
+        let locus = locus?;
+        let proposed = camera.position.to_array();
+        let proposed_is_inside = locus.contains_position(proposed);
+        let clamped = Vec3::from_array(locus.clamp_position(proposed));
+        crate::apply_presentation_gate(camera, proposed_is_inside, clamped)
+    }
+
     const VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS: u64 = 1_000;
     const VIRTUAL_TERRAIN_PAGE_CACHE_BYTES: usize = 128 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_REFINE_ABOVE_PIXELS: f64 = 0.75;
@@ -1438,8 +1479,8 @@ mod web {
         last_page_failure_key: Option<TerrainPageKey>,
     }
 
-    const STARTUP_PROGRESS_VERSION: u32 = 6;
-    const STARTUP_PROGRESS_PAYLOAD_WORDS: usize = 70;
+    const STARTUP_PROGRESS_VERSION: u32 = 7;
+    const STARTUP_PROGRESS_PAYLOAD_WORDS: usize = 97;
     const STARTUP_PROGRESS_WORDS: usize = STARTUP_PROGRESS_PAYLOAD_WORDS + 2;
 
     #[derive(Default)]
@@ -1820,6 +1861,8 @@ mod web {
         world: ReproductionWorld,
         environment: ReproductionEnvironment,
         render: ReproductionRender,
+        #[serde(default)]
+        streaming: Option<ReproductionStreaming>,
     }
 
     #[derive(Deserialize)]
@@ -1873,6 +1916,18 @@ mod web {
         world_id: String,
         source_identity_hash: String,
         seed: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionStreaming {
+        presentation_gate: ReproductionPresentationGate,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReproductionPresentationGate {
+        target_position_f32_bits: [u32; 3],
     }
 
     #[derive(Deserialize)]
@@ -1931,6 +1986,7 @@ mod web {
         viewport_size: Cell<[u32; 2]>,
         camera: RefCell<CameraState>,
         reproduction_camera: Cell<Option<CameraState>>,
+        reproduction_presentation_target: Cell<Option<Vec3>>,
         reproduction_restore_camera: Cell<Option<CameraState>>,
         spectator_body: Cell<Option<CameraState>>,
         input: RefCell<InputState>,
@@ -1954,6 +2010,10 @@ mod web {
         virtual_terrain_scheduler: RefCell<TerrainStreamScheduler>,
         virtual_terrain_cache: RefCell<TerrainPageMemoryCache>,
         exact_surface_domain_cache: RefCell<ExactSurfaceDomainCache>,
+        presentation_envelope_cache: RefCell<PresentationEnvelopeCache>,
+        presentation_target_position: Cell<Vec3>,
+        presentation_gate_steps: Cell<u64>,
+        presentation_gate_frames: Cell<u64>,
         terrain_ready: Cell<bool>,
         startup_ready: Cell<bool>,
         scope: DedicatedWorkerGlobalScope,
@@ -2104,6 +2164,13 @@ mod web {
                 canonical_pages,
                 virtual_columns,
                 virtual_regions,
+                presentation_target_position_bits: self
+                    .presentation_target_position
+                    .get()
+                    .to_array()
+                    .map(f32::to_bits),
+                presentation_gate_steps: self.presentation_gate_steps.get(),
+                presentation_gate_frames: self.presentation_gate_frames.get(),
                 virtual_pending_pages: virtual_stream.pending_pages,
                 virtual_in_flight_pages: virtual_stream.in_flight_pages,
                 virtual_obsolete_in_flight_pages: virtual_stream.obsolete_in_flight_pages,
@@ -2119,6 +2186,18 @@ mod web {
         fn apply_reproduction(&self, metadata: &str) -> Result<(), String> {
             let reproduction: ReproductionV2 = serde_json::from_str(metadata)
                 .map_err(|error| format!("parse voxels.reproduction.v2: {error}"))?;
+            let reproduction_presentation_target =
+                reproduction.streaming.as_ref().map(|streaming| {
+                    Vec3::from_array(
+                        streaming
+                            .presentation_gate
+                            .target_position_f32_bits
+                            .map(f32::from_bits),
+                    )
+                });
+            if reproduction_presentation_target.is_some_and(|target| !target.is_finite()) {
+                return Err("capture presentation target contains invalid values".to_owned());
+            }
             if reproduction.schema != "voxels.reproduction.v2" {
                 return Err(format!(
                     "unsupported reproduction schema {}",
@@ -2262,7 +2341,8 @@ mod web {
                     .set(Some(*self.camera.borrow()));
             }
             self.reproduction_camera.set(Some(camera));
-            *self.camera.borrow_mut() = camera;
+            self.reproduction_presentation_target
+                .set(reproduction_presentation_target.or(Some(camera.position)));
             self.input.borrow_mut().clear();
             self.simulation_accumulator.set(0.0);
             Ok(())
@@ -2270,6 +2350,7 @@ mod web {
 
         fn clear_reproduction(&self) {
             self.reproduction_camera.set(None);
+            self.reproduction_presentation_target.set(None);
             if let Some(camera) = self.reproduction_restore_camera.take() {
                 *self.camera.borrow_mut() = camera;
             }
@@ -2335,17 +2416,46 @@ mod web {
             let spectator_available = self.spectator_available();
             let gliding_available = self.gliding_available();
             let mut camera = self.camera.borrow_mut();
+            let committed_locus = self.renderer.borrow().virtual_terrain_committed_locus();
+            let retained_target = self.presentation_target_position.get();
+            let mut presentation_gate_active = committed_locus
+                .is_some_and(|locus| !locus.contains_position(retained_target.to_array()));
+            let mut presentation_target_position = if presentation_gate_active {
+                retained_target
+            } else {
+                camera.position
+            };
+            let mut exceptional_relocation = false;
             if self.profile.borrow().phase() == ProfilePhase::Complete
                 && let Some(restore) = self.profile_restore_camera.take()
             {
+                let previous_position = camera.position;
+                presentation_target_position = restore.position;
                 *camera = restore;
+                presentation_gate_active = committed_locus
+                    .is_some_and(|locus| !locus.contains_position(restore.position.to_array()));
+                if presentation_gate_active {
+                    camera.position = previous_position;
+                    camera.velocity = Vec3::ZERO;
+                    exceptional_relocation = true;
+                }
                 self.input.borrow_mut().clear();
                 self.simulation_accumulator.set(0.0);
             }
             camera.set_gliding_available(gliding_available);
             if !spectator_available && camera.locomotion() == LocomotionMode::Spectator {
                 if let Some(body) = self.spectator_body.take() {
+                    let previous_position = camera.position;
+                    presentation_target_position = body.position;
                     *camera = body;
+                    presentation_gate_active = committed_locus
+                        .is_some_and(|locus| !locus.contains_position(body.position.to_array()));
+                    if presentation_gate_active {
+                        camera.position = previous_position;
+                        camera.velocity = Vec3::ZERO;
+                        exceptional_relocation = true;
+                        self.simulation_accumulator.set(0.0);
+                    }
                 } else {
                     camera.set_locomotion(LocomotionMode::Walking);
                 }
@@ -2353,12 +2463,31 @@ mod web {
             }
             let reproducing = self.reproduction_camera.get().is_some();
             if let Some(reproduction_camera) = self.reproduction_camera.get() {
+                let previous_position = camera.position;
+                presentation_target_position = self
+                    .reproduction_presentation_target
+                    .get()
+                    .unwrap_or(reproduction_camera.position);
                 *camera = reproduction_camera;
+                if committed_locus.is_some_and(|locus| {
+                    !locus.contains_position(reproduction_camera.position.to_array())
+                }) {
+                    // Reproduction coordinates are an exceptional relocation. Keep presenting the
+                    // old certified position while the exact target envelope streams.
+                    camera.position = previous_position;
+                    camera.velocity = Vec3::ZERO;
+                    presentation_gate_active = true;
+                    exceptional_relocation = true;
+                } else {
+                    presentation_gate_active = committed_locus.is_some_and(|locus| {
+                        !locus.contains_position(presentation_target_position.to_array())
+                    });
+                }
                 self.input.borrow_mut().clear();
             }
             let profiling = !reproducing && self.profile.borrow().running();
             let chunks = self.chunks.borrow();
-            let mut accumulator = if reproducing {
+            let mut accumulator = if reproducing || exceptional_relocation {
                 0.0
             } else {
                 (self.simulation_accumulator.get() + dt.min(0.1))
@@ -2391,6 +2520,16 @@ mod web {
                             }
                         },
                     );
+                    if let Some(proposed) =
+                        gate_camera_to_presentation_locus(&mut camera, committed_locus)
+                    {
+                        presentation_target_position = proposed;
+                        presentation_gate_active = true;
+                        self.presentation_gate_steps
+                            .set(self.presentation_gate_steps.get().saturating_add(1));
+                    } else {
+                        presentation_target_position = camera.position;
+                    }
                 }
                 accumulator -= self.config.fixed_step_seconds;
                 steps += 1;
@@ -2404,6 +2543,7 @@ mod web {
                 camera.velocity = Vec3::ZERO;
             }
             if profiling && let Some(pose) = self.profile.borrow().pose() {
+                let previous_position = camera.position;
                 let voxel_x = (pose.position_xz.x / VOXEL_SIZE_METRES).floor() as i32;
                 let voxel_z = (pose.position_xz.y / VOXEL_SIZE_METRES).floor() as i32;
                 match self.cached_surface_sample(voxel_x, voxel_z) {
@@ -2423,12 +2563,26 @@ mod web {
                         camera.velocity = Vec3::new(pose.velocity_xz.x, 0.0, pose.velocity_xz.y);
                         camera.yaw = pose.yaw;
                         camera.pitch = pose.pitch;
+                        presentation_target_position = position;
+                        if committed_locus
+                            .is_some_and(|locus| !locus.contains_position(position.to_array()))
+                        {
+                            camera.position = previous_position;
+                            camera.velocity = Vec3::ZERO;
+                            presentation_gate_active = true;
+                        }
                     }
                     Err(error) => {
                         log_gpu_error(&format!("streaming profile surface probe failed: {error}"))
                     }
                 }
             }
+            if presentation_gate_active {
+                self.presentation_gate_frames
+                    .set(self.presentation_gate_frames.get().saturating_add(1));
+            }
+            self.presentation_target_position
+                .set(presentation_target_position);
             if time - self.last_enclosure_probe.get() >= self.config.enclosure_probe_interval_ms {
                 let probe_start = performance_now(performance.as_ref());
                 let key_light_direction = self.renderer.borrow().key_light_direction();
@@ -2475,15 +2629,18 @@ mod web {
             } else {
                 camera.streaming_velocity(&self.input.borrow())
             };
-            let exact_surface_domain =
+            let prediction_domain =
                 self.virtual_terrain_exact_surface_domain(&camera, streaming_velocity);
+            let presentation_envelope =
+                self.virtual_terrain_presentation_envelope(presentation_target_position);
             self.renderer
                 .borrow_mut()
-                .begin_virtual_terrain_exact_surface_domain(&exact_surface_domain);
+                .begin_virtual_terrain_presentation_envelope(&presentation_envelope);
             let stream_breakdown = self.stream_world(
                 &camera,
                 streaming_velocity,
-                &exact_surface_domain,
+                &presentation_envelope,
+                &prediction_domain,
                 performance.as_ref(),
             );
             let presence_start = performance_now(performance.as_ref());
@@ -2533,10 +2690,11 @@ mod web {
             let render = renderer.diagnostics();
             let virtual_terrain_revision_ready = {
                 let state = self.virtual_terrain.borrow();
-                !state
-                    .minimum_region_revisions
-                    .keys()
-                    .any(|key| exact_surface_domain.intersects_page(*key))
+                !state.minimum_region_revisions.keys().any(|key| {
+                    presentation_envelope
+                        .exact_surface_domain()
+                        .intersects_page(*key)
+                })
             };
             // A player is not ready merely because one coarse parent covers the viewport. The
             // initial frame must already own the complete 10 cm surface vicinity that walking,
@@ -2546,7 +2704,7 @@ mod web {
                 == VirtualTerrainRenderMode::Visible
                 && virtual_terrain_revision_ready
                 && renderer.virtual_terrain_committed_snapshot_is_valid()
-                && renderer.virtual_terrain_committed_covers_exact_domain(&exact_surface_domain);
+                && renderer.virtual_terrain_committed_contains_position(camera.position.to_array());
             self.terrain_ready.set(terrain_ready);
             let render_start = performance_now(performance.as_ref());
             let chunks = self.chunks.borrow();
@@ -2719,7 +2877,8 @@ mod web {
             &self,
             camera: &CameraState,
             streaming_velocity: Vec3,
-            exact_surface_domain: &ExactSurfaceDomain,
+            presentation_envelope: &PresentationEnvelope,
+            prediction_domain: &ExactSurfaceDomain,
             performance: Option<&web_sys::Performance>,
         ) -> StreamFrameSample {
             let remote_start = performance_now(performance);
@@ -2902,7 +3061,14 @@ mod web {
             }
             let publish_ms = (performance_now(performance) - publish_start) as f32;
             let virtual_terrain_start = performance_now(performance);
-            self.stream_virtual_terrain(camera, streaming_velocity, exact_surface_domain);
+            let mut presentation_camera = *camera;
+            presentation_camera.position = self.presentation_target_position.get();
+            self.stream_virtual_terrain(
+                &presentation_camera,
+                streaming_velocity,
+                presentation_envelope,
+                prediction_domain,
+            );
             let virtual_terrain_ms = (performance_now(performance) - virtual_terrain_start) as f32;
             StreamFrameSample {
                 remote_ms,
@@ -3213,6 +3379,19 @@ mod web {
             )
         }
 
+        fn virtual_terrain_presentation_envelope(
+            &self,
+            target_position: Vec3,
+        ) -> PresentationEnvelope {
+            self.presentation_envelope_cache.borrow_mut().resolve(
+                target_position.to_array().map(f64::from),
+                self.virtual_terrain_exact_surface_radius_metres(),
+                f64::from(self.config.view_distance_metres),
+                VIRTUAL_TERRAIN_MAX_EXACT_DOMAIN_LEAVES,
+                VIRTUAL_TERRAIN_MAX_COLUMNS,
+            )
+        }
+
         fn virtual_terrain_view(&self, camera: &CameraState) -> VirtualTerrainView {
             let [width, height] = self.viewport_size.get();
             let height = height.max(1);
@@ -3238,7 +3417,8 @@ mod web {
             &self,
             camera: &CameraState,
             streaming_velocity: Vec3,
-            exact_surface_domain: &ExactSurfaceDomain,
+            presentation_envelope: &PresentationEnvelope,
+            prediction_domain: &ExactSurfaceDomain,
         ) -> Vec<[i32; 2]> {
             let camera_chunk = world_to_chunk(camera.position);
             let camera_leaf = TerrainPageKey::surface(0, camera_chunk.x, camera_chunk.z);
@@ -3250,7 +3430,28 @@ mod web {
             let current_column = [camera_root.coord[0], camera_root.coord[2]];
             let camera_position = camera.position.to_array().map(f64::from);
             let predicted_position_f64 = predicted_position.to_array().map(f64::from);
-            let mut exact_columns = exact_surface_domain
+            let mut proof_columns = presentation_envelope
+                .required_horizon_roots()
+                .chain(
+                    presentation_envelope
+                        .exact_surface_domain()
+                        .required_pages_at_level(TERRAIN_COVERAGE_ROOT_LEVEL),
+                )
+                .map(|root| {
+                    (
+                        [root.coord[0], root.coord[2]],
+                        surface_page_horizontal_distance_squared(root, camera.position.to_array())
+                            .unwrap_or(f64::INFINITY),
+                    )
+                })
+                .collect::<Vec<_>>();
+            proof_columns.sort_by(|left, right| {
+                left.1
+                    .total_cmp(&right.1)
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            proof_columns.dedup_by_key(|(column, _)| *column);
+            let mut prediction_columns = prediction_domain
                 .required_pages_at_level(TERRAIN_COVERAGE_ROOT_LEVEL)
                 .map(|root| {
                     let distance =
@@ -3266,20 +3467,24 @@ mod web {
                     ([root.coord[0], root.coord[2]], distance)
                 })
                 .collect::<Vec<_>>();
-            exact_columns.sort_by(|left, right| {
+            prediction_columns.sort_by(|left, right| {
                 left.1
                     .total_cmp(&right.1)
                     .then_with(|| left.0.cmp(&right.0))
             });
-            exact_columns.dedup_by_key(|(column, _)| *column);
-            let mut prioritized =
-                Vec::with_capacity(VIRTUAL_TERRAIN_MAX_COLUMNS.max(exact_columns.len() + 1));
+            prediction_columns.dedup_by_key(|(column, _)| *column);
+            let mut prioritized = Vec::with_capacity(
+                VIRTUAL_TERRAIN_MAX_COLUMNS.max(proof_columns.len() + prediction_columns.len() + 1),
+            );
             let mut included = BTreeSet::new();
-            // Current ownership is needed immediately. Every exact-debt column follows before
-            // ordinary directional quality work. The ordinary cap is not a proof-domain cap:
-            // resolved and in-flight entries are filtered only when a request batch is formed.
-            for column in std::iter::once(current_column)
-                .chain(exact_columns.into_iter().map(|(column, _)| column))
+            // Every explicit safety/horizon proof column is scheduled before velocity prediction
+            // or ordinary quality. A missing horizon root must remain visible debt rather than
+            // being displaced by a directional score.
+            for column in proof_columns
+                .into_iter()
+                .map(|(column, _)| column)
+                .chain(std::iter::once(current_column))
+                .chain(prediction_columns.into_iter().map(|(column, _)| column))
             {
                 if included.insert(column) {
                     prioritized.push(column);
@@ -3392,33 +3597,20 @@ mod web {
             &self,
             camera: &CameraState,
             streaming_velocity: Vec3,
-            exact_surface_domain: &ExactSurfaceDomain,
+            presentation_envelope: &PresentationEnvelope,
+            prediction_domain: &ExactSurfaceDomain,
         ) {
             if !self.virtual_terrain_supported() {
                 return;
             }
-            let virtual_terrain_visible = {
-                self.renderer.borrow().virtual_terrain_render_mode()
-                    == VirtualTerrainRenderMode::Visible
-            };
-            if !exact_surface_domain.core_is_complete()
-                && virtual_terrain_visible
-                && let Err(error) = self
-                    .renderer
-                    .borrow_mut()
-                    .set_virtual_terrain_render_mode(VirtualTerrainRenderMode::Shadow)
-            {
-                log_gpu_error(&format!(
-                    "hide virtual terrain without a valid exact core: {error}"
-                ));
-            }
+            let exact_surface_domain = presentation_envelope.exact_surface_domain();
             // Certification and promotion are the first renderer mutation of the frame. A cache
             // arrival or directory update may change the next desired cut, but cannot invalidate
             // the immutable transaction that was encoded by an earlier frame.
             if let Err(error) = self
                 .renderer
                 .borrow_mut()
-                .advance_virtual_terrain_publication(exact_surface_domain)
+                .advance_virtual_terrain_publication()
             {
                 log_gpu_error(&format!("advance virtual terrain publication: {error}"));
             }
@@ -3433,7 +3625,8 @@ mod web {
             let prioritized_columns = self.desired_virtual_terrain_columns(
                 camera,
                 streaming_velocity,
-                exact_surface_domain,
+                presentation_envelope,
+                prediction_domain,
             );
             let desired_columns = prioritized_columns.iter().copied().collect::<BTreeSet<_>>();
             {
@@ -3537,7 +3730,7 @@ mod web {
             let mut cut = match self
                 .renderer
                 .borrow_mut()
-                .select_virtual_terrain_cut(view, exact_surface_domain)
+                .select_virtual_terrain_cut(view, presentation_envelope)
             {
                 Ok(cut) => cut,
                 Err(error) => {
@@ -3549,6 +3742,7 @@ mod web {
                 && let Err(error) = self.hydrate_virtual_terrain_from_cache(
                     &mut cut,
                     view,
+                    presentation_envelope,
                     exact_surface_domain,
                     streaming_velocity.length(),
                     now_ms,
@@ -3678,7 +3872,8 @@ mod web {
 
             let committed_covers_domain = {
                 let renderer = self.renderer.borrow();
-                renderer.virtual_terrain_committed_covers_exact_domain(exact_surface_domain)
+                renderer
+                    .virtual_terrain_committed_covers_presentation_envelope(presentation_envelope)
             };
             if committed_covers_domain
                 && self.renderer.borrow().virtual_terrain_render_mode()
@@ -3913,6 +4108,7 @@ mod web {
             &self,
             cut: &mut VirtualTerrainCut,
             view: VirtualTerrainView,
+            presentation_envelope: &PresentationEnvelope,
             exact_surface_domain: &ExactSurfaceDomain,
             speed_metres_per_second: f32,
             now_ms: u64,
@@ -4055,7 +4251,7 @@ mod web {
                 *cut = self
                     .renderer
                     .borrow_mut()
-                    .select_virtual_terrain_cut(view, exact_surface_domain)?;
+                    .select_virtual_terrain_cut(view, presentation_envelope)?;
             }
             Ok(uploaded)
         }
@@ -4925,6 +5121,7 @@ mod web {
                 *self.camera.borrow_mut() = restore;
             }
             self.reproduction_camera.set(None);
+            self.reproduction_presentation_target.set(None);
             if let Some(restore) = self.reproduction_restore_camera.take() {
                 *self.camera.borrow_mut() = restore;
             }
@@ -5694,6 +5891,12 @@ mod web {
             let last_page_upload_failure_kind = virtual_state.stats.last_page_upload_failure_kind;
             let last_page_failure_kind = virtual_state.stats.last_page_failure_kind;
             let last_page_failure_key = virtual_state.stats.last_page_failure_key;
+            let presentation_target = engine.presentation_target_position.get();
+            let presentation_gate_active = engine
+                .renderer
+                .borrow()
+                .virtual_terrain_committed_locus()
+                .is_some_and(|locus| !locus.contains_position(presentation_target.to_array()));
             let progress = vec![
                 STARTUP_PROGRESS_VERSION,
                 STARTUP_PROGRESS_WORDS as u32,
@@ -5767,6 +5970,33 @@ mod web {
                 u32::from(render.virtual_terrain_exact_prediction_complete),
                 render.virtual_terrain_exact_prediction_required_leaves,
                 render.virtual_terrain_exact_prediction_current_coverage,
+                u32::from(render.virtual_terrain_desired_envelope_complete),
+                render.virtual_terrain_desired_envelope_fingerprint as u32,
+                (render.virtual_terrain_desired_envelope_fingerprint >> 32) as u32,
+                render.virtual_terrain_desired_safety_leaves,
+                render.virtual_terrain_desired_horizon_roots,
+                render.virtual_terrain_desired_locus_minimum_leaf[0] as u32,
+                render.virtual_terrain_desired_locus_minimum_leaf[1] as u32,
+                render.virtual_terrain_desired_locus_maximum_leaf_exclusive[0] as u32,
+                render.virtual_terrain_desired_locus_maximum_leaf_exclusive[1] as u32,
+                render.virtual_terrain_committed_envelope_fingerprint as u32,
+                (render.virtual_terrain_committed_envelope_fingerprint >> 32) as u32,
+                render.virtual_terrain_committed_safety_leaves,
+                render.virtual_terrain_committed_safety_coverage,
+                render.virtual_terrain_committed_horizon_roots,
+                render.virtual_terrain_committed_horizon_coverage,
+                render.virtual_terrain_committed_locus_minimum_leaf[0] as u32,
+                render.virtual_terrain_committed_locus_minimum_leaf[1] as u32,
+                render.virtual_terrain_committed_locus_maximum_leaf_exclusive[0] as u32,
+                render.virtual_terrain_committed_locus_maximum_leaf_exclusive[1] as u32,
+                presentation_target.x.to_bits(),
+                presentation_target.y.to_bits(),
+                presentation_target.z.to_bits(),
+                u32::from(presentation_gate_active),
+                engine.presentation_gate_steps.get() as u32,
+                (engine.presentation_gate_steps.get() >> 32) as u32,
+                engine.presentation_gate_frames.get() as u32,
+                (engine.presentation_gate_frames.get() >> 32) as u32,
             ];
             debug_assert_eq!(progress.len(), STARTUP_PROGRESS_WORDS);
             progress
@@ -6053,6 +6283,14 @@ mod web {
                     let cache = engine.virtual_terrain_cache.borrow();
                     (cache.len(), cache.resident_bytes())
                 };
+                let presentation_target = engine.presentation_target_position.get();
+                let presentation_gate_active = engine
+                    .renderer
+                    .borrow()
+                    .virtual_terrain_committed_locus()
+                    .is_some_and(|locus| !locus.contains_position(presentation_target.to_array()));
+                let presentation_gate_steps = engine.presentation_gate_steps.get();
+                let presentation_gate_frames = engine.presentation_gate_frames.get();
                 values.extend_from_slice(&[
                     camera.position.x,
                     camera.position.y,
@@ -6349,6 +6587,45 @@ mod web {
                     } else {
                         0.0
                     },
+                    if render.virtual_terrain_desired_envelope_complete {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    (render.virtual_terrain_desired_envelope_fingerprint & 0x00ff_ffff) as f32,
+                    ((render.virtual_terrain_desired_envelope_fingerprint >> 24) & 0x00ff_ffff)
+                        as f32,
+                    ((render.virtual_terrain_desired_envelope_fingerprint >> 48) & 0x0000_ffff)
+                        as f32,
+                    render.virtual_terrain_desired_safety_leaves as f32,
+                    render.virtual_terrain_desired_horizon_roots as f32,
+                    render.virtual_terrain_desired_locus_minimum_leaf[0] as f32,
+                    render.virtual_terrain_desired_locus_minimum_leaf[1] as f32,
+                    render.virtual_terrain_desired_locus_maximum_leaf_exclusive[0] as f32,
+                    render.virtual_terrain_desired_locus_maximum_leaf_exclusive[1] as f32,
+                    (render.virtual_terrain_committed_envelope_fingerprint & 0x00ff_ffff) as f32,
+                    ((render.virtual_terrain_committed_envelope_fingerprint >> 24) & 0x00ff_ffff)
+                        as f32,
+                    ((render.virtual_terrain_committed_envelope_fingerprint >> 48) & 0x0000_ffff)
+                        as f32,
+                    render.virtual_terrain_committed_safety_leaves as f32,
+                    render.virtual_terrain_committed_safety_coverage as f32,
+                    render.virtual_terrain_committed_horizon_roots as f32,
+                    render.virtual_terrain_committed_horizon_coverage as f32,
+                    render.virtual_terrain_committed_locus_minimum_leaf[0] as f32,
+                    render.virtual_terrain_committed_locus_minimum_leaf[1] as f32,
+                    render.virtual_terrain_committed_locus_maximum_leaf_exclusive[0] as f32,
+                    render.virtual_terrain_committed_locus_maximum_leaf_exclusive[1] as f32,
+                    presentation_target.x,
+                    presentation_target.y,
+                    presentation_target.z,
+                    if presentation_gate_active { 1.0 } else { 0.0 },
+                    (presentation_gate_steps & 0x00ff_ffff) as f32,
+                    ((presentation_gate_steps >> 24) & 0x00ff_ffff) as f32,
+                    ((presentation_gate_steps >> 48) & 0x0000_ffff) as f32,
+                    (presentation_gate_frames & 0x00ff_ffff) as f32,
+                    ((presentation_gate_frames >> 24) & 0x00ff_ffff) as f32,
+                    ((presentation_gate_frames >> 48) & 0x0000_ffff) as f32,
                     engine.frame_sequence.get() as f32,
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);
@@ -6598,6 +6875,7 @@ mod web {
             viewport_size: Cell::new([width, height]),
             camera: RefCell::new(camera),
             reproduction_camera: Cell::new(None),
+            reproduction_presentation_target: Cell::new(None),
             reproduction_restore_camera: Cell::new(None),
             spectator_body: Cell::new(None),
             input: RefCell::new(InputState::default()),
@@ -6630,6 +6908,10 @@ mod web {
                 .map_err(|error| JsValue::from_str(&error.to_string()))?,
             ),
             exact_surface_domain_cache: RefCell::new(ExactSurfaceDomainCache::default()),
+            presentation_envelope_cache: RefCell::new(PresentationEnvelopeCache::default()),
+            presentation_target_position: Cell::new(camera.position),
+            presentation_gate_steps: Cell::new(0),
+            presentation_gate_frames: Cell::new(0),
             terrain_ready: Cell::new(false),
             startup_ready: Cell::new(false),
             scope,
@@ -6769,6 +7051,48 @@ mod tests {
 
     fn test_view_cone_tangent() -> f32 {
         viewport_view_cone_tangent(55.0, CAMERA_VERTICAL_FOV_RADIANS, 1_920, 1_080).unwrap()
+    }
+
+    #[test]
+    fn delayed_presentation_gate_preserves_position_and_streams_the_proposal() {
+        let committed_edge = 12.79;
+        let mut camera = CameraState::spawn(glam::Vec3::new(committed_edge, 7.0, 0.1));
+        camera.velocity = glam::Vec3::new(5.0, -2.0, 3.0);
+
+        for _ in 0..64 {
+            camera.position.x += 0.25;
+            let clamped = glam::Vec3::new(committed_edge, camera.position.y, camera.position.z);
+            let target = apply_presentation_gate(&mut camera, false, clamped)
+                .expect("each delayed forward proposal crosses the frozen half-open edge");
+            assert!(target.x > committed_edge);
+            assert_eq!(camera.position.x, committed_edge);
+            assert_eq!(camera.position.y, 7.0);
+            assert_eq!(camera.velocity.x, 0.0);
+            assert_eq!(camera.velocity.y, -2.0);
+            assert_eq!(camera.velocity.z, 3.0);
+        }
+
+        camera.position.x -= 0.25;
+        camera.velocity.x = -5.0;
+        let reversed_position = camera.position;
+        assert!(
+            apply_presentation_gate(&mut camera, true, reversed_position).is_none(),
+            "reversal back into A must immediately stop demanding adjacent B",
+        );
+        assert_eq!(camera.velocity.x, -5.0);
+    }
+
+    #[test]
+    fn presentation_gate_clears_only_blocked_horizontal_velocity() {
+        let mut camera = CameraState::spawn(glam::Vec3::new(3.2, 11.0, -10.6));
+        camera.velocity = glam::Vec3::new(2.0, 4.0, -3.0);
+
+        let target =
+            apply_presentation_gate(&mut camera, false, glam::Vec3::new(3.1, 11.0, -9.6)).unwrap();
+
+        assert_eq!(target.y, 11.0);
+        assert_eq!(camera.position, glam::Vec3::new(3.1, 11.0, -9.6));
+        assert_eq!(camera.velocity, glam::Vec3::new(0.0, 4.0, 0.0));
     }
 
     #[test]

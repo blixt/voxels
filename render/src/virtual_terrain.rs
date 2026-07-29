@@ -181,6 +181,10 @@ struct PresentationEnvelopeData {
     locus: Option<PresentationLocus>,
     exact_surface_domain: ExactSurfaceDomain,
     horizon_roots: BTreeSet<TerrainPageKey>,
+    exact_radius_bits: u64,
+    view_distance_bits: u64,
+    max_exact_leaves: usize,
+    max_horizon_roots: usize,
     complete: bool,
     fingerprint: u64,
 }
@@ -235,6 +239,10 @@ impl PresentationEnvelope {
                 locus: Some(locus),
                 exact_surface_domain,
                 horizon_roots,
+                exact_radius_bits: exact_radius_metres.to_bits(),
+                view_distance_bits: view_distance_metres.to_bits(),
+                max_exact_leaves,
+                max_horizon_roots,
                 complete: true,
                 fingerprint,
             }),
@@ -247,6 +255,10 @@ impl PresentationEnvelope {
                 locus: None,
                 exact_surface_domain: ExactSurfaceDomain::incomplete(),
                 horizon_roots: BTreeSet::new(),
+                exact_radius_bits: 0,
+                view_distance_bits: 0,
+                max_exact_leaves: 0,
+                max_horizon_roots: 0,
                 complete: false,
                 fingerprint: 0,
             }),
@@ -271,6 +283,26 @@ impl PresentationEnvelope {
 
     pub fn required_horizon_root_count(&self) -> usize {
         self.data.horizon_roots.len()
+    }
+
+    pub fn exact_radius_metres(&self) -> Option<f64> {
+        self.data
+            .complete
+            .then(|| f64::from_bits(self.data.exact_radius_bits))
+    }
+
+    pub fn view_distance_metres(&self) -> Option<f64> {
+        self.data
+            .complete
+            .then(|| f64::from_bits(self.data.view_distance_bits))
+    }
+
+    pub fn maximum_exact_leaves(&self) -> usize {
+        self.data.max_exact_leaves
+    }
+
+    pub fn maximum_horizon_roots(&self) -> usize {
+        self.data.max_horizon_roots
     }
 
     fn requires_horizon_owner(&self, key: TerrainPageKey) -> bool {

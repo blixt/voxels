@@ -420,6 +420,10 @@ pub struct ScreenshotStreamingManifest {
     pub canonical_pages: Vec<ScreenshotCanonicalPageState>,
     pub virtual_columns: Vec<ScreenshotVirtualColumnState>,
     pub virtual_regions: Vec<ScreenshotVirtualRegionState>,
+    /// Exact shell-side target which may be ahead of the gated presented camera.
+    pub presentation_target_position_bits: [u32; 3],
+    pub presentation_gate_steps: u64,
+    pub presentation_gate_frames: u64,
     pub virtual_pending_pages: usize,
     pub virtual_in_flight_pages: usize,
     pub virtual_obsolete_in_flight_pages: usize,
@@ -5261,6 +5265,15 @@ impl Renderer {
                 .flatten(),
             self.virtual_terrain_oracle_cut.as_ref(),
             self.virtual_terrain_exact_surface_domain.as_ref(),
+            self.virtual_terrain_desired_envelope.as_ref(),
+            self.virtual_terrain_committed_envelope.as_ref(),
+            self.virtual_terrain_cut.as_ref(),
+            self.virtual_terrain_publication
+                .as_ref()
+                .map(|publication| &publication.envelope),
+            self.virtual_terrain_publication
+                .as_ref()
+                .map(|publication| &publication.cut),
             gpu_virtual_feedback.as_ref(),
         );
         let published_cut = (self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible)
@@ -11120,10 +11133,18 @@ fn screenshot_streaming_manifest_json(manifest: &ScreenshotStreamingManifest) ->
     let _ = write!(
         encoded,
         concat!(
-            r#"],"virtualStream":{{"pendingPages":{},"inFlightPages":{},"obsoleteInFlightPages":{},"#,
+            r#"],"presentationGate":{{"targetPositionMetres":{:?},"targetPositionF32Bits":{:?},"#,
+            r#""blockedSimulationSteps":"{}","blockedFrames":"{}"}},"#,
+            r#""virtualStream":{{"pendingPages":{},"inFlightPages":{},"obsoleteInFlightPages":{},"#,
             r#""cancelledPendingPages":"{}","usefulBytes":"{}","cancellationWasteBytes":"{}","#,
             r#""failedPages":"{}","cachePages":{},"cacheBytes":"{}"}}}}"#
         ),
+        manifest
+            .presentation_target_position_bits
+            .map(f32::from_bits),
+        manifest.presentation_target_position_bits,
+        manifest.presentation_gate_steps,
+        manifest.presentation_gate_frames,
         manifest.virtual_pending_pages,
         manifest.virtual_in_flight_pages,
         manifest.virtual_obsolete_in_flight_pages,
@@ -11148,6 +11169,11 @@ fn screenshot_virtual_terrain_manifest_json(
     published_cut: Option<&VirtualTerrainCut>,
     oracle_cut: Option<&VirtualTerrainCut>,
     exact_surface_domain: Option<&ExactSurfaceDomain>,
+    desired_envelope: Option<&PresentationEnvelope>,
+    committed_envelope: Option<&PresentationEnvelope>,
+    committed_cut: Option<&VirtualTerrainCut>,
+    frozen_envelope: Option<&PresentationEnvelope>,
+    frozen_cut: Option<&VirtualTerrainCut>,
     feedback: Option<&GpuVirtualTerrainFeedback>,
 ) -> String {
     let mode = match mode {
@@ -11157,6 +11183,10 @@ fn screenshot_virtual_terrain_manifest_json(
     };
     let published = screenshot_virtual_cut_json(published_cut);
     let oracle = screenshot_virtual_cut_json(oracle_cut);
+    let desired_envelope = screenshot_presentation_envelope_json(desired_envelope, oracle_cut);
+    let committed_envelope =
+        screenshot_presentation_envelope_json(committed_envelope, committed_cut);
+    let frozen_envelope = screenshot_presentation_envelope_json(frozen_envelope, frozen_cut);
     let exact_surface_domain = exact_surface_domain.map_or_else(
         || "null".to_owned(),
         |domain| {
@@ -11198,10 +11228,16 @@ fn screenshot_virtual_terrain_manifest_json(
     );
     let mut encoded = format!(
         concat!(
-            r#"{{"mode":"{}","exactSurfaceDomain":{},"#,
+            r#"{{"mode":"{}","presentationEnvelopes":{{"desired":{},"committed":{},"frozen":{}}},"exactSurfaceDomain":{},"#,
             r#""publishedCut":{},"oracleCut":{},"residentPages":["#
         ),
-        mode, exact_surface_domain, published, oracle,
+        mode,
+        desired_envelope,
+        committed_envelope,
+        frozen_envelope,
+        exact_surface_domain,
+        published,
+        oracle,
     );
     for (index, (key, page)) in resident.iter().enumerate() {
         if index != 0 {
@@ -11279,6 +11315,62 @@ fn screenshot_virtual_terrain_manifest_json(
         encoded.push_str("null");
     }
     encoded.push('}');
+    encoded
+}
+
+fn screenshot_presentation_envelope_json(
+    envelope: Option<&PresentationEnvelope>,
+    cut: Option<&VirtualTerrainCut>,
+) -> String {
+    let Some(envelope) = envelope else {
+        return "null".to_owned();
+    };
+    let (minimum_leaf, maximum_leaf_exclusive, bounds_metres) =
+        envelope
+            .locus()
+            .map_or(([0; 2], [0; 2], [[0.0; 2]; 2]), |locus| {
+                (
+                    locus.minimum_leaf(),
+                    locus.maximum_leaf_exclusive(),
+                    locus.horizontal_bounds_metres(),
+                )
+            });
+    let mut encoded = format!(
+        concat!(
+            r#"{{"complete":{},"fingerprint":"{:016x}","locus":{{"minimumLeaf":{:?},"#,
+            r#""maximumLeafExclusive":{:?},"horizontalBoundsMetres":{:?}}},"#,
+            r#""construction":{{"exactRadiusMetres":{},"viewDistanceMetres":{},"maximumExactLeaves":{},"maximumHorizonRoots":{}}},"#,
+            r#""safetyLeaves":{},"safetyCoverage":{},"horizonRoots":{},"horizonCoverage":{},"safetyMembers":["#
+        ),
+        envelope.is_complete(),
+        envelope.fingerprint(),
+        minimum_leaf,
+        maximum_leaf_exclusive,
+        bounds_metres,
+        envelope.exact_radius_metres().unwrap_or(0.0),
+        envelope.view_distance_metres().unwrap_or(0.0),
+        envelope.maximum_exact_leaves(),
+        envelope.maximum_horizon_roots(),
+        envelope.exact_surface_domain().required_leaf_count(),
+        cut.map_or(0, |cut| {
+            cut.exact_surface_coverage(envelope.exact_surface_domain())
+        }),
+        envelope.required_horizon_root_count(),
+        cut.map_or(0, |cut| cut.presentation_horizon_coverage(envelope)),
+    );
+    write_virtual_page_keys(
+        &mut encoded,
+        &envelope
+            .exact_surface_domain()
+            .required_leaves()
+            .collect::<Vec<_>>(),
+    );
+    encoded.push_str("],\"horizonMembers\":[");
+    write_virtual_page_keys(
+        &mut encoded,
+        &envelope.required_horizon_roots().collect::<Vec<_>>(),
+    );
+    encoded.push_str("]}");
     encoded
 }
 
@@ -11376,6 +11468,13 @@ mod tests {
     #[test]
     fn screenshot_streaming_manifest_includes_virtual_transport_state() {
         let manifest = ScreenshotStreamingManifest {
+            presentation_target_position_bits: [
+                1.25_f32.to_bits(),
+                2.5_f32.to_bits(),
+                5.0_f32.to_bits(),
+            ],
+            presentation_gate_steps: 13,
+            presentation_gate_frames: 14,
             virtual_columns: vec![ScreenshotVirtualColumnState {
                 column: [-2, 4],
                 resolved_revision: Some(16),
@@ -11408,6 +11507,7 @@ mod tests {
                 r#"{"canonicalPages":[],"virtualColumns":["#,
                 r#"{"key":"virtual-column:-2:4","x":-2,"z":4,"resolvedRevision":"16","minimumRevision":"15","inFlight":true}],"virtualRegions":["#,
                 r#"{"key":"virtual:2:-2:3:4","level":2,"x":-2,"y":3,"z":4,"minimumRevision":"17","registered":true,"inFlight":false}],"#,
+                r#""presentationGate":{"targetPositionMetres":[1.25, 2.5, 5.0],"targetPositionF32Bits":[1067450368, 1075838976, 1084227584],"blockedSimulationSteps":"13","blockedFrames":"14"},"#,
                 r#""virtualStream":{"pendingPages":5,"inFlightPages":6,"obsoleteInFlightPages":2,"cancelledPendingPages":"7","usefulBytes":"8","#,
                 r#""cancellationWasteBytes":"9","failedPages":"10","cachePages":11,"cacheBytes":"12"}}"#
             )
@@ -11462,6 +11562,13 @@ mod tests {
             0.0,
             16,
         );
+        let envelope = crate::virtual_terrain::PresentationEnvelopeCache::default().resolve(
+            [-6.0, 3.0, 13.0],
+            0.0,
+            20.0,
+            64,
+            16,
+        );
         let manifest = screenshot_virtual_terrain_manifest_json(
             VirtualTerrainRenderMode::Visible,
             &resident,
@@ -11469,6 +11576,11 @@ mod tests {
             Some(&cut),
             Some(&cut),
             Some(&exact_surface_domain),
+            Some(&envelope),
+            Some(&envelope),
+            Some(&cut),
+            Some(&envelope),
+            Some(&cut),
             Some(&feedback),
         );
         assert!(manifest.contains(r#""mode":"visible""#));
@@ -11476,6 +11588,9 @@ mod tests {
             r#""exactSurfaceDomain":{"complete":true,"requiredLeaves":1,"fingerprint":"#
         ));
         assert!(manifest.contains(r#""currentExactCoverage":0,"oracleExactCoverage":0"#));
+        assert!(manifest.contains(r#""presentationEnvelopes":{"desired":{"complete":true"#));
+        assert!(manifest.contains(r#""committed":{"complete":true"#));
+        assert!(manifest.contains(r#""frozen":{"complete":true"#));
         assert!(manifest.contains(r#""coord":[-2, 3, 4]"#));
         assert!(manifest.contains(r#""revision":"17""#));
         assert!(manifest.contains(r#""representation":"sparseVoxelBrick""#));
