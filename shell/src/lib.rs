@@ -66,6 +66,20 @@ const fn profile_drain_can_complete(
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+const fn profile_owns_camera(
+    profile_running: bool,
+    restore_camera_pending: bool,
+    relocation_kind: Option<PendingRelocationKind>,
+) -> bool {
+    profile_running
+        || restore_camera_pending
+        || matches!(
+            relocation_kind,
+            Some(PendingRelocationKind::ProfileStep | PendingRelocationKind::ProfileRestore)
+        )
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn spectator_exit_destination(
     current: CameraState,
     saved_body: Option<CameraState>,
@@ -3710,7 +3724,11 @@ mod web {
             streaming_velocity: Vec3,
         ) -> ExactSurfaceDomain {
             let velocity = crate::exact_streaming_velocity(camera, streaming_velocity);
-            let velocity = velocity.is_finite().then_some(velocity).unwrap_or_default();
+            let velocity = if velocity.is_finite() {
+                velocity
+            } else {
+                Vec3::ZERO
+            };
             let endpoint =
                 camera.position + velocity * self.config.stream_velocity_lookahead_seconds.max(0.0);
             self.exact_surface_domain_cache.borrow_mut().resolve(
