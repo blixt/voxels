@@ -8,9 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 use voxels_world::{
-    TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_PAGE_MAX_CHILDREN,
-    TerrainHierarchyDirectoryV1, TerrainHierarchyNode, TerrainPageKey, TerrainPageRepresentation,
-    TerrainPageTransferIdentity, TerrainPageV1, WorldSourceIdentityHash, encode_terrain_page,
+    BoundarySide, TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_EDGE_SAMPLES,
+    TERRAIN_PAGE_MAX_CHILDREN, TerrainHierarchyDirectoryV1, TerrainHierarchyNode, TerrainPageKey,
+    TerrainPageRepresentation, TerrainPageTransferIdentity, TerrainPageV1, WorldSourceIdentityHash,
+    encode_terrain_page, heightfield_refined_handoff_fingerprints,
     reconstruct_exact_terrain_surface, validate_terrain_replacement,
 };
 
@@ -19,6 +20,10 @@ const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
 const NORMAL_ERROR_PIXELS_PER_RADIAN: f64 = 0.25;
 const PRESENTATION_LOCUS_EDGE_LEAVES: i32 = 4;
 const PRESENTATION_LOCUS_STRIDE_LEAVES: i32 = 2;
+// At the configured 128 m/s spectator cruise this gives ten seconds of isotropic coverage lead.
+// Because the 3.2 km view radius is still smaller than one coverage root, the dilated disk
+// intersects at most sixteen roots at every sub-root camera position.
+const PRESENTATION_HORIZON_MOBILITY_MARGIN_METRES: f64 = 1_280.0;
 
 /// A snapped, overlapping horizontal region in which a committed terrain presentation is safe.
 ///
@@ -88,30 +93,6 @@ impl PresentationLocus {
             && (minimum[1] as f32..maximum[1] as f32).contains(&position[1])
     }
 
-    /// Clamps horizontal motion to this convex half-open locus while preserving vertical motion.
-    ///
-    /// The maximum representable `f32` below the exclusive edge is used instead of an arbitrary
-    /// epsilon, so repeated blocked steps cannot drift outside or leave a visible dead strip.
-    pub fn clamp_position(self, mut position_metres: [f32; 3]) -> [f32; 3] {
-        let [minimum, maximum] = self.horizontal_bounds_metres();
-        for (world_axis, horizontal_axis) in [(0, 0), (2, 1)] {
-            let minimum = minimum[horizontal_axis] as f32;
-            let maximum = next_down_f32(maximum[horizontal_axis] as f32);
-            position_metres[world_axis] = position_metres[world_axis].clamp(minimum, maximum);
-        }
-        position_metres
-    }
-}
-
-fn next_down_f32(value: f32) -> f32 {
-    if value.is_nan() || value == f32::NEG_INFINITY {
-        return value;
-    }
-    if value == 0.0 {
-        return -f32::from_bits(1);
-    }
-    let bits = value.to_bits();
-    f32::from_bits(if value > 0.0 { bits - 1 } else { bits + 1 })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -209,10 +190,15 @@ impl PresentationEnvelope {
         else {
             return Self::incomplete();
         };
+        let horizon_radius_metres =
+            view_distance_metres + PRESENTATION_HORIZON_MOBILITY_MARGIN_METRES;
+        if !horizon_radius_metres.is_finite() {
+            return Self::incomplete();
+        }
         let Some(horizon_roots) = enumerate_locus_dilation_pages(
             locus,
             TERRAIN_COVERAGE_ROOT_LEVEL,
-            view_distance_metres,
+            horizon_radius_metres,
             max_horizon_roots,
         ) else {
             return Self::incomplete();
@@ -318,16 +304,36 @@ impl PresentationEnvelope {
         self.data.fingerprint
     }
 
-    pub fn contains_position(&self, position_metres: [f32; 3]) -> bool {
+    pub fn exact_quality_contains_position(&self, position_metres: [f32; 3]) -> bool {
         self.data
             .locus
             .is_some_and(|locus| locus.contains_position(position_metres))
     }
 
-    pub fn clamp_position(&self, position_metres: [f32; 3]) -> Option<[f32; 3]> {
-        self.data
-            .locus
-            .map(|locus| locus.clamp_position(position_metres))
+    /// Whether the immutable horizon ownership set can render the complete view disk at `position`.
+    ///
+    /// This is deliberately independent of the exact-quality locus. A coarse page remains an
+    /// authoritative one-owner fallback while finer pages stream, so ordinary movement is valid
+    /// anywhere this coverage proof holds.
+    pub fn horizon_covers_position(&self, position_metres: [f32; 3]) -> bool {
+        if !self.data.complete || !position_metres.into_iter().all(f32::is_finite) {
+            return false;
+        }
+        let Some(view_distance_metres) = self.view_distance_metres() else {
+            return false;
+        };
+        let Some(required) = enumerate_horizontal_bounds_dilation_pages(
+            [
+                [f64::from(position_metres[0]), f64::from(position_metres[2])],
+                [f64::from(position_metres[0]), f64::from(position_metres[2])],
+            ],
+            TERRAIN_COVERAGE_ROOT_LEVEL,
+            view_distance_metres,
+            self.data.max_horizon_roots,
+        ) else {
+            return false;
+        };
+        required.is_subset(&self.data.horizon_roots)
     }
 
     pub fn shares_storage_with(&self, other: &Self) -> bool {
@@ -341,6 +347,20 @@ fn enumerate_locus_dilation_pages(
     radius_metres: f64,
     maximum_pages: usize,
 ) -> Option<BTreeSet<TerrainPageKey>> {
+    enumerate_horizontal_bounds_dilation_pages(
+        locus.horizontal_bounds_metres(),
+        level,
+        radius_metres,
+        maximum_pages,
+    )
+}
+
+fn enumerate_horizontal_bounds_dilation_pages(
+    [locus_minimum, locus_maximum]: [[f64; 2]; 2],
+    level: u8,
+    radius_metres: f64,
+    maximum_pages: usize,
+) -> Option<BTreeSet<TerrainPageKey>> {
     if level > TERRAIN_COVERAGE_ROOT_LEVEL
         || !radius_metres.is_finite()
         || radius_metres < 0.0
@@ -348,7 +368,17 @@ fn enumerate_locus_dilation_pages(
     {
         return None;
     }
-    let [locus_minimum, locus_maximum] = locus.horizontal_bounds_metres();
+    if locus_minimum
+        .into_iter()
+        .chain(locus_maximum)
+        .any(|coordinate| !coordinate.is_finite())
+        || locus_minimum
+            .into_iter()
+            .zip(locus_maximum)
+            .any(|(minimum, maximum)| minimum > maximum)
+    {
+        return None;
+    }
     let page_span_metres = f64::from(TERRAIN_PAGE_EDGE_SAMPLES) * 0.1 * f64::from(1_u32 << level);
     let minimum =
         locus_minimum.map(|coordinate| ((coordinate - radius_metres) / page_span_metres).floor());
@@ -902,6 +932,7 @@ pub struct VirtualTerrainCut {
     pub traversal_overflow: bool,
     pub incoherent_replacement_groups: usize,
     pub exact_surface_lod_discontinuities: usize,
+    pub surface_handoff_mismatches: usize,
 }
 
 impl VirtualTerrainCut {
@@ -911,6 +942,7 @@ impl VirtualTerrainCut {
             && !self.selection_overflow
             && !self.traversal_overflow
             && self.exact_surface_lod_discontinuities == 0
+            && self.surface_handoff_mismatches == 0
     }
 
     /// Number of explicitly required exact leaves owned by this cut.
@@ -1175,6 +1207,7 @@ impl std::error::Error for VirtualTerrainError {}
 #[derive(Clone, Debug)]
 struct ResidentPage {
     page: TerrainPageV1,
+    refined_surface_handoffs: Option<[[[u8; 32]; 2]; 4]>,
     encoded_bytes: usize,
     primitive_count: usize,
     last_selected_frame: u64,
@@ -1244,6 +1277,7 @@ impl VirtualTerrainHierarchy {
             false,
             false,
             false,
+            0,
             0,
             0,
         )
@@ -1584,10 +1618,12 @@ impl VirtualTerrainHierarchy {
         self.resident_encoded_bytes += encoded_bytes;
         self.resident_primitives += primitive_count;
         let key = page.key;
+        let refined_surface_handoffs = heightfield_refined_handoff_fingerprints(&page);
         self.resident.insert(
             key,
             ResidentPage {
                 page,
+                refined_surface_handoffs,
                 encoded_bytes,
                 primitive_count,
                 last_selected_frame: 0,
@@ -1768,6 +1804,7 @@ impl VirtualTerrainHierarchy {
             builder.visit(root, true, root);
         }
         builder.balance_surface_lod();
+        let handoff_audit = builder.close_surface_handoffs();
         if let Some(envelope) = presentation_envelope {
             for root in envelope.required_horizon_roots() {
                 if !builder.fully_covers_horizon_root(root) {
@@ -1784,6 +1821,7 @@ impl VirtualTerrainHierarchy {
         builder.ownerless_roots.dedup();
         let exact_surface_lod_discontinuities =
             exact_surface_lod_discontinuity_edges(&builder.selected);
+        let surface_handoff_mismatches = handoff_audit.mismatches;
         let mut requested_pages = builder.requests.into_iter().collect::<Vec<_>>();
         requested_pages.sort_unstable_by_key(|identity| identity.key);
         let refinement_roots = builder.refinement_requests.into_iter().collect();
@@ -1791,7 +1829,8 @@ impl VirtualTerrainHierarchy {
             && builder.ownerless_roots.is_empty()
             && !builder.selection_overflow
             && !builder.traversal_overflow
-            && exact_surface_lod_discontinuities == 0;
+            && exact_surface_lod_discontinuities == 0
+            && surface_handoff_mismatches == 0;
         let fingerprint = cut_state_fingerprint(
             cut_fingerprint(&builder.selected, builder.hierarchy),
             &builder.ownerless_roots,
@@ -1800,6 +1839,7 @@ impl VirtualTerrainHierarchy {
             builder.traversal_overflow,
             builder.incoherent_replacement_groups,
             exact_surface_lod_discontinuities,
+            surface_handoff_mismatches,
         );
         if renderable {
             builder.hierarchy.refined_last_cut = builder.next_refined.clone();
@@ -1820,8 +1860,104 @@ impl VirtualTerrainHierarchy {
             traversal_overflow: builder.traversal_overflow,
             incoherent_replacement_groups: builder.incoherent_replacement_groups,
             exact_surface_lod_discontinuities,
+            surface_handoff_mismatches,
         })
     }
+}
+
+/// Audits every level-0 handoff against the representation selected on the other side.
+///
+/// Same-level pages compare their persisted native profiles. A balanced level-1 heightfield
+/// compares the correct child-resolution half derived from its midpoint witness. Missing or
+/// incompatible evidence makes the candidate cut non-renderable; the previous committed cut stays
+/// visible until coherent pages arrive.
+#[derive(Debug, Default, Eq, PartialEq)]
+struct SurfaceHandoffAudit {
+    mismatches: usize,
+    coarse_refinement_blockers: BTreeSet<TerrainPageKey>,
+}
+
+fn level_zero_surface_handoff_audit(
+    selected: &[TerrainPageKey],
+    hierarchy: &VirtualTerrainHierarchy,
+) -> SurfaceHandoffAudit {
+    let selected = selected.iter().copied().collect::<BTreeSet<_>>();
+    let mut audit = SurfaceHandoffAudit::default();
+    for key in selected
+        .iter()
+        .copied()
+        .filter(|key| key.is_surface() && key.level == 0)
+    {
+        for (offset_x, offset_z, side, opposite) in [
+            (-1, 0, BoundarySide::NegativeX, BoundarySide::PositiveX),
+            (1, 0, BoundarySide::PositiveX, BoundarySide::NegativeX),
+            (0, -1, BoundarySide::NegativeZ, BoundarySide::PositiveZ),
+            (0, 1, BoundarySide::PositiveZ, BoundarySide::NegativeZ),
+        ] {
+            let Some(neighbor_x) = key.coord[0].checked_add(offset_x) else {
+                audit.mismatches = audit.mismatches.saturating_add(1);
+                continue;
+            };
+            let Some(neighbor_z) = key.coord[2].checked_add(offset_z) else {
+                audit.mismatches = audit.mismatches.saturating_add(1);
+                continue;
+            };
+            let neighbor_leaf = TerrainPageKey::surface(0, neighbor_x, neighbor_z);
+            let Some(fine) = hierarchy.resident.get(&key) else {
+                audit.mismatches = audit.mismatches.saturating_add(1);
+                continue;
+            };
+            if selected.contains(&neighbor_leaf) {
+                if key < neighbor_leaf {
+                    let Some(neighbor) = hierarchy.resident.get(&neighbor_leaf) else {
+                        audit.mismatches = audit.mismatches.saturating_add(1);
+                        continue;
+                    };
+                    audit.mismatches = audit.mismatches.saturating_add(usize::from(
+                        fine.page.boundary_fingerprints[side as usize]
+                            != neighbor.page.boundary_fingerprints[opposite as usize],
+                    ));
+                }
+                continue;
+            }
+            let Some(coarse_key) = neighbor_leaf.ancestor_at(1) else {
+                audit.mismatches = audit.mismatches.saturating_add(1);
+                continue;
+            };
+            if !selected.contains(&coarse_key) {
+                continue;
+            }
+            let Some(coarse) = hierarchy.resident.get(&coarse_key) else {
+                audit.mismatches = audit.mismatches.saturating_add(1);
+                continue;
+            };
+            let Some(refined) = coarse.refined_surface_handoffs.as_ref() else {
+                // Exact coarse clusters do not contain the child-stride midpoint witnesses needed
+                // to prove a mixed-level handoff. Refine them rather than treating missing
+                // evidence as agreement.
+                audit.mismatches = audit.mismatches.saturating_add(1);
+                audit.coarse_refinement_blockers.insert(coarse_key);
+                continue;
+            };
+            let side_index = match opposite {
+                BoundarySide::NegativeX => 0,
+                BoundarySide::PositiveX => 1,
+                BoundarySide::NegativeZ => 2,
+                BoundarySide::PositiveZ => 3,
+                BoundarySide::NegativeY | BoundarySide::PositiveY => unreachable!(),
+            };
+            let half = match side.axis() {
+                voxels_world::FaceAxis::X => key.coord[2].rem_euclid(2) as usize,
+                voxels_world::FaceAxis::Z => key.coord[0].rem_euclid(2) as usize,
+                voxels_world::FaceAxis::Y => unreachable!(),
+            };
+            if fine.page.boundary_fingerprints[side as usize] != refined[side_index][half] {
+                audit.mismatches = audit.mismatches.saturating_add(1);
+                audit.coarse_refinement_blockers.insert(coarse_key);
+            }
+        }
+    }
+    audit
 }
 
 /// Finds fine edge segments whose selected neighbor skips an intermediate surface level.
@@ -2005,6 +2141,66 @@ impl CutBuilder<'_> {
                 covered.checked_add(1_u128 << (2 * u32::from(selected.level)))
             })
             == Some(required_leaf_area)
+    }
+
+    /// Closes representation handoffs by selecting coherent child evidence, never by adding seam
+    /// geometry. A mismatched coarse heightfield cannot remain selected merely because its children
+    /// have already arrived: that state has no pending work and would otherwise deadlock forever.
+    fn close_surface_handoffs(&mut self) -> SurfaceHandoffAudit {
+        let maximum_passes = usize::from(TERRAIN_COVERAGE_ROOT_LEVEL).saturating_add(1);
+        for _ in 0..maximum_passes {
+            self.selected.sort_unstable();
+            self.selected.dedup();
+            let audit = level_zero_surface_handoff_audit(&self.selected, self.hierarchy);
+            if audit.mismatches == 0 {
+                return audit;
+            }
+            let ready = audit
+                .coarse_refinement_blockers
+                .iter()
+                .copied()
+                .filter(|coarse| {
+                    self.selected.contains(coarse)
+                        && !self.next_balanced_selected.contains(coarse)
+                        && self
+                            .hierarchy
+                            .replacement_is_resident_and_coherent(*coarse)
+                })
+                .collect::<Vec<_>>();
+            if ready.is_empty() {
+                for coarse in audit.coarse_refinement_blockers.iter().copied() {
+                    let Some(children) = coarse.refinement_children() else {
+                        continue;
+                    };
+                    self.record_unavailable_replacement(coarse, &children);
+                }
+                return audit;
+            }
+            let additional_pages = ready
+                .iter()
+                .filter_map(|coarse| coarse.refinement_children())
+                .map(|children| children.len().saturating_sub(1))
+                .sum::<usize>();
+            if self.selected.len().saturating_add(additional_pages)
+                > self.hierarchy.capacity.max_selected_pages
+            {
+                self.selection_overflow = true;
+                return audit;
+            }
+            let mut refined = false;
+            for coarse in ready {
+                let Some(children) = coarse.refinement_children() else {
+                    continue;
+                };
+                refined |= self.refine_surface_frontier(coarse, children);
+            }
+            if !refined {
+                return audit;
+            }
+            self.balance_surface_lod();
+        }
+        self.traversal_overflow = true;
+        level_zero_surface_handoff_audit(&self.selected, self.hierarchy)
     }
 
     /// Makes every surface edge differ by at most one level without adding seam geometry.
@@ -2197,7 +2393,7 @@ impl CutBuilder<'_> {
             return false;
         };
         self.selected.retain(|key| *key != coarse);
-        for child in children {
+        for child in children.iter().copied() {
             self.selected.push(child);
             self.selected_owners.insert(child, owner);
         }
@@ -2783,6 +2979,7 @@ fn cut_state_fingerprint(
     traversal_overflow: bool,
     incoherent_replacement_groups: usize,
     exact_surface_lod_discontinuities: usize,
+    surface_handoff_mismatches: usize,
 ) -> u64 {
     // Selected owners alone do not identify an incomplete desired plan: two traversals may retain
     // the same fallback owners while missing different active roots. Keep the exact sorted blocker
@@ -2806,6 +3003,7 @@ fn cut_state_fingerprint(
     for value in [
         incoherent_replacement_groups as u64,
         exact_surface_lod_discontinuities as u64,
+        surface_handoff_mismatches as u64,
     ] {
         for byte in value.to_le_bytes() {
             fingerprint = fingerprint_byte(fingerprint, byte);
@@ -2856,8 +3054,8 @@ mod tests {
     use super::*;
     use voxels_world::{
         Material, SurfaceRegion, SurfaceSample, TerrainErrorBounds, TerrainHierarchyDirectoryV1,
-        VoxelCoord, build_exact_cluster_terrain_parent, build_exact_terrain_page,
-        build_sampled_heightfield_terrain_page,
+        VoxelCoord, build_exact_cluster_terrain_parent, build_exact_surface_terrain_page,
+        build_exact_terrain_page, build_sampled_heightfield_terrain_page,
     };
 
     fn identity() -> WorldSourceIdentityHash {
@@ -2944,6 +3142,7 @@ mod tests {
             traversal_overflow: false,
             incoherent_replacement_groups: 0,
             exact_surface_lod_discontinuities: 0,
+            surface_handoff_mismatches: 0,
         }
     }
 
@@ -2990,11 +3189,6 @@ mod tests {
         assert!(!first.contains_position([3.2, 0.0, 0.0]));
         assert!(next.contains_position([3.2, 0.0, 0.0]));
 
-        let clamped = first.clamp_position([3.2, 7.0, -20.0]);
-        assert!(first.contains_position(clamped));
-        assert_eq!(clamped[1], 7.0);
-        assert_eq!(clamped[2], -9.6);
-        assert!(clamped[0] < 3.2);
     }
 
     #[test]
@@ -3008,7 +3202,93 @@ mod tests {
         assert!(first.shares_storage_with(&moved_inside));
         assert!(!first.shares_storage_with(&adjacent));
         assert_eq!(cache.rebuilds(), 2);
-        assert_eq!(first.required_horizon_root_count(), 4);
+        assert_eq!(first.required_horizon_root_count(), 12);
+        assert!(first.exact_quality_contains_position([0.1, 0.0, 0.1]));
+        assert!(!first.exact_quality_contains_position([1_000.0, 0.0, 0.1]));
+        assert!(
+            first.horizon_covers_position([1_000.0, 0.0, 0.1]),
+            "coarse one-owner coverage must permit travel independently of exact quality"
+        );
+        assert!(
+            !first.horizon_covers_position([3_500.0, 0.0, 0.1]),
+            "coverage must still fail closed after the bounded root halo is exhausted"
+        );
+    }
+
+    #[test]
+    fn mobility_margin_is_isotropic_and_fits_the_hard_column_budget() {
+        let root_span_metres =
+            f64::from(TERRAIN_PAGE_EDGE_SAMPLES)
+                * 0.1
+                * f64::from(1_u32 << TERRAIN_COVERAGE_ROOT_LEVEL);
+        for z_step in 0..=16 {
+            for x_step in 0..=16 {
+                let camera = [
+                    f64::from(x_step) * root_span_metres / 16.0,
+                    0.0,
+                    f64::from(z_step) * root_span_metres / 16.0,
+                ];
+                let envelope =
+                    PresentationEnvelopeCache::default().resolve(camera, 12.8, 3_200.0, 16_384, 16);
+                assert!(
+                    envelope.is_complete(),
+                    "coverage overflowed at sub-root position {camera:?}"
+                );
+                assert!(envelope.required_horizon_root_count() <= 16);
+                for [dx, dz] in [
+                    [1_280.0, 0.0],
+                    [-1_280.0, 0.0],
+                    [0.0, 1_280.0],
+                    [0.0, -1_280.0],
+                    [905.0, 905.0],
+                    [-905.0, 905.0],
+                    [905.0, -905.0],
+                    [-905.0, -905.0],
+                ] {
+                    assert!(
+                        envelope.horizon_covers_position([
+                            (camera[0] + dx) as f32,
+                            0.0,
+                            (camera[2] + dz) as f32,
+                        ]),
+                        "coverage at {camera:?} omitted mobility offset [{dx}, {dz}]"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_mobility_dilation_fits_sixteen_roots_at_every_snapped_root_phase() {
+        let root_span_metres = f64::from(TERRAIN_PAGE_EDGE_SAMPLES)
+            * 0.1
+            * f64::from(1_u32 << TERRAIN_COVERAGE_ROOT_LEVEL);
+        let locus_stride_metres =
+            f64::from(PRESENTATION_LOCUS_STRIDE_LEAVES * TERRAIN_PAGE_EDGE_SAMPLES as i32) * 0.1;
+        let phases = (root_span_metres / locus_stride_metres).round() as usize;
+        assert_eq!(phases, 512);
+        let mut maximum = 0;
+        for z_phase in 0..phases {
+            for x_phase in 0..phases {
+                let locus = PresentationLocus::containing_position([
+                    x_phase as f64 * locus_stride_metres,
+                    0.0,
+                    z_phase as f64 * locus_stride_metres,
+                ])
+                .unwrap();
+                let roots = enumerate_locus_dilation_pages(
+                    locus,
+                    TERRAIN_COVERAGE_ROOT_LEVEL,
+                    3_200.0 + PRESENTATION_HORIZON_MOBILITY_MARGIN_METRES,
+                    16,
+                )
+                .unwrap_or_else(|| {
+                    panic!("mobility dilation overflowed at phase [{x_phase}, {z_phase}]")
+                });
+                maximum = maximum.max(roots.len());
+            }
+        }
+        assert_eq!(maximum, 14);
     }
 
     #[test]
@@ -3196,9 +3476,9 @@ mod tests {
         let base = 0x1234_5678_9abc_def0;
         let first = TerrainPageKey::surface(3, -2, 7);
         let second = TerrainPageKey::surface(3, 3, 7);
-        let first_missing = cut_state_fingerprint(base, &[first], false, false, false, 0, 0);
-        let second_missing = cut_state_fingerprint(base, &[second], false, false, false, 0, 0);
-        let overflowed = cut_state_fingerprint(base, &[first], false, true, false, 0, 0);
+        let first_missing = cut_state_fingerprint(base, &[first], false, false, false, 0, 0, 0);
+        let second_missing = cut_state_fingerprint(base, &[second], false, false, false, 0, 0, 0);
+        let overflowed = cut_state_fingerprint(base, &[first], false, true, false, 0, 0, 0);
 
         assert_ne!(first_missing, second_missing);
         assert_ne!(first_missing, overflowed);
@@ -3315,14 +3595,196 @@ mod tests {
     fn insert_unregistered_resident(hierarchy: &mut VirtualTerrainHierarchy, page: TerrainPageV1) {
         let encoded_bytes = encode_terrain_page(&page).unwrap().len();
         let primitive_count = page_primitive_count(&page);
+        let refined_surface_handoffs = heightfield_refined_handoff_fingerprints(&page);
         hierarchy.resident.insert(
             page.key,
             ResidentPage {
                 page,
+                refined_surface_handoffs,
                 encoded_bytes,
                 primitive_count,
                 last_selected_frame: 0,
             },
+        );
+    }
+
+    fn flat_heightfield_page(key: TerrainPageKey) -> TerrainPageV1 {
+        let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
+        let boundary_midpoints = if key.level == 0 {
+            Vec::new()
+        } else {
+            vec![
+                SurfaceSample {
+                    height: 0,
+                    material: Material::Grass,
+                    water_level: None,
+                    region: SurfaceRegion::VerdantForest,
+                    moisture: 0.5,
+                    temperature: 0.5,
+                    ridge: 0.0,
+                    route: None,
+                };
+                4 * TERRAIN_PAGE_EDGE_SAMPLES as usize
+            ]
+        };
+        build_sampled_heightfield_terrain_page(
+            identity(),
+            key,
+            1,
+            &vec![
+                SurfaceSample {
+                    height: 0,
+                    material: Material::Grass,
+                    water_level: None,
+                    region: SurfaceRegion::VerdantForest,
+                    moisture: 0.5,
+                    temperature: 0.5,
+                    ridge: 0.0,
+                    route: None,
+                };
+                edge * edge
+            ],
+            &boundary_midpoints,
+            TerrainErrorBounds::EXACT,
+        )
+        .unwrap()
+    }
+
+    fn flat_exact_surface_page(
+        key: TerrainPageKey,
+        opened_boundary_voxel: Option<VoxelCoord>,
+    ) -> TerrainPageV1 {
+        build_exact_surface_terrain_page(identity(), key, 1, [-4, 4], |coord| {
+            if Some(coord) == opened_boundary_voxel {
+                Material::Air
+            } else if coord.y > 0 {
+                Material::Air
+            } else if coord.y == 0 {
+                Material::Grass
+            } else {
+                Material::Stone
+            }
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn selected_exact_and_heightfield_handoff_must_agree_before_publication() {
+        let lower = TerrainPageKey::surface(0, -1, 0);
+        let higher = TerrainPageKey::surface(0, 0, 0);
+        let selected = vec![lower, higher];
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        insert_unregistered_resident(&mut hierarchy, flat_heightfield_page(lower));
+        insert_unregistered_resident(
+            &mut hierarchy,
+            flat_exact_surface_page(higher, None),
+        );
+
+        assert_eq!(
+            level_zero_surface_handoff_audit(&selected, &hierarchy),
+            SurfaceHandoffAudit::default(),
+            "equivalent exact and heightfield columns must form a publishable seam",
+        );
+
+        insert_unregistered_resident(
+            &mut hierarchy,
+            flat_exact_surface_page(
+                higher,
+                Some(VoxelCoord {
+                    x: 0,
+                    y: -1,
+                    z: 7,
+                }),
+            ),
+        );
+        let mismatch = level_zero_surface_handoff_audit(&selected, &hierarchy);
+        assert_eq!(mismatch.mismatches, 1);
+        let mut candidate = cut_with_selected(selected);
+        candidate.surface_handoff_mismatches = mismatch.mismatches;
+        assert!(
+            !candidate.is_renderable(),
+            "a boundary opening that the selected heightfield cannot represent must retain the prior cut",
+        );
+    }
+
+    #[test]
+    fn mixed_level_handoff_uses_the_correct_negative_coordinate_half() {
+        let coarse = TerrainPageKey::surface(1, -1, -1);
+        let fine = TerrainPageKey::surface(0, 0, -1);
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        insert_unregistered_resident(&mut hierarchy, surface_page(coarse));
+        insert_unregistered_resident(
+            &mut hierarchy,
+            build_exact_surface_terrain_page(identity(), fine, 1, [-32, 32], |coord| {
+                let height = coord.x.div_euclid(5) + coord.z.div_euclid(7);
+                if coord.y > height {
+                    Material::Air
+                } else {
+                    Material::Stone
+                }
+            })
+            .unwrap(),
+        );
+
+        let audit = level_zero_surface_handoff_audit(&[coarse, fine], &hierarchy);
+        assert_eq!(
+            audit,
+            SurfaceHandoffAudit::default(),
+            "the z=-1 fine page is the high child half under Euclidean ancestry",
+        );
+
+        let refined = hierarchy
+            .resident
+            .get(&coarse)
+            .unwrap()
+            .refined_surface_handoffs
+            .as_ref()
+            .unwrap();
+        let fine_fingerprint = hierarchy.resident.get(&fine).unwrap().page.boundary_fingerprints
+            [BoundarySide::NegativeX as usize];
+        assert_eq!(fine_fingerprint, refined[1][1]);
+        assert_ne!(
+            fine_fingerprint, refined[1][0],
+            "using truncating remainder at negative coordinates would silently select the wrong half",
+        );
+    }
+
+    #[test]
+    fn resident_coherent_children_close_a_handoff_mismatch_without_waiting_for_more_work() {
+        let fine = TerrainPageKey::surface(0, -1, 0);
+        let coarse = TerrainPageKey::surface(1, 0, 0);
+        let children = coarse.refinement_children().unwrap();
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        insert_unregistered_resident(&mut hierarchy, flat_exact_surface_page(fine, None));
+        insert_unregistered_resident(&mut hierarchy, surface_page(coarse));
+        for child in children.iter().copied() {
+            insert_unregistered_resident(&mut hierarchy, flat_heightfield_page(child));
+        }
+        // Replacement coherence is independently proven on page admission. This fixture isolates
+        // the selector's response after that proof has already succeeded.
+        hierarchy.coherent_replacements.insert(coarse);
+        let prior_refined = BTreeSet::new();
+        let mut builder = cut_builder_for_owned_selection(
+            &mut hierarchy,
+            &prior_refined,
+            default_exact_domain(),
+            vec![fine, coarse],
+            BTreeMap::from([(fine, fine), (coarse, coarse)]),
+        );
+
+        let audit = builder.close_surface_handoffs();
+
+        assert_eq!(audit, SurfaceHandoffAudit::default());
+        assert!(!builder.selected.contains(&coarse));
+        assert!(children.iter().all(|child| builder.selected.contains(child)));
+        assert!(builder.requests.is_empty());
+        assert!(builder.refinement_requests.is_empty());
+        assert!(
+            !builder.traversal_overflow,
+            "ready evidence must progress selection instead of producing a no-work deadlock",
         );
     }
 

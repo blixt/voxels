@@ -5,8 +5,8 @@
 //! every payload reconstructs only that owner's certified surface.
 
 use crate::{
-    BoundaryCertificate, BoundarySide, CanonicalFaceKey, FaceAxis, Material, SurfaceSample,
-    VoxelBounds, VoxelCoord, WorldSourceIdentityHash, canonical_exposed_faces,
+    BoundaryCertificate, BoundarySide, CanonicalFaceKey, FaceAxis, Material, RenderLayer,
+    SurfaceSample, VoxelBounds, VoxelCoord, WorldSourceIdentityHash, canonical_exposed_faces,
     directionally_owned_surface_faces,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,7 +16,7 @@ use std::io::Read;
 #[cfg(feature = "terrain-page-builder")]
 use crate::terrain_error::certify_bidirectional_surface_error;
 
-pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 8;
+pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 9;
 pub const TERRAIN_PAGE_EDGE_SAMPLES: u32 = 32;
 pub const TERRAIN_HEIGHTFIELD_BOUNDARY_SIDES: usize = 4;
 pub const TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS: usize =
@@ -34,9 +34,9 @@ pub const TERRAIN_PAGE_TARGET_COMPRESSED_BYTES: usize = 65_536;
 pub const TERRAIN_PAGE_MAX_COMPRESSED_BYTES: usize = 262_144;
 pub const TERRAIN_PAGE_MAX_PAYLOAD_BYTES: usize = 2_097_152;
 const SPARSE_BRICK_EDGE: u8 = 8;
-const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v8\0";
+const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v9\0";
 const PARENT_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-parent-boundary-v1\0";
-const HEIGHTFIELD_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-heightfield-boundary-v3\0";
+const SURFACE_HANDOFF_DOMAIN: &[u8] = b"voxels-terrain-surface-handoff-v1\0";
 const PAGE_MAGIC: &[u8; 4] = b"VXTP";
 const PAGE_HEADER_LEN: u16 = 344;
 const PAGE_COMPRESSION_BROTLI: u8 = 1;
@@ -844,8 +844,17 @@ pub fn build_exact_surface_terrain_page(
     };
     let faces = directionally_owned_surface_faces(bounds, |coord| samples.sample(coord));
     let certificate = BoundaryCertificate::build(bounds, |coord| samples.sample(coord));
-    let boundary_fingerprints =
+    let mut boundary_fingerprints =
         std::array::from_fn(|index| certificate.side(BoundarySide::ALL[index]).fingerprint);
+    for side in [
+        BoundarySide::NegativeX,
+        BoundarySide::PositiveX,
+        BoundarySide::NegativeZ,
+        BoundarySide::PositiveZ,
+    ] {
+        boundary_fingerprints[side as usize] =
+            exact_surface_handoff_fingerprint(bounds, &samples, side);
+    }
     let (materials, palette_indices) = material_coverage(bounds, &samples, &faces)?;
     let representation =
         TerrainPageRepresentation::SurfaceCluster(merge_surface_faces(&faces, &palette_indices));
@@ -1119,83 +1128,299 @@ fn heightfield_boundary_fingerprints(
     let edge = usize::from(grid.shape_xz[0]);
     std::array::from_fn(|index| {
         let side = BoundarySide::ALL[index];
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(HEIGHTFIELD_BOUNDARY_DOMAIN);
-        hasher.update(&[side.axis() as u8]);
-        hasher.update(&boundary_plane(bounds, side).to_le_bytes());
-        let hash_sample =
-            |hasher: &mut blake3::Hasher, ground: i32, water: i32, material_index: Option<u8>| {
-                hasher.update(&ground.to_le_bytes());
-                hasher.update(&water.to_le_bytes());
-                let material_id = material_index
-                    .and_then(|index| materials.get(usize::from(index)))
-                    .map_or(u16::MAX, |coverage| coverage.material.id());
-                hasher.update(&material_id.to_le_bytes());
-            };
-        let residual_side = match side {
-            BoundarySide::NegativeX => Some(0),
-            BoundarySide::PositiveX => Some(1),
-            BoundarySide::NegativeZ => Some(2),
-            BoundarySide::PositiveZ => Some(3),
-            BoundarySide::NegativeY | BoundarySide::PositiveY => None,
-        };
         match side {
             BoundarySide::NegativeX | BoundarySide::PositiveX => {
                 let x = usize::from(side == BoundarySide::PositiveX) * (edge - 1);
-                for z in 0..edge {
+                surface_handoff_fingerprint(
+                    side.axis(),
+                    boundary_plane(bounds, side),
+                    bounds.min.z,
+                    grid.sample_stride_voxels,
+                    edge,
+                    |z, hasher| {
                     let sample = x + z * edge;
-                    hash_sample(
-                        &mut hasher,
+                        hash_heightfield_column(
+                            hasher,
                         grid.ground_heights[sample],
                         grid.water_heights[sample],
-                        grid.sample_material_indices.get(sample).copied(),
-                    );
-                    if !grid.boundary_midpoint_ground_heights.is_empty()
-                        && z + 1 < edge
-                        && let Some(side) = residual_side
-                    {
-                        let residual = side * TERRAIN_PAGE_EDGE_SAMPLES as usize + z;
-                        hash_sample(
-                            &mut hasher,
-                            grid.boundary_midpoint_ground_heights[residual],
-                            grid.boundary_midpoint_water_heights[residual],
-                            grid.boundary_midpoint_material_indices
-                                .get(residual)
-                                .copied(),
+                            palette_material(
+                                materials,
+                                grid.sample_material_indices.get(sample).copied(),
+                            ),
                         );
-                    }
-                }
+                    },
+                )
             }
             BoundarySide::NegativeZ | BoundarySide::PositiveZ => {
                 let z = usize::from(side == BoundarySide::PositiveZ) * (edge - 1);
-                for x in 0..edge {
+                surface_handoff_fingerprint(
+                    side.axis(),
+                    boundary_plane(bounds, side),
+                    bounds.min.x,
+                    grid.sample_stride_voxels,
+                    edge,
+                    |x, hasher| {
                     let sample = x + z * edge;
-                    hash_sample(
-                        &mut hasher,
+                        hash_heightfield_column(
+                            hasher,
                         grid.ground_heights[sample],
                         grid.water_heights[sample],
-                        grid.sample_material_indices.get(sample).copied(),
-                    );
-                    if !grid.boundary_midpoint_ground_heights.is_empty()
-                        && x + 1 < edge
-                        && let Some(side) = residual_side
-                    {
-                        let residual = side * TERRAIN_PAGE_EDGE_SAMPLES as usize + x;
-                        hash_sample(
-                            &mut hasher,
-                            grid.boundary_midpoint_ground_heights[residual],
-                            grid.boundary_midpoint_water_heights[residual],
-                            grid.boundary_midpoint_material_indices
-                                .get(residual)
-                                .copied(),
+                            palette_material(
+                                materials,
+                                grid.sample_material_indices.get(sample).copied(),
+                            ),
                         );
-                    }
-                }
+                    },
+                )
             }
-            BoundarySide::NegativeY | BoundarySide::PositiveY => {}
+            BoundarySide::NegativeY | BoundarySide::PositiveY => {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(SURFACE_HANDOFF_DOMAIN);
+                hasher.update(&[side.axis() as u8]);
+                hasher.update(&boundary_plane(bounds, side).to_le_bytes());
+                *hasher.finalize().as_bytes()
+            }
         }
-        *hasher.finalize().as_bytes()
     })
+}
+
+fn exact_surface_handoff_fingerprint(
+    bounds: VoxelBounds,
+    samples: &ExactPageSamples,
+    side: BoundarySide,
+) -> [u8; 32] {
+    let (plane, tangent_min, column_at): (i32, i32, Box<dyn Fn(usize) -> (i32, i32)>) =
+        match side {
+            BoundarySide::NegativeX | BoundarySide::PositiveX => {
+                let x = if side == BoundarySide::PositiveX {
+                    bounds.max.x
+                } else {
+                    bounds.min.x
+                };
+                (
+                    x,
+                    bounds.min.z,
+                    Box::new(move |index| (x, bounds.min.z + index as i32)),
+                )
+            }
+            BoundarySide::NegativeZ | BoundarySide::PositiveZ => {
+                let z = if side == BoundarySide::PositiveZ {
+                    bounds.max.z
+                } else {
+                    bounds.min.z
+                };
+                (
+                    z,
+                    bounds.min.x,
+                    Box::new(move |index| (bounds.min.x + index as i32, z)),
+                )
+            }
+            BoundarySide::NegativeY | BoundarySide::PositiveY => unreachable!(),
+        };
+    surface_handoff_fingerprint(
+        side.axis(),
+        plane,
+        tangent_min,
+        1,
+        TERRAIN_PAGE_EDGE_SAMPLES as usize + 1,
+        |index, hasher| {
+            let (x, z) = column_at(index);
+            hash_exact_column(hasher, samples, x, z);
+        },
+    )
+}
+
+fn surface_handoff_fingerprint(
+    axis: FaceAxis,
+    plane: i32,
+    tangent_min: i32,
+    tangent_stride: u32,
+    column_count: usize,
+    mut hash_column: impl FnMut(usize, &mut blake3::Hasher),
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(SURFACE_HANDOFF_DOMAIN);
+    hasher.update(&[axis as u8]);
+    hasher.update(&plane.to_le_bytes());
+    hasher.update(&tangent_min.to_le_bytes());
+    hasher.update(&tangent_stride.to_le_bytes());
+    hasher.update(&(column_count as u32).to_le_bytes());
+    for index in 0..column_count {
+        hasher.update(&(index as u32).to_le_bytes());
+        hash_column(index, &mut hasher);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn layer_tag(layer: RenderLayer) -> u8 {
+    match layer {
+        RenderLayer::Empty => 0,
+        RenderLayer::Opaque => 1,
+        RenderLayer::Translucent => 2,
+    }
+}
+
+fn hash_initial_column_material(hasher: &mut blake3::Hasher, material: Material) {
+    hasher.update(&[layer_tag(material.render_layer())]);
+    if material.render_layer() != RenderLayer::Opaque {
+        hasher.update(&material.id().to_le_bytes());
+    }
+}
+
+fn hash_column_transition(
+    hasher: &mut blake3::Hasher,
+    plane_y: i32,
+    previous: Material,
+    next: Material,
+) {
+    let previous_layer = previous.render_layer();
+    let next_layer = next.render_layer();
+    if previous_layer == next_layer {
+        return;
+    }
+    let visible_material = match (previous_layer, next_layer) {
+        (RenderLayer::Opaque, _) => previous,
+        (_, RenderLayer::Opaque) => next,
+        (RenderLayer::Translucent, RenderLayer::Empty) => previous,
+        (RenderLayer::Empty, RenderLayer::Translucent) => next,
+        _ => next,
+    };
+    hasher.update(&plane_y.to_le_bytes());
+    hasher.update(&[layer_tag(next_layer)]);
+    hasher.update(&visible_material.id().to_le_bytes());
+}
+
+fn hash_exact_column(
+    hasher: &mut blake3::Hasher,
+    samples: &ExactPageSamples,
+    x: i32,
+    z: i32,
+) {
+    let minimum_y = samples.halo_min.y;
+    let maximum_y = minimum_y.saturating_add(samples.halo_shape[1] as i32);
+    let mut previous = samples.sample(VoxelCoord::new(x, minimum_y, z));
+    hash_initial_column_material(hasher, previous);
+    for y in minimum_y.saturating_add(1)..maximum_y {
+        let next = samples.sample(VoxelCoord::new(x, y, z));
+        hash_column_transition(hasher, y, previous, next);
+        previous = next;
+    }
+}
+
+fn hash_heightfield_column(
+    hasher: &mut blake3::Hasher,
+    ground_height: i32,
+    water_height: i32,
+    ground_material: Material,
+) {
+    hash_initial_column_material(hasher, ground_material);
+    if water_height > ground_height {
+        hash_column_transition(
+            hasher,
+            ground_height,
+            ground_material,
+            Material::Water,
+        );
+        hash_column_transition(hasher, water_height, Material::Water, Material::Air);
+    } else {
+        hash_column_transition(hasher, ground_height, ground_material, Material::Air);
+    }
+}
+
+fn palette_material(
+    materials: &[TerrainMaterialCoverage],
+    material_index: Option<u8>,
+) -> Material {
+    material_index
+        .and_then(|index| materials.get(usize::from(index)))
+        .map_or(Material::Air, |coverage| coverage.material)
+}
+
+/// Computes the two child-resolution handoff profiles on each horizontal side of a coarse
+/// heightfield. These hashes are renderer-resident derivations of the persisted midpoint witness;
+/// they add no transport bytes.
+pub fn heightfield_refined_handoff_fingerprints(
+    page: &TerrainPageV1,
+) -> Option<[[[u8; 32]; 2]; TERRAIN_HEIGHTFIELD_BOUNDARY_SIDES]> {
+    let TerrainPageRepresentation::HeightfieldGrid(grid) = &page.representation else {
+        return None;
+    };
+    if page.key.level == 0
+        || grid.boundary_midpoint_ground_heights.len()
+            != TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS
+    {
+        return None;
+    }
+    let edge = usize::from(grid.shape_xz[0]);
+    let child_stride = grid.sample_stride_voxels.checked_div(2)?;
+    let [[minimum_x, minimum_z], _] = page.key.horizontal_bounds()?;
+    let sides = [
+        BoundarySide::NegativeX,
+        BoundarySide::PositiveX,
+        BoundarySide::NegativeZ,
+        BoundarySide::PositiveZ,
+    ];
+    Some(std::array::from_fn(|side_index| {
+        let side = sides[side_index];
+        let mut samples = Vec::with_capacity(TERRAIN_PAGE_EDGE_SAMPLES as usize * 2 + 1);
+        for ordinary in 0..edge {
+            let sample = match side {
+                BoundarySide::NegativeX | BoundarySide::PositiveX => {
+                    usize::from(side == BoundarySide::PositiveX) * (edge - 1) + ordinary * edge
+                }
+                BoundarySide::NegativeZ | BoundarySide::PositiveZ => {
+                    ordinary + usize::from(side == BoundarySide::PositiveZ) * (edge - 1) * edge
+                }
+                BoundarySide::NegativeY | BoundarySide::PositiveY => unreachable!(),
+            };
+            samples.push((
+                grid.ground_heights[sample],
+                grid.water_heights[sample],
+                palette_material(
+                    &page.materials,
+                    grid.sample_material_indices.get(sample).copied(),
+                ),
+            ));
+            if ordinary + 1 < edge {
+                let residual =
+                    side_index * TERRAIN_PAGE_EDGE_SAMPLES as usize + ordinary;
+                samples.push((
+                    grid.boundary_midpoint_ground_heights[residual],
+                    grid.boundary_midpoint_water_heights[residual],
+                    palette_material(
+                        &page.materials,
+                        grid.boundary_midpoint_material_indices
+                            .get(residual)
+                            .copied(),
+                    ),
+                ));
+            }
+        }
+        std::array::from_fn(|half| {
+            let tangent_min = match side.axis() {
+                FaceAxis::X => minimum_z,
+                FaceAxis::Z => minimum_x,
+                FaceAxis::Y => unreachable!(),
+            }
+            .saturating_add(
+                i32::try_from(half * TERRAIN_PAGE_EDGE_SAMPLES as usize)
+                    .unwrap_or_default()
+                    .saturating_mul(child_stride as i32),
+            );
+            surface_handoff_fingerprint(
+                side.axis(),
+                boundary_plane(page.bounds, side),
+                tangent_min,
+                child_stride,
+                TERRAIN_PAGE_EDGE_SAMPLES as usize + 1,
+                |index, hasher| {
+                    let (ground, water, material) =
+                        samples[half * TERRAIN_PAGE_EDGE_SAMPLES as usize + index];
+                    hash_heightfield_column(hasher, ground, water, material);
+                },
+            )
+        })
+    }))
 }
 
 /// Assembles a parent from an already-built representation and an exact complete child group.
@@ -4032,6 +4257,102 @@ mod tests {
         let encoded = encode_terrain_page(&left).unwrap();
         assert!(encoded.len() <= TERRAIN_PAGE_TARGET_COMPRESSED_BYTES);
         assert_eq!(decode_terrain_page(&encoded, identity()).unwrap(), left);
+    }
+
+    #[test]
+    fn exact_and_heightfield_pages_share_one_representation_independent_handoff() {
+        let lower_key = TerrainPageKey::surface(0, -1, 0);
+        let higher_key = TerrainPageKey::surface(0, 0, 0);
+        let flat_samples = vec![
+            sampled_surface(0, Material::Grass, None);
+            (TERRAIN_PAGE_EDGE_SAMPLES as usize + 1).pow(2)
+        ];
+        let lower_heightfield = build_sampled_heightfield_terrain_page(
+            identity(),
+            lower_key,
+            1,
+            &flat_samples,
+            &[],
+            TerrainErrorBounds::EXACT,
+        )
+        .unwrap();
+        let flat_material = |coord: VoxelCoord| {
+            if coord.y > 0 {
+                Material::Air
+            } else if coord.y == 0 {
+                Material::Grass
+            } else {
+                Material::Stone
+            }
+        };
+        let higher_exact =
+            build_exact_surface_terrain_page(identity(), higher_key, 1, [-4, 4], flat_material)
+                .unwrap();
+        assert_eq!(
+            lower_heightfield.boundary_fingerprints[BoundarySide::PositiveX as usize],
+            higher_exact.boundary_fingerprints[BoundarySide::NegativeX as usize],
+        );
+
+        let opened_exact = build_exact_surface_terrain_page(
+            identity(),
+            higher_key,
+            2,
+            [-4, 4],
+            |coord| {
+                if coord.x == 0 && coord.z == 7 && coord.y == -1 {
+                    Material::Air
+                } else {
+                    flat_material(coord)
+                }
+            },
+        )
+        .unwrap();
+        assert_ne!(
+            lower_heightfield.boundary_fingerprints[BoundarySide::PositiveX as usize],
+            opened_exact.boundary_fingerprints[BoundarySide::NegativeX as usize],
+            "an opening on the handed-off column must invalidate a mixed representation seam",
+        );
+    }
+
+    #[test]
+    fn coarse_heightfield_midpoints_certify_each_fine_neighbor_half() {
+        let coarse_key = TerrainPageKey::surface(1, 0, 0);
+        let fine_key = TerrainPageKey::surface(0, -1, 0);
+        let coarse = build_sampled_heightfield_terrain_page(
+            identity(),
+            coarse_key,
+            1,
+            &vec![
+                sampled_surface(0, Material::Grass, None);
+                (TERRAIN_PAGE_EDGE_SAMPLES as usize + 1).pow(2)
+            ],
+            &vec![
+                sampled_surface(0, Material::Grass, None);
+                TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS
+            ],
+            TerrainErrorBounds::EXACT,
+        )
+        .unwrap();
+        let fine = build_exact_surface_terrain_page(identity(), fine_key, 1, [-4, 4], |coord| {
+            if coord.y > 0 {
+                Material::Air
+            } else if coord.y == 0 {
+                Material::Grass
+            } else {
+                Material::Stone
+            }
+        })
+        .unwrap();
+        let refined = heightfield_refined_handoff_fingerprints(&coarse).unwrap();
+        assert_eq!(
+            fine.boundary_fingerprints[BoundarySide::PositiveX as usize],
+            refined[0][0],
+        );
+        assert_ne!(
+            fine.boundary_fingerprints[BoundarySide::PositiveX as usize],
+            refined[0][1],
+            "the opposite tangent half must retain its absolute handoff range",
+        );
     }
 
     #[test]

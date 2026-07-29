@@ -79,26 +79,6 @@ const COLLISION_READINESS_RESERVE_SECONDS: f32 = 1.0;
 const INVENTORY_SWIPE_THRESHOLD_CSS_PIXELS: f32 = 34.0;
 
 #[cfg(any(target_arch = "wasm32", test))]
-fn apply_presentation_gate(
-    camera: &mut CameraState,
-    proposed_is_inside: bool,
-    clamped: glam::Vec3,
-) -> Option<glam::Vec3> {
-    let proposed = camera.position;
-    if proposed_is_inside {
-        return None;
-    }
-    if clamped.x != proposed.x {
-        camera.velocity.x = 0.0;
-    }
-    if clamped.z != proposed.z {
-        camera.velocity.z = 0.0;
-    }
-    camera.position = clamped;
-    Some(proposed)
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
 fn presence_heartbeat_expired(
     local_time_ms: f64,
     unanswered_ping_since_ms: f64,
@@ -214,6 +194,23 @@ fn exact_streaming_velocity(camera: &CameraState, streaming_velocity: glam::Vec3
         glam::Vec3::ZERO
     } else {
         streaming_velocity
+    }
+}
+
+/// Chooses the body whose canonical collision corridor must remain resident.
+///
+/// A spectator camera is collisionless and can move arbitrarily far, but its saved gameplay body
+/// is still an active return destination. Other synthetic spectator cameras retain the previous
+/// collisionless behavior.
+#[cfg(any(target_arch = "wasm32", test))]
+fn canonical_collision_camera(
+    current: client_view::ClientViewState,
+) -> Option<CameraState> {
+    if current.session_kind() == client_view::ClientViewSessionKind::Spectator {
+        Some(current.gameplay_body())
+    } else {
+        let camera = current.camera();
+        (camera.locomotion() != voxels_core::LocomotionMode::Spectator).then_some(camera)
     }
 }
 
@@ -1382,7 +1379,7 @@ mod web {
     use voxels_render::ui::{LiveStats, NavigationTelemetry};
     use voxels_render::virtual_terrain::{
         ExactSurfaceDomain, ExactSurfaceDomainCache, PresentationEnvelope,
-        PresentationEnvelopeCache, PresentationLocus, VirtualTerrainCut, VirtualTerrainView,
+        PresentationEnvelopeCache, VirtualTerrainCut, VirtualTerrainView,
     };
     use voxels_runtime::{
         AuthoritativeEditRevisions, ChunkState, CompletionStatus, DirectionalStreamPriority,
@@ -1414,7 +1411,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 8;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 56;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 58;
     const FRAME_SAMPLE_WIDTH: u32 = 22;
     const GPU_SAMPLE_WIDTH: u32 = 15;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -1450,6 +1447,7 @@ mod web {
         "virtualTerrainCommittedEnvelopeFingerprintLow24,virtualTerrainCommittedEnvelopeFingerprintMid24,virtualTerrainCommittedEnvelopeFingerprintHigh16,virtualTerrainCommittedSafetyLeaves,virtualTerrainCommittedSafetyCoverage,virtualTerrainCommittedHorizonRoots,virtualTerrainCommittedHorizonCoverage,virtualTerrainCommittedLocusMinimumLeafX,virtualTerrainCommittedLocusMinimumLeafZ,virtualTerrainCommittedLocusMaximumLeafExclusiveX,virtualTerrainCommittedLocusMaximumLeafExclusiveZ,",
         "presentedCameraInsideCommittedEnvelope,presentationTargetX,presentationTargetY,presentationTargetZ,presentationGateActive,presentationGateStepsLow24,presentationGateStepsMid24,presentationGateStepsHigh16,presentationGateFramesLow24,presentationGateFramesMid24,presentationGateFramesHigh16,",
         "clientViewGoalKind,clientViewAttemptPresent,clientViewAttemptCanonicalReady,clientViewAttemptTerrainStatus,virtualTerrainPublicationInFlight,",
+        "virtualTerrainPlanLastSelection,virtualTerrainPlanLastInvalidation,virtualTerrainPlanLastInvalidationLine,virtualTerrainPublicationLastAbortLine,",
         "frameSequence,schemaVersion,",
         "sampleCount,droppedSamples",
     );
@@ -1477,21 +1475,6 @@ mod web {
     const VIRTUAL_TERRAIN_STARTUP_GPU_REBUILDS_PER_FRAME: usize = TERRAIN_PAGE_MAX_CHILDREN * 2;
     const VIRTUAL_TERRAIN_STEADY_GPU_REBUILDS_PER_FRAME: usize = 1;
     const VIRTUAL_TERRAIN_MAX_EXACT_DOMAIN_LEAVES: usize = 16_384;
-
-    /// Applies the committed half-open presentation boundary after one simulation proposal.
-    ///
-    /// The unclamped position is returned as streaming demand. Horizontal velocity into a blocked
-    /// edge is cleared while vertical physics remains authoritative.
-    fn gate_camera_to_presentation_locus(
-        camera: &mut CameraState,
-        locus: Option<PresentationLocus>,
-    ) -> Option<Vec3> {
-        let locus = locus?;
-        let proposed = camera.position.to_array();
-        let proposed_is_inside = locus.contains_position(proposed);
-        let clamped = Vec3::from_array(locus.clamp_position(proposed));
-        crate::apply_presentation_gate(camera, proposed_is_inside, clamped)
-    }
 
     const VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS: u64 = 1_000;
     const VIRTUAL_TERRAIN_PAGE_CACHE_BYTES: usize = 128 * 1_024 * 1_024;
@@ -2514,6 +2497,9 @@ mod web {
             &self,
             destination: &CameraState,
         ) -> (Vec<ChunkCoord>, Vec<ChunkCoord>) {
+            if destination.locomotion() == LocomotionMode::Spectator {
+                return (Vec::new(), Vec::new());
+            }
             let streaming_velocity =
                 crate::exact_streaming_velocity(destination, destination.velocity);
             (
@@ -2543,7 +2529,7 @@ mod web {
             crate::RelocationReadiness {
                 presentation_envelope_committed: renderer
                     .virtual_terrain_committed_covers_presentation_envelope(envelope),
-                destination_presentable: renderer.virtual_terrain_committed_contains_position(
+                destination_presentable: renderer.virtual_terrain_committed_covers_position(
                     relocation.destination.position.to_array(),
                 ),
                 canonical_destination_ready,
@@ -2589,7 +2575,7 @@ mod web {
             let published = match self
                 .renderer
                 .borrow_mut()
-                .transition_client_view_in_locus(source, target.presentation_state())
+                .transition_client_view(source, target.presentation_state())
             {
                 Ok(published) => published,
                 Err(error) => {
@@ -2651,15 +2637,8 @@ mod web {
             ) {
                 camera.look(pending_look);
             }
-            let committed_locus = self.renderer.borrow().virtual_terrain_committed_locus();
-            let retained_target = self.presentation_target_position.get();
-            let mut presentation_gate_active = committed_locus
-                .is_some_and(|locus| !locus.contains_position(retained_target.to_array()));
-            let mut presentation_target_position = if presentation_gate_active {
-                retained_target
-            } else {
-                camera.position
-            };
+            let mut presentation_gate_active = false;
+            let mut presentation_target_position = camera.position;
             if self
                 .client_view
                 .borrow()
@@ -2711,9 +2690,12 @@ mod web {
             if !relocation_pending && reproducing {
                 *camera = self.client_view.borrow().camera();
                 presentation_target_position = camera.position;
-                presentation_gate_active = committed_locus.is_some_and(|locus| {
-                    !locus.contains_position(presentation_target_position.to_array())
-                });
+                presentation_gate_active = !self
+                    .renderer
+                    .borrow()
+                    .virtual_terrain_committed_covers_position(
+                        presentation_target_position.to_array(),
+                    );
                 self.input.borrow_mut().clear();
             }
             let active_profile = self.client_view.borrow().current().profile();
@@ -2788,10 +2770,14 @@ mod web {
                                 };
                                 (client_view.published(), target)
                             };
-                            match self.renderer.borrow_mut().transition_client_view_in_locus(
-                                source,
-                                target.presentation_state(),
-                            ) {
+                            match self
+                                .renderer
+                                .borrow_mut()
+                                .transition_client_view(
+                                    source,
+                                    target.presentation_state(),
+                                )
+                            {
                                 Ok(published) => {
                                     if self
                                         .client_view
@@ -2854,16 +2840,7 @@ mod web {
                         },
                     );
                     drop(chunks);
-                    if let Some(proposed) =
-                        gate_camera_to_presentation_locus(&mut camera, committed_locus)
-                    {
-                        presentation_target_position = proposed;
-                        presentation_gate_active = true;
-                        self.presentation_gate_steps
-                            .set(self.presentation_gate_steps.get().saturating_add(1));
-                    } else {
-                        presentation_target_position = camera.position;
-                    }
+                    presentation_target_position = camera.position;
                 }
                 accumulator -= self.config.fixed_step_seconds;
                 steps += 1;
@@ -2894,7 +2871,7 @@ mod web {
                 match self
                     .renderer
                     .borrow_mut()
-                    .advance_client_view_in_locus(source, *camera)
+                    .advance_live_client_view(source, *camera)
                 {
                     Ok(published) => {
                         let committed = self
@@ -2903,15 +2880,8 @@ mod web {
                             .commit_in_locus(source, next, published);
                         debug_assert!(committed);
                     }
-                    Err(
-                        voxels_render::renderer::ClientViewCommitError::CameraOutsidePresentationLocus,
-                    ) => {
-                        self.client_view
-                            .borrow_mut()
-                            .replace_goal(ClientViewGoalKind::Recenter, next);
-                    }
                     Err(error) => {
-                        log_gpu_error(&format!("advance client view in locus: {error}"));
+                        log_gpu_error(&format!("advance live client view: {error}"));
                     }
                 }
             }
@@ -2962,11 +2932,17 @@ mod web {
                 camera.streaming_velocity(&self.input.borrow())
             };
             let pending_relocation = self.pending_relocation.get();
-            let demand_camera = pending_relocation
+            let pending_goal_camera = self
+                .client_view
+                .borrow()
+                .goal()
+                .map(|goal| goal.target().camera());
+            let spatial_demand_camera = pending_relocation
                 .map(|relocation| relocation.destination)
-                .unwrap_or(*camera);
-            let demand_streaming_velocity = pending_relocation
-                .map(|relocation| relocation.destination.velocity)
+                .or(pending_goal_camera);
+            let demand_camera = spatial_demand_camera.unwrap_or(*camera);
+            let demand_streaming_velocity = spatial_demand_camera
+                .map(|camera| camera.velocity)
                 .unwrap_or(source_streaming_velocity);
             let prediction_domain = self
                 .virtual_terrain_exact_surface_domain(&demand_camera, demand_streaming_velocity);
@@ -2978,7 +2954,7 @@ mod web {
             let stream_breakdown = self.stream_world(
                 &camera,
                 source_streaming_velocity,
-                pending_relocation,
+                spatial_demand_camera,
                 &presentation_envelope,
                 &prediction_domain,
                 performance.as_ref(),
@@ -3065,7 +3041,7 @@ mod web {
                 == VirtualTerrainRenderMode::Visible
                 && virtual_terrain_revision_ready
                 && renderer.virtual_terrain_committed_snapshot_is_valid()
-                && renderer.virtual_terrain_committed_contains_position(camera.position.to_array());
+                && renderer.virtual_terrain_committed_covers_position(camera.position.to_array());
             self.terrain_ready.set(terrain_ready);
             let render_start = performance_now(performance.as_ref());
             let chunks = self.chunks.borrow();
@@ -3243,7 +3219,7 @@ mod web {
             &self,
             source_camera: &CameraState,
             source_streaming_velocity: Vec3,
-            pending_relocation: Option<crate::PendingRelocation>,
+            spatial_demand_camera: Option<CameraState>,
             presentation_envelope: &PresentationEnvelope,
             prediction_domain: &ExactSurfaceDomain,
             performance: Option<&web_sys::Performance>,
@@ -3258,48 +3234,52 @@ mod web {
             let exact_load_radius = self.scheduler.borrow().config().load_radius_chunks;
             let exact_lead_metres =
                 (exact_load_radius - 1).max(0) as f32 * CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
-            let demand_camera = pending_relocation
-                .map(|relocation| relocation.destination)
-                .unwrap_or(*source_camera);
-            let demand_streaming_velocity = pending_relocation
-                .map(|relocation| relocation.destination.velocity)
+            let demand_camera = spatial_demand_camera.unwrap_or(*source_camera);
+            let demand_streaming_velocity = spatial_demand_camera
+                .map(|camera| camera.velocity)
                 .unwrap_or(source_streaming_velocity);
+            let has_spatial_demand = spatial_demand_camera.is_some();
             let focus = world_to_chunk(predictive_stream_position(
                 demand_camera.position,
                 demand_streaming_velocity,
                 self.config.stream_velocity_lookahead_seconds,
                 exact_lead_metres,
             ));
-            let client_view_attempt_target = {
+            let (client_view_attempt_target, collision_camera) = {
                 let client_view = self.client_view.borrow();
-                client_view.goal().and_then(|goal| {
-                    client_view
-                        .attempt()
-                        .map(|_| (goal.version(), goal.target().camera()))
-                })
+                (
+                    client_view.goal().and_then(|goal| {
+                        client_view
+                            .attempt()
+                            .map(|_| (goal.version(), goal.target().camera()))
+                    }),
+                    crate::canonical_collision_camera(client_view.current()),
+                )
             };
             let attempt_target_matches_source =
                 client_view_attempt_target.is_some_and(|(_, target_camera)| {
                     crate::canonical_interest_camera_matches(source_camera, &target_camera)
                 });
-            let attempt_target_matches_demand = pending_relocation.is_some()
+            let attempt_target_matches_demand = has_spatial_demand
                 && client_view_attempt_target.is_some_and(|(_, target_camera)| {
                     crate::canonical_interest_camera_matches(&demand_camera, &target_camera)
                 });
             let collision_interest_start = performance_now(performance);
-            let mut source_collision_interest =
-                if source_camera.locomotion() == LocomotionMode::Spectator {
-                    Vec::new()
-                } else {
-                    self.collision_stream_interest(
-                        source_camera,
-                        crate::exact_streaming_velocity(source_camera, source_streaming_velocity),
-                        self.config.stream_collision_lookahead_seconds,
-                    )
-                };
+            let mut source_collision_interest = if let Some(body) = collision_camera {
+                // Spectator motion is collisionless, but its saved gameplay body remains a live
+                // return destination. Keep that one bounded collision corridor resident while the
+                // visual focus follows the spectator so leaving spectator is immediately playable.
+                self.collision_stream_interest(
+                    &body,
+                    crate::exact_streaming_velocity(&body, body.velocity),
+                    self.config.stream_collision_lookahead_seconds,
+                )
+            } else {
+                Vec::new()
+            };
             source_collision_interest.sort_unstable();
             source_collision_interest.dedup();
-            let demand_collision_interest = pending_relocation.map(|_| {
+            let demand_collision_interest = spatial_demand_camera.map(|_| {
                 let mut interest = self.collision_stream_interest(
                     &demand_camera,
                     crate::exact_streaming_velocity(&demand_camera, demand_streaming_velocity),
@@ -3350,8 +3330,8 @@ mod web {
                 (performance_now(performance) - collision_interest_start) as f32;
             let enclosed_interest_start = performance_now(performance);
             let source_enclosed_view_plan = self.enclosed_view_stream_plan(source_camera);
-            let demand_enclosed_view_plan =
-                pending_relocation.map(|_| self.enclosed_view_stream_plan(&demand_camera));
+            let demand_enclosed_view_plan = has_spatial_demand
+                .then(|| self.enclosed_view_stream_plan(&demand_camera));
             let (attempt_enclosed_interest, independent_attempt_enclosed_plan) =
                 match client_view_attempt_target {
                     Some(_) if attempt_target_matches_source => {
@@ -4201,7 +4181,10 @@ mod web {
                 let Some(attempt) = client_view.attempt() else {
                     return;
                 };
-                let Some(canonical) = attempt.canonical().ready_receipt(&self.scheduler.borrow())
+                let Some(canonical) = attempt.canonical().ready_receipt(
+                    &self.scheduler.borrow(),
+                    &self.edit_revisions.borrow(),
+                )
                 else {
                     return;
                 };
@@ -5886,7 +5869,7 @@ mod web {
         fn set_spectator(&self, requested: bool) -> bool {
             let active = requested && self.spectator_available();
             self.input.borrow_mut().clear();
-            let (source, target, kind, was_active) = {
+            let (source, target, was_active) = {
                 let client_view = self.client_view.borrow();
                 let source = client_view.published();
                 let current = client_view.current();
@@ -5901,12 +5884,7 @@ mod web {
                 } else {
                     current.leave_spectator()
                 };
-                let kind = if active {
-                    ClientViewGoalKind::SpectatorEnter
-                } else {
-                    ClientViewGoalKind::SpectatorExit
-                };
-                (source, target, kind, was_active)
+                (source, target, was_active)
             };
             if active == was_active {
                 return was_active;
@@ -5914,7 +5892,7 @@ mod web {
             let transitioned = self
                 .renderer
                 .borrow_mut()
-                .transition_client_view_in_locus(source, target.presentation_state());
+                .transition_client_view(source, target.presentation_state());
             match transitioned {
                 Ok(published) => {
                     let committed = self
@@ -5922,11 +5900,6 @@ mod web {
                         .borrow_mut()
                         .commit_in_locus(source, target, published);
                     debug_assert!(committed);
-                }
-                Err(
-                    voxels_render::renderer::ClientViewCommitError::CameraOutsidePresentationLocus,
-                ) => {
-                    self.client_view.borrow_mut().replace_goal(kind, target);
                 }
                 Err(error) => {
                     log_gpu_error(&format!("transition spectator client view: {error}"));
@@ -6182,9 +6155,12 @@ mod web {
                         operation_id,
                         message,
                     } => {
-                        log_gpu_error(&format!(
+                        // Occupied placement, insufficient stock, and other authority rejections
+                        // are ordinary player outcomes, not renderer failures. Keep them visible
+                        // without poisoning browser health/error telemetry.
+                        web_sys::console::warn_1(&JsValue::from_str(&format!(
                             "server rejected edit operation {operation_id}: {message}"
-                        ));
+                        )));
                         self.renderer.borrow_mut().show_gameplay_toast(message);
                     }
                 }
@@ -6282,7 +6258,7 @@ mod web {
             }
             let canonical: Vec<CanonicalRequirement> = {
                 let mut scheduler = self.scheduler.borrow_mut();
-                let report = scheduler.mark_voxels_edited(&coords);
+                let report = scheduler.mark_chunks_edited(affected_chunks);
                 report
                     .affected_chunks
                     .into_iter()
@@ -6707,8 +6683,10 @@ mod web {
             let presentation_gate_active = engine
                 .renderer
                 .borrow()
-                .virtual_terrain_committed_locus()
-                .is_some_and(|locus| !locus.contains_position(presentation_target.to_array()));
+                .virtual_terrain_committed_envelope()
+                .is_some_and(|envelope| {
+                    !envelope.horizon_covers_position(presentation_target.to_array())
+                });
             let progress = vec![
                 STARTUP_PROGRESS_VERSION,
                 STARTUP_PROGRESS_WORDS as u32,
@@ -7099,13 +7077,15 @@ mod web {
                 let (presented_camera_inside_committed_envelope, presentation_gate_active) = {
                     let renderer = engine.renderer.borrow();
                     (
-                        renderer.virtual_terrain_committed_contains_position(
+                        renderer.virtual_terrain_committed_covers_position(
                             camera.position.to_array(),
                         ),
                         renderer
-                            .virtual_terrain_committed_locus()
-                            .is_some_and(|locus| {
-                                !locus.contains_position(presentation_target.to_array())
+                            .virtual_terrain_committed_envelope()
+                            .is_some_and(|envelope| {
+                                !envelope.horizon_covers_position(
+                                    presentation_target.to_array(),
+                                )
                             }),
                     )
                 };
@@ -7118,10 +7098,7 @@ mod web {
                 ) = {
                     let client_view = engine.client_view.borrow();
                     let goal_kind = client_view.goal().map_or(0, |goal| match goal.kind() {
-                        ClientViewGoalKind::Recenter => 1,
                         ClientViewGoalKind::TerrainRepair => 2,
-                        ClientViewGoalKind::SpectatorEnter => 3,
-                        ClientViewGoalKind::SpectatorExit => 4,
                         ClientViewGoalKind::ProfileStep => 5,
                         ClientViewGoalKind::ProfileRestore => 6,
                         ClientViewGoalKind::ReproductionApply => 7,
@@ -7134,7 +7111,10 @@ mod web {
                         attempt.is_some_and(|attempt| {
                             attempt
                                 .canonical()
-                                .ready_receipt(&engine.scheduler.borrow())
+                                .ready_receipt(
+                                    &engine.scheduler.borrow(),
+                                    &engine.edit_revisions.borrow(),
+                                )
                                 .is_some()
                         }),
                     )
@@ -7388,7 +7368,7 @@ mod web {
                     virtual_terrain_resident_pages as f32,
                     virtual_terrain_resident_bytes as f32 / (1024.0 * 1024.0),
                     virtual_terrain_resident_primitives as f32,
-                    render.virtual_terrain_gpu_selected_pages as f32,
+                    render.virtual_terrain_cpu_selected_pages as f32,
                     render.virtual_terrain_cpu_requested_pages as f32,
                     render.virtual_terrain_published_ownerless_roots as f32,
                     if render.virtual_terrain_gpu_matches_cpu_cut {
@@ -7508,6 +7488,10 @@ mod web {
                     } else {
                         0.0
                     },
+                    render.virtual_terrain_plan_last_selection as f32,
+                    render.virtual_terrain_plan_last_invalidation as f32,
+                    render.virtual_terrain_plan_last_invalidation_line as f32,
+                    render.virtual_terrain_publication_last_abort_line as f32,
                     engine.frame_sequence.get() as f32,
                     SNAPSHOT_SCHEMA_VERSION as f32,
                 ]);
@@ -8074,48 +8058,6 @@ mod tests {
     }
 
     #[test]
-    fn delayed_presentation_gate_preserves_position_and_streams_the_proposal() {
-        let committed_edge = 12.79;
-        let mut camera = CameraState::spawn(glam::Vec3::new(committed_edge, 7.0, 0.1));
-        camera.velocity = glam::Vec3::new(5.0, -2.0, 3.0);
-
-        for _ in 0..64 {
-            camera.position.x += 0.25;
-            let clamped = glam::Vec3::new(committed_edge, camera.position.y, camera.position.z);
-            let target = apply_presentation_gate(&mut camera, false, clamped)
-                .expect("each delayed forward proposal crosses the frozen half-open edge");
-            assert!(target.x > committed_edge);
-            assert_eq!(camera.position.x, committed_edge);
-            assert_eq!(camera.position.y, 7.0);
-            assert_eq!(camera.velocity.x, 0.0);
-            assert_eq!(camera.velocity.y, -2.0);
-            assert_eq!(camera.velocity.z, 3.0);
-        }
-
-        camera.position.x -= 0.25;
-        camera.velocity.x = -5.0;
-        let reversed_position = camera.position;
-        assert!(
-            apply_presentation_gate(&mut camera, true, reversed_position).is_none(),
-            "reversal back into A must immediately stop demanding adjacent B",
-        );
-        assert_eq!(camera.velocity.x, -5.0);
-    }
-
-    #[test]
-    fn presentation_gate_clears_only_blocked_horizontal_velocity() {
-        let mut camera = CameraState::spawn(glam::Vec3::new(3.2, 11.0, -10.6));
-        camera.velocity = glam::Vec3::new(2.0, 4.0, -3.0);
-
-        let target =
-            apply_presentation_gate(&mut camera, false, glam::Vec3::new(3.1, 11.0, -9.6)).unwrap();
-
-        assert_eq!(target.y, 11.0);
-        assert_eq!(camera.position, glam::Vec3::new(3.1, 11.0, -9.6));
-        assert_eq!(camera.velocity, glam::Vec3::new(0.0, 4.0, 0.0));
-    }
-
-    #[test]
     fn server_resume_values_are_sanitized_before_use() {
         let valid = [12.0, 4.5, -8.0, 0.75, -0.4];
         let camera = camera_from_resume_values(valid);
@@ -8253,6 +8195,37 @@ mod tests {
         assert_eq!(
             predictive_stream_position(camera.position, glam::Vec3::ZERO, 1.5, 12.8),
             camera.position
+        );
+    }
+
+    #[test]
+    fn spectator_retains_the_saved_gameplay_body_as_its_collision_interest() {
+        let body = CameraState::spawn(glam::Vec3::new(1.6, 80.0, 1.6));
+        let render_state = voxels_render::renderer::ScreenshotMutableRenderState {
+            world_lab_open: false,
+            diagnostic_sky_color: None,
+            geometry_source_debug: false,
+            material_detail: true,
+        };
+        let gameplay = client_view::ClientViewState::gameplay(body, render_state);
+        assert_eq!(
+            canonical_collision_camera(gameplay)
+                .expect("gameplay collision body")
+                .position,
+            body.position
+        );
+
+        let mut far_camera = body;
+        far_camera.position = glam::Vec3::new(4_000.0, 900.0, -2_000.0);
+        let spectator = gameplay.enter_spectator().with_camera(far_camera);
+        let retained = canonical_collision_camera(spectator)
+            .expect("spectator retains one bounded return-body corridor");
+
+        assert_eq!(retained.position, body.position);
+        assert_ne!(retained.position, far_camera.position);
+        assert_ne!(
+            retained.locomotion(),
+            voxels_core::LocomotionMode::Spectator
         );
     }
 

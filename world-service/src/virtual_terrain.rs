@@ -460,8 +460,9 @@ fn build_coverage_region(
                 .unwrap_or(u32::MAX),
             material_boundary_millivoxels: 0,
             normal_milliradians: 0,
-            // Topology uncertainty belongs to the spatial page whose canonical halo intersects
-            // an edit. It must not depend on which larger directory happened to reveal the page.
+            // Topology uncertainty belongs to the directional surface owner whose interior or
+            // positive handoff sample intersects an edit. It must not depend on which larger
+            // directory happened to reveal the page.
             unresolved_topology: surface_page_has_edits(&snapshot, key),
         },
         &samples,
@@ -512,8 +513,6 @@ fn surface_page_has_edits(snapshot: &TerrainEditSnapshot, key: TerrainPageKey) -
     let Some([[minimum_x, minimum_z], [maximum_x, maximum_z]]) = key.horizontal_bounds() else {
         return false;
     };
-    let minimum_x = minimum_x.saturating_sub(1);
-    let minimum_z = minimum_z.saturating_sub(1);
     snapshot.edits.edited_chunks().into_iter().any(|chunk| {
         snapshot
             .edits
@@ -1087,6 +1086,35 @@ mod tests {
                     bounds.max.z
                 ))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn exact_surface_edit_discovery_matches_directional_page_ownership() {
+        let key = TerrainPageKey::surface(1, -2, 3);
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] =
+            key.horizontal_bounds().unwrap();
+        let snapshot_at = |x, z| {
+            let mut edits = voxels_world::EditMap::default();
+            edits.insert_override(VoxelCoord::new(x, 0, z), Material::Basalt);
+            TerrainEditSnapshot { edits, revision: 2 }
+        };
+
+        assert!(surface_page_has_edits(
+            &snapshot_at(minimum_x, minimum_z),
+            key
+        ));
+        assert!(surface_page_has_edits(
+            &snapshot_at(maximum_x, maximum_z),
+            key
+        ));
+        assert!(
+            !surface_page_has_edits(&snapshot_at(minimum_x - 1, minimum_z), key),
+            "the negative neighbor owns its own interface edit"
+        );
+        assert!(
+            !surface_page_has_edits(&snapshot_at(maximum_x + 1, maximum_z), key),
+            "only the positive handoff sample belongs to this page"
         );
     }
 

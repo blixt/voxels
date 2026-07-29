@@ -148,7 +148,17 @@ impl CanonicalFaceKey {
     }
 }
 
-/// Enumerates exact occupancy faces under one half-open rule. Sampling outside `bounds` is
+fn material_face_is_visible(material: Material, neighbor: Material) -> bool {
+    match material.render_layer() {
+        crate::RenderLayer::Empty => false,
+        crate::RenderLayer::Opaque => neighbor.render_layer() != crate::RenderLayer::Opaque,
+        crate::RenderLayer::Translucent => {
+            neighbor.render_layer() == crate::RenderLayer::Empty
+        }
+    }
+}
+
+/// Enumerates exact layer-aware faces under one half-open rule. Sampling outside `bounds` is
 /// intentional: chunk boundaries cannot invent faces when the neighboring canonical voxel exists.
 pub fn canonical_exposed_faces(
     bounds: VoxelBounds,
@@ -172,7 +182,7 @@ pub fn canonical_exposed_faces(
                             FaceAxis::Y => neighbor.y = neighbor.y.saturating_add(offset),
                             FaceAxis::Z => neighbor.z = neighbor.z.saturating_add(offset),
                         }
-                        if !material_at(neighbor).is_renderable() {
+                        if material_face_is_visible(material, material_at(neighbor)) {
                             faces.push(CanonicalFaceKey::exposed(solid, material, axis, positive));
                         }
                     }
@@ -213,7 +223,7 @@ pub fn directionally_owned_surface_faces(
             let outside = VoxelCoord::new(bounds.max.x, y, z);
             let inside_material = material_at(inside);
             let outside_material = material_at(outside);
-            if !inside_material.is_renderable() && outside_material.is_renderable() {
+            if material_face_is_visible(outside_material, inside_material) {
                 faces.push(CanonicalFaceKey::exposed(
                     outside,
                     outside_material,
@@ -229,7 +239,7 @@ pub fn directionally_owned_surface_faces(
             let outside = VoxelCoord::new(x, y, bounds.max.z);
             let inside_material = material_at(inside);
             let outside_material = material_at(outside);
-            if !inside_material.is_renderable() && outside_material.is_renderable() {
+            if material_face_is_visible(outside_material, inside_material) {
                 faces.push(CanonicalFaceKey::exposed(
                     outside,
                     outside_material,
@@ -460,7 +470,10 @@ mod tests {
                         [0, 0, 1],
                     ] {
                         let neighbor = VoxelCoord::new(x + offset[0], y + offset[1], z + offset[2]);
-                        expected += usize::from(!deterministic_material(neighbor).is_renderable());
+                        expected += usize::from(material_face_is_visible(
+                            deterministic_material(coord),
+                            deterministic_material(neighbor),
+                        ));
                     }
                 }
             }
@@ -601,6 +614,30 @@ mod tests {
             assert!(
                 right_owned.is_empty(),
                 "the higher-coordinate page must never duplicate the shared plane"
+            );
+        }
+    }
+
+    #[test]
+    fn directional_surface_owner_keeps_the_opaque_bank_visible_at_water_interfaces() {
+        let bounds =
+            VoxelBounds::new(VoxelCoord::new(-1, 0, 0), VoxelCoord::new(0, 1, 1)).unwrap();
+        for (inside, outside) in [
+            (Material::Stone, Material::Water),
+            (Material::Water, Material::Stone),
+        ] {
+            let faces = directionally_owned_surface_faces(bounds, |coord| {
+                if coord.x < 0 { inside } else { outside }
+            });
+            let seam = faces
+                .into_iter()
+                .filter(|face| face.axis == FaceAxis::X && face.plane == 0)
+                .collect::<Vec<_>>();
+            assert_eq!(seam.len(), 1);
+            assert_eq!(seam[0].material_id, Material::Stone.id());
+            assert_eq!(
+                seam[0].solid_side.x,
+                if inside == Material::Water { 0 } else { -1 }
             );
         }
     }

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { BrowserCapability } from "../lib/browser.ts";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import { snapshotValue } from "../lib/engine.ts";
+import { takePlayerScreenshot } from "../lib/player-screenshot.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { startWorldStack, type WorldSource } from "../lib/world.ts";
 import { readPngText } from "../../web/png-metadata.ts";
@@ -41,6 +42,25 @@ interface ReproductionMetadata {
     readonly cloudCoverage: number;
     readonly cloudBaseMetres: number;
     readonly cloudTopMetres: number;
+  };
+  readonly render: {
+    readonly diagnosticSkyColor: readonly [number, number, number] | null;
+    readonly features: {
+      readonly shadows: boolean;
+      readonly screenSpaceAmbientOcclusion: boolean;
+    };
+  };
+  readonly presentation: {
+    readonly selectedCutFingerprint: string;
+    readonly selectedCut: {
+      readonly kind: "virtualTerrain";
+      readonly cut: {
+        readonly selectedPages: readonly {
+          readonly level: number;
+          readonly coord: readonly [number, number, number];
+        }[];
+      } | null;
+    };
   };
 }
 
@@ -96,6 +116,21 @@ function parseMetadata(text: string): ReproductionMetadata {
   ) {
     throw new Error("capture omitted the exact camera pose");
   }
+  const diagnosticSkyColor = value.render?.diagnosticSkyColor;
+  if (
+    diagnosticSkyColor !== null &&
+    (diagnosticSkyColor?.length !== 3 ||
+      diagnosticSkyColor.some((channel) => !Number.isFinite(channel) || channel < 0 || channel > 1))
+  ) {
+    throw new Error("capture diagnostic sky color is invalid");
+  }
+  if (
+    !/^[0-9a-f]{16}$/u.test(value.presentation?.selectedCutFingerprint) ||
+    value.presentation.selectedCut?.kind !== "virtualTerrain" ||
+    !Array.isArray(value.presentation.selectedCut.cut?.selectedPages)
+  ) {
+    throw new Error("capture omitted the exact virtual terrain cut");
+  }
   return value;
 }
 
@@ -141,6 +176,15 @@ async function run(context: ScenarioContext, raw: readonly string[]) {
       cloudCoverage: metadata.environment.cloudCoverage,
       cloudBaseMetres: metadata.environment.cloudBaseMetres,
       cloudTopMetres: metadata.environment.cloudTopMetres,
+      cascadedShadows: metadata.render.features.shadows,
+      screenSpaceAmbientOcclusion: metadata.render.features.screenSpaceAmbientOcclusion,
+      ...(metadata.render.diagnosticSkyColor === null
+        ? {}
+        : {
+            diagnosticSkyRgb: metadata.render.diagnosticSkyColor.map((channel) =>
+              Math.round(channel * 255),
+            ) as [number, number, number],
+          }),
     },
     service: { metal: source === "terrain-diffusion-30m" },
     web: {
@@ -160,22 +204,41 @@ async function run(context: ScenarioContext, raw: readonly string[]) {
     ...world.clientRoute,
   });
   await viewport.engine.applyReproduction(metadataText);
+  const expectedCutLow48 =
+    BigInt(`0x${metadata.presentation.selectedCutFingerprint}`) & 0xffffffffffffn;
+  const expectedCutLow24 = Number(expectedCutLow48 & 0xffffffn);
+  const expectedCutHigh24 = Number((expectedCutLow48 >> 24n) & 0xffffffn);
   const applied = await viewport.engine.waitForSnapshot(
     (snapshot) =>
-      snapshotValue(snapshot, "residentChunks") > 0 && snapshotValue(snapshot, "frameSequence") > 0,
+      snapshotValue(snapshot, "residentChunks") > 0 &&
+      snapshotValue(snapshot, "frameSequence") > 0 &&
+      snapshotValue(snapshot, "clientViewGoalKind") === 0 &&
+      snapshotValue(snapshot, "virtualTerrainCutFingerprintLow24") === expectedCutLow24 &&
+      snapshotValue(snapshot, "virtualTerrainCutFingerprintHigh24") === expectedCutHigh24,
     {
       timeoutMs: 60_000,
-      description: "reproduction camera did not receive any resident terrain",
+      description: "reproduction did not commit the captured terrain cut",
     },
   );
   await viewport.engine.waitForFrameAfter(snapshotValue(applied, "frameSequence"));
-  const artifact = await viewport.screenshot("Reproduced screenshot", {
-    filename: "reproduced.png",
-  });
+  const reproduced = await takePlayerScreenshot(viewport.page);
+  const expectedPages = metadata.presentation.selectedCut.cut?.selectedPages;
+  const actualPages = reproduced.metadata.presentation.selectedCut.cut?.selectedPages;
+  if (JSON.stringify(actualPages) !== JSON.stringify(expectedPages)) {
+    throw new Error(
+      "reproduced terrain cut fingerprint collided with a different selected page set",
+    );
+  }
+  const artifact = await context.artifacts.write(
+    "Reproduced screenshot",
+    "reproduced.png",
+    reproduced.png,
+    "image/png",
+  );
   browser.assertHealthy();
   return {
     summary:
-      "Restored and froze the exact v2 camera, projection, world, environment, and viewport.",
+      "Restored and froze the exact v3 camera, projection, world, environment, and viewport.",
     details: {
       input: resolve(input),
       artifact,

@@ -342,7 +342,6 @@ pub enum ClientViewCommitError {
     InvalidPresentationState,
     StalePublishedReceipt,
     StaleTerrainReadyReceipt,
-    CameraOutsidePresentationLocus,
     Terrain(VirtualTerrainRendererError),
 }
 
@@ -360,9 +359,6 @@ impl std::fmt::Display for ClientViewCommitError {
             }
             Self::StaleTerrainReadyReceipt => {
                 formatter.write_str("virtual-terrain ready receipt is stale")
-            }
-            Self::CameraOutsidePresentationLocus => {
-                formatter.write_str("client-view camera is outside the presentation locus")
             }
             Self::Terrain(error) => write!(formatter, "{error}"),
         }
@@ -3337,6 +3333,14 @@ pub struct RenderDiagnostics {
     pub virtual_terrain_cpu_refinement_roots: u32,
     pub virtual_terrain_cpu_ownerless_roots: u32,
     pub virtual_terrain_cpu_exact_lod_discontinuities: u32,
+    /// Monotonic plan event at which the current CPU oracle was last selected.
+    pub virtual_terrain_plan_last_selection: u32,
+    /// Monotonic plan event at which the CPU oracle was last invalidated.
+    pub virtual_terrain_plan_last_invalidation: u32,
+    /// Rust source line of the most recent oracle invalidation.
+    pub virtual_terrain_plan_last_invalidation_line: u32,
+    /// Rust source line that most recently aborted a frozen terrain publication.
+    pub virtual_terrain_publication_last_abort_line: u32,
     pub virtual_terrain_gpu_selected_pages: u32,
     pub virtual_terrain_gpu_ownerless_roots: u32,
     pub virtual_terrain_gpu_encoded_surface_handles: u32,
@@ -3347,6 +3351,8 @@ pub struct RenderDiagnostics {
     pub virtual_terrain_gpu_encoding_overflow_flags: u32,
     pub virtual_terrain_gpu_matches_cpu_cut: bool,
     pub virtual_terrain_gpu_match_failure_flags: u32,
+    /// The live camera outran the committed virtual horizon, so this frame uses canonical chunks.
+    pub virtual_terrain_coverage_fallback_active: bool,
     pub virtual_terrain_published_pages: u32,
     pub virtual_terrain_published_ownerless_roots: u32,
     pub virtual_terrain_published_exact_pages: u32,
@@ -3976,6 +3982,11 @@ pub struct Renderer {
     next_view_revision: u64,
     /// Ephemeral quality/demand target selected from the latest view and resident directory.
     virtual_terrain_oracle_cut: Option<VirtualTerrainCut>,
+    virtual_terrain_plan_event_serial: u32,
+    virtual_terrain_plan_last_selection: u32,
+    virtual_terrain_plan_last_invalidation: u32,
+    virtual_terrain_plan_last_invalidation_line: u32,
+    virtual_terrain_publication_last_abort_line: u32,
     /// Immutable cut currently being encoded or awaiting GPU certification. Directory growth,
     /// cache arrivals, and a newer desired view may replace `virtual_terrain_oracle_cut`, but may
     /// not replace this transaction until it promotes or fails.
@@ -4912,6 +4923,11 @@ impl Renderer {
             next_presentation_serial: 1,
             next_view_revision: 1,
             virtual_terrain_oracle_cut: None,
+            virtual_terrain_plan_event_serial: 0,
+            virtual_terrain_plan_last_selection: 0,
+            virtual_terrain_plan_last_invalidation: 0,
+            virtual_terrain_plan_last_invalidation_line: 0,
+            virtual_terrain_publication_last_abort_line: 0,
             virtual_terrain_publication: None,
             next_virtual_terrain_request: 1,
             virtual_terrain_publication_abort_pending: false,
@@ -5829,11 +5845,12 @@ impl Renderer {
             .map(|presented| presented.state)
     }
 
-    /// Advances an already-published camera without rebuilding any spatial product.
+    /// Advances the live camera without rebuilding any spatial product.
     ///
-    /// The exact receipt gate and one half-open locus membership test make ordinary motion O(1).
-    /// Session, reproduction state, and terrain ownership cannot change through this API.
-    pub fn advance_client_view_in_locus(
+    /// Terrain coverage is a rendering capability, never a legality boundary for player motion.
+    /// When the committed virtual bank does not cover this camera the renderer temporarily uses
+    /// the authoritative canonical chunk path while streaming a replacement virtual cut.
+    pub fn advance_live_client_view(
         &mut self,
         active: PublishedClientViewReceipt,
         camera: CameraState,
@@ -5844,13 +5861,6 @@ impl Renderer {
         };
         if current.receipt != active {
             return Err(ClientViewCommitError::StalePublishedReceipt);
-        }
-        if let PresentedTerrain::Virtual(committed) = &current.terrain
-            && !committed
-                .envelope
-                .contains_position(camera.position.to_array())
-        {
-            return Err(ClientViewCommitError::CameraOutsidePresentationLocus);
         }
         let receipt = self.mint_published_client_view_receipt(
             active.request,
@@ -5867,9 +5877,11 @@ impl Renderer {
         Ok(receipt)
     }
 
-    /// Atomically changes session/reproduction-visible state while preserving the exact terrain
-    /// bank and proof already covering the target camera.
-    pub fn transition_client_view_in_locus(
+    /// Atomically changes session-visible state while preserving the current terrain bank.
+    ///
+    /// Spatial relocations still publish through `commit_virtual_client_view`; this path exists
+    /// for in-place session changes and already-readied profile steps.
+    pub fn transition_client_view(
         &mut self,
         active: PublishedClientViewReceipt,
         state: ClientViewPresentationState,
@@ -5880,13 +5892,6 @@ impl Renderer {
         };
         if current.receipt != active {
             return Err(ClientViewCommitError::StalePublishedReceipt);
-        }
-        if let PresentedTerrain::Virtual(committed) = &current.terrain
-            && !committed
-                .envelope
-                .contains_position(state.camera.position.to_array())
-        {
-            return Err(ClientViewCommitError::CameraOutsidePresentationLocus);
         }
         let receipt = self.mint_published_client_view_receipt(
             active.request,
@@ -6042,7 +6047,12 @@ impl Renderer {
         presented.receipt = receipt;
     }
 
+    #[track_caller]
     fn invalidate_virtual_terrain_desired_plan(&mut self) {
+        self.virtual_terrain_plan_event_serial =
+            self.virtual_terrain_plan_event_serial.wrapping_add(1).max(1);
+        self.virtual_terrain_plan_last_invalidation = self.virtual_terrain_plan_event_serial;
+        self.virtual_terrain_plan_last_invalidation_line = std::panic::Location::caller().line();
         self.virtual_terrain_oracle_cut = None;
         self.virtual_terrain_requested_view = None;
         self.virtual_terrain_oracle_view = None;
@@ -6653,6 +6663,9 @@ impl Renderer {
         self.virtual_terrain_oracle_view = Some(oracle_view);
         self.virtual_terrain_exact_surface_domain = Some(exact_surface_domain.clone());
         self.virtual_terrain_oracle_cut = Some(cut.clone());
+        self.virtual_terrain_plan_event_serial =
+            self.virtual_terrain_plan_event_serial.wrapping_add(1).max(1);
+        self.virtual_terrain_plan_last_selection = self.virtual_terrain_plan_event_serial;
         Ok(cut)
     }
 
@@ -6759,23 +6772,12 @@ impl Renderer {
             .and_then(PresentationEnvelope::locus)
     }
 
-    pub fn virtual_terrain_committed_contains_position(&self, position_metres: [f32; 3]) -> bool {
+    pub fn virtual_terrain_committed_covers_position(&self, position_metres: [f32; 3]) -> bool {
         self.virtual_terrain_committed_snapshot_is_valid()
             && self.presented_virtual_terrain().is_some_and(|committed| {
-                committed.revisions_current && committed.envelope.contains_position(position_metres)
+                committed.revisions_current
+                    && committed.envelope.horizon_covers_position(position_metres)
             })
-    }
-
-    pub fn clamp_to_virtual_terrain_committed_locus(
-        &self,
-        position_metres: [f32; 3],
-    ) -> Option<[f32; 3]> {
-        self.virtual_terrain_committed_snapshot_is_valid()
-            .then(|| {
-                self.committed_virtual_terrain_envelope()
-                    .and_then(|envelope| envelope.clamp_position(position_metres))
-            })
-            .flatten()
     }
 
     fn synchronize_virtual_terrain_cut_seams(
@@ -6826,17 +6828,20 @@ impl Renderer {
                         resident.heightfield_finer_neighbor_sides != finer_sides
                     });
             if can_replace_in_place {
-                // Candidate-only geometry has no visible owner. Release it before rebuilding so
-                // startup/travel does not need a second full page allocation merely to change its
-                // conforming boundary. Published owners continue through the transactional path.
+                // Candidate-only geometry has no visible owner. Release only that derived GPU
+                // representation before rebuilding so startup/travel does not need a second full
+                // allocation merely to change its conforming boundary. The validated logical
+                // page and its replacement-coherence proof are independent of this seam variant:
+                // removing and reinstalling them invalidates the oracle mid-publication, allowing
+                // capacity retention to evict the very candidate cut being prepared.
                 self.virtual_terrain_gpu.remove_page_geometry(page.key);
                 if let Some(old) = self.virtual_terrain_pages.remove(&page.key) {
                     discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, old.mesh);
                 }
-                let _ = self.virtual_terrain.remove_page(page.key);
-                let rebuilt = self.upload_virtual_terrain_page_with_seams(page, finer_sides, true);
+                let rebuilt =
+                    self.upload_virtual_terrain_page_with_seams(page, finer_sides, false);
                 changed |= recover_candidate_only_seam_rebuild(rebuilt, || {
-                    self.recover_failed_candidate_only_seam_page(page_key)
+                    self.recover_failed_candidate_only_seam_geometry(page_key)
                 })?;
             } else {
                 changed |= self.upload_virtual_terrain_page_with_seams(page, finer_sides, false)?;
@@ -6846,17 +6851,13 @@ impl Renderer {
         Ok(changed)
     }
 
-    fn recover_failed_candidate_only_seam_page(&mut self, key: TerrainPageKey) {
-        let _ = self.virtual_terrain.remove_page(key);
+    fn recover_failed_candidate_only_seam_geometry(&mut self, key: TerrainPageKey) {
         self.virtual_terrain_gpu.remove_page_geometry(key);
         if let Some(page) = self.virtual_terrain_pages.remove(&key) {
             discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
         }
-        // The failed page was candidate-only: keep presenting the immutable published bank and
-        // force the oracle to choose a complete resident fallback on the next selection.
-        self.virtual_terrain_oracle_cut = None;
-        self.virtual_terrain_requested_view = None;
-        self.virtual_terrain_oracle_view = None;
+        // The logical page and oracle remain valid. The bounded per-frame GPU rebuild path retries
+        // this evictable derivative while the immutable published bank continues to draw.
     }
 
     /// Freezes the latest desired cut as one exact publication request.
@@ -7014,7 +7015,7 @@ impl Renderer {
                     || !publication.certificate.complete
                     || !publication
                         .envelope
-                        .contains_position(state.camera.position.to_array())
+                        .horizon_covers_position(state.camera.position.to_array())
                 {
                     return Err(ClientViewCommitError::StaleTerrainReadyReceipt);
                 }
@@ -7126,7 +7127,10 @@ impl Renderer {
         true
     }
 
+    #[track_caller]
     fn abort_virtual_terrain_publication(&mut self) {
+        self.virtual_terrain_publication_last_abort_line =
+            std::panic::Location::caller().line();
         self.virtual_terrain_publication = None;
         self.discard_virtual_terrain_publication_resources();
     }
@@ -7239,9 +7243,7 @@ impl Renderer {
         if remove.is_empty() {
             return 0;
         }
-        self.virtual_terrain_oracle_cut = None;
-        self.virtual_terrain_requested_view = None;
-        self.virtual_terrain_oracle_view = None;
+        self.invalidate_virtual_terrain_desired_plan();
         let mut removed_pages = BTreeSet::new();
         for root in remove {
             removed_pages.extend(self.virtual_terrain.remove_region_directory(root));
@@ -7298,9 +7300,7 @@ impl Renderer {
         {
             self.abort_virtual_terrain_publication();
         }
-        self.virtual_terrain_oracle_cut = None;
-        self.virtual_terrain_requested_view = None;
-        self.virtual_terrain_oracle_view = None;
+        self.invalidate_virtual_terrain_desired_plan();
         let published = self
             .committed_virtual_terrain_cut()
             .is_some_and(|cut| cut.selected_pages.contains(&key));
@@ -7955,20 +7955,19 @@ impl Renderer {
             .cascades
             .map(|cascade| AabbClipVolume::new(cascade.clip_from_world));
         let cull_started = now_ms();
-        let (virtual_visible, virtual_ownership) =
+        let (virtual_visible, virtual_ownership, virtual_terrain_coverage_fallback_active) =
             if self.virtual_terrain_mode_from_presented_view() == VirtualTerrainRenderMode::Visible
             {
                 let (cut, envelope, _certificate) = self
                     .presented_virtual_terrain()
                     .map(|committed| (&committed.cut, &committed.envelope, committed.certificate))
                     .filter(|(_, _, certificate)| certificate.complete)?;
-                if !envelope.contains_position(camera.position.to_array()) {
-                    // Exceptional relocation and a lost publication race retain the last submitted
-                    // frame. Never render a camera outside the exact/horizon proof paired with the
-                    // active handle bank.
-                    return None;
-                }
-                if !self.virtual_terrain_gpu.presented_snapshot_matches(
+                if !envelope.horizon_covers_position(camera.position.to_array()) {
+                    // Coverage is not a wall. Suppress the complete virtual bank and render the
+                    // authoritative canonical chunks until a camera-covering cut can be committed
+                    // atomically. Default ownership guarantees the two terrain paths never overlap.
+                    (false, VirtualTerrainOwnership::default(), true)
+                } else if !self.virtual_terrain_gpu.presented_snapshot_matches(
                     virtual_terrain_snapshot_identity(
                         cut,
                         envelope,
@@ -7978,14 +7977,21 @@ impl Renderer {
                 ) {
                     // A visible frame has exactly one terrain generation. Never combine a CPU
                     // ownership cut or diagnostic sidecar with handles from another bank.
+                    (self.log_error)(
+                        "presented virtual terrain bank no longer matches its committed CPU cut",
+                    );
                     return None;
+                } else {
+                    let Ok(ownership) = VirtualTerrainOwnership::from_cut(cut) else {
+                        (self.log_error)(
+                            "committed virtual terrain cut cannot construct canonical ownership",
+                        );
+                        return None;
+                    };
+                    (true, ownership, false)
                 }
-                let Ok(ownership) = VirtualTerrainOwnership::from_cut(cut) else {
-                    return None;
-                };
-                (true, ownership)
             } else {
-                (false, VirtualTerrainOwnership::default())
+                (false, VirtualTerrainOwnership::default(), false)
             };
         let virtual_candidate_work =
             self.virtual_terrain_publication
@@ -8006,10 +8012,15 @@ impl Renderer {
             &virtual_ownership,
         );
         let virtual_world_draw_lists = if virtual_visible {
-            let Ok(draw_lists) = self.collect_virtual_terrain_draw_list(view_clip) else {
-                return None;
-            };
-            draw_lists
+            match self.collect_virtual_terrain_draw_list(view_clip) {
+                Ok(draw_lists) => draw_lists,
+                Err(error) => {
+                    (self.log_error)(&format!(
+                        "collect committed virtual terrain draw list: {error}"
+                    ));
+                    return None;
+                }
+            }
         } else {
             VirtualTerrainDrawLists::default()
         };
@@ -8127,11 +8138,14 @@ impl Renderer {
                     }
                     virtual_candidate_generation_to_submit = Some(generation);
                 }
-                Err(_) => {
+                Err(error) => {
                     if let (Some(timer), Some(frame)) = (self.gpu_timer.as_ref(), gpu_frame.take())
                     {
                         timer.cancel_frame(frame);
                     }
+                    (self.log_error)(&format!(
+                        "encode virtual terrain candidate snapshot: {error:?}"
+                    ));
                     virtual_candidate_encode_failed = true;
                     self.abort_virtual_terrain_publication();
                     if !can_present_after_candidate_encode_failure(virtual_visible) {
@@ -8829,6 +8843,12 @@ impl Renderer {
             virtual_terrain_cpu_ownerless_roots: oracle_virtual_ownerless_roots as u32,
             virtual_terrain_cpu_exact_lod_discontinuities: oracle_virtual_exact_lod_discontinuities
                 as u32,
+            virtual_terrain_plan_last_selection: self.virtual_terrain_plan_last_selection,
+            virtual_terrain_plan_last_invalidation: self.virtual_terrain_plan_last_invalidation,
+            virtual_terrain_plan_last_invalidation_line:
+                self.virtual_terrain_plan_last_invalidation_line,
+            virtual_terrain_publication_last_abort_line:
+                self.virtual_terrain_publication_last_abort_line,
             virtual_terrain_gpu_selected_pages: gpu_virtual_feedback
                 .as_ref()
                 .map_or(0, |feedback| feedback.selected_pages.len() as u32),
@@ -8855,6 +8875,7 @@ impl Renderer {
                 .map_or(0, |feedback| feedback.encoding_overflow_flags),
             virtual_terrain_gpu_matches_cpu_cut: gpu_virtual_matches_cpu,
             virtual_terrain_gpu_match_failure_flags: gpu_virtual_match_failure_flags,
+            virtual_terrain_coverage_fallback_active,
             virtual_terrain_published_pages: published_virtual_pages.len() as u32,
             virtual_terrain_published_ownerless_roots: published_virtual_ownerless_roots as u32,
             virtual_terrain_published_exact_pages: published_virtual_exact_pages as u32,
@@ -12439,6 +12460,7 @@ mod tests {
             traversal_overflow: false,
             incoherent_replacement_groups: 0,
             exact_surface_lod_discontinuities: 0,
+            surface_handoff_mismatches: 0,
         };
         let feedback = GpuVirtualTerrainFeedback {
             submission_id: 8,
@@ -13300,6 +13322,7 @@ mod tests {
             traversal_overflow: false,
             incoherent_replacement_groups: 0,
             exact_surface_lod_discontinuities: 0,
+            surface_handoff_mismatches: 0,
         };
         let revision_digest = 0xfeed_beef_cafe_babe;
         let certified = GpuVirtualTerrainFeedback {
@@ -14490,51 +14513,57 @@ mod tests {
             )
             .unwrap()
         };
-        let seam_faces = |quads: Vec<GpuQuad>, axis: FaceAxis| {
+        let seam_faces = |page_quads: [Vec<GpuQuad>; 2], axis: FaceAxis| {
             let mut faces = BTreeMap::<(i32, i32, u8, u16), usize>::new();
-            let mut rectangles = BTreeSet::new();
-            for quad in quads {
-                let face = ((quad.material_face & GPU_FACE_MASK) >> GPU_FACE_SHIFT) as u8;
-                let expected_axis_faces = match axis {
-                    FaceAxis::X => [0, 1],
-                    FaceAxis::Z => [4, 5],
-                    FaceAxis::Y => unreachable!(),
-                };
-                if !expected_axis_faces.contains(&face) {
-                    continue;
+            for quads in page_quads {
+                // One prepared rectangle becomes several encoded perimeter triangles. Collapse
+                // those triangles only within their source page; doing so across both pages would
+                // hide the exact duplicate ownership this incidence oracle is intended to catch.
+                let mut rectangles = BTreeSet::new();
+                for quad in quads {
+                    let face = ((quad.material_face & GPU_FACE_MASK) >> GPU_FACE_SHIFT) as u8;
+                    let expected_axis_faces = match axis {
+                        FaceAxis::X => [0, 1],
+                        FaceAxis::Z => [4, 5],
+                        FaceAxis::Y => unreachable!(),
+                    };
+                    if !expected_axis_faces.contains(&face) {
+                        continue;
+                    }
+                    let normal_axis = match axis {
+                        FaceAxis::X => 0,
+                        FaceAxis::Z => 2,
+                        FaceAxis::Y => unreachable!(),
+                    };
+                    let plane =
+                        quad.origin[normal_axis] + i32::from(matches!(face, 0 | 4));
+                    if plane != 0 {
+                        continue;
+                    }
+                    let material = (quad.material_face & 0xffff) as u16;
+                    let extent = if quad.extent_voxels[0] & CANONICAL_TRIANGLE_FLAG != 0 {
+                        quad.extent_voxels.map(|encoded| {
+                            (((encoded >> CANONICAL_TRIANGLE_EXTENT_SHIFT) & 31)
+                                | ((encoded >> (CANONICAL_TRIANGLE_EXTENT_SHIFT + 4)) & 32))
+                                + 1
+                        })
+                    } else {
+                        quad.extent_voxels
+                    };
+                    rectangles.insert((quad.origin, extent, face, material));
                 }
-                let normal_axis = match axis {
-                    FaceAxis::X => 0,
-                    FaceAxis::Z => 2,
-                    FaceAxis::Y => unreachable!(),
-                };
-                let plane = quad.origin[normal_axis] + i32::from(matches!(face, 0 | 4));
-                if plane != 0 {
-                    continue;
-                }
-                let material = (quad.material_face & 0xffff) as u16;
-                let extent = if quad.extent_voxels[0] & CANONICAL_TRIANGLE_FLAG != 0 {
-                    quad.extent_voxels.map(|encoded| {
-                        (((encoded >> CANONICAL_TRIANGLE_EXTENT_SHIFT) & 31)
-                            | ((encoded >> (CANONICAL_TRIANGLE_EXTENT_SHIFT + 4)) & 32))
-                            + 1
-                    })
-                } else {
-                    quad.extent_voxels
-                };
-                rectangles.insert((quad.origin, extent, face, material));
-            }
-            for (origin, extent, face, material) in rectangles {
-                for tangent in 0..i32::from(extent[0]) {
-                    for y in 0..i32::from(extent[1]) {
-                        let tangent_origin = match axis {
-                            FaceAxis::X => origin[2],
-                            FaceAxis::Z => origin[0],
-                            FaceAxis::Y => unreachable!(),
-                        };
-                        *faces
-                            .entry((origin[1] + y, tangent_origin + tangent, face, material))
-                            .or_default() += 1;
+                for (origin, extent, face, material) in rectangles {
+                    for tangent in 0..i32::from(extent[0]) {
+                        for y in 0..i32::from(extent[1]) {
+                            let tangent_origin = match axis {
+                                FaceAxis::X => origin[2],
+                                FaceAxis::Z => origin[0],
+                                FaceAxis::Y => unreachable!(),
+                            };
+                            *faces
+                                .entry((origin[1] + y, tangent_origin + tangent, face, material))
+                                .or_default() += 1;
+                        }
                     }
                 }
             }
@@ -14609,7 +14638,7 @@ mod tests {
                             .unwrap(),
                         )
                     };
-                    let faces = seam_faces(lower.into_iter().chain(higher).collect(), axis);
+                    let faces = seam_faces([lower, higher], axis);
                     let expected_face = match (axis, lower_height < higher_height) {
                         (FaceAxis::X, false) => 0,
                         (FaceAxis::X, true) => 1,
@@ -14863,16 +14892,16 @@ mod tests {
     }
 
     #[test]
-    fn candidate_only_seam_rebuild_failure_always_runs_oracle_recovery() {
-        let mut recovered = false;
+    fn candidate_only_seam_rebuild_failure_always_discards_only_the_gpu_derivative() {
+        let mut gpu_derivative_discarded = false;
         let injected = recover_candidate_only_seam_rebuild::<(), _>(
             Err(VirtualTerrainRendererError::GpuPoolCapacity),
-            || recovered = true,
+            || gpu_derivative_discarded = true,
         );
         assert_eq!(injected, Err(VirtualTerrainRendererError::GpuPoolCapacity));
         assert!(
-            recovered,
-            "an allocation failure after releasing candidate-only geometry must invalidate that candidate"
+            gpu_derivative_discarded,
+            "an allocation failure after releasing candidate-only geometry must discard the partial GPU derivative"
         );
     }
 
@@ -14912,6 +14941,7 @@ mod tests {
             traversal_overflow: false,
             incoherent_replacement_groups: 0,
             exact_surface_lod_discontinuities: 0,
+            surface_handoff_mismatches: 0,
         }
     }
 

@@ -1186,6 +1186,22 @@ impl StreamScheduler {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
+        self.mark_chunks_edited(&affected_chunks)
+    }
+
+    /// Invalidates the exact canonical products named by the authoritative world change.
+    ///
+    /// Hosts must use this path for server commits instead of independently re-deriving the
+    /// affected set from voxel coordinates. The scheduler revision is a local work capability,
+    /// while the server revision is a durable data floor; preserving that distinction prevents a
+    /// locally current remesh from being compared numerically with an unrelated global revision.
+    pub fn mark_chunks_edited(&mut self, chunks: &[ChunkCoord]) -> DirtyReport {
+        let affected_chunks = chunks
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let mut report = DirtyReport {
             affected_chunks: affected_chunks.clone(),
             ..DirtyReport::default()
@@ -2904,6 +2920,32 @@ mod tests {
         assert_eq!(
             report.affected_chunks,
             vec![ChunkCoord::new(0, 0, 0), ChunkCoord::new(1, 0, 0)]
+        );
+    }
+
+    #[test]
+    fn authoritative_chunk_invalidations_use_the_exact_supplied_product_set() {
+        let mut scheduler = scheduler(StreamConfig {
+            load_radius_chunks: 1,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 0,
+            max_tracked_chunks: 9,
+            max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
+        });
+        let center = ChunkCoord::new(0, 0, 0);
+        let right = ChunkCoord::new(1, 0, 0);
+        let left = ChunkCoord::new(-1, 0, 0);
+        scheduler.update_focus(center);
+
+        let report = scheduler.mark_chunks_edited(&[right, center, right]);
+
+        assert_eq!(report.affected_chunks, vec![center, right]);
+        assert_eq!(scheduler.status(center).unwrap().revision, 2);
+        assert_eq!(scheduler.status(right).unwrap().revision, 2);
+        assert_eq!(
+            scheduler.status(left).unwrap().revision,
+            1,
+            "a host-supplied authoritative product set must not expand through a second edit map"
         );
     }
 

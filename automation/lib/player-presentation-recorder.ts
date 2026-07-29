@@ -7,9 +7,15 @@ export type PlayerPresentationPhase =
   | "pedestal-step"
   | "pedestal-settle"
   | "travel"
+  | "jump"
+  | "spectator-ascent"
+  | "spectator-travel"
+  | "spectator-restore"
   | "travel-settle"
   | "dig"
-  | "dig-settle";
+  | "dig-settle"
+  | "place"
+  | "place-settle";
 
 export interface PlayerPresentationTraceFrame {
   readonly phase: PlayerPresentationPhase;

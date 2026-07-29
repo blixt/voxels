@@ -12,7 +12,9 @@ use voxels_render::renderer::{
     ClientViewPresentationState, ClientViewSession as RenderClientViewSession,
     ScreenshotMutableRenderState,
 };
-use voxels_runtime::{ChunkRevision, ChunkState, StreamScheduler, WorldRevisionFence};
+use voxels_runtime::{
+    AuthoritativeEditRevisions, ChunkRevision, ChunkState, StreamScheduler, WorldRevisionFence,
+};
 use voxels_world::ChunkCoord;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,6 +108,15 @@ impl ClientViewState {
             ClientViewSession::Profile(profile) => profile.camera,
             ClientViewSession::Reproduction(reproduction) => reproduction.camera,
         }
+    }
+
+    /// The collision-authoritative body retained while a synthetic camera is active.
+    ///
+    /// Spectator flight may move arbitrarily far from this body, but returning to gameplay must
+    /// not first encounter conservative-solid placeholders because its canonical chunks were
+    /// evicted.
+    pub(crate) const fn gameplay_body(self) -> CameraState {
+        self.gameplay_body
     }
 
     pub(crate) const fn can_edit(self) -> bool {
@@ -299,6 +310,7 @@ impl CanonicalAttemptPlan {
     pub(crate) fn ready_receipt(
         &self,
         scheduler: &StreamScheduler,
+        revisions: &AuthoritativeEditRevisions,
     ) -> Option<CanonicalReadyReceipt> {
         let ready = self
             .collision
@@ -317,9 +329,9 @@ impl CanonicalAttemptPlan {
                 .iter()
                 .chain(self.enclosed.iter())
                 .filter_map(|coord| {
-                    scheduler.status(*coord).map(|status| ChunkRevision {
+                    scheduler.status(*coord).map(|_| ChunkRevision {
                         coord: *coord,
-                        revision: status.revision,
+                        revision: revisions.chunk_floor(*coord),
                     })
                 }),
             std::iter::empty(),
@@ -369,10 +381,7 @@ pub(crate) struct GoalSequence {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClientViewGoalKind {
-    Recenter,
     TerrainRepair,
-    SpectatorEnter,
-    SpectatorExit,
     ProfileStep,
     ProfileRestore,
     ReproductionApply,
@@ -700,6 +709,8 @@ mod tests {
     use super::*;
     use glam::Vec3;
     use voxels_core::LocomotionMode;
+    use voxels_runtime::{CompletionStatus, FrameBudget, StreamConfig};
+    use voxels_world::VoxelCoord;
 
     const TEST_RENDER_STATE: ScreenshotMutableRenderState = ScreenshotMutableRenderState {
         world_lab_open: false,
@@ -738,6 +749,91 @@ mod tests {
     }
 
     #[test]
+    fn canonical_receipt_uses_authoritative_floors_not_local_scheduler_revisions() {
+        let coord = ChunkCoord::new(0, 0, 0);
+        let mut scheduler = StreamScheduler::new(StreamConfig {
+            load_radius_chunks: 0,
+            vertical_radius_chunks: 0,
+            retention_margin_chunks: 0,
+            max_tracked_chunks: 1,
+            max_secondary_interest_chunks: 0,
+        })
+        .expect("valid single-chunk scheduler");
+        scheduler.update_focus(coord);
+        for budget in [
+            FrameBudget {
+                generation: 1,
+                ..FrameBudget::default()
+            },
+            FrameBudget {
+                meshing: 1,
+                ..FrameBudget::default()
+            },
+            FrameBudget {
+                upload: 1,
+                ..FrameBudget::default()
+            },
+        ] {
+            let work = scheduler.schedule_frame(budget);
+            let ticket = work
+                .generation
+                .first()
+                .or_else(|| work.meshing.first())
+                .or_else(|| work.upload.first())
+                .copied()
+                .expect("one local scheduler stage");
+            assert_eq!(scheduler.complete(ticket), CompletionStatus::Accepted);
+        }
+        scheduler.mark_chunks_edited(&[coord]);
+        for budget in [
+            FrameBudget {
+                meshing: 1,
+                ..FrameBudget::default()
+            },
+            FrameBudget {
+                upload: 1,
+                ..FrameBudget::default()
+            },
+        ] {
+            let work = scheduler.schedule_frame(budget);
+            let ticket = work
+                .meshing
+                .first()
+                .or_else(|| work.upload.first())
+                .copied()
+                .expect("one local remesh stage");
+            assert_eq!(scheduler.complete(ticket), CompletionStatus::Accepted);
+        }
+        assert_eq!(scheduler.status(coord).unwrap().revision, 2);
+
+        let mut revisions = AuthoritativeEditRevisions::default();
+        assert_eq!(
+            revisions.observe_commit_batch(&[VoxelCoord::new(0, 0, 0)], 100, &[coord]),
+            vec![true]
+        );
+        let key = AttemptKey {
+            goal: GoalVersion(7),
+            attempt: AttemptId(9),
+        };
+        let receipt = CanonicalAttemptPlan::new(key, vec![coord], vec![coord])
+            .ready_receipt(&scheduler, &revisions)
+            .expect("resident canonical dependency");
+
+        assert_eq!(receipt.key(), key);
+        assert_eq!(
+            receipt.fence().chunks(),
+            &[ChunkRevision {
+                coord,
+                revision: 100,
+            }]
+        );
+        assert!(
+            receipt.fence().is_current(&revisions),
+            "different local and authoritative revision values must not reject a valid remesh"
+        );
+    }
+
+    #[test]
     fn superseded_attempt_receipts_cannot_commit_a_previous_goal() {
         let camera_a = CameraState::spawn(Vec3::new(0.0, 4.0, 0.0));
         let camera_b = CameraState::spawn(Vec3::new(32.0, 4.0, 0.0));
@@ -746,14 +842,15 @@ mod tests {
             10,
         );
         let goal_b = coordinator.replace_goal(
-            ClientViewGoalKind::Recenter,
+            ClientViewGoalKind::ProfileRestore,
             coordinator.current().with_camera(camera_b),
         );
         let attempt_b = coordinator
             .install_attempt(goal_b, 20, Vec::new(), Vec::new())
             .expect("B attempt");
 
-        let goal_a = coordinator.replace_goal(ClientViewGoalKind::Recenter, coordinator.current());
+        let goal_a =
+            coordinator.replace_goal(ClientViewGoalKind::ProfileRestore, coordinator.current());
         let attempt_a = coordinator
             .install_attempt(goal_a, 30, Vec::new(), Vec::new())
             .expect("A attempt");
@@ -777,7 +874,7 @@ mod tests {
         );
 
         let goal = coordinator.replace_goal(
-            ClientViewGoalKind::Recenter,
+            ClientViewGoalKind::ProfileRestore,
             coordinator.current().with_camera(camera_b),
         );
         let attempt = coordinator
@@ -801,7 +898,7 @@ mod tests {
             10,
         );
         coordinator.replace_goal(
-            ClientViewGoalKind::Recenter,
+            ClientViewGoalKind::ProfileRestore,
             coordinator.current().with_camera(camera_b),
         );
 
@@ -889,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn turning_pending_recenter_replaces_its_canonical_plan_before_commit() {
+    fn turning_pending_spatial_goal_replaces_its_canonical_plan_before_commit() {
         let camera_a = CameraState::spawn(Vec3::new(0.0, 4.0, 0.0));
         let mut camera_b = CameraState::spawn(Vec3::new(32.0, 4.0, 0.0));
         camera_b.yaw = 0.25;
@@ -898,7 +995,7 @@ mod tests {
             10,
         );
         let goal = coordinator.replace_goal(
-            ClientViewGoalKind::Recenter,
+            ClientViewGoalKind::ProfileRestore,
             coordinator.current().with_camera(camera_b),
         );
         let forward_chunk = ChunkCoord { x: 2, y: 0, z: -1 };
@@ -943,7 +1040,7 @@ mod tests {
         let mut target_camera = camera;
         target_camera.position.z = -16.0;
         let goal = coordinator.replace_goal(
-            ClientViewGoalKind::Recenter,
+            ClientViewGoalKind::ProfileRestore,
             current.with_camera(target_camera),
         );
         let attempt = coordinator

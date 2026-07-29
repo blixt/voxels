@@ -102,7 +102,8 @@ pub use terrain_page::{
     build_compact_exact_terrain_page, build_exact_cluster_terrain_parent,
     build_exact_surface_terrain_page, build_exact_terrain_page,
     build_sampled_heightfield_terrain_page, decode_terrain_page, encode_terrain_page,
-    reconstruct_exact_terrain_surface, validate_terrain_replacement,
+    heightfield_refined_handoff_fingerprints, reconstruct_exact_terrain_surface,
+    validate_terrain_replacement,
 };
 #[cfg(feature = "terrain-page-builder")]
 pub use terrain_page::{build_budgeted_terrain_parent, build_simplified_triangle_terrain_parent};
