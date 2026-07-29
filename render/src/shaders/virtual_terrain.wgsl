@@ -13,6 +13,8 @@ struct SnapshotCounters {
   ownerless_roots: u32,
   source_element_capacities: vec2<u32>,
   reserved: vec2<u32>,
+  handle_fingerprint_sums: array<atomic<u32>, 4>,
+  handle_fingerprint_squares: array<atomic<u32>, 4>,
 };
 
 @group(0) @binding(0) var<storage, read> candidates: array<CandidatePage>;
@@ -95,6 +97,33 @@ fn encode_snapshot(
       handles[destination + element] = first_handle + element;
     }
   }
+}
+
+@compute @workgroup_size(256)
+fn validate_snapshot(@builtin(global_invocation_id) global: vec3<u32>) {
+  let compact_index = global.x;
+  let surface_end = atomicLoad(&counters.element_counts[0]);
+  let triangle_end = surface_end + atomicLoad(&counters.element_counts[1]);
+  let water_surface_end = triangle_end + atomicLoad(&counters.element_counts[2]);
+  let water_triangle_end = water_surface_end + atomicLoad(&counters.element_counts[3]);
+  if compact_index >= water_triangle_end {
+    return;
+  }
+  var stream = 0u;
+  var stream_index = compact_index;
+  if compact_index >= water_surface_end {
+    stream = 3u;
+    stream_index -= water_surface_end;
+  } else if compact_index >= triangle_end {
+    stream = 2u;
+    stream_index -= triangle_end;
+  } else if compact_index >= surface_end {
+    stream = 1u;
+    stream_index -= surface_end;
+  }
+  let handle = handles[STREAM_OFFSETS[stream] + stream_index];
+  atomicAdd(&counters.handle_fingerprint_sums[stream], handle);
+  atomicAdd(&counters.handle_fingerprint_squares[stream], handle * handle);
 }
 
 @compute @workgroup_size(1)

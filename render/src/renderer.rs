@@ -26,8 +26,10 @@ use crate::virtual_terrain_gpu::{
     VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET, VIRTUAL_TERRAIN_WATER_SURFACE_HANDLE_SOURCE_BYTES,
     VIRTUAL_TERRAIN_WATER_SURFACE_INDIRECT_OFFSET,
     VIRTUAL_TERRAIN_WATER_TRIANGLE_HANDLE_SOURCE_BYTES,
-    VIRTUAL_TERRAIN_WATER_TRIANGLE_INDIRECT_OFFSET, VirtualTerrainGpuControl,
-    VirtualTerrainGpuGeometry, VirtualTerrainGpuGeometryRange, VirtualTerrainGpuTimestampWrites,
+    VIRTUAL_TERRAIN_WATER_TRIANGLE_INDIRECT_OFFSET, VirtualTerrainCandidateEncodeOutcome,
+    VirtualTerrainCandidateWork, VirtualTerrainGpuControl, VirtualTerrainGpuGeometry,
+    VirtualTerrainGpuGeometryRange, VirtualTerrainGpuTimestampWrites,
+    VirtualTerrainSnapshotIdentity,
 };
 use bytemuck::{Pod, Zeroable};
 use hashbrown::{HashMap, HashSet};
@@ -5946,7 +5948,7 @@ impl Renderer {
                     .selected_fingerprint(&published.selected_pages)
             && self
                 .virtual_terrain_gpu
-                .active_snapshot_matches(published.fingerprint, &published.selected_pages)
+                .active_snapshot_matches(virtual_terrain_snapshot_identity(published))
     }
 
     fn synchronize_virtual_terrain_cut_seams(
@@ -6069,16 +6071,16 @@ impl Renderer {
             self.virtual_terrain_cut_fits_snapshot(&cut)?;
             let active_matches = self
                 .virtual_terrain_gpu
-                .active_snapshot_matches(cut.fingerprint, &cut.selected_pages);
+                .active_snapshot_matches(virtual_terrain_snapshot_identity(&cut));
             let certified = self
                 .virtual_terrain_gpu
-                .candidate_is_certified(cut.fingerprint, &cut.selected_pages);
+                .candidate_is_certified(virtual_terrain_snapshot_identity(&cut));
             if !active_matches && !certified {
                 return Err(VirtualTerrainRendererError::GpuCutNotCertified);
             }
             if !active_matches {
                 self.virtual_terrain_gpu
-                    .promote_certified_candidate(cut.fingerprint, &cut.selected_pages)
+                    .promote_certified_candidate(virtual_terrain_snapshot_identity(&cut))
                     .map_err(|_| VirtualTerrainRendererError::GpuCutNotCertified)?;
             }
             self.discard_retired_virtual_terrain_pages();
@@ -6101,10 +6103,10 @@ impl Renderer {
     pub fn virtual_terrain_candidate_is_gpu_certified(&self) -> bool {
         self.virtual_terrain_oracle_cut.as_ref().is_some_and(|cut| {
             self.virtual_terrain_gpu
-                .candidate_is_certified(cut.fingerprint, &cut.selected_pages)
+                .candidate_is_certified(virtual_terrain_snapshot_identity(cut))
                 || self
                     .virtual_terrain_gpu
-                    .active_snapshot_matches(cut.fingerprint, &cut.selected_pages)
+                    .active_snapshot_matches(virtual_terrain_snapshot_identity(cut))
         })
     }
 
@@ -6912,7 +6914,7 @@ impl Renderer {
                 };
                 if !self
                     .virtual_terrain_gpu
-                    .presented_snapshot_matches(cut.fingerprint, &cut.selected_pages)
+                    .presented_snapshot_matches(virtual_terrain_snapshot_identity(cut))
                 {
                     // A visible frame has exactly one terrain generation. Never combine a CPU
                     // ownership cut or diagnostic sidecar with handles from another bank.
@@ -6925,13 +6927,13 @@ impl Renderer {
             } else {
                 (false, VirtualTerrainOwnership::default())
             };
-        let virtual_candidate_needs_encoding = self
-            .virtual_terrain_oracle_cut
-            .as_ref()
-            .is_some_and(|candidate| {
-                self.virtual_terrain_gpu
-                    .candidate_requires_encoding(candidate.fingerprint, &candidate.selected_pages)
-            });
+        let virtual_candidate_work =
+            self.virtual_terrain_oracle_cut
+                .as_ref()
+                .and_then(|candidate| {
+                    self.virtual_terrain_gpu
+                        .candidate_work(virtual_terrain_snapshot_identity(candidate))
+                });
         let (shadow_draw_lists, world_draw_list) = collect_opaque_draw_lists(
             &mut self.chunks,
             shadows_active,
@@ -7003,15 +7005,11 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
-        let virtual_candidate = if virtual_candidate_needs_encoding {
+        let virtual_candidate = if virtual_candidate_work.is_some() {
             let Some(oracle_cut) = self.virtual_terrain_oracle_cut.as_ref() else {
                 return false;
             };
-            Some((
-                oracle_cut.selected_pages.as_slice(),
-                oracle_cut.ownerless_roots.len() as u32,
-                oracle_cut.fingerprint,
-            ))
+            Some(virtual_terrain_snapshot_identity(oracle_cut))
         } else {
             None
         };
@@ -7024,37 +7022,48 @@ impl Renderer {
                     ambient_occlusion: self.options.screen_space_ambient_occlusion,
                     clouds: clouds_active,
                     weather: weather_active,
-                    virtual_terrain: virtual_candidate_needs_encoding,
+                    virtual_terrain: virtual_candidate_work
+                        == Some(VirtualTerrainCandidateWork::Encode),
                 },
             )
         });
         let mut virtual_candidate_encode_failed = false;
-        if let Some((selected_pages, ownerless_roots, oracle_fingerprint)) = virtual_candidate {
-            let timestamps = gpu_frame
-                .as_ref()
-                .map(|frame| VirtualTerrainGpuTimestampWrites {
-                    query_set: &frame.query_set,
-                    encoding_first_query: 24,
-                    finalize_first_query: 26,
-                });
-            if self
-                .virtual_terrain_gpu
-                .encode_candidate(
-                    &self.queue,
-                    &mut encoder,
-                    selected_pages,
-                    ownerless_roots,
-                    oracle_fingerprint,
-                    timestamps,
-                )
-                .is_err()
-            {
-                if let (Some(timer), Some(frame)) = (self.gpu_timer.as_ref(), gpu_frame.take()) {
-                    timer.cancel_frame(frame);
+        let mut virtual_candidate_generation_to_submit = None;
+        if let (Some(identity), Some(work)) = (virtual_candidate, virtual_candidate_work) {
+            let timestamps = (work == VirtualTerrainCandidateWork::Encode)
+                .then(|| {
+                    gpu_frame
+                        .as_ref()
+                        .map(|frame| VirtualTerrainGpuTimestampWrites {
+                            query_set: &frame.query_set,
+                            encoding_first_query: 24,
+                            finalize_first_query: 26,
+                        })
+                })
+                .flatten();
+            match self.virtual_terrain_gpu.encode_candidate(
+                &self.queue,
+                &mut encoder,
+                identity,
+                timestamps,
+            ) {
+                Ok(VirtualTerrainCandidateEncodeOutcome::Encoded(generation)) => {
+                    debug_assert_eq!(work, VirtualTerrainCandidateWork::Encode);
+                    virtual_candidate_generation_to_submit = Some(generation);
                 }
-                virtual_candidate_encode_failed = true;
-                if !can_present_after_candidate_encode_failure(virtual_visible) {
-                    return false;
+                Ok(VirtualTerrainCandidateEncodeOutcome::ReadbackOnly(generation)) => {
+                    debug_assert_eq!(work, VirtualTerrainCandidateWork::ReadbackOnly);
+                    virtual_candidate_generation_to_submit = Some(generation);
+                }
+                Err(_) => {
+                    if let (Some(timer), Some(frame)) = (self.gpu_timer.as_ref(), gpu_frame.take())
+                    {
+                        timer.cancel_frame(frame);
+                    }
+                    virtual_candidate_encode_failed = true;
+                    if !can_present_after_candidate_encode_failure(virtual_visible) {
+                        return false;
+                    }
                 }
             }
         }
@@ -7189,6 +7198,10 @@ impl Renderer {
                     &self.chunks,
                     "screenshot opaque terrain owner sidecar",
                 ) else {
+                    if let (Some(timer), Some(frame)) = (self.gpu_timer.as_ref(), gpu_frame.take())
+                    {
+                        timer.cancel_frame(frame);
+                    }
                     return false;
                 };
                 let virtual_opaque = if virtual_visible {
@@ -7200,6 +7213,11 @@ impl Renderer {
                         &self.virtual_terrain_retired_published_pages,
                         "screenshot virtual terrain owner sidecar",
                     ) else {
+                        if let (Some(timer), Some(frame)) =
+                            (self.gpu_timer.as_ref(), gpu_frame.take())
+                        {
+                            timer.cancel_frame(frame);
+                        }
                         return false;
                     };
                     Some(owners)
@@ -7213,6 +7231,10 @@ impl Renderer {
                     &self.water_chunks,
                     "screenshot water terrain owner sidecar",
                 ) else {
+                    if let (Some(timer), Some(frame)) = (self.gpu_timer.as_ref(), gpu_frame.take())
+                    {
+                        timer.cancel_frame(frame);
+                    }
                     return false;
                 };
                 (Some(opaque), virtual_opaque, Some(water))
@@ -7598,7 +7620,7 @@ impl Renderer {
         let virtual_terrain_presented_snapshot_matches_cut = virtual_visible
             && self.virtual_terrain_cut.as_ref().is_some_and(|cut| {
                 self.virtual_terrain_gpu
-                    .presented_snapshot_matches(cut.fingerprint, &cut.selected_pages)
+                    .presented_snapshot_matches(virtual_terrain_snapshot_identity(cut))
             });
         self.diagnostics = RenderDiagnostics {
             resident_chunks: (self.chunks.len()
@@ -7956,6 +7978,13 @@ impl Renderer {
             frame_id,
             camera,
         );
+        if let Some(generation) = virtual_candidate_generation_to_submit {
+            // No fallible frame construction remains below this point. A recorded generation only
+            // becomes submitted/readback-eligible here, so abandoning an earlier encoder cannot
+            // strand a slot or certify counters that were never produced.
+            self.virtual_terrain_gpu
+                .submit_pending_readback(&mut encoder, generation);
+        }
         if let (Some(timer), Some(gpu_frame)) = (self.gpu_timer.as_ref(), gpu_frame.as_ref()) {
             timer.resolve(&mut encoder, gpu_frame);
         }
@@ -9663,6 +9692,16 @@ fn view_projection(
     let view =
         glam::camera::rh::view::look_to_mat4(camera.position, camera.forward(), glam::Vec3::Y);
     projection * view
+}
+
+fn virtual_terrain_snapshot_identity(
+    cut: &VirtualTerrainCut,
+) -> VirtualTerrainSnapshotIdentity<'_> {
+    VirtualTerrainSnapshotIdentity {
+        fingerprint: cut.fingerprint,
+        selected_pages: &cut.selected_pages,
+        ownerless_roots: cut.ownerless_roots.len() as u32,
+    }
 }
 
 fn gpu_feedback_matches_cut(
