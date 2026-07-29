@@ -807,7 +807,6 @@ fn virtual_surface_gpu_quads(
 struct VirtualHeightfieldSamples {
     ground: Vec<f32>,
     water: Vec<Option<f32>>,
-    exact_neighbor_sides: [bool; 4],
     finer_neighbor_sides: [bool; 4],
 }
 
@@ -2108,7 +2107,6 @@ fn unconstrained_virtual_heightfield_samples(
             .iter()
             .map(|height| (*height != i32::MIN).then_some(*height as f32))
             .collect(),
-        exact_neighbor_sides: [false; 4],
         finer_neighbor_sides: [false; 4],
     }
 }
@@ -2143,33 +2141,9 @@ fn cut_finer_neighbor_sides(selected: &BTreeSet<TerrainPageKey>, key: TerrainPag
     sides.map(|neighbors| neighbors.into_iter().all(|key| selected.contains(&key)))
 }
 
-fn cut_exact_neighbor_sides(selected: &BTreeSet<TerrainPageKey>, key: TerrainPageKey) -> [bool; 4] {
-    if key.level != 0 || !key.is_surface() {
-        return [false; 4];
-    }
-    [(-1, 0), (1, 0), (0, -1), (0, 1)].map(|(offset_x, offset_z)| {
-        selected.contains(&TerrainPageKey::surface(
-            0,
-            key.coord[0].saturating_add(offset_x),
-            key.coord[2].saturating_add(offset_z),
-        ))
-    })
-}
-
-fn restore_exact_neighbor_heightfield_boundaries(
-    page: &TerrainPageV1,
-    samples: &VirtualHeightfieldSamples,
-    exact_sides: [bool; 4],
-) -> VirtualHeightfieldSamples {
-    debug_assert_eq!(page.key.level, 0);
-    let mut restored = samples.clone();
-    restored.exact_neighbor_sides = exact_sides;
-    restored
-}
-
 #[cfg(test)]
 fn constrained_virtual_heightfield_samples(
-    hierarchy: &VirtualTerrainHierarchy,
+    _hierarchy: &VirtualTerrainHierarchy,
     page: &TerrainPageV1,
 ) -> Result<VirtualHeightfieldSamples, VirtualTerrainRendererError> {
     let TerrainPageRepresentation::HeightfieldGrid(grid) = &page.representation else {
@@ -2177,28 +2151,7 @@ fn constrained_virtual_heightfield_samples(
             page.representation.kind(),
         ));
     };
-    let samples = unconstrained_virtual_heightfield_samples(grid);
-    if page.key.level == 0 {
-        let selected = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-            .into_iter()
-            .filter_map(|(offset_x, offset_z)| {
-                let key = TerrainPageKey::surface(
-                    0,
-                    page.key.coord[0].saturating_add(offset_x),
-                    page.key.coord[2].saturating_add(offset_z),
-                );
-                hierarchy.directory_node(key).map(|_| key)
-            })
-            .chain(std::iter::once(page.key))
-            .collect::<BTreeSet<_>>();
-        Ok(restore_exact_neighbor_heightfield_boundaries(
-            page,
-            &samples,
-            cut_exact_neighbor_sides(&selected, page.key),
-        ))
-    } else {
-        Ok(samples)
-    }
+    Ok(unconstrained_virtual_heightfield_samples(grid))
 }
 
 fn push_virtual_triangle_i32(
@@ -2552,7 +2505,6 @@ struct VirtualTerrainGpuPage {
     revision: u64,
     content_fingerprint: [u8; 32],
     representation: TerrainPageRepresentationKind,
-    heightfield_exact_neighbor_sides: [bool; 4],
     heightfield_finer_neighbor_sides: [bool; 4],
     heightfield_ground_corner_bits: [u32; 4],
     heightfield_ground_boundary_bits: [[u32; TERRAIN_PAGE_EDGE_SAMPLES as usize + 1]; 4],
@@ -5521,22 +5473,14 @@ impl Renderer {
         &mut self,
         page: TerrainPageV1,
     ) -> Result<(), VirtualTerrainRendererError> {
-        let (exact_neighbor_sides, finer_neighbor_sides) = self
+        let finer_neighbor_sides = self
             .virtual_terrain_pages
             .get(&page.key)
-            .map_or(([false; 4], [false; 4]), |existing| {
-                (
-                    existing.heightfield_exact_neighbor_sides,
-                    existing.heightfield_finer_neighbor_sides,
-                )
+            .map_or([false; 4], |existing| {
+                existing.heightfield_finer_neighbor_sides
             });
-        self.upload_virtual_terrain_page_with_seams(
-            page,
-            exact_neighbor_sides,
-            finer_neighbor_sides,
-            true,
-        )
-        .map(|_| ())
+        self.upload_virtual_terrain_page_with_seams(page, finer_neighbor_sides, true)
+            .map(|_| ())
     }
 
     /// Stages and installs one complete refinement replacement as a failure-atomic group.
@@ -5607,12 +5551,7 @@ impl Renderer {
             if self.virtual_terrain_pages.contains_key(&page.key) {
                 continue;
             }
-            match self.upload_virtual_terrain_page_with_seams(
-                page.clone(),
-                [false; 4],
-                [false; 4],
-                false,
-            ) {
+            match self.upload_virtual_terrain_page_with_seams(page.clone(), [false; 4], false) {
                 Ok(true) => staged.push(page.key),
                 Ok(false) => {}
                 Err(error) => {
@@ -5650,7 +5589,6 @@ impl Renderer {
     fn upload_virtual_terrain_page_with_seams(
         &mut self,
         page: TerrainPageV1,
-        exact_neighbor_sides: [bool; 4],
         finer_neighbor_sides: [bool; 4],
         install_page: bool,
     ) -> Result<bool, VirtualTerrainRendererError> {
@@ -5660,24 +5598,10 @@ impl Renderer {
             }
             _ => None,
         };
-        let mut constrained_heightfield = match (&page.representation, base_heightfield) {
-            (TerrainPageRepresentation::HeightfieldGrid(_), Some(samples))
-                if page.key.level == 0 =>
-            {
-                Some(restore_exact_neighbor_heightfield_boundaries(
-                    &page,
-                    &samples,
-                    exact_neighbor_sides,
-                ))
-            }
-            (_, samples) => samples,
-        };
+        let mut constrained_heightfield = base_heightfield;
         if let Some(heightfield) = constrained_heightfield.as_mut() {
             heightfield.finer_neighbor_sides = finer_neighbor_sides;
         }
-        let heightfield_exact_neighbor_sides = constrained_heightfield
-            .as_ref()
-            .map_or([false; 4], |heightfield| heightfield.exact_neighbor_sides);
         let heightfield_finer_neighbor_sides = constrained_heightfield
             .as_ref()
             .map_or([false; 4], |heightfield| heightfield.finer_neighbor_sides);
@@ -5712,7 +5636,6 @@ impl Renderer {
             && existing.revision == page.revision
             && existing.content_fingerprint == page.content_fingerprint
             && existing.representation == page.representation.kind()
-            && existing.heightfield_exact_neighbor_sides == heightfield_exact_neighbor_sides
             && existing.heightfield_finer_neighbor_sides == heightfield_finer_neighbor_sides
             && existing.heightfield_ground_corner_bits == heightfield_ground_corner_bits
             && existing.heightfield_ground_boundary_bits == heightfield_ground_boundary_bits
@@ -5951,7 +5874,6 @@ impl Renderer {
             revision: page.revision,
             content_fingerprint: page.content_fingerprint,
             representation: page.representation.kind(),
-            heightfield_exact_neighbor_sides,
             heightfield_finer_neighbor_sides,
             heightfield_ground_corner_bits,
             heightfield_ground_boundary_bits,
@@ -6179,12 +6101,10 @@ impl Renderer {
                 ) {
                     return None;
                 }
-                let exact_sides = cut_exact_neighbor_sides(&selected, *key);
                 let finer_sides = cut_finer_neighbor_sides(&selected, *key);
                 self.virtual_terrain_pages.get(key).and_then(|resident| {
-                    (resident.heightfield_exact_neighbor_sides != exact_sides
-                        || resident.heightfield_finer_neighbor_sides != finer_sides)
-                        .then(|| (page.clone(), exact_sides, finer_sides))
+                    (resident.heightfield_finer_neighbor_sides != finer_sides)
+                        .then(|| (page.clone(), finer_sides))
                 })
             })
             .collect::<Vec<_>>();
@@ -6196,15 +6116,14 @@ impl Renderer {
         // recovery must encode a fresh complete snapshot from the surviving source records.
         self.virtual_terrain_gpu.invalidate_candidate();
         let mut changed = false;
-        for (page, exact_sides, finer_sides) in rebuilds {
+        for (page, finer_sides) in rebuilds {
             let page_key = page.key;
             let can_replace_in_place = !published.contains(&page.key)
                 && self
                     .virtual_terrain_pages
                     .get(&page.key)
                     .is_some_and(|resident| {
-                        resident.heightfield_exact_neighbor_sides != exact_sides
-                            || resident.heightfield_finer_neighbor_sides != finer_sides
+                        resident.heightfield_finer_neighbor_sides != finer_sides
                     });
             if can_replace_in_place {
                 // Candidate-only geometry has no visible owner. Release it before rebuilding so
@@ -6215,22 +6134,12 @@ impl Renderer {
                     discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, old.mesh);
                 }
                 let _ = self.virtual_terrain.remove_page(page.key);
-                let rebuilt = self.upload_virtual_terrain_page_with_seams(
-                    page,
-                    exact_sides,
-                    finer_sides,
-                    true,
-                );
+                let rebuilt = self.upload_virtual_terrain_page_with_seams(page, finer_sides, true);
                 changed |= recover_candidate_only_seam_rebuild(rebuilt, || {
                     self.recover_failed_candidate_only_seam_page(page_key)
                 })?;
             } else {
-                changed |= self.upload_virtual_terrain_page_with_seams(
-                    page,
-                    exact_sides,
-                    finer_sides,
-                    false,
-                )?;
+                changed |= self.upload_virtual_terrain_page_with_seams(page, finer_sides, false)?;
             }
         }
         debug_assert!(changed);
@@ -11261,7 +11170,7 @@ fn screenshot_virtual_terrain_manifest_json(
             encoded,
             concat!(
                 r#"{{"level":{},"coord":{:?},"revision":"{}","contentFingerprint":"{}","#,
-                r#""representation":"{}","representationKind":{},"heightfieldExactNeighborSides":{:?},"#,
+                r#""representation":"{}","representationKind":{},"#,
                 r#""heightfieldFinerNeighborSides":{:?},"heightfieldGroundCornerBits":{:?},"#,
                 r#""heightfieldGroundBoundaryBits":{:?}}}"#
             ),
@@ -11271,7 +11180,6 @@ fn screenshot_virtual_terrain_manifest_json(
             hex_bytes(&page.content_fingerprint),
             virtual_representation_label(page.representation),
             page.representation as u8,
-            page.heightfield_exact_neighbor_sides,
             page.heightfield_finer_neighbor_sides,
             page.heightfield_ground_corner_bits,
             page.heightfield_ground_boundary_bits,
@@ -11286,7 +11194,7 @@ fn screenshot_virtual_terrain_manifest_json(
             encoded,
             concat!(
                 r#"{{"level":{},"coord":{:?},"revision":"{}","contentFingerprint":"{}","#,
-                r#""representation":"{}","representationKind":{},"heightfieldExactNeighborSides":{:?},"#,
+                r#""representation":"{}","representationKind":{},"#,
                 r#""heightfieldFinerNeighborSides":{:?},"heightfieldGroundCornerBits":{:?},"#,
                 r#""heightfieldGroundBoundaryBits":{:?}}}"#
             ),
@@ -11296,7 +11204,6 @@ fn screenshot_virtual_terrain_manifest_json(
             hex_bytes(&page.content_fingerprint),
             virtual_representation_label(page.representation),
             page.representation as u8,
-            page.heightfield_exact_neighbor_sides,
             page.heightfield_finer_neighbor_sides,
             page.heightfield_ground_corner_bits,
             page.heightfield_ground_boundary_bits,
@@ -11541,7 +11448,6 @@ mod tests {
                 revision: 17,
                 content_fingerprint: [0xab; 32],
                 representation: TerrainPageRepresentationKind::SparseVoxelBrick,
-                heightfield_exact_neighbor_sides: [false; 4],
                 heightfield_finer_neighbor_sides: [false; 4],
                 heightfield_ground_corner_bits: [0; 4],
                 heightfield_ground_boundary_bits: [[0; TERRAIN_PAGE_EDGE_SAMPLES as usize + 1]; 4],
@@ -13042,7 +12948,7 @@ mod tests {
     }
 
     #[test]
-    fn level_zero_heightfield_keeps_raw_boundaries_for_coarse_and_exact_neighbors() {
+    fn level_zero_heightfield_geometry_is_independent_of_exact_neighbor_residency() {
         let source = voxels_world::WorldSourceIdentityHash::from_bytes([32; 32]);
         let parent_key = TerrainPageKey::surface(1, 0, 0);
         let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
@@ -13118,18 +13024,7 @@ mod tests {
 
         let constrained =
             constrained_virtual_heightfield_samples(&hierarchy, &heightfield).unwrap();
-        assert_eq!(constrained.exact_neighbor_sides, [false, true, false, true]);
         assert!(constrained.ground.iter().all(|height| *height == 10.0));
-        let mixed_corner = restore_exact_neighbor_heightfield_boundaries(
-            &heightfield,
-            &constrained,
-            [false, true, false, false],
-        );
-        assert_eq!(
-            mixed_corner.exact_neighbor_sides,
-            [false, true, false, false]
-        );
-        assert!(mixed_corner.ground.iter().all(|height| *height == 10.0));
     }
 
     #[test]
