@@ -2,6 +2,10 @@ import type { Page } from "playwright";
 import { BrowserCapability } from "../lib/browser.ts";
 import { type EngineClient, snapshotValue } from "../lib/engine.ts";
 import { analyzeDiagnosticSky } from "../lib/image.ts";
+import {
+  PlayerPresentationRecorder,
+  type PlayerPresentationViolation,
+} from "../lib/player-presentation-recorder.ts";
 import { summarizeSurfaceCutAdjacency, takePlayerScreenshot } from "../lib/player-screenshot.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { startDevelopmentWorldStack } from "../lib/world.ts";
@@ -9,7 +13,6 @@ import { startDevelopmentWorldStack } from "../lib/world.ts";
 const VIEWPORT = { width: 960, height: 540 };
 const COLD_START_BUDGET_MS = 60_000;
 const STABLE_CUT_DURATION_MS = 10_000;
-const STABILITY_POLL_MS = 200;
 const STABILITY_TIMEOUT_MS = 60_000;
 
 interface AuditedCapture {
@@ -17,6 +20,38 @@ interface AuditedCapture {
   readonly cutFingerprint: string;
   readonly largestEnclosedSkyComponent: number;
   readonly settleMs: number;
+}
+
+async function preserveContinuousPresentationFailure(
+  context: ScenarioContext,
+  page: Page,
+  violation: PlayerPresentationViolation,
+): Promise<void> {
+  const stem = `continuous-${violation.phase}-frame-${violation.frameSequence}`;
+  const errors: unknown[] = [];
+  try {
+    await context.artifacts.writeJson(
+      "continuous player presentation failure trace",
+      `${stem}.json`,
+      violation,
+    );
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
+    const png = await page.screenshot({ type: "png" });
+    await context.artifacts.write(
+      "continuous player presentation failure view",
+      `${stem}.png`,
+      png,
+      "image/png",
+    );
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length > 0) {
+    throw new AggregateError(errors, "could not preserve all continuous presentation evidence");
+  }
 }
 
 async function auditCapture(
@@ -111,16 +146,20 @@ async function auditCapture(
   };
 }
 
-async function shortPlayerStep(
-  page: Page,
-  capturePosition: () => Promise<readonly number[]>,
-): Promise<number> {
-  const before = await capturePosition();
+async function shortPlayerStep(page: Page, recorder: PlayerPresentationRecorder): Promise<number> {
+  const before = recorder.latestSnapshot;
   await page.keyboard.down("KeyW");
-  await page.waitForTimeout(180);
-  await page.keyboard.up("KeyW");
-  await page.waitForTimeout(100);
-  const after = await capturePosition();
+  try {
+    await recorder.guard(page.waitForTimeout(180));
+  } finally {
+    await page.keyboard.up("KeyW");
+  }
+  const releasedAfter = snapshotValue(recorder.latestSnapshot, "frameSequence");
+  await recorder.waitForFrameAfter(releasedAfter, {
+    timeoutMs: 5_000,
+    description: "renderer did not observe the end of the real W-key step",
+  });
+  const after = recorder.latestSnapshot;
   const distance = Math.hypot(
     snapshotValue(after, "cameraX") - snapshotValue(before, "cameraX"),
     snapshotValue(after, "cameraZ") - snapshotValue(before, "cameraZ"),
@@ -134,44 +173,27 @@ async function shortPlayerStep(
 async function walkBeyondProtectedPedestal(
   context: ScenarioContext,
   page: Page,
-  engine: EngineClient,
-  assertHealthy: () => void,
+  recorder: PlayerPresentationRecorder,
   targetMetres: number,
 ): Promise<number> {
-  const before = await engine.snapshot();
+  const before = recorder.latestSnapshot;
   await page.keyboard.down("ShiftLeft");
   await page.keyboard.down("KeyW");
   let distance = 0;
   let nextPixelAudit = 0;
   try {
     const deadline = performance.now() + 20_000;
+    let previousFrame = snapshotValue(recorder.latestSnapshot, "frameSequence");
     while (performance.now() < deadline) {
-      await page.waitForTimeout(50);
-      const current = await engine.snapshot();
-      assertHealthy();
+      const current = await recorder.waitForFrameAfter(previousFrame, {
+        timeoutMs: Math.max(1, deadline - performance.now()),
+        description: "renderer stopped advancing during real player sprint",
+      });
+      previousFrame = snapshotValue(current, "frameSequence");
       distance = Math.hypot(
         snapshotValue(current, "cameraX") - snapshotValue(before, "cameraX"),
         snapshotValue(current, "cameraZ") - snapshotValue(before, "cameraZ"),
       );
-      const presentationInvalid =
-        snapshotValue(current, "terrainReady") !== 1 ||
-        snapshotValue(current, "virtualTerrainPublishedExactPages") === 0 ||
-        snapshotValue(current, "virtualTerrainPublishedMinimumLevel") !== 0 ||
-        snapshotValue(current, "virtualTerrainPublishedExactLodDiscontinuities") !== 0 ||
-        snapshotValue(current, "virtualTerrainGpuEncodingOverflowFlags") !== 0 ||
-        snapshotValue(current, "virtualTerrainPresentedSnapshotMatchesCut") !== 1;
-      if (presentationInvalid) {
-        const png = await page.screenshot({ type: "png" });
-        await context.artifacts.write(
-          "invalid terrain presentation during sprint",
-          "during-sprint-invalid-presentation.png",
-          png,
-          "image/png",
-        );
-        throw new Error(
-          `terrain lost its exact playable presentation after ${distance.toFixed(2)}m of sprinting`,
-        );
-      }
       if (performance.now() >= nextPixelAudit) {
         const png = await page.screenshot({ type: "png" });
         const [magenta, black] = await Promise.all([
@@ -212,6 +234,7 @@ async function stablePhaseCapture(
   page: Page,
   phase: string,
   engine: EngineClient,
+  recorder: PlayerPresentationRecorder,
   assertHealthy: () => void,
 ): Promise<AuditedCapture> {
   const started = performance.now();
@@ -219,8 +242,13 @@ async function stablePhaseCapture(
   let lastLog = 0;
   let previousFingerprint = "";
   let previousFlow = "";
+  let previousFrame = snapshotValue(recorder.latestSnapshot, "frameSequence");
   while (performance.now() - started < STABILITY_TIMEOUT_MS) {
-    const current = await engine.snapshot();
+    const current = await recorder.waitForFrameAfter(previousFrame, {
+      timeoutMs: Math.max(1, STABILITY_TIMEOUT_MS - (performance.now() - started)),
+      description: `${phase} renderer stopped advancing before convergence`,
+    });
+    previousFrame = snapshotValue(current, "frameSequence");
     assertHealthy();
     const exactPages = snapshotValue(current, "virtualTerrainPublishedExactPages");
     const fingerprint = [
@@ -336,11 +364,12 @@ async function stablePhaseCapture(
     previousFlow = flow;
     if (stableSince !== undefined && performance.now() - stableSince >= STABLE_CUT_DURATION_MS) {
       const settleMs = performance.now() - started;
-      const capture = await auditCapture(context, page, engine, phase, current, settleMs);
+      const capture = await recorder.guard(
+        auditCapture(context, page, engine, phase, current, settleMs),
+      );
       assertHealthy();
       return capture;
     }
-    await page.waitForTimeout(STABILITY_POLL_MS);
   }
   const failure = await takePlayerScreenshot(page);
   await context.artifacts.write(
@@ -383,160 +412,177 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
   });
   const { engine, page } = viewport;
   let lastProgressLog = 0;
-  let latestStartupSnapshot: readonly number[] | undefined;
-  let ready: readonly number[];
-  try {
-    ready = await engine.waitForSnapshot(
-      (snapshot) =>
-        snapshotValue(snapshot, "terrainReady") === 1 &&
-        snapshotValue(snapshot, "canonicalImmediateRequired") > 0 &&
-        snapshotValue(snapshot, "canonicalImmediateResident") >=
-          snapshotValue(snapshot, "canonicalImmediateRequired") &&
-        snapshotValue(snapshot, "grounded") === 1 &&
-        snapshotValue(snapshot, "pendingJobs") === 0 &&
-        snapshotValue(snapshot, "frameSequence") > 0,
-      {
-        timeoutMs: COLD_START_BUDGET_MS,
-        description: "default player never received a playable terrain presentation",
-        onSnapshot: (snapshot) => {
-          latestStartupSnapshot = snapshot;
-          browser.assertHealthy();
-          if (performance.now() - lastProgressLog < 10_000) return;
-          lastProgressLog = performance.now();
-          context.log(
-            JSON.stringify({
-              exactPages: snapshotValue(snapshot, "virtualTerrainPublishedExactPages"),
-              minimumLevel: snapshotValue(snapshot, "virtualTerrainPublishedMinimumLevel"),
-              maximumLevel: snapshotValue(snapshot, "virtualTerrainPublishedMaximumLevel"),
-              residentPages: snapshotValue(snapshot, "virtualTerrainResidentPages"),
-              selectedPages: snapshotValue(snapshot, "virtualTerrainSelectedPages"),
-              requestedPages: snapshotValue(snapshot, "virtualTerrainRequestedPages"),
-              pendingPages: snapshotValue(snapshot, "virtualTerrainStreamPending"),
-              inFlightPages: snapshotValue(snapshot, "virtualTerrainStreamInFlight"),
-              columns: snapshotValue(snapshot, "virtualTerrainColumns"),
-              columnInFlight: snapshotValue(snapshot, "virtualTerrainColumnInFlight"),
-              columnRevisionFloors: snapshotValue(snapshot, "virtualTerrainColumnRevisionFloors"),
-              currentColumnKnown: snapshotValue(snapshot, "virtualTerrainCurrentColumnKnown"),
-              currentColumnRoots: snapshotValue(snapshot, "virtualTerrainCurrentColumnRoots"),
-              currentColumnRegisteredRoots: snapshotValue(
-                snapshot,
-                "virtualTerrainCurrentColumnRegisteredRoots",
-              ),
-              directoryInFlight: snapshotValue(snapshot, "virtualTerrainDirectoryInFlight"),
-              columnOtherFailed: snapshotValue(snapshot, "virtualTerrainColumnOtherFailed"),
-              directoryOtherFailed: snapshotValue(snapshot, "virtualTerrainDirectoryOtherFailed"),
-              pageOtherFailed: snapshotValue(snapshot, "virtualTerrainPageOtherFailed"),
-              pageUploadFailed: snapshotValue(snapshot, "virtualTerrainPageUploadFailed"),
-            }),
-          );
-        },
-      },
-    );
-  } catch (error) {
-    try {
-      await context.artifacts.writeJson(
-        "cold-start failure engine snapshot",
-        "cold-start-failure-snapshot.json",
-        {
-          error: error instanceof Error ? error.message : String(error),
-          snapshot: latestStartupSnapshot,
-        },
+  const recorder = new PlayerPresentationRecorder(engine, {
+    initialPhase: "startup",
+    onFrame: (frame) => {
+      browser.assertHealthy();
+      if (frame.phase !== "startup" || performance.now() - lastProgressLog < 10_000) return;
+      lastProgressLog = performance.now();
+      context.log(
+        `startup continuous frame ${JSON.stringify({
+          frameSequence: frame.frameSequence,
+          renderMode: frame.renderMode,
+          terrainReady: frame.terrainReady,
+          exactPages: frame.published.exactPages,
+          minimumLevel: frame.published.minimumLevel,
+          cut: frame.published.cutFingerprint,
+          bankGeneration: frame.gpu.presentedBankGeneration,
+          bankMatchesCut: frame.gpu.presentedBankMatchesCut,
+          committedEnvelope: frame.committedEnvelope.fingerprint,
+          committedSafety: `${frame.committedEnvelope.safetyCoverage}/${frame.committedEnvelope.safetyLeaves}`,
+          committedHorizon: `${frame.committedEnvelope.horizonCoverage}/${frame.committedEnvelope.horizonRoots}`,
+          target: frame.presentationTarget,
+          gate: frame.presentationGate,
+        })}`,
       );
-    } catch (artifactError) {
-      context.log(`could not preserve cold-start snapshot evidence: ${String(artifactError)}`);
-    }
-    try {
-      const screenshot = await page.screenshot({ type: "png" });
-      await context.artifacts.write(
-        "cold-start failure player view",
-        "cold-start-failure.png",
-        screenshot,
-        "image/png",
-      );
-    } catch (artifactError) {
-      context.log(`could not preserve cold-start screenshot evidence: ${String(artifactError)}`);
-    }
-    throw error;
-  }
-  const coldStartMs = performance.now() - coldStartStarted;
-  await engine.setCameraLook(snapshotValue(ready, "yaw"), -0.48);
-  const pedestalStepMetres = await shortPlayerStep(page, () => engine.snapshot());
-  const pedestal = await stablePhaseCapture(context, page, "default-pedestal", engine, () =>
-    browser.assertHealthy(),
-  );
-
-  await engine.setCameraLook(0, -0.22);
-  const distanceMetres = await walkBeyondProtectedPedestal(
-    context,
-    page,
-    engine,
-    () => browser.assertHealthy(),
-    32,
-  );
-  await engine.waitForSnapshot((snapshot) => snapshotValue(snapshot, "grounded") === 1, {
-    timeoutMs: 15_000,
-    description: "player did not land after leaving the spawn pedestal",
-  });
-  await engine.setCameraLook(0, -0.48);
-  const travel = await stablePhaseCapture(context, page, "after-sprint", engine, () =>
-    browser.assertHealthy(),
-  );
-  await engine.setCameraLook(0, -0.72);
-  const targeted = await engine.waitForSnapshot(
-    (snapshot) => snapshotValue(snapshot, "targetPresent") === 1,
-    { timeoutMs: 15_000, description: "ordinary player could not target terrain to dig" },
-  );
-  const editsBefore = snapshotValue(targeted, "edits");
-
-  // First click acquires pointer lock, second click is the same primary-button dig action a player
-  // performs. The test intentionally does not call the automation edit shortcut.
-  await page.mouse.click(VIEWPORT.width / 2, VIEWPORT.height / 2);
-  await page.waitForFunction(() => document.pointerLockElement instanceof HTMLCanvasElement);
-  await page.mouse.down();
-  await page.waitForTimeout(120);
-  await page.mouse.up();
-  await engine.waitForSnapshot((snapshot) => snapshotValue(snapshot, "edits") > editsBefore, {
-    timeoutMs: 20_000,
-    description: "real primary-button dig did not become authoritative",
-  });
-  const edited = await stablePhaseCapture(context, page, "after-player-dig", engine, () =>
-    browser.assertHealthy(),
-  );
-  if (edited.cutFingerprint === travel.cutFingerprint) {
-    throw new Error("the authoritative player dig never changed the published terrain revision");
-  }
-  const reproductionCapture = await takePlayerScreenshot(page);
-  await context.artifacts.write(
-    "F2 gameplay capture with reproduction metadata",
-    reproductionCapture.filename,
-    reproductionCapture.png,
-    "image/png",
-  );
-  browser.assertHealthy();
-
-  return {
-    summary:
-      "Default spawn, a real player step, movement off the pedestal, and a real dig retained exact, stable, gap-free near terrain.",
-    metrics: {
-      walkedMetres: distanceMetres,
-      pedestalStepMetres,
-      pedestalExactPages: pedestal.exactPages,
-      editedExactPages: edited.exactPages,
-      travelExactPages: travel.exactPages,
-      pedestalSelectedCut: pedestal.cutFingerprint,
-      travelSelectedCut: travel.cutFingerprint,
-      editedSelectedCut: edited.cutFingerprint,
-      largestEnclosedSkyComponent: Math.max(
-        ...[pedestal, travel, edited].map((entry) => entry.largestEnclosedSkyComponent),
-      ),
-      exactLodDiscontinuities: 0,
-      reproductionScreenshotBytes: reproductionCapture.png.byteLength,
-      coldStartMs,
-      pedestalSettleMs: pedestal.settleMs,
-      travelSettleMs: travel.settleMs,
-      editSettleMs: edited.settleMs,
     },
-  };
+    onViolation: (violation) => preserveContinuousPresentationFailure(context, page, violation),
+  });
+  try {
+    let ready: readonly number[];
+    try {
+      await recorder.start();
+      ready = await recorder.waitFor(
+        (snapshot) =>
+          snapshotValue(snapshot, "terrainReady") === 1 &&
+          snapshotValue(snapshot, "canonicalImmediateRequired") > 0 &&
+          snapshotValue(snapshot, "canonicalImmediateResident") >=
+            snapshotValue(snapshot, "canonicalImmediateRequired") &&
+          snapshotValue(snapshot, "grounded") === 1 &&
+          snapshotValue(snapshot, "pendingJobs") === 0 &&
+          snapshotValue(snapshot, "frameSequence") > 0,
+        {
+          timeoutMs: COLD_START_BUDGET_MS,
+          description: "default player never received a playable terrain presentation",
+        },
+      );
+    } catch (error) {
+      try {
+        await context.artifacts.writeJson(
+          "cold-start failure engine snapshot",
+          "cold-start-failure-snapshot.json",
+          {
+            error: error instanceof Error ? error.message : String(error),
+            snapshot: recorder.trace().at(-1),
+            continuousTrace: recorder.trace(),
+          },
+        );
+      } catch (artifactError) {
+        context.log(`could not preserve cold-start snapshot evidence: ${String(artifactError)}`);
+      }
+      try {
+        const screenshot = await page.screenshot({ type: "png" });
+        await context.artifacts.write(
+          "cold-start failure player view",
+          "cold-start-failure.png",
+          screenshot,
+          "image/png",
+        );
+      } catch (artifactError) {
+        context.log(`could not preserve cold-start screenshot evidence: ${String(artifactError)}`);
+      }
+      throw error;
+    }
+    const coldStartMs = performance.now() - coldStartStarted;
+    recorder.setPhase("pedestal-step");
+    await recorder.guard(engine.setCameraLook(snapshotValue(ready, "yaw"), -0.48));
+    const pedestalStepMetres = await shortPlayerStep(page, recorder);
+    recorder.setPhase("pedestal-settle");
+    const pedestal = await stablePhaseCapture(
+      context,
+      page,
+      "default-pedestal",
+      engine,
+      recorder,
+      () => browser.assertHealthy(),
+    );
+
+    recorder.setPhase("travel");
+    await recorder.guard(engine.setCameraLook(0, -0.22));
+    const distanceMetres = await walkBeyondProtectedPedestal(context, page, recorder, 32);
+    await recorder.waitFor((snapshot) => snapshotValue(snapshot, "grounded") === 1, {
+      timeoutMs: 15_000,
+      description: "player did not land after leaving the spawn pedestal",
+    });
+    await recorder.guard(engine.setCameraLook(0, -0.48));
+    recorder.setPhase("travel-settle");
+    const travel = await stablePhaseCapture(context, page, "after-sprint", engine, recorder, () =>
+      browser.assertHealthy(),
+    );
+
+    recorder.setPhase("dig");
+    await recorder.guard(engine.setCameraLook(0, -0.72));
+    const targeted = await recorder.waitFor(
+      (snapshot) => snapshotValue(snapshot, "targetPresent") === 1,
+      { timeoutMs: 15_000, description: "ordinary player could not target terrain to dig" },
+    );
+    const editsBefore = snapshotValue(targeted, "edits");
+
+    // First click acquires pointer lock, second click is the same primary-button dig action a player
+    // performs. The test intentionally does not call the automation edit shortcut.
+    await recorder.guard(page.mouse.click(VIEWPORT.width / 2, VIEWPORT.height / 2));
+    await recorder.guard(
+      page.waitForFunction(() => document.pointerLockElement instanceof HTMLCanvasElement),
+    );
+    await page.mouse.down();
+    try {
+      await recorder.guard(page.waitForTimeout(120));
+    } finally {
+      await page.mouse.up();
+    }
+    await recorder.waitFor((snapshot) => snapshotValue(snapshot, "edits") > editsBefore, {
+      timeoutMs: 20_000,
+      description: "real primary-button dig did not become authoritative",
+    });
+    recorder.setPhase("dig-settle");
+    const edited = await stablePhaseCapture(
+      context,
+      page,
+      "after-player-dig",
+      engine,
+      recorder,
+      () => browser.assertHealthy(),
+    );
+    if (edited.cutFingerprint === travel.cutFingerprint) {
+      throw new Error("the authoritative player dig never changed the published terrain revision");
+    }
+    const reproductionCapture = await recorder.guard(takePlayerScreenshot(page));
+    await context.artifacts.write(
+      "F2 gameplay capture with reproduction metadata",
+      reproductionCapture.filename,
+      reproductionCapture.png,
+      "image/png",
+    );
+    browser.assertHealthy();
+
+    return {
+      summary:
+        "Default spawn, a real player step, movement off the pedestal, and a real dig retained exact, stable, gap-free near terrain on every observed renderer frame.",
+      metrics: {
+        walkedMetres: distanceMetres,
+        pedestalStepMetres,
+        pedestalExactPages: pedestal.exactPages,
+        editedExactPages: edited.exactPages,
+        travelExactPages: travel.exactPages,
+        pedestalSelectedCut: pedestal.cutFingerprint,
+        travelSelectedCut: travel.cutFingerprint,
+        editedSelectedCut: edited.cutFingerprint,
+        largestEnclosedSkyComponent: Math.max(
+          ...[pedestal, travel, edited].map((entry) => entry.largestEnclosedSkyComponent),
+        ),
+        exactLodDiscontinuities: 0,
+        continuousRendererFrames: recorder.observedFrames,
+        firstPlayableFrameSequence: recorder.firstPlayableFrameSequence ?? 0,
+        reproductionScreenshotBytes: reproductionCapture.png.byteLength,
+        coldStartMs,
+        pedestalSettleMs: pedestal.settleMs,
+        travelSettleMs: travel.settleMs,
+        editSettleMs: edited.settleMs,
+      },
+    };
+  } finally {
+    await recorder.stop();
+  }
 }
 
 export default defineScenario({

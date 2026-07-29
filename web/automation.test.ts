@@ -60,6 +60,44 @@ describe("engine automation contract", () => {
     expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.virtualTerrainExactPredictionCurrentCoverage]).toBe(
       "virtualTerrainExactPredictionCurrentCoverage",
     );
+    expect(
+      SNAPSHOT_FIELD_NAMES.slice(
+        SNAPSHOT.virtualTerrainDesiredEnvelopeComplete,
+        SNAPSHOT.frameSequence,
+      ),
+    ).toEqual([
+      "virtualTerrainDesiredEnvelopeComplete",
+      "virtualTerrainDesiredEnvelopeFingerprintLow24",
+      "virtualTerrainDesiredEnvelopeFingerprintMid24",
+      "virtualTerrainDesiredEnvelopeFingerprintHigh16",
+      "virtualTerrainDesiredSafetyLeaves",
+      "virtualTerrainDesiredHorizonRoots",
+      "virtualTerrainDesiredLocusMinimumLeafX",
+      "virtualTerrainDesiredLocusMinimumLeafZ",
+      "virtualTerrainDesiredLocusMaximumLeafExclusiveX",
+      "virtualTerrainDesiredLocusMaximumLeafExclusiveZ",
+      "virtualTerrainCommittedEnvelopeFingerprintLow24",
+      "virtualTerrainCommittedEnvelopeFingerprintMid24",
+      "virtualTerrainCommittedEnvelopeFingerprintHigh16",
+      "virtualTerrainCommittedSafetyLeaves",
+      "virtualTerrainCommittedSafetyCoverage",
+      "virtualTerrainCommittedHorizonRoots",
+      "virtualTerrainCommittedHorizonCoverage",
+      "virtualTerrainCommittedLocusMinimumLeafX",
+      "virtualTerrainCommittedLocusMinimumLeafZ",
+      "virtualTerrainCommittedLocusMaximumLeafExclusiveX",
+      "virtualTerrainCommittedLocusMaximumLeafExclusiveZ",
+      "presentationTargetX",
+      "presentationTargetY",
+      "presentationTargetZ",
+      "presentationGateActive",
+      "presentationGateStepsLow24",
+      "presentationGateStepsMid24",
+      "presentationGateStepsHigh16",
+      "presentationGateFramesLow24",
+      "presentationGateFramesMid24",
+      "presentationGateFramesHigh16",
+    ]);
     expect(SNAPSHOT_FIELD_NAMES[SNAPSHOT.schemaVersion]).toBe("schemaVersion");
   });
 

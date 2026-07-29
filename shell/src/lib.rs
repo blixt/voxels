@@ -2782,7 +2782,14 @@ mod web {
                 });
                 self.input.borrow_mut().clear();
             }
-            let profiling = !reproducing && self.profile.borrow().running();
+            let profiling = !reproducing
+                && crate::profile_owns_camera(
+                    self.profile.borrow().running(),
+                    self.profile_restore_camera.get().is_some(),
+                    self.pending_relocation
+                        .get()
+                        .map(|relocation| relocation.kind),
+                );
             let mut accumulator = if relocation_pending {
                 self.simulation_accumulator.get()
             } else if reproducing {
@@ -7661,6 +7668,15 @@ mod tests {
             },
             true,
         ));
+        assert!(profile_owns_camera(
+            false,
+            false,
+            Some(PendingRelocationKind::ProfileRestore),
+        ));
+        assert!(
+            !profile_owns_camera(false, false, None),
+            "authority returns to gameplay only after the restore transaction commits"
+        );
     }
 
     #[test]
