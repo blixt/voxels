@@ -243,23 +243,128 @@ pub enum VirtualTerrainRenderMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VirtualTerrainRequestId(u64);
 
-/// Opaque proof that the renderer committed one exact request.
+/// Semantic session whose camera and reproduction-visible state are presented atomically.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ClientViewSession {
+    #[default]
+    Gameplay,
+    Spectator,
+    Profile,
+    Reproduction,
+}
+
+/// Complete renderer-visible state for one client-view publication.
 ///
-/// This will become part of the aggregate client-view receipt when camera and scene ownership move
-/// into the renderer. For now it prevents the shell from treating an unrelated GPU completion as a
-/// publication.
+/// The shell may construct future state while the renderer continues drawing the current tuple.
+/// None of these values become visible until the matching terrain request commits.
+#[derive(Clone, Copy, Debug)]
+pub struct ClientViewPresentationState {
+    pub camera: CameraState,
+    pub session: ClientViewSession,
+    pub reproduction_environment: Option<WorldEnvironmentState>,
+    pub render_state: ScreenshotMutableRenderState,
+}
+
+/// Opaque identity for one atomically published camera/session/terrain tuple.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct VirtualTerrainPromotionReceipt {
-    request: VirtualTerrainRequestId,
-    generation: u64,
+pub struct PublishedClientViewReceipt {
+    presentation_serial: u64,
+    view_revision: u64,
+    request: Option<VirtualTerrainRequestId>,
+    terrain_generation: Option<u64>,
     revision_digest: u64,
 }
 
+impl PublishedClientViewReceipt {
+    pub const fn matches_frame(self, frame: FrameSubmissionReceipt) -> bool {
+        self.presentation_serial == frame.presentation_serial
+            && self.view_revision == frame.view_revision
+    }
+}
+
+/// Exact renderer-owned tuple submitted and presented for one frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum VirtualTerrainPromotionStatus {
+pub struct FrameSubmissionReceipt {
+    frame_id: u32,
+    presentation_serial: u64,
+    view_revision: u64,
+}
+
+impl FrameSubmissionReceipt {
+    pub const fn frame_id(self) -> u32 {
+        self.frame_id
+    }
+
+    pub const fn matches(self, published: PublishedClientViewReceipt) -> bool {
+        published.matches_frame(self)
+    }
+}
+
+/// Non-forgeable evidence that one exact request and GPU generation are ready to commit.
+///
+/// Deliberately not `Copy` or `Clone`: a host moves the evidence into one commit attempt.
+#[derive(Debug, Eq, PartialEq)]
+pub struct VirtualTerrainReadyReceipt {
+    request: VirtualTerrainRequestId,
+    generation: u64,
+    revision_digest: u64,
+    source: VirtualTerrainReadySource,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VirtualTerrainReadySource {
+    Active,
+    Candidate,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum VirtualTerrainReadyStatus {
     Pending,
-    Promoted(VirtualTerrainPromotionReceipt),
+    Ready(VirtualTerrainReadyReceipt),
     Stale,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientViewCommitError {
+    AlreadyInitialized,
+    NotInitialized,
+    InvalidCamera,
+    InvalidPresentationState,
+    StalePublishedReceipt,
+    StaleTerrainReadyReceipt,
+    CameraOutsidePresentationLocus,
+    Terrain(VirtualTerrainRendererError),
+}
+
+impl std::fmt::Display for ClientViewCommitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyInitialized => formatter.write_str("client view is already initialized"),
+            Self::NotInitialized => formatter.write_str("client view is not initialized"),
+            Self::InvalidCamera => formatter.write_str("client-view camera is invalid"),
+            Self::InvalidPresentationState => {
+                formatter.write_str("client-view presentation state is invalid")
+            }
+            Self::StalePublishedReceipt => {
+                formatter.write_str("published client-view receipt is stale")
+            }
+            Self::StaleTerrainReadyReceipt => {
+                formatter.write_str("virtual-terrain ready receipt is stale")
+            }
+            Self::CameraOutsidePresentationLocus => {
+                formatter.write_str("client-view camera is outside the presentation locus")
+            }
+            Self::Terrain(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for ClientViewCommitError {}
+
+impl From<VirtualTerrainRendererError> for ClientViewCommitError {
+    fn from(error: VirtualTerrainRendererError) -> Self {
+        Self::Terrain(error)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -281,30 +386,41 @@ struct CommittedVirtualTerrainPresentation {
     envelope: PresentationEnvelope,
     certificate: PresentationCoverageCertificate,
     revisions: WorldRevisionFence,
-    receipt: VirtualTerrainPromotionReceipt,
+    request: VirtualTerrainRequestId,
+    generation: u64,
 }
 
 impl CommittedVirtualTerrainPresentation {
-    fn from_publication(
-        publication: VirtualTerrainPublication,
-        generation: u64,
-    ) -> (Self, VirtualTerrainPromotionReceipt) {
-        let receipt = VirtualTerrainPromotionReceipt {
+    fn from_publication(publication: VirtualTerrainPublication, generation: u64) -> Self {
+        Self {
+            cut: publication.cut,
+            envelope: publication.envelope,
+            certificate: publication.certificate,
+            revisions: publication.revisions,
             request: publication.request,
             generation,
-            revision_digest: publication.revisions.digest(),
-        };
-        (
-            Self {
-                cut: publication.cut,
-                envelope: publication.envelope,
-                certificate: publication.certificate,
-                revisions: publication.revisions,
-                receipt,
-            },
-            receipt,
-        )
+        }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PresentedTerrain {
+    CanonicalShadow,
+    Virtual(Box<CommittedVirtualTerrainPresentation>),
+}
+
+#[derive(Clone, Debug)]
+struct PresentedClientView {
+    state: ClientViewPresentationState,
+    terrain: PresentedTerrain,
+    receipt: PublishedClientViewReceipt,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScreenshotFrameIdentity {
+    frame_id: u32,
+    camera: CameraState,
+    published: PublishedClientViewReceipt,
 }
 
 /// Frozen proof computed once at transaction construction and moved unchanged into committed state.
@@ -409,54 +525,25 @@ fn take_invalidated_virtual_terrain_publication(
     }
 }
 
-fn revoke_invalidated_committed_virtual_terrain(
-    committed: &mut Option<CommittedVirtualTerrainPresentation>,
+fn revoke_invalidated_presented_terrain(
+    terrain: &mut PresentedTerrain,
     change: &WorldChange,
 ) -> bool {
-    if committed
-        .as_ref()
-        .is_some_and(|committed| change.invalidates(&committed.revisions))
-    {
-        *committed = None;
+    if matches!(
+        terrain,
+        PresentedTerrain::Virtual(committed) if change.invalidates(&committed.revisions)
+    ) {
+        *terrain = PresentedTerrain::CanonicalShadow;
         true
     } else {
         false
     }
 }
 
-fn reset_virtual_terrain_presentation_state(
-    publication: &mut Option<VirtualTerrainPublication>,
-    committed: &mut Option<CommittedVirtualTerrainPresentation>,
-) -> bool {
-    let changed = publication.is_some() || committed.is_some();
-    *publication = None;
-    *committed = None;
+fn reset_presented_terrain(terrain: &mut PresentedTerrain) -> bool {
+    let changed = matches!(terrain, PresentedTerrain::Virtual(_));
+    *terrain = PresentedTerrain::CanonicalShadow;
     changed
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum VirtualTerrainRevisionAdmission {
-    Stale,
-    Pending,
-    Ready(VirtualTerrainPromotionDecision),
-}
-
-fn revalidate_ready_virtual_terrain_publication(
-    decision: VirtualTerrainPromotionDecision,
-    is_current: impl FnOnce() -> bool,
-) -> VirtualTerrainRevisionAdmission {
-    match decision {
-        VirtualTerrainPromotionDecision::Stale => VirtualTerrainRevisionAdmission::Stale,
-        VirtualTerrainPromotionDecision::Pending => VirtualTerrainRevisionAdmission::Pending,
-        VirtualTerrainPromotionDecision::CommitActive(_)
-        | VirtualTerrainPromotionDecision::PromoteCandidate(_) => {
-            if is_current() {
-                VirtualTerrainRevisionAdmission::Ready(decision)
-            } else {
-                VirtualTerrainRevisionAdmission::Stale
-            }
-        }
-    }
 }
 
 const fn virtual_terrain_committed_snapshot_is_safe(
@@ -3739,10 +3826,13 @@ pub struct Renderer {
     water_chunks: BTreeMap<MeshKey, ChunkMesh>,
     virtual_terrain: VirtualTerrainHierarchy,
     virtual_terrain_gpu: VirtualTerrainGpuControl,
-    virtual_terrain_mode: VirtualTerrainRenderMode,
-    /// Last GPU-certified ownership tuple. Cut, safety/horizon certificate, exact revisions, and
-    /// opaque receipt are replaced by one assignment and can never describe different banks.
-    virtual_terrain_committed: Option<CommittedVirtualTerrainPresentation>,
+    /// Camera, session-visible state, and terrain ownership used by every submitted frame.
+    ///
+    /// Candidate work is deliberately separate: an in-flight destination can progress while this
+    /// exact tuple continues drawing the source view.
+    presented_client_view: Option<PresentedClientView>,
+    next_presentation_serial: u64,
+    next_view_revision: u64,
     /// Ephemeral quality/demand target selected from the latest view and resident directory.
     virtual_terrain_oracle_cut: Option<VirtualTerrainCut>,
     /// Immutable cut currently being encoded or awaiting GPU certification. Directory growth,
@@ -3797,7 +3887,6 @@ pub struct Renderer {
     environment: OutdoorEnvironment,
     server_world_environment: WorldEnvironmentState,
     debug_environment_override: DebugEnvironmentOverride,
-    reproduction_environment_override: Option<WorldEnvironmentState>,
     world_environment: WorldEnvironmentState,
     observer_world_xz_metres: [f64; 2],
     celestial_observation: CelestialObservation,
@@ -4683,8 +4772,9 @@ impl Renderer {
             water_chunks: BTreeMap::new(),
             virtual_terrain,
             virtual_terrain_gpu,
-            virtual_terrain_mode: VirtualTerrainRenderMode::Disabled,
-            virtual_terrain_committed: None,
+            presented_client_view: None,
+            next_presentation_serial: 1,
+            next_view_revision: 1,
             virtual_terrain_oracle_cut: None,
             virtual_terrain_publication: None,
             next_virtual_terrain_request: 1,
@@ -4724,7 +4814,6 @@ impl Renderer {
             environment,
             server_world_environment: world_environment,
             debug_environment_override: DebugEnvironmentOverride::default(),
-            reproduction_environment_override: None,
             world_environment,
             observer_world_xz_metres,
             celestial_observation,
@@ -4843,19 +4932,14 @@ impl Renderer {
         self.world_environment = self.effective_environment_state();
     }
 
-    pub fn set_reproduction_environment(&mut self, state: Option<WorldEnvironmentState>) -> bool {
-        if state.is_some_and(|state| state != state.sanitized()) {
-            return false;
-        }
-        self.reproduction_environment_override = state;
-        self.refresh_effective_environment()
-    }
-
     fn effective_environment_state(&self) -> WorldEnvironmentState {
-        self.reproduction_environment_override.unwrap_or_else(|| {
-            self.debug_environment_override
-                .apply(self.server_world_environment)
-        })
+        self.presented_client_view
+            .as_ref()
+            .and_then(|presented| presented.state.reproduction_environment)
+            .unwrap_or_else(|| {
+                self.debug_environment_override
+                    .apply(self.server_world_environment)
+            })
     }
 
     fn refresh_effective_environment(&mut self) -> bool {
@@ -4949,7 +5033,7 @@ impl Renderer {
         if self.exact_volume_chunk_presented(coord) {
             return true;
         }
-        if self.virtual_terrain_mode != VirtualTerrainRenderMode::Visible {
+        if self.virtual_terrain_mode_from_presented_view() != VirtualTerrainRenderMode::Visible {
             return false;
         }
         let key = TerrainPageKey::surface(0, coord.x, coord.z);
@@ -5071,18 +5155,21 @@ impl Renderer {
             color.map(|value| value.map(|channel| channel.clamp(0.0, 1.0)));
         self.ui
             .set_diagnostic_sky_active(self.runtime_config.diagnostic_sky_color.is_some());
+        self.revise_presented_render_state();
     }
 
     /// Colors visible geometry by its actual resident page representation and hierarchy depth.
     pub fn set_geometry_source_debug(&mut self, active: bool) {
         self.geometry_source_debug = active;
         self.ui.set_geometry_sources_active(active);
+        self.revise_presented_render_state();
     }
 
     /// Selects the material-detail pipeline for deterministic profiling without adding a
     /// developer-only control to the player-facing World Lab.
     pub fn set_material_detail_enabled(&mut self, enabled: bool) {
         self.options.material_detail = enabled;
+        self.revise_presented_render_state();
     }
 
     pub const fn ui_open(&self) -> bool {
@@ -5239,21 +5326,6 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn set_reproduction_render_state(&mut self, state: ScreenshotMutableRenderState) -> bool {
-        if state.diagnostic_sky_color.is_some_and(|color| {
-            color
-                .into_iter()
-                .any(|channel| !channel.is_finite() || !(0.0..=1.0).contains(&channel))
-        }) {
-            return false;
-        }
-        _ = self.ui.set_open(state.world_lab_open);
-        self.set_diagnostic_sky_color(state.diagnostic_sky_color);
-        self.set_geometry_source_debug(state.geometry_source_debug);
-        self.set_material_detail_enabled(state.material_detail);
-        true
-    }
-
     pub fn set_screenshot_streaming_manifest(&mut self, manifest: ScreenshotStreamingManifest) {
         self.screenshot_streaming_manifest = manifest;
     }
@@ -5347,11 +5419,17 @@ impl Renderer {
             UiAction::SpectatorRequested(active) => {
                 self.host_ui_action = Some(HostUiAction::SpectatorRequested(active));
             }
-            UiAction::None | UiAction::PanelOpenChanged(_) => {}
+            UiAction::PanelOpenChanged(_) => self.revise_presented_render_state(),
+            UiAction::None => {}
         }
     }
 
-    fn screenshot_reproduction_metadata(&self, frame_id: u32, camera: &CameraState) -> String {
+    fn screenshot_reproduction_metadata(
+        &self,
+        frame_id: u32,
+        camera: &CameraState,
+        published: PublishedClientViewReceipt,
+    ) -> String {
         let world = self.screenshot_world_identity.as_ref().map_or_else(
             || "null".to_owned(),
             |world| {
@@ -5389,12 +5467,13 @@ impl Renderer {
         let streaming_manifest =
             screenshot_streaming_manifest_json(&self.screenshot_streaming_manifest);
         let gpu_virtual_feedback = self.virtual_terrain_gpu.latest_feedback();
+        let virtual_terrain_mode = self.virtual_terrain_mode_from_presented_view();
         let virtual_terrain_manifest =
             screenshot_virtual_terrain_manifest_json(ScreenshotVirtualTerrainManifestContext {
-                mode: self.virtual_terrain_mode,
+                mode: virtual_terrain_mode,
                 resident: &self.virtual_terrain_pages,
                 retired_published: &self.virtual_terrain_retired_published_pages,
-                published_cut: (self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible)
+                published_cut: (virtual_terrain_mode == VirtualTerrainRenderMode::Visible)
                     .then_some(self.committed_virtual_terrain_cut())
                     .flatten(),
                 oracle_cut: self.virtual_terrain_oracle_cut.as_ref(),
@@ -5412,7 +5491,7 @@ impl Renderer {
                     .map(|publication| &publication.cut),
                 feedback: gpu_virtual_feedback.as_ref(),
             });
-        let published_cut = (self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible)
+        let published_cut = (virtual_terrain_mode == VirtualTerrainRenderMode::Visible)
             .then_some(self.committed_virtual_terrain_cut())
             .flatten();
         let cut_manifest = format!(
@@ -5420,6 +5499,12 @@ impl Renderer {
             screenshot_virtual_cut_json(published_cut),
         );
         let cut_fingerprint = published_cut.map_or(0, |cut| cut.fingerprint);
+        let published_request = published
+            .request
+            .map_or_else(|| "null".to_owned(), |request| request.0.to_string());
+        let published_generation = published
+            .terrain_generation
+            .map_or_else(|| "null".to_owned(), |generation| generation.to_string());
         let inverse_view_projection = view_projection(
             &self.config,
             camera,
@@ -5446,11 +5531,11 @@ impl Renderer {
         );
         format!(
             concat!(
-                r#"{{"schema":"voxels.reproduction.v2","frameSequence":{},"runtime":{},"gpu":{},"image":{{"#,
+                r#"{{"schema":"voxels.reproduction.v3","frameSequence":{},"runtime":{},"gpu":{},"image":{{"#,
                 r#""pixelWidth":{},"pixelHeight":{},"cssWidth":{},"cssHeight":{},"devicePixelRatio":{}}},"#,
                 r#""camera":{{"eyeMetres":{:?},"velocityMetresPerSecond":{:?},"yawRadians":{},"pitchRadians":{},"headingDegrees":{},"verticalFovRadians":{},"nearPlaneMetres":0.05,"farPlaneMetres":{},"grounded":{},"locomotion":"{}","fluid":{{"immersion":{},"eyeDepthMetres":{},"signedEyeDepthMetres":{},"surfaceYMetres":{},"surfaceKnown":{},"eyesSubmerged":{},"swimming":{}}}}},"#,
                 r#""world":{},"environment":{{"serverTimeSeconds":{},"worldDays":{},"dayFraction":{},"yearFraction":{},"moonOrbitFraction":{},"twinklePhase":{},"planetCircumferenceMetres":{},"axialTiltRadians":{},"moonOrbitInclinationRadians":{},"celestialSeed":"{}","celestialRevision":"{}","weatherFraction":{},"weatherCycleSeconds":{},"cloudOffsetMetres":{:?},"cloudVelocityMetresPerSecond":{:?},"cloudCoverage":{},"cloudBaseMetres":{},"cloudTopMetres":{},"weatherSeed":"{}","weatherRevision":"{}","sunDirection":{:?},"moonDirection":{:?},"debugDayFraction":{},"debugWeatherFraction":{},"reproductionOverride":{},"surfaceRegion":{}}},"#,
-                r#""presentation":{{"viewportFingerprint":"{:016x}","selectedCutFingerprint":"{:016x}","terrainHandleSnapshot":{{"generation":"{}","cutFingerprint":"{:016x}","matchesPublishedCut":{}}},"selectedCut":{},"virtualTerrain":{},"worldQuads":{},"waterQuads":{},"drawCalls":{},"waterDrawCalls":{},"surfaceWidth":{},"surfaceHeight":{}}},"#,
+                r#""presentation":{{"publishedClientView":{{"presentationSerial":"{}","viewRevision":"{}","terrainRequest":{},"terrainGeneration":{},"revisionDigest":"{:016x}"}},"viewportFingerprint":"{:016x}","selectedCutFingerprint":"{:016x}","terrainHandleSnapshot":{{"generation":"{}","cutFingerprint":"{:016x}","matchesPublishedCut":{}}},"selectedCut":{},"virtualTerrain":{},"worldQuads":{},"waterQuads":{},"drawCalls":{},"waterDrawCalls":{},"surfaceWidth":{},"surfaceHeight":{}}},"#,
                 r#""streaming":{},"#,
                 r#""attachments":{},"#,
                 r#""render":{{"worldLabOpen":{},"features":{{"shadows":{},"voxelAmbientOcclusion":{},"screenSpaceAmbientOcclusion":{},"fog":{},"farTerrain":{},"water":{},"targetOutline":{},"materialDetail":{},"caveHeadlamp":{},"localLighting":{}}},"diagnosticSkyColor":{},"geometrySourceDebug":{},"viewDistanceMetres":{}}}}}"#
@@ -5504,8 +5589,15 @@ impl Renderer {
             celestial.moon_direction,
             debug_day_fraction,
             debug_weather_fraction,
-            self.reproduction_environment_override.is_some(),
+            self.presented_client_view
+                .as_ref()
+                .is_some_and(|presented| { presented.state.reproduction_environment.is_some() }),
             self.surface_region as u8,
+            published.presentation_serial,
+            published.view_revision,
+            published_request,
+            published_generation,
+            published.revision_digest,
             self.diagnostics.viewport_fingerprint,
             cut_fingerprint,
             self.diagnostics
@@ -5545,12 +5637,264 @@ impl Renderer {
         self.host_ui_action.take()
     }
 
-    pub fn set_spectator_active(&mut self, active: bool) {
-        self.ui.set_spectator_active(active);
-    }
-
     pub fn set_spectator_available(&mut self, available: bool) {
         self.ui.set_spectator_available(available);
+    }
+
+    pub fn current_mutable_render_state(&self) -> ScreenshotMutableRenderState {
+        ScreenshotMutableRenderState {
+            world_lab_open: self.ui.open(),
+            diagnostic_sky_color: self.runtime_config.diagnostic_sky_color,
+            geometry_source_debug: self.geometry_source_debug,
+            material_detail: self.options.material_detail,
+        }
+    }
+
+    /// Installs the renderer's first truthful camera/session tuple over canonical terrain.
+    ///
+    /// Virtual selection and GPU certification may proceed independently after this point, but no
+    /// virtual owner becomes visible until `commit_virtual_client_view` replaces this aggregate.
+    pub fn initialize_client_view(
+        &mut self,
+        state: ClientViewPresentationState,
+    ) -> Result<PublishedClientViewReceipt, ClientViewCommitError> {
+        if self.presented_client_view.is_some() {
+            return Err(ClientViewCommitError::AlreadyInitialized);
+        }
+        self.validate_client_view_state(&state)?;
+        let receipt = self.mint_published_client_view_receipt(None, None, 0, true);
+        self.presented_client_view = Some(PresentedClientView {
+            state,
+            terrain: PresentedTerrain::CanonicalShadow,
+            receipt,
+        });
+        self.apply_presented_client_view_state();
+        Ok(receipt)
+    }
+
+    pub fn active_client_view_receipt(&self) -> Option<PublishedClientViewReceipt> {
+        self.presented_client_view
+            .as_ref()
+            .map(|presented| presented.receipt)
+    }
+
+    pub fn active_client_view_state(&self) -> Option<ClientViewPresentationState> {
+        self.presented_client_view
+            .as_ref()
+            .map(|presented| presented.state)
+    }
+
+    /// Advances an already-published camera without rebuilding any spatial product.
+    ///
+    /// The exact receipt gate and one half-open locus membership test make ordinary motion O(1).
+    /// Session, reproduction state, and terrain ownership cannot change through this API.
+    pub fn advance_client_view_in_locus(
+        &mut self,
+        active: PublishedClientViewReceipt,
+        camera: CameraState,
+    ) -> Result<PublishedClientViewReceipt, ClientViewCommitError> {
+        self.validate_camera(&camera)?;
+        let Some(current) = self.presented_client_view.as_ref() else {
+            return Err(ClientViewCommitError::NotInitialized);
+        };
+        if current.receipt != active {
+            return Err(ClientViewCommitError::StalePublishedReceipt);
+        }
+        if let PresentedTerrain::Virtual(committed) = &current.terrain
+            && !committed
+                .envelope
+                .contains_position(camera.position.to_array())
+        {
+            return Err(ClientViewCommitError::CameraOutsidePresentationLocus);
+        }
+        let receipt = self.mint_published_client_view_receipt(
+            active.request,
+            active.terrain_generation,
+            active.revision_digest,
+            false,
+        );
+        let Some(current) = self.presented_client_view.as_mut() else {
+            unreachable!("client view remained initialized")
+        };
+        current.state.camera = camera;
+        current.receipt = receipt;
+        self.apply_presented_client_view_state();
+        Ok(receipt)
+    }
+
+    /// Atomically changes session/reproduction-visible state while preserving the exact terrain
+    /// bank and proof already covering the target camera.
+    pub fn transition_client_view_in_locus(
+        &mut self,
+        active: PublishedClientViewReceipt,
+        state: ClientViewPresentationState,
+    ) -> Result<PublishedClientViewReceipt, ClientViewCommitError> {
+        self.validate_client_view_state(&state)?;
+        let Some(current) = self.presented_client_view.as_ref() else {
+            return Err(ClientViewCommitError::NotInitialized);
+        };
+        if current.receipt != active {
+            return Err(ClientViewCommitError::StalePublishedReceipt);
+        }
+        if let PresentedTerrain::Virtual(committed) = &current.terrain
+            && !committed
+                .envelope
+                .contains_position(state.camera.position.to_array())
+        {
+            return Err(ClientViewCommitError::CameraOutsidePresentationLocus);
+        }
+        let receipt = self.mint_published_client_view_receipt(
+            active.request,
+            active.terrain_generation,
+            active.revision_digest,
+            true,
+        );
+        let Some(current) = self.presented_client_view.as_mut() else {
+            unreachable!("client view remained initialized")
+        };
+        current.state = state;
+        current.receipt = receipt;
+        self.apply_presented_client_view_state();
+        Ok(receipt)
+    }
+
+    fn presented_virtual_terrain(&self) -> Option<&CommittedVirtualTerrainPresentation> {
+        match self
+            .presented_client_view
+            .as_ref()
+            .map(|presented| &presented.terrain)
+        {
+            Some(PresentedTerrain::Virtual(committed)) => Some(committed),
+            Some(PresentedTerrain::CanonicalShadow) | None => None,
+        }
+    }
+
+    fn virtual_terrain_mode_from_presented_view(&self) -> VirtualTerrainRenderMode {
+        match self
+            .presented_client_view
+            .as_ref()
+            .map(|presented| &presented.terrain)
+        {
+            Some(PresentedTerrain::Virtual(_)) => VirtualTerrainRenderMode::Visible,
+            Some(PresentedTerrain::CanonicalShadow) => VirtualTerrainRenderMode::Shadow,
+            None => VirtualTerrainRenderMode::Disabled,
+        }
+    }
+
+    fn validate_camera(&self, camera: &CameraState) -> Result<(), ClientViewCommitError> {
+        let fluid = camera.fluid_state();
+        if !camera.position.is_finite()
+            || !camera.velocity.is_finite()
+            || !camera.yaw.is_finite()
+            || !camera.pitch.is_finite()
+            || !(-1.5..=1.5).contains(&camera.pitch)
+            || !fluid.immersion.is_finite()
+            || !(0.0..=1.0).contains(&fluid.immersion)
+            || !fluid.eye_depth_metres.is_finite()
+            || !fluid.signed_eye_depth_metres.is_finite()
+        {
+            return Err(ClientViewCommitError::InvalidCamera);
+        }
+        Ok(())
+    }
+
+    fn validate_client_view_state(
+        &self,
+        state: &ClientViewPresentationState,
+    ) -> Result<(), ClientViewCommitError> {
+        self.validate_camera(&state.camera)?;
+        if (state.session == ClientViewSession::Reproduction)
+            != state.reproduction_environment.is_some()
+            || state
+                .reproduction_environment
+                .is_some_and(|environment| environment != environment.sanitized())
+            || state
+                .render_state
+                .diagnostic_sky_color
+                .is_some_and(|color| {
+                    color
+                        .into_iter()
+                        .any(|channel| !channel.is_finite() || !(0.0..=1.0).contains(&channel))
+                })
+        {
+            return Err(ClientViewCommitError::InvalidPresentationState);
+        }
+        let observer = [
+            f64::from(state.camera.position.x),
+            f64::from(state.camera.position.z),
+        ];
+        let environment = state.reproduction_environment.unwrap_or_else(|| {
+            self.debug_environment_override
+                .apply(self.server_world_environment)
+        });
+        if environment.celestial_observation(observer).is_none() {
+            return Err(ClientViewCommitError::InvalidPresentationState);
+        }
+        Ok(())
+    }
+
+    fn mint_published_client_view_receipt(
+        &mut self,
+        request: Option<VirtualTerrainRequestId>,
+        terrain_generation: Option<u64>,
+        revision_digest: u64,
+        new_presentation: bool,
+    ) -> PublishedClientViewReceipt {
+        if new_presentation {
+            self.next_presentation_serial = self.next_presentation_serial.wrapping_add(1).max(1);
+        }
+        self.next_view_revision = self.next_view_revision.wrapping_add(1).max(1);
+        PublishedClientViewReceipt {
+            presentation_serial: self.next_presentation_serial,
+            view_revision: self.next_view_revision,
+            request,
+            terrain_generation,
+            revision_digest,
+        }
+    }
+
+    fn apply_presented_client_view_state(&mut self) {
+        let Some(state) = self
+            .presented_client_view
+            .as_ref()
+            .map(|presented| presented.state)
+        else {
+            return;
+        };
+        self.observer_world_xz_metres = [
+            f64::from(state.camera.position.x),
+            f64::from(state.camera.position.z),
+        ];
+        self.ui
+            .set_spectator_active(state.session == ClientViewSession::Spectator);
+        _ = self.ui.set_open(state.render_state.world_lab_open);
+        self.runtime_config.diagnostic_sky_color = state.render_state.diagnostic_sky_color;
+        self.ui
+            .set_diagnostic_sky_active(self.runtime_config.diagnostic_sky_color.is_some());
+        self.geometry_source_debug = state.render_state.geometry_source_debug;
+        self.ui
+            .set_geometry_sources_active(self.geometry_source_debug);
+        self.options.material_detail = state.render_state.material_detail;
+        let refreshed = self.refresh_effective_environment();
+        debug_assert!(refreshed, "validated client-view environment must render");
+    }
+
+    fn revise_presented_render_state(&mut self) {
+        let state = self.current_mutable_render_state();
+        let Some(active) = self.active_client_view_receipt() else {
+            return;
+        };
+        let receipt = self.mint_published_client_view_receipt(
+            active.request,
+            active.terrain_generation,
+            active.revision_digest,
+            false,
+        );
+        let Some(presented) = self.presented_client_view.as_mut() else {
+            return;
+        };
+        presented.state.render_state = state;
+        presented.receipt = receipt;
     }
 
     fn invalidate_virtual_terrain_desired_plan(&mut self) {
@@ -5561,20 +5905,17 @@ impl Renderer {
     }
 
     fn committed_virtual_terrain_cut(&self) -> Option<&VirtualTerrainCut> {
-        self.virtual_terrain_committed
-            .as_ref()
+        self.presented_virtual_terrain()
             .map(|committed| &committed.cut)
     }
 
     fn committed_virtual_terrain_envelope(&self) -> Option<&PresentationEnvelope> {
-        self.virtual_terrain_committed
-            .as_ref()
+        self.presented_virtual_terrain()
             .map(|committed| &committed.envelope)
     }
 
     fn committed_virtual_terrain_certificate(&self) -> Option<PresentationCoverageCertificate> {
-        self.virtual_terrain_committed
-            .as_ref()
+        self.presented_virtual_terrain()
             .map(|committed| committed.certificate)
     }
 
@@ -6178,11 +6519,6 @@ impl Renderer {
         self.virtual_terrain_oracle_view = Some(oracle_view);
         self.virtual_terrain_exact_surface_domain = Some(exact_surface_domain.clone());
         self.virtual_terrain_oracle_cut = Some(cut.clone());
-        if self.virtual_terrain_mode == VirtualTerrainRenderMode::Disabled {
-            // A fresh renderer has no published virtual owner yet. Shadow mode certifies the
-            // candidate handle snapshot before its first publication.
-            self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
-        }
         Ok(cut)
     }
 
@@ -6199,7 +6535,7 @@ impl Renderer {
         let committed = self.committed_virtual_terrain_cut();
         let envelope = self.committed_virtual_terrain_envelope();
         virtual_terrain_committed_snapshot_is_safe(
-            self.virtual_terrain_committed.is_some(),
+            self.presented_virtual_terrain().is_some(),
             self.committed_virtual_terrain_certificate()
                 .is_some_and(|certificate| certificate.complete),
             committed
@@ -6255,7 +6591,9 @@ impl Renderer {
         let selected = cut.selected_pages.iter().copied().collect::<BTreeSet<_>>();
         let published = self
             .committed_virtual_terrain_cut()
-            .filter(|_| self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible)
+            .filter(|_| {
+                self.virtual_terrain_mode_from_presented_view() == VirtualTerrainRenderMode::Visible
+            })
             .map(|cut| cut.selected_pages.iter().copied().collect::<BTreeSet<_>>())
             .unwrap_or_default();
         let rebuilds = cut
@@ -6401,64 +6739,116 @@ impl Renderer {
         Ok(Some(request))
     }
 
-    /// Explicitly commits only the exact current request before new streaming mutations.
+    /// Returns generation-stamped readiness evidence without changing presentation state.
     ///
-    /// GPU callbacks only record generation-stamped evidence. This synchronous method rechecks the
-    /// immutable revision fence, the exact candidate generation, and the request identity before
-    /// swapping the committed CPU proof and GPU bank as one renderer operation.
-    pub fn try_promote_virtual_terrain(
-        &mut self,
+    /// Candidate callbacks never promote themselves. The source tuple remains renderable until a
+    /// coordinator moves this opaque evidence into `commit_virtual_client_view`.
+    pub fn poll_virtual_terrain_ready(
+        &self,
         request: VirtualTerrainRequestId,
+    ) -> VirtualTerrainReadyStatus {
+        let Some(publication) =
+            exact_virtual_terrain_publication(self.virtual_terrain_publication.as_ref(), request)
+        else {
+            return VirtualTerrainReadyStatus::Stale;
+        };
+        if !publication.certificate.complete {
+            return VirtualTerrainReadyStatus::Stale;
+        }
+        let identity = virtual_terrain_snapshot_identity(&publication.cut, &publication.envelope);
+        let active_generation = self
+            .virtual_terrain_gpu
+            .matching_active_generation(identity);
+        let candidate_certified = publication.candidate_generation.is_some_and(|generation| {
+            self.virtual_terrain_gpu
+                .candidate_is_certified(identity, generation)
+        });
+        let decision = virtual_terrain_promotion_decision(
+            Some(publication.request),
+            request,
+            active_generation.is_some(),
+            active_generation,
+            candidate_certified,
+            publication.candidate_generation,
+        );
+        let (generation, source) = match decision {
+            VirtualTerrainPromotionDecision::Stale => return VirtualTerrainReadyStatus::Stale,
+            VirtualTerrainPromotionDecision::Pending => return VirtualTerrainReadyStatus::Pending,
+            VirtualTerrainPromotionDecision::CommitActive(generation) => {
+                (generation, VirtualTerrainReadySource::Active)
+            }
+            VirtualTerrainPromotionDecision::PromoteCandidate(generation) => {
+                (generation, VirtualTerrainReadySource::Candidate)
+            }
+        };
+        VirtualTerrainReadyStatus::Ready(VirtualTerrainReadyReceipt {
+            request,
+            generation,
+            revision_digest: publication.revisions.digest(),
+            source,
+        })
+    }
+
+    /// Atomically replaces camera, session-visible state, CPU proof, and GPU terrain bank.
+    ///
+    /// All validation occurs before the first mutation. A ready receipt from a superseded request,
+    /// generation, or revision fence is a strict no-op.
+    pub fn commit_virtual_client_view(
+        &mut self,
+        ready: VirtualTerrainReadyReceipt,
         authoritative_revisions: &AuthoritativeEditRevisions,
-    ) -> Result<VirtualTerrainPromotionStatus, VirtualTerrainRendererError> {
-        let admission = {
-            let Some(publication) = exact_virtual_terrain_publication(
-                self.virtual_terrain_publication.as_ref(),
-                request,
-            ) else {
-                return Ok(VirtualTerrainPromotionStatus::Stale);
-            };
-            if !publication.certificate.complete {
-                VirtualTerrainRevisionAdmission::Stale
-            } else {
+        state: ClientViewPresentationState,
+    ) -> Result<PublishedClientViewReceipt, ClientViewCommitError> {
+        if self.presented_client_view.is_none() {
+            return Err(ClientViewCommitError::NotInitialized);
+        }
+        self.validate_client_view_state(&state)?;
+        let decision =
+            {
+                let Some(publication) = exact_virtual_terrain_publication(
+                    self.virtual_terrain_publication.as_ref(),
+                    ready.request,
+                ) else {
+                    return Err(ClientViewCommitError::StaleTerrainReadyReceipt);
+                };
+                if publication.revisions.digest() != ready.revision_digest
+                    || !publication.revisions.is_current(authoritative_revisions)
+                    || !publication.certificate.complete
+                    || !publication
+                        .envelope
+                        .contains_position(state.camera.position.to_array())
+                {
+                    return Err(ClientViewCommitError::StaleTerrainReadyReceipt);
+                }
                 let identity =
                     virtual_terrain_snapshot_identity(&publication.cut, &publication.envelope);
-                let active_generation = self
-                    .virtual_terrain_gpu
-                    .matching_active_generation(identity);
-                let candidate_certified =
-                    publication.candidate_generation.is_some_and(|generation| {
-                        self.virtual_terrain_gpu
-                            .candidate_is_certified(identity, generation)
-                    });
-                let decision = virtual_terrain_promotion_decision(
-                    Some(publication.request),
-                    request,
-                    active_generation.is_some(),
-                    active_generation,
-                    candidate_certified,
-                    publication.candidate_generation,
-                );
-                revalidate_ready_virtual_terrain_publication(decision, || {
-                    publication.revisions.is_current(authoritative_revisions)
-                })
-            }
-        };
-        let ready = match admission {
-            VirtualTerrainRevisionAdmission::Stale => {
-                self.abort_virtual_terrain_publication();
-                return Ok(VirtualTerrainPromotionStatus::Stale);
-            }
-            VirtualTerrainRevisionAdmission::Pending => {
-                return Ok(VirtualTerrainPromotionStatus::Pending);
-            }
-            VirtualTerrainRevisionAdmission::Ready(ready) => ready,
-        };
+                let decision = match ready.source {
+                    VirtualTerrainReadySource::Active => self
+                        .virtual_terrain_gpu
+                        .matching_active_generation(identity)
+                        .map(VirtualTerrainPromotionDecision::CommitActive),
+                    VirtualTerrainReadySource::Candidate => publication
+                        .candidate_generation
+                        .filter(|generation| *generation == ready.generation)
+                        .filter(|generation| {
+                            self.virtual_terrain_gpu
+                                .candidate_is_certified(identity, *generation)
+                        })
+                        .map(VirtualTerrainPromotionDecision::PromoteCandidate),
+                };
+                match decision {
+                    Some(decision @ VirtualTerrainPromotionDecision::CommitActive(generation))
+                    | Some(
+                        decision @ VirtualTerrainPromotionDecision::PromoteCandidate(generation),
+                    ) if generation == ready.generation => decision,
+                    _ => return Err(ClientViewCommitError::StaleTerrainReadyReceipt),
+                }
+            };
         let Some(publication) = self.virtual_terrain_publication.take() else {
             unreachable!("ready admission retains the exact publication")
         };
         let identity = virtual_terrain_snapshot_identity(&publication.cut, &publication.envelope);
-        let generation = match ready {
+        let generation = match decision {
             VirtualTerrainPromotionDecision::PromoteCandidate(generation) => {
                 match self
                     .virtual_terrain_gpu
@@ -6467,7 +6857,9 @@ impl Renderer {
                     Ok(generation) => generation,
                     Err(_) => {
                         self.virtual_terrain_publication = Some(publication);
-                        return Err(VirtualTerrainRendererError::GpuCutNotCertified);
+                        return Err(ClientViewCommitError::Terrain(
+                            VirtualTerrainRendererError::GpuCutNotCertified,
+                        ));
                     }
                 }
             }
@@ -6476,15 +6868,28 @@ impl Renderer {
                 unreachable!("ready admission")
             }
         };
-        let (committed, receipt) =
+        let revision_digest = publication.revisions.digest();
+        let request = publication.request;
+        let committed =
             CommittedVirtualTerrainPresentation::from_publication(publication, generation);
+        let receipt = self.mint_published_client_view_receipt(
+            Some(request),
+            Some(generation),
+            revision_digest,
+            true,
+        );
+        self.presented_client_view = Some(PresentedClientView {
+            state,
+            terrain: PresentedTerrain::Virtual(Box::new(committed)),
+            receipt,
+        });
+        self.apply_presented_client_view_state();
         self.discard_retired_virtual_terrain_pages();
-        self.virtual_terrain_committed = Some(committed);
         self.virtual_terrain_staging_frontier.clear();
         // The unchanged-view cache was selected against the old committed overlap/capacity. Force
         // the next frame to derive demand and admission from the cut that actually promoted.
         self.invalidate_virtual_terrain_desired_plan();
-        Ok(VirtualTerrainPromotionStatus::Promoted(receipt))
+        Ok(receipt)
     }
 
     pub const fn virtual_terrain_publication_in_flight(&self) -> bool {
@@ -6522,10 +6927,16 @@ impl Renderer {
         ) {
             self.discard_virtual_terrain_publication_resources();
         }
-        if revoke_invalidated_committed_virtual_terrain(&mut self.virtual_terrain_committed, change)
-        {
-            if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible {
-                self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
+        let revoke_presented = self
+            .presented_client_view
+            .as_mut()
+            .is_some_and(|presented| {
+                revoke_invalidated_presented_terrain(&mut presented.terrain, change)
+            });
+        if revoke_presented {
+            let receipt = self.mint_published_client_view_receipt(None, None, 0, true);
+            if let Some(presented) = self.presented_client_view.as_mut() {
+                presented.receipt = receipt;
             }
             self.invalidate_virtual_terrain_desired_plan();
         }
@@ -6538,16 +6949,20 @@ impl Renderer {
     /// metadata and advancing the feedback generation makes all pre-reset callbacks inert before
     /// their source allocations are retired.
     pub fn reset_virtual_terrain_world(&mut self) {
-        reset_virtual_terrain_presentation_state(
-            &mut self.virtual_terrain_publication,
-            &mut self.virtual_terrain_committed,
-        );
+        self.virtual_terrain_publication = None;
+        let reset_presented = self
+            .presented_client_view
+            .as_mut()
+            .is_some_and(|presented| reset_presented_terrain(&mut presented.terrain));
+        if reset_presented {
+            let receipt = self.mint_published_client_view_receipt(None, None, 0, true);
+            if let Some(presented) = self.presented_client_view.as_mut() {
+                presented.receipt = receipt;
+            }
+        }
         self.virtual_terrain_gpu.reset_world();
         self.virtual_terrain_staging_frontier.clear();
         self.virtual_terrain_publication_abort_pending = false;
-        if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible {
-            self.virtual_terrain_mode = VirtualTerrainRenderMode::Shadow;
-        }
         self.invalidate_virtual_terrain_desired_plan();
         self.virtual_terrain_desired_envelope = None;
         self.virtual_terrain_exact_surface_domain = None;
@@ -6568,21 +6983,8 @@ impl Renderer {
         debug_assert!(self.virtual_terrain_retired_published_pages.is_empty());
     }
 
-    pub fn set_virtual_terrain_render_mode(
-        &mut self,
-        mode: VirtualTerrainRenderMode,
-    ) -> Result<(), VirtualTerrainRendererError> {
-        if mode == VirtualTerrainRenderMode::Visible
-            && !self.virtual_terrain_committed_snapshot_is_valid()
-        {
-            return Err(VirtualTerrainRendererError::GpuCutNotCertified);
-        }
-        self.virtual_terrain_mode = mode;
-        Ok(())
-    }
-
-    pub const fn virtual_terrain_render_mode(&self) -> VirtualTerrainRenderMode {
-        self.virtual_terrain_mode
+    pub fn virtual_terrain_render_mode(&self) -> VirtualTerrainRenderMode {
+        self.virtual_terrain_mode_from_presented_view()
     }
 
     pub fn virtual_terrain_region_roots(&self) -> Vec<TerrainPageKey> {
@@ -7078,7 +7480,7 @@ impl Renderer {
             return true;
         }
         let leaf = TerrainPageKey::surface(0, chunk.0, chunk.2);
-        self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible
+        self.virtual_terrain_mode_from_presented_view() == VirtualTerrainRenderMode::Visible
             && self.committed_virtual_terrain_cut().is_some_and(|cut| {
                 cut.selected_pages.iter().any(|selected| {
                     selected.is_surface() && leaf.ancestor_at(selected.level) == Some(*selected)
@@ -7096,7 +7498,7 @@ impl Renderer {
             voxel_z.div_euclid(CHUNK_EDGE as i32),
         );
         let virtual_leaf = TerrainPageKey::surface(0, column.0, column.1);
-        if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible
+        if self.virtual_terrain_mode_from_presented_view() == VirtualTerrainRenderMode::Visible
             && self.committed_virtual_terrain_cut().is_some_and(|cut| {
                 cut.selected_pages.iter().any(|selected| {
                     selected.is_surface()
@@ -7219,23 +7621,30 @@ impl Renderer {
         (uniform, occluded, portal_rejected, visibility_tests)
     }
 
-    /// Encodes and submits one frame, returning `false` when the surface could not be presented.
+    /// Encodes and submits the exact renderer-owned client view.
+    ///
+    /// A receipt is returned only after the command buffer is submitted and the surface is
+    /// presented. In-flight destination work never replaces the source tuple implicitly.
     #[must_use]
     pub fn render(
         &mut self,
         frame_id: u32,
         dt: f32,
-        camera: &CameraState,
         ui_stats: LiveStats,
         local_light_visibility: impl FnMut([f32; 3], f32) -> LocalLightVisibility,
         mut now_ms: impl FnMut() -> f64,
-    ) -> bool {
+    ) -> Option<FrameSubmissionReceipt> {
+        let (camera, published) = self
+            .presented_client_view
+            .as_ref()
+            .map(|presented| (presented.state.camera, presented.receipt))?;
+        let camera = &camera;
         let dt = bounded_frame_delta(dt);
         self.time += dt;
         self.observer_world_xz_metres =
             [f64::from(camera.position.x), f64::from(camera.position.z)];
         if !self.refresh_effective_environment() {
-            return false;
+            return None;
         }
         let interior_seconds = if self.interior_target.enclosure > self.interior.enclosure {
             0.25
@@ -7267,7 +7676,7 @@ impl Renderer {
             .update(-self.environment.key_light_direction)
             .is_err()
         {
-            return false;
+            return None;
         }
         let Ok(shadow_cascades) = directional_shadow_cascades(
             &self.config,
@@ -7275,7 +7684,7 @@ impl Renderer {
             self.shadow_direction.basis(),
             self.runtime_config.directional_shadows,
         ) else {
-            return false;
+            return None;
         };
         self.ui.set_stats(ui_stats);
         self.ui.advance(dt);
@@ -7321,20 +7730,17 @@ impl Renderer {
             .map(|cascade| AabbClipVolume::new(cascade.clip_from_world));
         let cull_started = now_ms();
         let (virtual_visible, virtual_ownership) =
-            if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible {
-                let Some((cut, envelope, _certificate)) = self
-                    .virtual_terrain_committed
-                    .as_ref()
+            if self.virtual_terrain_mode_from_presented_view() == VirtualTerrainRenderMode::Visible
+            {
+                let (cut, envelope, _certificate) = self
+                    .presented_virtual_terrain()
                     .map(|committed| (&committed.cut, &committed.envelope, committed.certificate))
-                    .filter(|(_, _, certificate)| certificate.complete)
-                else {
-                    return false;
-                };
+                    .filter(|(_, _, certificate)| certificate.complete)?;
                 if !envelope.contains_position(camera.position.to_array()) {
                     // Exceptional relocation and a lost publication race retain the last submitted
                     // frame. Never render a camera outside the exact/horizon proof paired with the
                     // active handle bank.
-                    return false;
+                    return None;
                 }
                 if !self
                     .virtual_terrain_gpu
@@ -7342,10 +7748,10 @@ impl Renderer {
                 {
                     // A visible frame has exactly one terrain generation. Never combine a CPU
                     // ownership cut or diagnostic sidecar with handles from another bank.
-                    return false;
+                    return None;
                 }
                 let Ok(ownership) = VirtualTerrainOwnership::from_cut(cut) else {
-                    return false;
+                    return None;
                 };
                 (true, ownership)
             } else {
@@ -7370,7 +7776,7 @@ impl Renderer {
         );
         let virtual_world_draw_lists = if virtual_visible {
             let Ok(draw_lists) = self.collect_virtual_terrain_draw_list(view_clip) else {
-                return false;
+                return None;
             };
             draw_lists
         } else {
@@ -7420,9 +7826,9 @@ impl Renderer {
             }
             CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return false;
+                return None;
             }
-            _ => return false,
+            _ => return None,
         };
         let view = frame
             .texture
@@ -7433,9 +7839,7 @@ impl Renderer {
                 label: Some("frame encoder"),
             });
         let virtual_candidate = if virtual_candidate_work.is_some() {
-            let Some(publication) = self.virtual_terrain_publication.as_ref() else {
-                return false;
-            };
+            let publication = self.virtual_terrain_publication.as_ref()?;
             Some(virtual_terrain_snapshot_identity(
                 &publication.cut,
                 &publication.envelope,
@@ -7499,7 +7903,7 @@ impl Renderer {
                     virtual_candidate_encode_failed = true;
                     self.abort_virtual_terrain_publication();
                     if !can_present_after_candidate_encode_failure(virtual_visible) {
-                        return false;
+                        return None;
                     }
                 }
             }
@@ -7639,7 +8043,7 @@ impl Renderer {
                     {
                         timer.cancel_frame(frame);
                     }
-                    return false;
+                    return None;
                 };
                 let virtual_opaque = if virtual_visible {
                     let Some(owners) = screenshot_virtual_terrain_owner_buffers(
@@ -7655,7 +8059,7 @@ impl Renderer {
                         {
                             timer.cancel_frame(frame);
                         }
-                        return false;
+                        return None;
                     };
                     Some(owners)
                 } else {
@@ -7672,7 +8076,7 @@ impl Renderer {
                     {
                         timer.cancel_frame(frame);
                     }
-                    return false;
+                    return None;
                 };
                 (Some(opaque), virtual_opaque, Some(water))
             } else if self.screenshot_requested {
@@ -7993,8 +8397,7 @@ impl Renderer {
             .as_ref()
             .map(|publication| (&publication.cut, &publication.envelope))
             .or_else(|| {
-                self.virtual_terrain_committed
-                    .as_ref()
+                self.presented_virtual_terrain()
                     .map(|committed| (&committed.cut, &committed.envelope))
             });
         let gpu_virtual_matches_cpu = gpu_virtual_feedback.as_ref().is_some_and(|feedback| {
@@ -8149,14 +8552,11 @@ impl Renderer {
             virtual_terrain_presented_snapshot_fingerprint,
         ) = presented_snapshot_identity.unwrap_or((0, 0));
         let virtual_terrain_presented_snapshot_matches_cut = virtual_visible
-            && self
-                .virtual_terrain_committed
-                .as_ref()
-                .is_some_and(|committed| {
-                    self.virtual_terrain_gpu.presented_snapshot_matches(
-                        virtual_terrain_snapshot_identity(&committed.cut, &committed.envelope),
-                    )
-                });
+            && self.presented_virtual_terrain().is_some_and(|committed| {
+                self.virtual_terrain_gpu.presented_snapshot_matches(
+                    virtual_terrain_snapshot_identity(&committed.cut, &committed.envelope),
+                )
+            });
         self.diagnostics = RenderDiagnostics {
             resident_chunks: (self.chunks.len()
                 + usize::from(virtual_visible) * self.virtual_terrain_pages.len())
@@ -8541,8 +8941,11 @@ impl Renderer {
             screenshot_target.as_ref(),
             screenshot_diagnostic_identity_target.as_ref(),
             screenshot_diagnostic_depth_target.as_ref(),
-            frame_id,
-            camera,
+            ScreenshotFrameIdentity {
+                frame_id,
+                camera: *camera,
+                published,
+            },
         );
         if let Some(generation) = virtual_candidate_generation_to_submit {
             // No fallible frame construction remains below this point. A recorded generation only
@@ -8563,7 +8966,11 @@ impl Renderer {
         self.queue.submit([command_buffer]);
         self.queue.present(frame);
         self.diagnostics.cpu_submit_ms = (now_ms() - submit_started).max(0.0) as f32;
-        true
+        Some(FrameSubmissionReceipt {
+            frame_id,
+            presentation_serial: published.presentation_serial,
+            view_revision: published.view_revision,
+        })
     }
 
     fn schedule_screenshot_readback(
@@ -8572,8 +8979,7 @@ impl Renderer {
         texture: Option<&wgpu::Texture>,
         diagnostic_identity_texture: Option<&wgpu::Texture>,
         diagnostic_depth_texture: Option<&wgpu::Texture>,
-        frame_id: u32,
-        camera: &CameraState,
+        frame: ScreenshotFrameIdentity,
     ) {
         if !self.screenshot_requested {
             return;
@@ -8699,7 +9105,8 @@ impl Renderer {
             );
         }
         let filename = self.ui.screenshot_filename();
-        let metadata = self.screenshot_reproduction_metadata(frame_id, camera);
+        let metadata =
+            self.screenshot_reproduction_metadata(frame.frame_id, &frame.camera, frame.published);
         let state = Arc::clone(&self.screenshot_readback);
         if let Ok(mut readback) = state.lock() {
             readback.in_flight = true;
@@ -12647,42 +13054,11 @@ mod tests {
             virtual_terrain_promotion_decision(Some(request), request, true, Some(77), false, None,),
             VirtualTerrainPromotionDecision::CommitActive(77),
         );
-        let (committed, receipt) =
-            CommittedVirtualTerrainPresentation::from_publication(publication, 77);
-        assert_eq!(committed.receipt, receipt);
-        assert_eq!(receipt.request, request);
-        assert_eq!(receipt.generation, 77);
+        let committed = CommittedVirtualTerrainPresentation::from_publication(publication, 77);
+        assert_eq!(committed.request, request);
+        assert_eq!(committed.generation, 77);
         assert_eq!(committed.envelope, envelope);
         assert!(committed.certificate.complete);
-    }
-
-    #[test]
-    fn pending_publication_does_not_scan_revisions_but_ready_publication_scans_once() {
-        let scans = std::cell::Cell::new(0);
-        let pending = revalidate_ready_virtual_terrain_publication(
-            VirtualTerrainPromotionDecision::Pending,
-            || {
-                scans.set(scans.get() + 1);
-                true
-            },
-        );
-        assert_eq!(pending, VirtualTerrainRevisionAdmission::Pending);
-        assert_eq!(scans.get(), 0);
-
-        let ready = revalidate_ready_virtual_terrain_publication(
-            VirtualTerrainPromotionDecision::PromoteCandidate(17),
-            || {
-                scans.set(scans.get() + 1);
-                true
-            },
-        );
-        assert_eq!(
-            ready,
-            VirtualTerrainRevisionAdmission::Ready(
-                VirtualTerrainPromotionDecision::PromoteCandidate(17)
-            )
-        );
-        assert_eq!(scans.get(), 1);
     }
 
     #[test]
@@ -12702,25 +13078,19 @@ mod tests {
             WorldRevisionFence::new([], []).expect("empty committed fence"),
             None,
         );
-        let (active, _) =
+        let active =
             CommittedVirtualTerrainPresentation::from_publication(committed_publication, 43);
         let former_selected = active.cut.selected_pages.clone();
-        let mut committed = Some(active);
+        let mut terrain = PresentedTerrain::Virtual(Box::new(active));
 
-        assert!(reset_virtual_terrain_presentation_state(
-            &mut candidate,
-            &mut committed
-        ));
+        assert!(candidate.is_some());
+        candidate = None;
+        assert!(reset_presented_terrain(&mut terrain));
         assert!(candidate.is_none());
-        assert!(committed.is_none());
+        assert_eq!(terrain, PresentedTerrain::CanonicalShadow);
         let pages_preserved_by_presentation = candidate
             .iter()
             .flat_map(|candidate| candidate.cut.selected_pages.iter())
-            .chain(
-                committed
-                    .iter()
-                    .flat_map(|committed| committed.cut.selected_pages.iter()),
-            )
             .copied()
             .collect::<BTreeSet<_>>();
         assert!(
@@ -12729,10 +13099,7 @@ mod tests {
                 .all(|key| !pages_preserved_by_presentation.contains(key)),
             "reset presentation state cannot preserve former selected pages through retention",
         );
-        assert!(!reset_virtual_terrain_presentation_state(
-            &mut candidate,
-            &mut committed
-        ));
+        assert!(!reset_presented_terrain(&mut terrain));
     }
 
     #[test]
@@ -12818,30 +13185,27 @@ mod tests {
             unrelated_fence.clone(),
             None,
         );
-        let (unrelated_committed, _) =
+        let unrelated_committed =
             CommittedVirtualTerrainPresentation::from_publication(unrelated_publication, 8);
-        let mut committed = Some(unrelated_committed.clone());
+        let mut terrain = PresentedTerrain::Virtual(Box::new(unrelated_committed.clone()));
         assert!(take_invalidated_virtual_terrain_publication(
             &mut candidate,
             changed
         ));
         assert!(candidate.is_none());
-        assert!(!revoke_invalidated_committed_virtual_terrain(
-            &mut committed,
-            changed
-        ));
-        assert_eq!(committed, Some(unrelated_committed));
+        assert!(!revoke_invalidated_presented_terrain(&mut terrain, changed));
+        assert_eq!(
+            terrain,
+            PresentedTerrain::Virtual(Box::new(unrelated_committed))
+        );
 
         let affected_publication =
             test_publication(VirtualTerrainRequestId(53), envelope, affected_fence, None);
-        let (affected_committed, _) =
+        let affected_committed =
             CommittedVirtualTerrainPresentation::from_publication(affected_publication, 9);
-        let mut committed = Some(affected_committed);
-        assert!(revoke_invalidated_committed_virtual_terrain(
-            &mut committed,
-            changed
-        ));
-        assert!(committed.is_none());
+        let mut terrain = PresentedTerrain::Virtual(Box::new(affected_committed));
+        assert!(revoke_invalidated_presented_terrain(&mut terrain, changed));
+        assert_eq!(terrain, PresentedTerrain::CanonicalShadow);
     }
 
     #[test]
