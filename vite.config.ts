@@ -161,8 +161,13 @@ function rustWasm(profile: WasmBuildProfile): Plugin {
       ensureWasmBuilt(profile);
     },
     configureServer(server) {
+      let initialWatchScanComplete = false;
+      server.watcher.once("ready", () => {
+        initialWatchScanComplete = true;
+      });
       for (const input of [...directories, ...files]) server.watcher.add(input);
       watchRustInputChanges(server.watcher, (file) => {
+        if (!initialWatchScanComplete) return;
         if (!isInput(file)) return;
         nativeReloadWillFollow ||= isNativeWorldServiceInput(file);
         if (timer) clearTimeout(timer);
@@ -290,6 +295,10 @@ function nativeWorldService(): Plugin {
     },
     configureServer(server) {
       let handleSignal: (() => void) | undefined;
+      let initialWatchScanComplete = false;
+      server.watcher.once("ready", () => {
+        initialWatchScanComplete = true;
+      });
       const nativeInputs = [
         ...NATIVE_WORLD_SERVICE_SOURCE_DIRS,
         ...NATIVE_WORLD_SERVICE_INPUT_FILES,
@@ -471,6 +480,7 @@ function nativeWorldService(): Plugin {
       process.once("SIGTERM", handleSignal);
       for (const input of nativeInputs) server.watcher.add(input);
       watchRustInputChanges(server.watcher, (file) => {
+        if (!initialWatchScanComplete) return;
         if (!isNativeWorldServiceInput(file)) return;
         crashAttempts = 0;
         scheduleRebuild(true);
