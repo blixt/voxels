@@ -312,12 +312,6 @@ export class EngineClient {
   }
 }
 
-export function gpuSampleStart(snapshot: readonly number[]): number {
-  const sampleCount = snapshot[SNAPSHOT.sampleCount];
-  if (sampleCount === undefined) throw new Error("snapshot omitted its frame sample count");
-  return SNAPSHOT.droppedSamples + 1 + sampleCount * FRAME_SAMPLE_WIDTH;
-}
-
 export function snapshotValue(snapshot: readonly number[], field: SnapshotField): number {
   const value = snapshot[SNAPSHOT[field]];
   if (value === undefined) throw new Error(`snapshot omitted ${field}`);
