@@ -11021,6 +11021,17 @@ const fn virtual_representation_label(kind: TerrainPageRepresentationKind) -> &'
 mod tests {
     use super::*;
 
+    fn test_heightfield_boundary_midpoints(
+        key: TerrainPageKey,
+        sample: voxels_world::SurfaceSample,
+    ) -> Vec<voxels_world::SurfaceSample> {
+        if key.level == 0 {
+            Vec::new()
+        } else {
+            vec![sample; 4 * TERRAIN_PAGE_EDGE_SAMPLES as usize]
+        }
+    }
+
     #[test]
     fn screenshot_json_escaping_preserves_adapter_text_as_data() {
         assert_eq!(
@@ -12048,6 +12059,7 @@ mod tests {
             key,
             3,
             &samples,
+            &test_heightfield_boundary_midpoints(key, samples[0]),
             voxels_world::TerrainErrorBounds::EXACT,
         )
         .unwrap();
@@ -12090,6 +12102,7 @@ mod tests {
             key,
             4,
             &samples,
+            &[],
             voxels_world::TerrainErrorBounds::EXACT,
         )
         .unwrap();
@@ -12140,6 +12153,7 @@ mod tests {
             key,
             5,
             &samples,
+            &[],
             voxels_world::TerrainErrorBounds::EXACT,
         )
         .unwrap();
@@ -12209,6 +12223,7 @@ mod tests {
             key,
             4,
             &samples,
+            &test_heightfield_boundary_midpoints(key, samples[0]),
             voxels_world::TerrainErrorBounds::EXACT,
         )
         .unwrap();
@@ -12328,6 +12343,7 @@ mod tests {
             parent_key,
             1,
             &parent_samples,
+            &test_heightfield_boundary_midpoints(parent_key, parent_samples[0]),
             voxels_world::TerrainErrorBounds::EXACT,
         )
         .unwrap();
@@ -12353,6 +12369,7 @@ mod tests {
                         };
                         edge * edge
                     ],
+                    &[],
                     voxels_world::TerrainErrorBounds::EXACT,
                 )
                 .unwrap()
@@ -12398,6 +12415,7 @@ mod tests {
             parent_key,
             1,
             &vec![sample(2); edge * edge],
+            &test_heightfield_boundary_midpoints(parent_key, sample(9)),
             voxels_world::TerrainErrorBounds::EXACT,
         )
         .unwrap();
@@ -12407,6 +12425,7 @@ mod tests {
             child_keys[0],
             1,
             &vec![sample(9); edge * edge],
+            &[],
             voxels_world::TerrainErrorBounds::EXACT,
         )
         .unwrap();
@@ -12432,6 +12451,7 @@ mod tests {
                     *key,
                     1,
                     &vec![sample(9); edge * edge],
+                    &[],
                     voxels_world::TerrainErrorBounds::EXACT,
                 )
                 .unwrap()
@@ -12628,6 +12648,7 @@ mod tests {
                     key,
                     1,
                     &vec![sample; edge * edge],
+                    &[],
                     voxels_world::TerrainErrorBounds::EXACT,
                 )
                 .unwrap()
@@ -12638,6 +12659,7 @@ mod tests {
             parent_key,
             1,
             &vec![sample; edge * edge],
+            &test_heightfield_boundary_midpoints(parent_key, sample),
             voxels_world::TerrainErrorBounds::EXACT,
         )
         .unwrap();

@@ -2164,12 +2164,48 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
+        let boundary_midpoints = if key.level == 0 {
+            Vec::new()
+        } else {
+            let midpoint = stride / 2;
+            let [[_, _], [maximum_x, maximum_z]] = key.horizontal_bounds().unwrap();
+            [
+                (minimum_x, true),
+                (maximum_x, true),
+                (minimum_z, false),
+                (maximum_z, false),
+            ]
+            .into_iter()
+            .flat_map(|(fixed, x_fixed)| {
+                (0..TERRAIN_PAGE_EDGE_SAMPLES as i32).map(move |offset| {
+                    let tangent =
+                        if x_fixed { minimum_z } else { minimum_x } + offset * stride + midpoint;
+                    let (world_x, world_z) = if x_fixed {
+                        (fixed, tangent)
+                    } else {
+                        (tangent, fixed)
+                    };
+                    SurfaceSample {
+                        height: world_x.div_euclid(5) + world_z.div_euclid(7),
+                        material: Material::Stone,
+                        water_level: None,
+                        region: SurfaceRegion::VerdantForest,
+                        moisture: 0.5,
+                        temperature: 0.5,
+                        ridge: 0.0,
+                        route: None,
+                    }
+                })
+            })
+            .collect()
+        };
         let error = 1_000_u32 << u32::from(key.level);
         build_sampled_heightfield_terrain_page(
             identity(),
             key,
             7,
             &samples,
+            &boundary_midpoints,
             TerrainErrorBounds {
                 geometric_millivoxels: error,
                 silhouette_millivoxels: error,
