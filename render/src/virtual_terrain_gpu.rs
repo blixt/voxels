@@ -43,6 +43,8 @@ const STREAM_TRIANGLE: usize = 1;
 const STREAM_WATER_SURFACE: usize = 2;
 const STREAM_WATER_TRIANGLE: usize = 3;
 const STREAM_COUNT: usize = 4;
+pub(crate) const MAX_GEOMETRY_RANGES_PER_STREAM: usize = 9;
+const ADDITIONAL_GEOMETRY_RANGES_PER_STREAM: usize = MAX_GEOMETRY_RANGES_PER_STREAM - 1;
 
 const fn stream_element_capacity(bytes: u64) -> u32 {
     (bytes / GPU_GEOMETRY_ELEMENT_BYTES) as u32
@@ -71,13 +73,16 @@ pub(crate) const VIRTUAL_TERRAIN_HANDLE_BANK_BYTES: u64 =
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
 struct GpuCandidatePage {
+    // The first pair per stream is kept separate so ordinary pages remain cheap to construct.
     // Each pair is (packed first handle, element count).
     ranges: [[u32; 2]; STREAM_COUNT],
+    additional_ranges: [[[u32; 2]; ADDITIONAL_GEOMETRY_RANGES_PER_STREAM]; STREAM_COUNT],
+    range_counts: [u32; STREAM_COUNT],
     // Stream-relative, exclusive-prefix destinations assigned deterministically by the CPU.
     destinations: [u32; STREAM_COUNT],
 }
 
-const _: () = assert!(size_of::<GpuCandidatePage>() == 48);
+const _: () = assert!(size_of::<GpuCandidatePage>() == 320);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
@@ -176,7 +181,7 @@ struct SnapshotMetadata {
     selected_pages: Vec<TerrainPageKey>,
     ownerless_roots: u32,
     expected_counts: [u32; STREAM_COUNT],
-    expected_ranges: Vec<[[u32; 2]; STREAM_COUNT]>,
+    expected_descriptors: Vec<GpuCandidatePage>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -680,7 +685,7 @@ impl VirtualTerrainGpuControl {
         if !pages.is_empty() {
             queue.write_buffer(&self.candidate_pages, 0, bytemuck::cast_slice(&pages));
         }
-        let expected_ranges = pages.iter().map(|page| page.ranges).collect();
+        let expected_descriptors = pages.clone();
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
         let counters = GpuSnapshotCounters {
@@ -709,7 +714,7 @@ impl VirtualTerrainGpuControl {
             selected_pages: identity.selected_pages.to_vec(),
             ownerless_roots: identity.ownerless_roots,
             expected_counts,
-            expected_ranges,
+            expected_descriptors,
         });
         self.pending_bank = Some(inactive);
         if let Ok(mut pending) = self.pending_feedback.lock() {
@@ -814,7 +819,7 @@ impl VirtualTerrainGpuControl {
         let Some(descriptor_count) = self.banks[bank]
             .metadata
             .as_ref()
-            .map(|metadata| metadata.expected_ranges.len())
+            .map(|metadata| metadata.expected_descriptors.len())
         else {
             return;
         };
@@ -1077,19 +1082,90 @@ fn assign_candidate_page_destinations(
     stream_prefixes: &mut [u32; STREAM_COUNT],
     stream_capacities: [u32; STREAM_COUNT],
 ) -> Result<GpuCandidatePage, VirtualTerrainGpuError> {
+    let range_lists = ranges.map(|range| {
+        if range[1] == 0 {
+            Vec::new()
+        } else {
+            vec![range]
+        }
+    });
+    assign_candidate_page_range_destinations(&range_lists, stream_prefixes, stream_capacities)
+}
+
+fn assign_candidate_page_range_destinations(
+    range_lists: &[Vec<[u32; 2]>; STREAM_COUNT],
+    stream_prefixes: &mut [u32; STREAM_COUNT],
+    stream_capacities: [u32; STREAM_COUNT],
+) -> Result<GpuCandidatePage, VirtualTerrainGpuError> {
     let destinations = *stream_prefixes;
     let mut next_prefixes = destinations;
+    let mut ranges = [[0; 2]; STREAM_COUNT];
+    let mut additional_ranges = [[[0; 2]; ADDITIONAL_GEOMETRY_RANGES_PER_STREAM]; STREAM_COUNT];
+    let mut range_counts = [0; STREAM_COUNT];
     for stream in 0..STREAM_COUNT {
+        let list = &range_lists[stream];
+        if list.len() > MAX_GEOMETRY_RANGES_PER_STREAM || list.iter().any(|range| range[1] == 0) {
+            return Err(VirtualTerrainGpuError::InvalidGeometry);
+        }
+        range_counts[stream] =
+            u32::try_from(list.len()).map_err(|_| VirtualTerrainGpuError::InvalidGeometry)?;
+        if let Some(first) = list.first() {
+            ranges[stream] = *first;
+        }
+        for (destination, range) in additional_ranges[stream]
+            .iter_mut()
+            .zip(list.iter().skip(1))
+        {
+            *destination = *range;
+        }
+        let stream_count = list.iter().try_fold(0u32, |total, range| {
+            total
+                .checked_add(range[1])
+                .ok_or(VirtualTerrainGpuError::GeometryCapacity)
+        })?;
         next_prefixes[stream] = next_prefixes[stream]
-            .checked_add(ranges[stream][1])
+            .checked_add(stream_count)
             .filter(|end| *end <= stream_capacities[stream])
             .ok_or(VirtualTerrainGpuError::GeometryCapacity)?;
     }
     *stream_prefixes = next_prefixes;
     Ok(GpuCandidatePage {
         ranges,
+        additional_ranges,
+        range_counts,
         destinations,
     })
+}
+
+fn candidate_range(page: &GpuCandidatePage, stream: usize, range: usize) -> Option<[u32; 2]> {
+    let count = usize::try_from(page.range_counts[stream]).ok()?;
+    if range >= count || count > MAX_GEOMETRY_RANGES_PER_STREAM {
+        return None;
+    }
+    if range == 0 {
+        Some(page.ranges[stream])
+    } else {
+        page.additional_ranges[stream].get(range - 1).copied()
+    }
+}
+
+fn candidate_stream_element_count(page: &GpuCandidatePage, stream: usize) -> Option<u32> {
+    (0..usize::try_from(page.range_counts[stream]).ok()?).try_fold(0u32, |total, range| {
+        total.checked_add(candidate_range(page, stream, range)?[1])
+    })
+}
+
+fn candidate_page_counts(pages: &[GpuCandidatePage]) -> Option<[u32; STREAM_COUNT]> {
+    let mut prefixes = [0u32; STREAM_COUNT];
+    for page in pages {
+        if page.destinations != prefixes {
+            return None;
+        }
+        for (stream, prefix) in prefixes.iter_mut().enumerate() {
+            *prefix = prefix.checked_add(candidate_stream_element_count(page, stream)?)?;
+        }
+    }
+    Some(prefixes)
 }
 
 fn expected_indirect_commands(counts: [u32; STREAM_COUNT]) -> [u32; GPU_SNAPSHOT_INDIRECT_WORDS] {
@@ -1100,26 +1176,11 @@ fn expected_indirect_commands(counts: [u32; STREAM_COUNT]) -> [u32; GPU_SNAPSHOT
 
 fn candidate_descriptors_match_canonical(
     candidate_pages: &[GpuCandidatePage],
-    expected_ranges: &[[[u32; 2]; STREAM_COUNT]],
+    expected_descriptors: &[GpuCandidatePage],
     expected_counts: [u32; STREAM_COUNT],
 ) -> bool {
-    if candidate_pages.len() != expected_ranges.len() {
-        return false;
-    }
-    let mut prefixes = [0; STREAM_COUNT];
-    for (candidate, ranges) in candidate_pages.iter().zip(expected_ranges) {
-        let Ok(expected) = assign_candidate_page_destinations(
-            *ranges,
-            &mut prefixes,
-            VIRTUAL_TERRAIN_HANDLE_CAPACITIES,
-        ) else {
-            return false;
-        };
-        if candidate != &expected {
-            return false;
-        }
-    }
-    prefixes == expected_counts
+    candidate_pages == expected_descriptors
+        && candidate_page_counts(candidate_pages) == Some(expected_counts)
 }
 
 fn snapshot_counter_evidence_matches(
@@ -1141,7 +1202,7 @@ fn snapshot_validation_failure_flags(
 ) -> u32 {
     u32::from(!candidate_descriptors_match_canonical(
         &readback.candidate_pages,
-        &metadata.expected_ranges,
+        &metadata.expected_descriptors,
         metadata.expected_counts,
     )) * VALIDATION_DESCRIPTOR_MISMATCH
         | u32::from(
@@ -1179,24 +1240,31 @@ fn exact_candidate_handles_match(
 ) -> bool {
     pages.iter().all(|page| {
         (0..STREAM_COUNT).all(|stream| {
-            let [first, count] = page.ranges[stream];
-            let Some(end) = page.destinations[stream].checked_add(count) else {
-                return false;
-            };
-            let Ok(destination) = usize::try_from(page.destinations[stream]) else {
-                return false;
-            };
-            let Ok(end) = usize::try_from(end) else {
-                return false;
-            };
-            let Some(actual) = stream_handles[stream].get(destination..end) else {
-                return false;
-            };
-            actual.iter().enumerate().all(|(index, actual)| {
-                u32::try_from(index)
-                    .ok()
-                    .and_then(|index| first.checked_add(index))
-                    == Some(*actual)
+            let mut destination = page.destinations[stream];
+            (0..usize::try_from(page.range_counts[stream]).unwrap_or(usize::MAX)).all(|range| {
+                let Some([first, count]) = candidate_range(page, stream, range) else {
+                    return false;
+                };
+                let Some(end) = destination.checked_add(count) else {
+                    return false;
+                };
+                let Ok(destination_index) = usize::try_from(destination) else {
+                    return false;
+                };
+                let Ok(end_index) = usize::try_from(end) else {
+                    return false;
+                };
+                let Some(actual) = stream_handles[stream].get(destination_index..end_index) else {
+                    return false;
+                };
+                let matches = actual.iter().enumerate().all(|(index, actual)| {
+                    u32::try_from(index)
+                        .ok()
+                        .and_then(|index| first.checked_add(index))
+                        == Some(*actual)
+                });
+                destination = end;
+                matches
             })
         })
     })
@@ -1426,7 +1494,7 @@ mod tests {
             selected_pages,
             ownerless_roots,
             expected_counts,
-            expected_ranges: Vec::new(),
+            expected_descriptors: Vec::new(),
         }
     }
 
@@ -1487,9 +1555,12 @@ mod tests {
         assert!(shader.contains("fn encode_snapshot"));
         assert!(shader.contains("fn validate_candidate_structure"));
         assert!(shader.contains("fn validate_snapshot"));
-        assert!(shader.contains("handles[destination + element] = first_handle + element"));
-        assert!(shader.contains("if handles[destination + element] != first_handle + element"));
+        assert!(shader.contains("handles[range_destination + element] = first_handle + element"));
+        assert!(
+            shader.contains("if handles[range_destination + element] != first_handle + element")
+        );
         assert!(shader.contains("page.destinations[stream]"));
+        assert!(shader.contains("page.range_counts[stream]"));
         assert!(shader.contains("page_tokens[page_index] = 1u"));
         for line in shader
             .lines()
@@ -1628,10 +1699,13 @@ mod tests {
                 panic!("the invalidated hardware-test candidate must encode again")
             }
         };
-        let self_consistent_but_wrong = GpuCandidatePage {
-            ranges: [[1, 3], [3, 2], [0, 0], [0, 0]],
-            destinations: [0; STREAM_COUNT],
-        };
+        let mut prefixes = [0; STREAM_COUNT];
+        let self_consistent_but_wrong = assign_candidate_page_destinations(
+            [[1, 3], [3, 2], [0, 0], [0, 0]],
+            &mut prefixes,
+            VIRTUAL_TERRAIN_HANDLE_CAPACITIES,
+        )
+        .unwrap();
         queue.write_buffer(
             &control.candidate_pages,
             0,
@@ -1691,11 +1765,15 @@ mod tests {
                 panic!("the descriptor gap-overlap candidate must encode")
             }
         };
-        let gap_and_overlap = GpuCandidatePage {
-            ranges: [[5, 1], [6, 1], [0, 0], [0, 0]],
-            // Surface skips destination 3 while triangle overlaps destination 1.
-            destinations: [4, 1, 0, 0],
-        };
+        let mut prefixes = [0; STREAM_COUNT];
+        let mut gap_and_overlap = assign_candidate_page_destinations(
+            [[5, 1], [6, 1], [0, 0], [0, 0]],
+            &mut prefixes,
+            VIRTUAL_TERRAIN_HANDLE_CAPACITIES,
+        )
+        .unwrap();
+        // Surface skips destination 3 while triangle overlaps destination 1.
+        gap_and_overlap.destinations = [4, 1, 0, 0];
         queue.write_buffer(
             &control.candidate_pages,
             size_of::<GpuCandidatePage>() as u64,
@@ -1946,9 +2024,9 @@ mod tests {
                 )
                 .unwrap()
             })
-            .collect();
+            .collect::<Vec<_>>();
         let mut metadata = metadata(5, 8, vec![], 0, counts);
-        metadata.expected_ranges = ranges;
+        metadata.expected_descriptors = candidate_pages.clone();
         let mut readback = GpuSnapshotReadback {
             counters: GpuSnapshotCounters::default(),
             indirect_commands: expected_indirect_commands(metadata.expected_counts),
@@ -2002,6 +2080,51 @@ mod tests {
     }
 
     #[test]
+    fn bounded_range_lists_concatenate_disjoint_immutable_partitions_exactly() {
+        let range_lists = [
+            vec![[10, 2], [40, 1], [70, 3]],
+            vec![[GPU_HANDLE_SEGMENT_BIT | 5, 2], [90, 1]],
+            Vec::new(),
+            vec![[120, 2]],
+        ];
+        let mut prefixes = [3, 4, 0, 1];
+        let page =
+            assign_candidate_page_range_destinations(&range_lists, &mut prefixes, [16, 16, 0, 8])
+                .unwrap();
+        assert_eq!(page.destinations, [3, 4, 0, 1]);
+        assert_eq!(page.range_counts, [3, 2, 0, 1]);
+        assert_eq!(prefixes, [9, 7, 0, 3]);
+        assert!(exact_candidate_handles_match(
+            &[page],
+            &[
+                vec![0, 0, 0, 10, 11, 40, 70, 71, 72],
+                vec![
+                    0,
+                    0,
+                    0,
+                    0,
+                    GPU_HANDLE_SEGMENT_BIT | 5,
+                    GPU_HANDLE_SEGMENT_BIT | 6,
+                    90
+                ],
+                vec![],
+                vec![0, 120, 121],
+            ],
+        ));
+    }
+
+    #[test]
+    fn range_list_descriptor_overhead_is_fixed_and_bounded() {
+        assert_eq!(size_of::<GpuCandidatePage>(), 320);
+        assert_eq!(MAX_GEOMETRY_RANGES_PER_STREAM, 9);
+        assert_eq!(
+            size_of::<GpuCandidatePage>() - 48,
+            272,
+            "immutable partition selection costs 272 descriptor bytes per selected page"
+        );
+    }
+
+    #[test]
     fn deterministic_prefix_assignment_is_capacity_checked_and_transactional() {
         let mut prefixes = [3, u32::MAX, 0, 0];
         let before = prefixes;
@@ -2049,11 +2172,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(candidate_descriptors_match_canonical(
             &canonical,
-            &expected_ranges,
+            &canonical,
             expected_counts,
         ));
         let mut metadata = metadata(4, 5, vec![], 0, expected_counts);
-        metadata.expected_ranges = expected_ranges.clone();
+        metadata.expected_descriptors = canonical.clone();
         let mut readback = GpuSnapshotReadback {
             counters: GpuSnapshotCounters::default(),
             indirect_commands: expected_indirect_commands(expected_counts),
@@ -2065,7 +2188,7 @@ mod tests {
         wrong_first[0].ranges[0][0] += 1;
         assert!(!candidate_descriptors_match_canonical(
             &wrong_first,
-            &expected_ranges,
+            &canonical,
             expected_counts,
         ));
         readback.candidate_pages = wrong_first.clone();
@@ -2079,7 +2202,7 @@ mod tests {
         wrong_count_zero[1].ranges[0][1] = 0;
         assert!(!candidate_descriptors_match_canonical(
             &wrong_count_zero,
-            &expected_ranges,
+            &canonical,
             expected_counts,
         ));
 
@@ -2087,7 +2210,7 @@ mod tests {
         destination_gap[1].destinations[0] += 1;
         assert!(!candidate_descriptors_match_canonical(
             &destination_gap,
-            &expected_ranges,
+            &canonical,
             expected_counts,
         ));
 
@@ -2095,7 +2218,7 @@ mod tests {
         destination_overlap[1].destinations[0] -= 1;
         assert!(!candidate_descriptors_match_canonical(
             &destination_overlap,
-            &expected_ranges,
+            &canonical,
             expected_counts,
         ));
 
@@ -2103,12 +2226,12 @@ mod tests {
         stale_descriptor[1].ranges = canonical[0].ranges;
         assert!(!candidate_descriptors_match_canonical(
             &stale_descriptor,
-            &expected_ranges,
+            &canonical,
             expected_counts,
         ));
         assert!(!candidate_descriptors_match_canonical(
             &canonical[..1],
-            &expected_ranges,
+            &canonical,
             expected_counts,
         ));
     }
@@ -2138,10 +2261,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut metadata = metadata(9, 17, selected_pages, 0, expected_counts);
-        metadata.expected_ranges = expected_ranges;
+        metadata.expected_descriptors = descriptors.clone();
         assert!(candidate_descriptors_match_canonical(
             &descriptors,
-            &metadata.expected_ranges,
+            &metadata.expected_descriptors,
             metadata.expected_counts,
         ));
 

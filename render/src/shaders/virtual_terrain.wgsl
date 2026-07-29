@@ -1,6 +1,8 @@
 struct CandidatePage {
   // opaque surface, opaque triangle, water surface, water triangle.
   ranges: array<vec2<u32>, 4>,
+  additional_ranges: array<array<vec2<u32>, 8>, 4>,
+  range_counts: array<u32, 4>,
   // Stream-relative exclusive prefixes computed by the CPU.
   destinations: array<u32, 4>,
 };
@@ -43,9 +45,30 @@ const HANDLE_MISMATCH: u32 = 128u;
 
 var<workgroup> lane_failures: array<u32, 64>;
 
-fn candidate_range_error_flags(page: CandidatePage, stream: u32) -> u32 {
-  let first_handle = page.ranges[stream].x;
-  let count = page.ranges[stream].y;
+fn candidate_range(page: CandidatePage, stream: u32, range: u32) -> vec2<u32> {
+  if range == 0u {
+    return page.ranges[stream];
+  }
+  return page.additional_ranges[stream][range - 1u];
+}
+
+fn candidate_stream_count(page: CandidatePage, stream: u32) -> u32 {
+  var count = 0u;
+  for (var range = 0u; range < page.range_counts[stream]; range += 1u) {
+    count += candidate_range(page, stream, range).y;
+  }
+  return count;
+}
+
+fn candidate_range_error_flags(
+  page: CandidatePage,
+  stream: u32,
+  range_index: u32,
+  destination: u32,
+) -> u32 {
+  let range = candidate_range(page, stream, range_index);
+  let first_handle = range.x;
+  let count = range.y;
   let source_segment = first_handle >> 31u;
   let first_element = first_handle & HANDLE_ELEMENT_MASK;
   let source_capacity = select(
@@ -53,8 +76,6 @@ fn candidate_range_error_flags(page: CandidatePage, stream: u32) -> u32 {
     counters.source_element_capacities.y,
     source_segment == 1u,
   );
-  let destination = page.destinations[stream];
-
   var flags = 0u;
   if first_element > source_capacity
       || count > source_capacity - min(first_element, source_capacity) {
@@ -82,13 +103,25 @@ fn validate_candidate_structure(@builtin(workgroup_id) workgroup: vec3<u32>) {
   let page = candidates[page_index];
   var error_flags = 0u;
   for (var stream = 0u; stream < 4u; stream += 1u) {
-    error_flags |= candidate_range_error_flags(page, stream);
+    if page.range_counts[stream] > 9u {
+      error_flags |= OVERFLOW_STRUCTURE;
+      continue;
+    }
+    var range_destination = page.destinations[stream];
+    for (var range = 0u; range < page.range_counts[stream]; range += 1u) {
+      let geometry_range = candidate_range(page, stream, range);
+      if geometry_range.y == 0u {
+        error_flags |= OVERFLOW_STRUCTURE;
+      }
+      error_flags |= candidate_range_error_flags(page, stream, range, range_destination);
+      range_destination += geometry_range.y;
+    }
 
     var expected_destination = 0u;
     if page_index > 0u {
       let previous = candidates[page_index - 1u];
       let previous_destination = previous.destinations[stream];
-      let previous_count = previous.ranges[stream].y;
+      let previous_count = candidate_stream_count(previous, stream);
       if previous_destination > STREAM_CAPACITIES[stream]
           || previous_count > STREAM_CAPACITIES[stream]
               - min(previous_destination, STREAM_CAPACITIES[stream]) {
@@ -102,7 +135,7 @@ fn validate_candidate_structure(@builtin(workgroup_id) workgroup: vec3<u32>) {
     }
 
     if page_index + 1u == counters.selected_count {
-      let end = page.destinations[stream] + page.ranges[stream].y;
+      let end = page.destinations[stream] + candidate_stream_count(page, stream);
       if end != counters.element_counts[stream] {
         error_flags |= OVERFLOW_STRUCTURE;
       }
@@ -139,11 +172,15 @@ fn encode_snapshot(
 
   let page = candidates[page_index];
   for (var stream = 0u; stream < 4u; stream += 1u) {
-    let first_handle = page.ranges[stream].x;
-    let count = page.ranges[stream].y;
-    let destination = STREAM_OFFSETS[stream] + page.destinations[stream];
-    for (var element = local.x; element < count; element += 64u) {
-      handles[destination + element] = first_handle + element;
+    var range_destination = STREAM_OFFSETS[stream] + page.destinations[stream];
+    for (var range = 0u; range < page.range_counts[stream]; range += 1u) {
+      let geometry_range = candidate_range(page, stream, range);
+      let first_handle = geometry_range.x;
+      let count = geometry_range.y;
+      for (var element = local.x; element < count; element += 64u) {
+        handles[range_destination + element] = first_handle + element;
+      }
+      range_destination += count;
     }
   }
 }
@@ -175,13 +212,17 @@ fn validate_snapshot(
   let page = candidates[page_index];
   var lane_failed = 0u;
   for (var stream = 0u; stream < 4u; stream += 1u) {
-    let first_handle = page.ranges[stream].x;
-    let count = page.ranges[stream].y;
-    let destination = STREAM_OFFSETS[stream] + page.destinations[stream];
-    for (var element = local.x; element < count; element += 64u) {
-      if handles[destination + element] != first_handle + element {
-        lane_failed = 1u;
+    var range_destination = STREAM_OFFSETS[stream] + page.destinations[stream];
+    for (var range = 0u; range < page.range_counts[stream]; range += 1u) {
+      let geometry_range = candidate_range(page, stream, range);
+      let first_handle = geometry_range.x;
+      let count = geometry_range.y;
+      for (var element = local.x; element < count; element += 64u) {
+        if handles[range_destination + element] != first_handle + element {
+          lane_failed = 1u;
+        }
       }
+      range_destination += count;
     }
   }
   lane_failures[local.x] = lane_failed;
