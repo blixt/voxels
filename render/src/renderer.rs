@@ -3887,28 +3887,35 @@ impl ShadowGpu {
                 }],
             })
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("shadow caster pipeline layout"),
-            bind_group_layouts: &[Some(&layout), Some(virtual_geometry_layout)],
-            immediate_size: 0,
-        });
+        let fixed_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("fixed shadow caster pipeline layout"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+        let virtual_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("virtual terrain shadow caster pipeline layout"),
+                bind_group_layouts: &[Some(&layout), Some(virtual_geometry_layout)],
+                immediate_size: 0,
+            });
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/shadow.wgsl"));
         let fixed_pipeline = shadow_caster_pipeline(
             device,
             "fixed shadow caster pipeline",
-            &pipeline_layout,
+            &fixed_pipeline_layout,
             &shader,
         );
         let virtual_surface_pipeline = virtual_surface_shadow_caster_pipeline(
             device,
             "virtual terrain surface handle shadow caster pipeline",
-            &pipeline_layout,
+            &virtual_pipeline_layout,
             &shader,
         );
         let virtual_triangle_pipeline = virtual_triangle_shadow_caster_pipeline(
             device,
             "virtual terrain triangle shadow caster pipeline",
-            &pipeline_layout,
+            &virtual_pipeline_layout,
             &shader,
         );
         Ok(Self {
