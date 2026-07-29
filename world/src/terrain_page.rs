@@ -1138,11 +1138,11 @@ fn heightfield_boundary_fingerprints(
                     grid.sample_stride_voxels,
                     edge,
                     |z, hasher| {
-                    let sample = x + z * edge;
+                        let sample = x + z * edge;
                         hash_heightfield_column(
                             hasher,
-                        grid.ground_heights[sample],
-                        grid.water_heights[sample],
+                            grid.ground_heights[sample],
+                            grid.water_heights[sample],
                             palette_material(
                                 materials,
                                 grid.sample_material_indices.get(sample).copied(),
@@ -1160,11 +1160,11 @@ fn heightfield_boundary_fingerprints(
                     grid.sample_stride_voxels,
                     edge,
                     |x, hasher| {
-                    let sample = x + z * edge;
+                        let sample = x + z * edge;
                         hash_heightfield_column(
                             hasher,
-                        grid.ground_heights[sample],
-                        grid.water_heights[sample],
+                            grid.ground_heights[sample],
+                            grid.water_heights[sample],
                             palette_material(
                                 materials,
                                 grid.sample_material_indices.get(sample).copied(),
@@ -1189,34 +1189,33 @@ fn exact_surface_handoff_fingerprint(
     samples: &ExactPageSamples,
     side: BoundarySide,
 ) -> [u8; 32] {
-    let (plane, tangent_min, column_at): (i32, i32, Box<dyn Fn(usize) -> (i32, i32)>) =
-        match side {
-            BoundarySide::NegativeX | BoundarySide::PositiveX => {
-                let x = if side == BoundarySide::PositiveX {
-                    bounds.max.x
-                } else {
-                    bounds.min.x
-                };
-                (
-                    x,
-                    bounds.min.z,
-                    Box::new(move |index| (x, bounds.min.z + index as i32)),
-                )
-            }
-            BoundarySide::NegativeZ | BoundarySide::PositiveZ => {
-                let z = if side == BoundarySide::PositiveZ {
-                    bounds.max.z
-                } else {
-                    bounds.min.z
-                };
-                (
-                    z,
-                    bounds.min.x,
-                    Box::new(move |index| (bounds.min.x + index as i32, z)),
-                )
-            }
-            BoundarySide::NegativeY | BoundarySide::PositiveY => unreachable!(),
-        };
+    let (plane, tangent_min, column_at): (i32, i32, Box<dyn Fn(usize) -> (i32, i32)>) = match side {
+        BoundarySide::NegativeX | BoundarySide::PositiveX => {
+            let x = if side == BoundarySide::PositiveX {
+                bounds.max.x
+            } else {
+                bounds.min.x
+            };
+            (
+                x,
+                bounds.min.z,
+                Box::new(move |index| (x, bounds.min.z + index as i32)),
+            )
+        }
+        BoundarySide::NegativeZ | BoundarySide::PositiveZ => {
+            let z = if side == BoundarySide::PositiveZ {
+                bounds.max.z
+            } else {
+                bounds.min.z
+            };
+            (
+                z,
+                bounds.min.x,
+                Box::new(move |index| (bounds.min.x + index as i32, z)),
+            )
+        }
+        BoundarySide::NegativeY | BoundarySide::PositiveY => unreachable!(),
+    };
     surface_handoff_fingerprint(
         side.axis(),
         plane,
@@ -1290,12 +1289,7 @@ fn hash_column_transition(
     hasher.update(&visible_material.id().to_le_bytes());
 }
 
-fn hash_exact_column(
-    hasher: &mut blake3::Hasher,
-    samples: &ExactPageSamples,
-    x: i32,
-    z: i32,
-) {
+fn hash_exact_column(hasher: &mut blake3::Hasher, samples: &ExactPageSamples, x: i32, z: i32) {
     let minimum_y = samples.halo_min.y;
     let maximum_y = minimum_y.saturating_add(samples.halo_shape[1] as i32);
     let mut previous = samples.sample(VoxelCoord::new(x, minimum_y, z));
@@ -1315,22 +1309,14 @@ fn hash_heightfield_column(
 ) {
     hash_initial_column_material(hasher, ground_material);
     if water_height > ground_height {
-        hash_column_transition(
-            hasher,
-            ground_height,
-            ground_material,
-            Material::Water,
-        );
+        hash_column_transition(hasher, ground_height, ground_material, Material::Water);
         hash_column_transition(hasher, water_height, Material::Water, Material::Air);
     } else {
         hash_column_transition(hasher, ground_height, ground_material, Material::Air);
     }
 }
 
-fn palette_material(
-    materials: &[TerrainMaterialCoverage],
-    material_index: Option<u8>,
-) -> Material {
+fn palette_material(materials: &[TerrainMaterialCoverage], material_index: Option<u8>) -> Material {
     material_index
         .and_then(|index| materials.get(usize::from(index)))
         .map_or(Material::Air, |coverage| coverage.material)
@@ -1346,8 +1332,7 @@ pub fn heightfield_refined_handoff_fingerprints(
         return None;
     };
     if page.key.level == 0
-        || grid.boundary_midpoint_ground_heights.len()
-            != TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS
+        || grid.boundary_midpoint_ground_heights.len() != TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS
     {
         return None;
     }
@@ -1382,8 +1367,7 @@ pub fn heightfield_refined_handoff_fingerprints(
                 ),
             ));
             if ordinary + 1 < edge {
-                let residual =
-                    side_index * TERRAIN_PAGE_EDGE_SAMPLES as usize + ordinary;
+                let residual = side_index * TERRAIN_PAGE_EDGE_SAMPLES as usize + ordinary;
                 samples.push((
                     grid.boundary_midpoint_ground_heights[residual],
                     grid.boundary_midpoint_water_heights[residual],
@@ -3310,7 +3294,7 @@ fn boundary_quads_are_valid(
     palette_len: usize,
 ) -> bool {
     quads.iter().all(|quad| {
-            quad.width > 0
+        quad.width > 0
             && quad.height > 0
             && usize::from(quad.material_index) < palette_len
             && quad_inside_bounds(*quad, page.bounds, page.key.is_surface())
@@ -3332,8 +3316,7 @@ fn quad_inside_bounds(
             } else {
                 (quad.positive && (bounds.min.x + 1..=bounds.max.x).contains(&quad.plane))
                     || (!quad.positive && (bounds.min.x..bounds.max.x).contains(&quad.plane))
-            })
-                && quad.u >= bounds.min.y
+            }) && quad.u >= bounds.min.y
                 && quad.v >= bounds.min.z
                 && quad.u.saturating_add(width) <= bounds.max.y
                 && quad.v.saturating_add(height) <= bounds.max.z
@@ -3352,8 +3335,7 @@ fn quad_inside_bounds(
             } else {
                 (quad.positive && (bounds.min.z + 1..=bounds.max.z).contains(&quad.plane))
                     || (!quad.positive && (bounds.min.z..bounds.max.z).contains(&quad.plane))
-            })
-                && quad.u >= bounds.min.x
+            }) && quad.u >= bounds.min.x
                 && quad.v >= bounds.min.y
                 && quad.u.saturating_add(width) <= bounds.max.x
                 && quad.v.saturating_add(height) <= bounds.max.y
@@ -4293,20 +4275,15 @@ mod tests {
             higher_exact.boundary_fingerprints[BoundarySide::NegativeX as usize],
         );
 
-        let opened_exact = build_exact_surface_terrain_page(
-            identity(),
-            higher_key,
-            2,
-            [-4, 4],
-            |coord| {
+        let opened_exact =
+            build_exact_surface_terrain_page(identity(), higher_key, 2, [-4, 4], |coord| {
                 if coord.x == 0 && coord.z == 7 && coord.y == -1 {
                     Material::Air
                 } else {
                     flat_material(coord)
                 }
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         assert_ne!(
             lower_heightfield.boundary_fingerprints[BoundarySide::PositiveX as usize],
             opened_exact.boundary_fingerprints[BoundarySide::NegativeX as usize],

@@ -92,7 +92,6 @@ impl PresentationLocus {
         (minimum[0] as f32..maximum[0] as f32).contains(&position[0])
             && (minimum[1] as f32..maximum[1] as f32).contains(&position[1])
     }
-
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -704,10 +703,8 @@ impl ExactSurfaceDomain {
         // nominal 3.2 m denominator as f64 moves exact negative f32 boundaries just below their
         // page and violates half-open ownership.
         let leaf_span_metres = TERRAIN_PAGE_EDGE_SAMPLES as f32 * 0.1;
-        let leaf_coordinates =
-            [position_metres[0], position_metres[2]].map(|coordinate| {
-                (coordinate / leaf_span_metres).floor()
-            });
+        let leaf_coordinates = [position_metres[0], position_metres[2]]
+            .map(|coordinate| (coordinate / leaf_span_metres).floor());
         if leaf_coordinates
             .into_iter()
             .any(|coordinate| coordinate < i32::MIN as f32 || coordinate > i32::MAX as f32)
@@ -1357,8 +1354,7 @@ impl VirtualTerrainHierarchy {
                 ancestor = candidate.parent();
             }
         }
-        let exact_surface_lod_discontinuities =
-            exact_surface_lod_discontinuity_edges(&selected);
+        let exact_surface_lod_discontinuities = exact_surface_lod_discontinuity_edges(&selected);
         let surface_handoff_mismatches =
             level_zero_surface_handoff_audit(&selected, self).mismatches;
         let mut selected_primitives = 0_usize;
@@ -1368,10 +1364,8 @@ impl VirtualTerrainHierarchy {
                 .resident
                 .get(key)
                 .expect("resident selection was validated above");
-            selected_primitives =
-                selected_primitives.saturating_add(resident.primitive_count);
-            selected_encoded_bytes =
-                selected_encoded_bytes.saturating_add(resident.encoded_bytes);
+            selected_primitives = selected_primitives.saturating_add(resident.primitive_count);
+            selected_encoded_bytes = selected_encoded_bytes.saturating_add(resident.encoded_bytes);
         }
         let fingerprint = self.selected_fingerprint(&selected);
         Ok(VirtualTerrainCut {
@@ -1396,10 +1390,7 @@ impl VirtualTerrainHierarchy {
         &mut self,
         selected: &[TerrainPageKey],
     ) -> Result<(), VirtualTerrainError> {
-        if selected
-            .iter()
-            .any(|key| !self.resident.contains_key(key))
-        {
+        if selected.iter().any(|key| !self.resident.contains_key(key)) {
             return Err(VirtualTerrainError::InvalidSelection);
         }
         self.frame = self.frame.wrapping_add(1).max(1);
@@ -2369,9 +2360,7 @@ impl CutBuilder<'_> {
                 .filter(|coarse| {
                     self.selected.contains(coarse)
                         && !self.next_balanced_selected.contains(coarse)
-                        && self
-                            .hierarchy
-                            .replacement_is_resident_and_coherent(*coarse)
+                        && self.hierarchy.replacement_is_resident_and_coherent(*coarse)
                 })
                 .collect::<Vec<_>>();
             if ready.is_empty() {
@@ -3395,7 +3384,6 @@ mod tests {
         assert!(first.contains_position([-9.6, 0.0, -9.6]));
         assert!(!first.contains_position([3.2, 0.0, 0.0]));
         assert!(next.contains_position([3.2, 0.0, 0.0]));
-
     }
 
     #[test]
@@ -3424,10 +3412,9 @@ mod tests {
 
     #[test]
     fn mobility_margin_is_isotropic_and_fits_the_hard_column_budget() {
-        let root_span_metres =
-            f64::from(TERRAIN_PAGE_EDGE_SAMPLES)
-                * 0.1
-                * f64::from(1_u32 << TERRAIN_COVERAGE_ROOT_LEVEL);
+        let root_span_metres = f64::from(TERRAIN_PAGE_EDGE_SAMPLES)
+            * 0.1
+            * f64::from(1_u32 << TERRAIN_COVERAGE_ROOT_LEVEL);
         for z_step in 0..=16 {
             for x_step in 0..=16 {
                 let camera = [
@@ -3883,10 +3870,7 @@ mod tests {
         let mut hierarchy =
             VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
         insert_unregistered_resident(&mut hierarchy, flat_heightfield_page(lower));
-        insert_unregistered_resident(
-            &mut hierarchy,
-            flat_exact_surface_page(higher, None),
-        );
+        insert_unregistered_resident(&mut hierarchy, flat_exact_surface_page(higher, None));
 
         assert_eq!(
             level_zero_surface_handoff_audit(&selected, &hierarchy),
@@ -3896,14 +3880,7 @@ mod tests {
 
         insert_unregistered_resident(
             &mut hierarchy,
-            flat_exact_surface_page(
-                higher,
-                Some(VoxelCoord {
-                    x: 0,
-                    y: -1,
-                    z: 7,
-                }),
-            ),
+            flat_exact_surface_page(higher, Some(VoxelCoord { x: 0, y: -1, z: 7 })),
         );
         let mismatch = level_zero_surface_handoff_audit(&selected, &hierarchy);
         assert_eq!(mismatch.mismatches, 1);
@@ -3949,8 +3926,12 @@ mod tests {
             .refined_surface_handoffs
             .as_ref()
             .unwrap();
-        let fine_fingerprint = hierarchy.resident.get(&fine).unwrap().page.boundary_fingerprints
-            [BoundarySide::NegativeX as usize];
+        let fine_fingerprint = hierarchy
+            .resident
+            .get(&fine)
+            .unwrap()
+            .page
+            .boundary_fingerprints[BoundarySide::NegativeX as usize];
         assert_eq!(fine_fingerprint, refined[1][1]);
         assert_ne!(
             fine_fingerprint, refined[1][0],
@@ -3986,7 +3967,11 @@ mod tests {
 
         assert_eq!(audit, SurfaceHandoffAudit::default());
         assert!(!builder.selected.contains(&coarse));
-        assert!(children.iter().all(|child| builder.selected.contains(child)));
+        assert!(
+            children
+                .iter()
+                .all(|child| builder.selected.contains(child))
+        );
         assert!(builder.requests.is_empty());
         assert!(builder.refinement_requests.is_empty());
         assert!(

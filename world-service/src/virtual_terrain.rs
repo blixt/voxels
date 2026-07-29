@@ -1097,8 +1097,7 @@ mod tests {
     #[test]
     fn exact_surface_edit_discovery_matches_directional_page_ownership() {
         let key = TerrainPageKey::surface(1, -2, 3);
-        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] =
-            key.horizontal_bounds().unwrap();
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = key.horizontal_bounds().unwrap();
         let snapshot_at = |x, z| {
             let mut edits = voxels_world::EditMap::default();
             edits.insert_override(VoxelCoord::new(x, 0, z), Material::Basalt);

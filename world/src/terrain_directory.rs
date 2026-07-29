@@ -323,7 +323,6 @@ impl TerrainHierarchyDirectoryV1 {
             .ok()
             .and_then(|index| self.nodes.get(index))
     }
-
 }
 
 fn terrain_page_source_geometry_bytes(page: &TerrainPageV1) -> Result<u32, TerrainDirectoryError> {

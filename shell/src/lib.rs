@@ -1488,8 +1488,7 @@ mod web {
     // those handoffs through the optional one-page throttle makes an already-resident complete cut
     // trail ordinary sprinting for seconds. Optional screen-error refinement remains deliberately
     // incremental so it cannot monopolize the browser renderer.
-    const VIRTUAL_TERRAIN_MANDATORY_GPU_REBUILDS_PER_FRAME: usize =
-        TERRAIN_PAGE_MAX_CHILDREN * 2;
+    const VIRTUAL_TERRAIN_MANDATORY_GPU_REBUILDS_PER_FRAME: usize = TERRAIN_PAGE_MAX_CHILDREN * 2;
     const VIRTUAL_TERRAIN_OPTIONAL_GPU_REBUILDS_PER_FRAME: usize = 1;
     const VIRTUAL_TERRAIN_MAX_EXACT_DOMAIN_LEAVES: usize = 16_384;
 
@@ -3027,10 +3026,12 @@ mod web {
                 .virtual_terrain_exact_surface_domain(&demand_camera, demand_streaming_velocity);
             let presentation_envelope =
                 self.virtual_terrain_presentation_envelope(presentation_target_position);
-            self.renderer.borrow_mut().begin_virtual_terrain_presentation_envelope(
-                &presentation_envelope,
-                presentation_target_position.to_array(),
-            );
+            self.renderer
+                .borrow_mut()
+                .begin_virtual_terrain_presentation_envelope(
+                    &presentation_envelope,
+                    presentation_target_position.to_array(),
+                );
             let stream_breakdown = self.stream_world(
                 &camera,
                 source_streaming_velocity,
@@ -3039,11 +3040,7 @@ mod web {
                 &prediction_domain,
                 performance.as_ref(),
             );
-            if self
-                .renderer
-                .borrow()
-                .screenshot_reproduction_invalidated()
-            {
+            if self.renderer.borrow().screenshot_reproduction_invalidated() {
                 // Exact replay is impossible after an intersecting authoritative change. Cancel
                 // the pending handoff or restore the interactive session instead of allowing a
                 // normal terrain publication to satisfy the reproduction goal.

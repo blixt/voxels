@@ -152,9 +152,7 @@ fn material_face_is_visible(material: Material, neighbor: Material) -> bool {
     match material.render_layer() {
         crate::RenderLayer::Empty => false,
         crate::RenderLayer::Opaque => neighbor.render_layer() != crate::RenderLayer::Opaque,
-        crate::RenderLayer::Translucent => {
-            neighbor.render_layer() == crate::RenderLayer::Empty
-        }
+        crate::RenderLayer::Translucent => neighbor.render_layer() == crate::RenderLayer::Empty,
     }
 }
 
@@ -573,10 +571,8 @@ mod tests {
 
     #[test]
     fn directional_surface_pages_own_both_shared_boundary_orientations_from_the_lower_side() {
-        let left =
-            VoxelBounds::new(VoxelCoord::new(-2, -2, -1), VoxelCoord::new(0, 4, 1)).unwrap();
-        let right =
-            VoxelBounds::new(VoxelCoord::new(0, -2, -1), VoxelCoord::new(2, 4, 1)).unwrap();
+        let left = VoxelBounds::new(VoxelCoord::new(-2, -2, -1), VoxelCoord::new(0, 4, 1)).unwrap();
+        let right = VoxelBounds::new(VoxelCoord::new(0, -2, -1), VoxelCoord::new(2, 4, 1)).unwrap();
         let combined =
             VoxelBounds::new(VoxelCoord::new(-2, -2, -1), VoxelCoord::new(2, 4, 1)).unwrap();
 
@@ -620,8 +616,7 @@ mod tests {
 
     #[test]
     fn directional_surface_owner_keeps_the_opaque_bank_visible_at_water_interfaces() {
-        let bounds =
-            VoxelBounds::new(VoxelCoord::new(-1, 0, 0), VoxelCoord::new(0, 1, 1)).unwrap();
+        let bounds = VoxelBounds::new(VoxelCoord::new(-1, 0, 0), VoxelCoord::new(0, 1, 1)).unwrap();
         for (inside, outside) in [
             (Material::Stone, Material::Water),
             (Material::Water, Material::Stone),

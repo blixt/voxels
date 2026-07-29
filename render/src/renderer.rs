@@ -5873,8 +5873,7 @@ impl Renderer {
         if self.virtual_terrain_publication.is_some() {
             self.abort_virtual_terrain_publication();
         }
-        self.virtual_terrain_reproduction_cut =
-            Some(ScreenshotReproductionCut { cut, revisions });
+        self.virtual_terrain_reproduction_cut = Some(ScreenshotReproductionCut { cut, revisions });
         self.virtual_terrain_reproduction_invalidated = false;
         self.invalidate_virtual_terrain_desired_plan();
         Ok(())
@@ -6687,13 +6686,11 @@ impl Renderer {
                 Ok(cut)
                     if cut.fingerprint == pinned.cut.fingerprint
                         && cut.covers_presentation_envelope(presentation_envelope)
-                        && self
-                            .virtual_terrain
-                            .selection_is_exact_partition_for_view(
-                                &cut.selected_pages,
-                                view,
-                                presentation_envelope,
-                            ) =>
+                        && self.virtual_terrain.selection_is_exact_partition_for_view(
+                            &cut.selected_pages,
+                            view,
+                            presentation_envelope,
+                        ) =>
                 {
                     cut
                 }
@@ -6941,15 +6938,16 @@ impl Renderer {
         if !self.virtual_terrain_committed_snapshot_is_valid() {
             return (0, 0);
         }
-        self.presented_virtual_terrain().map_or((0, 0), |committed| {
-            if !committed.revisions_current {
-                return (0, 0);
-            }
-            (
-                committed.cut.exact_surface_coverage(domain),
-                committed.cut.exact_surface_core_coverage(domain),
-            )
-        })
+        self.presented_virtual_terrain()
+            .map_or((0, 0), |committed| {
+                if !committed.revisions_current {
+                    return (0, 0);
+                }
+                (
+                    committed.cut.exact_surface_coverage(domain),
+                    committed.cut.exact_surface_core_coverage(domain),
+                )
+            })
     }
 
     fn synchronize_virtual_terrain_cut_seams(
@@ -13780,10 +13778,7 @@ mod tests {
         ));
         let mut candidate = Some(publication_b);
         assert!(
-            !take_virtual_terrain_publication_missing_target(
-                &mut candidate,
-                [0.1, 0.0, 0.1],
-            ),
+            !take_virtual_terrain_publication_missing_target(&mut candidate, [0.1, 0.0, 0.1],),
             "overlapping exact domains must preserve useful work during A to B to A motion",
         );
         assert_eq!(
@@ -13791,10 +13786,7 @@ mod tests {
             Some(request_b),
         );
         assert!(
-            take_virtual_terrain_publication_missing_target(
-                &mut candidate,
-                [-30.0, 0.0, 0.1],
-            ),
+            take_virtual_terrain_publication_missing_target(&mut candidate, [-30.0, 0.0, 0.1],),
             "a target outside the frozen exact domain must supersede it",
         );
         assert!(candidate.is_none());
@@ -15203,10 +15195,9 @@ mod tests {
         let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 2);
         let incomplete = root.refinement_children().unwrap()[..2].to_vec();
         assert_eq!(
-            VirtualTerrainOwnership::from_cut(
-                &virtual_cut_with_selected(incomplete),
-                |_| Some(voxels_world::TerrainTopologyClass::Volumetric),
-            ),
+            VirtualTerrainOwnership::from_cut(&virtual_cut_with_selected(incomplete), |_| Some(
+                voxels_world::TerrainTopologyClass::Volumetric
+            ),),
             Err(VirtualTerrainRendererError::IncompleteRootPartition(root))
         );
     }
