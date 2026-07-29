@@ -251,13 +251,26 @@ impl TerrainHierarchyDirectoryV1 {
                 }
                 continue;
             };
-            for key in children {
-                let Some(child) = by_key.get(&key) else {
+            for key in &children {
+                let Some(child) = by_key.get(key) else {
                     return false;
                 };
-                if !errors_cover(node.errors, child.errors) || !referenced.insert(key) {
+                if !errors_cover(node.errors, child.errors) || !referenced.insert(*key) {
                     return false;
                 }
+            }
+            let exact_surface_replacement = node.key.is_surface()
+                && node.key.level == 1
+                && node.representation == TerrainPageRepresentationKind::HeightfieldGrid
+                && children.into_iter().all(|key| {
+                    by_key.get(&key).is_some_and(|child| {
+                        child.errors == TerrainErrorBounds::EXACT
+                            && child.topology == TerrainTopologyClass::Volumetric
+                            && child.representation == TerrainPageRepresentationKind::SurfaceCluster
+                    })
+                });
+            if exact_surface_replacement && !node.errors.unresolved_topology {
+                return false;
             }
         }
         if self
@@ -309,6 +322,42 @@ impl TerrainHierarchyDirectoryV1 {
             .binary_search_by_key(&key, |node| node.key)
             .ok()
             .and_then(|index| self.nodes.get(index))
+    }
+
+    /// Returns the coarse sides whose replacement by exact volumetric surface children requires
+    /// an exact neighbor at the same level.
+    ///
+    /// A heightfield boundary is a single-valued curve. An exact surface column may instead own
+    /// caves, overhangs, floating components, multiple material runs, or vertical steps at that
+    /// boundary. The compact heightfield payload cannot certify those topologies. Until a richer
+    /// boundary certificate exists, all four sides of an exact L0 replacement are therefore
+    /// conservatively closed by exact neighbors. This rule is derived entirely from persisted
+    /// directory nodes, so it is stable across cache and discovery order.
+    pub fn surface_exact_refinement_closure_sides(&self, key: TerrainPageKey) -> [bool; 4] {
+        let Some(parent) = self.node(key).filter(|node| {
+            node.key.is_surface()
+                && node.key.level == 1
+                && node.has_children
+                && node.errors.unresolved_topology
+                && node.representation == TerrainPageRepresentationKind::HeightfieldGrid
+        }) else {
+            return [false; 4];
+        };
+        let Some(children) = parent.key.refinement_children() else {
+            return [false; 4];
+        };
+        if children.into_iter().all(|child| {
+            self.node(child).is_some_and(|node| {
+                node.key.level == 0
+                    && node.errors == TerrainErrorBounds::EXACT
+                    && node.topology == TerrainTopologyClass::Volumetric
+                    && node.representation == TerrainPageRepresentationKind::SurfaceCluster
+            })
+        }) {
+            [true; 4]
+        } else {
+            [false; 4]
+        }
     }
 }
 
@@ -776,8 +825,10 @@ impl<'a> Cursor<'a> {
 mod tests {
     use super::*;
     use crate::{
-        Material, TerrainPageRepresentation, VoxelCoord, build_exact_cluster_terrain_parent,
-        build_exact_terrain_page,
+        Material, SurfaceRegion, SurfaceSample, TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS,
+        TERRAIN_PAGE_EDGE_SAMPLES, TerrainPageRepresentation, VoxelCoord,
+        build_exact_cluster_terrain_parent, build_exact_surface_terrain_page,
+        build_exact_terrain_page, build_sampled_heightfield_terrain_page,
     };
 
     fn identity() -> WorldSourceIdentityHash {
@@ -808,6 +859,51 @@ mod tests {
             .collect::<Vec<_>>();
         let root = build_exact_cluster_terrain_parent(root_key, 8, &leaves).unwrap();
         leaves.into_iter().chain([root]).collect()
+    }
+
+    fn exact_surface_refinement_pages(unresolved_topology: bool) -> Vec<TerrainPageV1> {
+        let root = TerrainPageKey::surface(1, -1, 0);
+        let sample = SurfaceSample {
+            height: 0,
+            material: Material::Stone,
+            water_level: None,
+            region: SurfaceRegion::VerdantForest,
+            moisture: 0.5,
+            temperature: 0.5,
+            ridge: 0.0,
+            route: None,
+        };
+        let parent = build_sampled_heightfield_terrain_page(
+            identity(),
+            root,
+            11,
+            &vec![
+                sample;
+                (TERRAIN_PAGE_EDGE_SAMPLES as usize + 1)
+                    * (TERRAIN_PAGE_EDGE_SAMPLES as usize + 1)
+            ],
+            &vec![sample; TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS],
+            TerrainErrorBounds {
+                unresolved_topology,
+                ..TerrainErrorBounds::EXACT
+            },
+        )
+        .unwrap();
+        root.refinement_children()
+            .unwrap()
+            .into_iter()
+            .map(|key| {
+                build_exact_surface_terrain_page(identity(), key, 11, [-2, 3], |coord| {
+                    if coord.y <= 0 {
+                        Material::Stone
+                    } else {
+                        Material::Air
+                    }
+                })
+                .unwrap()
+            })
+            .chain([parent])
+            .collect()
     }
 
     fn structural_region_forest(root_coords: &[[i32; 3]]) -> TerrainHierarchyDirectoryV1 {
@@ -875,6 +971,39 @@ mod tests {
             directory
         );
         assert_eq!(encode_terrain_directory(&directory).unwrap(), encoded);
+    }
+
+    #[test]
+    fn exact_surface_refinement_persists_a_conservative_four_side_closure_rule() {
+        let root = TerrainPageKey::surface(1, -1, 0);
+        let directory = TerrainHierarchyDirectoryV1::from_surface_refinement_pages(
+            root,
+            &exact_surface_refinement_pages(true),
+        )
+        .unwrap();
+        assert_eq!(
+            directory.surface_exact_refinement_closure_sides(root),
+            [true; 4]
+        );
+        let decoded =
+            decode_terrain_directory(&encode_terrain_directory(&directory).unwrap(), identity())
+                .unwrap();
+        assert_eq!(
+            decoded.surface_exact_refinement_closure_sides(root),
+            [true; 4]
+        );
+    }
+
+    #[test]
+    fn exact_surface_refinement_requires_an_unresolved_heightfield_owner() {
+        let root = TerrainPageKey::surface(1, -1, 0);
+        assert_eq!(
+            TerrainHierarchyDirectoryV1::from_surface_refinement_pages(
+                root,
+                &exact_surface_refinement_pages(false),
+            ),
+            Err(TerrainDirectoryError::InvalidHierarchy)
+        );
     }
 
     #[test]
