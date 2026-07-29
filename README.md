@@ -52,6 +52,8 @@ growth, edit latency, and one real Chromium observer.
 All verification and profiling entry points are indexed in the canonical
 [testing and performance map](docs/testing.md); the initial bot capacity results are in the
 [2026-07-17 load report](docs/20260717-bot-load-report.md).
+Concrete improvements that still need a benchmark or product decision remain in the small
+[maintenance follow-up list](docs/maintenance-followups.md).
 `vp run automation -- run terrain-fetch` and the `terrain-diffusion` scenario's `full`,
 `counterproof`, `base`, `detail`, and `survey` modes exercise the optional native Rust/Metal Terrain
 Diffusion provider on Apple silicon; see [the provider notes](docs/terrain-diffusion-metal.md).
