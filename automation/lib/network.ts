@@ -371,14 +371,16 @@ class ConnectionInspector {
       return;
     }
     const buffered = Buffer.concat([this.http[direction], bytes]);
-    if (buffered.length > MAX_HTTP_HEADER_BYTES)
-      throw new Error("WebSocket HTTP upgrade is too large");
     const end = buffered.indexOf(HTTP_HEADER_END);
     if (end < 0) {
+      if (buffered.length > MAX_HTTP_HEADER_BYTES)
+        throw new Error("WebSocket HTTP upgrade is too large");
       this.http[direction] = buffered;
       return;
     }
     const headerLength = end + HTTP_HEADER_END.length;
+    if (headerLength > MAX_HTTP_HEADER_BYTES)
+      throw new Error("WebSocket HTTP upgrade is too large");
     if (direction === "upstream") {
       const firstLine = buffered.subarray(0, end).toString("latin1").split("\r\n", 1)[0];
       if (firstLine === undefined) throw new Error("WebSocket upgrade omitted its request line");

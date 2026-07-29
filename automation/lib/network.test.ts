@@ -82,6 +82,23 @@ describe("network benchmark link", () => {
     expect(messages).toEqual([{ opcode: 2, payload: "VXWP fixture", frameBytes: frame.length }]);
   });
 
+  it("does not count a coalesced first WebSocket frame against the HTTP header limit", () => {
+    const payload = vxwpFrame(4, 70_000, 0);
+    const frame = Buffer.alloc(10 + payload.length);
+    frame[0] = 0x82;
+    frame[1] = 0x7f;
+    frame.writeBigUInt64BE(BigInt(payload.length), 2);
+    payload.copy(frame, 10);
+    const response = Buffer.from(
+      "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+    );
+    const stats = testInternals.blankStats();
+    const inspector = new testInternals.ConnectionInspector({ current: stats });
+
+    expect(() => inspector.observe("downstream", Buffer.concat([response, frame]))).not.toThrow();
+    expect(testInternals.clonedStats(stats).downstream.frames).toBe(1);
+  });
+
   it("attributes every frame byte in a fragmented WebSocket message", () => {
     const messages: {
       opcode: number;
