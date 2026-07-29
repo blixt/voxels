@@ -464,12 +464,8 @@ impl PresenceHub {
             if pose.sequence <= player.pose.map_or(0, |prior| prior.sequence) {
                 return PoseAdmission::IgnoredStale;
             }
-            let role_transition = player
-                .pose
-                .is_some_and(|prior| is_spectator(prior) != is_spectator(pose));
             if player.last_pose_receipt_ms != 0
                 && now.saturating_sub(player.last_pose_receipt_ms) < min_interval_ms
-                && !role_transition
             {
                 return PoseAdmission::IgnoredRateLimit;
             }
@@ -1368,6 +1364,35 @@ mod tests {
         assert_eq!(
             normal.accept_pose(&normal_attachment, too_fast_player),
             PoseAdmission::Invalid("player velocity exceeds the authoritative limit")
+        );
+    }
+
+    #[test]
+    fn spectator_role_transitions_cannot_bypass_the_pose_rate_limit() {
+        let hub = PresenceHub::new(
+            PresenceConfig {
+                max_pose_updates_per_second: 1,
+                ..PresenceConfig::default()
+            },
+            GameplayConfig {
+                allow_spectator_mode: true,
+                ..GameplayConfig::default()
+            },
+        )
+        .expect("hub");
+        let claim = hub
+            .join(&identity(24), resume(0.0, 1.62, 0.0))
+            .expect("join");
+        let attachment = hub.attach(claim.session_id).expect("attach");
+        let mut spectator = pose(1, 0.0, 0.0);
+        spectator.flags = PLAYER_POSE_SPECTATOR;
+        assert_eq!(
+            hub.accept_pose(&attachment, spectator),
+            PoseAdmission::Accepted
+        );
+        assert_eq!(
+            hub.accept_pose(&attachment, pose(2, 0.0, 0.0)),
+            PoseAdmission::IgnoredRateLimit
         );
     }
 
