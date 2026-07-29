@@ -1390,15 +1390,19 @@ fn virtual_microvoxel_gpu_quads(
                     x + (z + 1) * edge,
                 ];
                 let heights = samples.map(|sample| heightfield.water[sample]);
-                if heights.into_iter().all(|height| height.is_some()) {
-                    let values = heights.map(|height| lattice_height(height.unwrap()));
-                    let [left, right, far_right, far_left] = values;
-                    let [left, right, far_right, far_left] = [left?, right?, far_right?, far_left?];
-                    if left != right || left != far_right || left != far_left {
-                        return Ok(None);
-                    }
-                    flat_heights[x + z * cells] = Some(left);
+                let [Some(left), Some(right), Some(far_right), Some(far_left)] = heights else {
+                    continue;
+                };
+                let [left, right, far_right, far_left] = [
+                    lattice_height(left)?,
+                    lattice_height(right)?,
+                    lattice_height(far_right)?,
+                    lattice_height(far_left)?,
+                ];
+                if left != right || left != far_right || left != far_left {
+                    return Ok(None);
                 }
+                flat_heights[x + z * cells] = Some(left);
             }
         }
         let mut water_emitted = vec![false; cells * cells];
@@ -5281,26 +5285,29 @@ impl Renderer {
         let streaming_manifest =
             screenshot_streaming_manifest_json(&self.screenshot_streaming_manifest);
         let gpu_virtual_feedback = self.virtual_terrain_gpu.latest_feedback();
-        let virtual_terrain_manifest = screenshot_virtual_terrain_manifest_json(
-            self.virtual_terrain_mode,
-            &self.virtual_terrain_pages,
-            &self.virtual_terrain_retired_published_pages,
-            (self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible)
-                .then_some(self.virtual_terrain_cut.as_ref())
-                .flatten(),
-            self.virtual_terrain_oracle_cut.as_ref(),
-            self.virtual_terrain_exact_surface_domain.as_ref(),
-            self.virtual_terrain_desired_envelope.as_ref(),
-            self.virtual_terrain_committed_envelope.as_ref(),
-            self.virtual_terrain_cut.as_ref(),
-            self.virtual_terrain_publication
-                .as_ref()
-                .map(|publication| &publication.envelope),
-            self.virtual_terrain_publication
-                .as_ref()
-                .map(|publication| &publication.cut),
-            gpu_virtual_feedback.as_ref(),
-        );
+        let virtual_terrain_manifest =
+            screenshot_virtual_terrain_manifest_json(ScreenshotVirtualTerrainManifestContext {
+                mode: self.virtual_terrain_mode,
+                resident: &self.virtual_terrain_pages,
+                retired_published: &self.virtual_terrain_retired_published_pages,
+                published_cut: (self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible)
+                    .then_some(self.virtual_terrain_cut.as_ref())
+                    .flatten(),
+                oracle_cut: self.virtual_terrain_oracle_cut.as_ref(),
+                exact_surface_domain: self.virtual_terrain_exact_surface_domain.as_ref(),
+                desired_envelope: self.virtual_terrain_desired_envelope.as_ref(),
+                committed_envelope: self.virtual_terrain_committed_envelope.as_ref(),
+                committed_cut: self.virtual_terrain_cut.as_ref(),
+                frozen_envelope: self
+                    .virtual_terrain_publication
+                    .as_ref()
+                    .map(|publication| &publication.envelope),
+                frozen_cut: self
+                    .virtual_terrain_publication
+                    .as_ref()
+                    .map(|publication| &publication.cut),
+                feedback: gpu_virtual_feedback.as_ref(),
+            });
         let published_cut = (self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible)
             .then_some(self.virtual_terrain_cut.as_ref())
             .flatten();
@@ -10176,10 +10183,10 @@ fn gpu_feedback_match_failure_flags(
     const CANDIDATE_ENCODE_FAILED: u32 = 1 << 9;
 
     let Some(feedback) = feedback else {
-        return MISSING_FEEDBACK | u32::from(candidate_encode_failed) * CANDIDATE_ENCODE_FAILED;
+        return MISSING_FEEDBACK | (u32::from(candidate_encode_failed) * CANDIDATE_ENCODE_FAILED);
     };
     let Some((cut, envelope)) = cut.zip(envelope) else {
-        return MISSING_CUT | u32::from(candidate_encode_failed) * CANDIDATE_ENCODE_FAILED;
+        return MISSING_CUT | (u32::from(candidate_encode_failed) * CANDIDATE_ENCODE_FAILED);
     };
     let mut failures = 0;
     failures |= u32::from(feedback.submission_id == 0) * INVALID_SUBMISSION;
@@ -11192,20 +11199,38 @@ fn json_optional_u64(value: Option<u64>) -> String {
     value.map_or_else(|| "null".to_owned(), |value| format!(r#""{value}""#))
 }
 
-fn screenshot_virtual_terrain_manifest_json(
+struct ScreenshotVirtualTerrainManifestContext<'a> {
     mode: VirtualTerrainRenderMode,
-    resident: &BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
-    retired_published: &BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
-    published_cut: Option<&VirtualTerrainCut>,
-    oracle_cut: Option<&VirtualTerrainCut>,
-    exact_surface_domain: Option<&ExactSurfaceDomain>,
-    desired_envelope: Option<&PresentationEnvelope>,
-    committed_envelope: Option<&PresentationEnvelope>,
-    committed_cut: Option<&VirtualTerrainCut>,
-    frozen_envelope: Option<&PresentationEnvelope>,
-    frozen_cut: Option<&VirtualTerrainCut>,
-    feedback: Option<&GpuVirtualTerrainFeedback>,
+    resident: &'a BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
+    retired_published: &'a BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
+    published_cut: Option<&'a VirtualTerrainCut>,
+    oracle_cut: Option<&'a VirtualTerrainCut>,
+    exact_surface_domain: Option<&'a ExactSurfaceDomain>,
+    desired_envelope: Option<&'a PresentationEnvelope>,
+    committed_envelope: Option<&'a PresentationEnvelope>,
+    committed_cut: Option<&'a VirtualTerrainCut>,
+    frozen_envelope: Option<&'a PresentationEnvelope>,
+    frozen_cut: Option<&'a VirtualTerrainCut>,
+    feedback: Option<&'a GpuVirtualTerrainFeedback>,
+}
+
+fn screenshot_virtual_terrain_manifest_json(
+    context: ScreenshotVirtualTerrainManifestContext<'_>,
 ) -> String {
+    let ScreenshotVirtualTerrainManifestContext {
+        mode,
+        resident,
+        retired_published,
+        published_cut,
+        oracle_cut,
+        exact_surface_domain,
+        desired_envelope,
+        committed_envelope,
+        committed_cut,
+        frozen_envelope,
+        frozen_cut,
+        feedback,
+    } = context;
     let mode = match mode {
         VirtualTerrainRenderMode::Disabled => "disabled",
         VirtualTerrainRenderMode::Shadow => "shadow",
@@ -11599,20 +11624,21 @@ mod tests {
             64,
             16,
         );
-        let manifest = screenshot_virtual_terrain_manifest_json(
-            VirtualTerrainRenderMode::Visible,
-            &resident,
-            &BTreeMap::new(),
-            Some(&cut),
-            Some(&cut),
-            Some(&exact_surface_domain),
-            Some(&envelope),
-            Some(&envelope),
-            Some(&cut),
-            Some(&envelope),
-            Some(&cut),
-            Some(&feedback),
-        );
+        let manifest =
+            screenshot_virtual_terrain_manifest_json(ScreenshotVirtualTerrainManifestContext {
+                mode: VirtualTerrainRenderMode::Visible,
+                resident: &resident,
+                retired_published: &BTreeMap::new(),
+                published_cut: Some(&cut),
+                oracle_cut: Some(&cut),
+                exact_surface_domain: Some(&exact_surface_domain),
+                desired_envelope: Some(&envelope),
+                committed_envelope: Some(&envelope),
+                committed_cut: Some(&cut),
+                frozen_envelope: Some(&envelope),
+                frozen_cut: Some(&cut),
+                feedback: Some(&feedback),
+            });
         assert!(manifest.contains(r#""mode":"visible""#));
         assert!(manifest.contains(
             r#""exactSurfaceDomain":{"complete":true,"requiredLeaves":1,"fingerprint":"#

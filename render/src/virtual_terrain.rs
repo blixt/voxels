@@ -2047,12 +2047,12 @@ impl CutBuilder<'_> {
                 right_exact
                     .cmp(&left_exact)
                     .then_with(|| {
-                        left_exact
-                            .then(|| {
-                                self.surface_component_distance(left)
-                                    .total_cmp(&self.surface_component_distance(right))
-                            })
-                            .unwrap_or(std::cmp::Ordering::Equal)
+                        if left_exact {
+                            self.surface_component_distance(left)
+                                .total_cmp(&self.surface_component_distance(right))
+                        } else {
+                            std::cmp::Ordering::Equal
+                        }
                     })
                     .then_with(|| {
                         self.surface_component_refinement_cost(left)

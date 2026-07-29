@@ -265,7 +265,7 @@ impl VirtualTerrainGpuControl {
         device: &Device,
         capacity: VirtualTerrainCapacity,
     ) -> Result<Self, VirtualTerrainGpuError> {
-        let maximum_storage = u64::from(device.limits().max_storage_buffer_binding_size);
+        let maximum_storage = device.limits().max_storage_buffer_binding_size;
         let candidate_bytes = buffer_bytes::<GpuCandidatePage>(capacity.max_selected_pages)?;
         let candidate_token_bytes = buffer_bytes::<u32>(capacity.max_selected_pages)?;
         let readback_bytes = GPU_SNAPSHOT_READBACK_PREFIX_BYTES
@@ -457,7 +457,7 @@ impl VirtualTerrainGpuControl {
             return Err(VirtualTerrainGpuError::DeviceLimit);
         }
         for source in sources {
-            if source.size() > u64::from(device.limits().max_storage_buffer_binding_size)
+            if source.size() > device.limits().max_storage_buffer_binding_size
                 || !source.usage().contains(wgpu::BufferUsages::STORAGE)
                 || !source.size().is_multiple_of(GPU_GEOMETRY_ELEMENT_BYTES)
             {
@@ -996,7 +996,7 @@ impl VirtualTerrainGpuControl {
         let counters = feedback.counters;
         snapshot_metadata_matches(Some(metadata), identity)
             && snapshot_counter_evidence_matches(counters, metadata)
-            && snapshot_validation_failure_flags(&feedback, metadata) == 0
+            && snapshot_validation_failure_flags(feedback, metadata) == 0
     }
 
     pub(crate) fn promote_certified_candidate(
@@ -1139,14 +1139,14 @@ fn snapshot_validation_failure_flags(
     readback: &GpuSnapshotReadback,
     metadata: &SnapshotMetadata,
 ) -> u32 {
-    u32::from(!candidate_descriptors_match_canonical(
+    (u32::from(!candidate_descriptors_match_canonical(
         &readback.candidate_pages,
         &metadata.expected_ranges,
         metadata.expected_counts,
-    )) * VALIDATION_DESCRIPTOR_MISMATCH
-        | u32::from(
+    )) * VALIDATION_DESCRIPTOR_MISMATCH)
+        | (u32::from(
             readback.indirect_commands != expected_indirect_commands(metadata.expected_counts),
-        ) * VALIDATION_INDIRECT_MISMATCH
+        ) * VALIDATION_INDIRECT_MISMATCH)
 }
 
 fn snapshot_counter_buffer_usage() -> wgpu::BufferUsages {
@@ -1437,7 +1437,9 @@ mod tests {
             + VIRTUAL_TERRAIN_WATER_SURFACE_HANDLE_SOURCE_BYTES
             + VIRTUAL_TERRAIN_WATER_TRIANGLE_HANDLE_SOURCE_BYTES;
         assert_eq!(old_copied_bytes, 192 * 1_024 * 1_024);
-        assert!(VIRTUAL_TERRAIN_HANDLE_BANK_BYTES < 33 * 1_024 * 1_024);
+        const {
+            assert!(VIRTUAL_TERRAIN_HANDLE_BANK_BYTES < 33 * 1_024 * 1_024);
+        }
         assert!(VIRTUAL_TERRAIN_HANDLE_BANK_BYTES * 2 < old_copied_bytes);
     }
 
@@ -1986,7 +1988,7 @@ mod tests {
         assert_eq!(pages[0].destinations, [0, 0, 0, 0]);
         assert_eq!(pages[1].destinations, [2, 0, 1, 3]);
         assert_eq!(pages[2].destinations, [3, 4, 1, 5]);
-        for stream in 0..STREAM_COUNT {
+        for (stream, count) in counts.iter().copied().enumerate() {
             for pair in pages.windows(2) {
                 assert_eq!(
                     pair[0].destinations[stream] + pair[0].ranges[stream][1],
@@ -1996,7 +1998,7 @@ mod tests {
             assert_eq!(
                 pages.last().unwrap().destinations[stream]
                     + pages.last().unwrap().ranges[stream][1],
-                counts[stream]
+                count
             );
         }
     }
