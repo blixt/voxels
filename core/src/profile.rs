@@ -148,13 +148,36 @@ impl ProfileAutomation {
         if !matches!(self.phase, ProfilePhase::Warmup | ProfilePhase::Measured) {
             return None;
         }
+        Some(self.route_pose())
+    }
+
+    /// Route pose which must be admitted before the current phase may become observable.
+    ///
+    /// `Drain` deliberately includes the terminal pose at the exact configured duration. Without
+    /// this separate contract, a host that advances into Drain before applying a pose silently
+    /// reports the full distance while stopping one fixed step short.
+    pub fn admission_pose(self) -> Option<ProfilePose> {
+        if !matches!(
+            self.phase,
+            ProfilePhase::Warmup | ProfilePhase::Measured | ProfilePhase::Drain
+        ) {
+            return None;
+        }
+        let mut pose = self.route_pose();
+        if self.phase == ProfilePhase::Drain {
+            pose.velocity_xz = Vec2::ZERO;
+        }
+        Some(pose)
+    }
+
+    fn route_pose(self) -> ProfilePose {
         if self.route == ProfileRoute::Straight {
-            return Some(ProfilePose {
+            return ProfilePose {
                 position_xz: Vec2::new(self.origin.x, self.origin.z - self.distance_metres()),
                 velocity_xz: Vec2::new(0.0, -self.speed_metres_per_second()),
                 yaw: 0.0,
                 pitch: -0.22,
-            });
+            };
         }
         // Warm the exact route measured by the allocator gate. The configured warmup completes one
         // lap and discovers its geometry; measurement then revisits the same canonical/LOD working
@@ -164,12 +187,12 @@ impl ProfileAutomation {
         let angle = (self.distance_metres() % loop_metres) / radius;
         let offset = Vec2::new(radius * angle.sin(), radius * (1.0 - angle.cos()));
         let direction = Vec2::new(angle.cos(), angle.sin());
-        Some(ProfilePose {
+        ProfilePose {
             position_xz: Vec2::new(self.origin.x, self.origin.z) + offset,
             velocity_xz: direction * self.speed_metres_per_second(),
             yaw: direction.x.atan2(-direction.y),
             pitch: -0.22,
-        })
+        }
     }
 
     fn speed_metres_per_second(self) -> f32 {
@@ -209,6 +232,11 @@ mod tests {
         assert_eq!(profile.phase(), ProfilePhase::Drain);
         assert!((profile.distance_metres() - 72.0).abs() < 0.01);
         assert!(profile.pose().is_none());
+        let terminal = profile
+            .admission_pose()
+            .expect("Drain still owns the terminal route pose");
+        assert!((terminal.position_xz - Vec2::new(2.0, -4.0)).length() < 0.001);
+        assert_eq!(terminal.velocity_xz, Vec2::ZERO);
         profile.complete_drain();
         assert_eq!(profile.phase(), ProfilePhase::Complete);
         assert!(!profile.running());
@@ -257,6 +285,13 @@ mod tests {
         assert_eq!(profile.phase(), ProfilePhase::Drain);
         assert!((profile.distance_metres() - 48.0).abs() < 0.01);
         assert!(profile.pose().is_none());
+        assert_eq!(
+            profile
+                .admission_pose()
+                .expect("Drain exposes the exact terminal target")
+                .position_xz,
+            Vec2::new(2.0, -52.0)
+        );
 
         let mut moving = ProfileAutomation::with_config(config);
         moving.start_route(Vec3::new(2.0, 3.0, -4.0), ProfileRoute::Straight);

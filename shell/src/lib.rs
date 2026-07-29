@@ -3,6 +3,96 @@
 #[cfg(any(target_arch = "wasm32", test))]
 use voxels_core::CameraState;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(any(target_arch = "wasm32", test))]
+enum PendingRelocationKind {
+    ProfileStep,
+    ProfileRestore,
+    SpectatorExit,
+    ReproductionApply,
+    ReproductionRestore,
+}
+
+#[derive(Clone, Copy)]
+#[cfg(any(target_arch = "wasm32", test))]
+struct PendingRelocation {
+    kind: PendingRelocationKind,
+    destination: CameraState,
+    presentation_target: glam::Vec3,
+    profile_after_commit: Option<voxels_core::ProfileAutomation>,
+    destination_resolved: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg(any(target_arch = "wasm32", test))]
+struct RelocationReadiness {
+    presentation_envelope_committed: bool,
+    destination_presentable: bool,
+    canonical_destination_ready: bool,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl RelocationReadiness {
+    const fn is_ready(self) -> bool {
+        self.presentation_envelope_committed
+            && self.destination_presentable
+            && self.canonical_destination_ready
+    }
+}
+
+/// Completes an exceptional camera handoff once, and only once, after every destination product
+/// has certified the same target. A caller retains the unchanged source camera while this returns
+/// `None`; consuming the transaction is the atomic handoff.
+#[cfg(any(target_arch = "wasm32", test))]
+fn take_ready_relocation(
+    pending: &mut Option<PendingRelocation>,
+    readiness: RelocationReadiness,
+) -> Option<PendingRelocation> {
+    (readiness.is_ready()
+        && pending
+            .as_ref()
+            .is_some_and(|relocation| relocation.destination_resolved))
+    .then(|| pending.take())
+    .flatten()
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+const fn profile_drain_can_complete(
+    has_pending_relocation: bool,
+    readiness: RelocationReadiness,
+    frame_submitted: bool,
+) -> bool {
+    !has_pending_relocation && readiness.is_ready() && frame_submitted
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn spectator_exit_destination(
+    current: CameraState,
+    saved_body: Option<CameraState>,
+) -> CameraState {
+    saved_body.unwrap_or_else(|| {
+        let mut destination = current;
+        destination.set_locomotion(voxels_core::LocomotionMode::Walking);
+        destination
+    })
+}
+
+/// A capture made while the presentation gate is blocked contains source camera A and proposed
+/// target B. If B's immutable envelope cannot present A, replay must finish the captured handoff
+/// to B rather than publishing B underneath an out-of-envelope A and permanently withholding
+/// frames.
+#[cfg(any(target_arch = "wasm32", test))]
+fn reproduction_relocation_destination(
+    mut captured_camera: CameraState,
+    presentation_target: glam::Vec3,
+    target_envelope_contains_camera: bool,
+) -> CameraState {
+    if !target_envelope_contains_camera {
+        captured_camera.position = presentation_target;
+    }
+    captured_camera
+}
+
 #[cfg(any(target_arch = "wasm32", test))]
 const INTERACTION_REACH_METRES: f32 = 5.0;
 #[cfg(any(target_arch = "wasm32", test))]
@@ -617,6 +707,32 @@ fn replace_portal_frontiers(
     current.clear();
     current.extend_from_slice(replacement);
     true
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn merge_enclosed_view_stream_plans(
+    mut source: EnclosedViewStreamPlan,
+    destination: EnclosedViewStreamPlan,
+) -> EnclosedViewStreamPlan {
+    source.chunks.extend(destination.chunks);
+    source
+        .chunks
+        .sort_unstable_by_key(|coord| (coord.x, coord.y, coord.z));
+    source.chunks.dedup();
+    source.frontiers.extend(destination.frontiers);
+    source.frontiers.sort_unstable_by_key(|frontier| {
+        (
+            frontier.source.x,
+            frontier.source.y,
+            frontier.source.z,
+            frontier.neighbor.x,
+            frontier.neighbor.y,
+            frontier.neighbor.z,
+            frontier.face,
+        )
+    });
+    source.frontiers.dedup();
+    source
 }
 
 /// Follows only broad upward portals far enough to distinguish a bounded cavern from open sky.
@@ -1989,6 +2105,7 @@ mod web {
         reproduction_presentation_target: Cell<Option<Vec3>>,
         reproduction_restore_camera: Cell<Option<CameraState>>,
         spectator_body: Cell<Option<CameraState>>,
+        pending_relocation: Cell<Option<crate::PendingRelocation>>,
         input: RefCell<InputState>,
         remote: RemoteWorldClient,
         presence: RemotePresenceClient,
@@ -2340,10 +2457,23 @@ mod web {
                 self.reproduction_restore_camera
                     .set(Some(*self.camera.borrow()));
             }
-            self.reproduction_camera.set(Some(camera));
+            let presentation_target = reproduction_presentation_target.unwrap_or(camera.position);
+            let target_envelope = self.virtual_terrain_presentation_envelope(presentation_target);
+            let destination = crate::reproduction_relocation_destination(
+                camera,
+                presentation_target,
+                target_envelope.contains_position(camera.position.to_array()),
+            );
+            self.reproduction_camera.set(Some(destination));
             self.reproduction_presentation_target
-                .set(reproduction_presentation_target.or(Some(camera.position)));
-            self.input.borrow_mut().clear();
+                .set(Some(presentation_target));
+            self.begin_relocation(crate::PendingRelocation {
+                kind: crate::PendingRelocationKind::ReproductionApply,
+                destination,
+                presentation_target,
+                profile_after_commit: None,
+                destination_resolved: true,
+            });
             self.simulation_accumulator.set(0.0);
             Ok(())
         }
@@ -2352,7 +2482,17 @@ mod web {
             self.reproduction_camera.set(None);
             self.reproduction_presentation_target.set(None);
             if let Some(camera) = self.reproduction_restore_camera.take() {
-                *self.camera.borrow_mut() = camera;
+                self.begin_relocation(crate::PendingRelocation {
+                    kind: crate::PendingRelocationKind::ReproductionRestore,
+                    destination: camera,
+                    presentation_target: camera.position,
+                    profile_after_commit: None,
+                    destination_resolved: true,
+                });
+            } else if self.pending_relocation.get().is_some_and(|relocation| {
+                relocation.kind == crate::PendingRelocationKind::ReproductionApply
+            }) {
+                self.pending_relocation.set(None);
             }
             _ = self
                 .renderer
@@ -2361,9 +2501,147 @@ mod web {
             self.simulation_accumulator.set(0.0);
         }
 
-        fn cached_surface_sample(&self, x: i32, z: i32) -> Result<SurfaceSample, String> {
-            resident_surface_sample(&self.chunks.borrow(), x, z, self.remote_environment.1)
-                .ok_or_else(|| "native surface column is not resident yet".to_owned())
+        fn begin_relocation(&self, relocation: crate::PendingRelocation) {
+            // A new explicit destination supersedes an older transaction as one indivisible
+            // intent. The old destination never becomes observable after this write.
+            self.pending_relocation.set(Some(relocation));
+            self.presentation_target_position
+                .set(relocation.presentation_target);
+            self.input.borrow_mut().clear();
+        }
+
+        fn profile_step_relocation(
+            &self,
+            source: CameraState,
+            profile_after_commit: ProfileAutomation,
+        ) -> Option<crate::PendingRelocation> {
+            let pose = profile_after_commit.admission_pose()?;
+            let voxel_x = (pose.position_xz.x / VOXEL_SIZE_METRES).floor() as i32;
+            let voxel_z = (pose.position_xz.y / VOXEL_SIZE_METRES).floor() as i32;
+            let surface = resident_surface_sample(
+                &self.chunks.borrow(),
+                voxel_x,
+                voxel_z,
+                self.remote_environment.1,
+            );
+            let mut position = Vec3::new(pose.position_xz.x, source.position.y, pose.position_xz.y);
+            if let Some(surface) = surface {
+                let top = surface
+                    .water_level
+                    .unwrap_or(surface.height)
+                    .max(surface.height);
+                position.y = (top + 1) as f32 * VOXEL_SIZE_METRES
+                    + voxels_core::PLAYER_EYE_HEIGHT_METRES
+                    + 0.8;
+            }
+            let mut destination = CameraState::spawn(position);
+            destination.velocity = Vec3::new(pose.velocity_xz.x, 0.0, pose.velocity_xz.y);
+            destination.yaw = pose.yaw;
+            destination.pitch = pose.pitch;
+            Some(crate::PendingRelocation {
+                kind: crate::PendingRelocationKind::ProfileStep,
+                destination,
+                presentation_target: position,
+                profile_after_commit: Some(profile_after_commit),
+                destination_resolved: surface.is_some(),
+            })
+        }
+
+        fn refresh_profile_relocation(
+            &self,
+            mut relocation: crate::PendingRelocation,
+        ) -> crate::PendingRelocation {
+            if relocation.kind != crate::PendingRelocationKind::ProfileStep
+                || relocation.destination_resolved
+            {
+                return relocation;
+            }
+            let voxel_x = (relocation.destination.position.x / VOXEL_SIZE_METRES).floor() as i32;
+            let voxel_z = (relocation.destination.position.z / VOXEL_SIZE_METRES).floor() as i32;
+            let Some(surface) = resident_surface_sample(
+                &self.chunks.borrow(),
+                voxel_x,
+                voxel_z,
+                self.remote_environment.1,
+            ) else {
+                return relocation;
+            };
+            let top = surface
+                .water_level
+                .unwrap_or(surface.height)
+                .max(surface.height);
+            relocation.destination.position.y =
+                (top + 1) as f32 * VOXEL_SIZE_METRES + voxels_core::PLAYER_EYE_HEIGHT_METRES + 0.8;
+            relocation.presentation_target.y = relocation.destination.position.y;
+            relocation.destination_resolved = true;
+            relocation
+        }
+
+        fn relocation_canonical_interests(
+            &self,
+            destination: &CameraState,
+        ) -> (Vec<ChunkCoord>, Vec<ChunkCoord>) {
+            let streaming_velocity =
+                crate::exact_streaming_velocity(destination, destination.velocity);
+            (
+                self.collision_stream_interest(
+                    destination,
+                    streaming_velocity,
+                    self.config.stream_collision_lookahead_seconds,
+                ),
+                self.enclosed_view_stream_interest(destination),
+            )
+        }
+
+        fn relocation_readiness(
+            &self,
+            relocation: crate::PendingRelocation,
+            envelope: &PresentationEnvelope,
+        ) -> crate::RelocationReadiness {
+            let (collision_interest, enclosed_interest) =
+                self.relocation_canonical_interests(&relocation.destination);
+            let canonical_destination_ready = relocation.destination_resolved && {
+                let scheduler = self.scheduler.borrow();
+                scheduler.interest_readiness(&collision_interest).is_ready()
+                    && (enclosed_interest.is_empty()
+                        || scheduler.interest_readiness(&enclosed_interest).is_ready())
+            };
+            let renderer = self.renderer.borrow();
+            crate::RelocationReadiness {
+                presentation_envelope_committed: renderer
+                    .virtual_terrain_committed_covers_presentation_envelope(envelope),
+                destination_presentable: renderer.virtual_terrain_committed_contains_position(
+                    relocation.destination.position.to_array(),
+                ),
+                canonical_destination_ready,
+            }
+        }
+
+        fn try_commit_pending_relocation(
+            &self,
+            camera: &mut CameraState,
+        ) -> Option<crate::PendingRelocation> {
+            let relocation = self
+                .pending_relocation
+                .get()
+                .map(|relocation| self.refresh_profile_relocation(relocation))?;
+            let envelope =
+                self.virtual_terrain_presentation_envelope(relocation.presentation_target);
+            let readiness = self.relocation_readiness(relocation, &envelope);
+            let mut pending = Some(relocation);
+            let committed = crate::take_ready_relocation(&mut pending, readiness);
+            self.pending_relocation.set(pending);
+            let relocation = committed?;
+            *camera = relocation.destination;
+            if let Some(profile) = relocation.profile_after_commit {
+                *self.profile.borrow_mut() = profile;
+            }
+            if relocation.kind == crate::PendingRelocationKind::ProfileStep {
+                self.simulation_accumulator.set(
+                    (self.simulation_accumulator.get() - self.config.fixed_step_seconds).max(0.0),
+                );
+            }
+            Some(relocation)
         }
 
         fn start_profile(&self, profile_id: u32) -> bool {
@@ -2378,6 +2656,10 @@ mod web {
         }
 
         fn start_stream_profile(&self, route: ProfileRoute) -> bool {
+            if self.pending_relocation.get().is_some() || self.reproduction_camera.get().is_some() {
+                log_gpu_error("cannot start a streaming profile during an exceptional relocation");
+                return false;
+            }
             self.input.borrow_mut().clear();
             let camera = *self.camera.borrow();
             let position = camera.position;
@@ -2425,69 +2707,71 @@ mod web {
             } else {
                 camera.position
             };
-            let mut exceptional_relocation = false;
             if self.profile.borrow().phase() == ProfilePhase::Complete
+                && self.pending_relocation.get().is_none()
+                && self.reproduction_camera.get().is_none()
                 && let Some(restore) = self.profile_restore_camera.take()
             {
-                let previous_position = camera.position;
-                presentation_target_position = restore.position;
-                *camera = restore;
-                presentation_gate_active = committed_locus
-                    .is_some_and(|locus| !locus.contains_position(restore.position.to_array()));
-                if presentation_gate_active {
-                    camera.position = previous_position;
-                    camera.velocity = Vec3::ZERO;
-                    exceptional_relocation = true;
-                }
-                self.input.borrow_mut().clear();
+                self.begin_relocation(crate::PendingRelocation {
+                    kind: crate::PendingRelocationKind::ProfileRestore,
+                    destination: restore,
+                    presentation_target: restore.position,
+                    profile_after_commit: None,
+                    destination_resolved: true,
+                });
                 self.simulation_accumulator.set(0.0);
             }
             camera.set_gliding_available(gliding_available);
-            if !spectator_available && camera.locomotion() == LocomotionMode::Spectator {
-                if let Some(body) = self.spectator_body.take() {
-                    let previous_position = camera.position;
-                    presentation_target_position = body.position;
-                    *camera = body;
-                    presentation_gate_active = committed_locus
-                        .is_some_and(|locus| !locus.contains_position(body.position.to_array()));
-                    if presentation_gate_active {
-                        camera.position = previous_position;
-                        camera.velocity = Vec3::ZERO;
-                        exceptional_relocation = true;
-                        self.simulation_accumulator.set(0.0);
-                    }
-                } else {
-                    camera.set_locomotion(LocomotionMode::Walking);
-                }
-                self.input.borrow_mut().clear();
-            }
             let reproducing = self.reproduction_camera.get().is_some();
-            if let Some(reproduction_camera) = self.reproduction_camera.get() {
-                let previous_position = camera.position;
+            if !reproducing
+                && !spectator_available
+                && camera.locomotion() == LocomotionMode::Spectator
+                && self.pending_relocation.get().is_none()
+            {
+                let destination =
+                    crate::spectator_exit_destination(*camera, self.spectator_body.take());
+                self.begin_relocation(crate::PendingRelocation {
+                    kind: crate::PendingRelocationKind::SpectatorExit,
+                    destination,
+                    presentation_target: destination.position,
+                    profile_after_commit: None,
+                    destination_resolved: true,
+                });
+                self.simulation_accumulator.set(0.0);
+            }
+
+            if let Some(relocation) = self.pending_relocation.get() {
+                presentation_target_position = relocation.presentation_target;
+                if let Some(relocation) = self.try_commit_pending_relocation(&mut camera) {
+                    presentation_target_position = relocation.presentation_target;
+                    presentation_gate_active = false;
+                } else {
+                    presentation_target_position = self
+                        .pending_relocation
+                        .get()
+                        .map(|relocation| relocation.presentation_target)
+                        .unwrap_or(presentation_target_position);
+                    presentation_gate_active = true;
+                }
+            }
+
+            let relocation_pending = self.pending_relocation.get().is_some();
+            if !relocation_pending && let Some(reproduction_camera) = self.reproduction_camera.get()
+            {
+                *camera = reproduction_camera;
                 presentation_target_position = self
                     .reproduction_presentation_target
                     .get()
                     .unwrap_or(reproduction_camera.position);
-                *camera = reproduction_camera;
-                if committed_locus.is_some_and(|locus| {
-                    !locus.contains_position(reproduction_camera.position.to_array())
-                }) {
-                    // Reproduction coordinates are an exceptional relocation. Keep presenting the
-                    // old certified position while the exact target envelope streams.
-                    camera.position = previous_position;
-                    camera.velocity = Vec3::ZERO;
-                    presentation_gate_active = true;
-                    exceptional_relocation = true;
-                } else {
-                    presentation_gate_active = committed_locus.is_some_and(|locus| {
-                        !locus.contains_position(presentation_target_position.to_array())
-                    });
-                }
+                presentation_gate_active = committed_locus.is_some_and(|locus| {
+                    !locus.contains_position(presentation_target_position.to_array())
+                });
                 self.input.borrow_mut().clear();
             }
             let profiling = !reproducing && self.profile.borrow().running();
-            let chunks = self.chunks.borrow();
-            let mut accumulator = if reproducing || exceptional_relocation {
+            let mut accumulator = if relocation_pending {
+                self.simulation_accumulator.get()
+            } else if reproducing {
                 0.0
             } else {
                 (self.simulation_accumulator.get() + dt.min(0.1))
@@ -2502,8 +2786,40 @@ mod web {
                 && steps < self.config.max_steps_per_frame
             {
                 if profiling {
-                    self.profile.borrow_mut().advance_fixed_step();
+                    if !matches!(
+                        self.profile.borrow().phase(),
+                        ProfilePhase::Warmup | ProfilePhase::Measured
+                    ) {
+                        // Drain owns an already admitted terminal pose. It waits for the exact
+                        // render/canonical certificate below and consumes no additional ticks.
+                        accumulator = 0.0;
+                        break;
+                    }
+                    let mut next_profile = *self.profile.borrow();
+                    next_profile.advance_fixed_step();
+                    if let Some(relocation) = self.profile_step_relocation(*camera, next_profile) {
+                        presentation_target_position = relocation.presentation_target;
+                        let envelope = self
+                            .virtual_terrain_presentation_envelope(relocation.presentation_target);
+                        let readiness = self.relocation_readiness(relocation, &envelope);
+                        let mut pending = Some(relocation);
+                        if let Some(relocation) =
+                            crate::take_ready_relocation(&mut pending, readiness)
+                        {
+                            *camera = relocation.destination;
+                            *self.profile.borrow_mut() = next_profile;
+                        } else {
+                            self.pending_relocation.set(pending);
+                            presentation_gate_active = true;
+                            break;
+                        }
+                    } else {
+                        // Idle/Complete have no route target. Running phases, including the
+                        // terminal Drain transition, always take the transactional branch above.
+                        *self.profile.borrow_mut() = next_profile;
+                    }
                 } else {
+                    let chunks = self.chunks.borrow();
                     camera.update(
                         &self.input.borrow(),
                         self.config.fixed_step_seconds,
@@ -2520,6 +2836,7 @@ mod web {
                             }
                         },
                     );
+                    drop(chunks);
                     if let Some(proposed) =
                         gate_camera_to_presentation_locus(&mut camera, committed_locus)
                     {
@@ -2535,46 +2852,12 @@ mod web {
                 steps += 1;
             }
             self.simulation_accumulator.set(accumulator);
-            drop(chunks);
             if profiling {
                 // The provider-neutral rail bypasses gameplay integration, so carry its exact
-                // motion intent explicitly through the production velocity-lookahead path. Drain
-                // is stationary and therefore clears the last route velocity.
-                camera.velocity = Vec3::ZERO;
-            }
-            if profiling && let Some(pose) = self.profile.borrow().pose() {
-                let previous_position = camera.position;
-                let voxel_x = (pose.position_xz.x / VOXEL_SIZE_METRES).floor() as i32;
-                let voxel_z = (pose.position_xz.y / VOXEL_SIZE_METRES).floor() as i32;
-                match self.cached_surface_sample(voxel_x, voxel_z) {
-                    Ok(surface) => {
-                        let top = surface
-                            .water_level
-                            .unwrap_or(surface.height)
-                            .max(surface.height);
-                        let position = glam::Vec3::new(
-                            pose.position_xz.x,
-                            (top + 1) as f32 * VOXEL_SIZE_METRES
-                                + voxels_core::PLAYER_EYE_HEIGHT_METRES
-                                + 0.8,
-                            pose.position_xz.y,
-                        );
-                        *camera = CameraState::spawn(position);
-                        camera.velocity = Vec3::new(pose.velocity_xz.x, 0.0, pose.velocity_xz.y);
-                        camera.yaw = pose.yaw;
-                        camera.pitch = pose.pitch;
-                        presentation_target_position = position;
-                        if committed_locus
-                            .is_some_and(|locus| !locus.contains_position(position.to_array()))
-                        {
-                            camera.position = previous_position;
-                            camera.velocity = Vec3::ZERO;
-                            presentation_gate_active = true;
-                        }
-                    }
-                    Err(error) => {
-                        log_gpu_error(&format!("streaming profile surface probe failed: {error}"))
-                    }
+                // motion intent explicitly through the production velocity-lookahead path. Once
+                // the last pose is admitted, Drain is stationary.
+                if self.profile.borrow().phase() == ProfilePhase::Drain {
+                    camera.velocity = Vec3::ZERO;
                 }
             }
             if presentation_gate_active {
@@ -2624,13 +2907,20 @@ mod web {
                 simulation_ms,
             ));
             let stream_start = performance_now(performance.as_ref());
-            let streaming_velocity = if profiling || reproducing {
+            let source_streaming_velocity = if profiling || reproducing {
                 camera.velocity
             } else {
                 camera.streaming_velocity(&self.input.borrow())
             };
-            let prediction_domain =
-                self.virtual_terrain_exact_surface_domain(&camera, streaming_velocity);
+            let pending_relocation = self.pending_relocation.get();
+            let demand_camera = pending_relocation
+                .map(|relocation| relocation.destination)
+                .unwrap_or(*camera);
+            let demand_streaming_velocity = pending_relocation
+                .map(|relocation| relocation.destination.velocity)
+                .unwrap_or(source_streaming_velocity);
+            let prediction_domain = self
+                .virtual_terrain_exact_surface_domain(&demand_camera, demand_streaming_velocity);
             let presentation_envelope =
                 self.virtual_terrain_presentation_envelope(presentation_target_position);
             self.renderer
@@ -2638,11 +2928,21 @@ mod web {
                 .begin_virtual_terrain_presentation_envelope(&presentation_envelope);
             let stream_breakdown = self.stream_world(
                 &camera,
-                streaming_velocity,
+                source_streaming_velocity,
+                pending_relocation,
                 &presentation_envelope,
                 &prediction_domain,
                 performance.as_ref(),
             );
+            if self.pending_relocation.get().is_some() {
+                if let Some(relocation) = self.try_commit_pending_relocation(&mut camera) {
+                    presentation_target_position = relocation.presentation_target;
+                } else if let Some(relocation) = self.pending_relocation.get() {
+                    presentation_target_position = relocation.presentation_target;
+                }
+                self.presentation_target_position
+                    .set(presentation_target_position);
+            }
             let presence_start = performance_now(performance.as_ref());
             if let Some(opened) = self.remote.world_opened() {
                 self.presence.ensure_session(&opened, time);
@@ -2668,6 +2968,20 @@ mod web {
                 let shape = self.renderer.borrow().edit_shape();
                 self.dig_target(&camera, shape)
             };
+            let profile_drain_readiness = (self.profile.borrow().phase() == ProfilePhase::Drain)
+                .then(|| {
+                    self.relocation_readiness(
+                        crate::PendingRelocation {
+                            kind: crate::PendingRelocationKind::ProfileStep,
+                            destination: *camera,
+                            presentation_target: camera.position,
+                            profile_after_commit: None,
+                            destination_resolved: true,
+                        },
+                        &presentation_envelope,
+                    )
+                })
+                .unwrap_or_default();
             let mut renderer = self.renderer.borrow_mut();
             if renderer.screenshot_pending() {
                 renderer.set_screenshot_streaming_manifest(self.screenshot_streaming_manifest());
@@ -2831,8 +3145,11 @@ mod web {
                 self.profile_wasm_high
                     .set(self.profile_wasm_high.get().max(wasm_committed_bytes()));
                 if self.profile.borrow().phase() == ProfilePhase::Drain
-                    && terrain_ready
-                    && submitted
+                    && crate::profile_drain_can_complete(
+                        self.pending_relocation.get().is_some(),
+                        profile_drain_readiness,
+                        submitted,
+                    )
                 {
                     self.profile.borrow_mut().complete_drain();
                 }
@@ -2875,8 +3192,9 @@ mod web {
 
         fn stream_world(
             &self,
-            camera: &CameraState,
-            streaming_velocity: Vec3,
+            source_camera: &CameraState,
+            source_streaming_velocity: Vec3,
+            pending_relocation: Option<crate::PendingRelocation>,
             presentation_envelope: &PresentationEnvelope,
             prediction_domain: &ExactSurfaceDomain,
             performance: Option<&web_sys::Performance>,
@@ -2891,28 +3209,48 @@ mod web {
             let exact_load_radius = self.scheduler.borrow().config().load_radius_chunks;
             let exact_lead_metres =
                 (exact_load_radius - 1).max(0) as f32 * CHUNK_EDGE as f32 * VOXEL_SIZE_METRES;
+            let demand_camera = pending_relocation
+                .map(|relocation| relocation.destination)
+                .unwrap_or(*source_camera);
+            let demand_streaming_velocity = pending_relocation
+                .map(|relocation| relocation.destination.velocity)
+                .unwrap_or(source_streaming_velocity);
             let focus = world_to_chunk(predictive_stream_position(
-                camera.position,
-                streaming_velocity,
+                demand_camera.position,
+                demand_streaming_velocity,
                 self.config.stream_velocity_lookahead_seconds,
                 exact_lead_metres,
             ));
-            let exact_streaming_velocity =
-                crate::exact_streaming_velocity(camera, streaming_velocity);
             let collision_interest_start = performance_now(performance);
-            let collision_interest = if camera.locomotion() == LocomotionMode::Spectator {
+            let mut collision_interest = if source_camera.locomotion() == LocomotionMode::Spectator
+            {
                 Vec::new()
             } else {
                 self.collision_stream_interest(
-                    camera,
-                    exact_streaming_velocity,
+                    source_camera,
+                    crate::exact_streaming_velocity(source_camera, source_streaming_velocity),
                     self.config.stream_collision_lookahead_seconds,
                 )
             };
+            if pending_relocation.is_some() {
+                collision_interest.extend(self.collision_stream_interest(
+                    &demand_camera,
+                    crate::exact_streaming_velocity(&demand_camera, demand_streaming_velocity),
+                    self.config.stream_collision_lookahead_seconds,
+                ));
+                collision_interest.sort_unstable_by_key(|coord| (coord.x, coord.y, coord.z));
+                collision_interest.dedup();
+            }
             let collision_interest_ms =
                 (performance_now(performance) - collision_interest_start) as f32;
             let enclosed_interest_start = performance_now(performance);
-            let enclosed_view_plan = self.enclosed_view_stream_plan(camera);
+            let mut enclosed_view_plan = self.enclosed_view_stream_plan(source_camera);
+            if pending_relocation.is_some() {
+                enclosed_view_plan = crate::merge_enclosed_view_stream_plans(
+                    enclosed_view_plan,
+                    self.enclosed_view_stream_plan(&demand_camera),
+                );
+            }
             let enclosed_view_interest = &enclosed_view_plan.chunks;
             let enclosed_view_frontiers_changed = crate::replace_portal_frontiers(
                 &mut self.enclosed_view_frontiers.borrow_mut(),
@@ -2920,15 +3258,19 @@ mod web {
             );
             let enclosed_interest_ms =
                 (performance_now(performance) - enclosed_interest_start) as f32;
-            // Canonical chunks are simulation and collision data only. Visible terrain demand is
-            // owned entirely by the virtual page scheduler, so no camera-driven visual chunk
-            // corridor or secondary terrain-height hint participates in this scheduler.
+            // Canonical chunks are simulation and collision data only. During an exceptional
+            // handoff, source and destination interests coexist while the scheduler focus moves to
+            // the destination. The visible A cut remains committed until B's full envelope is
+            // publishable, and B cannot become the camera until its exact canonical corridor is
+            // resident.
             let mut urgent_interest = collision_interest.clone();
             urgent_interest.extend(enclosed_view_interest.iter().copied());
+            urgent_interest.sort_unstable_by_key(|coord| (coord.x, coord.y, coord.z));
+            urgent_interest.dedup();
             let interest = urgent_interest.clone();
             let priority_hint = directional_stream_priority(
-                camera,
-                streaming_velocity,
+                &demand_camera,
+                demand_streaming_velocity,
                 CHUNK_EDGE as f32 * VOXEL_SIZE_METRES,
                 self.config.stream_velocity_lookahead_seconds,
                 self.config.stream_view_cone_half_angle_degrees,
@@ -3061,11 +3403,11 @@ mod web {
             }
             let publish_ms = (performance_now(performance) - publish_start) as f32;
             let virtual_terrain_start = performance_now(performance);
-            let mut presentation_camera = *camera;
+            let mut presentation_camera = demand_camera;
             presentation_camera.position = self.presentation_target_position.get();
             self.stream_virtual_terrain(
                 &presentation_camera,
-                streaming_velocity,
+                demand_streaming_velocity,
                 presentation_envelope,
                 prediction_domain,
             );
@@ -5117,6 +5459,7 @@ mod web {
         }
 
         fn prepare_stop(&self) {
+            self.pending_relocation.set(None);
             if let Some(restore) = self.profile_restore_camera.take() {
                 *self.camera.borrow_mut() = restore;
             }
@@ -5165,11 +5508,30 @@ mod web {
                 self.spectator_body.set(Some(*camera));
                 camera.set_locomotion(LocomotionMode::Spectator);
             } else if !active && was_active {
-                if let Some(body) = self.spectator_body.take() {
-                    *camera = body;
-                } else {
-                    camera.set_locomotion(LocomotionMode::Walking);
+                if self.pending_relocation.get().is_none_or(|relocation| {
+                    relocation.kind != crate::PendingRelocationKind::SpectatorExit
+                }) {
+                    let destination =
+                        crate::spectator_exit_destination(*camera, self.spectator_body.take());
+                    self.begin_relocation(crate::PendingRelocation {
+                        kind: crate::PendingRelocationKind::SpectatorExit,
+                        destination,
+                        presentation_target: destination.position,
+                        profile_after_commit: None,
+                        destination_resolved: true,
+                    });
+                    self.simulation_accumulator.set(0.0);
                 }
+            } else if active
+                && was_active
+                && let Some(relocation) = self.pending_relocation.get()
+                && relocation.kind == crate::PendingRelocationKind::SpectatorExit
+            {
+                // Re-enabling spectator before the atomic exit commits cancels that exact
+                // transaction and restores its saved body as the next possible exit target.
+                self.spectator_body.set(Some(relocation.destination));
+                self.pending_relocation.set(None);
+                self.presentation_target_position.set(camera.position);
             }
             let active = camera.locomotion() == LocomotionMode::Spectator;
             self.presence.send_pose_now(&camera, self.last_time.get());
@@ -6878,6 +7240,7 @@ mod web {
             reproduction_presentation_target: Cell::new(None),
             reproduction_restore_camera: Cell::new(None),
             spectator_body: Cell::new(None),
+            pending_relocation: Cell::new(None),
             input: RefCell::new(InputState::default()),
             remote,
             presence,
@@ -7051,6 +7414,322 @@ mod tests {
 
     fn test_view_cone_tangent() -> f32 {
         viewport_view_cone_tangent(55.0, CAMERA_VERTICAL_FOV_RADIANS, 1_920, 1_080).unwrap()
+    }
+
+    fn pending_relocation(
+        kind: PendingRelocationKind,
+        destination: CameraState,
+        presentation_target: glam::Vec3,
+    ) -> PendingRelocation {
+        PendingRelocation {
+            kind,
+            destination,
+            presentation_target,
+            profile_after_commit: None,
+            destination_resolved: true,
+        }
+    }
+
+    #[test]
+    fn exceptional_relocation_holds_source_until_every_destination_product_is_ready() {
+        let source = CameraState::spawn(glam::Vec3::new(1.0, 8.0, 1.0));
+        let destination = CameraState::spawn(glam::Vec3::new(129.0, 12.0, -65.0));
+        let mut pending = Some(pending_relocation(
+            PendingRelocationKind::ProfileRestore,
+            destination,
+            destination.position,
+        ));
+        let held_source = source.position;
+
+        for readiness in [
+            RelocationReadiness {
+                presentation_envelope_committed: false,
+                destination_presentable: true,
+                canonical_destination_ready: true,
+            },
+            RelocationReadiness {
+                presentation_envelope_committed: true,
+                destination_presentable: false,
+                canonical_destination_ready: true,
+            },
+            RelocationReadiness {
+                presentation_envelope_committed: true,
+                destination_presentable: true,
+                canonical_destination_ready: false,
+            },
+        ] {
+            assert!(take_ready_relocation(&mut pending, readiness).is_none());
+            assert!(
+                pending.is_some(),
+                "the destination intent must remain durable"
+            );
+            assert_eq!(
+                source.position, held_source,
+                "readiness polling must not mutate the visible source"
+            );
+        }
+
+        let committed = take_ready_relocation(
+            &mut pending,
+            RelocationReadiness {
+                presentation_envelope_committed: true,
+                destination_presentable: true,
+                canonical_destination_ready: true,
+            },
+        )
+        .expect("the complete destination certificate commits the handoff");
+        assert_eq!(committed.destination.position, destination.position);
+        assert!(pending.is_none());
+        assert!(
+            take_ready_relocation(
+                &mut pending,
+                RelocationReadiness {
+                    presentation_envelope_committed: true,
+                    destination_presentable: true,
+                    canonical_destination_ready: true,
+                },
+            )
+            .is_none(),
+            "a consumed handoff cannot oscillate or apply twice"
+        );
+    }
+
+    #[test]
+    fn unresolved_profile_surface_cannot_commit_despite_other_certificates() {
+        let destination = CameraState::spawn(glam::Vec3::new(64.0, 8.0, 64.0));
+        let mut relocation = pending_relocation(
+            PendingRelocationKind::ProfileStep,
+            destination,
+            destination.position,
+        );
+        relocation.destination_resolved = false;
+        let mut pending = Some(relocation);
+        assert!(
+            take_ready_relocation(
+                &mut pending,
+                RelocationReadiness {
+                    presentation_envelope_committed: true,
+                    destination_presentable: true,
+                    canonical_destination_ready: true,
+                },
+            )
+            .is_none()
+        );
+        assert!(pending.is_some());
+    }
+
+    #[test]
+    fn latest_relocation_supersedes_a_blocked_target_without_reversal_oscillation() {
+        let camera_b = CameraState::spawn(glam::Vec3::new(128.0, 8.0, 0.0));
+        let camera_a = CameraState::spawn(glam::Vec3::new(0.0, 8.0, 0.0));
+        let mut pending = Some(pending_relocation(
+            PendingRelocationKind::ReproductionApply,
+            camera_b,
+            camera_b.position,
+        ));
+        assert_eq!(
+            pending.as_ref().map(|relocation| relocation.kind),
+            Some(PendingRelocationKind::ReproductionApply)
+        );
+
+        pending = Some(pending_relocation(
+            PendingRelocationKind::ReproductionRestore,
+            camera_a,
+            camera_a.position,
+        ));
+        let committed = take_ready_relocation(
+            &mut pending,
+            RelocationReadiness {
+                presentation_envelope_committed: true,
+                destination_presentable: true,
+                canonical_destination_ready: true,
+            },
+        )
+        .expect("the replacement intent commits");
+        assert_eq!(committed.presentation_target, camera_a.position);
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn profile_time_distance_and_drain_wait_for_terminal_pose_admission() {
+        let config = voxels_core::ProfileConfig {
+            fixed_step_seconds: 0.25,
+            speed_metres_per_second: 8.0,
+            warmup_seconds: 0.25,
+            measure_seconds: 0.0,
+        };
+        let mut admitted = voxels_core::ProfileAutomation::with_config(config);
+        admitted.start_route(glam::Vec3::ZERO, voxels_core::ProfileRoute::Straight);
+        let mut candidate = admitted;
+        candidate.advance_fixed_step();
+        assert_eq!(candidate.phase(), voxels_core::ProfilePhase::Drain);
+        assert_eq!(
+            candidate
+                .admission_pose()
+                .expect("Drain owns the exact terminal route pose")
+                .position_xz,
+            glam::Vec2::new(0.0, -2.0)
+        );
+
+        let destination = CameraState::spawn(glam::Vec3::new(0.0, 8.0, -2.0));
+        let mut relocation = pending_relocation(
+            PendingRelocationKind::ProfileStep,
+            destination,
+            destination.position,
+        );
+        relocation.profile_after_commit = Some(candidate);
+        let mut pending = Some(relocation);
+        assert!(
+            take_ready_relocation(
+                &mut pending,
+                RelocationReadiness {
+                    presentation_envelope_committed: false,
+                    destination_presentable: true,
+                    canonical_destination_ready: true,
+                },
+            )
+            .is_none()
+        );
+        assert_eq!(admitted.elapsed_seconds(), 0.0);
+        assert_eq!(admitted.distance_metres(), 0.0);
+        assert!(!profile_drain_can_complete(
+            true,
+            RelocationReadiness {
+                presentation_envelope_committed: true,
+                destination_presentable: true,
+                canonical_destination_ready: true,
+            },
+            true,
+        ));
+
+        let committed = take_ready_relocation(
+            &mut pending,
+            RelocationReadiness {
+                presentation_envelope_committed: true,
+                destination_presentable: true,
+                canonical_destination_ready: true,
+            },
+        )
+        .expect("terminal pose becomes observable only with its complete certificate");
+        admitted = committed
+            .profile_after_commit
+            .expect("profile state and camera hand off atomically");
+        assert_eq!(admitted.elapsed_seconds(), 0.25);
+        assert_eq!(admitted.distance_metres(), 2.0);
+        assert!(!profile_drain_can_complete(
+            false,
+            RelocationReadiness {
+                presentation_envelope_committed: false,
+                destination_presentable: true,
+                canonical_destination_ready: true,
+            },
+            true,
+        ));
+        assert!(!profile_drain_can_complete(
+            false,
+            RelocationReadiness {
+                presentation_envelope_committed: true,
+                destination_presentable: true,
+                canonical_destination_ready: true,
+            },
+            false,
+        ));
+        assert!(profile_drain_can_complete(
+            false,
+            RelocationReadiness {
+                presentation_envelope_committed: true,
+                destination_presentable: true,
+                canonical_destination_ready: true,
+            },
+            true,
+        ));
+    }
+
+    #[test]
+    fn manual_spectator_exit_restores_saved_body_or_certifies_current_position() {
+        let mut spectator = CameraState::spawn(glam::Vec3::new(90.0, 40.0, -20.0));
+        spectator.set_locomotion(voxels_core::LocomotionMode::Spectator);
+        let body = CameraState::spawn(glam::Vec3::new(2.0, 8.0, 3.0));
+
+        let restored = spectator_exit_destination(spectator, Some(body));
+        assert_eq!(restored.position, body.position);
+        assert_eq!(restored.locomotion(), voxels_core::LocomotionMode::Walking);
+        let exit = pending_relocation(
+            PendingRelocationKind::SpectatorExit,
+            restored,
+            restored.position,
+        );
+        assert_eq!(exit.kind, PendingRelocationKind::SpectatorExit);
+
+        let in_place = spectator_exit_destination(spectator, None);
+        assert_eq!(in_place.position, spectator.position);
+        assert_eq!(in_place.locomotion(), voxels_core::LocomotionMode::Walking);
+    }
+
+    #[test]
+    fn gated_capture_replay_never_publishes_target_b_under_out_of_envelope_camera_a() {
+        let camera_a = CameraState::spawn(glam::Vec3::new(0.0, 8.0, 0.0));
+        let target_b = glam::Vec3::new(256.0, 8.0, -256.0);
+
+        let overlapping = reproduction_relocation_destination(camera_a, target_b, true);
+        assert_eq!(overlapping.position, camera_a.position);
+
+        let disjoint = reproduction_relocation_destination(camera_a, target_b, false);
+        assert_eq!(disjoint.position, target_b);
+        let mut pending = Some(pending_relocation(
+            PendingRelocationKind::ReproductionApply,
+            disjoint,
+            target_b,
+        ));
+        assert!(
+            take_ready_relocation(
+                &mut pending,
+                RelocationReadiness {
+                    presentation_envelope_committed: false,
+                    destination_presentable: false,
+                    canonical_destination_ready: false,
+                },
+            )
+            .is_none()
+        );
+        assert_eq!(
+            pending
+                .expect("replay retains B until publication")
+                .destination
+                .position,
+            target_b
+        );
+    }
+
+    #[test]
+    fn relocation_stream_plan_retains_source_and_destination_without_duplicate_frontiers() {
+        let shared_frontier = PortalFrontier {
+            source: voxels_world::ChunkCoord::new(0, 1, 0),
+            neighbor: voxels_world::ChunkCoord::new(1, 1, 0),
+            face: 1,
+            cells: [7; CHUNK_FACE_WORDS],
+        };
+        let merged = merge_enclosed_view_stream_plans(
+            EnclosedViewStreamPlan {
+                chunks: vec![voxels_world::ChunkCoord::new(0, 1, 0)],
+                frontiers: vec![shared_frontier.clone()],
+            },
+            EnclosedViewStreamPlan {
+                chunks: vec![
+                    voxels_world::ChunkCoord::new(0, 1, 0),
+                    voxels_world::ChunkCoord::new(8, 1, 0),
+                ],
+                frontiers: vec![shared_frontier],
+            },
+        );
+        assert_eq!(
+            merged.chunks,
+            vec![
+                voxels_world::ChunkCoord::new(0, 1, 0),
+                voxels_world::ChunkCoord::new(8, 1, 0),
+            ]
+        );
+        assert_eq!(merged.frontiers.len(), 1);
     }
 
     #[test]
