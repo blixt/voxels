@@ -55,7 +55,7 @@ use voxels_world::protocol::{
     encode_terrain_region_column_batch_result, encode_virtual_terrain_page_batch_result,
     encode_world_opened, message_kind, message_request_id, open_presence_kind, open_world_kind,
     player_pose_kind, presence_ping_kind, terrain_directory_batch_kind,
-    terrain_region_column_batch_kind, virtual_terrain_page_batch_kind,
+    terrain_region_column_batch_kind, validate_world_environment, virtual_terrain_page_batch_kind,
 };
 use voxels_world::{
     CHUNK_EDGE, ChunkCoord, Material, MeshingHalo, SurfaceSampleBlockRequest,
@@ -152,7 +152,9 @@ impl WorldServer {
 
         let presence = PresenceHub::new(config.presence, config.gameplay)
             .map_err(WorldServerError::Presence)?;
-        let environment = EnvironmentAuthority::new(config.environment, presence.now_ms());
+        let environment_server_time_ms = presence.now_ms();
+        let environment = EnvironmentAuthority::new(config.environment, environment_server_time_ms)
+            .validate_startup(environment_server_time_ms)?;
         let authorization = ConnectionAuthorization::from_config(&config.transport)?;
         let allow_non_loopback = config.transport.allow_non_loopback;
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -636,6 +638,15 @@ impl EnvironmentAuthority {
             weather_seed: self.config.weather_seed,
             weather_revision: self.config.weather_revision,
         }
+    }
+
+    fn validate_startup(self, sample_server_time_ms: u64) -> Result<Self, WorldServerError> {
+        validate_world_environment(&self.snapshot(sample_server_time_ms)).map_err(|_| {
+            WorldServiceConfigError::InvalidEnvironment(
+                "configured environment clock derives a protocol-incompatible startup snapshot",
+            )
+        })?;
+        Ok(self)
     }
 }
 
@@ -4742,6 +4753,35 @@ mod tests {
         assert_eq!(authority.snapshot(9_000_010).day_fraction, 0.73);
         assert_eq!(authority.snapshot(10).weather_fraction, 0.68);
         assert_eq!(authority.snapshot(9_000_010).weather_fraction, 0.68);
+    }
+
+    #[test]
+    fn startup_rejects_environment_day_numbers_outside_the_protocol_range() {
+        let invalid = EnvironmentAuthority::from_anchor(
+            crate::EnvironmentConfig {
+                day_length_seconds: 1.0,
+                ..crate::EnvironmentConfig::default()
+            },
+            1_000,
+            1_800_000_000.0,
+        );
+        assert!(matches!(
+            invalid.validate_startup(1_000),
+            Err(WorldServerError::Config(
+                WorldServiceConfigError::InvalidEnvironment(_)
+            ))
+        ));
+
+        let valid = EnvironmentAuthority::from_anchor(
+            crate::EnvironmentConfig {
+                day_length_seconds: 86_400.0,
+                world_day_number_at_unix_epoch: 999_900_000,
+                ..crate::EnvironmentConfig::default()
+            },
+            1_000,
+            1_800_000_000.0,
+        );
+        assert!(valid.validate_startup(1_000).is_ok());
     }
 
     fn player_identity(user: u8, player: u8, name: &str) -> PlayerIdentity {
