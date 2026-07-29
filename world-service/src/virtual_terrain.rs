@@ -450,6 +450,8 @@ fn build_coverage_region(
             stride,
         )
         .map_err(|error| VirtualTerrainError::Source(error.to_string()))?;
+    let child_boundary_midpoints =
+        sample_child_heightfield_boundary_midpoints(source, root, priority)?;
     let has_edits = !snapshot.edits.is_empty();
     let exact_scan = if root.level == 1 && has_edits {
         Some(sample_exact_surface_edits(
@@ -467,6 +469,7 @@ fn build_coverage_region(
         root,
         &mut revision_at,
         &samples,
+        &child_boundary_midpoints,
         TerrainErrorBounds {
             geometric_millivoxels: stride.saturating_mul(2_000),
             silhouette_millivoxels: stride.saturating_mul(2_000),
@@ -517,6 +520,75 @@ fn build_coverage_region(
                 .map_err(|error| VirtualTerrainError::Build(error.to_string()))?;
     }
     Ok(built)
+}
+
+fn sample_child_heightfield_boundary_midpoints(
+    source: &dyn WorldSourceEngine,
+    root: TerrainPageKey,
+    priority: WorldProductPriority,
+) -> Result<BTreeMap<TerrainPageKey, Vec<voxels_world::SurfaceSample>>, VirtualTerrainError> {
+    if root.level <= 1 {
+        return Ok(BTreeMap::new());
+    }
+    let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = root
+        .horizontal_bounds()
+        .ok_or(VirtualTerrainError::InvalidRoot)?;
+    let child_stride = 1u32
+        .checked_shl(u32::from(root.level - 1))
+        .ok_or(VirtualTerrainError::InvalidRoot)?;
+    let midpoint_offset =
+        i32::try_from(child_stride / 2).map_err(|_| VirtualTerrainError::InvalidRoot)?;
+    let half_x = minimum_x + (maximum_x - minimum_x) / 2;
+    let half_z = minimum_z + (maximum_z - minimum_z) / 2;
+    let vertical = [minimum_x, half_x, maximum_x]
+        .map(|x| {
+            source
+                .surface_sample_lattice(
+                    priority,
+                    [x, minimum_z.saturating_add(midpoint_offset)],
+                    [1, TERRAIN_PAGE_EDGE_SAMPLES * 2],
+                    child_stride,
+                )
+                .map_err(|error| VirtualTerrainError::Source(error.to_string()))
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    let horizontal = [minimum_z, half_z, maximum_z]
+        .map(|z| {
+            source
+                .surface_sample_lattice(
+                    priority,
+                    [minimum_x.saturating_add(midpoint_offset), z],
+                    [TERRAIN_PAGE_EDGE_SAMPLES * 2, 1],
+                    child_stride,
+                )
+                .map_err(|error| VirtualTerrainError::Source(error.to_string()))
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    let side_samples = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+    root.refinement_children()
+        .ok_or(VirtualTerrainError::InvalidRoot)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, key)| {
+            let quadrant_x = index & 1;
+            let quadrant_z = (index >> 1) & 1;
+            let tangent_x = quadrant_x * side_samples;
+            let tangent_z = quadrant_z * side_samples;
+            let mut residuals =
+                Vec::with_capacity(voxels_world::TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS);
+            residuals.extend_from_slice(&vertical[quadrant_x][tangent_z..tangent_z + side_samples]);
+            residuals
+                .extend_from_slice(&vertical[quadrant_x + 1][tangent_z..tangent_z + side_samples]);
+            residuals
+                .extend_from_slice(&horizontal[quadrant_z][tangent_x..tangent_x + side_samples]);
+            residuals.extend_from_slice(
+                &horizontal[quadrant_z + 1][tangent_x..tangent_x + side_samples],
+            );
+            Ok((key, residuals))
+        })
+        .collect()
 }
 
 struct ExactSurfaceScan {

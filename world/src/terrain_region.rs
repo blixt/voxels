@@ -157,6 +157,7 @@ pub fn build_terrain_coverage_root(
     root: TerrainPageKey,
     revision: u64,
     samples: &[SurfaceSample],
+    child_boundary_midpoints: &BTreeMap<TerrainPageKey, Vec<SurfaceSample>>,
     errors: TerrainErrorBounds,
 ) -> Result<TerrainRegionBuildV1, TerrainRegionBuildError> {
     build_terrain_coverage_root_with_revisions(
@@ -164,6 +165,7 @@ pub fn build_terrain_coverage_root(
         root,
         |_| Some(revision),
         samples,
+        child_boundary_midpoints,
         errors,
     )
 }
@@ -179,6 +181,7 @@ pub fn build_terrain_coverage_root_with_revisions(
     root: TerrainPageKey,
     mut revision_at: impl FnMut(TerrainPageKey) -> Option<u64>,
     samples: &[SurfaceSample],
+    child_boundary_midpoints: &BTreeMap<TerrainPageKey, Vec<SurfaceSample>>,
     errors: TerrainErrorBounds,
 ) -> Result<TerrainRegionBuildV1, TerrainRegionBuildError> {
     if root.level == 0
@@ -214,6 +217,10 @@ pub fn build_terrain_coverage_root_with_revisions(
                 key,
                 revision_at(key).ok_or(TerrainRegionBuildError::MissingRevision(key))?,
                 &child_samples,
+                child_boundary_midpoints
+                    .get(&key)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
                 TerrainErrorBounds {
                     geometric_millivoxels: errors.geometric_millivoxels / 2,
                     silhouette_millivoxels: errors.silhouette_millivoxels / 2,
@@ -232,11 +239,31 @@ pub fn build_terrain_coverage_root_with_revisions(
                 .map(move |x| samples[x * 2 + z * 2 * fine_edge])
         })
         .collect::<Vec<_>>();
+    let boundary_midpoints = [
+        (0, true),
+        (fine_edge - 1, true),
+        (0, false),
+        (fine_edge - 1, false),
+    ]
+    .into_iter()
+    .flat_map(|(fixed, x_fixed)| {
+        (0..TERRAIN_PAGE_EDGE_SAMPLES as usize).map(move |offset| {
+            let tangent = offset * 2 + 1;
+            let (x, z) = if x_fixed {
+                (fixed, tangent)
+            } else {
+                (tangent, fixed)
+            };
+            samples[x + z * fine_edge]
+        })
+    })
+    .collect::<Vec<_>>();
     let sampled_root = build_sampled_heightfield_terrain_page(
         source_identity_hash,
         root,
         revision_at(root).ok_or(TerrainRegionBuildError::MissingRevision(root))?,
         &root_samples,
+        &boundary_midpoints,
         errors,
     )?;
     ensure_publication_budget(&sampled_root)?;

@@ -15,8 +15,11 @@ use std::io::Read;
 #[cfg(feature = "terrain-page-builder")]
 use crate::terrain_error::certify_bidirectional_surface_error;
 
-pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 6;
+pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 7;
 pub const TERRAIN_PAGE_EDGE_SAMPLES: u32 = 32;
+pub const TERRAIN_HEIGHTFIELD_BOUNDARY_SIDES: usize = 4;
+pub const TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS: usize =
+    TERRAIN_HEIGHTFIELD_BOUNDARY_SIDES * TERRAIN_PAGE_EDGE_SAMPLES as usize;
 pub const TERRAIN_PAGE_MAX_LEVEL: u8 = 20;
 pub const TERRAIN_PAGE_MAX_CHILDREN: usize = 8;
 pub const TERRAIN_SURFACE_PAGE_CHILDREN: usize = 4;
@@ -30,9 +33,9 @@ pub const TERRAIN_PAGE_TARGET_COMPRESSED_BYTES: usize = 65_536;
 pub const TERRAIN_PAGE_MAX_COMPRESSED_BYTES: usize = 262_144;
 pub const TERRAIN_PAGE_MAX_PAYLOAD_BYTES: usize = 2_097_152;
 const SPARSE_BRICK_EDGE: u8 = 8;
-const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v6\0";
+const PAGE_FINGERPRINT_DOMAIN: &[u8] = b"voxels-terrain-page-v7\0";
 const PARENT_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-parent-boundary-v1\0";
-const HEIGHTFIELD_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-heightfield-boundary-v2\0";
+const HEIGHTFIELD_BOUNDARY_DOMAIN: &[u8] = b"voxels-terrain-heightfield-boundary-v3\0";
 const PAGE_MAGIC: &[u8; 4] = b"VXTP";
 const PAGE_HEADER_LEN: u16 = 344;
 const PAGE_COMPRESSION_BROTLI: u8 = 1;
@@ -275,6 +278,15 @@ pub struct TerrainHeightfieldGrid {
     pub cell_material_indices: Vec<u8>,
     /// Canonical water top plane coordinates, or `i32::MIN` for a dry lattice vertex.
     pub water_heights: Vec<i32>,
+    /// One source sample halfway between each pair of ordinary samples on every horizontal side.
+    ///
+    /// The order is negative X, positive X, negative Z, positive Z, with the tangent coordinate
+    /// increasing inside each side. Level 0 has no finer lattice and stores no residuals. Every
+    /// coarser page stores exactly 4 * 32 entries. A balanced cut can differ by at most one level,
+    /// so this is the complete boundary witness required by any legal finer neighbor.
+    pub boundary_midpoint_ground_heights: Vec<i32>,
+    pub boundary_midpoint_material_indices: Vec<u8>,
+    pub boundary_midpoint_water_heights: Vec<i32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -867,6 +879,7 @@ pub fn build_sampled_heightfield_terrain_page(
     key: TerrainPageKey,
     revision: u64,
     samples: &[SurfaceSample],
+    boundary_midpoints: &[SurfaceSample],
     mut errors: TerrainErrorBounds,
 ) -> Result<TerrainPageV1, TerrainPageBuildError> {
     let stride = 1u32
@@ -880,13 +893,21 @@ pub fn build_sampled_heightfield_terrain_page(
     if samples.len() != sample_count {
         return Err(TerrainPageBuildError::InvalidSurfaceLattice);
     }
+    let expected_boundary_midpoints = if key.level == 0 {
+        0
+    } else {
+        TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS
+    };
+    if boundary_midpoints.len() != expected_boundary_midpoints {
+        return Err(TerrainPageBuildError::InvalidSurfaceLattice);
+    }
     let bounds = if key.is_surface() {
         let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = key
             .horizontal_bounds()
             .ok_or(TerrainPageBuildError::InvalidPageKey)?;
         let mut minimum_y = i32::MAX;
         let mut maximum_y = i32::MIN;
-        for sample in samples {
+        for sample in samples.iter().chain(boundary_midpoints) {
             let ground = sample
                 .height
                 .checked_add(1)
@@ -936,12 +957,45 @@ pub fn build_sampled_heightfield_terrain_page(
         ground_heights.push(ground);
         water_heights.push(water);
     }
+    let mut boundary_midpoint_ground_heights = Vec::with_capacity(expected_boundary_midpoints);
+    let mut boundary_midpoint_water_heights = Vec::with_capacity(expected_boundary_midpoints);
+    for sample in boundary_midpoints {
+        if !sample.material.is_renderable() {
+            return Err(TerrainPageBuildError::InvalidSurfaceLattice);
+        }
+        let ground = sample
+            .height
+            .checked_add(1)
+            .ok_or(TerrainPageBuildError::InvalidSurfaceLattice)?;
+        if !(bounds.min.y..=bounds.max.y).contains(&ground) {
+            return Err(TerrainPageBuildError::InvalidSurfaceLattice);
+        }
+        let water = sample
+            .water_level
+            .map(|height| {
+                height
+                    .checked_add(1)
+                    .filter(|height| {
+                        *height >= ground && (bounds.min.y..=bounds.max.y).contains(height)
+                    })
+                    .ok_or(TerrainPageBuildError::InvalidSurfaceLattice)
+            })
+            .transpose()?
+            .unwrap_or(i32::MIN);
+        boundary_midpoint_ground_heights.push(ground);
+        boundary_midpoint_water_heights.push(water);
+    }
 
     let mut materials_by_id = samples
         .iter()
+        .chain(boundary_midpoints)
         .map(|sample| (sample.material.id(), sample.material))
         .collect::<BTreeMap<_, _>>();
-    if samples.iter().any(|sample| sample.water_level.is_some()) {
+    if samples
+        .iter()
+        .chain(boundary_midpoints)
+        .any(|sample| sample.water_level.is_some())
+    {
         materials_by_id.insert(Material::Water.id(), Material::Water);
     }
     let palette_indices = materials_by_id
@@ -956,6 +1010,15 @@ pub fn build_sampled_heightfield_terrain_page(
 
     let edge = shape as usize;
     let sample_material_indices = samples
+        .iter()
+        .map(|sample| {
+            palette_indices
+                .get(&sample.material.id())
+                .copied()
+                .ok_or(TerrainPageBuildError::MaterialPaletteOverflow)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let boundary_midpoint_material_indices = boundary_midpoints
         .iter()
         .map(|sample| {
             palette_indices
@@ -1024,6 +1087,9 @@ pub fn build_sampled_heightfield_terrain_page(
         sample_material_indices,
         cell_material_indices,
         water_heights,
+        boundary_midpoint_ground_heights,
+        boundary_midpoint_material_indices,
+        boundary_midpoint_water_heights,
     };
     let boundary_fingerprints = heightfield_boundary_fingerprints(bounds, &grid, &materials);
     let mut page = TerrainPageV1 {
@@ -1056,33 +1122,73 @@ fn heightfield_boundary_fingerprints(
         hasher.update(HEIGHTFIELD_BOUNDARY_DOMAIN);
         hasher.update(&[side.axis() as u8]);
         hasher.update(&boundary_plane(bounds, side).to_le_bytes());
+        let hash_sample =
+            |hasher: &mut blake3::Hasher, ground: i32, water: i32, material_index: Option<u8>| {
+                hasher.update(&ground.to_le_bytes());
+                hasher.update(&water.to_le_bytes());
+                let material_id = material_index
+                    .and_then(|index| materials.get(usize::from(index)))
+                    .map_or(u16::MAX, |coverage| coverage.material.id());
+                hasher.update(&material_id.to_le_bytes());
+            };
+        let residual_side = match side {
+            BoundarySide::NegativeX => Some(0),
+            BoundarySide::PositiveX => Some(1),
+            BoundarySide::NegativeZ => Some(2),
+            BoundarySide::PositiveZ => Some(3),
+            BoundarySide::NegativeY | BoundarySide::PositiveY => None,
+        };
         match side {
             BoundarySide::NegativeX | BoundarySide::PositiveX => {
                 let x = usize::from(side == BoundarySide::PositiveX) * (edge - 1);
                 for z in 0..edge {
                     let sample = x + z * edge;
-                    hasher.update(&grid.ground_heights[sample].to_le_bytes());
-                    hasher.update(&grid.water_heights[sample].to_le_bytes());
-                    let material_id = grid
-                        .sample_material_indices
-                        .get(sample)
-                        .and_then(|index| materials.get(usize::from(*index)))
-                        .map_or(u16::MAX, |coverage| coverage.material.id());
-                    hasher.update(&material_id.to_le_bytes());
+                    hash_sample(
+                        &mut hasher,
+                        grid.ground_heights[sample],
+                        grid.water_heights[sample],
+                        grid.sample_material_indices.get(sample).copied(),
+                    );
+                    if !grid.boundary_midpoint_ground_heights.is_empty()
+                        && z + 1 < edge
+                        && let Some(side) = residual_side
+                    {
+                        let residual = side * TERRAIN_PAGE_EDGE_SAMPLES as usize + z;
+                        hash_sample(
+                            &mut hasher,
+                            grid.boundary_midpoint_ground_heights[residual],
+                            grid.boundary_midpoint_water_heights[residual],
+                            grid.boundary_midpoint_material_indices
+                                .get(residual)
+                                .copied(),
+                        );
+                    }
                 }
             }
             BoundarySide::NegativeZ | BoundarySide::PositiveZ => {
                 let z = usize::from(side == BoundarySide::PositiveZ) * (edge - 1);
                 for x in 0..edge {
                     let sample = x + z * edge;
-                    hasher.update(&grid.ground_heights[sample].to_le_bytes());
-                    hasher.update(&grid.water_heights[sample].to_le_bytes());
-                    let material_id = grid
-                        .sample_material_indices
-                        .get(sample)
-                        .and_then(|index| materials.get(usize::from(*index)))
-                        .map_or(u16::MAX, |coverage| coverage.material.id());
-                    hasher.update(&material_id.to_le_bytes());
+                    hash_sample(
+                        &mut hasher,
+                        grid.ground_heights[sample],
+                        grid.water_heights[sample],
+                        grid.sample_material_indices.get(sample).copied(),
+                    );
+                    if !grid.boundary_midpoint_ground_heights.is_empty()
+                        && x + 1 < edge
+                        && let Some(side) = residual_side
+                    {
+                        let residual = side * TERRAIN_PAGE_EDGE_SAMPLES as usize + x;
+                        hash_sample(
+                            &mut hasher,
+                            grid.boundary_midpoint_ground_heights[residual],
+                            grid.boundary_midpoint_water_heights[residual],
+                            grid.boundary_midpoint_material_indices
+                                .get(residual)
+                                .copied(),
+                        );
+                    }
                 }
             }
             BoundarySide::NegativeY | BoundarySide::PositiveY => {}
@@ -1926,12 +2032,91 @@ fn validate_surface_heightfield_replacement(
             }
         }
     }
-
-    // Intermediate child vertices on the four outer edges are presentation residuals, not
-    // independent boundary authority. The renderer evaluates them from these coincident parent
-    // samples in dyadic fixed point, recursively through the hierarchy. This preserves the exact
-    // integer source samples in the payload while making the rendered replacement conforming.
+    for side in 0..TERRAIN_HEIGHTFIELD_BOUNDARY_SIDES {
+        for fine_offset in 0..=TERRAIN_PAGE_EDGE_SAMPLES as usize * 2 {
+            let parent_boundary = if fine_offset.is_multiple_of(2) {
+                heightfield_boundary_sample(parent, parent_grid, side, fine_offset / 2, false)
+            } else {
+                heightfield_boundary_sample(parent, parent_grid, side, fine_offset / 2, true)
+            }
+            .ok_or(TerrainReplacementError::InvalidRepresentation)?;
+            let high_tangent = fine_offset > TERRAIN_PAGE_EDGE_SAMPLES as usize;
+            let child_quadrant = match side {
+                0 => usize::from(high_tangent) * 2,
+                1 => 1 + usize::from(high_tangent) * 2,
+                2 => usize::from(high_tangent),
+                _ => 2 + usize::from(high_tangent),
+            };
+            let child_key = TerrainPageKey::surface(
+                parent.key.level - 1,
+                parent.key.coord[0] * 2 + (child_quadrant & 1) as i32,
+                parent.key.coord[2] * 2 + ((child_quadrant >> 1) & 1) as i32,
+            );
+            let child = child_by_key
+                .get(&child_key)
+                .ok_or(TerrainReplacementError::IncompleteChildKeys)?;
+            let TerrainPageRepresentation::HeightfieldGrid(child_grid) = &child.representation
+            else {
+                return Err(TerrainReplacementError::InvalidRepresentation);
+            };
+            let child_offset = if high_tangent {
+                fine_offset - TERRAIN_PAGE_EDGE_SAMPLES as usize
+            } else {
+                fine_offset
+            };
+            let child = heightfield_boundary_sample(child, child_grid, side, child_offset, false)
+                .ok_or(TerrainReplacementError::InvalidRepresentation)?;
+            if parent_boundary != child {
+                return Err(TerrainReplacementError::OuterBoundaryMismatch);
+            }
+        }
+    }
     Ok(())
+}
+
+fn heightfield_boundary_sample(
+    page: &TerrainPageV1,
+    grid: &TerrainHeightfieldGrid,
+    side: usize,
+    offset: usize,
+    midpoint: bool,
+) -> Option<(i32, i32, Material)> {
+    let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize;
+    if side >= TERRAIN_HEIGHTFIELD_BOUNDARY_SIDES || offset > cells {
+        return None;
+    }
+    let sample = if midpoint {
+        if offset >= cells {
+            return None;
+        }
+        side.checked_mul(cells)?.checked_add(offset)?
+    } else {
+        let edge = cells + 1;
+        match side {
+            0 => offset.checked_mul(edge)?,
+            1 => cells.checked_add(offset.checked_mul(edge)?)?,
+            2 => offset,
+            _ => offset.checked_add(cells.checked_mul(edge)?)?,
+        }
+    };
+    let (ground, water, material_index) = if midpoint {
+        (
+            *grid.boundary_midpoint_ground_heights.get(sample)?,
+            *grid.boundary_midpoint_water_heights.get(sample)?,
+            *grid.boundary_midpoint_material_indices.get(sample)?,
+        )
+    } else {
+        (
+            *grid.ground_heights.get(sample)?,
+            *grid.water_heights.get(sample)?,
+            *grid.sample_material_indices.get(sample)?,
+        )
+    };
+    Some((
+        ground,
+        water,
+        page.materials.get(usize::from(material_index))?.material,
+    ))
 }
 
 fn heightfield_sample_material(
@@ -2687,12 +2872,31 @@ fn representation_bytes(representation: &TerrainPageRepresentation) -> Vec<u8> {
             push_u32(&mut bytes, grid.sample_material_indices.len() as u32);
             push_u32(&mut bytes, grid.cell_material_indices.len() as u32);
             push_u32(&mut bytes, grid.water_heights.len() as u32);
+            push_u32(
+                &mut bytes,
+                grid.boundary_midpoint_ground_heights.len() as u32,
+            );
+            push_u32(
+                &mut bytes,
+                grid.boundary_midpoint_material_indices.len() as u32,
+            );
+            push_u32(
+                &mut bytes,
+                grid.boundary_midpoint_water_heights.len() as u32,
+            );
             for height in &grid.ground_heights {
                 push_i32(&mut bytes, *height);
             }
             bytes.extend_from_slice(&grid.sample_material_indices);
             bytes.extend_from_slice(&grid.cell_material_indices);
             for height in &grid.water_heights {
+                push_i32(&mut bytes, *height);
+            }
+            for height in &grid.boundary_midpoint_ground_heights {
+                push_i32(&mut bytes, *height);
+            }
+            bytes.extend_from_slice(&grid.boundary_midpoint_material_indices);
+            for height in &grid.boundary_midpoint_water_heights {
                 push_i32(&mut bytes, *height);
             }
         }
@@ -2811,6 +3015,11 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
             let expected_stride = 1u32.checked_shl(u32::from(page.key.level)).unwrap_or(0);
             let edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
             let cells = TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize;
+            let boundary_midpoints = if page.key.level == 0 {
+                0
+            } else {
+                TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS
+            };
             page.topology == TerrainTopologyClass::SingleRunColumns
                 && grid.sample_stride_voxels == expected_stride
                 && grid.shape_xz
@@ -2822,6 +3031,9 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
                 && grid.sample_material_indices.len() == edge * edge
                 && grid.water_heights.len() == edge * edge
                 && grid.cell_material_indices.len() == cells
+                && grid.boundary_midpoint_ground_heights.len() == boundary_midpoints
+                && grid.boundary_midpoint_material_indices.len() == boundary_midpoints
+                && grid.boundary_midpoint_water_heights.len() == boundary_midpoints
                 && grid
                     .ground_heights
                     .iter()
@@ -2838,11 +3050,25 @@ fn representation_is_valid(page: &TerrainPageV1) -> bool {
                 && grid
                     .sample_material_indices
                     .iter()
+                    .chain(&grid.boundary_midpoint_material_indices)
                     .all(|index| usize::from(*index) < palette_len)
                 && grid
                     .cell_material_indices
                     .iter()
                     .all(|index| usize::from(*index) < palette_len)
+                && grid
+                    .boundary_midpoint_ground_heights
+                    .iter()
+                    .all(|height| (page.bounds.min.y..=page.bounds.max.y).contains(height))
+                && grid
+                    .boundary_midpoint_water_heights
+                    .iter()
+                    .zip(&grid.boundary_midpoint_ground_heights)
+                    .all(|(water, ground)| {
+                        *water == i32::MIN
+                            || (*water >= *ground
+                                && (page.bounds.min.y..=page.bounds.max.y).contains(water))
+                    })
         }
     }
 }
@@ -3439,14 +3665,25 @@ fn decode_representation(
             let sample_material_count = cursor.u32()? as usize;
             let cell_material_count = cursor.u32()? as usize;
             let water_count = cursor.u32()? as usize;
+            let boundary_ground_count = cursor.u32()? as usize;
+            let boundary_material_count = cursor.u32()? as usize;
+            let boundary_water_count = cursor.u32()? as usize;
             let expected_edge = TERRAIN_PAGE_EDGE_SAMPLES as usize + 1;
             let expected_samples = expected_edge * expected_edge;
             let expected_materials =
                 TERRAIN_PAGE_EDGE_SAMPLES as usize * TERRAIN_PAGE_EDGE_SAMPLES as usize;
+            let expected_boundary = if sample_stride_voxels == 1 {
+                0
+            } else {
+                TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS
+            };
             if ground_count != expected_samples
                 || sample_material_count != expected_samples
                 || cell_material_count != expected_materials
                 || water_count != expected_samples
+                || boundary_ground_count != expected_boundary
+                || boundary_material_count != expected_boundary
+                || boundary_water_count != expected_boundary
             {
                 return Err(TerrainPageCodecError::InvalidRepresentation(
                     "heightfield grid counts",
@@ -3462,6 +3699,16 @@ fn decode_representation(
             for _ in 0..water_count {
                 water_heights.push(cursor.i32()?);
             }
+            let mut boundary_midpoint_ground_heights = Vec::with_capacity(boundary_ground_count);
+            for _ in 0..boundary_ground_count {
+                boundary_midpoint_ground_heights.push(cursor.i32()?);
+            }
+            let boundary_midpoint_material_indices =
+                cursor.bytes(boundary_material_count)?.to_vec();
+            let mut boundary_midpoint_water_heights = Vec::with_capacity(boundary_water_count);
+            for _ in 0..boundary_water_count {
+                boundary_midpoint_water_heights.push(cursor.i32()?);
+            }
             TerrainPageRepresentation::HeightfieldGrid(TerrainHeightfieldGrid {
                 sample_stride_voxels,
                 shape_xz,
@@ -3469,6 +3716,9 @@ fn decode_representation(
                 sample_material_indices,
                 cell_material_indices,
                 water_heights,
+                boundary_midpoint_ground_heights,
+                boundary_midpoint_material_indices,
+                boundary_midpoint_water_heights,
             })
         }
     };
@@ -3630,6 +3880,42 @@ mod tests {
             .collect()
     }
 
+    fn heightfield_boundary_midpoints(key: TerrainPageKey) -> Vec<SurfaceSample> {
+        if key.level == 0 {
+            return Vec::new();
+        }
+        let bounds = key.bounds().unwrap();
+        let stride = 1i32 << key.level;
+        let midpoint = stride / 2;
+        [
+            (bounds.min.x, true),
+            (bounds.max.x, true),
+            (bounds.min.z, false),
+            (bounds.max.z, false),
+        ]
+        .into_iter()
+        .flat_map(|(fixed, x_fixed)| {
+            (0..TERRAIN_PAGE_EDGE_SAMPLES as i32).map(move |offset| {
+                let tangent =
+                    if x_fixed { bounds.min.z } else { bounds.min.x } + offset * stride + midpoint;
+                let (world_x, world_z) = if x_fixed {
+                    (fixed, tangent)
+                } else {
+                    (tangent, fixed)
+                };
+                let height = 24 + world_x.div_euclid(32) + world_z.div_euclid(48);
+                let material =
+                    if (world_x.div_euclid(16) + world_z.div_euclid(16)).rem_euclid(3) == 0 {
+                        Material::Dirt
+                    } else {
+                        Material::Grass
+                    };
+                sampled_surface(height, material, (height < 20).then_some(20))
+            })
+        })
+        .collect()
+    }
+
     fn surface_heightfield_samples(key: TerrainPageKey) -> Vec<SurfaceSample> {
         let [[minimum_x, minimum_z], _] = key.horizontal_bounds().unwrap();
         let stride = 1i32 << key.level;
@@ -3651,6 +3937,42 @@ mod tests {
             .collect()
     }
 
+    fn surface_heightfield_boundary_midpoints(key: TerrainPageKey) -> Vec<SurfaceSample> {
+        if key.level == 0 {
+            return Vec::new();
+        }
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = key.horizontal_bounds().unwrap();
+        let stride = 1i32 << key.level;
+        let midpoint = stride / 2;
+        [
+            (minimum_x, true),
+            (maximum_x, true),
+            (minimum_z, false),
+            (maximum_z, false),
+        ]
+        .into_iter()
+        .flat_map(|(fixed, x_fixed)| {
+            (0..TERRAIN_PAGE_EDGE_SAMPLES as i32).map(move |offset| {
+                let tangent =
+                    if x_fixed { minimum_z } else { minimum_x } + offset * stride + midpoint;
+                let (world_x, world_z) = if x_fixed {
+                    (fixed, tangent)
+                } else {
+                    (tangent, fixed)
+                };
+                let height = world_x + world_z;
+                let material =
+                    if (world_x.div_euclid(16) + world_z.div_euclid(16)).rem_euclid(2) == 0 {
+                        Material::Dirt
+                    } else {
+                        Material::Grass
+                    };
+                sampled_surface(height, material, None)
+            })
+        })
+        .collect()
+    }
+
     #[test]
     fn sampled_heightfield_round_trips_and_adjacent_negative_pages_share_their_edge() {
         let left_key = TerrainPageKey {
@@ -3666,6 +3988,7 @@ mod tests {
             left_key,
             17,
             &heightfield_samples(left_key),
+            &heightfield_boundary_midpoints(left_key),
             TerrainErrorBounds::EXACT,
         )
         .unwrap();
@@ -3674,6 +3997,7 @@ mod tests {
             right_key,
             17,
             &heightfield_samples(right_key),
+            &heightfield_boundary_midpoints(right_key),
             TerrainErrorBounds::EXACT,
         )
         .unwrap();
@@ -3708,6 +4032,7 @@ mod tests {
             key,
             19,
             &samples,
+            &[],
             TerrainErrorBounds::EXACT,
         )
         .unwrap();
@@ -3795,6 +4120,7 @@ mod tests {
             parent_key,
             30,
             &samples,
+            &vec![samples[0]; TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS],
             TerrainErrorBounds {
                 unresolved_topology: true,
                 ..TerrainErrorBounds::EXACT
@@ -3863,6 +4189,7 @@ mod tests {
                 key,
                 1,
                 &samples,
+                &vec![samples[0]; TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS],
                 TerrainErrorBounds::EXACT,
             ),
             Err(TerrainPageBuildError::InvalidSurfaceLattice)
@@ -3908,6 +4235,7 @@ mod tests {
                     child,
                     27,
                     &surface_heightfield_samples(child),
+                    &surface_heightfield_boundary_midpoints(child),
                     TerrainErrorBounds::EXACT,
                 )
                 .unwrap()
@@ -3918,6 +4246,7 @@ mod tests {
             key,
             28,
             &surface_heightfield_samples(key),
+            &surface_heightfield_boundary_midpoints(key),
             TerrainErrorBounds::EXACT,
         )
         .unwrap();
@@ -3933,7 +4262,7 @@ mod tests {
     }
 
     #[test]
-    fn surface_quadtree_replacement_constrains_intermediate_edge_vertices_at_presentation() {
+    fn surface_quadtree_replacement_rejects_unwitnessed_intermediate_edge_change() {
         let key = TerrainPageKey::surface(1, 0, 0);
         let children = key
             .refinement_children()
@@ -3953,6 +4282,7 @@ mod tests {
                     child,
                     27,
                     &samples,
+                    &[],
                     TerrainErrorBounds::EXACT,
                 )
                 .unwrap()
@@ -3966,11 +4296,18 @@ mod tests {
                 sampled_surface(0, Material::Grass, None);
                 (TERRAIN_PAGE_EDGE_SAMPLES as usize + 1).pow(2)
             ],
+            &vec![
+                sampled_surface(0, Material::Grass, None);
+                TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS
+            ],
             TerrainErrorBounds::EXACT,
         )
         .unwrap();
 
-        validate_terrain_replacement(&parent, &children).unwrap();
+        assert_eq!(
+            validate_terrain_replacement(&parent, &children),
+            Err(TerrainReplacementError::OuterBoundaryMismatch)
+        );
     }
 
     fn terrain(coord: VoxelCoord) -> Material {
@@ -4589,6 +4926,12 @@ mod tests {
         )
         .unwrap();
         let encoded = encode_terrain_page(&page).unwrap();
+        let mut obsolete = encoded.clone();
+        obsolete[4..6].copy_from_slice(&6u16.to_le_bytes());
+        assert_eq!(
+            decode_terrain_page(&obsolete, identity()),
+            Err(TerrainPageCodecError::UnsupportedVersion(6))
+        );
         assert_eq!(
             decode_terrain_page(&encoded, WorldSourceIdentityHash::from_bytes([0x33; 32])),
             Err(TerrainPageCodecError::SourceIdentityMismatch)

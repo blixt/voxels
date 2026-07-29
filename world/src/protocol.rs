@@ -5058,11 +5058,23 @@ mod tests {
         let sample_edge = usize::try_from(crate::TERRAIN_PAGE_EDGE_SAMPLES * 2 + 1)
             .expect("coverage sample edge");
         let samples = vec![sample; sample_edge * sample_edge];
+        let child_boundary_midpoints = root
+            .refinement_children()
+            .expect("refinable coverage root")
+            .into_iter()
+            .map(|key| {
+                (
+                    key,
+                    vec![sample; crate::TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS],
+                )
+            })
+            .collect();
         let build = crate::build_terrain_coverage_root(
             source_identity_hash,
             root,
             11,
             &samples,
+            &child_boundary_midpoints,
             crate::TerrainErrorBounds {
                 geometric_millivoxels: 1_024_000,
                 silhouette_millivoxels: 1_024_000,
