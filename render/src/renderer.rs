@@ -2141,19 +2141,6 @@ fn cut_finer_neighbor_sides(selected: &BTreeSet<TerrainPageKey>, key: TerrainPag
     sides.map(|neighbors| neighbors.into_iter().all(|key| selected.contains(&key)))
 }
 
-#[cfg(test)]
-fn constrained_virtual_heightfield_samples(
-    _hierarchy: &VirtualTerrainHierarchy,
-    page: &TerrainPageV1,
-) -> Result<VirtualHeightfieldSamples, VirtualTerrainRendererError> {
-    let TerrainPageRepresentation::HeightfieldGrid(grid) = &page.representation else {
-        return Err(VirtualTerrainRendererError::UnsupportedRepresentation(
-            page.representation.kind(),
-        ));
-    };
-    Ok(unconstrained_virtual_heightfield_samples(grid))
-}
-
 fn push_virtual_triangle_i32(
     vertices: &mut Vec<GpuTerrainVertex>,
     positions: [[i32; 3]; 3],
@@ -12927,24 +12914,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         voxels_world::validate_terrain_replacement(&parent, &children).unwrap();
-        let pages = children
-            .iter()
-            .cloned()
-            .chain([parent.clone()])
-            .collect::<Vec<_>>();
-        let directory = voxels_world::TerrainHierarchyDirectoryV1::from_surface_refinement_pages(
-            parent_key, &pages,
-        )
-        .unwrap();
-        let mut hierarchy =
-            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
-        hierarchy.register_region_directory(&directory).unwrap();
-        hierarchy.install_page(parent).unwrap();
-
-        let constrained =
-            constrained_virtual_heightfield_samples(&hierarchy, &children[0]).unwrap();
-        assert_eq!(constrained.ground[1], 101.0);
-        assert_eq!(constrained.ground[1 + edge], 1.0);
+        let TerrainPageRepresentation::HeightfieldGrid(grid) = &children[0].representation else {
+            panic!("validated child must retain its sampled heightfield");
+        };
+        let samples = unconstrained_virtual_heightfield_samples(grid);
+        assert_eq!(samples.ground[1], 101.0);
+        assert_eq!(samples.ground[1 + edge], 1.0);
     }
 
     #[test]
@@ -12962,15 +12937,6 @@ mod tests {
             ridge: 0.0,
             route: None,
         };
-        let parent = voxels_world::build_sampled_heightfield_terrain_page(
-            source,
-            parent_key,
-            1,
-            &vec![sample(9); edge * edge],
-            &test_heightfield_boundary_midpoints(parent_key, sample(9)),
-            voxels_world::TerrainErrorBounds::EXACT,
-        )
-        .unwrap();
         let child_keys = parent_key.refinement_children().unwrap();
         let heightfield = voxels_world::build_sampled_heightfield_terrain_page(
             source,
@@ -12995,36 +12961,29 @@ mod tests {
             },
         )
         .unwrap();
-        let other_children = child_keys[2..]
-            .iter()
-            .map(|key| {
-                voxels_world::build_sampled_heightfield_terrain_page(
-                    source,
-                    *key,
-                    1,
-                    &vec![sample(9); edge * edge],
-                    &[],
-                    voxels_world::TerrainErrorBounds::EXACT,
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>();
-        let pages = [parent.clone(), heightfield.clone(), exact]
-            .into_iter()
-            .chain(other_children)
-            .collect::<Vec<_>>();
-        let directory = voxels_world::TerrainHierarchyDirectoryV1::from_surface_refinement_pages(
-            parent_key, &pages,
-        )
-        .unwrap();
-        let mut hierarchy =
-            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
-        hierarchy.register_region_directory(&directory).unwrap();
-        hierarchy.install_page(parent).unwrap();
+        let TerrainPageRepresentation::HeightfieldGrid(grid) = &heightfield.representation else {
+            panic!("level-zero sampled page must retain its heightfield");
+        };
+        let without_neighbor = BTreeSet::from([heightfield.key]);
+        let with_exact_neighbor = BTreeSet::from([heightfield.key, exact.key]);
+        let without_neighbor_sides = cut_finer_neighbor_sides(&without_neighbor, heightfield.key);
+        let with_exact_neighbor_sides =
+            cut_finer_neighbor_sides(&with_exact_neighbor, heightfield.key);
+        assert_eq!(without_neighbor_sides, [false; 4]);
+        assert_eq!(with_exact_neighbor_sides, without_neighbor_sides);
 
-        let constrained =
-            constrained_virtual_heightfield_samples(&hierarchy, &heightfield).unwrap();
-        assert!(constrained.ground.iter().all(|height| *height == 10.0));
+        let mut without_neighbor_samples = unconstrained_virtual_heightfield_samples(grid);
+        without_neighbor_samples.finer_neighbor_sides = without_neighbor_sides;
+        let mut with_exact_neighbor_samples = unconstrained_virtual_heightfield_samples(grid);
+        with_exact_neighbor_samples.finer_neighbor_sides = with_exact_neighbor_sides;
+        let without_neighbor_geometry =
+            virtual_microvoxel_gpu_quads(&heightfield, grid, &without_neighbor_samples).unwrap();
+        let with_exact_neighbor_geometry =
+            virtual_microvoxel_gpu_quads(&heightfield, grid, &with_exact_neighbor_samples).unwrap();
+        assert_eq!(
+            with_exact_neighbor_geometry, without_neighbor_geometry,
+            "same-level exact residency must not perturb the emitted L0 voxel geometry"
+        );
     }
 
     #[test]
