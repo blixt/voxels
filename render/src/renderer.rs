@@ -17,8 +17,8 @@ use crate::ui::{Color, InventoryItem, LiveStats, MissionControlUi, UiAction, UiK
 pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
 use crate::ui_gpu::{SCENE_FORMAT, UiGpu};
 use crate::virtual_terrain::{
-    VirtualTerrainCapacity, VirtualTerrainCut, VirtualTerrainError, VirtualTerrainHierarchy,
-    VirtualTerrainView,
+    ExactSurfaceDomain, VirtualTerrainCapacity, VirtualTerrainCut, VirtualTerrainError,
+    VirtualTerrainHierarchy, VirtualTerrainView,
 };
 use crate::virtual_terrain_gpu::{
     GpuVirtualTerrainFeedback, VIRTUAL_TERRAIN_SURFACE_HANDLE_SOURCE_BYTES,
@@ -267,6 +267,14 @@ const fn virtual_terrain_committed_snapshot_is_safe(
     active_bank_matches_committed: bool,
 ) -> bool {
     has_committed_cut && committed_cut_is_renderable && active_bank_matches_committed
+}
+
+fn virtual_terrain_cut_preserves_exact_domain(
+    committed: Option<&VirtualTerrainCut>,
+    candidate: &VirtualTerrainCut,
+    domain: &ExactSurfaceDomain,
+) -> bool {
+    committed.is_none_or(|committed| candidate.preserves_exact_surface_coverage(committed, domain))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2974,6 +2982,14 @@ pub struct RenderDiagnostics {
     pub virtual_terrain_published_minimum_level: u32,
     pub virtual_terrain_published_maximum_level: u32,
     pub virtual_terrain_published_exact_lod_discontinuities: u32,
+    /// Whether the immutable motion domain used by this frame was enumerated without overflow.
+    pub virtual_terrain_exact_domain_complete: bool,
+    /// Number of level-0 surface pages required by that exact motion domain.
+    pub virtual_terrain_exact_domain_required_leaves: u32,
+    /// Required leaves owned by the currently committed virtual-terrain cut.
+    pub virtual_terrain_exact_domain_current_coverage: u32,
+    /// Stable identity of the exact motion domain shared by selection and presentation.
+    pub virtual_terrain_exact_domain_fingerprint: u64,
     /// Stable identity of the complete virtual hierarchy cut selected for presentation.
     pub virtual_terrain_cut_fingerprint: u64,
     /// Monotonic identity of the immutable GPU handle bank used by this presented frame.
@@ -3578,6 +3594,8 @@ pub struct Renderer {
     virtual_terrain_requested_view: Option<VirtualTerrainView>,
     /// Capacity-adjusted view used by the CPU oracle and handle-snapshot encoder.
     virtual_terrain_oracle_view: Option<VirtualTerrainView>,
+    /// Exact discrete motion domain used by selection, publication, and presentation readiness.
+    virtual_terrain_exact_surface_domain: Option<ExactSurfaceDomain>,
     virtual_terrain_pages: BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
     virtual_terrain_retired_published_pages: BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
     virtual_terrain_heightfield_samples: BTreeMap<TerrainPageKey, CachedVirtualHeightfieldSamples>,
@@ -4496,6 +4514,7 @@ impl Renderer {
             virtual_terrain_headroom_frames: 0,
             virtual_terrain_requested_view: None,
             virtual_terrain_oracle_view: None,
+            virtual_terrain_exact_surface_domain: None,
             virtual_terrain_pages: BTreeMap::new(),
             virtual_terrain_retired_published_pages: BTreeMap::new(),
             virtual_terrain_heightfield_samples: BTreeMap::new(),
@@ -5199,6 +5218,7 @@ impl Renderer {
                 .then_some(self.virtual_terrain_cut.as_ref())
                 .flatten(),
             self.virtual_terrain_oracle_cut.as_ref(),
+            self.virtual_terrain_exact_surface_domain.as_ref(),
             gpu_virtual_feedback.as_ref(),
         );
         let published_cut = (self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible)
@@ -5347,6 +5367,21 @@ impl Renderer {
         self.virtual_terrain_requested_view = None;
         self.virtual_terrain_oracle_view = None;
         self.virtual_terrain_headroom_frames = 0;
+    }
+
+    /// Records the immutable exact domain before any streaming work can return early.
+    ///
+    /// Screenshot and startup diagnostics must still identify the failed proof input when
+    /// discovery, selection, or publication cannot complete. A changed domain also invalidates the
+    /// cached oracle so selection cannot reuse a cut derived for the previous motion sweep.
+    pub fn begin_virtual_terrain_exact_surface_domain(
+        &mut self,
+        exact_surface_domain: &ExactSurfaceDomain,
+    ) {
+        if self.virtual_terrain_exact_surface_domain.as_ref() != Some(exact_surface_domain) {
+            self.invalidate_virtual_terrain_desired_plan();
+            self.virtual_terrain_exact_surface_domain = Some(exact_surface_domain.clone());
+        }
     }
 
     pub fn register_virtual_terrain_directory(
@@ -5888,10 +5923,13 @@ impl Renderer {
     pub fn select_virtual_terrain_cut(
         &mut self,
         view: VirtualTerrainView,
+        exact_surface_domain: &ExactSurfaceDomain,
     ) -> Result<VirtualTerrainCut, VirtualTerrainRendererError> {
         let known_fitting_scale = self.virtual_terrain_error_scale.max(1.0);
         let mut recovery_probe = false;
-        if self.virtual_terrain_requested_view == Some(view) {
+        if self.virtual_terrain_requested_view == Some(view)
+            && self.virtual_terrain_exact_surface_domain.as_ref() == Some(exact_surface_domain)
+        {
             let sustained_headroom = known_fitting_scale > 1.0
                 && self
                     .virtual_terrain_oracle_cut
@@ -5942,7 +5980,9 @@ impl Renderer {
                 candidate_view.refine_above_pixels *= error_scale;
                 candidate_view.coarsen_below_pixels *= error_scale;
             }
-            let candidate = self.virtual_terrain.select_cut(candidate_view)?;
+            let candidate = self
+                .virtual_terrain
+                .select_cut(candidate_view, exact_surface_domain)?;
             let capacity = self.virtual_terrain_cut_fits_snapshot(&candidate);
             match capacity {
                 Ok(()) => break (candidate_view, candidate),
@@ -5980,6 +6020,7 @@ impl Renderer {
         }
         self.virtual_terrain_requested_view = Some(view);
         self.virtual_terrain_oracle_view = Some(oracle_view);
+        self.virtual_terrain_exact_surface_domain = Some(exact_surface_domain.clone());
         self.virtual_terrain_oracle_cut = Some(cut.clone());
         if self.virtual_terrain_mode == VirtualTerrainRenderMode::Disabled {
             // A fresh renderer has no published virtual owner yet. Shadow mode certifies the
@@ -6008,6 +6049,15 @@ impl Renderer {
                     .presented_snapshot_matches(virtual_terrain_snapshot_identity(committed))
             }),
         )
+    }
+
+    pub fn virtual_terrain_committed_covers_exact_domain(
+        &self,
+        domain: &ExactSurfaceDomain,
+    ) -> bool {
+        self.virtual_terrain_cut
+            .as_ref()
+            .is_some_and(|cut| cut.covers_exact_surface_domain(domain))
     }
 
     fn synchronize_virtual_terrain_cut_seams(
@@ -6123,6 +6173,17 @@ impl Renderer {
         else {
             return Ok(false);
         };
+        if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible
+            && !virtual_terrain_cut_preserves_exact_domain(
+                self.virtual_terrain_cut.as_ref(),
+                &cut,
+                self.virtual_terrain_exact_surface_domain
+                    .as_ref()
+                    .expect("a selected cut always records its exact surface domain"),
+            )
+        {
+            return Ok(false);
+        }
         if let Some(missing) = cut
             .selected_pages
             .iter()
@@ -6159,6 +6220,7 @@ impl Renderer {
     /// certified cuts while canonical terrain remains the sole visible owner.
     pub fn advance_virtual_terrain_publication(
         &mut self,
+        exact_surface_domain: &ExactSurfaceDomain,
     ) -> Result<bool, VirtualTerrainRendererError> {
         if self.virtual_terrain_publication_abort_pending {
             self.retain_virtual_terrain_pages(std::iter::empty())?;
@@ -6167,6 +6229,16 @@ impl Renderer {
         let Some(cut) = self.virtual_terrain_publication_cut.as_ref().cloned() else {
             return Ok(false);
         };
+        if self.virtual_terrain_mode == VirtualTerrainRenderMode::Visible
+            && !virtual_terrain_cut_preserves_exact_domain(
+                self.virtual_terrain_cut.as_ref(),
+                &cut,
+                exact_surface_domain,
+            )
+        {
+            self.abort_virtual_terrain_publication();
+            return Ok(false);
+        }
         let identity = virtual_terrain_snapshot_identity(&cut);
         match virtual_terrain_publication_advance(
             true,
@@ -6234,35 +6306,6 @@ impl Renderer {
 
     pub fn registered_virtual_terrain_region_roots(&self) -> Vec<TerrainPageKey> {
         self.virtual_terrain.registered_roots().collect()
-    }
-
-    /// Coverage roots that can affect the committed owner or either side of the next publication.
-    ///
-    /// Shell revision floors outside this set are unrelated background edits and must not block
-    /// local refinement or presentation readiness.
-    pub fn virtual_terrain_relevant_region_roots(&self) -> BTreeSet<TerrainPageKey> {
-        let mut relevant = BTreeSet::new();
-        for cut in [
-            self.virtual_terrain_cut.as_ref(),
-            self.virtual_terrain_oracle_cut.as_ref(),
-            self.virtual_terrain_publication_cut.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            for key in cut
-                .selected_pages
-                .iter()
-                .copied()
-                .chain(cut.requested_pages.iter().map(|identity| identity.key))
-                .chain(cut.refinement_roots.iter().copied())
-            {
-                if let Some(root) = key.ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL) {
-                    relevant.insert(root);
-                }
-            }
-        }
-        relevant
     }
 
     /// Retires immutable region directories outside the current streaming working set.
@@ -7706,6 +7749,24 @@ impl Renderer {
             .then_some(self.virtual_terrain_cut.as_ref())
             .flatten()
             .map_or(0, |cut| cut.exact_surface_lod_discontinuities);
+        let (
+            virtual_terrain_exact_domain_complete,
+            virtual_terrain_exact_domain_required_leaves,
+            virtual_terrain_exact_domain_current_coverage,
+            virtual_terrain_exact_domain_fingerprint,
+        ) = self
+            .virtual_terrain_exact_surface_domain
+            .as_ref()
+            .map_or((false, 0, 0, 0), |domain| {
+                (
+                    domain.is_complete(),
+                    domain.required_leaf_count(),
+                    self.virtual_terrain_cut
+                        .as_ref()
+                        .map_or(0, |cut| cut.exact_surface_coverage(domain)),
+                    domain.fingerprint(),
+                )
+            });
         let virtual_terrain_cut_fingerprint = virtual_visible
             .then_some(self.virtual_terrain_cut.as_ref())
             .flatten()
@@ -7778,6 +7839,12 @@ impl Renderer {
             virtual_terrain_published_maximum_level: u32::from(published_virtual_maximum_level),
             virtual_terrain_published_exact_lod_discontinuities:
                 published_virtual_exact_lod_discontinuities as u32,
+            virtual_terrain_exact_domain_complete,
+            virtual_terrain_exact_domain_required_leaves:
+                virtual_terrain_exact_domain_required_leaves as u32,
+            virtual_terrain_exact_domain_current_coverage:
+                virtual_terrain_exact_domain_current_coverage as u32,
+            virtual_terrain_exact_domain_fingerprint,
             virtual_terrain_cut_fingerprint,
             virtual_terrain_presented_snapshot_generation,
             virtual_terrain_presented_snapshot_fingerprint,
@@ -10858,6 +10925,7 @@ fn screenshot_virtual_terrain_manifest_json(
     retired_published: &BTreeMap<TerrainPageKey, VirtualTerrainGpuPage>,
     published_cut: Option<&VirtualTerrainCut>,
     oracle_cut: Option<&VirtualTerrainCut>,
+    exact_surface_domain: Option<&ExactSurfaceDomain>,
     feedback: Option<&GpuVirtualTerrainFeedback>,
 ) -> String {
     let mode = match mode {
@@ -10867,8 +10935,28 @@ fn screenshot_virtual_terrain_manifest_json(
     };
     let published = screenshot_virtual_cut_json(published_cut);
     let oracle = screenshot_virtual_cut_json(oracle_cut);
+    let exact_surface_domain = exact_surface_domain.map_or_else(
+        || "null".to_owned(),
+        |domain| {
+            format!(
+                concat!(
+                    r#"{{"complete":{},"requiredLeaves":{},"fingerprint":"{:016x}","#,
+                    r#""currentExactCoverage":{},"oracleExactCoverage":{}}}"#
+                ),
+                domain.is_complete(),
+                domain.required_leaf_count(),
+                domain.fingerprint(),
+                published_cut.map_or(0, |cut| cut.exact_surface_coverage(domain)),
+                oracle_cut.map_or(0, |cut| cut.exact_surface_coverage(domain)),
+            )
+        },
+    );
     let mut encoded = format!(
-        r#"{{"mode":"{mode}","publishedCut":{published},"oracleCut":{oracle},"residentPages":["#
+        concat!(
+            r#"{{"mode":"{}","exactSurfaceDomain":{},"#,
+            r#""publishedCut":{},"oracleCut":{},"residentPages":["#
+        ),
+        mode, exact_surface_domain, published, oracle,
     );
     for (index, (key, page)) in resident.iter().enumerate() {
         if index != 0 {
@@ -11123,15 +11211,26 @@ mod tests {
             encoded_pages: 1,
             ..GpuVirtualTerrainFeedback::default()
         };
+        let exact_surface_domain = ExactSurfaceDomain::swept_horizontal_capsule(
+            [-6.0, 3.0, 13.0],
+            [-6.0, 3.0, 13.0],
+            0.0,
+            16,
+        );
         let manifest = screenshot_virtual_terrain_manifest_json(
             VirtualTerrainRenderMode::Visible,
             &resident,
             &BTreeMap::new(),
             Some(&cut),
             Some(&cut),
+            Some(&exact_surface_domain),
             Some(&feedback),
         );
         assert!(manifest.contains(r#""mode":"visible""#));
+        assert!(manifest.contains(
+            r#""exactSurfaceDomain":{"complete":true,"requiredLeaves":1,"fingerprint":"#
+        ));
+        assert!(manifest.contains(r#""currentExactCoverage":0,"oracleExactCoverage":0"#));
         assert!(manifest.contains(r#""coord":[-2, 3, 4]"#));
         assert!(manifest.contains(r#""revision":"17""#));
         assert!(manifest.contains(r#""representation":"sparseVoxelBrick""#));

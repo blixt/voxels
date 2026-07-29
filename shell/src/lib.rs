@@ -153,17 +153,6 @@ fn predictive_stream_position(
     position + glam::Vec3::new(lead.x, 0.0, lead.y)
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
-fn virtual_terrain_has_relevant_revision_floor<'a>(
-    floors: impl IntoIterator<Item = &'a voxels_world::TerrainPageKey>,
-    relevant_roots: &std::collections::BTreeSet<voxels_world::TerrainPageKey>,
-) -> bool {
-    floors.into_iter().any(|key| {
-        key.ancestor_at(voxels_world::TERRAIN_COVERAGE_ROOT_LEVEL)
-            .is_some_and(|root| relevant_roots.contains(&root))
-    })
-}
-
 /// Canonical chunks intersecting the current body/support, intended movement sweep, or view/edit
 /// corridor. This bounded secondary interest is both scheduled and transported as collision
 /// critical, keeping physics and rendering ahead of running, gliding, swimming, and edits.
@@ -979,34 +968,6 @@ fn camera_from_resume_values(values: [f32; 5]) -> CameraState {
     )
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
-fn virtual_terrain_column_corridor(start: [i32; 2], end: [i32; 2]) -> Vec<[i32; 2]> {
-    let [mut x, mut z] = start.map(i64::from);
-    let [end_x, end_z] = end.map(i64::from);
-    let delta_x = (end_x - x).abs();
-    let step_x = (end_x - x).signum();
-    let delta_z = -(end_z - z).abs();
-    let step_z = (end_z - z).signum();
-    let mut error = delta_x + delta_z;
-    let mut columns = Vec::new();
-    loop {
-        columns.push([x as i32, z as i32]);
-        if x == end_x && z == end_z {
-            break;
-        }
-        let doubled = error.saturating_mul(2);
-        if doubled >= delta_z {
-            error += delta_z;
-            x += step_x;
-        }
-        if doubled <= delta_x {
-            error += delta_x;
-            z += step_z;
-        }
-    }
-    columns
-}
-
 /// Keeps completed discovery products as a bounded spatial working set.
 ///
 /// A frame-to-frame desired list is a request priority, not an ownership revocation list. Treating
@@ -1268,8 +1229,7 @@ mod web {
         RemoteWorldError,
     };
     use crate::{
-        ChunkPortalMask, predictive_stream_position, virtual_terrain_column_corridor,
-        virtual_terrain_column_working_set, virtual_terrain_has_relevant_revision_floor,
+        ChunkPortalMask, predictive_stream_position, virtual_terrain_column_working_set,
         virtual_terrain_root_working_set, world_environment_at,
     };
     use bytemuck::{Pod, Zeroable};
@@ -1295,7 +1255,9 @@ mod web {
     };
     use voxels_render::shadow::DirectionalShadowConfig;
     use voxels_render::ui::{LiveStats, NavigationTelemetry};
-    use voxels_render::virtual_terrain::{VirtualTerrainCut, VirtualTerrainView};
+    use voxels_render::virtual_terrain::{
+        ExactSurfaceDomain, VirtualTerrainCut, VirtualTerrainView,
+    };
     use voxels_runtime::{
         AuthoritativeEditRevisions, ChunkState, CompletionStatus, DirectionalStreamPriority,
         FrameBudget, StreamConfig, StreamScheduler, revision_satisfies,
@@ -1323,7 +1285,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 8;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 51;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 52;
     const FRAME_SAMPLE_WIDTH: u32 = 22;
     const GPU_SAMPLE_WIDTH: u32 = 15;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -1373,6 +1335,7 @@ mod web {
     const VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME: usize = TERRAIN_PAGE_MAX_CHILDREN * 2;
     const VIRTUAL_TERRAIN_CACHE_UPLOAD_BYTES_PER_FRAME: usize = 8 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_CACHE_UPLOAD_CPU_MS: f64 = 2.0;
+    const VIRTUAL_TERRAIN_MAX_EXACT_DOMAIN_LEAVES: usize = 16_384;
     const VIRTUAL_TERRAIN_DIRECTORY_RETRY_MS: u64 = 1_000;
     const VIRTUAL_TERRAIN_PAGE_CACHE_BYTES: usize = 128 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_REFINE_ABOVE_PIXELS: f64 = 0.75;
@@ -1447,8 +1410,8 @@ mod web {
         last_page_failure_key: Option<TerrainPageKey>,
     }
 
-    const STARTUP_PROGRESS_VERSION: u32 = 4;
-    const STARTUP_PROGRESS_PAYLOAD_WORDS: usize = 59;
+    const STARTUP_PROGRESS_VERSION: u32 = 5;
+    const STARTUP_PROGRESS_PAYLOAD_WORDS: usize = 64;
     const STARTUP_PROGRESS_WORDS: usize = STARTUP_PROGRESS_PAYLOAD_WORDS + 2;
 
     #[derive(Default)]
@@ -1547,6 +1510,7 @@ mod web {
         identity: TerrainPageTransferIdentity,
         node: &TerrainHierarchyNode,
         view: VirtualTerrainView,
+        exact_surface_domain: &ExactSurfaceDomain,
         speed_metres_per_second: f32,
     ) -> TerrainPageDemand {
         let page_distance = terrain_page_distance_metres(node.key, view.camera_position_metres);
@@ -1578,13 +1542,12 @@ mod web {
             time_to_exposure_ms,
             distance_millimetres: (page_distance * 1_000.0).clamp(0.0, f64::from(u32::MAX)) as u32,
             occlusion_confidence_millis: 0,
-            // The first publishable owner requires complete L0 coverage around the player.
-            // Every surface ancestor intersecting that disk is on the dependency chain to those
-            // leaves, even when its own simplified representation reports zero projected error.
+            // Every surface ancestor intersecting the exact swept domain is on the dependency chain
+            // to its leaves, even when its own simplified representation reports zero projected error.
             // Treating the chain as correctness-critical prevents distant high-error pages from
             // consuming the request window while spawn remains blocked on exact local terrain.
             topology_critical: node.errors.unresolved_topology
-                || (node.key.is_surface() && page_distance <= view.exact_surface_radius_metres),
+                || exact_surface_domain.intersects_page(node.key),
             silhouette_critical: node.errors.silhouette_millivoxels > 0
                 || node.errors.material_boundary_millivoxels > 0,
             estimated_encoded_bytes: node.encoded_bytes,
@@ -2483,8 +2446,17 @@ mod web {
             } else {
                 camera.streaming_velocity(&self.input.borrow())
             };
-            let stream_breakdown =
-                self.stream_world(&camera, streaming_velocity, performance.as_ref());
+            let exact_surface_domain =
+                self.virtual_terrain_exact_surface_domain(&camera, streaming_velocity);
+            self.renderer
+                .borrow_mut()
+                .begin_virtual_terrain_exact_surface_domain(&exact_surface_domain);
+            let stream_breakdown = self.stream_world(
+                &camera,
+                streaming_velocity,
+                &exact_surface_domain,
+                performance.as_ref(),
+            );
             let presence_start = performance_now(performance.as_ref());
             if let Some(opened) = self.remote.world_opened() {
                 self.presence.ensure_session(&opened, time);
@@ -2532,18 +2504,10 @@ mod web {
             let render = renderer.diagnostics();
             let virtual_terrain_revision_ready = {
                 let state = self.virtual_terrain.borrow();
-                let camera_chunk = world_to_chunk(camera.position);
-                let current_root = TerrainPageKey::surface(0, camera_chunk.x, camera_chunk.z)
-                    .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL);
-                let current_root_registered =
-                    current_root.is_some_and(|root| state.registered_roots.contains(&root));
-                let mut relevant_roots = renderer.virtual_terrain_relevant_region_roots();
-                relevant_roots.extend(current_root);
-                current_root_registered
-                    && !virtual_terrain_has_relevant_revision_floor(
-                        state.minimum_region_revisions.keys(),
-                        &relevant_roots,
-                    )
+                !state
+                    .minimum_region_revisions
+                    .keys()
+                    .any(|key| exact_surface_domain.intersects_page(*key))
             };
             // A player is not ready merely because one coarse parent covers the viewport. The
             // initial frame must already own the complete 10 cm surface vicinity that walking,
@@ -2553,11 +2517,7 @@ mod web {
                 == VirtualTerrainRenderMode::Visible
                 && virtual_terrain_revision_ready
                 && renderer.virtual_terrain_committed_snapshot_is_valid()
-                && self.virtual_terrain_committed_covers_exact_corridor(
-                    &renderer,
-                    camera.position,
-                    streaming_velocity,
-                );
+                && renderer.virtual_terrain_committed_covers_exact_domain(&exact_surface_domain);
             self.terrain_ready.set(terrain_ready);
             let render_start = performance_now(performance.as_ref());
             let chunks = self.chunks.borrow();
@@ -2730,6 +2690,7 @@ mod web {
             &self,
             camera: &CameraState,
             streaming_velocity: Vec3,
+            exact_surface_domain: &ExactSurfaceDomain,
             performance: Option<&web_sys::Performance>,
         ) -> StreamFrameSample {
             let remote_start = performance_now(performance);
@@ -2912,7 +2873,7 @@ mod web {
             }
             let publish_ms = (performance_now(performance) - publish_start) as f32;
             let virtual_terrain_start = performance_now(performance);
-            self.stream_virtual_terrain(camera, streaming_velocity);
+            self.stream_virtual_terrain(camera, streaming_velocity, exact_surface_domain);
             let virtual_terrain_ms = (performance_now(performance) - virtual_terrain_start) as f32;
             StreamFrameSample {
                 remote_ms,
@@ -3206,46 +3167,27 @@ mod web {
                 * f64::from(VOXEL_SIZE_METRES)
         }
 
-        fn virtual_terrain_committed_covers_exact_corridor(
+        fn virtual_terrain_exact_surface_domain(
             &self,
-            renderer: &Renderer,
-            position: Vec3,
-            velocity: Vec3,
-        ) -> bool {
+            camera: &CameraState,
+            streaming_velocity: Vec3,
+        ) -> ExactSurfaceDomain {
+            let velocity = crate::exact_streaming_velocity(camera, streaming_velocity);
             let velocity = velocity.is_finite().then_some(velocity).unwrap_or_default();
             let endpoint =
-                position + velocity * self.config.stream_velocity_lookahead_seconds.max(0.0);
-            let committed = renderer
-                .virtual_terrain_cut()
-                .filter(|cut| cut.is_renderable());
-            committed.is_some_and(|cut| {
-                cut.has_exact_surface_corridor(
-                    position.to_array().map(f64::from),
-                    endpoint.to_array().map(f64::from),
-                    self.virtual_terrain_exact_surface_radius_metres(),
-                )
-            })
+                camera.position + velocity * self.config.stream_velocity_lookahead_seconds.max(0.0);
+            ExactSurfaceDomain::swept_horizontal_capsule(
+                camera.position.to_array().map(f64::from),
+                endpoint.to_array().map(f64::from),
+                self.virtual_terrain_exact_surface_radius_metres(),
+                VIRTUAL_TERRAIN_MAX_EXACT_DOMAIN_LEAVES,
+            )
         }
 
         fn virtual_terrain_view(&self, camera: &CameraState) -> VirtualTerrainView {
             let [width, height] = self.viewport_size.get();
             let height = height.max(1);
             let forward = camera.forward();
-            let exact_surface_radius_metres = self.virtual_terrain_exact_surface_radius_metres();
-            let (refine_above_pixels, coarsen_below_pixels) =
-                if self.startup_ready.get() && self.terrain_ready.get() {
-                    (
-                        VIRTUAL_TERRAIN_REFINE_ABOVE_PIXELS,
-                        VIRTUAL_TERRAIN_COARSEN_BELOW_PIXELS,
-                    )
-                } else {
-                    // Do not spend bandwidth refining ordinary distant screen error while startup or
-                    // travel has left the player's mandatory exact vicinity incomplete. Exact-radius,
-                    // graded-transition, and topology-unknown pages bypass these finite thresholds,
-                    // so correctness converges before disposable distant detail can fill the source
-                    // pool and evict its own replacement groups.
-                    (1_000_000_000.0, 500_000_000.0)
-                };
             VirtualTerrainView {
                 camera_position_metres: camera.position.to_array().map(f64::from),
                 camera_forward: forward.to_array().map(f64::from),
@@ -3254,12 +3196,11 @@ mod web {
                 viewport_height_pixels: height,
                 near_metres: 0.05,
                 far_metres: f64::from(self.config.view_distance_metres),
-                refine_above_pixels,
-                coarsen_below_pixels,
+                refine_above_pixels: VIRTUAL_TERRAIN_REFINE_ABOVE_PIXELS,
+                coarsen_below_pixels: VIRTUAL_TERRAIN_COARSEN_BELOW_PIXELS,
                 // Normal error is most visible on wet terrain. Always selecting against the
                 // conservative wet bound prevents rain from changing geometry ownership.
                 wet_specular_sensitivity: 1.0,
-                exact_surface_radius_metres,
                 force_exact_leaves: false,
             }
         }
@@ -3268,6 +3209,7 @@ mod web {
             &self,
             camera: &CameraState,
             streaming_velocity: Vec3,
+            exact_surface_domain: &ExactSurfaceDomain,
         ) -> Vec<[i32; 2]> {
             let camera_chunk = world_to_chunk(camera.position);
             let camera_leaf = TerrainPageKey::surface(0, camera_chunk.x, camera_chunk.z);
@@ -3276,25 +3218,16 @@ mod web {
             };
             let predicted_position = camera.position
                 + streaming_velocity * self.config.stream_velocity_lookahead_seconds.max(0.0);
-            let predicted_chunk = world_to_chunk(predicted_position);
-            let predicted_root = TerrainPageKey::surface(0, predicted_chunk.x, predicted_chunk.z)
-                .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
-                .unwrap_or(camera_root);
             let current_column = [camera_root.coord[0], camera_root.coord[2]];
-            let predicted_column = [predicted_root.coord[0], predicted_root.coord[2]];
             let mut prioritized = Vec::with_capacity(VIRTUAL_TERRAIN_MAX_COLUMNS);
             let mut included = BTreeSet::new();
-            // Current ownership is needed immediately. The predicted endpoint follows so the
-            // slowest build starts against its deadline, then every crossed fixed column is
-            // enumerated explicitly. Pure endpoint ranking skipped the intervening 12.8 m roots
-            // at flight speed and made successful lookahead useless.
-            for column in std::iter::once(current_column)
-                .chain(std::iter::once(predicted_column))
-                .chain(virtual_terrain_column_corridor(
-                    current_column,
-                    predicted_column,
-                ))
-            {
+            // Current ownership is needed immediately. Every coverage root in the exact swept
+            // domain follows before ordinary directional quality work.
+            for column in std::iter::once(current_column).chain(
+                exact_surface_domain
+                    .required_pages_at_level(TERRAIN_COVERAGE_ROOT_LEVEL)
+                    .map(|root| [root.coord[0], root.coord[2]]),
+            ) {
                 if included.insert(column) {
                     prioritized.push(column);
                     if prioritized.len() == VIRTUAL_TERRAIN_MAX_COLUMNS {
@@ -3378,6 +3311,7 @@ mod web {
             &self,
             prioritized_columns: &[[i32; 2]],
             camera: &CameraState,
+            exact_surface_domain: &ExactSurfaceDomain,
         ) -> Vec<TerrainPageKey> {
             let state = self.virtual_terrain.borrow();
             let camera_position = camera.position.to_array().map(f64::from);
@@ -3388,8 +3322,13 @@ mod web {
             {
                 let mut column_roots = column.roots.to_vec();
                 column_roots.sort_by(|left, right| {
-                    terrain_page_distance_metres(*left, camera_position)
-                        .total_cmp(&terrain_page_distance_metres(*right, camera_position))
+                    exact_surface_domain
+                        .intersects_page(*right)
+                        .cmp(&exact_surface_domain.intersects_page(*left))
+                        .then_with(|| {
+                            terrain_page_distance_metres(*left, camera_position)
+                                .total_cmp(&terrain_page_distance_metres(*right, camera_position))
+                        })
                         .then_with(|| left.cmp(right))
                 });
                 roots.extend(column_roots);
@@ -3401,7 +3340,12 @@ mod web {
             roots
         }
 
-        fn stream_virtual_terrain(&self, camera: &CameraState, streaming_velocity: Vec3) {
+        fn stream_virtual_terrain(
+            &self,
+            camera: &CameraState,
+            streaming_velocity: Vec3,
+            exact_surface_domain: &ExactSurfaceDomain,
+        ) {
             if !self.virtual_terrain_supported() {
                 return;
             }
@@ -3411,37 +3355,23 @@ mod web {
             if let Err(error) = self
                 .renderer
                 .borrow_mut()
-                .advance_virtual_terrain_publication()
+                .advance_virtual_terrain_publication(exact_surface_domain)
             {
                 log_gpu_error(&format!("advance virtual terrain publication: {error}"));
             }
-            let (publication_in_flight, publication_owns_geometry, committed_covers_corridor) = {
+            let (publication_in_flight, publication_owns_geometry) = {
                 let renderer = self.renderer.borrow();
                 (
                     renderer.virtual_terrain_publication_in_flight(),
                     renderer.virtual_terrain_publication_owns_geometry(),
-                    self.virtual_terrain_committed_covers_exact_corridor(
-                        &renderer,
-                        camera.position,
-                        streaming_velocity,
-                    ),
                 )
             };
-            if !committed_covers_corridor
-                && self.renderer.borrow().virtual_terrain_render_mode()
-                    == VirtualTerrainRenderMode::Visible
-                && let Err(error) = self
-                    .renderer
-                    .borrow_mut()
-                    .set_virtual_terrain_render_mode(VirtualTerrainRenderMode::Shadow)
-            {
-                log_gpu_error(&format!(
-                    "restore canonical terrain ownership outside exact corridor: {error}"
-                ));
-            }
             let now_ms = self.last_time.get().max(0.0) as u64;
-            let prioritized_columns =
-                self.desired_virtual_terrain_columns(camera, streaming_velocity);
+            let prioritized_columns = self.desired_virtual_terrain_columns(
+                camera,
+                streaming_velocity,
+                exact_surface_domain,
+            );
             let desired_columns = prioritized_columns.iter().copied().collect::<BTreeSet<_>>();
             {
                 let mut state = self.virtual_terrain.borrow_mut();
@@ -3459,8 +3389,11 @@ mod web {
             }
             self.request_virtual_terrain_columns(&prioritized_columns, now_ms);
 
-            let prioritized_roots =
-                self.desired_virtual_terrain_roots(&prioritized_columns, camera);
+            let prioritized_roots = self.desired_virtual_terrain_roots(
+                &prioritized_columns,
+                camera,
+                exact_surface_domain,
+            );
             let camera_chunk = world_to_chunk(camera.position);
             let Some(camera_root) = TerrainPageKey::surface(0, camera_chunk.x, camera_chunk.z)
                 .ancestor_at(TERRAIN_COVERAGE_ROOT_LEVEL)
@@ -3538,7 +3471,11 @@ mod web {
             );
 
             let view = self.virtual_terrain_view(camera);
-            let mut cut = match self.renderer.borrow_mut().select_virtual_terrain_cut(view) {
+            let mut cut = match self
+                .renderer
+                .borrow_mut()
+                .select_virtual_terrain_cut(view, exact_surface_domain)
+            {
                 Ok(cut) => cut,
                 Err(error) => {
                     log_gpu_error(&format!("select virtual terrain cut: {error}"));
@@ -3549,6 +3486,7 @@ mod web {
                 && let Err(error) = self.hydrate_virtual_terrain_from_cache(
                     &mut cut,
                     view,
+                    exact_surface_domain,
                     streaming_velocity.length(),
                     now_ms,
                 )
@@ -3557,17 +3495,12 @@ mod web {
                 return;
             }
 
-            let mut relevant_roots = self
-                .renderer
-                .borrow()
-                .virtual_terrain_relevant_region_roots();
-            relevant_roots.insert(camera_root);
             let relevant_revision_pending = {
                 let state = self.virtual_terrain.borrow();
-                virtual_terrain_has_relevant_revision_floor(
-                    state.minimum_region_revisions.keys(),
-                    &relevant_roots,
-                )
+                state
+                    .minimum_region_revisions
+                    .keys()
+                    .any(|key| exact_surface_domain.intersects_page(*key))
             };
             if !relevant_revision_pending {
                 // Directory metadata and encoded cache arrivals are not GPU ownership mutations.
@@ -3575,12 +3508,20 @@ mod web {
                 // admission into source geometry is serialized behind that transaction.
                 let mut refinement_roots = cut.refinement_roots.clone();
                 refinement_roots.sort_unstable_by(|left, right| {
-                    surface_page_horizontal_distance_squared(*left, camera.position.to_array())
-                        .partial_cmp(&surface_page_horizontal_distance_squared(
-                            *right,
-                            camera.position.to_array(),
-                        ))
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                    exact_surface_domain
+                        .intersects_page(*right)
+                        .cmp(&exact_surface_domain.intersects_page(*left))
+                        .then_with(|| {
+                            surface_page_horizontal_distance_squared(
+                                *left,
+                                camera.position.to_array(),
+                            )
+                            .partial_cmp(&surface_page_horizontal_distance_squared(
+                                *right,
+                                camera.position.to_array(),
+                            ))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                        })
                         .then_with(|| right.level.cmp(&left.level))
                         .then_with(|| left.cmp(right))
                 });
@@ -3607,8 +3548,12 @@ mod web {
                 }
             }
 
-            let demands =
-                self.virtual_terrain_demand_groups(&cut, view, streaming_velocity.length());
+            let demands = self.virtual_terrain_demand_groups(
+                &cut,
+                view,
+                exact_surface_domain,
+                streaming_velocity.length(),
+            );
             let cached_demands = {
                 let cache = self.virtual_terrain_cache.borrow();
                 demands
@@ -3668,15 +3613,14 @@ mod web {
                 }
             }
 
-            let committed_covers_corridor = {
+            let committed_covers_domain = {
                 let renderer = self.renderer.borrow();
-                self.virtual_terrain_committed_covers_exact_corridor(
-                    &renderer,
-                    camera.position,
-                    streaming_velocity,
-                )
+                renderer.virtual_terrain_committed_covers_exact_domain(exact_surface_domain)
             };
-            if committed_covers_corridor {
+            if committed_covers_domain
+                && self.renderer.borrow().virtual_terrain_render_mode()
+                    != VirtualTerrainRenderMode::Visible
+            {
                 match self
                     .renderer
                     .borrow_mut()
@@ -3911,6 +3855,7 @@ mod web {
             &self,
             cut: &mut VirtualTerrainCut,
             view: VirtualTerrainView,
+            exact_surface_domain: &ExactSurfaceDomain,
             speed_metres_per_second: f32,
             now_ms: u64,
         ) -> Result<bool, VirtualTerrainRendererError> {
@@ -3941,8 +3886,12 @@ mod web {
 
                 // Cache-ready work follows the same topology/deadline/error ordering as transport.
                 // BTree identity order is only a final deterministic tie-breaker.
-                let mut groups =
-                    self.virtual_terrain_demand_groups(cut, view, speed_metres_per_second);
+                let mut groups = self.virtual_terrain_demand_groups(
+                    cut,
+                    view,
+                    exact_surface_domain,
+                    speed_metres_per_second,
+                );
                 groups.sort_by(TerrainDemandGroup::compare_priority);
 
                 let mut ready = None;
@@ -4048,7 +3997,7 @@ mod web {
                 *cut = self
                     .renderer
                     .borrow_mut()
-                    .select_virtual_terrain_cut(view)?;
+                    .select_virtual_terrain_cut(view, exact_surface_domain)?;
             }
             Ok(uploaded)
         }
@@ -4057,6 +4006,7 @@ mod web {
             &self,
             cut: &VirtualTerrainCut,
             view: VirtualTerrainView,
+            exact_surface_domain: &ExactSurfaceDomain,
             speed_metres_per_second: f32,
         ) -> Vec<TerrainDemandGroup> {
             let state = self.virtual_terrain.borrow();
@@ -4089,6 +4039,7 @@ mod web {
                             *identity,
                             node,
                             view,
+                            exact_surface_domain,
                             speed_metres_per_second,
                         ))
                     })
@@ -4111,6 +4062,7 @@ mod web {
                     identity,
                     node,
                     view,
+                    exact_surface_domain,
                     speed_metres_per_second,
                 )));
             }
@@ -5746,6 +5698,11 @@ mod web {
                 render.virtual_terrain_published_pages,
                 render.virtual_terrain_published_exact_pages,
                 render.virtual_terrain_published_exact_lod_discontinuities,
+                u32::from(render.virtual_terrain_exact_domain_complete),
+                render.virtual_terrain_exact_domain_required_leaves,
+                render.virtual_terrain_exact_domain_current_coverage,
+                render.virtual_terrain_exact_domain_fingerprint as u32,
+                (render.virtual_terrain_exact_domain_fingerprint >> 32) as u32,
             ];
             debug_assert_eq!(progress.len(), STARTUP_PROGRESS_WORDS);
             progress
@@ -6239,6 +6196,16 @@ mod web {
                     enclosed_view_renderable as f32,
                     enclosed_view_owned as f32,
                     virtual_terrain_mode,
+                    if render.virtual_terrain_exact_domain_complete {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    render.virtual_terrain_exact_domain_required_leaves as f32,
+                    render.virtual_terrain_exact_domain_current_coverage as f32,
+                    (render.virtual_terrain_exact_domain_fingerprint & 0x00ff_ffff) as f32,
+                    ((render.virtual_terrain_exact_domain_fingerprint >> 24) & 0x00ff_ffff) as f32,
+                    ((render.virtual_terrain_exact_domain_fingerprint >> 48) & 0x0000_ffff) as f32,
                     virtual_terrain_registered_regions as f32,
                     virtual_terrain_directory_in_flight as f32,
                     virtual_terrain_directory_nodes as f32,
@@ -6723,26 +6690,6 @@ mod tests {
 
     fn test_view_cone_tangent() -> f32 {
         viewport_view_cone_tangent(55.0, CAMERA_VERTICAL_FOV_RADIANS, 1_920, 1_080).unwrap()
-    }
-
-    #[test]
-    fn unrelated_revision_floor_does_not_block_the_current_publication_root() {
-        let current =
-            voxels_world::TerrainPageKey::surface(voxels_world::TERRAIN_COVERAGE_ROOT_LEVEL, 0, 0);
-        let unrelated = voxels_world::TerrainPageKey::surface(
-            voxels_world::TERRAIN_COVERAGE_ROOT_LEVEL,
-            40,
-            -40,
-        );
-        let relevant = [current].into_iter().collect::<BTreeSet<_>>();
-        assert!(!virtual_terrain_has_relevant_revision_floor(
-            [&unrelated],
-            &relevant
-        ));
-        assert!(virtual_terrain_has_relevant_revision_floor(
-            [&unrelated, &current],
-            &relevant
-        ));
     }
 
     #[test]
@@ -7305,19 +7252,6 @@ mod tests {
                 .into_iter()
                 .all(|coord| { !ready.contains(&(coord.x, coord.y, coord.z)) })
         );
-    }
-
-    #[test]
-    fn virtual_terrain_column_corridor_covers_every_crossed_deadline() {
-        let columns = virtual_terrain_column_corridor([10, -4], [16, -1]);
-        assert_eq!(columns.first(), Some(&[10, -4]));
-        assert_eq!(columns.last(), Some(&[16, -1]));
-        assert_eq!(columns.len(), 7);
-        assert!(columns.windows(2).all(|pair| {
-            let delta_x = (pair[1][0] - pair[0][0]).abs();
-            let delta_z = (pair[1][1] - pair[0][1]).abs();
-            delta_x <= 1 && delta_z <= 1 && delta_x + delta_z > 0
-        }));
     }
 
     #[test]

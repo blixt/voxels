@@ -47,6 +47,15 @@ export interface PlayerScreenshotMetadata {
         readonly ownerlessRoots: readonly unknown[];
       } | null;
     };
+    readonly virtualTerrain: {
+      readonly exactSurfaceDomain: {
+        readonly complete: boolean;
+        readonly requiredLeaves: number;
+        readonly fingerprint: string;
+        readonly currentExactCoverage: number;
+        readonly oracleExactCoverage: number;
+      };
+    };
   };
   readonly streaming: {
     readonly virtualStream: {
@@ -210,26 +219,51 @@ export function summarizeSurfaceCutAdjacency(
   };
 }
 
+export function assertPlayerScreenshotMetadata(metadata: unknown): PlayerScreenshotMetadata {
+  const candidate = metadata as PlayerScreenshotMetadata;
+  const exactSurfaceDomain = candidate.presentation?.virtualTerrain?.exactSurfaceDomain;
+  if (
+    candidate.schema !== "voxels.reproduction.v2" ||
+    candidate.attachments?.terrainPixelOwnership?.schema !== "voxels.terrain-pixel-ownership.v1" ||
+    candidate.presentation?.selectedCut?.kind !== "virtualTerrain" ||
+    typeof candidate.presentation?.terrainHandleSnapshot?.matchesPublishedCut !== "boolean" ||
+    typeof candidate.presentation.terrainHandleSnapshot.generation !== "string" ||
+    typeof candidate.presentation.terrainHandleSnapshot.cutFingerprint !== "string" ||
+    !Array.isArray(candidate.presentation.selectedCut.cut?.selectedPages) ||
+    !Array.isArray(candidate.presentation.selectedCut.cut?.refinementRoots) ||
+    typeof exactSurfaceDomain?.complete !== "boolean" ||
+    !Number.isSafeInteger(exactSurfaceDomain.requiredLeaves) ||
+    exactSurfaceDomain.requiredLeaves < 0 ||
+    (exactSurfaceDomain.complete
+      ? exactSurfaceDomain.requiredLeaves === 0
+      : exactSurfaceDomain.requiredLeaves !== 0) ||
+    !/^[0-9a-f]{16}$/.test(exactSurfaceDomain.fingerprint) ||
+    (!exactSurfaceDomain.complete && exactSurfaceDomain.fingerprint !== "0000000000000000") ||
+    !Number.isSafeInteger(exactSurfaceDomain.currentExactCoverage) ||
+    exactSurfaceDomain.currentExactCoverage < 0 ||
+    exactSurfaceDomain.currentExactCoverage > exactSurfaceDomain.requiredLeaves ||
+    !Number.isSafeInteger(exactSurfaceDomain.oracleExactCoverage) ||
+    exactSurfaceDomain.oracleExactCoverage < 0 ||
+    exactSurfaceDomain.oracleExactCoverage > exactSurfaceDomain.requiredLeaves ||
+    !Array.isArray(candidate.camera?.eyeMetres) ||
+    candidate.camera.eyeMetres.length !== 3 ||
+    !candidate.camera.eyeMetres.every(Number.isFinite)
+  ) {
+    throw new Error("player screenshot metadata contract is incomplete");
+  }
+  return candidate;
+}
+
 function parseMetadata(png: Uint8Array): PlayerScreenshotMetadata {
   const text = readPngText(png, "voxels.reproduction");
   if (text === undefined) throw new Error("player screenshot omitted voxels.reproduction metadata");
-  const metadata = JSON.parse(text) as PlayerScreenshotMetadata;
-  if (
-    metadata.schema !== "voxels.reproduction.v2" ||
-    metadata.attachments?.terrainPixelOwnership?.schema !== "voxels.terrain-pixel-ownership.v1" ||
-    metadata.presentation?.selectedCut?.kind !== "virtualTerrain" ||
-    typeof metadata.presentation?.terrainHandleSnapshot?.matchesPublishedCut !== "boolean" ||
-    typeof metadata.presentation.terrainHandleSnapshot.generation !== "string" ||
-    typeof metadata.presentation.terrainHandleSnapshot.cutFingerprint !== "string" ||
-    !Array.isArray(metadata.presentation.selectedCut.cut?.selectedPages) ||
-    !Array.isArray(metadata.presentation.selectedCut.cut?.refinementRoots) ||
-    !Array.isArray(metadata.camera?.eyeMetres) ||
-    metadata.camera.eyeMetres.length !== 3 ||
-    !metadata.camera.eyeMetres.every(Number.isFinite)
-  ) {
-    throw new Error(`player screenshot metadata contract is incomplete: ${text}`);
+  try {
+    return assertPlayerScreenshotMetadata(JSON.parse(text));
+  } catch (error) {
+    throw new Error(`player screenshot metadata contract is incomplete: ${text}`, {
+      cause: error,
+    });
   }
-  return metadata;
 }
 
 async function completedDownload(download: Download): Promise<{

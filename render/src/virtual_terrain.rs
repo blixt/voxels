@@ -7,15 +7,215 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use voxels_world::{
-    TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_PAGE_MAX_CHILDREN, TerrainHierarchyDirectoryV1,
-    TerrainHierarchyNode, TerrainPageKey, TerrainPageRepresentation, TerrainPageTransferIdentity,
-    TerrainPageV1, WorldSourceIdentityHash, encode_terrain_page, reconstruct_exact_terrain_surface,
-    validate_terrain_replacement,
+    TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_PAGE_MAX_CHILDREN,
+    TerrainHierarchyDirectoryV1, TerrainHierarchyNode, TerrainPageKey, TerrainPageRepresentation,
+    TerrainPageTransferIdentity, TerrainPageV1, WorldSourceIdentityHash, encode_terrain_page,
+    reconstruct_exact_terrain_surface, validate_terrain_replacement,
 };
 
 const FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
 const NORMAL_ERROR_PIXELS_PER_RADIAN: f64 = 0.25;
+
+/// The exact 10 cm surface tiles required by one player-motion prediction.
+///
+/// This is deliberately a discrete, immutable proof domain rather than a radius interpreted
+/// independently by selection, transport, and presentation. Every intersecting level-0 page is
+/// enumerated analytically, including pages for which no hierarchy root has arrived yet.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExactSurfaceDomain {
+    required_leaves: BTreeSet<TerrainPageKey>,
+    ancestors_by_level: Vec<BTreeSet<TerrainPageKey>>,
+    complete: bool,
+    fingerprint: u64,
+}
+
+impl ExactSurfaceDomain {
+    /// Builds a conservative exact enumeration of the horizontal swept capsule.
+    ///
+    /// The candidate page rectangle is bounded before allocation or iteration. Invalid input,
+    /// coordinate overflow, or a domain larger than `max_required_leaves` produces an incomplete
+    /// domain which can never certify presentation readiness.
+    pub fn swept_horizontal_capsule(
+        start_metres: [f64; 3],
+        end_metres: [f64; 3],
+        radius_metres: f64,
+        max_required_leaves: usize,
+    ) -> Self {
+        let incomplete = || Self {
+            required_leaves: BTreeSet::new(),
+            ancestors_by_level: vec![BTreeSet::new(); usize::from(TERRAIN_COVERAGE_ROOT_LEVEL) + 1],
+            complete: false,
+            fingerprint: 0,
+        };
+        if !start_metres.into_iter().all(f64::is_finite)
+            || !end_metres.into_iter().all(f64::is_finite)
+            || !radius_metres.is_finite()
+            || radius_metres < 0.0
+            || max_required_leaves == 0
+        {
+            return incomplete();
+        }
+
+        let start = [start_metres[0], start_metres[2]];
+        let end = [end_metres[0], end_metres[2]];
+        let leaf_span_metres = f64::from(TERRAIN_PAGE_EDGE_SAMPLES) * 0.1;
+        let minimum = [
+            (start[0].min(end[0]) - radius_metres) / leaf_span_metres,
+            (start[1].min(end[1]) - radius_metres) / leaf_span_metres,
+        ];
+        let maximum = [
+            (start[0].max(end[0]) + radius_metres) / leaf_span_metres,
+            (start[1].max(end[1]) + radius_metres) / leaf_span_metres,
+        ];
+        let minimum = minimum.map(f64::floor);
+        // Page ownership is half-open. `floor` selects the unique owner at the lower capsule bound;
+        // at the upper bound it also includes the page owning that boundary point, while the page
+        // immediately below is included by the non-zero interior.
+        let maximum = maximum.map(f64::floor);
+        if minimum
+            .into_iter()
+            .chain(maximum)
+            .any(|value| value < f64::from(i32::MIN) || value > f64::from(i32::MAX))
+        {
+            return incomplete();
+        }
+        let minimum = minimum.map(|value| value as i32);
+        let maximum = maximum.map(|value| value as i32);
+        let Some(width) = i64::from(maximum[0])
+            .checked_sub(i64::from(minimum[0]))
+            .and_then(|value| value.checked_add(1))
+        else {
+            return incomplete();
+        };
+        let Some(height) = i64::from(maximum[1])
+            .checked_sub(i64::from(minimum[1]))
+            .and_then(|value| value.checked_add(1))
+        else {
+            return incomplete();
+        };
+        let Some(candidate_count) = width
+            .checked_mul(height)
+            .and_then(|value| usize::try_from(value).ok())
+        else {
+            return incomplete();
+        };
+        if candidate_count > max_required_leaves {
+            return incomplete();
+        }
+
+        let radius_squared = radius_metres * radius_metres;
+        let coordinate_scale = start
+            .into_iter()
+            .chain(end)
+            .chain([radius_metres])
+            .map(f64::abs)
+            .fold(1.0_f64, f64::max);
+        let conservative_roundoff =
+            f64::EPSILON * coordinate_scale * coordinate_scale * 128.0 + 1.0e-12;
+        let mut required_leaves = BTreeSet::new();
+        for z in minimum[1]..=maximum[1] {
+            for x in minimum[0]..=maximum[0] {
+                let key = TerrainPageKey::surface(0, x, z);
+                let Some([page_minimum, page_maximum]) = key.horizontal_bounds() else {
+                    return incomplete();
+                };
+                let page_minimum = page_minimum.map(|value| f64::from(value) * 0.1);
+                let page_maximum = page_maximum.map(|value| f64::from(value) * 0.1);
+                if segment_aabb_distance_squared_2d(start, end, page_minimum, page_maximum)
+                    <= radius_squared + conservative_roundoff
+                {
+                    required_leaves.insert(key);
+                }
+            }
+        }
+        if required_leaves.is_empty() {
+            return incomplete();
+        }
+
+        let mut ancestors_by_level =
+            vec![BTreeSet::new(); usize::from(TERRAIN_COVERAGE_ROOT_LEVEL) + 1];
+        let mut fingerprint = FINGERPRINT_OFFSET;
+        for leaf in &required_leaves {
+            for level in 0..=TERRAIN_COVERAGE_ROOT_LEVEL {
+                let Some(ancestor) = leaf.ancestor_at(level) else {
+                    return incomplete();
+                };
+                ancestors_by_level[usize::from(level)].insert(ancestor);
+            }
+            fingerprint ^= u64::from(leaf.level);
+            fingerprint = fingerprint.wrapping_mul(FINGERPRINT_PRIME);
+            for component in leaf.coord {
+                fingerprint ^= u64::from(component as u32);
+                fingerprint = fingerprint.wrapping_mul(FINGERPRINT_PRIME);
+            }
+        }
+        Self {
+            required_leaves,
+            ancestors_by_level,
+            complete: true,
+            fingerprint,
+        }
+    }
+
+    pub const fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    pub fn required_leaf_count(&self) -> usize {
+        self.required_leaves.len()
+    }
+
+    pub const fn fingerprint(&self) -> u64 {
+        self.fingerprint
+    }
+
+    pub fn required_leaves(&self) -> impl Iterator<Item = TerrainPageKey> + '_ {
+        self.required_leaves.iter().copied()
+    }
+
+    pub fn required_pages_at_level(&self, level: u8) -> impl Iterator<Item = TerrainPageKey> + '_ {
+        self.ancestors_by_level
+            .get(usize::from(level))
+            .into_iter()
+            .flatten()
+            .copied()
+    }
+
+    pub fn intersects_page(&self, key: TerrainPageKey) -> bool {
+        self.complete
+            && key.is_surface()
+            && self
+                .ancestors_by_level
+                .get(usize::from(key.level))
+                .is_some_and(|pages| pages.contains(&key))
+    }
+
+    pub fn intersects_page_margin(&self, key: TerrainPageKey, margin_pages: i32) -> bool {
+        if !self.complete || !key.is_surface() || margin_pages < 0 {
+            return false;
+        }
+        self.ancestors_by_level
+            .get(usize::from(key.level))
+            .is_some_and(|pages| {
+                (-margin_pages..=margin_pages).any(|z| {
+                    (-margin_pages..=margin_pages).any(|x| {
+                        let Some(candidate_x) = key.coord[0].checked_add(x) else {
+                            return false;
+                        };
+                        let Some(candidate_z) = key.coord[2].checked_add(z) else {
+                            return false;
+                        };
+                        pages.contains(&TerrainPageKey::surface(
+                            key.level,
+                            candidate_x,
+                            candidate_z,
+                        ))
+                    })
+                })
+            })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VirtualTerrainCapacity {
@@ -69,8 +269,6 @@ pub struct VirtualTerrainView {
     pub refine_above_pixels: f64,
     pub coarsen_below_pixels: f64,
     pub wet_specular_sensitivity: f64,
-    /// Surface pages intersecting this horizontal radius must resolve to the 10 cm leaf lattice.
-    pub exact_surface_radius_metres: f64,
     /// Reference/debug override. Production selection normally follows certified error.
     pub force_exact_leaves: bool,
 }
@@ -98,8 +296,6 @@ impl VirtualTerrainView {
             && self.coarsen_below_pixels >= 0.0
             && self.wet_specular_sensitivity.is_finite()
             && (0.0..=1.0).contains(&self.wet_specular_sensitivity)
-            && self.exact_surface_radius_metres.is_finite()
-            && self.exact_surface_radius_metres >= 0.0
     }
 }
 
@@ -129,93 +325,49 @@ impl VirtualTerrainCut {
             && self.exact_surface_lod_discontinuities == 0
     }
 
-    /// Returns whether every selected surface owner intersecting the player's required vicinity
-    /// is an exact 10 cm leaf.
+    /// Number of explicitly required exact leaves owned by this cut.
     ///
-    /// Renderability alone proves only that a cut is a complete partition. A complete coarse cut
-    /// is a valid distant fallback, but publishing it underneath the player creates giant
-    /// polygons and repeated coarse/detail oscillation.
-    pub fn has_exact_surface_vicinity(
-        &self,
-        camera_position_metres: [f64; 3],
-        radius_metres: f64,
-    ) -> bool {
-        if !camera_position_metres.into_iter().all(f64::is_finite)
-            || !radius_metres.is_finite()
-            || radius_metres < 0.0
+    /// Looking up the required set, rather than scanning selected pages, makes absent roots and
+    /// unregistered gaps fail closed.
+    pub fn exact_surface_coverage(&self, domain: &ExactSurfaceDomain) -> usize {
+        if !domain.is_complete()
+            || self
+                .selected_pages
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
         {
-            return false;
+            return 0;
         }
-        let mut intersecting_pages = 0usize;
-        for key in self.selected_pages.iter().filter(|key| key.is_surface()) {
-            let Some([minimum, maximum]) = key.horizontal_bounds() else {
-                return false;
-            };
-            let distance_squared = [0, 1]
-                .into_iter()
-                .map(|axis| {
-                    let point = camera_position_metres[axis * 2];
-                    let minimum = f64::from(minimum[axis]) * 0.1;
-                    let maximum = f64::from(maximum[axis]) * 0.1;
-                    let distance = if point < minimum {
-                        minimum - point
-                    } else if point > maximum {
-                        point - maximum
-                    } else {
-                        0.0
-                    };
-                    distance * distance
-                })
-                .sum::<f64>();
-            if distance_squared > radius_metres * radius_metres {
-                continue;
-            }
-            intersecting_pages += 1;
-            if key.level != 0 {
-                return false;
-            }
-        }
-        intersecting_pages > 0
+        domain
+            .required_leaves()
+            .filter(|leaf| self.selected_pages.binary_search(leaf).is_ok())
+            .count()
     }
 
-    /// Returns whether every surface owner intersecting a swept horizontal player corridor is an
-    /// exact 10 cm leaf.
-    ///
-    /// This is an analytic segment-to-page-AABB proof, not sampled motion. A thin coarse sliver
-    /// crossed between sample points therefore cannot become visible during high-speed travel.
-    pub fn has_exact_surface_corridor(
+    pub fn preserves_exact_surface_coverage(
         &self,
-        start_metres: [f64; 3],
-        end_metres: [f64; 3],
-        radius_metres: f64,
+        committed: &Self,
+        domain: &ExactSurfaceDomain,
     ) -> bool {
-        if !start_metres.into_iter().all(f64::is_finite)
-            || !end_metres.into_iter().all(f64::is_finite)
-            || !radius_metres.is_finite()
-            || radius_metres < 0.0
-        {
-            return false;
-        }
-        let start = [start_metres[0], start_metres[2]];
-        let end = [end_metres[0], end_metres[2]];
-        let mut intersecting_pages = 0usize;
-        for key in self.selected_pages.iter().filter(|key| key.is_surface()) {
-            let Some([minimum, maximum]) = key.horizontal_bounds() else {
-                return false;
-            };
-            let minimum = minimum.map(|value| f64::from(value) * 0.1);
-            let maximum = maximum.map(|value| f64::from(value) * 0.1);
-            if segment_aabb_distance_squared_2d(start, end, minimum, maximum)
-                > radius_metres * radius_metres
-            {
-                continue;
-            }
-            intersecting_pages += 1;
-            if key.level != 0 {
-                return false;
-            }
-        }
-        intersecting_pages > 0
+        domain.is_complete()
+            && !self
+                .selected_pages
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            && !committed
+                .selected_pages
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            && domain.required_leaves().all(|leaf| {
+                committed.selected_pages.binary_search(&leaf).is_err()
+                    || self.selected_pages.binary_search(&leaf).is_ok()
+            })
+    }
+
+    pub fn covers_exact_surface_domain(&self, domain: &ExactSurfaceDomain) -> bool {
+        domain.is_complete()
+            && domain.required_leaf_count() > 0
+            && self.exact_surface_coverage(domain) == domain.required_leaf_count()
     }
 }
 
@@ -870,6 +1022,7 @@ impl VirtualTerrainHierarchy {
     pub fn select_cut(
         &mut self,
         view: VirtualTerrainView,
+        exact_surface_domain: &ExactSurfaceDomain,
     ) -> Result<VirtualTerrainCut, VirtualTerrainError> {
         if !view.validates() {
             return Err(VirtualTerrainError::InvalidView);
@@ -881,6 +1034,7 @@ impl VirtualTerrainHierarchy {
         let mut builder = CutBuilder {
             hierarchy: self,
             view,
+            exact_surface_domain,
             frame,
             prior_refined: &prior_refined,
             prior_balanced_selected_blockers,
@@ -909,9 +1063,7 @@ impl VirtualTerrainHierarchy {
             .copied()
             .filter(|key| {
                 builder.hierarchy.nodes.get(key).is_some_and(|node| {
-                    page_is_visible(node.bounds, view)
-                        || (key.is_surface()
-                            && page_intersects_exact_surface_radius(node.bounds, view))
+                    page_is_visible(node.bounds, view) || exact_surface_domain.intersects_page(*key)
                 })
             })
             .collect::<Vec<_>>();
@@ -1118,6 +1270,7 @@ fn terrain_page_keys_overlap(left: TerrainPageKey, right: TerrainPageKey) -> boo
 struct CutBuilder<'a> {
     hierarchy: &'a mut VirtualTerrainHierarchy,
     view: VirtualTerrainView,
+    exact_surface_domain: &'a ExactSurfaceDomain,
     frame: u64,
     prior_refined: &'a BTreeSet<TerrainPageKey>,
     prior_balanced_selected_blockers: BTreeMap<TerrainPageKey, BTreeSet<TerrainPageKey>>,
@@ -1344,12 +1497,7 @@ impl CutBuilder<'_> {
         if !key.is_surface() {
             return false;
         }
-        self.view.force_exact_leaves
-            || self
-                .hierarchy
-                .nodes
-                .get(&key)
-                .is_some_and(|node| page_intersects_exact_surface_radius(node.bounds, self.view))
+        self.view.force_exact_leaves || self.exact_surface_domain.intersects_page(key)
     }
 
     fn surface_component_requires_exact(
@@ -1627,10 +1775,10 @@ impl CutBuilder<'_> {
             }
             return;
         };
-        let exact_surface =
-            key.is_surface() && page_intersects_exact_surface_radius(node.bounds, self.view);
+        let exact_surface = self.exact_surface_domain.intersects_page(key);
         let graded_surface = key.is_surface()
-            && page_intersects_surface_lod_guard(node.bounds, key.level, self.view);
+            && key.level > 0
+            && self.exact_surface_domain.intersects_page_margin(key, 2);
         if root && !page_is_visible(node.bounds, self.view) && !exact_surface {
             return;
         }
@@ -1842,57 +1990,6 @@ fn distance_to_page_metres(bounds: voxels_world::VoxelBounds, point: [f64; 3]) -
         .sqrt()
 }
 
-fn page_intersects_exact_surface_radius(
-    bounds: voxels_world::VoxelBounds,
-    view: VirtualTerrainView,
-) -> bool {
-    page_horizontal_distance_squared(bounds, view)
-        <= view.exact_surface_radius_metres * view.exact_surface_radius_metres
-}
-
-/// Grades the surface quadtree outward one spatial page at a time.
-///
-/// Without this guard, an exact level-0 page can share an edge directly with a level-3 or
-/// coarser page even though all intermediate directories are resident. Besides looking like a
-/// giant block beside 10 cm terrain, that discontinuity makes any conforming boundary needlessly
-/// large. Each hierarchy level gets one page-width guard band, so adjacent selected pages can
-/// converge incrementally instead of jumping several levels at once.
-fn page_intersects_surface_lod_guard(
-    bounds: voxels_world::VoxelBounds,
-    level: u8,
-    view: VirtualTerrainView,
-) -> bool {
-    if level == 0 {
-        return false;
-    }
-    let page_width_metres = f64::from(bounds.max.x.saturating_sub(bounds.min.x)) * 0.1;
-    // Two page widths leave a complete intermediate ring even at a diagonal corner, where the
-    // Euclidean distance across one square alone is not enough to prevent a two-level jump.
-    let radius = view.exact_surface_radius_metres + page_width_metres * 2.0;
-    page_horizontal_distance_squared(bounds, view) <= radius * radius
-}
-
-fn page_horizontal_distance_squared(
-    bounds: voxels_world::VoxelBounds,
-    view: VirtualTerrainView,
-) -> f64 {
-    let minimum = bounds.min.as_array().map(|value| f64::from(value) * 0.1);
-    let maximum = bounds.max.as_array().map(|value| f64::from(value) * 0.1);
-    [0, 2]
-        .into_iter()
-        .map(|axis| {
-            let distance = if view.camera_position_metres[axis] < minimum[axis] {
-                minimum[axis] - view.camera_position_metres[axis]
-            } else if view.camera_position_metres[axis] > maximum[axis] {
-                view.camera_position_metres[axis] - maximum[axis]
-            } else {
-                0.0
-            };
-            distance * distance
-        })
-        .sum()
-}
-
 fn page_is_visible(bounds: voxels_world::VoxelBounds, view: VirtualTerrainView) -> bool {
     let minimum = bounds.min.as_array().map(|value| f64::from(value) * 0.1);
     let maximum = bounds.max.as_array().map(|value| f64::from(value) * 0.1);
@@ -2073,9 +2170,32 @@ mod tests {
             refine_above_pixels: 0.65,
             coarsen_below_pixels: 0.35,
             wet_specular_sensitivity: 1.0,
-            exact_surface_radius_metres: 0.0,
             force_exact_leaves,
         }
+    }
+
+    fn exact_domain(view: VirtualTerrainView, radius_metres: f64) -> ExactSurfaceDomain {
+        ExactSurfaceDomain::swept_horizontal_capsule(
+            view.camera_position_metres,
+            view.camera_position_metres,
+            radius_metres,
+            16_384,
+        )
+    }
+
+    fn select_cut(
+        hierarchy: &mut VirtualTerrainHierarchy,
+        view: VirtualTerrainView,
+    ) -> Result<VirtualTerrainCut, VirtualTerrainError> {
+        hierarchy.select_cut(view, &exact_domain(view, 0.0))
+    }
+
+    fn default_exact_domain() -> &'static ExactSurfaceDomain {
+        static DOMAIN: std::sync::LazyLock<ExactSurfaceDomain> = std::sync::LazyLock::new(|| {
+            let view = view(false);
+            exact_domain(view, 0.0)
+        });
+        &DOMAIN
     }
 
     fn cut_with_selected(selected_pages: Vec<TerrainPageKey>) -> VirtualTerrainCut {
@@ -2234,6 +2354,7 @@ mod tests {
     fn cut_builder_for_owned_selection<'a>(
         hierarchy: &'a mut VirtualTerrainHierarchy,
         prior_refined: &'a BTreeSet<TerrainPageKey>,
+        exact_surface_domain: &'a ExactSurfaceDomain,
         selected: Vec<TerrainPageKey>,
         selected_owners: BTreeMap<TerrainPageKey, TerrainPageKey>,
     ) -> CutBuilder<'a> {
@@ -2241,6 +2362,7 @@ mod tests {
         CutBuilder {
             hierarchy,
             view: view(false),
+            exact_surface_domain,
             frame: 1,
             prior_refined,
             prior_balanced_selected_blockers: BTreeMap::new(),
@@ -2286,6 +2408,7 @@ mod tests {
         let mut builder = cut_builder_for_owned_selection(
             &mut hierarchy,
             &prior_refined,
+            default_exact_domain(),
             selected,
             selected_owners,
         );
@@ -2330,6 +2453,7 @@ mod tests {
         let mut builder = cut_builder_for_owned_selection(
             &mut hierarchy,
             &prior_refined,
+            default_exact_domain(),
             selected.clone(),
             selected_owners,
         );
@@ -2380,6 +2504,7 @@ mod tests {
         let mut builder = cut_builder_for_owned_selection(
             &mut hierarchy,
             &prior_refined,
+            default_exact_domain(),
             selected,
             selected_owners,
         );
@@ -2477,21 +2602,24 @@ mod tests {
             .chain([(coarse_missing, coarse_missing)])
             .collect::<BTreeMap<_, _>>();
         let prior_refined = BTreeSet::new();
-        let mut builder = cut_builder_for_owned_selection(
-            &mut hierarchy,
-            &prior_refined,
-            selected,
-            selected_owners,
-        );
         let exact_page = coarse_ready;
         let [[minimum_x, minimum_z], [maximum_x, maximum_z]] =
             exact_page.horizontal_bounds().unwrap();
-        builder.view.camera_position_metres = [
+        let exact_position = [
             f64::from(minimum_x + maximum_x) * 0.05,
             0.0,
             f64::from(minimum_z + maximum_z) * 0.05,
         ];
-        builder.view.exact_surface_radius_metres = 0.1;
+        let exact_surface_domain =
+            ExactSurfaceDomain::swept_horizontal_capsule(exact_position, exact_position, 0.1, 16);
+        let mut builder = cut_builder_for_owned_selection(
+            &mut hierarchy,
+            &prior_refined,
+            &exact_surface_domain,
+            selected,
+            selected_owners,
+        );
+        builder.view.camera_position_metres = exact_position;
         let ready_component = surface_lod_discontinuity_components(
             &surface_lod_discontinuity_pairs(&builder.selected),
         )
@@ -2577,6 +2705,7 @@ mod tests {
         let mut builder = cut_builder_for_owned_selection(
             &mut hierarchy,
             &prior_refined,
+            default_exact_domain(),
             selected,
             selected_owners,
         );
@@ -2658,6 +2787,7 @@ mod tests {
         let mut builder = cut_builder_for_owned_selection(
             &mut hierarchy,
             &prior_refined,
+            default_exact_domain(),
             selected,
             selected_owners,
         );
@@ -2734,8 +2864,8 @@ mod tests {
         let (mut hierarchy, coarse_pages) = hierarchy_with_registration_order(false);
         let (mut reversed, _) = hierarchy_with_registration_order(true);
 
-        let first = hierarchy.select_cut(test_view).unwrap();
-        let reversed_first = reversed.select_cut(test_view).unwrap();
+        let first = select_cut(&mut hierarchy, test_view).unwrap();
+        let reversed_first = select_cut(&mut reversed, test_view).unwrap();
         assert_eq!(first.selected_pages, vec![fine_owner, coarse_owner]);
         assert_eq!(reversed_first.selected_pages, first.selected_pages);
         assert_eq!(reversed_first.requested_pages, first.requested_pages);
@@ -2746,17 +2876,17 @@ mod tests {
             Some(&BTreeSet::from([coarse_owner]))
         );
 
-        let repeated = hierarchy.select_cut(test_view).unwrap();
+        let repeated = select_cut(&mut hierarchy, test_view).unwrap();
         assert_eq!(repeated.selected_pages, first.selected_pages);
         assert_eq!(repeated.fingerprint, first.fingerprint);
         assert_eq!(repeated.requested_pages, first.requested_pages);
         assert!(repeated.is_renderable());
 
         let (mut retired_neighbor, _) = hierarchy_with_registration_order(false);
-        let blocked = retired_neighbor.select_cut(test_view).unwrap();
+        let blocked = select_cut(&mut retired_neighbor, test_view).unwrap();
         assert_eq!(blocked.selected_pages, first.selected_pages);
         retired_neighbor.set_active_roots([fine_owner]).unwrap();
-        let unblocked = retired_neighbor.select_cut(test_view).unwrap();
+        let unblocked = select_cut(&mut retired_neighbor, test_view).unwrap();
         assert!(
             fine_children
                 .iter()
@@ -2780,7 +2910,7 @@ mod tests {
         {
             hierarchy.install_page(page).unwrap();
         }
-        let resolved = hierarchy.select_cut(test_view).unwrap();
+        let resolved = select_cut(&mut hierarchy, test_view).unwrap();
         assert!(
             fine_children
                 .iter()
@@ -2794,7 +2924,7 @@ mod tests {
         assert!(resolved.requested_pages.is_empty());
         assert!(resolved.is_renderable());
         assert!(hierarchy.balanced_selected_blockers.is_empty());
-        let resolved_repeated = hierarchy.select_cut(test_view).unwrap();
+        let resolved_repeated = select_cut(&mut hierarchy, test_view).unwrap();
         assert_eq!(resolved_repeated.selected_pages, resolved.selected_pages);
         assert_eq!(resolved_repeated.fingerprint, resolved.fingerprint);
     }
@@ -2841,9 +2971,8 @@ mod tests {
         test_view.camera_forward = [0.0, 0.0, 1.0];
         test_view.vertical_fov_radians = 2.5;
         test_view.aspect_ratio = 10.0;
-        test_view.exact_surface_radius_metres = 0.0;
 
-        let cut = hierarchy.select_cut(test_view).unwrap();
+        let cut = select_cut(&mut hierarchy, test_view).unwrap();
 
         assert_eq!(cut.selected_pages, vec![fine_owner, coarse_owner]);
         assert!(
@@ -2905,17 +3034,17 @@ mod tests {
             )
             .unwrap();
 
-        let initial = hierarchy.select_cut(view(true)).unwrap();
+        let initial = select_cut(&mut hierarchy, view(true)).unwrap();
         assert_eq!(initial.selected_pages, vec![root]);
         assert_eq!(initial.requested_pages.len(), 4);
         assert!(initial.refinement_roots.is_empty());
-        assert!(!initial.has_exact_surface_vicinity([-3.2, 3.2, 8.0], 10.0));
+        assert!(!initial.covers_exact_surface_domain(&exact_domain(view(true), 10.0)));
 
         for child in base_pages.iter().filter(|page| page.key != root) {
             hierarchy.install_page(child.clone()).unwrap();
         }
         let children = root.refinement_children().unwrap();
-        let terminal = hierarchy.select_cut(view(true)).unwrap();
+        let terminal = select_cut(&mut hierarchy, view(true)).unwrap();
         assert_eq!(
             terminal
                 .selected_pages
@@ -2951,7 +3080,7 @@ mod tests {
             hierarchy.install_page(child.clone()).unwrap();
         }
 
-        let refined = hierarchy.select_cut(view(true)).unwrap();
+        let refined = select_cut(&mut hierarchy, view(true)).unwrap();
         assert!(!refined.selected_pages.contains(&refined_root));
         assert_eq!(refined.selected_pages.len(), 7);
         assert_eq!(
@@ -3068,12 +3197,12 @@ mod tests {
         let (mut hierarchy, pages) = hierarchy();
         let root = pages.iter().find(|page| page.key.level == 1).unwrap();
         hierarchy.install_page(root.clone()).unwrap();
-        let cut = hierarchy.select_cut(view(true)).unwrap();
+        let cut = select_cut(&mut hierarchy, view(true)).unwrap();
         assert!(cut.is_renderable());
         assert_eq!(cut.selected_pages, vec![root.key]);
         assert_eq!(cut.requested_pages.len(), TERRAIN_PAGE_MAX_CHILDREN);
         assert!(cut.ownerless_roots.is_empty());
-        assert!(!cut.has_exact_surface_vicinity([-3.2, 3.2, -3.2], 1.0));
+        assert!(!cut.covers_exact_surface_domain(&exact_domain(view(true), 1.0)));
     }
 
     #[test]
@@ -3082,7 +3211,7 @@ mod tests {
         for page in pages {
             hierarchy.install_page(page).unwrap();
         }
-        let cut = hierarchy.select_cut(view(true)).unwrap();
+        let cut = select_cut(&mut hierarchy, view(true)).unwrap();
         assert!(cut.is_renderable());
         assert_eq!(cut.selected_pages.len(), TERRAIN_PAGE_MAX_CHILDREN);
         assert!(cut.selected_pages.iter().all(|key| key.level == 0));
@@ -3108,7 +3237,7 @@ mod tests {
         let mut edge_view = view(true);
         edge_view.camera_position_metres = [-3.2, 3.2, -6.3];
         edge_view.camera_forward = [0.0, 0.0, -1.0];
-        let cut = hierarchy.select_cut(edge_view).unwrap();
+        let cut = select_cut(&mut hierarchy, edge_view).unwrap();
         assert!(cut.is_renderable());
         assert_eq!(cut.selected_pages.len(), TERRAIN_PAGE_MAX_CHILDREN);
         assert!(cut.selected_pages.iter().all(|key| key.level == 0));
@@ -3120,7 +3249,7 @@ mod tests {
         for page in pages {
             hierarchy.install_page(page).unwrap();
         }
-        let cut = hierarchy.select_cut(view(false)).unwrap();
+        let cut = select_cut(&mut hierarchy, view(false)).unwrap();
         assert_eq!(cut.selected_pages.len(), 1);
         assert_eq!(cut.selected_pages[0].level, 1);
         assert_eq!(cut.selected_primitives, 1);
@@ -3140,9 +3269,8 @@ mod tests {
         let mut distant_view = view(false);
         distant_view.camera_position_metres = [0.0, 0.0, 6.4];
         distant_view.camera_forward = [1.0, 0.0, 0.0];
-        distant_view.exact_surface_radius_metres = 0.0;
 
-        let cut = hierarchy.select_cut(distant_view).unwrap();
+        let cut = select_cut(&mut hierarchy, distant_view).unwrap();
 
         assert_eq!(cut.selected_pages, vec![root]);
         assert!(
@@ -3155,7 +3283,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_surface_radius_selects_leaf_lattice_without_debug_override() {
+    fn exact_surface_domain_selects_leaf_lattice_without_debug_override() {
         let root = TerrainPageKey::surface(1, -1, -1);
         let (directory, pages) = surface_segment(root);
         let mut hierarchy =
@@ -3165,28 +3293,202 @@ mod tests {
             hierarchy.install_page(page).unwrap();
         }
         let mut exact_view = view(false);
-        exact_view.camera_position_metres = [-3.2, 3.2, 1.0];
-        exact_view.exact_surface_radius_metres = 4.0;
-        let cut = hierarchy.select_cut(exact_view).unwrap();
+        exact_view.camera_position_metres = [-3.2, 3.2, -3.2];
+        let exact_domain = exact_domain(exact_view, 3.0);
+        let cut = hierarchy.select_cut(exact_view, &exact_domain).unwrap();
         assert_eq!(cut.selected_pages.len(), 4);
         assert!(cut.selected_pages.iter().all(|key| key.level == 0));
         assert!(cut.requested_pages.is_empty());
-        assert!(cut.has_exact_surface_vicinity(exact_view.camera_position_metres, 4.0));
+        assert!(cut.covers_exact_surface_domain(&exact_domain));
     }
 
     #[test]
-    fn exact_surface_corridor_rejects_a_coarse_owner_crossed_between_endpoints() {
+    fn stationary_exact_surface_domain_is_the_single_half_open_owner() {
+        let domain = ExactSurfaceDomain::swept_horizontal_capsule(
+            [0.25, 7.0, 0.5],
+            [0.25, 7.0, 0.5],
+            0.0,
+            16,
+        );
+
+        assert!(domain.is_complete());
+        assert_eq!(
+            domain.required_leaves().collect::<Vec<_>>(),
+            vec![TerrainPageKey::surface(0, 0, 0)]
+        );
+        assert_eq!(
+            domain.required_pages_at_level(1).collect::<Vec<_>>(),
+            vec![TerrainPageKey::surface(1, 0, 0)]
+        );
+    }
+
+    #[test]
+    fn exact_surface_domain_floors_negative_coordinates_without_aliasing_zero() {
+        let just_negative = ExactSurfaceDomain::swept_horizontal_capsule(
+            [-0.01, 0.0, -0.01],
+            [-0.01, 0.0, -0.01],
+            0.0,
+            16,
+        );
+        let negative_boundary = ExactSurfaceDomain::swept_horizontal_capsule(
+            [-3.2, 0.0, -3.2],
+            [-3.2, 0.0, -3.2],
+            0.0,
+            16,
+        );
+
+        assert_eq!(
+            just_negative.required_leaves().collect::<Vec<_>>(),
+            vec![TerrainPageKey::surface(0, -1, -1)]
+        );
+        assert_eq!(
+            negative_boundary.required_leaves().collect::<Vec<_>>(),
+            vec![TerrainPageKey::surface(0, -1, -1)],
+            "an exact negative page boundary belongs to the half-open page on its positive side"
+        );
+    }
+
+    #[test]
+    fn exact_surface_domain_boundary_contact_uses_half_open_point_ownership() {
+        let stationary =
+            ExactSurfaceDomain::swept_horizontal_capsule([3.2, 0.0, 0.5], [3.2, 0.0, 0.5], 0.0, 16);
+        let arriving =
+            ExactSurfaceDomain::swept_horizontal_capsule([0.5, 0.0, 0.5], [3.2, 0.0, 0.5], 0.0, 16);
+        let tangent =
+            ExactSurfaceDomain::swept_horizontal_capsule([1.6, 0.0, 1.6], [1.6, 0.0, 1.6], 1.6, 16);
+
+        assert_eq!(
+            stationary.required_leaves().collect::<Vec<_>>(),
+            vec![TerrainPageKey::surface(0, 1, 0)]
+        );
+        assert_eq!(
+            arriving.required_leaves().collect::<Vec<_>>(),
+            vec![
+                TerrainPageKey::surface(0, 0, 0),
+                TerrainPageKey::surface(0, 1, 0),
+            ],
+            "the previous owner contains the segment interior while the endpoint belongs to the next page"
+        );
+        assert_eq!(
+            tangent.required_leaves().collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                TerrainPageKey::surface(0, 0, 0),
+                TerrainPageKey::surface(0, 0, 1),
+                TerrainPageKey::surface(0, 1, 0),
+            ]),
+            "a closed capsule includes its positive-side tangent owners, but not a diagonal page beyond its radius"
+        );
+    }
+
+    #[test]
+    fn exact_surface_domain_enumerates_every_leaf_on_a_fast_diagonal() {
+        let forward = ExactSurfaceDomain::swept_horizontal_capsule(
+            [0.1, 0.0, 0.2],
+            [12.7, 0.0, 9.5],
+            0.0,
+            64,
+        );
+        let reverse = ExactSurfaceDomain::swept_horizontal_capsule(
+            [12.7, 0.0, 9.5],
+            [0.1, 0.0, 0.2],
+            0.0,
+            64,
+        );
+        let expected = BTreeSet::from([
+            TerrainPageKey::surface(0, 0, 0),
+            TerrainPageKey::surface(0, 1, 0),
+            TerrainPageKey::surface(0, 1, 1),
+            TerrainPageKey::surface(0, 2, 1),
+            TerrainPageKey::surface(0, 2, 2),
+            TerrainPageKey::surface(0, 3, 2),
+        ]);
+
+        assert!(forward.is_complete());
+        assert_eq!(forward.required_leaves().collect::<BTreeSet<_>>(), expected);
+        assert_eq!(
+            reverse, forward,
+            "capsule enumeration must not depend on travel direction"
+        );
+    }
+
+    #[test]
+    fn exact_surface_domain_fails_closed_on_coordinate_or_enumeration_overflow() {
+        let coordinate_overflow = ExactSurfaceDomain::swept_horizontal_capsule(
+            [1.0e30, 0.0, 0.0],
+            [1.0e30, 0.0, 0.0],
+            0.0,
+            16,
+        );
+        let enumeration_overflow =
+            ExactSurfaceDomain::swept_horizontal_capsule([0.1, 0.0, 0.1], [12.7, 0.0, 0.1], 0.0, 3);
+        let invalid = ExactSurfaceDomain::swept_horizontal_capsule(
+            [f64::NAN, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            0.0,
+            16,
+        );
+        let nominal = cut_with_selected(vec![TerrainPageKey::surface(0, 0, 0)]);
+
+        for domain in [coordinate_overflow, enumeration_overflow, invalid] {
+            assert!(!domain.is_complete());
+            assert_eq!(domain.required_leaf_count(), 0);
+            assert!(!nominal.covers_exact_surface_domain(&domain));
+        }
+    }
+
+    #[test]
+    fn exact_surface_coverage_fails_closed_for_an_unregistered_gap() {
+        let domain =
+            ExactSurfaceDomain::swept_horizontal_capsule([0.5, 0.0, 0.5], [3.5, 0.0, 0.5], 0.0, 16);
+        let gap = cut_with_selected(vec![
+            TerrainPageKey::surface(0, 0, 0),
+            TerrainPageKey::surface(1, 0, 0),
+        ]);
+
+        assert_eq!(domain.required_leaf_count(), 2);
+        assert_eq!(gap.exact_surface_coverage(&domain), 1);
+        assert!(
+            !gap.covers_exact_surface_domain(&domain),
+            "a coarse or absent owner cannot certify an unregistered exact leaf"
+        );
+    }
+
+    #[test]
+    fn exact_surface_promotion_rejects_an_equal_count_leaf_swap() {
+        let domain =
+            ExactSurfaceDomain::swept_horizontal_capsule([0.5, 0.0, 0.5], [3.5, 0.0, 0.5], 0.0, 16);
+        let committed = cut_with_selected(vec![TerrainPageKey::surface(0, 0, 0)]);
+        let candidate = cut_with_selected(vec![TerrainPageKey::surface(0, 1, 0)]);
+
+        assert_eq!(committed.exact_surface_coverage(&domain), 1);
+        assert_eq!(candidate.exact_surface_coverage(&domain), 1);
+        assert!(
+            !candidate.preserves_exact_surface_coverage(&committed, &domain),
+            "equal scalar coverage must not hide the loss of a previously exact leaf"
+        );
+    }
+
+    #[test]
+    fn exact_surface_domain_rejects_a_coarse_owner_crossed_between_endpoints() {
         let current = TerrainPageKey::surface(0, 0, 0);
         let coarse_ahead = TerrainPageKey::surface(1, 1, 0);
         let cut = cut_with_selected(vec![current, coarse_ahead]);
-        assert!(cut.has_exact_surface_corridor([0.5, 3.0, 0.5], [2.5, 3.0, 0.5], 0.0));
+        let short =
+            ExactSurfaceDomain::swept_horizontal_capsule([0.5, 3.0, 0.5], [2.5, 3.0, 0.5], 0.0, 16);
+        let long = ExactSurfaceDomain::swept_horizontal_capsule(
+            [0.5, 3.0, 0.5],
+            [10.0, 3.0, 0.5],
+            0.0,
+            16,
+        );
+        assert!(cut.covers_exact_surface_domain(&short));
         assert!(
-            !cut.has_exact_surface_corridor([0.5, 3.0, 0.5], [10.0, 3.0, 0.5], 0.0),
+            !cut.covers_exact_surface_domain(&long),
             "a coarse page crossed only in the middle of motion must revoke virtual ownership"
         );
 
         let exact = cut_with_selected((0..=3).map(|x| TerrainPageKey::surface(0, x, 0)).collect());
-        assert!(exact.has_exact_surface_corridor([0.5, 3.0, 0.5], [10.0, 3.0, 0.5], 0.0));
+        assert!(exact.covers_exact_surface_domain(&long));
     }
 
     #[test]
@@ -3210,7 +3512,7 @@ mod tests {
     #[test]
     fn missing_root_is_explicitly_ownerless_and_requested() {
         let (mut hierarchy, _) = hierarchy();
-        let cut = hierarchy.select_cut(view(false)).unwrap();
+        let cut = select_cut(&mut hierarchy, view(false)).unwrap();
         assert!(!cut.is_renderable());
         assert_eq!(cut.ownerless_roots.len(), 1);
         assert_eq!(cut.requested_pages.len(), 1);
@@ -3220,7 +3522,7 @@ mod tests {
     fn empty_hierarchy_is_not_a_renderable_owner() {
         let mut hierarchy =
             VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
-        let cut = hierarchy.select_cut(view(false)).unwrap();
+        let cut = select_cut(&mut hierarchy, view(false)).unwrap();
         assert!(cut.selected_pages.is_empty());
         assert!(cut.ownerless_roots.is_empty());
         assert!(!cut.is_renderable());
@@ -3255,7 +3557,7 @@ mod tests {
         let mut invalid = view(false);
         invalid.aspect_ratio = f64::NAN;
         assert_eq!(
-            hierarchy.select_cut(invalid),
+            hierarchy.select_cut(invalid, default_exact_domain()),
             Err(VirtualTerrainError::InvalidView)
         );
     }

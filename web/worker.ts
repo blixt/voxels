@@ -23,8 +23,8 @@ let screenshotDeadline = 0;
 let screenshotEncoding = false;
 let disposal: Promise<void> | null = null;
 const pending: Exclude<ToWorker, InitMessage>[] = [];
-const STARTUP_PROGRESS_VERSION = 4;
-const STARTUP_PROGRESS_WORDS = 61;
+const STARTUP_PROGRESS_VERSION = 5;
+const STARTUP_PROGRESS_WORDS = 66;
 const STARTUP_SCHEMA_MISMATCH_TIMEOUT_MS = 5_000;
 
 function bitmaskLabels(flags: number, labels: ReadonlyArray<readonly [number, string]>): string {
@@ -187,6 +187,11 @@ function monitorReadiness(engine: EngineHandle): void {
       publishedPages = 0,
       publishedExactPages = 0,
       publishedDiscontinuities = 0,
+      exactDomainComplete = 0,
+      exactDomainRequiredLeaves = 0,
+      exactDomainCurrentCoverage = 0,
+      exactDomainFingerprintLow = 0,
+      exactDomainFingerprintHigh = 0,
     ] = progress;
     const key = [
       resident,
@@ -248,6 +253,11 @@ function monitorReadiness(engine: EngineHandle): void {
       publishedPages,
       publishedExactPages,
       publishedDiscontinuities,
+      exactDomainComplete,
+      exactDomainRequiredLeaves,
+      exactDomainCurrentCoverage,
+      exactDomainFingerprintLow,
+      exactDomainFingerprintHigh,
     ].join("/");
     if (key !== previous) {
       const now = performance.now();
@@ -256,7 +266,7 @@ function monitorReadiness(engine: EngineHandle): void {
       previous = key;
       if (detailed) lastDetailedPost = now;
       const detail = detailed
-        ? `Terrain cut: CPU ${cpuSelected} pages/${cpuRequested} requested/${cpuRefinementRoots} refinement roots/${cpuOwnerless} ownerless/${cpuDiscontinuities} skipped-level edges; GPU ${gpuSelected} selected/${gpuEncodedPages} encoded pages/${gpuOwnerless} ownerless/encoding overflow ${gpuEncodingOverflow}; candidate match ${gpuMatchesCpu === 1 ? "yes" : `no (${gpuMatchFailureLabels(gpuMatchFailures)})`}, presented cut match ${presentedMatchesCut === 1 ? "yes" : "no"}; discovery ${columns} columns/${columnInFlight} in flight/${columnRevisionFloors} column revision floors/${regionRevisionFloors} region revision floors/current ${currentColumnKnown === 1 ? `${currentColumnRegisteredRoots}/${currentColumnRoots} roots registered` : "column unknown"}, flow ${columnAccepted} accepted/${columnSubmitDeferred} deferred/${columnPreempted} preempted/${columnTimedOut} timed out/${columnOtherFailed} errors; directories ${directoryAccepted} accepted/${directorySubmitDeferred} deferred/${directoryPreempted} preempted/${directoryTimedOut} timed out/${directoryOtherFailed} errors/${directoryInFlight} in flight; stream ${streamPending} pending/${streamInFlight} in flight/${streamFailed} failed/${streamUsefulKiB} KiB useful, cache ${cachePages}, resident ${residentPages}, GPU ${gpuAllocatedMiB}/${gpuCapacityMiB} MiB; page flow ${pageSubmitDeferred} deferred/${pagePreempted} preempted/${pageTimedOut} timed out/${pageOtherFailed} transport errors; products ${pageUnavailable} unavailable/${pageStaleRevision} stale/${pageGenerationFailed} generation/${pageUploadFailed} upload (last ${uploadFailureLabel(lastPageUploadFailureKind)})${lastPageFailureKind === 0 ? "" : `, last product ${pageFailureLabel(lastPageFailureKind)}@L${lastPageFailureLevel}(${lastPageFailureX | 0},${lastPageFailureY | 0},${lastPageFailureZ | 0})`}; published ${publishedPages} pages (${publishedExactPages} exact, ${publishedDiscontinuities} skipped-level edges), terrain ${terrainReady === 1 ? "ready" : "pending"}.`
+        ? `Terrain cut: CPU ${cpuSelected} pages/${cpuRequested} requested/${cpuRefinementRoots} refinement roots/${cpuOwnerless} ownerless/${cpuDiscontinuities} skipped-level edges; GPU ${gpuSelected} selected/${gpuEncodedPages} encoded pages/${gpuOwnerless} ownerless/encoding overflow ${gpuEncodingOverflow}; candidate match ${gpuMatchesCpu === 1 ? "yes" : `no (${gpuMatchFailureLabels(gpuMatchFailures)})`}, presented cut match ${presentedMatchesCut === 1 ? "yes" : "no"}; exact domain ${exactDomainComplete === 1 ? "complete" : "incomplete"} ${exactDomainCurrentCoverage}/${exactDomainRequiredLeaves} leaves fingerprint ${exactDomainFingerprintHigh.toString(16).padStart(8, "0")}${exactDomainFingerprintLow.toString(16).padStart(8, "0")}; discovery ${columns} columns/${columnInFlight} in flight/${columnRevisionFloors} column revision floors/${regionRevisionFloors} region revision floors/current ${currentColumnKnown === 1 ? `${currentColumnRegisteredRoots}/${currentColumnRoots} roots registered` : "column unknown"}, flow ${columnAccepted} accepted/${columnSubmitDeferred} deferred/${columnPreempted} preempted/${columnTimedOut} timed out/${columnOtherFailed} errors; directories ${directoryAccepted} accepted/${directorySubmitDeferred} deferred/${directoryPreempted} preempted/${directoryTimedOut} timed out/${directoryOtherFailed} errors/${directoryInFlight} in flight; stream ${streamPending} pending/${streamInFlight} in flight/${streamFailed} failed/${streamUsefulKiB} KiB useful, cache ${cachePages}, resident ${residentPages}, GPU ${gpuAllocatedMiB}/${gpuCapacityMiB} MiB; page flow ${pageSubmitDeferred} deferred/${pagePreempted} preempted/${pageTimedOut} timed out/${pageOtherFailed} transport errors; products ${pageUnavailable} unavailable/${pageStaleRevision} stale/${pageGenerationFailed} generation/${pageUploadFailed} upload (last ${uploadFailureLabel(lastPageUploadFailureKind)})${lastPageFailureKind === 0 ? "" : `, last product ${pageFailureLabel(lastPageFailureKind)}@L${lastPageFailureLevel}(${lastPageFailureX | 0},${lastPageFailureY | 0},${lastPageFailureZ | 0})`}; published ${publishedPages} pages (${publishedExactPages} exact, ${publishedDiscontinuities} skipped-level edges), terrain ${terrainReady === 1 ? "ready" : "pending"}.`
         : undefined;
       scope.postMessage({ kind: "loading", stage: "vicinity", resident, required, detail });
     }
