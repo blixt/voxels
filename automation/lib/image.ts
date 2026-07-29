@@ -372,6 +372,10 @@ export async function compareRenderedImages(
                 x + 1 < width ? current + 1 : -1,
                 y > 0 ? current - width : -1,
                 y + 1 < height ? current + width : -1,
+                x > 0 && y > 0 ? current - width - 1 : -1,
+                x + 1 < width && y > 0 ? current - width + 1 : -1,
+                x > 0 && y + 1 < height ? current + width - 1 : -1,
+                x + 1 < width && y + 1 < height ? current + width + 1 : -1,
               ];
               for (const neighbor of neighbors) {
                 if (neighbor < 0 || mask[neighbor] === 0 || visited[neighbor] !== 0) continue;

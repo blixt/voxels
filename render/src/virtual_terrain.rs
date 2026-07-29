@@ -1305,13 +1305,7 @@ impl VirtualTerrainHierarchy {
     pub fn selected_fingerprint(&self, selected: &[TerrainPageKey]) -> u64 {
         cut_state_fingerprint(
             cut_fingerprint(selected, self),
-            &[],
-            false,
-            false,
-            false,
-            0,
-            0,
-            0,
+            CutFingerprintState::default(),
         )
     }
 
@@ -1340,7 +1334,7 @@ impl VirtualTerrainHierarchy {
             return Err(VirtualTerrainError::ResidentPageCapacity);
         }
         for key in selected.iter().copied() {
-            if self.resident.get(&key).is_none() {
+            if !self.resident.contains_key(&key) {
                 return Err(VirtualTerrainError::UnknownPage(key));
             }
         }
@@ -1363,7 +1357,7 @@ impl VirtualTerrainHierarchy {
             let resident = self
                 .resident
                 .get(key)
-                .expect("resident selection was validated above");
+                .ok_or(VirtualTerrainError::UnknownPage(*key))?;
             selected_primitives = selected_primitives.saturating_add(resident.primitive_count);
             selected_encoded_bytes = selected_encoded_bytes.saturating_add(resident.encoded_bytes);
         }
@@ -1396,10 +1390,10 @@ impl VirtualTerrainHierarchy {
         self.frame = self.frame.wrapping_add(1).max(1);
         let frame = self.frame;
         for key in selected {
-            self.resident
-                .get_mut(key)
-                .expect("resident selection was validated above")
-                .last_selected_frame = frame;
+            let Some(resident) = self.resident.get_mut(key) else {
+                return Err(VirtualTerrainError::InvalidSelection);
+            };
+            resident.last_selected_frame = frame;
         }
         Ok(())
     }
@@ -2031,13 +2025,15 @@ impl VirtualTerrainHierarchy {
             && surface_handoff_mismatches == 0;
         let fingerprint = cut_state_fingerprint(
             cut_fingerprint(&builder.selected, builder.hierarchy),
-            &builder.ownerless_roots,
-            builder.feedback_overflow,
-            builder.selection_overflow,
-            builder.traversal_overflow,
-            builder.incoherent_replacement_groups,
-            exact_surface_lod_discontinuities,
-            surface_handoff_mismatches,
+            CutFingerprintState {
+                ownerless_roots: &builder.ownerless_roots,
+                feedback_overflow: builder.feedback_overflow,
+                selection_overflow: builder.selection_overflow,
+                traversal_overflow: builder.traversal_overflow,
+                incoherent_replacement_groups: builder.incoherent_replacement_groups,
+                exact_surface_lod_discontinuities,
+                surface_handoff_mismatches,
+            },
         );
         if renderable {
             builder.hierarchy.refined_last_cut = builder.next_refined.clone();
@@ -3167,21 +3163,23 @@ fn cut_fingerprint(selected: &[TerrainPageKey], hierarchy: &VirtualTerrainHierar
     fingerprint
 }
 
-fn cut_state_fingerprint(
-    mut fingerprint: u64,
-    ownerless_roots: &[TerrainPageKey],
+#[derive(Clone, Copy, Debug, Default)]
+struct CutFingerprintState<'a> {
+    ownerless_roots: &'a [TerrainPageKey],
     feedback_overflow: bool,
     selection_overflow: bool,
     traversal_overflow: bool,
     incoherent_replacement_groups: usize,
     exact_surface_lod_discontinuities: usize,
     surface_handoff_mismatches: usize,
-) -> u64 {
+}
+
+fn cut_state_fingerprint(mut fingerprint: u64, state: CutFingerprintState<'_>) -> u64 {
     // Selected owners alone do not identify an incomplete desired plan: two traversals may retain
     // the same fallback owners while missing different active roots. Keep the exact sorted blocker
     // set and every publication-relevant failure state in the identity passed to GPU certification.
     fingerprint = fingerprint_byte(fingerprint, 0xff);
-    for key in ownerless_roots {
+    for key in state.ownerless_roots {
         fingerprint = fingerprint_byte(fingerprint, key.level);
         for component in key.coord {
             for byte in component.to_le_bytes() {
@@ -3189,17 +3187,17 @@ fn cut_state_fingerprint(
             }
         }
     }
-    for byte in (ownerless_roots.len() as u64).to_le_bytes() {
+    for byte in (state.ownerless_roots.len() as u64).to_le_bytes() {
         fingerprint = fingerprint_byte(fingerprint, byte);
     }
-    let flags = u8::from(feedback_overflow)
-        | (u8::from(selection_overflow) << 1)
-        | (u8::from(traversal_overflow) << 2);
+    let flags = u8::from(state.feedback_overflow)
+        | (u8::from(state.selection_overflow) << 1)
+        | (u8::from(state.traversal_overflow) << 2);
     fingerprint = fingerprint_byte(fingerprint, flags);
     for value in [
-        incoherent_replacement_groups as u64,
-        exact_surface_lod_discontinuities as u64,
-        surface_handoff_mismatches as u64,
+        state.incoherent_replacement_groups as u64,
+        state.exact_surface_lod_discontinuities as u64,
+        state.surface_handoff_mismatches as u64,
     ] {
         for byte in value.to_le_bytes() {
             fingerprint = fingerprint_byte(fingerprint, byte);
@@ -3670,9 +3668,28 @@ mod tests {
         let base = 0x1234_5678_9abc_def0;
         let first = TerrainPageKey::surface(3, -2, 7);
         let second = TerrainPageKey::surface(3, 3, 7);
-        let first_missing = cut_state_fingerprint(base, &[first], false, false, false, 0, 0, 0);
-        let second_missing = cut_state_fingerprint(base, &[second], false, false, false, 0, 0, 0);
-        let overflowed = cut_state_fingerprint(base, &[first], false, true, false, 0, 0, 0);
+        let first_missing = cut_state_fingerprint(
+            base,
+            CutFingerprintState {
+                ownerless_roots: &[first],
+                ..CutFingerprintState::default()
+            },
+        );
+        let second_missing = cut_state_fingerprint(
+            base,
+            CutFingerprintState {
+                ownerless_roots: &[second],
+                ..CutFingerprintState::default()
+            },
+        );
+        let overflowed = cut_state_fingerprint(
+            base,
+            CutFingerprintState {
+                ownerless_roots: &[first],
+                selection_overflow: true,
+                ..CutFingerprintState::default()
+            },
+        );
 
         assert_ne!(first_missing, second_missing);
         assert_ne!(first_missing, overflowed);

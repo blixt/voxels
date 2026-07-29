@@ -435,6 +435,7 @@ struct ScreenshotFrameIdentity {
     frame_id: u32,
     camera: CameraState,
     published: PublishedClientViewReceipt,
+    animation_time_seconds: f32,
 }
 
 /// Frozen proof computed once at transaction construction and moved unchanged into committed state.
@@ -2941,8 +2942,7 @@ pub enum ChunkActivationReason {
     Radial = 1,
     Portal = 2,
     Interaction = 4,
-    Surface = 8,
-    EnclosedView = 16,
+    EnclosedView = 8,
 }
 
 impl ChunkMesh {
@@ -3363,6 +3363,7 @@ pub struct RenderDiagnostics {
     pub virtual_terrain_gpu_matches_cpu_cut: bool,
     pub virtual_terrain_gpu_match_failure_flags: u32,
     pub virtual_terrain_presented_coverage_gap_frames: u64,
+    pub virtual_terrain_presented_invariant_failure_frames: u64,
     pub virtual_terrain_published_pages: u32,
     pub virtual_terrain_published_ownerless_roots: u32,
     pub virtual_terrain_published_exact_pages: u32,
@@ -3994,6 +3995,7 @@ pub struct Renderer {
     virtual_terrain_oracle_cut: Option<VirtualTerrainCut>,
     /// Exact resident cut requested by an active screenshot reproduction.
     virtual_terrain_reproduction_cut: Option<ScreenshotReproductionCut>,
+    screenshot_reproduction_animation_time_seconds: Option<f32>,
     virtual_terrain_reproduction_invalidated: bool,
     virtual_terrain_plan_event_serial: u32,
     virtual_terrain_plan_last_selection: u32,
@@ -4001,6 +4003,7 @@ pub struct Renderer {
     virtual_terrain_plan_last_invalidation_line: u32,
     virtual_terrain_publication_last_abort_line: u32,
     virtual_terrain_presented_coverage_gap_frames: u64,
+    virtual_terrain_presented_invariant_failure_frames: u64,
     /// Immutable cut currently being encoded or awaiting GPU certification. Directory growth,
     /// cache arrivals, and a newer desired view may replace `virtual_terrain_oracle_cut`, but may
     /// not replace this transaction until it promotes or fails.
@@ -4025,7 +4028,6 @@ pub struct Renderer {
     virtual_terrain_arena: ArenaAllocator,
     virtual_terrain_arena_buffers: Vec<Buffer>,
     canonical_ready_chunks: HashSet<(i32, i32, i32)>,
-    canonical_surface_ready_chunks: HashSet<(i32, i32, i32)>,
     enclosed_view_ready_chunks: HashSet<(i32, i32, i32)>,
     chunk_activations: ChunkActivations,
     local_light_candidates: BTreeMap<MeshKey, Vec<GpuLocalLight>>,
@@ -4938,6 +4940,7 @@ impl Renderer {
             next_view_revision: 1,
             virtual_terrain_oracle_cut: None,
             virtual_terrain_reproduction_cut: None,
+            screenshot_reproduction_animation_time_seconds: None,
             virtual_terrain_reproduction_invalidated: false,
             virtual_terrain_plan_event_serial: 0,
             virtual_terrain_plan_last_selection: 0,
@@ -4945,6 +4948,7 @@ impl Renderer {
             virtual_terrain_plan_last_invalidation_line: 0,
             virtual_terrain_publication_last_abort_line: 0,
             virtual_terrain_presented_coverage_gap_frames: 0,
+            virtual_terrain_presented_invariant_failure_frames: 0,
             virtual_terrain_publication: None,
             next_virtual_terrain_request: 1,
             virtual_terrain_publication_abort_pending: false,
@@ -4959,7 +4963,6 @@ impl Renderer {
             virtual_terrain_arena,
             virtual_terrain_arena_buffers: Vec::new(),
             canonical_ready_chunks: HashSet::new(),
-            canonical_surface_ready_chunks: HashSet::new(),
             enclosed_view_ready_chunks: HashSet::new(),
             chunk_activations: ChunkActivations::default(),
             local_light_candidates: BTreeMap::new(),
@@ -5174,24 +5177,20 @@ impl Renderer {
         }
     }
 
-    /// Atomically replaces the exact-volume working set and independently complete surface
-    /// columns. These are exact leaves of the virtual terrain hierarchy, never a second LOD owner.
+    /// Atomically replaces the exact-volume working set. These chunks supplement the virtual
+    /// surface hierarchy for collision, interaction, and enclosed volume; they are never a second
+    /// surface LOD owner.
     pub fn set_canonical_cut_ready_chunks(
         &mut self,
         canonical_chunks: impl IntoIterator<Item = (i32, i32, i32)>,
-        surface_chunks: impl IntoIterator<Item = (i32, i32, i32)>,
     ) {
-        let canonical_replacement = canonical_chunks.into_iter().collect::<HashSet<_>>();
-        let surface_replacement = surface_chunks.into_iter().collect::<HashSet<_>>();
-        self.canonical_ready_chunks = canonical_replacement;
-        self.canonical_surface_ready_chunks = surface_replacement;
+        self.canonical_ready_chunks = canonical_chunks.into_iter().collect();
     }
 
     /// Whether an exact-volume chunk belongs to the current renderable working set.
     pub fn exact_volume_chunk_presented(&self, coord: ChunkCoord) -> bool {
         let coord = (coord.x, coord.y, coord.z);
         self.canonical_ready_chunks.contains(&coord)
-            || self.canonical_surface_ready_chunks.contains(&coord)
             || self.enclosed_view_ready_chunks.contains(&coord)
     }
 
@@ -5606,6 +5605,7 @@ impl Renderer {
         frame_id: u32,
         camera: &CameraState,
         published: PublishedClientViewReceipt,
+        animation_time_seconds: f32,
     ) -> String {
         let world = self.screenshot_world_identity.as_ref().map_or_else(
             || "null".to_owned(),
@@ -5704,7 +5704,7 @@ impl Renderer {
                 r#""worldPositionReconstruction":{{"pixelCenter":true,"depthConvention":"reverse-z-webgpu","#,
                 r#""inverseViewProjectionColumns":{:?}}}}}}}"#
             ),
-            self.geometry_source_debug, representation_kinds, inverse_view_projection,
+            true, representation_kinds, inverse_view_projection,
         );
         format!(
             concat!(
@@ -5715,7 +5715,7 @@ impl Renderer {
                 r#""presentation":{{"publishedClientView":{{"presentationSerial":"{}","viewRevision":"{}","terrainRequest":{},"terrainGeneration":{},"revisionDigest":"{:016x}"}},"viewportFingerprint":"{:016x}","selectedCutFingerprint":"{:016x}","terrainHandleSnapshot":{{"generation":"{}","presentationFingerprint":"{:016x}","cutFingerprint":"{:016x}","matchesPublishedCut":{}}},"selectedCut":{},"virtualTerrain":{},"worldQuads":{},"waterQuads":{},"drawCalls":{},"waterDrawCalls":{},"surfaceWidth":{},"surfaceHeight":{}}},"#,
                 r#""streaming":{},"#,
                 r#""attachments":{},"#,
-                r#""render":{{"worldLabOpen":{},"features":{{"shadows":{},"voxelAmbientOcclusion":{},"screenSpaceAmbientOcclusion":{},"fog":{},"farTerrain":{},"water":{},"targetOutline":{},"materialDetail":{},"caveHeadlamp":{},"localLighting":{}}},"diagnosticSkyColor":{},"geometrySourceDebug":{},"viewDistanceMetres":{}}}}}"#
+                r#""render":{{"worldLabOpen":{},"features":{{"shadows":{},"voxelAmbientOcclusion":{},"screenSpaceAmbientOcclusion":{},"fog":{},"farTerrain":{},"water":{},"targetOutline":{},"materialDetail":{},"caveHeadlamp":{},"localLighting":{}}},"diagnosticSkyColor":{},"geometrySourceDebug":{},"viewDistanceMetres":{},"animationTimeSeconds":{}}}}}"#
             ),
             frame_id,
             runtime_identity,
@@ -5808,6 +5808,7 @@ impl Renderer {
             diagnostic_sky,
             self.geometry_source_debug,
             self.runtime_config.view_distance_metres,
+            animation_time_seconds,
         )
     }
 
@@ -5837,6 +5838,7 @@ impl Renderer {
         &mut self,
         selected_pages: Vec<TerrainPageKey>,
         expected_fingerprint: u64,
+        animation_time_seconds: f32,
     ) -> Result<(), VirtualTerrainRendererError> {
         let cut = self
             .virtual_terrain
@@ -5874,6 +5876,7 @@ impl Renderer {
             self.abort_virtual_terrain_publication();
         }
         self.virtual_terrain_reproduction_cut = Some(ScreenshotReproductionCut { cut, revisions });
+        self.screenshot_reproduction_animation_time_seconds = Some(animation_time_seconds);
         self.virtual_terrain_reproduction_invalidated = false;
         self.invalidate_virtual_terrain_desired_plan();
         Ok(())
@@ -5881,6 +5884,7 @@ impl Renderer {
 
     pub fn clear_screenshot_reproduction_cut(&mut self) {
         let changed = self.virtual_terrain_reproduction_cut.take().is_some();
+        self.screenshot_reproduction_animation_time_seconds = None;
         if changed && self.virtual_terrain_publication.is_some() {
             // Symmetrically prevent a reproduction publication from binding to the restored live
             // view after the pin is removed.
@@ -5895,6 +5899,7 @@ impl Renderer {
         if self.virtual_terrain_reproduction_cut.take().is_none() {
             return false;
         }
+        self.screenshot_reproduction_animation_time_seconds = None;
         if self.virtual_terrain_publication.is_some() {
             self.abort_virtual_terrain_publication();
         } else {
@@ -7940,7 +7945,6 @@ impl Renderer {
                 && cut.selected_pages.contains(&leaf);
         }
         self.canonical_ready_chunks.contains(&chunk)
-            || self.canonical_surface_ready_chunks.contains(&chunk)
             || self.enclosed_view_ready_chunks.contains(&chunk)
     }
 
@@ -7966,7 +7970,7 @@ impl Renderer {
             return (required, required);
         }
         let covered = if self
-            .canonical_surface_ready_chunks
+            .canonical_ready_chunks
             .iter()
             .any(|&(x, _, z)| (x, z) == column)
         {
@@ -8096,7 +8100,17 @@ impl Renderer {
             .map(|presented| (presented.state.camera, presented.receipt))?;
         let camera = &camera;
         let dt = bounded_frame_delta(dt);
-        self.time += dt;
+        if self
+            .presented_client_view
+            .as_ref()
+            .is_some_and(|presented| presented.state.session == ClientViewSession::Reproduction)
+        {
+            self.time = self
+                .screenshot_reproduction_animation_time_seconds
+                .unwrap_or(self.time);
+        } else {
+            self.time += dt;
+        }
         self.observer_world_xz_metres =
             [f64::from(camera.position.x), f64::from(camera.position.z)];
         if !self.refresh_effective_environment() {
@@ -8188,10 +8202,31 @@ impl Renderer {
         let (virtual_visible, virtual_ownership, committed_horizon_covers_camera) =
             if self.virtual_terrain_mode_from_presented_view() == VirtualTerrainRenderMode::Visible
             {
-                let (cut, envelope, _certificate) = self
+                let Some((cut, envelope, certificate)) = self
                     .presented_virtual_terrain()
                     .map(|committed| (&committed.cut, &committed.envelope, committed.certificate))
-                    .filter(|(_, _, certificate)| certificate.complete)?;
+                else {
+                    self.virtual_terrain_presented_invariant_failure_frames = self
+                        .virtual_terrain_presented_invariant_failure_frames
+                        .saturating_add(1);
+                    (self.log_error)("visible virtual terrain has no committed presentation");
+                    return None;
+                };
+                if !certificate.complete
+                    || !cut.ownerless_roots.is_empty()
+                    || cut.selection_overflow
+                    || cut.traversal_overflow
+                    || cut.exact_surface_lod_discontinuities != 0
+                    || cut.surface_handoff_mismatches != 0
+                {
+                    self.virtual_terrain_presented_invariant_failure_frames = self
+                        .virtual_terrain_presented_invariant_failure_frames
+                        .saturating_add(1);
+                    (self.log_error)(
+                        "committed virtual terrain cut lost its complete ownership or seam proof",
+                    );
+                    return None;
+                }
                 if !self.virtual_terrain_gpu.presented_snapshot_matches(
                     virtual_terrain_snapshot_identity(
                         cut,
@@ -8205,6 +8240,9 @@ impl Renderer {
                     (self.log_error)(
                         "presented virtual terrain bank no longer matches its committed CPU cut",
                     );
+                    self.virtual_terrain_presented_invariant_failure_frames = self
+                        .virtual_terrain_presented_invariant_failure_frames
+                        .saturating_add(1);
                     return None;
                 }
                 let Ok(ownership) = VirtualTerrainOwnership::from_cut(cut, |key| {
@@ -8216,6 +8254,9 @@ impl Renderer {
                     (self.log_error)(
                         "committed virtual terrain cut cannot construct canonical ownership",
                     );
+                    self.virtual_terrain_presented_invariant_failure_frames = self
+                        .virtual_terrain_presented_invariant_failure_frames
+                        .saturating_add(1);
                     return None;
                 };
                 // A committed cut is a complete, certified partition. Keep that one owner visible
@@ -8519,7 +8560,7 @@ impl Renderer {
             self.ui_gpu.scene_view()
         };
         let (screenshot_opaque_owners, screenshot_virtual_opaque_owners, screenshot_water_owners) =
-            if self.screenshot_requested && self.geometry_source_debug {
+            if self.screenshot_requested {
                 let Some(opaque) = screenshot_diagnostic_owner_buffers(
                     &self.device,
                     &self.queue,
@@ -8567,15 +8608,6 @@ impl Renderer {
                     return None;
                 };
                 (Some(opaque), virtual_opaque, Some(water))
-            } else if self.screenshot_requested {
-                // Ordinary F2 captures retain the complete reproduction/cut metadata without
-                // allocating and uploading a second owner stream for every resident primitive.
-                // Geometry-source debug captures opt into that expensive pixel attachment.
-                (
-                    Some(Vec::new()),
-                    virtual_visible.then_some(Vec::new()),
-                    Some(Vec::new()),
-                )
             } else {
                 (None, None, None)
             };
@@ -8595,40 +8627,38 @@ impl Renderer {
                 view_formats: &[],
             })
         });
-        let screenshot_diagnostic_identity_target =
-            (self.screenshot_requested && self.geometry_source_debug).then(|| {
-                self.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("screenshot integer ownership target"),
-                    size: wgpu::Extent3d {
-                        width: self.config.width,
-                        height: self.config.height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: TextureFormat::Rgba32Uint,
-                    usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                })
-            });
-        let screenshot_diagnostic_depth_target =
-            (self.screenshot_requested && self.geometry_source_debug).then(|| {
-                self.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("screenshot exact reverse-z target"),
-                    size: wgpu::Extent3d {
-                        width: self.config.width,
-                        height: self.config.height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: TextureFormat::R32Uint,
-                    usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                })
-            });
+        let screenshot_diagnostic_identity_target = self.screenshot_requested.then(|| {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("screenshot integer ownership target"),
+                size: wgpu::Extent3d {
+                    width: self.config.width,
+                    height: self.config.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: TextureFormat::Rgba32Uint,
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        });
+        let screenshot_diagnostic_depth_target = self.screenshot_requested.then(|| {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("screenshot exact reverse-z target"),
+                size: wgpu::Extent3d {
+                    width: self.config.width,
+                    height: self.config.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: TextureFormat::R32Uint,
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("opaque world pass"),
@@ -9119,6 +9149,8 @@ impl Renderer {
             virtual_terrain_gpu_match_failure_flags: gpu_virtual_match_failure_flags,
             virtual_terrain_presented_coverage_gap_frames: self
                 .virtual_terrain_presented_coverage_gap_frames,
+            virtual_terrain_presented_invariant_failure_frames: self
+                .virtual_terrain_presented_invariant_failure_frames,
             virtual_terrain_published_pages: published_virtual_pages.len() as u32,
             virtual_terrain_published_ownerless_roots: published_virtual_ownerless_roots as u32,
             virtual_terrain_published_exact_pages: published_virtual_exact_pages as u32,
@@ -9458,6 +9490,7 @@ impl Renderer {
                 frame_id,
                 camera: *camera,
                 published,
+                animation_time_seconds: self.time,
             },
         );
         if let Some(generation) = virtual_candidate_generation_to_submit {
@@ -9618,8 +9651,12 @@ impl Renderer {
             );
         }
         let filename = self.ui.screenshot_filename();
-        let metadata =
-            self.screenshot_reproduction_metadata(frame.frame_id, &frame.camera, frame.published);
+        let metadata = self.screenshot_reproduction_metadata(
+            frame.frame_id,
+            &frame.camera,
+            frame.published,
+            frame.animation_time_seconds,
+        );
         let state = Arc::clone(&self.screenshot_readback);
         if let Ok(mut readback) = state.lock() {
             readback.in_flight = true;

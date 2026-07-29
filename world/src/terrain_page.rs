@@ -1189,7 +1189,8 @@ fn exact_surface_handoff_fingerprint(
     samples: &ExactPageSamples,
     side: BoundarySide,
 ) -> [u8; 32] {
-    let (plane, tangent_min, column_at): (i32, i32, Box<dyn Fn(usize) -> (i32, i32)>) = match side {
+    type BoundaryColumnAt = Box<dyn Fn(usize) -> (i32, i32)>;
+    let (plane, tangent_min, column_at): (i32, i32, BoundaryColumnAt) = match side {
         BoundarySide::NegativeX | BoundarySide::PositiveX => {
             let x = if side == BoundarySide::PositiveX {
                 bounds.max.x

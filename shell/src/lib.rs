@@ -1457,7 +1457,7 @@ mod web {
         "virtualTerrainSelectedPages,virtualTerrainRequestedPages,virtualTerrainOwnerlessRoots,virtualTerrainGpuMatchesCpuCut,virtualTerrainGpuEncodingOverflowFlags,virtualTerrainGpuEncodedPages,virtualTerrainGpuOwnerlessRoots,virtualTerrainStreamPending,virtualTerrainStreamInFlight,virtualTerrainCancellationWasteMiB,virtualTerrainCachePages,",
         "virtualTerrainCacheMiB,virtualTerrainColumns,virtualTerrainColumnInFlight,virtualTerrainColumnRevisionFloors,virtualTerrainCurrentColumnKnown,virtualTerrainCurrentColumnRoots,virtualTerrainCurrentColumnRegisteredRoots,virtualTerrainNearestRegisteredRootMetres,",
         "virtualTerrainColumnAccepted,virtualTerrainColumnSubmitDeferred,virtualTerrainColumnPreempted,virtualTerrainColumnTimedOut,virtualTerrainColumnOtherFailed,virtualTerrainDirectoryAccepted,virtualTerrainDirectorySubmitDeferred,virtualTerrainDirectoryPreempted,",
-        "virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,virtualTerrainPageSubmitDeferred,virtualTerrainPagePreempted,virtualTerrainPageTimedOut,virtualTerrainPageOtherFailed,virtualTerrainPageUnavailable,virtualTerrainPageStaleRevision,virtualTerrainPageGenerationFailed,virtualTerrainPageUploadFailed,virtualTerrainPublishedPages,virtualTerrainPublishedExactPages,virtualTerrainPublishedMinimumLevel,virtualTerrainPublishedMaximumLevel,virtualTerrainPublishedExactLodDiscontinuities,virtualTerrainCutFingerprintLow24,virtualTerrainCutFingerprintHigh24,virtualTerrainPresentedSnapshotGenerationLow24,virtualTerrainPresentedSnapshotGenerationHigh24,virtualTerrainPresentedSnapshotFingerprintLow24,virtualTerrainPresentedSnapshotFingerprintHigh24,virtualTerrainPresentedSnapshotMatchesCut,virtualTerrainPresentedCoverageGapFrames,",
+        "virtualTerrainDirectoryTimedOut,virtualTerrainDirectoryOtherFailed,virtualTerrainPageSubmitDeferred,virtualTerrainPagePreempted,virtualTerrainPageTimedOut,virtualTerrainPageOtherFailed,virtualTerrainPageUnavailable,virtualTerrainPageStaleRevision,virtualTerrainPageGenerationFailed,virtualTerrainPageUploadFailed,virtualTerrainPublishedPages,virtualTerrainPublishedExactPages,virtualTerrainPublishedMinimumLevel,virtualTerrainPublishedMaximumLevel,virtualTerrainPublishedExactLodDiscontinuities,virtualTerrainCutFingerprintLow24,virtualTerrainCutFingerprintHigh24,virtualTerrainPresentedSnapshotGenerationLow24,virtualTerrainPresentedSnapshotGenerationHigh24,virtualTerrainPresentedSnapshotFingerprintLow24,virtualTerrainPresentedSnapshotFingerprintHigh24,virtualTerrainPresentedSnapshotMatchesCut,virtualTerrainPresentedCoverageGapFrames,virtualTerrainPresentedInvariantFailureFrames,",
         "virtualTerrainDesiredEnvelopeComplete,virtualTerrainDesiredEnvelopeFingerprintLow24,virtualTerrainDesiredEnvelopeFingerprintMid24,virtualTerrainDesiredEnvelopeFingerprintHigh16,virtualTerrainDesiredSafetyLeaves,virtualTerrainDesiredHorizonRoots,virtualTerrainDesiredLocusMinimumLeafX,virtualTerrainDesiredLocusMinimumLeafZ,virtualTerrainDesiredLocusMaximumLeafExclusiveX,virtualTerrainDesiredLocusMaximumLeafExclusiveZ,",
         "virtualTerrainCommittedEnvelopeFingerprintLow24,virtualTerrainCommittedEnvelopeFingerprintMid24,virtualTerrainCommittedEnvelopeFingerprintHigh16,virtualTerrainCommittedSafetyLeaves,virtualTerrainCommittedSafetyCoverage,virtualTerrainCommittedHorizonRoots,virtualTerrainCommittedHorizonCoverage,virtualTerrainCommittedLocusMinimumLeafX,virtualTerrainCommittedLocusMinimumLeafZ,virtualTerrainCommittedLocusMaximumLeafExclusiveX,virtualTerrainCommittedLocusMaximumLeafExclusiveZ,",
         "presentedCameraInsideCommittedEnvelope,presentationTargetX,presentationTargetY,presentationTargetZ,presentationGateActive,presentationGateStepsLow24,presentationGateStepsMid24,presentationGateStepsHigh16,presentationGateFramesLow24,presentationGateFramesMid24,presentationGateFramesHigh16,",
@@ -2043,6 +2043,7 @@ mod web {
         diagnostic_sky_color: Option<[f32; 3]>,
         geometry_source_debug: bool,
         view_distance_metres: f32,
+        animation_time_seconds: f32,
     }
 
     #[derive(Deserialize)]
@@ -2145,7 +2146,6 @@ mod web {
         interaction_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         enclosed_view_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         enclosed_view_frontiers: RefCell<Vec<crate::PortalFrontier>>,
-        surface_active_chunks: RefCell<BTreeSet<(i32, i32, i32)>>,
         touch_inventory_drag: Cell<Option<[f32; 2]>>,
         profile: RefCell<ProfileAutomation>,
         profile_restore_camera: Cell<Option<CameraState>>,
@@ -2429,6 +2429,11 @@ mod web {
             {
                 return Err("capture diagnostic sky color is invalid".to_owned());
             }
+            if !reproduction.render.animation_time_seconds.is_finite()
+                || reproduction.render.animation_time_seconds < 0.0
+            {
+                return Err("capture animation time is invalid".to_owned());
+            }
             let render_state = ScreenshotMutableRenderState {
                 world_lab_open: reproduction.render.world_lab_open,
                 diagnostic_sky_color: reproduction.render.diagnostic_sky_color,
@@ -2463,7 +2468,11 @@ mod web {
                 })?;
             self.renderer
                 .borrow_mut()
-                .set_screenshot_reproduction_cut(selected_pages, expected_cut_fingerprint)
+                .set_screenshot_reproduction_cut(
+                    selected_pages,
+                    expected_cut_fingerprint,
+                    reproduction.render.animation_time_seconds,
+                )
                 .map_err(|error| {
                     format!(
                         "capture terrain cut is unavailable from the current authoritative world: {error}"
@@ -3620,7 +3629,6 @@ mod web {
                     &collision_interest,
                     enclosed_view_interest,
                     &enclosed_view_plan.frontiers,
-                    &[],
                 );
             }
             let publish_ms = (performance_now(performance) - publish_start) as f32;
@@ -5809,7 +5817,6 @@ mod web {
             collision_interest: &[ChunkCoord],
             enclosed_view_interest: &[ChunkCoord],
             enclosed_view_frontiers: &[crate::PortalFrontier],
-            surface_interest: &[ChunkCoord],
         ) {
             let scheduler = self.scheduler.borrow();
             let config = scheduler.config();
@@ -5842,7 +5849,7 @@ mod web {
             }
             // Preserve only exact, complete, active 3D sets. The renderer must not use an inactive
             // retained Y profile to suppress a surface parent for a different vertical band.
-            let mut canonical_ready_chunks = radial.clone();
+            let canonical_ready_chunks = radial.clone();
             // Preserve the old radial reason for retained resident meshes until the scheduler
             // actually evicts them. This carries visible coverage across small focus moves while
             // new columns become atomically ready, matching the retention hysteresis contract.
@@ -5881,9 +5888,6 @@ mod web {
                     },
                 )
                 .collect::<Vec<_>>();
-            let surface = complete_interest(surface_interest);
-            canonical_ready_chunks.extend(surface.iter().copied());
-            let canonical_surface_ready_chunks = surface.clone();
             drop(scheduler);
             self.reconcile_activation_reason(
                 &self.radial_active_chunks,
@@ -5900,16 +5904,8 @@ mod web {
                 enclosed_view.clone(),
                 ChunkActivationReason::EnclosedView,
             );
-            self.reconcile_activation_reason(
-                &self.surface_active_chunks,
-                surface,
-                ChunkActivationReason::Surface,
-            );
             let mut renderer = self.renderer.borrow_mut();
-            renderer.set_canonical_cut_ready_chunks(
-                canonical_ready_chunks,
-                canonical_surface_ready_chunks,
-            );
+            renderer.set_canonical_cut_ready_chunks(canonical_ready_chunks);
             renderer.set_enclosed_view_ready_chunks(enclosed_view);
             renderer.set_exact_volume_frontier_faces(&frontier_faces);
         }
@@ -7582,6 +7578,7 @@ mod web {
                         0.0
                     },
                     render.virtual_terrain_presented_coverage_gap_frames as f32,
+                    render.virtual_terrain_presented_invariant_failure_frames as f32,
                     if render.virtual_terrain_desired_envelope_complete {
                         1.0
                     } else {
@@ -7966,7 +7963,6 @@ mod web {
             interaction_active_chunks: RefCell::new(BTreeSet::new()),
             enclosed_view_active_chunks: RefCell::new(BTreeSet::new()),
             enclosed_view_frontiers: RefCell::new(Vec::new()),
-            surface_active_chunks: RefCell::new(BTreeSet::new()),
             touch_inventory_drag: Cell::new(None),
             profile: RefCell::new(ProfileAutomation::with_config(ProfileConfig {
                 fixed_step_seconds: engine_config.fixed_step_seconds,

@@ -244,7 +244,7 @@ async function walkBeyondProtectedPedestal(
   await page.keyboard.down("ShiftLeft");
   await page.keyboard.down("KeyW");
   let distance = 0;
-  let nextPixelAudit = 0;
+  let nextPixelAudit = performance.now();
   let previous = before;
   let lastProgressAt = performance.now();
   let longestNoProgressMs = 0;
@@ -253,6 +253,7 @@ async function walkBeyondProtectedPedestal(
   let exactQualityDebtStartedMetres = 0;
   let longestExactQualityDebtMs = 0;
   let longestExactQualityDebtMetres = 0;
+  const transientCaptures: { readonly png: Buffer; readonly distanceMetres: number }[] = [];
   try {
     const deadline = performance.now() + 20_000;
     let previousFrame = snapshotValue(recorder.latestSnapshot, "frameSequence");
@@ -309,36 +310,39 @@ async function walkBeyondProtectedPedestal(
       }
       if (performance.now() >= nextPixelAudit) {
         const png = await page.screenshot({ type: "png" });
-        const [magenta, terrainInteriorSky, black] = await Promise.all([
-          analyzeDiagnosticSky(page, png),
-          analyzeDiagnosticSky(page, png, { x0: 0.04, x1: 0.96, y0: 0.58, y1: 0.98 }),
-          analyzeDiagnosticSky(page, png, { x0: 0.05, x1: 0.95, y0: 0.08, y1: 0.58 }, "black"),
-        ]);
-        if (
-          magenta.largestEnclosedComponentPixels > 0 ||
-          terrainInteriorSky.diagnosticSkyPixels > 0 ||
-          black.largestComponentPixels >= 16
-        ) {
-          await context.artifacts.write(
-            "transient terrain hole during sprint",
-            "during-sprint-transient-hole.png",
-            png,
-            "image/png",
-          );
-          throw new Error(
-            `terrain exposed a transient hole after ${distance.toFixed(2)}m of sprinting: ` +
-              `${magenta.largestEnclosedComponentPixels} enclosed magenta pixels, ` +
-              `${terrainInteriorSky.diagnosticSkyPixels} below-silhouette magenta pixels, ` +
-              `${black.largestComponentPixels} contiguous black pixels`,
-          );
-        }
-        nextPixelAudit = performance.now() + 250;
+        transientCaptures.push({ png, distanceMetres: distance });
+        nextPixelAudit = Math.max(nextPixelAudit + 250, performance.now() + 1);
       }
       if (distance >= targetMetres) break;
     }
   } finally {
     await page.keyboard.up("KeyW");
     await page.keyboard.up("ShiftLeft");
+  }
+  for (const capture of transientCaptures) {
+    const [magenta, terrainInteriorSky, black] = await Promise.all([
+      analyzeDiagnosticSky(page, capture.png),
+      analyzeDiagnosticSky(page, capture.png, { x0: 0.04, x1: 0.96, y0: 0.58, y1: 0.98 }),
+      analyzeDiagnosticSky(page, capture.png, { x0: 0.05, x1: 0.95, y0: 0.08, y1: 0.58 }, "black"),
+    ]);
+    if (
+      magenta.largestEnclosedComponentPixels > 0 ||
+      terrainInteriorSky.diagnosticSkyPixels > 0 ||
+      black.largestComponentPixels >= 16
+    ) {
+      await context.artifacts.write(
+        "transient terrain hole during sprint",
+        "during-sprint-transient-hole.png",
+        capture.png,
+        "image/png",
+      );
+      throw new Error(
+        `terrain exposed a transient hole after ${capture.distanceMetres.toFixed(2)}m of sprinting: ` +
+          `${magenta.largestEnclosedComponentPixels} enclosed magenta pixels, ` +
+          `${terrainInteriorSky.diagnosticSkyPixels} below-silhouette magenta pixels, ` +
+          `${black.largestComponentPixels} contiguous black pixels`,
+      );
+    }
   }
   if (exactQualityDebtStartedAt !== undefined) {
     longestExactQualityDebtMs = Math.max(
@@ -623,10 +627,18 @@ async function verifyCaptureReplayAgainstCurrentWorld(
       footprintPixels: 4,
       diagnosticGeometry: true,
     });
+    const originalOwnership = capture.ownership;
+    const replayedOwnership = replayed.ownership;
+    const ownershipAttachmentMatches =
+      originalOwnership !== null &&
+      replayedOwnership !== null &&
+      originalOwnership.width === replayedOwnership.width &&
+      originalOwnership.height === replayedOwnership.height &&
+      Buffer.from(originalOwnership.pixels).equals(Buffer.from(replayedOwnership.pixels));
     await context.artifacts.writeJson(
       "same-world screenshot replay comparison",
       "same-world-replay-comparison.json",
-      imageComparison,
+      { ...imageComparison, ownershipAttachmentMatches },
     );
     await context.artifacts.write(
       "same-world screenshot metadata replay",
@@ -637,12 +649,13 @@ async function verifyCaptureReplayAgainstCurrentWorld(
     const geometry = imageComparison.diagnosticGeometry;
     if (
       geometry === null ||
+      !ownershipAttachmentMatches ||
       geometry.largestDisagreementComponentPixels > 16 ||
       geometry.occupancyJaccard < 0.9999 ||
       imageComparison.meanAbsoluteLinearLumaDelta > 0.02
     ) {
       throw new Error(
-        `same-world screenshot replay changed rendered geometry or appearance: ${JSON.stringify(imageComparison)}`,
+        `same-world screenshot replay changed exact terrain ownership, material, depth, geometry, or appearance: ${JSON.stringify({ ...imageComparison, ownershipAttachmentMatches })}`,
       );
     }
     return replayed.png.byteLength;

@@ -44,6 +44,7 @@ interface ReproductionMetadata {
   };
   readonly render: {
     readonly diagnosticSkyColor: readonly [number, number, number] | null;
+    readonly animationTimeSeconds: number;
     readonly features: {
       readonly shadows: boolean;
       readonly screenSpaceAmbientOcclusion: boolean;
@@ -109,6 +110,12 @@ function parseMetadata(text: string): ReproductionMetadata {
       diagnosticSkyColor.some((channel) => !Number.isFinite(channel) || channel < 0 || channel > 1))
   ) {
     throw new Error("capture diagnostic sky color is invalid");
+  }
+  if (
+    !Number.isFinite(value.render?.animationTimeSeconds) ||
+    value.render.animationTimeSeconds < 0
+  ) {
+    throw new Error("capture renderer animation time is invalid");
   }
   if (
     !/^[0-9a-f]{16}$/u.test(value.presentation?.selectedCutFingerprint) ||

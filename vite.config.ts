@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { createConnection } from "node:net";
@@ -129,13 +129,13 @@ function clientConfig(emitBuildAsset: boolean): Plugin {
         response.end(readFileSync(CLIENT_CONFIG_SOURCE, "utf8"));
       });
       server.watcher.add(CLIENT_CONFIG_SOURCE);
-      server.watcher.on("change", (file) => {
+      watchRustInputChanges(server.watcher, (file, event) => {
         if (
           path.resolve(file) === CLIENT_CONFIG_SOURCE &&
-          contentChanges.observe(file, "change", true)
+          contentChanges.observe(file, event, true)
         ) {
           server.config.logger.info(
-            `[voxels-client-config] change ${path.relative(process.cwd(), file)}`,
+            `[voxels-client-config] ${event} ${path.relative(process.cwd(), file)}`,
           );
           server.ws.send({ type: "full-reload" });
         }
@@ -155,8 +155,7 @@ export function watchRustInputChanges(
 
 type RustInputEvent = "add" | "change" | "unlink";
 
-function inputContentFingerprint(file: string, event: RustInputEvent): string | null {
-  if (event === "unlink") return null;
+function inputContentFingerprint(file: string): string | null {
   try {
     return createHash("sha256").update(readFileSync(file)).digest("hex");
   } catch (error) {
@@ -167,10 +166,11 @@ function inputContentFingerprint(file: string, event: RustInputEvent): string | 
 
 /// Converts noisy filesystem notifications into actual source-content transitions.
 ///
-/// macOS can report a watched temporary config as changed when the newly launched daemon merely
-/// reads it. Vite's shared watcher may already be ready when a plugin adds its paths, so each
-/// plugin primes an explicit content snapshot before subscribing. Later access-only events remain
-/// inert without delaying a real edit, add, or removal.
+/// macOS/Vite can report delayed or reordered notifications for an unchanged external temporary
+/// config. Vite's shared watcher may already be ready when a plugin adds its paths, so each plugin
+/// primes an explicit content snapshot before subscribing. Every later event is only a hint to
+/// sample current existence and bytes, keeping no-op or stale events inert without delaying a real
+/// edit, add, or removal.
 export class WatchedInputContentChanges {
   readonly #fingerprints = new Map<string, string | null>();
 
@@ -192,9 +192,9 @@ export class WatchedInputContentChanges {
     for (const input of inputs) visit(path.resolve(input));
   }
 
-  observe(file: string, event: RustInputEvent, armed: boolean): boolean {
+  observe(file: string, _event: RustInputEvent, armed: boolean): boolean {
     const resolved = path.resolve(file);
-    const next = inputContentFingerprint(resolved, event);
+    const next = inputContentFingerprint(resolved);
     const known = this.#fingerprints.has(resolved);
     const previous = this.#fingerprints.get(resolved);
     this.#fingerprints.set(resolved, next);
@@ -284,11 +284,24 @@ function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ESRCH") return;
     if (code === "EPERM") {
-      // Some macOS launch contexts deny signalling the detached process group even though the
-      // direct child remains ours. Fall back to the child handle so closing Vite cannot crash and
-      // strand the supervised daemon.
+      // Some macOS launch contexts deny signalling the detached process group even though its
+      // processes remain ours. Snapshot descendants before stopping the direct child, then signal
+      // those exact owned processes leaf-first so Cargo cannot strand rustc/build-script children.
+      const descendants =
+        process.platform === "win32" || child.pid === undefined
+          ? []
+          : ownedDescendantProcessIds(child.pid);
       try {
         child.kill(signal);
+        for (const pid of descendants.reverse()) {
+          try {
+            process.kill(pid, signal);
+          } catch (descendantError) {
+            if ((descendantError as NodeJS.ErrnoException).code !== "ESRCH") {
+              throw descendantError;
+            }
+          }
+        }
         return;
       } catch (fallbackError) {
         if ((fallbackError as NodeJS.ErrnoException).code === "ESRCH") return;
@@ -297,6 +310,36 @@ function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
     }
     throw error;
   }
+}
+
+function ownedDescendantProcessIds(rootPid: number): number[] {
+  let rows: string;
+  try {
+    rows = execFileSync("/bin/ps", ["-ax", "-o", "pid=,ppid="], {
+      encoding: "utf8",
+    });
+  } catch {
+    return [];
+  }
+  const childrenByParent = new Map<number, number[]>();
+  for (const row of rows.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s*$/u.exec(row);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const parentPid = Number(match[2]);
+    const children = childrenByParent.get(parentPid);
+    if (children) children.push(pid);
+    else childrenByParent.set(parentPid, [pid]);
+  }
+  const descendants: number[] = [];
+  const pending = [...(childrenByParent.get(rootPid) ?? [])];
+  while (pending.length > 0) {
+    const pid = pending.pop();
+    if (pid === undefined) break;
+    descendants.push(pid);
+    pending.push(...(childrenByParent.get(pid) ?? []));
+  }
+  return descendants;
 }
 
 async function terminateProcessTree(child: ChildProcess, timeoutMs = 2_000): Promise<void> {
@@ -347,6 +390,15 @@ async function waitForWorldService(
   throw new Error(`native daemon did not listen on ${host}:${port} within ${timeoutMs}ms`);
 }
 
+export async function assertWorldServicePortAvailable(configPath: string): Promise<void> {
+  const { host, port } = worldServiceListenAddress(readFileSync(configPath, "utf8"));
+  if (await portAcceptsConnections(host, port)) {
+    throw new Error(
+      `native daemon port ${host}:${port} is already in use; stop the stale service or choose a different development port`,
+    );
+  }
+}
+
 function childExitReason(code: number | null, signal: NodeJS.Signals | null): string {
   return signal ? `signal ${signal}` : `status ${code ?? "unknown"}`;
 }
@@ -362,12 +414,16 @@ function nativeWorldService(): Plugin {
   let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   let crashAttempts = 0;
   let finishInitialBuild: (() => Promise<void>) | undefined;
+  let stopServerChildren: (() => Promise<void>) | undefined;
   return {
     name: "voxels-native-world-service",
     apply: (_config, environment) =>
       environment.command === "serve" && process.env.VOXELS_EXTERNAL_WORLD_SERVICE !== "1",
     async buildStart() {
       await finishInitialBuild?.();
+    },
+    async closeBundle() {
+      await stopServerChildren?.();
     },
     configureServer(server) {
       let handleSignal: (() => void) | undefined;
@@ -377,23 +433,27 @@ function nativeWorldService(): Plugin {
         ...NATIVE_WORLD_SERVICE_INPUT_FILES,
       ];
       contentChanges.prime(nativeInputs);
-      const stop = async (): Promise<void> => {
-        if (stopping) return;
-        stopping = true;
-        if (rebuildTimer) clearTimeout(rebuildTimer);
-        if (handleSignal) {
-          process.off("SIGINT", handleSignal);
-          process.off("SIGTERM", handleSignal);
-        }
-        const build = buildChild;
-        const daemon = daemonChild;
-        buildChild = undefined;
-        daemonChild = undefined;
-        await Promise.all([
-          build ? terminateProcessTree(build) : Promise.resolve(),
-          daemon ? terminateProcessTree(daemon) : Promise.resolve(),
-        ]);
+      let stopPromise: Promise<void> | undefined;
+      const stop = (): Promise<void> => {
+        stopPromise ??= (async () => {
+          stopping = true;
+          if (rebuildTimer) clearTimeout(rebuildTimer);
+          if (handleSignal) {
+            process.off("SIGINT", handleSignal);
+            process.off("SIGTERM", handleSignal);
+          }
+          const build = buildChild;
+          const daemon = daemonChild;
+          buildChild = undefined;
+          daemonChild = undefined;
+          await Promise.all([
+            build ? terminateProcessTree(build) : Promise.resolve(),
+            daemon ? terminateProcessTree(daemon) : Promise.resolve(),
+          ]);
+        })();
+        return stopPromise;
       };
+      stopServerChildren = stop;
 
       const compile = (): Promise<boolean> => {
         server.config.logger.info(
@@ -440,6 +500,7 @@ function nativeWorldService(): Plugin {
       };
 
       const launch = async (): Promise<void> => {
+        await assertWorldServicePortAvailable(WORLD_SERVICE_CONFIG_SOURCE);
         const executable = path.resolve(
           process.env.CARGO_TARGET_DIR ?? "target",
           profile,

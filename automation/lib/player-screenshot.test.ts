@@ -17,6 +17,7 @@ describe("player screenshot surface-cut audit", () => {
   const reproducibleMetadata = {
     schema: "voxels.reproduction.v3",
     camera: { eyeMetres: [1, 2, 3] },
+    render: { animationTimeSeconds: 12.5 },
     presentation: {
       publishedClientView: {
         presentationSerial: "3",

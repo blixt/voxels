@@ -93,6 +93,7 @@ export interface PlayerScreenshotMetadata {
   readonly render: {
     readonly worldLabOpen: boolean;
     readonly geometrySourceDebug: boolean;
+    readonly animationTimeSeconds: number;
   };
   readonly attachments: {
     readonly terrainPixelOwnership: {
@@ -336,7 +337,9 @@ export function assertPlayerScreenshotMetadata(metadata: unknown): PlayerScreens
         : exactSurfaceDomain.coreFingerprint) ||
     !Array.isArray(candidate.camera?.eyeMetres) ||
     candidate.camera.eyeMetres.length !== 3 ||
-    !candidate.camera.eyeMetres.every(Number.isFinite)
+    !candidate.camera.eyeMetres.every(Number.isFinite) ||
+    !Number.isFinite(candidate.render?.animationTimeSeconds) ||
+    candidate.render.animationTimeSeconds < 0
   ) {
     throw new Error("player screenshot metadata contract is incomplete");
   }

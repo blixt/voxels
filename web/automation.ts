@@ -248,6 +248,7 @@ export const SNAPSHOT_FIELD_NAMES = [
   "virtualTerrainPresentedSnapshotFingerprintHigh24",
   "virtualTerrainPresentedSnapshotMatchesCut",
   "virtualTerrainPresentedCoverageGapFrames",
+  "virtualTerrainPresentedInvariantFailureFrames",
   "virtualTerrainDesiredEnvelopeComplete",
   "virtualTerrainDesiredEnvelopeFingerprintLow24",
   "virtualTerrainDesiredEnvelopeFingerprintMid24",

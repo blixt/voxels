@@ -1,6 +1,11 @@
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { createServer } from "node:net";
+import path from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import {
   browserWasmProfile,
+  assertWorldServicePortAvailable,
   isNativeWorldServiceInput,
   pathBelongsTo,
   WatchedInputContentChanges,
@@ -32,18 +37,73 @@ describe("Rust WASM development watcher", () => {
     expect(observed).toEqual(["add:added.rs", "change:changed.rs", "unlink:removed.rs"]);
   });
 
-  it("arms from initial content and rejects an unchanged watcher notification", () => {
+  it("reacts only to actual file content and existence transitions", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "voxels-watcher-"));
+    const file = path.join(directory, "client.toml");
     const changes = new WatchedInputContentChanges();
-    const file = new URL("vite.config.test.ts", import.meta.url).pathname;
+    try {
+      writeFileSync(file, "alpha");
+      changes.prime([file]);
+      expect(changes.observe(file, "change", true)).toBe(false);
+      expect(changes.observe(file, "add", true)).toBe(false);
 
-    expect(changes.observe(file, "add", false)).toBe(false);
-    expect(changes.observe(file, "change", true)).toBe(false);
-    expect(changes.observe(file, "unlink", true)).toBe(true);
-    expect(changes.observe(file, "add", true)).toBe(true);
+      writeFileSync(file, "beta");
+      expect(changes.observe(file, "change", true)).toBe(true);
+      expect(changes.observe(file, "change", true)).toBe(false);
+
+      unlinkSync(file);
+      expect(changes.observe(file, "unlink", true)).toBe(true);
+      expect(changes.observe(file, "unlink", true)).toBe(false);
+
+      writeFileSync(file, "beta");
+      expect(changes.observe(file, "add", true)).toBe(true);
+      expect(changes.observe(file, "unlink", true)).toBe(false);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("detects a new file below a primed directory", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "voxels-watcher-directory-"));
+    const existing = path.join(directory, "existing.rs");
+    const nested = path.join(directory, "nested");
+    const added = path.join(nested, "added.rs");
+    const changes = new WatchedInputContentChanges();
+    try {
+      writeFileSync(existing, "existing");
+      changes.prime([directory]);
+      expect(changes.observe(existing, "add", true)).toBe(false);
+      mkdirSync(nested);
+      writeFileSync(added, "new");
+      expect(changes.observe(added, "add", true)).toBe(true);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
 
 describe("native world-service development command", () => {
+  it("rejects a stale listener instead of accepting the wrong daemon", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "voxels-world-port-"));
+    const config = path.join(directory, "world-service.toml");
+    const server = createServer();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
+      });
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        throw new Error("test server did not expose a TCP address");
+      }
+      writeFileSync(config, `[transport]\nlisten = "127.0.0.1:${address.port}"\n`);
+      await expect(assertWorldServicePortAvailable(config)).rejects.toThrow("already in use");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("uses the optimized Metal-enabled daemon and checked-in config when run alone", () => {
     expect(worldServiceCargoArgs({ metal: true })).toEqual([
       "run",

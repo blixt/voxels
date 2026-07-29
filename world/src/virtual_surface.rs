@@ -204,7 +204,7 @@ pub fn directionally_owned_surface_faces(
     bounds: VoxelBounds,
     mut material_at: impl FnMut(VoxelCoord) -> Material,
 ) -> Vec<CanonicalFaceKey> {
-    let mut faces = canonical_exposed_faces(bounds, |coord| material_at(coord));
+    let mut faces = canonical_exposed_faces(bounds, &mut material_at);
     faces.retain(|face| {
         !matches!(
             face.axis,

@@ -90,6 +90,7 @@ export interface PlayerPresentationTraceFrame {
   };
   readonly presentedCameraInsideCommittedEnvelope: boolean;
   readonly presentedCoverageGapFrames: number;
+  readonly presentedInvariantFailureFrames: number;
   readonly presentationTarget: readonly [number, number, number];
   readonly presentationGate: {
     readonly active: boolean;
@@ -263,6 +264,10 @@ function traceFrame(
     presentedCameraInsideCommittedEnvelope:
       snapshotValue(snapshot, "presentedCameraInsideCommittedEnvelope") === 1,
     presentedCoverageGapFrames: snapshotValue(snapshot, "virtualTerrainPresentedCoverageGapFrames"),
+    presentedInvariantFailureFrames: snapshotValue(
+      snapshot,
+      "virtualTerrainPresentedInvariantFailureFrames",
+    ),
     presentationTarget: [
       snapshotValue(snapshot, "presentationTargetX"),
       snapshotValue(snapshot, "presentationTargetY"),
@@ -347,6 +352,11 @@ function invalidCommittedPresentation(frame: PlayerPresentationTraceFrame): stri
   if (frame.presentedCoverageGapFrames !== 0) {
     reasons.push(
       `renderer accumulated ${frame.presentedCoverageGapFrames} frame(s) outside its complete terrain horizon`,
+    );
+  }
+  if (frame.presentedInvariantFailureFrames !== 0) {
+    reasons.push(
+      `renderer accumulated ${frame.presentedInvariantFailureFrames} frame(s) without a complete GPU ownership, bank, LOD, and seam proof`,
     );
   }
   if (
