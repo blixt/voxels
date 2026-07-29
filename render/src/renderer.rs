@@ -246,6 +246,29 @@ enum VirtualTerrainPublicationAdvance {
 struct VirtualTerrainPublication {
     cut: VirtualTerrainCut,
     envelope: PresentationEnvelope,
+    certificate: PresentationCoverageCertificate,
+}
+
+/// Frozen proof computed once at transaction construction and moved unchanged into committed state.
+///
+/// The cut and envelope are immutable after this point. Frame readiness and draw admission can
+/// therefore inspect this certificate in O(1) instead of rescanning every selected page against
+/// every horizon root.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PresentationCoverageCertificate {
+    complete: bool,
+    exact_coverage: usize,
+    horizon_coverage: usize,
+}
+
+impl PresentationCoverageCertificate {
+    fn certify(cut: &VirtualTerrainCut, envelope: &PresentationEnvelope) -> Self {
+        Self {
+            complete: cut.covers_presentation_envelope(envelope),
+            exact_coverage: cut.exact_surface_coverage(envelope.exact_surface_domain()),
+            horizon_coverage: cut.presentation_horizon_coverage(envelope),
+        }
+    }
 }
 
 const fn virtual_terrain_publication_advance(
@@ -3615,6 +3638,7 @@ pub struct Renderer {
     virtual_terrain_cut: Option<VirtualTerrainCut>,
     /// Safety and horizon proof committed with `virtual_terrain_cut` and the active handle bank.
     virtual_terrain_committed_envelope: Option<PresentationEnvelope>,
+    virtual_terrain_committed_certificate: Option<PresentationCoverageCertificate>,
     /// Ephemeral quality/demand target selected from the latest view and resident directory.
     virtual_terrain_oracle_cut: Option<VirtualTerrainCut>,
     /// Immutable cut currently being encoded or awaiting GPU certification. Directory growth,
@@ -4551,6 +4575,7 @@ impl Renderer {
             virtual_terrain_mode: VirtualTerrainRenderMode::Disabled,
             virtual_terrain_cut: None,
             virtual_terrain_committed_envelope: None,
+            virtual_terrain_committed_certificate: None,
             virtual_terrain_oracle_cut: None,
             virtual_terrain_publication: None,
             virtual_terrain_staging_frontier: BTreeSet::new(),
@@ -6098,11 +6123,11 @@ impl Renderer {
         let committed = self.virtual_terrain_cut.as_ref();
         let envelope = self.virtual_terrain_committed_envelope.as_ref();
         virtual_terrain_committed_snapshot_is_safe(
-            committed.is_some() && envelope.is_some(),
-            committed.is_some_and(VirtualTerrainCut::is_renderable)
-                && committed
-                    .zip(envelope)
-                    .is_some_and(|(cut, envelope)| cut.covers_presentation_envelope(envelope)),
+            committed.is_some()
+                && envelope.is_some()
+                && self.virtual_terrain_committed_certificate.is_some(),
+            self.virtual_terrain_committed_certificate
+                .is_some_and(|certificate| certificate.complete),
             committed
                 .zip(envelope)
                 .is_some_and(|(committed, envelope)| {
@@ -6273,7 +6298,8 @@ impl Renderer {
         else {
             return Ok(false);
         };
-        if !cut.covers_presentation_envelope(&envelope) {
+        let certificate = PresentationCoverageCertificate::certify(&cut, &envelope);
+        if !certificate.complete {
             return Ok(false);
         }
         if let Some(missing) = cut
@@ -6287,7 +6313,11 @@ impl Renderer {
         }
         self.synchronize_virtual_terrain_cut_seams(&cut)?;
         self.virtual_terrain_cut_fits_snapshot(&cut)?;
-        let publication = VirtualTerrainPublication { cut, envelope };
+        let publication = VirtualTerrainPublication {
+            cut,
+            envelope,
+            certificate,
+        };
         if self
             .virtual_terrain_gpu
             .active_snapshot_matches(virtual_terrain_snapshot_identity(
@@ -6303,6 +6333,7 @@ impl Renderer {
             {
                 self.virtual_terrain_cut = Some(publication.cut);
                 self.virtual_terrain_committed_envelope = Some(publication.envelope);
+                self.virtual_terrain_committed_certificate = Some(publication.certificate);
             }
             self.virtual_terrain_staging_frontier.clear();
             self.invalidate_virtual_terrain_desired_plan();
@@ -6330,10 +6361,7 @@ impl Renderer {
             &publication.envelope,
             self.virtual_terrain_desired_envelope.as_ref(),
         );
-        if !publication
-            .cut
-            .covers_presentation_envelope(&publication.envelope)
-        {
+        if !publication.certificate.complete {
             self.abort_virtual_terrain_publication();
             return Ok(false);
         }
@@ -6360,6 +6388,7 @@ impl Renderer {
         self.discard_retired_virtual_terrain_pages();
         self.virtual_terrain_cut = Some(publication.cut);
         self.virtual_terrain_committed_envelope = Some(publication.envelope);
+        self.virtual_terrain_committed_certificate = Some(publication.certificate);
         self.virtual_terrain_publication = None;
         self.virtual_terrain_staging_frontier.clear();
         // The unchanged-view cache was selected against the old committed overlap/capacity. Force
@@ -7153,8 +7182,9 @@ impl Renderer {
                     .virtual_terrain_cut
                     .as_ref()
                     .zip(self.virtual_terrain_committed_envelope.as_ref())
-                    .filter(|(cut, envelope)| {
-                        cut.is_renderable() && cut.covers_presentation_envelope(envelope)
+                    .filter(|_| {
+                        self.virtual_terrain_committed_certificate
+                            .is_some_and(|certificate| certificate.complete)
                     })
                 else {
                     return false;
@@ -7945,16 +7975,16 @@ impl Renderer {
         ) = self.virtual_terrain_committed_envelope.as_ref().map_or(
             (0, 0, 0, 0, 0, [0; 2], [0; 2]),
             |envelope| {
-                let cut = self.virtual_terrain_cut.as_ref();
+                let certificate = self
+                    .virtual_terrain_committed_certificate
+                    .unwrap_or_default();
                 let locus = envelope.locus();
                 (
                     envelope.fingerprint(),
                     envelope.exact_surface_domain().required_leaf_count(),
-                    cut.map_or(0, |cut| {
-                        cut.exact_surface_coverage(envelope.exact_surface_domain())
-                    }),
+                    certificate.exact_coverage,
                     envelope.required_horizon_root_count(),
-                    cut.map_or(0, |cut| cut.presentation_horizon_coverage(envelope)),
+                    certificate.horizon_coverage,
                     locus.map_or([0; 2], PresentationLocus::minimum_leaf),
                     locus.map_or([0; 2], PresentationLocus::maximum_leaf_exclusive),
                 )
