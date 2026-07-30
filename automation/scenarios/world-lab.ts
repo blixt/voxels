@@ -304,6 +304,8 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
       ) < 0.001,
     { description: "spectator mode did not restore the saved body position" },
   );
+  await page.keyboard.press("F3");
+  await page.waitForTimeout(100);
   await page.mouse.click(813.5, 205);
   await page.mouse.click(813.5, 268);
   const restored = await viewport.engine.waitForSnapshot(
