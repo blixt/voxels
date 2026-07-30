@@ -10,6 +10,7 @@ import {
   assertWorldServicePortAvailable,
   isNativeWorldServiceInput,
   pathBelongsTo,
+  signalOwnedProcessGroup,
   terminateProcessTree,
   WatchedInputContentChanges,
   watchRustInputChanges,
@@ -21,6 +22,45 @@ import {
   worldServiceBuildCargoArgs,
   worldServiceCargoArgs,
 } from "./scripts/world-service-command.ts";
+
+function waitForOutput(
+  child: ReturnType<typeof spawn>,
+  output: () => string,
+  pattern: RegExp,
+  timeoutMs = 1_000,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let pollTimer: NodeJS.Timeout | undefined;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (pollTimer !== undefined) clearTimeout(pollTimer);
+      child.off("error", onError);
+      child.off("exit", onExit);
+      if (error === undefined) resolve();
+      else reject(error);
+    };
+    const onError = (error: Error): void => finish(error);
+    const onExit = (): void => {
+      if (!pattern.test(output())) {
+        finish(new Error(`process exited before reporting ${pattern}: ${output()}`));
+      }
+    };
+    const poll = (): void => {
+      if (pattern.test(output())) finish();
+      else pollTimer = setTimeout(poll, 5);
+    };
+    const deadline = setTimeout(
+      () => finish(new Error(`process did not report ${pattern}: ${output()}`)),
+      timeoutMs,
+    );
+    child.once("error", onError);
+    child.once("exit", onExit);
+    poll();
+  });
+}
 
 describe("Rust WASM development watcher", () => {
   it("rebuilds for changed, added, and removed Rust inputs", () => {
@@ -87,6 +127,15 @@ describe("Rust WASM development watcher", () => {
 });
 
 describe("native world-service development command", () => {
+  it("reports denied process-group signals without skipping the direct fallback", () => {
+    const denied = Object.assign(new Error("denied"), { code: "EPERM" });
+    expect(
+      signalOwnedProcessGroup(123, "SIGKILL", () => {
+        throw denied;
+      }),
+    ).toBe("forbidden");
+  });
+
   it("accepts readiness only from the daemon instance nonce it launched", async () => {
     const server = createHttpServer((_request, response) => {
       response.statusCode = 200;
@@ -180,30 +229,9 @@ describe("native world-service development command", () => {
     });
     let lateChildPid: number | undefined;
     try {
-      await new Promise<void>((resolve, reject) => {
-        parent.once("error", reject);
-        const poll = (): void => {
-          if (output.includes("ready\n")) resolve();
-          else setTimeout(poll, 5);
-        };
-        poll();
-      });
+      await waitForOutput(parent, () => output, /^ready$/mu);
 
-      const lateLine = new Promise<void>((resolve, reject) => {
-        const deadline = setTimeout(
-          () => reject(new Error(`late descendant was not reported: ${output}`)),
-          1_000,
-        );
-        const poll = (): void => {
-          if (/^late:\d+$/mu.test(output)) {
-            clearTimeout(deadline);
-            resolve();
-          } else {
-            setTimeout(poll, 5);
-          }
-        };
-        poll();
-      });
+      const lateLine = waitForOutput(parent, () => output, /^late:\d+$/mu);
       await Promise.all([terminateProcessTree(parent, 250), lateLine]);
 
       lateChildPid = Number(/^late:(\d+)$/mu.exec(output)?.[1]);

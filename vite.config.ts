@@ -283,6 +283,22 @@ function signalProcessIds(processIds: Iterable<number>, signal: NodeJS.Signals):
   }
 }
 
+export function signalOwnedProcessGroup(
+  rootPid: number,
+  signal: NodeJS.Signals,
+  kill: (pid: number, signal: NodeJS.Signals) => true = (pid, signal) => process.kill(pid, signal),
+): "signaled" | "missing" | "forbidden" {
+  try {
+    kill(-rootPid, signal);
+    return "signaled";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return "missing";
+    if (code === "EPERM") return "forbidden";
+    throw error;
+  }
+}
+
 function signalProcessTree(
   child: ChildProcess,
   signal: NodeJS.Signals,
@@ -292,29 +308,20 @@ function signalProcessTree(
   const descendants =
     process.platform === "win32" || child.pid === undefined ? [] : ownedProcessTreeIds(child.pid);
   try {
-    if (!forceDirectFallback && process.platform !== "win32" && child.pid !== undefined) {
-      process.kill(-child.pid, signal);
-    } else {
-      child.kill(signal);
-      signalProcessIds(descendants.reverse(), signal);
+    if (
+      !forceDirectFallback &&
+      process.platform !== "win32" &&
+      child.pid !== undefined &&
+      signalOwnedProcessGroup(child.pid, signal) === "signaled"
+    ) {
+      return descendants;
     }
+    child.kill(signal);
+    signalProcessIds(descendants.reverse(), signal);
     return descendants;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ESRCH") return descendants;
-    if (code === "EPERM") {
-      // Some macOS launch contexts deny signalling the detached process group even though its
-      // processes remain ours. Snapshot descendants before stopping the direct child, then signal
-      // those exact owned processes leaf-first so Cargo cannot strand rustc/build-script children.
-      try {
-        child.kill(signal);
-        signalProcessIds(descendants.reverse(), signal);
-        return descendants;
-      } catch (fallbackError) {
-        if ((fallbackError as NodeJS.ErrnoException).code === "ESRCH") return descendants;
-        throw fallbackError;
-      }
-    }
     throw error;
   }
 }
@@ -375,6 +382,26 @@ async function waitForProcessIdsExit(
   return survivors;
 }
 
+async function forceKillOwnedProcessIds(
+  rootPid: number | undefined,
+  processIds: Iterable<number>,
+  timeoutMs: number,
+): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs;
+  let survivors = new Set(processIds);
+  while (true) {
+    if (process.platform !== "win32" && rootPid !== undefined) {
+      for (const pid of ownedProcessTreeIds(rootPid)) survivors.add(pid);
+    }
+    const live = [...survivors].filter(processExists);
+    if (live.length === 0) return [];
+    signalProcessIds(live, "SIGKILL");
+    if (Date.now() >= deadline) return live.filter(processExists);
+    await delay(Math.min(25, Math.max(1, deadline - Date.now())));
+    survivors = new Set(live.filter(processExists));
+  }
+}
+
 export async function terminateProcessTree(
   child: ChildProcess,
   timeoutMs = 2_000,
@@ -399,21 +426,18 @@ export async function terminateProcessTree(
     // descendant. Keep the individual PID fallback for platforms or launchers without group
     // signaling.
     if (!forceDirectFallback && process.platform !== "win32" && rootPid !== undefined) {
-      try {
-        process.kill(-rootPid, "SIGKILL");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-      }
+      // A missing or forbidden group signal deliberately falls through to the iterative owned-PID
+      // fallback, matching the initial TERM path on restricted macOS launch contexts.
+      signalOwnedProcessGroup(rootPid, "SIGKILL");
     }
     if (child.exitCode === null && child.signalCode === null) {
       for (const pid of signalProcessTree(child, "SIGKILL", forceDirectFallback)) {
         escalationIds.add(pid);
       }
     }
-    signalProcessIds(escalationIds, "SIGKILL");
     const [, killSurvivors] = await Promise.all([
       child.exitCode === null && child.signalCode === null ? exited : Promise.resolve(),
-      waitForProcessIdsExit(escalationIds, timeoutMs),
+      forceKillOwnedProcessIds(rootPid, escalationIds, timeoutMs),
     ]);
     if (killSurvivors.length > 0) {
       throw new Error(
