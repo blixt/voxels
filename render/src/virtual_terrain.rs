@@ -1929,23 +1929,12 @@ impl VirtualTerrainHierarchy {
                 None
             }
         };
-        let headroom_pages = self.capacity.max_resident_pages / 8;
-        let headroom_bytes = self.capacity.max_resident_encoded_bytes / 8;
-        let headroom_primitives = self.capacity.max_resident_primitives / 8;
-        let has_low_watermark = |pages: usize, bytes: usize, primitives: usize| {
-            pages
-                .saturating_add(added_pages)
-                .saturating_add(headroom_pages)
-                <= self.capacity.max_resident_pages
-                && bytes
-                    .saturating_add(added_bytes)
-                    .saturating_add(headroom_bytes)
-                    <= self.capacity.max_resident_encoded_bytes
-                && primitives
-                    .saturating_add(added_primitives)
-                    .saturating_add(headroom_primitives)
-                    <= self.capacity.max_resident_primitives
-        };
+        let pages_under_pressure =
+            self.resident.len().saturating_add(added_pages) > self.capacity.max_resident_pages;
+        let bytes_under_pressure = self.resident_encoded_bytes.saturating_add(added_bytes)
+            > self.capacity.max_resident_encoded_bytes;
+        let primitives_under_pressure = self.resident_primitives.saturating_add(added_primitives)
+            > self.capacity.max_resident_primitives;
         if additions.is_empty()
             || capacity_error(
                 self.resident.len(),
@@ -1974,6 +1963,57 @@ impl VirtualTerrainHierarchy {
         // Retire true travel history before newer pages. Equal-age descendants retire before their
         // coarser traversal ancestors, preserving a usable spine for as long as possible.
         candidates.sort_unstable();
+        let protected_pages_with_additions = self
+            .resident
+            .len()
+            .saturating_sub(candidates.len())
+            .saturating_add(added_pages);
+        let protected_bytes_with_additions = self
+            .resident_encoded_bytes
+            .saturating_sub(
+                candidates
+                    .iter()
+                    .map(|(_, _, _, bytes, _)| *bytes)
+                    .sum::<usize>(),
+            )
+            .saturating_add(added_bytes);
+        let protected_primitives_with_additions = self
+            .resident_primitives
+            .saturating_sub(
+                candidates
+                    .iter()
+                    .map(|(_, _, _, _, primitives)| *primitives)
+                    .sum::<usize>(),
+            )
+            .saturating_add(added_primitives);
+        let admission_limit = |capacity: usize, protected_floor: usize, under_pressure: bool| {
+            let low_watermark = capacity.saturating_sub(capacity / 8);
+            if under_pressure && protected_floor <= low_watermark {
+                low_watermark
+            } else {
+                capacity
+            }
+        };
+        let target_pages = admission_limit(
+            self.capacity.max_resident_pages,
+            protected_pages_with_additions,
+            pages_under_pressure,
+        );
+        let target_bytes = admission_limit(
+            self.capacity.max_resident_encoded_bytes,
+            protected_bytes_with_additions,
+            bytes_under_pressure,
+        );
+        let target_primitives = admission_limit(
+            self.capacity.max_resident_primitives,
+            protected_primitives_with_additions,
+            primitives_under_pressure,
+        );
+        let has_reclaim_target = |pages: usize, bytes: usize, primitives: usize| {
+            pages.saturating_add(added_pages) <= target_pages
+                && bytes.saturating_add(added_bytes) <= target_bytes
+                && primitives.saturating_add(added_primitives) <= target_primitives
+        };
         let mut remaining_pages = self.resident.len();
         let mut remaining_bytes = self.resident_encoded_bytes;
         let mut remaining_primitives = self.resident_primitives;
@@ -1983,7 +2023,7 @@ impl VirtualTerrainHierarchy {
             remaining_bytes = remaining_bytes.saturating_sub(bytes);
             remaining_primitives = remaining_primitives.saturating_sub(primitives);
             remove.push(key);
-            if has_low_watermark(remaining_pages, remaining_bytes, remaining_primitives) {
+            if has_reclaim_target(remaining_pages, remaining_bytes, remaining_primitives) {
                 break;
             }
         }
@@ -5494,6 +5534,35 @@ mod tests {
         hierarchy.install_page(pages[2].clone()).unwrap();
         assert_eq!(hierarchy.resident_usage().0, 2);
         assert!(hierarchy.resident_usage().2 <= capacity.max_resident_primitives);
+    }
+
+    #[test]
+    fn logical_admission_does_not_chase_unreachable_protected_headroom() {
+        let pages = (0..24)
+            .map(|x| flat_heightfield_page(TerrainPageKey::surface(0, x, 0)))
+            .collect::<Vec<_>>();
+        let directory = TerrainHierarchyDirectoryV1::from_pages(&pages).unwrap();
+        let page_bytes = encode_terrain_page(&pages[0]).unwrap().len();
+        let mut capacity = VirtualTerrainCapacity::DEVELOPMENT_128_MIB;
+        capacity.max_resident_pages = pages.len();
+        capacity.max_resident_encoded_bytes = page_bytes * pages.len() - 1;
+        let mut hierarchy = VirtualTerrainHierarchy::new(capacity).unwrap();
+        hierarchy.register_region_directory(&directory).unwrap();
+        for page in &pages[..23] {
+            hierarchy.install_page(page.clone()).unwrap();
+        }
+        let protected = pages[..21].iter().map(|page| page.key).collect();
+
+        let removed = hierarchy
+            .reclaim_lru_for_admission(&pages[23..], &protected)
+            .unwrap();
+
+        assert_eq!(removed, vec![pages[21].key]);
+        assert!(hierarchy.resident_page(pages[21].key).is_none());
+        assert!(hierarchy.resident_page(pages[22].key).is_some());
+        hierarchy.install_page(pages[23].clone()).unwrap();
+        assert_eq!(hierarchy.resident_usage().0, 23);
+        assert!(hierarchy.resident_usage().1 <= capacity.max_resident_encoded_bytes);
     }
 
     #[test]
