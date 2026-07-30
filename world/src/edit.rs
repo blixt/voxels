@@ -150,6 +150,19 @@ impl EditedChunk {
         z: (usize, usize),
         mut visit: impl FnMut(u16),
     ) {
+        let indexed_column_cost = (x.1 - x.0 + 1) * (z.1 - z.0 + 1) * 2;
+        if self.overrides.len() <= indexed_column_cost {
+            for &(index, _) in &self.overrides {
+                let [local_x, local_y, local_z] = local_coord(index);
+                if (x.0..=x.1).contains(&local_x)
+                    && (y.0..=y.1).contains(&local_y)
+                    && (z.0..=z.1).contains(&local_z)
+                {
+                    visit(index);
+                }
+            }
+            return;
+        }
         for local_x in x.0..=x.1 {
             for local_z in z.0..=z.1 {
                 let start = local_index([local_x, y.0, local_z]);

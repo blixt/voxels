@@ -40,7 +40,7 @@ use std::sync::{Arc, Mutex};
 use voxels_core::{CameraState, EnclosureSample, FluidState, RemoteAvatarPose};
 use voxels_runtime::{
     AuthoritativeEditRevisions, RevisionFenceError, TerrainPageRevision, WorldChange,
-    WorldRevisionFence,
+    WorldRevisionFence, revision_satisfies,
 };
 use voxels_world::protocol::{EditShape, EditVolume};
 use voxels_world::{
@@ -571,11 +571,13 @@ fn pending_canonical_world_changes_ready(
 fn take_pending_canonical_chunk_uploads(
     pending: &mut BTreeMap<u64, PendingCanonicalWorldChange>,
     key: MeshKey,
-    except_revision: Option<u64>,
+    superseded_by_revision: Option<u64>,
 ) -> Vec<PreparedCanonicalChunkUpload> {
     let mut discarded = Vec::new();
     for (revision, change) in pending {
-        if Some(*revision) == except_revision {
+        if let Some(incoming) = superseded_by_revision
+            && (*revision == incoming || !revision_satisfies(incoming, *revision))
+        {
             continue;
         }
         let Some(uploads) = change.uploads.as_mut() else {
@@ -592,6 +594,21 @@ fn take_pending_canonical_chunk_uploads(
         *uploads = retained;
     }
     discarded
+}
+
+fn pending_canonical_chunk_has_newer_upload(
+    pending: &BTreeMap<u64, PendingCanonicalWorldChange>,
+    key: MeshKey,
+    revision: u64,
+) -> bool {
+    pending.iter().any(|(candidate_revision, change)| {
+        *candidate_revision != revision
+            && revision_satisfies(*candidate_revision, revision)
+            && change
+                .uploads
+                .as_ref()
+                .is_some_and(|uploads| uploads.iter().any(|upload| upload.key == key))
+    })
 }
 
 fn reset_presented_terrain(terrain: &mut PresentedTerrain) -> bool {
@@ -8007,6 +8024,41 @@ impl Renderer {
         {
             return self.upload_chunks_atomic(chunks);
         }
+        let chunks = chunks.into_iter().collect::<Vec<_>>();
+        if chunks.is_empty() {
+            return false;
+        }
+        let chunks = chunks
+            .into_iter()
+            .filter(|(chunk, _)| {
+                let coord = chunk.coord();
+                let key = (0, coord.x, coord.y, coord.z);
+                !pending_canonical_chunk_has_newer_upload(
+                    &self.pending_canonical_world_changes,
+                    key,
+                    server_revision,
+                )
+            })
+            .collect::<Vec<_>>();
+        let prepared_keys = chunks
+            .iter()
+            .map(|(chunk, _)| {
+                let coord = chunk.coord();
+                (0, coord.x, coord.y, coord.z)
+            })
+            .collect::<BTreeSet<_>>();
+        let previous = self
+            .pending_canonical_world_changes
+            .get_mut(&server_revision)
+            .and_then(|pending| pending.uploads.take());
+        if let Some(previous) = previous {
+            for upload in previous {
+                self.discard_canonical_chunk_upload(upload);
+            }
+        }
+        for key in prepared_keys {
+            self.discard_pending_canonical_chunk_uploads(key, Some(server_revision));
+        }
         let mut prepared = Vec::new();
         for (chunk, mesh) in chunks {
             let Some(upload) = self.prepare_canonical_chunk_upload(chunk, mesh) else {
@@ -8017,25 +8069,13 @@ impl Renderer {
             };
             prepared.push(upload);
         }
-        if prepared.is_empty() {
-            return false;
-        }
-        let prepared_keys = prepared
-            .iter()
-            .map(|upload| upload.key)
-            .collect::<BTreeSet<_>>();
-        let previous = self
+        let Some(pending) = self
             .pending_canonical_world_changes
             .get_mut(&server_revision)
-            .and_then(|pending| pending.uploads.replace(prepared));
-        if let Some(previous) = previous {
-            for upload in previous {
-                self.discard_canonical_chunk_upload(upload);
-            }
-        }
-        for key in prepared_keys {
-            self.discard_pending_canonical_chunk_uploads(key, Some(server_revision));
-        }
+        else {
+            unreachable!("the staged revision was checked before preparation")
+        };
+        pending.uploads = Some(prepared);
         true
     }
 
@@ -14424,6 +14464,12 @@ mod tests {
                     uploads: Some(vec![upload(key)]),
                 },
             ),
+            (
+                9,
+                PendingCanonicalWorldChange {
+                    uploads: Some(vec![upload(key)]),
+                },
+            ),
         ]);
         let superseded = take_pending_canonical_chunk_uploads(&mut pending, key, Some(8));
         assert_eq!(superseded.len(), 1);
@@ -14439,15 +14485,33 @@ mod tests {
             vec![other],
         );
         assert_eq!(pending[&8].uploads.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            pending[&9].uploads.as_ref().unwrap().len(),
+            1,
+            "an out-of-order older stage cannot discard a newer prepared epoch"
+        );
+        assert!(pending_canonical_chunk_has_newer_upload(&pending, key, 8));
+        assert!(!pending_canonical_chunk_has_newer_upload(&pending, key, 9));
 
         let evicted = take_pending_canonical_chunk_uploads(&mut pending, key, None);
-        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted.len(), 2);
         assert!(pending.values().all(|change| {
             change
                 .uploads
                 .as_ref()
                 .is_some_and(|uploads| uploads.iter().all(|upload| upload.key != key))
         }));
+
+        let wrapped = BTreeMap::from([(
+            1,
+            PendingCanonicalWorldChange {
+                uploads: Some(vec![upload(key)]),
+            },
+        )]);
+        assert!(
+            pending_canonical_chunk_has_newer_upload(&wrapped, key, u64::MAX),
+            "serial revision one is newer than the pre-wrap maximum"
+        );
     }
 
     #[test]

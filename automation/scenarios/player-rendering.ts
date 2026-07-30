@@ -450,6 +450,7 @@ async function sustainedSpectatorTravel(
   readonly frames: number;
   readonly cutTransitions: number;
   readonly exactLocusTransitions: number;
+  readonly committedExactEpochTransitions: number;
 }> {
   const before = recorder.latestSnapshot;
   const yaw = snapshotValue(before, "yaw");
@@ -470,11 +471,13 @@ async function sustainedSpectatorTravel(
     snapshotValue(before, "virtualTerrainCutFingerprintLow24"),
   ].join(":");
   let exactLocus = [
-    snapshotValue(before, "virtualTerrainDesiredLocusMinimumLeafX"),
-    snapshotValue(before, "virtualTerrainDesiredLocusMinimumLeafZ"),
-    snapshotValue(before, "virtualTerrainDesiredLocusMaximumLeafExclusiveX"),
-    snapshotValue(before, "virtualTerrainDesiredLocusMaximumLeafExclusiveZ"),
+    snapshotValue(before, "virtualTerrainCommittedLocusMinimumLeafX"),
+    snapshotValue(before, "virtualTerrainCommittedLocusMinimumLeafZ"),
+    snapshotValue(before, "virtualTerrainCommittedLocusMaximumLeafExclusiveX"),
+    snapshotValue(before, "virtualTerrainCommittedLocusMaximumLeafExclusiveZ"),
   ].join(":");
+  let committedExactEpoch = `${exactLocus}|${cut}`;
+  let committedExactEpochTransitions = 0;
   const deadline = performance.now() + durationMs;
   await page.keyboard.down("KeyW");
   try {
@@ -496,14 +499,19 @@ async function sustainedSpectatorTravel(
         cut = currentCut;
       }
       const currentExactLocus = [
-        snapshotValue(current, "virtualTerrainDesiredLocusMinimumLeafX"),
-        snapshotValue(current, "virtualTerrainDesiredLocusMinimumLeafZ"),
-        snapshotValue(current, "virtualTerrainDesiredLocusMaximumLeafExclusiveX"),
-        snapshotValue(current, "virtualTerrainDesiredLocusMaximumLeafExclusiveZ"),
+        snapshotValue(current, "virtualTerrainCommittedLocusMinimumLeafX"),
+        snapshotValue(current, "virtualTerrainCommittedLocusMinimumLeafZ"),
+        snapshotValue(current, "virtualTerrainCommittedLocusMaximumLeafExclusiveX"),
+        snapshotValue(current, "virtualTerrainCommittedLocusMaximumLeafExclusiveZ"),
       ].join(":");
       if (currentExactLocus !== exactLocus) {
         exactLocusTransitions += 1;
         exactLocus = currentExactLocus;
+      }
+      const currentCommittedExactEpoch = `${currentExactLocus}|${currentCut}`;
+      if (currentCommittedExactEpoch !== committedExactEpoch) {
+        committedExactEpochTransitions += 1;
+        committedExactEpoch = currentCommittedExactEpoch;
       }
       const observedAt = performance.now();
       const forwardStep =
@@ -558,10 +566,11 @@ async function sustainedSpectatorTravel(
       `held spectator-forward input drifted ${lateralDriftMetres.toFixed(2)}m away from its commanded ray`,
     );
   }
-  if (exactLocusTransitions === 0 || cutTransitions === 0) {
+  if (exactLocusTransitions === 0 || cutTransitions === 0 || committedExactEpochTransitions === 0) {
     throw new Error(
-      `spectator movement did not exercise a new exact terrain locus and committed cut: ` +
-        `${exactLocusTransitions} locus transitions, ${cutTransitions} cut transitions`,
+      `spectator movement did not exercise a new committed exact terrain epoch: ` +
+        `${exactLocusTransitions} committed locus transitions, ${cutTransitions} cut transitions, ` +
+        `${committedExactEpochTransitions} paired epoch transitions`,
     );
   }
   return {
@@ -571,6 +580,7 @@ async function sustainedSpectatorTravel(
     frames,
     cutTransitions,
     exactLocusTransitions,
+    committedExactEpochTransitions,
   };
 }
 
@@ -1358,6 +1368,8 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
         freshSpectatorTravelFrames: freshSpectatorMotion.frames,
         freshSpectatorCutTransitions: freshSpectatorMotion.cutTransitions,
         freshSpectatorExactLocusTransitions: freshSpectatorMotion.exactLocusTransitions,
+        freshSpectatorCommittedExactEpochTransitions:
+          freshSpectatorMotion.committedExactEpochTransitions,
         freshSpectatorEndpointExactPages: freshSpectatorEndpoint.exactPages,
         freshSpectatorEndpointCut: freshSpectatorEndpoint.cutFingerprint,
         freshSpectatorBodyRestoreErrorMetres,
