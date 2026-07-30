@@ -652,7 +652,10 @@ async function verifyCaptureReplayAgainstCurrentWorld(
       !ownershipAttachmentMatches ||
       geometry.largestDisagreementComponentPixels > 16 ||
       geometry.occupancyJaccard < 0.9999 ||
-      imageComparison.meanAbsoluteLinearLumaDelta > 0.02
+      imageComparison.ssim < 0.99 ||
+      imageComparison.meanAbsoluteLinearRgbDelta > 0.005 ||
+      imageComparison.meanAbsoluteLinearLumaDelta > 0.005 ||
+      imageComparison.relativeMeanLinearLumaDelta > 0.02
     ) {
       throw new Error(
         `same-world screenshot replay changed exact terrain ownership, material, depth, geometry, or appearance: ${JSON.stringify({ ...imageComparison, ownershipAttachmentMatches })}`,

@@ -153,6 +153,74 @@ describe("native world-service development command", () => {
     }
   });
 
+  it("reaps a stubborn descendant forked during the termination grace window", async () => {
+    if (process.platform === "win32") return;
+    const lateChildSource = [
+      'process.on("SIGTERM", () => {});',
+      "setInterval(() => {}, 1_000);",
+    ].join("");
+    const parentSource = [
+      'const { spawn } = require("node:child_process");',
+      'process.stdout.write("ready\\n");',
+      'process.once("SIGTERM", () => {',
+      `  const child = spawn(process.execPath, ["-e", ${JSON.stringify(lateChildSource)}],`,
+      '    { stdio: "ignore" });',
+      "  process.stdout.write(`late:${child.pid}\\n`);",
+      "  setTimeout(() => process.exit(0), 10);",
+      "});",
+      "setInterval(() => {}, 1_000);",
+    ].join("");
+    const parent = spawn(process.execPath, ["-e", parentSource], {
+      detached: true,
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    let output = "";
+    parent.stdout?.on("data", (chunk: Buffer) => {
+      output += chunk.toString();
+    });
+    let lateChildPid: number | undefined;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        parent.once("error", reject);
+        const poll = (): void => {
+          if (output.includes("ready\n")) resolve();
+          else setTimeout(poll, 5);
+        };
+        poll();
+      });
+
+      const lateLine = new Promise<void>((resolve, reject) => {
+        const deadline = setTimeout(
+          () => reject(new Error(`late descendant was not reported: ${output}`)),
+          1_000,
+        );
+        const poll = (): void => {
+          if (/^late:\d+$/mu.test(output)) {
+            clearTimeout(deadline);
+            resolve();
+          } else {
+            setTimeout(poll, 5);
+          }
+        };
+        poll();
+      });
+      await Promise.all([terminateProcessTree(parent, 250), lateLine]);
+
+      lateChildPid = Number(/^late:(\d+)$/mu.exec(output)?.[1]);
+      expect(Number.isSafeInteger(lateChildPid)).toBe(true);
+      expect(() => process.kill(lateChildPid as number, 0)).toThrow();
+    } finally {
+      if (parent.exitCode === null && parent.signalCode === null) parent.kill("SIGKILL");
+      if (lateChildPid !== undefined) {
+        try {
+          process.kill(lateChildPid, "SIGKILL");
+        } catch {
+          // Cleanup is best effort after the ESRCH assertion.
+        }
+      }
+    }
+  });
+
   it("rejects a stale listener instead of accepting the wrong daemon", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "voxels-world-port-"));
     const config = path.join(directory, "world-service.toml");

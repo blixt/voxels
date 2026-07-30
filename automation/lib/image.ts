@@ -37,6 +37,7 @@ export interface RenderedImageComparison {
   readonly comparisonSamples: number;
   readonly comparisonFootprintPixels: number;
   readonly ssim: number;
+  readonly meanAbsoluteLinearRgbDelta: number;
   readonly meanAbsoluteLinearLumaDelta: number;
   readonly relativeMeanLinearLumaDelta: number;
   readonly diagnosticGeometry: null | {
@@ -287,21 +288,38 @@ export async function compareRenderedImages(
       let sumRightSquared = 0;
       let sumProduct = 0;
       let sumAbsolute = 0;
+      let sumAbsoluteRgb = 0;
       for (let y = roi.y0; y < roi.y1; y += footprint) {
         for (let x = roi.x0; x < roi.x1; x += footprint) {
           let leftLuma = 0;
           let rightLuma = 0;
+          const leftRgb: [number, number, number] = [0, 0, 0];
+          const rightRgb: [number, number, number] = [0, 0, 0];
           let footprintSampleCount = 0;
           for (let dy = 0; dy < footprint && y + dy < roi.y1; dy += 1) {
             for (let dx = 0; dx < footprint && x + dx < roi.x1; dx += 1) {
               const pixel = (x + dx + (y + dy) * leftImage.width) * 4;
               leftLuma += luma(leftImage.pixels, pixel);
               rightLuma += luma(rightImage.pixels, pixel);
+              for (let channel = 0; channel < 3; channel += 1) {
+                leftRgb[channel] =
+                  required(leftRgb, channel) + linear(required(leftImage.pixels, pixel + channel));
+                rightRgb[channel] =
+                  required(rightRgb, channel) +
+                  linear(required(rightImage.pixels, pixel + channel));
+              }
               footprintSampleCount += 1;
             }
           }
           leftLuma /= footprintSampleCount;
           rightLuma /= footprintSampleCount;
+          for (let channel = 0; channel < 3; channel += 1) {
+            sumAbsoluteRgb +=
+              Math.abs(
+                required(leftRgb, channel) / footprintSampleCount -
+                  required(rightRgb, channel) / footprintSampleCount,
+              ) / 3;
+          }
           comparisonSamples += 1;
           sumLeft += leftLuma;
           sumRight += rightLuma;
@@ -423,6 +441,7 @@ export async function compareRenderedImages(
           ((2 * meanLeft * meanRight + c1) * (2 * covariance + c2)) /
           ((meanLeft * meanLeft + meanRight * meanRight + c1) *
             (varianceLeft + varianceRight + c2)),
+        meanAbsoluteLinearRgbDelta: sumAbsoluteRgb / comparisonSamples,
         meanAbsoluteLinearLumaDelta: sumAbsolute / comparisonSamples,
         relativeMeanLinearLumaDelta: Math.abs(meanRight - meanLeft) / Math.max(meanLeft, 0.001),
         diagnosticGeometry: geometry,

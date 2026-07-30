@@ -3,7 +3,8 @@ import { resolve } from "node:path";
 import { BrowserCapability } from "../lib/browser.ts";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import { snapshotValue } from "../lib/engine.ts";
-import { takePlayerScreenshot } from "../lib/player-screenshot.ts";
+import { compareRenderedImages } from "../lib/image.ts";
+import { readPlayerScreenshot, takePlayerScreenshot } from "../lib/player-screenshot.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { readPngText } from "../../web/png-metadata.ts";
 import type { WasmBuildProfile } from "../../scripts/build-wasm.ts";
@@ -164,6 +165,7 @@ async function run(context: ScenarioContext, raw: readonly string[]) {
     throw new Error("replay-screenshot --url must use http or https");
   }
   const capture = await readFile(resolve(input));
+  const source = readPlayerScreenshot(capture, resolve(input));
   const metadataText = readPngText(capture, "voxels.reproduction");
   if (metadataText === undefined) {
     throw new Error("capture has no voxels.reproduction PNG metadata");
@@ -203,6 +205,35 @@ async function run(context: ScenarioContext, raw: readonly string[]) {
   if (JSON.stringify(actualPages) !== JSON.stringify(expectedPages)) {
     throw new Error(
       "reproduced terrain cut fingerprint collided with a different selected page set",
+    );
+  }
+  const imageComparison = await compareRenderedImages(viewport.page, source.png, reproduced.png, {
+    region: { x0: 0.03, x1: 0.97, y0: 0.06, y1: 0.9 },
+    footprintPixels: 4,
+    diagnosticGeometry: true,
+  });
+  const ownershipAttachmentMatches =
+    source.ownership !== null &&
+    reproduced.ownership !== null &&
+    source.ownership.width === reproduced.ownership.width &&
+    source.ownership.height === reproduced.ownership.height &&
+    Buffer.from(source.ownership.pixels).equals(Buffer.from(reproduced.ownership.pixels));
+  await context.artifacts.writeJson("Fresh-browser replay comparison", "replay-comparison.json", {
+    ...imageComparison,
+    ownershipAttachmentMatches,
+  });
+  if (
+    !ownershipAttachmentMatches ||
+    imageComparison.ssim < 0.99 ||
+    imageComparison.meanAbsoluteLinearRgbDelta > 0.005 ||
+    imageComparison.meanAbsoluteLinearLumaDelta > 0.005 ||
+    imageComparison.relativeMeanLinearLumaDelta > 0.02 ||
+    imageComparison.diagnosticGeometry === null ||
+    imageComparison.diagnosticGeometry.occupancyJaccard < 0.9999 ||
+    imageComparison.diagnosticGeometry.largestDisagreementComponentPixels > 16
+  ) {
+    throw new Error(
+      `fresh-browser replay changed terrain ownership, geometry, or appearance: ${JSON.stringify({ ...imageComparison, ownershipAttachmentMatches })}`,
     );
   }
   const artifact = await context.artifacts.write(

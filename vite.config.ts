@@ -290,9 +290,7 @@ function signalProcessTree(
 ): number[] {
   if (child.exitCode !== null || child.signalCode !== null) return [];
   const descendants =
-    process.platform === "win32" || child.pid === undefined
-      ? []
-      : ownedDescendantProcessIds(child.pid);
+    process.platform === "win32" || child.pid === undefined ? [] : ownedProcessTreeIds(child.pid);
   try {
     if (!forceDirectFallback && process.platform !== "win32" && child.pid !== undefined) {
       process.kill(-child.pid, signal);
@@ -321,21 +319,24 @@ function signalProcessTree(
   }
 }
 
-function ownedDescendantProcessIds(rootPid: number): number[] {
+function ownedProcessTreeIds(rootPid: number): number[] {
   let rows: string;
   try {
-    rows = execFileSync("/bin/ps", ["-ax", "-o", "pid=,ppid="], {
+    rows = execFileSync("/bin/ps", ["-ax", "-o", "pid=,ppid=,pgid="], {
       encoding: "utf8",
     });
   } catch {
     return [];
   }
   const childrenByParent = new Map<number, number[]>();
+  const processGroupMembers = new Set<number>();
   for (const row of rows.split("\n")) {
-    const match = /^\s*(\d+)\s+(\d+)\s*$/u.exec(row);
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/u.exec(row);
     if (!match) continue;
     const pid = Number(match[1]);
     const parentPid = Number(match[2]);
+    const processGroup = Number(match[3]);
+    if (processGroup === rootPid && pid !== rootPid) processGroupMembers.add(pid);
     const children = childrenByParent.get(parentPid);
     if (children) children.push(pid);
     else childrenByParent.set(parentPid, [pid]);
@@ -348,7 +349,7 @@ function ownedDescendantProcessIds(rootPid: number): number[] {
     descendants.push(pid);
     pending.push(...(childrenByParent.get(pid) ?? []));
   }
-  return descendants;
+  return [...new Set([...descendants, ...processGroupMembers])];
 }
 
 function processExists(pid: number): boolean {
@@ -380,20 +381,39 @@ export async function terminateProcessTree(
   forceDirectFallback = false,
 ): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
+  const rootPid = child.pid;
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
   const descendants = signalProcessTree(child, "SIGTERM", forceDirectFallback);
   const [, termSurvivors] = await Promise.all([
     Promise.race([exited, delay(timeoutMs)]),
     waitForProcessIdsExit(descendants, timeoutMs),
   ]);
-  if ((child.exitCode === null && child.signalCode === null) || termSurvivors.length > 0) {
-    if (child.exitCode === null && child.signalCode === null) {
-      signalProcessTree(child, "SIGKILL", forceDirectFallback);
+  const escalationIds = new Set(termSurvivors);
+  if (process.platform !== "win32" && rootPid !== undefined) {
+    for (const pid of ownedProcessTreeIds(rootPid)) escalationIds.add(pid);
+  }
+  if ((child.exitCode === null && child.signalCode === null) || escalationIds.size > 0) {
+    // The group leader can exit during the TERM grace period while a descendant survives and
+    // forks. Killing the original process group closes the snapshot-to-signal race: every current
+    // member receives SIGKILL in one kernel operation and a killed member cannot create a later
+    // descendant. Keep the individual PID fallback for platforms or launchers without group
+    // signaling.
+    if (!forceDirectFallback && process.platform !== "win32" && rootPid !== undefined) {
+      try {
+        process.kill(-rootPid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
     }
-    signalProcessIds(termSurvivors, "SIGKILL");
+    if (child.exitCode === null && child.signalCode === null) {
+      for (const pid of signalProcessTree(child, "SIGKILL", forceDirectFallback)) {
+        escalationIds.add(pid);
+      }
+    }
+    signalProcessIds(escalationIds, "SIGKILL");
     const [, killSurvivors] = await Promise.all([
       child.exitCode === null && child.signalCode === null ? exited : Promise.resolve(),
-      waitForProcessIdsExit(termSurvivors, timeoutMs),
+      waitForProcessIdsExit(escalationIds, timeoutMs),
     ]);
     if (killSurvivors.length > 0) {
       throw new Error(
