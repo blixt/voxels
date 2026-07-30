@@ -1000,6 +1000,9 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
     // Fly perpendicular to the later yaw-zero walking route so this probe cannot warm its pages.
     await recorder.guard(engine.setCameraLook(Math.PI / 2, 0));
     const freshSpectatorMotion = await sustainedSpectatorTravel(page, recorder, 5_000, 40);
+    // Aim at terrain for the geometry audit. A horizontal elevated view leaves diagnostic sky
+    // inside the centre reticle, whose UI ring would otherwise look like an enclosed sky component.
+    await recorder.guard(engine.setCameraLook(Math.PI / 2, -0.48));
     await recorder.waitFor(
       (snapshot) =>
         snapshotValue(snapshot, "terrainReady") === 1 &&
