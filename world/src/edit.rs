@@ -150,8 +150,15 @@ impl EditedChunk {
         z: (usize, usize),
         mut visit: impl FnMut(u16),
     ) {
-        let indexed_column_cost = (x.1 - x.0 + 1) * (z.1 - z.0 + 1) * 2;
-        if self.overrides.len() <= indexed_column_cost {
+        let full_chunk_box =
+            x == (0, CHUNK_EDGE - 1) && y == (0, CHUNK_EDGE - 1) && z == (0, CHUNK_EDGE - 1);
+        let search_depth =
+            usize::BITS as usize - self.overrides.len().max(1).leading_zeros() as usize;
+        let indexed_column_cost = (x.1 - x.0 + 1)
+            .saturating_mul(z.1 - z.0 + 1)
+            .saturating_mul(2)
+            .saturating_mul(search_depth);
+        if full_chunk_box || self.overrides.len() <= indexed_column_cost {
             for &(index, _) in &self.overrides {
                 let [local_x, local_y, local_z] = local_coord(index);
                 if (x.0..=x.1).contains(&local_x)

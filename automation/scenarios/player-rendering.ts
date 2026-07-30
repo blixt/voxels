@@ -476,7 +476,6 @@ async function sustainedSpectatorTravel(
     snapshotValue(before, "virtualTerrainCommittedLocusMaximumLeafExclusiveX"),
     snapshotValue(before, "virtualTerrainCommittedLocusMaximumLeafExclusiveZ"),
   ].join(":");
-  let committedExactEpoch = `${exactLocus}|${cut}`;
   let committedExactEpochTransitions = 0;
   const deadline = performance.now() + durationMs;
   await page.keyboard.down("KeyW");
@@ -494,9 +493,9 @@ async function sustainedSpectatorTravel(
         snapshotValue(current, "virtualTerrainCutFingerprintHigh24"),
         snapshotValue(current, "virtualTerrainCutFingerprintLow24"),
       ].join(":");
-      if (currentCut !== cut) {
+      const cutChanged = currentCut !== cut;
+      if (cutChanged) {
         cutTransitions += 1;
-        cut = currentCut;
       }
       const currentExactLocus = [
         snapshotValue(current, "virtualTerrainCommittedLocusMinimumLeafX"),
@@ -504,15 +503,15 @@ async function sustainedSpectatorTravel(
         snapshotValue(current, "virtualTerrainCommittedLocusMaximumLeafExclusiveX"),
         snapshotValue(current, "virtualTerrainCommittedLocusMaximumLeafExclusiveZ"),
       ].join(":");
-      if (currentExactLocus !== exactLocus) {
+      const exactLocusChanged = currentExactLocus !== exactLocus;
+      if (exactLocusChanged) {
         exactLocusTransitions += 1;
-        exactLocus = currentExactLocus;
       }
-      const currentCommittedExactEpoch = `${currentExactLocus}|${currentCut}`;
-      if (currentCommittedExactEpoch !== committedExactEpoch) {
+      if (cutChanged && exactLocusChanged) {
         committedExactEpochTransitions += 1;
-        committedExactEpoch = currentCommittedExactEpoch;
       }
+      cut = currentCut;
+      exactLocus = currentExactLocus;
       const observedAt = performance.now();
       const forwardStep =
         (snapshotValue(current, "cameraX") - snapshotValue(previous, "cameraX")) * forward[0] +
