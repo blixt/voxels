@@ -489,6 +489,13 @@ async function sustainedSpectatorTravel(
       longestFrameWaitMs = Math.max(longestFrameWaitMs, performance.now() - frameWaitStarted);
       previousFrame = snapshotValue(current, "frameSequence");
       frames += 1;
+      if (snapshotValue(current, "spectatorActive") !== 1) {
+        throw new Error(
+          `spectator mode was revoked during held forward input after ${frames} frame(s); ` +
+            `client-view goal ${snapshotValue(current, "clientViewGoalKind")}, ` +
+            `attempt ${snapshotValue(current, "clientViewAttemptPresent")}`,
+        );
+      }
       const currentCut = [
         snapshotValue(current, "virtualTerrainCutFingerprintHigh24"),
         snapshotValue(current, "virtualTerrainCutFingerprintLow24"),
@@ -547,7 +554,20 @@ async function sustainedSpectatorTravel(
   );
   if (distanceMetres < minimumDistanceMetres) {
     throw new Error(
-      `spectator covered only ${distanceMetres.toFixed(2)}m during ${durationMs / 1_000}s of held forward input`,
+      `spectator covered only ${distanceMetres.toFixed(2)}m during ${durationMs / 1_000}s of held ` +
+        `forward input across ${frames} frame(s); camera ` +
+        `${JSON.stringify([
+          snapshotValue(before, "cameraX"),
+          snapshotValue(before, "cameraY"),
+          snapshotValue(before, "cameraZ"),
+        ])} -> ${JSON.stringify([
+          snapshotValue(previous, "cameraX"),
+          snapshotValue(previous, "cameraY"),
+          snapshotValue(previous, "cameraZ"),
+        ])}, spectator ${snapshotValue(previous, "spectatorActive")}, ` +
+        `client-view goal ${snapshotValue(previous, "clientViewGoalKind")}, ` +
+        `attempt ${snapshotValue(previous, "clientViewAttemptPresent")}, ` +
+        `gate ${snapshotValue(previous, "presentationGateActive")}`,
     );
   }
   if (longestNoProgressMs > MAX_SPECTATOR_NO_PROGRESS_MS) {
