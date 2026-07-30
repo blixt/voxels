@@ -7,7 +7,7 @@ provider therefore adds no provider branch, model dependency, or Metal API to th
 
 ## Why binary WebSocket first
 
-VXWP v41 uses the standard `WebSocket` API over loopback. This is the best first transport for
+VXWP v43 uses the standard `WebSocket` API over loopback. This is the best first transport for
 reliable chunk assets: it is mature, works in a dedicated worker, and requires neither an HTTP/3
 certificate setup nor WebRTC signaling. Axum's native Rust server disables Nagle delay, and the
 application bounds outstanding work so classic WebSocket's missing receive-side backpressure cannot
@@ -39,13 +39,13 @@ The [W3C WebTransport specification][webtransport-spec] supports carrying the sa
 envelopes on a future reliable stream. Transport choice is deliberately below world identity,
 request correlation, and chunk codecs.
 
-## VXWP v41 contract
+## VXWP v43 contract
 
 Each WebSocket message contains exactly one little-endian VXWP envelope with `VXWP` magic, protocol
 version, message kind, request ID, payload length, and reserved fields. The format is code-versioned;
 Rust enum layout and Serde output are not wire formats.
 
-1. The browser upgrades `/v41/world`, offering `voxels.world.v41` and the configured local auth token,
+1. The browser upgrades `/v43/world`, offering `voxels.world.v43` and the configured local auth token,
    then sends `OpenWorld` with its maximum in-flight batch count and browser-local player claim.
 2. The daemon replies with `WorldOpened`: immutable world manifest, source identity/hash,
    capabilities, negotiated request window, echoed player claim, spawn sample, authoritative resume
@@ -60,7 +60,7 @@ Rust enum layout and Serde output are not wire formats.
    geometric, silhouette, material, and topology error against the current viewport. It requests
    complete child replacement groups by expected error reduction per byte and time to exposure.
    Missing refinement never invalidates an already renderable parent.
-5. Virtual-terrain page batches carry `VXTP` v7 pages identified by source, spatial key, revision, and
+5. Virtual-terrain page batches carry `VXTP` v10 pages identified by source, spatial key, revision, and
    semantic content fingerprint. Every decoded page is checked against the negotiated world identity,
    half-open bounds, boundary certificates, payload bounds, and directory declaration before it can
    enter residency. A complete group replaces its parent atomically in the one selected cut.
@@ -69,7 +69,7 @@ Rust enum layout and Serde output are not wire formats.
    to the same virtual hierarchy as exact leaves. They do not activate a parallel near-terrain draw
    path, and page refinement cannot change gameplay authority.
 7. Every chunk or surface result body is independently Brotli-compressed at quality 2 with a 20-bit
-   window. Its mandatory v41 envelope declares the exact uncompressed length; the decoder rejects
+   window. Its mandatory v43 envelope declares the exact uncompressed length; the decoder rejects
    unknown codecs, nonzero reserved bytes, outputs above the 16 MiB frame bound, truncated streams,
    and streams producing even one byte beyond the declaration before semantic validation. Large
    logical frames are paced in fragments keyed by a connection-local transfer ID, independent of
@@ -80,7 +80,7 @@ Rust enum layout and Serde output are not wire formats.
 8. `Cancel` is best effort. Late, canceled, mismatched, or stale-revision responses are discarded;
    they cannot resurrect an evicted scheduler ticket or strand partial reassembly state.
 9. `WorldOpened` also returns a connection-scoped, random presence session token. The browser uses
-   it to open `/v41/presence` on a dedicated socket; a token cannot be reused by another world
+   it to open `/v43/presence` on a dedicated socket; a token cannot be reused by another world
    connection.
 10. Browsers send bounded `PlayerPose` latest-state frames. The server validates monotonic sequence,
     finite coordinates, update rate, reported velocity, and receipt-time horizontal/vertical movement
@@ -109,7 +109,7 @@ Rust enum layout and Serde output are not wire formats.
     The server expands it to the selected one-cubic-metre sphere or cube centred on the target,
     credits every removed material, and atomically commits at most 1,021 exact voxel values.
     Placement consumes only earned selected material and succeeds only when the complete stencil is
-    empty. VXWP v41 returns the semantic action plus an adaptive sparse-ordinal or dense-bitset
+    empty. VXWP v43 returns the semantic action plus an adaptive sparse-ordinal or dense-bitset
     mutation mask; final materials and affected chunk halos are reconstructed rather than repeated.
     Inventory, compact edit chunks, bounded idempotency receipts, and canonical chunk revisions
     share one SQLite transaction. Virtual-terrain revision floors are derived from those chunks;
@@ -122,12 +122,12 @@ Rust enum layout and Serde output are not wire formats.
 The required capability set is
 `CANONICAL_CHUNKS | VIRTUAL_TERRAIN | PLAYER_PRESENCE | SERVER_EDITS`. Environment queries,
 authored routes and fully server-simulated movement inputs still need separate versioned products;
-the client never substitutes procedural answers for a remote learned world. VXWP v41 has no
+the client never substitutes procedural answers for a remote learned world. VXWP v43 has no
 fixed-ring surface-tile capability, request kind, response codec, or edit invalidation list.
 
 When the server advertises `VIRTUAL_TERRAIN`, the browser also discovers bounded horizontal region
 columns and fetches each region's hierarchy directory plus its independently renderable root page.
-Further `VXTP` v9 pages are requested by key, revision, and semantic content fingerprint. They may
+Further `VXTP` v10 pages are requested by key, revision, and semantic content fingerprint. They may
 encode stepped surfaces, sparse voxel bricks, quad or triangle clusters, or 33x33 sampled
 heightfields, but representation never changes half-open spatial ownership. Source identity,
 boundary certificates, error bounds, material coverage, child identities, payload limits, and the
@@ -180,9 +180,9 @@ Copy it to both `config/client.toml` as `[world].auth_subprotocol_token` and
 
 ```toml
 [world]
-endpoint = "ws://127.0.0.1:9777/v41/world"
-presence_endpoint = "ws://127.0.0.1:9777/v41/presence"
-subprotocol = "voxels.world.v41"
+endpoint = "ws://127.0.0.1:9777/v43/world"
+presence_endpoint = "ws://127.0.0.1:9777/v43/presence"
+subprotocol = "voxels.world.v43"
 auth_subprotocol_token = "the-same-random-local-token"
 ```
 

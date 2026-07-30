@@ -793,9 +793,9 @@ mod tests {
                 controls_enabled: true,
             },
             world: WorldTransportConfig {
-                endpoint: "ws://127.0.0.1:9777/v41/world".to_owned(),
-                presence_endpoint: "ws://127.0.0.1:9777/v41/presence".to_owned(),
-                subprotocol: "voxels.world.v41".to_owned(),
+                endpoint: "ws://127.0.0.1:9777/v43/world".to_owned(),
+                presence_endpoint: "ws://127.0.0.1:9777/v43/presence".to_owned(),
+                subprotocol: "voxels.world.v43".to_owned(),
                 auth_subprotocol_token: "replace-with-a-random-local-token".to_owned(),
                 max_in_flight_batches: 8,
                 buffered_amount_high_water_bytes: 8 * 1024 * 1024,
@@ -1062,8 +1062,8 @@ mod tests {
         for endpoint in [
             "ws://",
             "wss:///",
-            "ws://127.0.0.1:9777/v41/world#fragment",
-            "ws://127.0.0.1:99999/v41/world",
+            "ws://127.0.0.1:9777/v43/world#fragment",
+            "ws://127.0.0.1:99999/v43/world",
         ] {
             let mut invalid = config.clone();
             invalid.world.endpoint = endpoint.to_owned();
