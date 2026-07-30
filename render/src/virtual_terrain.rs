@@ -1933,7 +1933,9 @@ impl VirtualTerrainHierarchy {
         let headroom_bytes = self.capacity.max_resident_encoded_bytes / 8;
         let headroom_primitives = self.capacity.max_resident_primitives / 8;
         let has_low_watermark = |pages: usize, bytes: usize, primitives: usize| {
-            pages.saturating_add(added_pages).saturating_add(headroom_pages)
+            pages
+                .saturating_add(added_pages)
+                .saturating_add(headroom_pages)
                 <= self.capacity.max_resident_pages
                 && bytes
                     .saturating_add(added_bytes)
