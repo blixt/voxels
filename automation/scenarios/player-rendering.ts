@@ -1000,6 +1000,19 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
     // Fly perpendicular to the later yaw-zero walking route so this probe cannot warm its pages.
     await recorder.guard(engine.setCameraLook(Math.PI / 2, 0));
     const freshSpectatorMotion = await sustainedSpectatorTravel(page, recorder, 5_000, 40);
+    await recorder.waitFor(
+      (snapshot) =>
+        snapshotValue(snapshot, "terrainReady") === 1 &&
+        snapshotValue(snapshot, "virtualTerrainExactCoreComplete") === 1 &&
+        snapshotValue(snapshot, "virtualTerrainExactCoreRequiredLeaves") > 0 &&
+        snapshotValue(snapshot, "virtualTerrainExactCoreCurrentCoverage") ===
+          snapshotValue(snapshot, "virtualTerrainExactCoreRequiredLeaves") &&
+        snapshotValue(snapshot, "virtualTerrainPresentedSnapshotMatchesCut") === 1,
+      {
+        timeoutMs: 30_000,
+        description: "fresh spectator endpoint never received its exact committed terrain core",
+      },
+    );
     const freshSpectatorEndpoint = await auditCapture(
       context,
       page,
