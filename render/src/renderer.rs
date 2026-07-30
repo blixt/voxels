@@ -6498,6 +6498,52 @@ impl Renderer {
         Ok(())
     }
 
+    /// Makes room in the decoded hierarchy without weakening an ownership transaction.
+    ///
+    /// Encoded pages remain in the shell cache, so historical pages can be reconstructed if travel
+    /// returns to them. Every page that can affect the current frame, the next certified frame, or
+    /// an exact screenshot reproduction remains resident together with its traversal ancestry.
+    fn reclaim_virtual_terrain_logical_capacity(
+        &mut self,
+        pages: &[TerrainPageV1],
+    ) -> Result<(), VirtualTerrainRendererError> {
+        let mut selected = Vec::new();
+        if let Some(cut) = self.committed_virtual_terrain_cut() {
+            selected.extend(cut.selected_pages.iter().copied());
+        }
+        if let Some(cut) = &self.virtual_terrain_oracle_cut {
+            selected.extend(cut.selected_pages.iter().copied());
+        }
+        if let Some(publication) = &self.virtual_terrain_publication {
+            selected.extend(publication.cut.selected_pages.iter().copied());
+        }
+        if let Some(reproduction) = &self.virtual_terrain_reproduction_cut {
+            selected.extend(reproduction.cut.selected_pages.iter().copied());
+        }
+        selected.extend(self.virtual_terrain.roots());
+        selected.extend(pages.iter().map(|page| page.key));
+
+        let protected = resident_virtual_terrain_ancestry(&selected, |key| {
+            self.virtual_terrain.resident_page(key).is_some()
+        });
+        let removed = self
+            .virtual_terrain
+            .reclaim_lru_for_admission(pages, &protected)?;
+        if removed.is_empty() {
+            return Ok(());
+        }
+
+        // Absolute GPU handles must be invalidated before their backing ranges can be reused.
+        for key in removed {
+            self.virtual_terrain_gpu.remove_page_geometry(key);
+            if let Some(page) = self.virtual_terrain_pages.remove(&key) {
+                discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
+            }
+        }
+        self.invalidate_virtual_terrain_desired_plan();
+        Ok(())
+    }
+
     /// Uploads a certified virtual-terrain page without publishing a partial render owner.
     ///
     /// GPU storage is prepared first, hierarchy identity is installed second, and only then is the
@@ -6508,6 +6554,7 @@ impl Renderer {
         page: TerrainPageV1,
     ) -> Result<(), VirtualTerrainRendererError> {
         if self.virtual_terrain.resident_page(page.key).is_none() {
+            self.reclaim_virtual_terrain_logical_capacity(std::slice::from_ref(&page))?;
             self.virtual_terrain.install_page(page)?;
             self.invalidate_virtual_terrain_desired_plan();
             return Ok(());
@@ -6566,6 +6613,7 @@ impl Renderer {
             .iter()
             .any(|page| self.virtual_terrain.resident_page(page.key).is_none());
         if logical_replacement_missing {
+            self.reclaim_virtual_terrain_logical_capacity(&pages)?;
             install_virtual_terrain_replacement_pages(
                 &mut self.virtual_terrain,
                 parent,

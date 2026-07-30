@@ -1844,6 +1844,115 @@ impl VirtualTerrainHierarchy {
         )
     }
 
+    pub(crate) fn reclaim_lru_for_admission(
+        &mut self,
+        pages: &[TerrainPageV1],
+        protected: &BTreeSet<TerrainPageKey>,
+    ) -> Result<Vec<TerrainPageKey>, VirtualTerrainError> {
+        let mut missing = BTreeSet::new();
+        let additions = pages
+            .iter()
+            .filter(|page| !self.resident.contains_key(&page.key) && missing.insert(page.key))
+            .map(|page| {
+                let Some(node) = self.nodes.get(&page.key) else {
+                    return Err(VirtualTerrainError::UnknownPage(page.key));
+                };
+                if page.source_identity_hash
+                    != self
+                        .source_identity_hash
+                        .unwrap_or(page.source_identity_hash)
+                {
+                    return Err(VirtualTerrainError::SourceMismatch);
+                }
+                if !page.validates_identity()
+                    || page.revision != node.revision
+                    || page.content_fingerprint != node.content_fingerprint
+                    || page.errors != node.errors
+                    || page.topology != node.topology
+                    || page.representation.kind() != node.representation
+                {
+                    return Err(VirtualTerrainError::InvalidPage(page.key));
+                }
+                let encoded_bytes = encode_terrain_page(page)
+                    .map_err(|_| VirtualTerrainError::InvalidPage(page.key))?
+                    .len();
+                if encoded_bytes != node.encoded_bytes as usize {
+                    return Err(VirtualTerrainError::InvalidPage(page.key));
+                }
+                Ok((encoded_bytes, page_primitive_count(page)))
+            })
+            .collect::<Result<Vec<_>, VirtualTerrainError>>()?;
+        let added_pages = additions.len();
+        let added_bytes = additions.iter().map(|(bytes, _)| *bytes).sum::<usize>();
+        let added_primitives = additions
+            .iter()
+            .map(|(_, primitives)| *primitives)
+            .sum::<usize>();
+        let capacity_error = |pages: usize, bytes: usize, primitives: usize| {
+            if pages.saturating_add(added_pages) > self.capacity.max_resident_pages {
+                Some(VirtualTerrainError::ResidentPageCapacity)
+            } else if bytes.saturating_add(added_bytes) > self.capacity.max_resident_encoded_bytes {
+                Some(VirtualTerrainError::ResidentByteCapacity)
+            } else if primitives.saturating_add(added_primitives)
+                > self.capacity.max_resident_primitives
+            {
+                Some(VirtualTerrainError::ResidentPrimitiveCapacity)
+            } else {
+                None
+            }
+        };
+        if additions.is_empty()
+            || capacity_error(
+                self.resident.len(),
+                self.resident_encoded_bytes,
+                self.resident_primitives,
+            )
+            .is_none()
+        {
+            return Ok(Vec::new());
+        }
+
+        let mut candidates = self
+            .resident
+            .iter()
+            .filter(|(key, _)| !protected.contains(key))
+            .map(|(key, resident)| {
+                (
+                    key.level,
+                    resident.last_selected_frame,
+                    *key,
+                    resident.encoded_bytes,
+                    resident.primitive_count,
+                )
+            })
+            .collect::<Vec<_>>();
+        // Fine descendants retire before their coarser ancestors, preserving a usable traversal
+        // spine for as long as possible. Within one level, evict the least recently selected page.
+        candidates.sort_unstable();
+        let mut remaining_pages = self.resident.len();
+        let mut remaining_bytes = self.resident_encoded_bytes;
+        let mut remaining_primitives = self.resident_primitives;
+        let mut remove = Vec::new();
+        for (_, _, key, bytes, primitives) in candidates {
+            remaining_pages = remaining_pages.saturating_sub(1);
+            remaining_bytes = remaining_bytes.saturating_sub(bytes);
+            remaining_primitives = remaining_primitives.saturating_sub(primitives);
+            remove.push(key);
+            if capacity_error(remaining_pages, remaining_bytes, remaining_primitives).is_none() {
+                break;
+            }
+        }
+        if let Some(error) = capacity_error(remaining_pages, remaining_bytes, remaining_primitives)
+        {
+            return Err(error);
+        }
+        for key in &remove {
+            let removed = self.remove_page(*key);
+            debug_assert!(removed);
+        }
+        Ok(remove)
+    }
+
     pub fn remove_page(&mut self, key: TerrainPageKey) -> bool {
         let Some(resident) = self.resident.remove(&key) else {
             return false;
@@ -5311,6 +5420,63 @@ mod tests {
         assert_eq!(hierarchy.roots().count(), 0);
         assert_eq!(hierarchy.source_identity_hash(), None);
         assert!(hierarchy.remove_region_directory(root).is_empty());
+    }
+
+    #[test]
+    fn logical_admission_evicts_only_the_oldest_unprotected_page() {
+        let pages = [
+            flat_heightfield_page(TerrainPageKey::surface(0, 0, 0)),
+            flat_heightfield_page(TerrainPageKey::surface(0, 1, 0)),
+            flat_heightfield_page(TerrainPageKey::surface(0, 2, 0)),
+        ];
+        let directory = TerrainHierarchyDirectoryV1::from_pages(&pages).unwrap();
+        let page_primitives = page_primitive_count(&pages[0]);
+        let mut capacity = VirtualTerrainCapacity::DEVELOPMENT_128_MIB;
+        capacity.max_resident_primitives = page_primitives * 2;
+        let mut hierarchy = VirtualTerrainHierarchy::new(capacity).unwrap();
+        hierarchy.register_region_directory(&directory).unwrap();
+        hierarchy.install_page(pages[0].clone()).unwrap();
+        hierarchy.install_page(pages[1].clone()).unwrap();
+        hierarchy.touch_resident_selection(&[pages[1].key]).unwrap();
+
+        let removed = hierarchy
+            .reclaim_lru_for_admission(&pages[2..], &BTreeSet::from([pages[1].key]))
+            .unwrap();
+
+        assert_eq!(removed, vec![pages[0].key]);
+        assert!(hierarchy.resident_page(pages[0].key).is_none());
+        assert!(hierarchy.resident_page(pages[1].key).is_some());
+        hierarchy.install_page(pages[2].clone()).unwrap();
+        assert_eq!(hierarchy.resident_usage().0, 2);
+        assert!(hierarchy.resident_usage().2 <= capacity.max_resident_primitives);
+    }
+
+    #[test]
+    fn logical_admission_fails_without_mutating_protected_owners() {
+        let pages = [
+            flat_heightfield_page(TerrainPageKey::surface(0, 0, 0)),
+            flat_heightfield_page(TerrainPageKey::surface(0, 1, 0)),
+            flat_heightfield_page(TerrainPageKey::surface(0, 2, 0)),
+        ];
+        let directory = TerrainHierarchyDirectoryV1::from_pages(&pages).unwrap();
+        let mut capacity = VirtualTerrainCapacity::DEVELOPMENT_128_MIB;
+        capacity.max_resident_primitives = page_primitive_count(&pages[0]) * 2;
+        let mut hierarchy = VirtualTerrainHierarchy::new(capacity).unwrap();
+        hierarchy.register_region_directory(&directory).unwrap();
+        hierarchy.install_page(pages[0].clone()).unwrap();
+        hierarchy.install_page(pages[1].clone()).unwrap();
+        let usage = hierarchy.resident_usage();
+
+        assert_eq!(
+            hierarchy.reclaim_lru_for_admission(
+                &pages[2..],
+                &BTreeSet::from([pages[0].key, pages[1].key]),
+            ),
+            Err(VirtualTerrainError::ResidentPrimitiveCapacity),
+        );
+        assert_eq!(hierarchy.resident_usage(), usage);
+        assert!(hierarchy.resident_page(pages[0].key).is_some());
+        assert!(hierarchy.resident_page(pages[1].key).is_some());
     }
 
     #[test]
