@@ -16,7 +16,7 @@ use std::io::Read;
 #[cfg(feature = "terrain-page-builder")]
 use crate::terrain_error::certify_bidirectional_surface_error;
 
-pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 10;
+pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 11;
 pub const TERRAIN_PAGE_EDGE_SAMPLES: u32 = 32;
 pub const TERRAIN_HEIGHTFIELD_BOUNDARY_SIDES: usize = 4;
 pub const TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS: usize =
@@ -376,8 +376,9 @@ pub enum TerrainPageRepresentationKind {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerrainCanonicalOwnership {
-    SurfaceEnvelopeAndEdits = 0,
+    SurfaceEnvelopeAndEditPatch = 0,
     FullFaceDomain = 1,
+    SurfaceEnvelopeOnly = 2,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -414,8 +415,7 @@ impl TerrainPageV1 {
             && (!matches!(
                 self.representation,
                 TerrainPageRepresentation::HeightfieldGrid(_)
-            ) || self.canonical_ownership
-                == TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits)
+            ) || self.canonical_ownership == TerrainCanonicalOwnership::SurfaceEnvelopeOnly)
             && representation_is_valid(self)
             && self.content_fingerprint == terrain_page_fingerprint(self)
     }
@@ -792,13 +792,15 @@ pub fn build_exact_surface_terrain_page(
 ) -> Result<TerrainPageV1, TerrainPageBuildError> {
     let (bounds, samples) = sample_exact_surface_page(key, vertical_bounds, material_at)?;
     finish_exact_surface_page(
-        source_identity_hash,
-        key,
-        revision,
-        bounds,
+        ExactSurfacePageHeader {
+            source_identity_hash,
+            key,
+            revision,
+            bounds,
+            canonical_ownership: TerrainCanonicalOwnership::FullFaceDomain,
+        },
         &samples,
         &samples,
-        TerrainCanonicalOwnership::FullFaceDomain,
         |_| true,
     )
 }
@@ -824,13 +826,15 @@ pub fn build_owned_exact_surface_terrain_page(
         sample_exact_surface_page(key, vertical_bounds, handoff_material_at)?;
     debug_assert_eq!(bounds, handoff_bounds);
     finish_exact_surface_page(
-        source_identity_hash,
-        key,
-        revision,
-        bounds,
+        ExactSurfacePageHeader {
+            source_identity_hash,
+            key,
+            revision,
+            bounds,
+            canonical_ownership: TerrainCanonicalOwnership::SurfaceEnvelopeAndEditPatch,
+        },
         &samples,
         &handoff_samples,
-        TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits,
         face_owned,
     )
 }
@@ -915,16 +919,27 @@ fn sample_exact_surface_page(
     ))
 }
 
-fn finish_exact_surface_page(
+struct ExactSurfacePageHeader {
     source_identity_hash: WorldSourceIdentityHash,
     key: TerrainPageKey,
     revision: u64,
     bounds: VoxelBounds,
+    canonical_ownership: TerrainCanonicalOwnership,
+}
+
+fn finish_exact_surface_page(
+    header: ExactSurfacePageHeader,
     samples: &ExactPageSamples,
     handoff_samples: &ExactPageSamples,
-    canonical_ownership: TerrainCanonicalOwnership,
     mut face_owned: impl FnMut(&CanonicalFaceKey) -> bool,
 ) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    let ExactSurfacePageHeader {
+        source_identity_hash,
+        key,
+        revision,
+        bounds,
+        canonical_ownership,
+    } = header;
     let mut faces = directionally_owned_surface_faces(bounds, |coord| samples.sample(coord));
     faces.retain(|face| face_owned(face));
     let certificate = BoundaryCertificate::build(bounds, |coord| handoff_samples.sample(coord));
@@ -1195,7 +1210,7 @@ pub fn build_sampled_heightfield_terrain_page(
         children: Vec::new(),
         errors,
         topology: TerrainTopologyClass::SingleRunColumns,
-        canonical_ownership: TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits,
+        canonical_ownership: TerrainCanonicalOwnership::SurfaceEnvelopeOnly,
         boundary_fingerprints,
         materials,
         representation: TerrainPageRepresentation::HeightfieldGrid(grid),
@@ -1540,8 +1555,12 @@ pub fn assemble_terrain_parent(
         .all(|child| child.canonical_ownership == TerrainCanonicalOwnership::FullFaceDomain)
     {
         TerrainCanonicalOwnership::FullFaceDomain
+    } else if children.iter().any(|child| {
+        child.canonical_ownership == TerrainCanonicalOwnership::SurfaceEnvelopeAndEditPatch
+    }) {
+        TerrainCanonicalOwnership::SurfaceEnvelopeAndEditPatch
     } else {
-        TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits
+        TerrainCanonicalOwnership::SurfaceEnvelopeOnly
     };
     let boundary_fingerprints = aggregate_child_boundaries(key, children)?;
     let mut child_references = children
@@ -3676,8 +3695,9 @@ pub fn decode_terrain_page(
     }
     let level = cursor.u8()?;
     let canonical_ownership = match cursor.u8()? {
-        0 => TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits,
+        0 => TerrainCanonicalOwnership::SurfaceEnvelopeAndEditPatch,
         1 => TerrainCanonicalOwnership::FullFaceDomain,
+        2 => TerrainCanonicalOwnership::SurfaceEnvelopeOnly,
         _ => {
             return Err(TerrainPageCodecError::InvalidHeader(
                 "unknown canonical ownership",
@@ -3830,7 +3850,7 @@ pub fn decode_terrain_page(
         || (matches!(
             page.representation,
             TerrainPageRepresentation::HeightfieldGrid(_)
-        ) && page.canonical_ownership != TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits)
+        ) && page.canonical_ownership != TerrainCanonicalOwnership::SurfaceEnvelopeOnly)
         || !page_bounds_match_key(page.key, page.bounds)
         || !children_are_complete(&page)
     {
@@ -4459,7 +4479,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             page.canonical_ownership,
-            TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits
+            TerrainCanonicalOwnership::SurfaceEnvelopeAndEditPatch
         );
         let TerrainPageRepresentation::SurfaceCluster(quads) = &page.representation else {
             panic!("owned exact surface must remain a clustered face patch");

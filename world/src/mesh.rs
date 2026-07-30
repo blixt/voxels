@@ -79,10 +79,7 @@ struct FaceKey {
 
 /// Greedily merges coplanar visible faces with the same material. `outside` samples world coordinates
 /// beyond this chunk, preventing hidden seam faces when neighboring chunks are resident or generated.
-pub fn mesh_chunk(
-    chunk: &Chunk,
-    outside: impl FnMut(i32, i32, i32) -> Material,
-) -> MeshedChunk {
+pub fn mesh_chunk(chunk: &Chunk, outside: impl FnMut(i32, i32, i32) -> Material) -> MeshedChunk {
     mesh_chunk_with_ownership(chunk, None, None, outside)
 }
 
@@ -298,9 +295,12 @@ pub(crate) fn heightfield_owns_face(
         return false;
     };
     let neighbor_y = world_origin[1].saturating_add(neighbor[1]);
-    material == current.ground_material
-        && current_y < current.ground_plane
-        && neighbor_y >= neighbor_column.ground_plane
+    // Heightfield ownership is geometric. A vertical riser is represented by the higher
+    // column's surface material across its complete rectangle, while the canonical source can
+    // contain Dirt/Stone strata below that top voxel. Retaining those deeper-material faces would
+    // put two coplanar owners on the same 10 cm face. Material is intentionally not part of this
+    // predicate; authored provenance above it still wins as EditPatch.
+    current_y < current.ground_plane && neighbor_y >= neighbor_column.ground_plane
 }
 
 fn emitter_is_exposed(occupancy: &[u8], local: [usize; 3]) -> bool {
@@ -471,7 +471,6 @@ mod tests {
                 MeshingSurfaceColumn {
                     valid: true,
                     ground_plane,
-                    ground_material: Material::Stone,
                     water_plane,
                 };
                 MeshingSurfaceEnvelope::COLUMN_COUNT
@@ -682,7 +681,6 @@ mod tests {
                 columns.push(MeshingSurfaceColumn {
                     valid: true,
                     ground_plane: if x < 16 { 10 } else { 5 },
-                    ground_material: Material::Stone,
                     water_plane: None,
                 });
             }
@@ -730,35 +728,96 @@ mod tests {
     }
 
     #[test]
+    fn source_surface_partition_owns_stratified_cliff_risers_by_geometry() {
+        let coord = ChunkCoord::new(0, 0, 0);
+        let mut columns = Vec::with_capacity(MeshingSurfaceEnvelope::COLUMN_COUNT);
+        for _z in -1..=CHUNK_EDGE as i32 {
+            for x in -1..=CHUNK_EDGE as i32 {
+                columns.push(MeshingSurfaceColumn {
+                    valid: true,
+                    ground_plane: if x < 16 { 10 } else { 5 },
+                    water_plane: None,
+                });
+            }
+        }
+        let surface = MeshingSurfaceEnvelope::from_columns(coord, columns).unwrap();
+        let mut chunk = Chunk::empty(coord);
+        for z in 0..CHUNK_EDGE {
+            for x in 0..CHUNK_EDGE {
+                let plane = if x < 16 { 10 } else { 5 };
+                for y in 0..usize::try_from(plane).unwrap() {
+                    chunk.set(
+                        x,
+                        y,
+                        z,
+                        if y + 1 == usize::try_from(plane).unwrap() {
+                            Material::Grass
+                        } else if y + 4 >= usize::try_from(plane).unwrap() {
+                            Material::Dirt
+                        } else {
+                            Material::Stone
+                        },
+                    );
+                }
+            }
+        }
+        let mesh = mesh_chunk_with_surface(&chunk, Some(&surface), |x, y, _| {
+            let plane = if x < 16 { 10 } else { 5 };
+            if y >= plane {
+                Material::Air
+            } else if y + 1 == plane {
+                Material::Grass
+            } else if y + 4 >= plane {
+                Material::Dirt
+            } else {
+                Material::Stone
+            }
+        });
+        assert_eq!(
+            mesh.opaque_surface_quads as usize,
+            mesh.opaque.len(),
+            "every coplanar Grass/Dirt/Stone riser face must transfer to the one virtual owner"
+        );
+        let riser_materials = mesh.opaque[..mesh.opaque_surface_quads as usize]
+            .iter()
+            .filter(|quad| quad.face == FACE_POS_X && quad.origin[0] == 15)
+            .map(|quad| quad.material)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            riser_materials,
+            [
+                Material::Grass.id(),
+                Material::Dirt.id(),
+                Material::Stone.id()
+            ]
+            .into_iter()
+            .collect(),
+            "the ownership partition must retain all canonical material strata in its suppressed slice"
+        );
+    }
+
+    #[test]
     fn material_only_surface_edit_has_one_disjoint_edit_owner() {
         let coord = ChunkCoord::new(0, 0, 0);
         let surface = flat_surface(coord, 10, None);
         let mut chunk = Chunk::empty(coord);
         fill_below(&mut chunk, |_, _| 10);
         chunk.set(5, 9, 5, Material::Basalt);
-        let edits = MeshingEditEnvelope::from_sampler(coord, |x, y, z| {
-            [x, y, z] == [5, 9, 5]
-        })
-        .unwrap();
-        let mesh = mesh_chunk_with_ownership(
-            &chunk,
-            Some(&surface),
-            Some(&edits),
-            |_, y, _| {
-                if y < 10 {
-                    Material::Stone
-                } else {
-                    Material::Air
-                }
-            },
-        );
+        let edits =
+            MeshingEditEnvelope::from_sampler(coord, |x, y, z| [x, y, z] == [5, 9, 5]).unwrap();
+        let mesh = mesh_chunk_with_ownership(&chunk, Some(&surface), Some(&edits), |_, y, _| {
+            if y < 10 {
+                Material::Stone
+            } else {
+                Material::Air
+            }
+        });
         assert_eq!(mesh.opaque_edit_quads, 1);
         let edit = mesh.opaque[mesh.opaque_surface_quads as usize];
         assert_eq!(edit.material, Material::Basalt.id());
         assert_eq!(edit.face, FACE_POS_Y);
         assert!(
-            mesh.opaque[mesh.opaque_surface_quads as usize
-                + mesh.opaque_edit_quads as usize..]
+            mesh.opaque[mesh.opaque_surface_quads as usize + mesh.opaque_edit_quads as usize..]
                 .is_empty(),
             "an edit patch must not move unrelated source volume into its ownership range"
         );

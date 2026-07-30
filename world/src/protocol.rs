@@ -7,11 +7,10 @@
 use crate::{
     ChunkCoord, ChunkSnapshot, MESHING_SURFACE_CONTRACT_VERSION, Material, MeshingEditEnvelope,
     MeshingHalo, MeshingSurfaceColumn, MeshingSurfaceEnvelope, ModelIdentity,
-    SourceDeviceRequirement, SurfaceRegion, TERRAIN_COVERAGE_ROOT_LEVEL,
-    TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError, TerrainHierarchyDirectoryV1,
-    TerrainPageBatchRequestV1, TerrainPageBatchResultV1, TerrainPageCodecError, TerrainPageKey,
-    TerrainPageTransferCodecError, VOXEL_SIZE_METRES, VoxelCoord, WorldId, WorldManifest,
-    WorldProductPriority, WorldSourceError,
+    SourceDeviceRequirement, SurfaceRegion, TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_REGION_ROOT_LEVEL,
+    TerrainDirectoryError, TerrainHierarchyDirectoryV1, TerrainPageBatchRequestV1,
+    TerrainPageBatchResultV1, TerrainPageCodecError, TerrainPageKey, TerrainPageTransferCodecError,
+    VOXEL_SIZE_METRES, VoxelCoord, WorldId, WorldManifest, WorldProductPriority, WorldSourceError,
     WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind, codec, decode_terrain_directory,
     decode_terrain_page_batch_request, decode_terrain_page_batch_result, encode_terrain_directory,
     encode_terrain_page_batch_request, encode_terrain_page_batch_result,
@@ -21,7 +20,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 43;
+pub const PROTOCOL_VERSION: u16 = 44;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -3617,18 +3616,18 @@ fn decode_meshing_edits(
         edited.push(cursor.u16()?);
     }
     cursor.finish()?;
-    MeshingEditEnvelope::from_indices(coord, edited)
-        .ok_or(ProtocolError::InvalidPayload("invalid meshing edit envelope"))
+    MeshingEditEnvelope::from_indices(coord, edited).ok_or(ProtocolError::InvalidPayload(
+        "invalid meshing edit envelope",
+    ))
 }
 
 fn encode_meshing_surface(surface: &MeshingSurfaceEnvelope) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(6 + surface.columns().len() * 12);
+    let mut bytes = Vec::with_capacity(6 + surface.columns().len() * 10);
     push_u16(&mut bytes, MESHING_SURFACE_CONTRACT_VERSION);
     push_u32(&mut bytes, surface.columns().len() as u32);
     for column in surface.columns() {
         bytes.push(u8::from(column.valid));
         push_i32(&mut bytes, column.ground_plane);
-        push_u16(&mut bytes, column.ground_material.id());
         bytes.push(u8::from(column.water_plane.is_some()));
         if let Some(water_plane) = column.water_plane {
             push_i32(&mut bytes, water_plane);
@@ -3665,8 +3664,6 @@ fn decode_meshing_surface(
             }
         };
         let ground_plane = cursor.i32()?;
-        let ground_material = Material::from_id(cursor.u16()?)
-            .ok_or(ProtocolError::InvalidPayload("invalid meshing surface material"))?;
         let water_plane = match cursor.u8()? {
             0 => None,
             1 => Some(cursor.i32()?),
@@ -3686,7 +3683,6 @@ fn decode_meshing_surface(
         columns.push(MeshingSurfaceColumn {
             valid,
             ground_plane,
-            ground_material,
             water_plane,
         });
     }

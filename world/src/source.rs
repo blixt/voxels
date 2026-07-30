@@ -28,7 +28,7 @@ pub const MESHING_HALO_VOXELS: usize =
 /// Version of the stride-one source-surface plane contract shared by chunk meshing and terrain
 /// heightfield pages. Changing sample ownership or plane semantics requires both this value and the
 /// source sampler identity to advance.
-pub const MESHING_SURFACE_CONTRACT_VERSION: u16 = 2;
+pub const MESHING_SURFACE_CONTRACT_VERSION: u16 = 3;
 
 const IDENTITY_HASH_DOMAIN: &[u8] = b"voxels-world-source-identity-v1\0";
 const MANIFEST_HASH_DOMAIN: &[u8] = b"voxels-world-manifest-v1\0";
@@ -418,12 +418,12 @@ impl ChunkSnapshot {
             && chunk.coord() == meshing_surface.coord()
             && chunk.coord() == meshing_edits.coord())
         .then_some(Self {
-                source_identity_hash,
-                chunk,
-                meshing_halo,
-                meshing_surface,
-                meshing_edits,
-            })
+            source_identity_hash,
+            chunk,
+            meshing_halo,
+            meshing_surface,
+            meshing_edits,
+        })
     }
 }
 
@@ -906,7 +906,6 @@ pub struct MeshingHalo {
 pub struct MeshingSurfaceColumn {
     pub valid: bool,
     pub ground_plane: i32,
-    pub ground_material: Material,
     pub water_plane: Option<i32>,
 }
 
@@ -998,11 +997,7 @@ impl MeshingEditEnvelope {
         }
         let Some(index) = usize::try_from(x + 1)
             .ok()
-            .and_then(|x| {
-                usize::try_from(z + 1)
-                    .ok()
-                    .map(|z| x + z * Self::EDGE)
-            })
+            .and_then(|x| usize::try_from(z + 1).ok().map(|z| x + z * Self::EDGE))
             .and_then(|xz| {
                 usize::try_from(y + 1)
                     .ok()
@@ -1028,9 +1023,7 @@ impl MeshingSurfaceEnvelope {
         (coord.is_world_representable()
             && columns.len() == Self::COLUMN_COUNT
             && columns.iter().all(|column| {
-                (column.valid
-                    || (column.water_plane.is_none()
-                        && column.ground_material == Material::Air))
+                (column.valid || column.water_plane.is_none())
                     && column
                         .water_plane
                         .is_none_or(|water| water >= column.ground_plane)
@@ -1059,7 +1052,6 @@ impl MeshingSurfaceEnvelope {
                     columns.push(MeshingSurfaceColumn {
                         valid: false,
                         ground_plane: 0,
-                        ground_material: Material::Air,
                         water_plane: None,
                     });
                     continue;
@@ -1076,7 +1068,6 @@ impl MeshingSurfaceEnvelope {
                 columns.push(MeshingSurfaceColumn {
                     valid: true,
                     ground_plane,
-                    ground_material: sample.material,
                     water_plane,
                 });
             }
@@ -1103,9 +1094,7 @@ impl MeshingSurfaceEnvelope {
         }
         let local_x = usize::try_from(x + 1).ok()?;
         let local_z = usize::try_from(z + 1).ok()?;
-        self.columns
-            .get(local_x + local_z * Self::EDGE)
-            .copied()
+        self.columns.get(local_x + local_z * Self::EDGE).copied()
     }
 
     pub fn sample_world(&self, x: i32, z: i32) -> Option<MeshingSurfaceColumn> {
@@ -1454,16 +1443,20 @@ impl ProceduralWorldSource {
         let depth = (i64::from(max_z) - i64::from(min_z) + 1) as usize;
         let region = self.generator.region(min_x, min_z, width, depth);
         let meshing_halo = MeshingHalo::from_sampler(coord, |x, y, z| region.sample(x, y, z));
-        let meshing_surface =
+        let Some(meshing_surface) =
             MeshingSurfaceEnvelope::from_sampler(coord, |x, z| self.generator.surface_sample(x, z))
-                .expect("representable chunks have representable source surface planes");
+        else {
+            unreachable!("representable chunks have representable source surface planes")
+        };
+        let Some(meshing_edits) = MeshingEditEnvelope::empty(coord) else {
+            unreachable!("representable chunks have a representable empty edit envelope")
+        };
         ChunkSnapshot {
             source_identity_hash: self.source_identity_hash(),
             chunk,
             meshing_halo,
             meshing_surface,
-            meshing_edits: MeshingEditEnvelope::empty(coord)
-                .expect("representable chunks have a representable empty edit envelope"),
+            meshing_edits,
         }
     }
 }
@@ -1786,12 +1779,7 @@ mod tests {
         let source = ProceduralWorldSource::new(7);
         let origin = [-19, -31];
         let dense = source
-            .surface_sample_lattice(
-                WorldProductPriority::CollisionCritical,
-                origin,
-                [9, 9],
-                1,
-            )
+            .surface_sample_lattice(WorldProductPriority::CollisionCritical, origin, [9, 9], 1)
             .unwrap();
         let coarse = source
             .surface_sample_lattice(WorldProductPriority::VirtualTerrain, origin, [5, 5], 2)
@@ -1806,12 +1794,7 @@ mod tests {
             }
         }
         let left = source
-            .surface_sample_lattice(
-                WorldProductPriority::Prefetch,
-                origin,
-                [5, 9],
-                1,
-            )
+            .surface_sample_lattice(WorldProductPriority::Prefetch, origin, [5, 9], 1)
             .unwrap();
         let right = source
             .surface_sample_lattice(
@@ -2130,7 +2113,6 @@ mod tests {
                     Some(MeshingSurfaceColumn {
                         valid: true,
                         ground_plane: sample.height + 1,
-                        ground_material: sample.material,
                         water_plane: sample.water_level.map(|height| height + 1),
                     })
                 );
@@ -2159,11 +2141,14 @@ mod tests {
             Some(MeshingSurfaceColumn {
                 valid: false,
                 ground_plane: 0,
-                ground_material: Material::Air,
                 water_plane: None,
             })
         );
-        assert!(envelope.sample_local(0, 0).is_some_and(|column| column.valid));
+        assert!(
+            envelope
+                .sample_local(0, 0)
+                .is_some_and(|column| column.valid)
+        );
     }
 
     #[test]

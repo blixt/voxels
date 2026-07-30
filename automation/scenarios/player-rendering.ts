@@ -244,7 +244,6 @@ async function walkBeyondProtectedPedestal(
   await page.keyboard.down("ShiftLeft");
   await page.keyboard.down("KeyW");
   let distance = 0;
-  let nextPixelAudit = performance.now();
   let previous = before;
   let lastProgressAt = performance.now();
   let longestNoProgressMs = 0;
@@ -253,7 +252,6 @@ async function walkBeyondProtectedPedestal(
   let exactQualityDebtStartedMetres = 0;
   let longestExactQualityDebtMs = 0;
   let longestExactQualityDebtMetres = 0;
-  const transientCaptures: { readonly png: Buffer; readonly distanceMetres: number }[] = [];
   try {
     const deadline = performance.now() + 20_000;
     let previousFrame = snapshotValue(recorder.latestSnapshot, "frameSequence");
@@ -308,41 +306,37 @@ async function walkBeyondProtectedPedestal(
           `renderer presented ${snapshotValue(current, "virtualTerrainPresentedCoverageGapFrames") - coverageGapBaseline} frame(s) after the camera outran its complete terrain horizon`,
         );
       }
-      if (performance.now() >= nextPixelAudit) {
-        const png = await page.screenshot({ type: "png" });
-        transientCaptures.push({ png, distanceMetres: distance });
-        nextPixelAudit = Math.max(nextPixelAudit + 250, performance.now() + 1);
-      }
       if (distance >= targetMetres) break;
     }
   } finally {
     await page.keyboard.up("KeyW");
     await page.keyboard.up("ShiftLeft");
   }
-  for (const capture of transientCaptures) {
-    const [magenta, terrainInteriorSky, black] = await Promise.all([
-      analyzeDiagnosticSky(page, capture.png),
-      analyzeDiagnosticSky(page, capture.png, { x0: 0.04, x1: 0.96, y0: 0.58, y1: 0.98 }),
-      analyzeDiagnosticSky(page, capture.png, { x0: 0.05, x1: 0.95, y0: 0.08, y1: 0.58 }, "black"),
-    ]);
-    if (
-      magenta.largestEnclosedComponentPixels > 0 ||
-      terrainInteriorSky.diagnosticSkyPixels > 0 ||
-      black.largestComponentPixels >= 16
-    ) {
-      await context.artifacts.write(
-        "transient terrain hole during sprint",
-        "during-sprint-transient-hole.png",
-        capture.png,
-        "image/png",
-      );
-      throw new Error(
-        `terrain exposed a transient hole after ${capture.distanceMetres.toFixed(2)}m of sprinting: ` +
-          `${magenta.largestEnclosedComponentPixels} enclosed magenta pixels, ` +
-          `${terrainInteriorSky.diagnosticSkyPixels} below-silhouette magenta pixels, ` +
-          `${black.largestComponentPixels} contiguous black pixels`,
-      );
-    }
+  // Full-resolution screenshot readback inside the held-key loop gives streaming extra wall-clock
+  // headroom. Audit the resulting view only after the uninstrumented movement interval ends.
+  const postSprintPng = await page.screenshot({ type: "png" });
+  const [magenta, terrainInteriorSky, black] = await Promise.all([
+    analyzeDiagnosticSky(page, postSprintPng),
+    analyzeDiagnosticSky(page, postSprintPng, { x0: 0.04, x1: 0.96, y0: 0.58, y1: 0.98 }),
+    analyzeDiagnosticSky(page, postSprintPng, { x0: 0.05, x1: 0.95, y0: 0.08, y1: 0.58 }, "black"),
+  ]);
+  if (
+    magenta.largestEnclosedComponentPixels > 0 ||
+    terrainInteriorSky.diagnosticSkyPixels > 0 ||
+    black.largestComponentPixels >= 16
+  ) {
+    await context.artifacts.write(
+      "terrain hole immediately after sprint",
+      "post-sprint-terrain-hole.png",
+      postSprintPng,
+      "image/png",
+    );
+    throw new Error(
+      `terrain exposed a hole after ${distance.toFixed(2)}m of uninstrumented sprinting: ` +
+        `${magenta.largestEnclosedComponentPixels} enclosed magenta pixels, ` +
+        `${terrainInteriorSky.diagnosticSkyPixels} below-silhouette magenta pixels, ` +
+        `${black.largestComponentPixels} contiguous black pixels`,
+    );
   }
   if (exactQualityDebtStartedAt !== undefined) {
     longestExactQualityDebtMs = Math.max(
@@ -447,11 +441,15 @@ async function jumpAndLand(page: Page, recorder: PlayerPresentationRecorder): Pr
 async function sustainedSpectatorTravel(
   page: Page,
   recorder: PlayerPresentationRecorder,
+  durationMs = SPECTATOR_TRAVEL_MS,
+  minimumDistanceMetres = 100,
 ): Promise<{
   readonly distanceMetres: number;
   readonly longestNoProgressMs: number;
   readonly longestFrameWaitMs: number;
   readonly frames: number;
+  readonly cutTransitions: number;
+  readonly exactLocusTransitions: number;
 }> {
   const before = recorder.latestSnapshot;
   const yaw = snapshotValue(before, "yaw");
@@ -465,7 +463,19 @@ async function sustainedSpectatorTravel(
   let longestNoProgressMs = 0;
   let longestFrameWaitMs = 0;
   let frames = 0;
-  const deadline = performance.now() + SPECTATOR_TRAVEL_MS;
+  let cutTransitions = 0;
+  let exactLocusTransitions = 0;
+  let cut = [
+    snapshotValue(before, "virtualTerrainCutFingerprintHigh24"),
+    snapshotValue(before, "virtualTerrainCutFingerprintLow24"),
+  ].join(":");
+  let exactLocus = [
+    snapshotValue(before, "virtualTerrainDesiredLocusMinimumLeafX"),
+    snapshotValue(before, "virtualTerrainDesiredLocusMinimumLeafZ"),
+    snapshotValue(before, "virtualTerrainDesiredLocusMaximumLeafExclusiveX"),
+    snapshotValue(before, "virtualTerrainDesiredLocusMaximumLeafExclusiveZ"),
+  ].join(":");
+  const deadline = performance.now() + durationMs;
   await page.keyboard.down("KeyW");
   try {
     while (performance.now() < deadline) {
@@ -477,6 +487,24 @@ async function sustainedSpectatorTravel(
       longestFrameWaitMs = Math.max(longestFrameWaitMs, performance.now() - frameWaitStarted);
       previousFrame = snapshotValue(current, "frameSequence");
       frames += 1;
+      const currentCut = [
+        snapshotValue(current, "virtualTerrainCutFingerprintHigh24"),
+        snapshotValue(current, "virtualTerrainCutFingerprintLow24"),
+      ].join(":");
+      if (currentCut !== cut) {
+        cutTransitions += 1;
+        cut = currentCut;
+      }
+      const currentExactLocus = [
+        snapshotValue(current, "virtualTerrainDesiredLocusMinimumLeafX"),
+        snapshotValue(current, "virtualTerrainDesiredLocusMinimumLeafZ"),
+        snapshotValue(current, "virtualTerrainDesiredLocusMaximumLeafExclusiveX"),
+        snapshotValue(current, "virtualTerrainDesiredLocusMaximumLeafExclusiveZ"),
+      ].join(":");
+      if (currentExactLocus !== exactLocus) {
+        exactLocusTransitions += 1;
+        exactLocus = currentExactLocus;
+      }
       const observedAt = performance.now();
       const forwardStep =
         (snapshotValue(current, "cameraX") - snapshotValue(previous, "cameraX")) * forward[0] +
@@ -510,9 +538,9 @@ async function sustainedSpectatorTravel(
   const lateralDriftMetres = Math.sqrt(
     Math.max(0, totalDisplacement * totalDisplacement - distanceMetres * distanceMetres),
   );
-  if (distanceMetres < 100) {
+  if (distanceMetres < minimumDistanceMetres) {
     throw new Error(
-      `spectator covered only ${distanceMetres.toFixed(2)}m during ${SPECTATOR_TRAVEL_MS / 1_000}s of held forward input`,
+      `spectator covered only ${distanceMetres.toFixed(2)}m during ${durationMs / 1_000}s of held forward input`,
     );
   }
   if (longestNoProgressMs > MAX_SPECTATOR_NO_PROGRESS_MS) {
@@ -530,7 +558,20 @@ async function sustainedSpectatorTravel(
       `held spectator-forward input drifted ${lateralDriftMetres.toFixed(2)}m away from its commanded ray`,
     );
   }
-  return { distanceMetres, longestNoProgressMs, longestFrameWaitMs, frames };
+  if (exactLocusTransitions === 0 || cutTransitions === 0) {
+    throw new Error(
+      `spectator movement did not exercise a new exact terrain locus and committed cut: ` +
+        `${exactLocusTransitions} locus transitions, ${cutTransitions} cut transitions`,
+    );
+  }
+  return {
+    distanceMetres,
+    longestNoProgressMs,
+    longestFrameWaitMs,
+    frames,
+    cutTransitions,
+    exactLocusTransitions,
+  };
 }
 
 async function waitForInventoryRevision(
@@ -941,6 +982,51 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
       throw error;
     }
     const coldStartMs = performance.now() - coldStartStarted;
+
+    // Exercise the reported failure in its coldest real state: enter spectator immediately after
+    // the first playable frame, before the ten-second stability window, ordinary movement, edits,
+    // screenshots, or a long route can warm the destination page cache.
+    recorder.setPhase("fresh-spectator-travel");
+    const bodyBeforeFreshSpectator = await recorder.guard(engine.setSpectator(true));
+    // Fly perpendicular to the later yaw-zero walking route so this probe cannot warm its pages.
+    await recorder.guard(engine.setCameraLook(Math.PI / 2, 0));
+    const freshSpectatorMotion = await sustainedSpectatorTravel(page, recorder, 5_000, 40);
+    const freshSpectatorEndpoint = await auditCapture(
+      context,
+      page,
+      engine,
+      "fresh-spectator-endpoint",
+      0,
+    );
+    recorder.setPhase("fresh-spectator-restore");
+    const freshRestoredBody = await recorder.guard(engine.setSpectator(false));
+    const freshSpectatorBodyRestoreErrorMetres = Math.hypot(
+      snapshotValue(freshRestoredBody, "cameraX") -
+        snapshotValue(bodyBeforeFreshSpectator, "cameraX"),
+      snapshotValue(freshRestoredBody, "cameraY") -
+        snapshotValue(bodyBeforeFreshSpectator, "cameraY"),
+      snapshotValue(freshRestoredBody, "cameraZ") -
+        snapshotValue(bodyBeforeFreshSpectator, "cameraZ"),
+    );
+    if (freshSpectatorBodyRestoreErrorMetres > 0.001) {
+      throw new Error(
+        `fresh spectator flight restored the player body ${freshSpectatorBodyRestoreErrorMetres.toFixed(4)}m from its saved position`,
+      );
+    }
+    await recorder.waitFor(
+      (snapshot) =>
+        snapshotValue(snapshot, "terrainReady") === 1 &&
+        snapshotValue(snapshot, "canonicalImmediateRequired") > 0 &&
+        snapshotValue(snapshot, "canonicalImmediateResident") >=
+          snapshotValue(snapshot, "canonicalImmediateRequired") &&
+        snapshotValue(snapshot, "grounded") === 1,
+      {
+        timeoutMs: 30_000,
+        description:
+          "gameplay body did not recover exact collision terrain after immediate spectator flight",
+      },
+    );
+
     recorder.setPhase("pedestal-step");
     await recorder.guard(engine.setCameraLook(snapshotValue(ready, "yaw"), -0.48));
     const pedestalStepMetres = await shortPlayerStep(page, recorder);
@@ -1264,8 +1350,17 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
 
     return {
       summary:
-        "Default spawn, walking, jumping, sustained spectator flight, dig, place, and capture retained continuous movement and exact gap-free near terrain.",
+        "Default spawn, immediate and sustained spectator flight, walking, jumping, dig, place, and capture retained continuous movement and exact gap-free near terrain.",
       metrics: {
+        freshSpectatorTravelMetres: freshSpectatorMotion.distanceMetres,
+        freshSpectatorLongestNoProgressMs: freshSpectatorMotion.longestNoProgressMs,
+        freshSpectatorLongestFrameWaitMs: freshSpectatorMotion.longestFrameWaitMs,
+        freshSpectatorTravelFrames: freshSpectatorMotion.frames,
+        freshSpectatorCutTransitions: freshSpectatorMotion.cutTransitions,
+        freshSpectatorExactLocusTransitions: freshSpectatorMotion.exactLocusTransitions,
+        freshSpectatorEndpointExactPages: freshSpectatorEndpoint.exactPages,
+        freshSpectatorEndpointCut: freshSpectatorEndpoint.cutFingerprint,
+        freshSpectatorBodyRestoreErrorMetres,
         walkedMetres: travelMotion.distanceMetres,
         playerLongestNoProgressMs: travelMotion.longestNoProgressMs,
         playerLongestFrameWaitMs: travelMotion.longestFrameWaitMs,
@@ -1297,12 +1392,14 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
         travelTerrainRevisionDigest: travel.terrainRevisionDigest,
         editedTerrainRevisionDigest: edited.terrainRevisionDigest,
         largestEnclosedSkyComponent: Math.max(
-          ...[pedestal, travel, edited, placed, spectator].map(
+          ...[freshSpectatorEndpoint, pedestal, travel, edited, placed, spectator].map(
             (entry) => entry.largestEnclosedSkyComponent,
           ),
         ),
         largestTerrainInteriorSkyPixels: Math.max(
-          ...[pedestal, travel, edited, placed].map((entry) => entry.terrainInteriorSkyPixels),
+          ...[freshSpectatorEndpoint, pedestal, travel, edited, placed].map(
+            (entry) => entry.terrainInteriorSkyPixels,
+          ),
         ),
         exactLodDiscontinuities: 0,
         continuousRendererFrames: recorder.observedFrames,

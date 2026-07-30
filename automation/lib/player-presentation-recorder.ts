@@ -6,6 +6,8 @@ export type PlayerPresentationPhase =
   | "startup"
   | "pedestal-step"
   | "pedestal-settle"
+  | "fresh-spectator-travel"
+  | "fresh-spectator-restore"
   | "travel"
   | "jump"
   | "spectator-ascent"

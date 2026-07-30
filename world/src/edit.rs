@@ -1,4 +1,7 @@
-use crate::{CHUNK_EDGE, Chunk, ChunkCoord, Generator, Material, MeshingHalo, SkylineFeature};
+use crate::{
+    CHUNK_EDGE, Chunk, ChunkCoord, Generator, Material, MeshingEditEnvelope, MeshingHalo,
+    SkylineFeature,
+};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -139,6 +142,26 @@ impl EditedChunk {
         let after = self.overrides.partition_point(|&(index, _)| index <= end);
         &self.overrides[first..after]
     }
+
+    fn for_each_in_box(
+        &self,
+        x: (usize, usize),
+        y: (usize, usize),
+        z: (usize, usize),
+        mut visit: impl FnMut(u16),
+    ) {
+        for local_x in x.0..=x.1 {
+            for local_z in z.0..=z.1 {
+                let start = local_index([local_x, y.0, local_z]);
+                let end = local_index([local_x, y.1, local_z]);
+                let first = self.overrides.partition_point(|&(index, _)| index < start);
+                let after = self.overrides.partition_point(|&(index, _)| index <= end);
+                for &(index, _) in &self.overrides[first..after] {
+                    visit(index);
+                }
+            }
+        }
+    }
 }
 
 impl EditMap {
@@ -224,6 +247,75 @@ impl EditMap {
         self.chunks
             .get(&chunk_key(coord.chunk()))
             .and_then(|chunk| chunk.get(local_index(coord.local())))
+    }
+
+    /// Builds the one-voxel edit-provenance shell for a canonical mesh directly from the sparse
+    /// journal. This visits only edited entries in the 27 potentially intersecting chunks instead
+    /// of issuing 34³ B-tree lookups for every generated chunk.
+    pub fn meshing_edit_envelope(&self, coord: ChunkCoord) -> Option<MeshingEditEnvelope> {
+        if !coord.is_world_representable() {
+            return None;
+        }
+        let origin = coord.world_origin();
+        let edge = CHUNK_EDGE as i32;
+        let mut indices = Vec::new();
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let [Some(x), Some(y), Some(z)] = [
+                        coord.x.checked_add(dx),
+                        coord.y.checked_add(dy),
+                        coord.z.checked_add(dz),
+                    ] else {
+                        continue;
+                    };
+                    let neighbor = ChunkCoord::new(x, y, z);
+                    if !neighbor.is_world_representable() {
+                        continue;
+                    }
+                    let Some(chunk) = self.chunks.get(&chunk_key(neighbor)) else {
+                        continue;
+                    };
+                    let neighbor_origin = neighbor.world_origin();
+                    let bounds = |offset| match offset {
+                        -1 => (CHUNK_EDGE - 1, CHUNK_EDGE - 1),
+                        0 => (0, CHUNK_EDGE - 1),
+                        1 => (0, 0),
+                        _ => unreachable!("meshing neighbors are exactly one chunk away"),
+                    };
+                    chunk.for_each_in_box(bounds(dx), bounds(dy), bounds(dz), |local_index| {
+                        let local = local_coord(local_index);
+                        let voxel = [
+                            neighbor_origin[0] + local[0] as i32,
+                            neighbor_origin[1] + local[1] as i32,
+                            neighbor_origin[2] + local[2] as i32,
+                        ];
+                        let relative = [
+                            i64::from(voxel[0]) - i64::from(origin[0]),
+                            i64::from(voxel[1]) - i64::from(origin[1]),
+                            i64::from(voxel[2]) - i64::from(origin[2]),
+                        ];
+                        if !relative
+                            .iter()
+                            .all(|value| (-1..=i64::from(edge)).contains(value))
+                        {
+                            return;
+                        }
+                        let x = (relative[0] + 1) as usize;
+                        let y = (relative[1] + 1) as usize;
+                        let z = (relative[2] + 1) as usize;
+                        let index = x
+                            + z * MeshingEditEnvelope::EDGE
+                            + y * MeshingEditEnvelope::EDGE * MeshingEditEnvelope::EDGE;
+                        debug_assert!(u16::try_from(index).is_ok());
+                        indices.push(index as u16);
+                    });
+                }
+            }
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        MeshingEditEnvelope::from_indices(coord, indices)
     }
 
     pub fn len(&self) -> usize {
@@ -847,6 +939,65 @@ pub fn apply_resident_mutations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_meshing_edit_envelope_matches_exhaustive_sampling() {
+        let coord = ChunkCoord::new(2, 3, -4);
+        let origin = coord.world_origin();
+        let mut edits = EditMap::default();
+        for voxel in [
+            VoxelCoord::new(origin[0] - 1, origin[1] - 1, origin[2] - 1),
+            VoxelCoord::new(origin[0] + 7, origin[1] + 9, origin[2] + 11),
+            VoxelCoord::new(
+                origin[0] + CHUNK_EDGE as i32,
+                origin[1] + CHUNK_EDGE as i32,
+                origin[2] + CHUNK_EDGE as i32,
+            ),
+            VoxelCoord::new(origin[0] - 2, origin[1], origin[2]),
+        ] {
+            edits.insert_override(voxel, Material::Basalt);
+        }
+        let sparse = edits.meshing_edit_envelope(coord).unwrap();
+        let exhaustive = MeshingEditEnvelope::from_sampler(coord, |x, y, z| {
+            edits.override_at(VoxelCoord::new(x, y, z)).is_some()
+        })
+        .unwrap();
+        assert_eq!(sparse, exhaustive);
+        assert_eq!(sparse.indices().len(), 3);
+    }
+
+    #[test]
+    fn dense_neighbor_queries_visit_only_the_intersecting_slab() {
+        let chunk = EditedChunk {
+            overrides: (0..crate::CHUNK_VOLUME)
+                .map(|index| (index as u16, Material::Stone))
+                .collect(),
+        };
+        let mut face = 0;
+        chunk.for_each_in_box(
+            (CHUNK_EDGE - 1, CHUNK_EDGE - 1),
+            (0, CHUNK_EDGE - 1),
+            (0, CHUNK_EDGE - 1),
+            |_| face += 1,
+        );
+        let mut edge = 0;
+        chunk.for_each_in_box(
+            (CHUNK_EDGE - 1, CHUNK_EDGE - 1),
+            (CHUNK_EDGE - 1, CHUNK_EDGE - 1),
+            (0, CHUNK_EDGE - 1),
+            |_| edge += 1,
+        );
+        let mut corner = 0;
+        chunk.for_each_in_box(
+            (CHUNK_EDGE - 1, CHUNK_EDGE - 1),
+            (CHUNK_EDGE - 1, CHUNK_EDGE - 1),
+            (CHUNK_EDGE - 1, CHUNK_EDGE - 1),
+            |_| corner += 1,
+        );
+        assert_eq!(face, CHUNK_EDGE * CHUNK_EDGE);
+        assert_eq!(edge, CHUNK_EDGE);
+        assert_eq!(corner, 1);
+    }
 
     #[test]
     fn durable_edit_chunk_round_trips_compactly_and_binds_its_coordinate() {

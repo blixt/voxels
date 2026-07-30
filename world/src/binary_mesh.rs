@@ -213,20 +213,12 @@ pub fn mesh_chunk_binary_with_scratch_and_surface(
                         ),
                         surface_owned: surface.is_some_and(|surface| {
                             heightfield_owns_face(
-                                surface,
-                                origin,
-                                local,
-                                neighbor,
-                                material,
-                                face as u8,
+                                surface, origin, local, neighbor, material, face as u8,
                             )
                         }),
                         edit_owned: edits.is_some_and(|edits| {
-                            edits.sample_local(
-                                local[0] as i32,
-                                local[1] as i32,
-                                local[2] as i32,
-                            ) || edits.sample_local(neighbor[0], neighbor[1], neighbor[2])
+                            edits.sample_local(local[0] as i32, local[1] as i32, local[2] as i32)
+                                || edits.sample_local(neighbor[0], neighbor[1], neighbor[2])
                         }),
                     };
                     let planes = &mut scratch.keyed_planes[slice];
@@ -247,12 +239,15 @@ pub fn mesh_chunk_binary_with_scratch_and_surface(
 
         for slice in 0..CHUNK_EDGE {
             for plane in &mut scratch.keyed_planes[slice] {
+                let mut partitions = MeshPartitions {
+                    mesh: &mut mesh,
+                    opaque_edits: &mut opaque_edits,
+                    opaque_volume: &mut opaque_volume,
+                    translucent_edits: &mut translucent_edits,
+                    translucent_volume: &mut translucent_volume,
+                };
                 append_binary_plane(
-                    &mut mesh,
-                    &mut opaque_edits,
-                    &mut opaque_volume,
-                    &mut translucent_edits,
-                    &mut translucent_volume,
+                    &mut partitions,
                     face as u8,
                     slice,
                     plane.key,
@@ -271,6 +266,14 @@ pub fn mesh_chunk_binary_with_scratch_and_surface(
     mesh.translucent.extend(translucent_edits);
     mesh.translucent.extend(translucent_volume);
     mesh
+}
+
+struct MeshPartitions<'a> {
+    mesh: &'a mut MeshedChunk,
+    opaque_edits: &'a mut Vec<Quad>,
+    opaque_volume: &'a mut Vec<Quad>,
+    translucent_edits: &'a mut Vec<Quad>,
+    translucent_volume: &'a mut Vec<Quad>,
 }
 
 fn build_visible_face_columns(scratch: &mut BinaryMeshScratch) {
@@ -300,11 +303,7 @@ fn build_visible_face_columns(scratch: &mut BinaryMeshScratch) {
 }
 
 fn append_binary_plane(
-    mesh: &mut MeshedChunk,
-    opaque_edits: &mut Vec<Quad>,
-    opaque_volume: &mut Vec<Quad>,
-    translucent_edits: &mut Vec<Quad>,
-    translucent_volume: &mut Vec<Quad>,
+    output: &mut MeshPartitions<'_>,
     face: u8,
     slice: usize,
     key: FaceKey,
@@ -337,12 +336,14 @@ fn append_binary_plane(
                 _pad: 0,
             };
             match key.material.render_layer() {
-                RenderLayer::Opaque if key.edit_owned => opaque_edits.push(quad),
-                RenderLayer::Opaque if key.surface_owned => mesh.opaque.push(quad),
-                RenderLayer::Opaque => opaque_volume.push(quad),
-                RenderLayer::Translucent if key.edit_owned => translucent_edits.push(quad),
-                RenderLayer::Translucent if key.surface_owned => mesh.translucent.push(quad),
-                RenderLayer::Translucent => translucent_volume.push(quad),
+                RenderLayer::Opaque if key.edit_owned => output.opaque_edits.push(quad),
+                RenderLayer::Opaque if key.surface_owned => output.mesh.opaque.push(quad),
+                RenderLayer::Opaque => output.opaque_volume.push(quad),
+                RenderLayer::Translucent if key.edit_owned => {
+                    output.translucent_edits.push(quad);
+                }
+                RenderLayer::Translucent if key.surface_owned => output.mesh.translucent.push(quad),
+                RenderLayer::Translucent => output.translucent_volume.push(quad),
                 RenderLayer::Empty => unreachable!("visible face cannot belong to air"),
             }
         }
@@ -477,9 +478,10 @@ fn compose(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mesh::mesh_chunk_with_ownership;
     use crate::{
-        ChunkCoord, Generator, MeshingSurfaceColumn, MeshingSurfaceEnvelope, mesh_chunk,
-        mesh_chunk_with_surface,
+        ChunkCoord, Generator, MeshingEditEnvelope, MeshingSurfaceColumn, MeshingSurfaceEnvelope,
+        mesh_chunk,
     };
 
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -523,23 +525,27 @@ mod tests {
         assert_eq!(binary.emissive_clusters, scalar.emissive_clusters);
     }
 
-    fn assert_surface_equivalent(
+    fn assert_owned_equivalent(
         chunk: &Chunk,
         surface: &MeshingSurfaceEnvelope,
+        edits: Option<&MeshingEditEnvelope>,
         outside: impl Fn(i32, i32, i32) -> Material + Copy,
     ) {
-        let scalar = mesh_chunk_with_surface(chunk, Some(surface), outside);
-        let binary = mesh_chunk_binary_with_surface(chunk, surface, outside);
+        let scalar = mesh_chunk_with_ownership(chunk, Some(surface), edits, outside);
+        let binary = mesh_chunk_binary_with_scratch_and_surface(
+            chunk,
+            Some(surface),
+            edits,
+            outside,
+            &mut BinaryMeshScratch::default(),
+        );
         assert_eq!(binary.opaque_surface_quads, scalar.opaque_surface_quads);
         assert_eq!(binary.opaque_edit_quads, scalar.opaque_edit_quads);
         assert_eq!(
             binary.translucent_surface_quads,
             scalar.translucent_surface_quads
         );
-        assert_eq!(
-            binary.translucent_edit_quads,
-            scalar.translucent_edit_quads
-        );
+        assert_eq!(binary.translucent_edit_quads, scalar.translucent_edit_quads);
         assert_eq!(
             unit_faces(&binary.opaque[..binary.opaque_surface_quads as usize]),
             unit_faces(&scalar.opaque[..scalar.opaque_surface_quads as usize])
@@ -595,7 +601,6 @@ mod tests {
                 MeshingSurfaceColumn {
                     valid: true,
                     ground_plane: origin_y + 10,
-                    ground_material: Material::Stone,
                     water_plane: Some(origin_y + 14),
                 };
                 MeshingSurfaceEnvelope::COLUMN_COUNT
@@ -619,7 +624,13 @@ mod tests {
         }
         chunk.set(7, 4, 8, Material::Air);
         chunk.set(9, 17, 10, Material::Basalt);
-        assert_surface_equivalent(&chunk, &surface, |_, y, _| {
+        let origin = coord.world_origin();
+        let edits = MeshingEditEnvelope::from_sampler(coord, |x, y, z| {
+            [x, y, z] == [origin[0] + 7, origin[1] + 4, origin[2] + 8]
+                || [x, y, z] == [origin[0] + 9, origin[1] + 17, origin[2] + 10]
+        })
+        .unwrap();
+        assert_owned_equivalent(&chunk, &surface, Some(&edits), |_, y, _| {
             if y < origin_y + 10 {
                 Material::Stone
             } else if y < origin_y + 14 {

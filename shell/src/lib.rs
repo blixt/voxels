@@ -3722,6 +3722,9 @@ mod web {
             requirements: &[CanonicalRequirement],
         ) {
             if requirements.is_empty() {
+                self.renderer
+                    .borrow_mut()
+                    .discard_staged_canonical_world_change(server_revision);
                 return;
             }
             let replacement = requirements
@@ -3730,6 +3733,7 @@ mod web {
                 .collect::<BTreeMap<_, _>>();
             let replacement_keys = replacement.keys().copied().collect::<BTreeSet<_>>();
             let mut merged = BTreeMap::new();
+            let mut superseded_revisions = Vec::new();
             let mut publications = self.canonical_publications.borrow_mut();
             publications.retain(|publication| {
                 let overlaps = publication
@@ -3737,6 +3741,7 @@ mod web {
                     .keys()
                     .any(|key| replacement_keys.contains(key));
                 if overlaps {
+                    superseded_revisions.push(publication.server_revision);
                     merged.extend(
                         publication
                             .requirements
@@ -3753,6 +3758,11 @@ mod web {
                 server_revision,
                 requirements: merged,
             });
+            drop(publications);
+            let mut renderer = self.renderer.borrow_mut();
+            for revision in superseded_revisions {
+                renderer.discard_staged_canonical_world_change(revision);
+            }
         }
 
         fn publish_ready_canonical_cuts(&self) -> bool {
@@ -3785,6 +3795,9 @@ mod web {
                         .retain(|candidate| {
                             candidate.server_revision != publication.server_revision
                         });
+                    self.renderer
+                        .borrow_mut()
+                        .discard_staged_canonical_world_change(publication.server_revision);
                     continue;
                 }
                 if current != publication.requirements
@@ -3829,7 +3842,10 @@ mod web {
                         cut.push((chunk, &mesh.mesh));
                     }
                     cut.len() == current.len()
-                        && self.renderer.borrow_mut().upload_chunks_atomic(cut)
+                        && self
+                            .renderer
+                            .borrow_mut()
+                            .stage_canonical_world_change(publication.server_revision, cut)
                 };
                 if uploaded {
                     let mut uploads = self.pending_uploads.borrow_mut();
@@ -6388,7 +6404,7 @@ mod web {
                 // proofs before applying voxel values or retiring/mutating any geometry source.
                 self.renderer
                     .borrow_mut()
-                    .invalidate_virtual_terrain_world_change(&world_change);
+                    .invalidate_virtual_terrain_world_change(&world_change, server_revision);
             }
             let accepted_mutations = mutations
                 .iter()
@@ -6423,11 +6439,7 @@ mod web {
                         if !resident.contains_key(&key) {
                             continue;
                         }
-                        let Some(envelope) =
-                            MeshingEditEnvelope::from_sampler(coord, |x, y, z| {
-                                edits.override_at(VoxelCoord::new(x, y, z)).is_some()
-                            })
-                        else {
+                        let Some(envelope) = edits.meshing_edit_envelope(coord) else {
                             log_gpu_error("authoritative edit provenance exceeded world bounds");
                             continue;
                         };

@@ -12,13 +12,12 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use voxels_world::{
-    CanonicalFaceKey, FEATURE_MAX_RADIUS_VOXELS, FaceAxis, Material,
-    TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_PAGE_TARGET_COMPRESSED_BYTES,
-    TERRAIN_REGION_ROOT_LEVEL, TerrainErrorBounds, TerrainHierarchyDirectoryV1, TerrainPageKey,
-    TerrainPageTransferIdentity, TerrainPageV1, TerrainRegionBuildV1,
-    TerrainSimplificationBudget, VoxelBlockRequest, VoxelCoord, WorldProduct, WorldProductBatch,
-    WorldProductPriority, WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash,
-    build_owned_exact_surface_terrain_page,
+    CanonicalFaceKey, FEATURE_MAX_RADIUS_VOXELS, FaceAxis, Material, TERRAIN_COVERAGE_ROOT_LEVEL,
+    TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TERRAIN_REGION_ROOT_LEVEL,
+    TerrainErrorBounds, TerrainHierarchyDirectoryV1, TerrainPageKey, TerrainPageTransferIdentity,
+    TerrainPageV1, TerrainRegionBuildV1, TerrainSimplificationBudget, VoxelBlockRequest,
+    VoxelCoord, WorldProduct, WorldProductBatch, WorldProductPriority, WorldProductRequest,
+    WorldSourceEngine, WorldSourceIdentityHash, build_owned_exact_surface_terrain_page,
     build_terrain_coverage_root_with_revisions, build_terrain_region, decode_terrain_page,
     encode_terrain_directory, encode_terrain_page,
 };
@@ -663,11 +662,7 @@ impl ExactSurfaceScan {
             FaceAxis::Y => face.solid_side.y,
             FaceAxis::Z => face.solid_side.z,
         };
-        *component = component.saturating_add(if face.plane > solid_component {
-            1
-        } else {
-            -1
-        });
+        *component = component.saturating_add(if face.plane > solid_component { 1 } else { -1 });
         if self.edits.override_at(face.solid_side).is_some()
             || self.edits.override_at(neighbor).is_some()
         {
@@ -681,11 +676,13 @@ impl ExactSurfaceScan {
         };
         if material == Material::Water {
             return face.axis == FaceAxis::Y
-                && face.plane == current.water_level.and_then(|height| height.checked_add(1)).unwrap_or(i32::MIN);
+                && face.plane
+                    == current
+                        .water_level
+                        .and_then(|height| height.checked_add(1))
+                        .unwrap_or(i32::MIN);
         }
-        if material.render_layer() != voxels_world::RenderLayer::Opaque
-            || material != current.material
-        {
+        if material.render_layer() != voxels_world::RenderLayer::Opaque {
             return false;
         }
         let Some(neighbor_column) = self.source_sample(neighbor.x, neighbor.z) else {

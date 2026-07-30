@@ -562,6 +562,38 @@ fn mark_invalidated_presented_terrain_revision(
     true
 }
 
+fn pending_canonical_world_changes_ready(
+    pending: &BTreeMap<u64, PendingCanonicalWorldChange>,
+) -> bool {
+    pending.values().all(|change| change.uploads.is_some())
+}
+
+fn take_pending_canonical_chunk_uploads(
+    pending: &mut BTreeMap<u64, PendingCanonicalWorldChange>,
+    key: MeshKey,
+    except_revision: Option<u64>,
+) -> Vec<PreparedCanonicalChunkUpload> {
+    let mut discarded = Vec::new();
+    for (revision, change) in pending {
+        if Some(*revision) == except_revision {
+            continue;
+        }
+        let Some(uploads) = change.uploads.as_mut() else {
+            continue;
+        };
+        let mut retained = Vec::with_capacity(uploads.len());
+        for upload in std::mem::take(uploads) {
+            if upload.key == key {
+                discarded.push(upload);
+            } else {
+                retained.push(upload);
+            }
+        }
+        *uploads = retained;
+    }
+    discarded
+}
+
 fn reset_presented_terrain(terrain: &mut PresentedTerrain) -> bool {
     let changed = matches!(terrain, PresentedTerrain::Virtual(_));
     *terrain = PresentedTerrain::CanonicalShadow;
@@ -2837,15 +2869,10 @@ fn constrain_bounded_gpu_quads(
     // larger than the packed representation. The introduced tile vertices also become shared
     // lattice endpoints for every neighbor in this same pass.
     let base_quads = split_gpu_quads_for_canonical_triangles(base_quads);
-    constrain_split_bounded_gpu_quads(
-        &base_quads,
-        bounds_min,
-        bounds_max,
-        preserve_packed_ao,
-    )
-    .into_iter()
-    .flatten()
-    .collect()
+    constrain_split_bounded_gpu_quads(&base_quads, bounds_min, bounds_max, preserve_packed_ao)
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 fn constrain_split_bounded_gpu_quads(
@@ -2918,8 +2945,7 @@ fn canonical_gpu_quads_partitioned(
         .chain(volume)
         .collect::<Vec<_>>();
     let chunk_max = world_origin.map(|value| value.saturating_add(CHUNK_EDGE as i32));
-    let constrained =
-        constrain_split_bounded_gpu_quads(&split, world_origin, chunk_max, false);
+    let constrained = constrain_split_bounded_gpu_quads(&split, world_origin, chunk_max, false);
     let surface_output_count = constrained[..surface_split_count]
         .iter()
         .map(Vec::len)
@@ -2992,6 +3018,15 @@ struct PreparedCanonicalChunkUpload {
     opaque: Option<ChunkMesh>,
     translucent: Option<ChunkMesh>,
     local_lights: Vec<GpuLocalLight>,
+}
+
+/// Canonical geometry prepared for the same visual epoch as the next revised virtual cut.
+///
+/// Allocations and queue writes are complete, but the resident directories remain untouched until
+/// `commit_virtual_client_view` promotes the matching virtual publication. This prevents an
+/// accepted edit from ever presenting as `V_old + C_new`.
+struct PendingCanonicalWorldChange {
+    uploads: Option<Vec<PreparedCanonicalChunkUpload>>,
 }
 
 #[repr(u8)]
@@ -3126,21 +3161,20 @@ struct VirtualTerrainDrawLists {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct VirtualTerrainOwnership {
     envelope_pages: BTreeSet<TerrainPageKey>,
+    edit_patch_pages: BTreeSet<TerrainPageKey>,
     full_face_pages: BTreeMap<TerrainPageKey, voxels_world::VoxelBounds>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VirtualTerrainCanonicalCapability {
-    SurfaceEnvelope,
+    SurfaceEnvelope { includes_edit_patch: bool },
     FullFaceDomain(voxels_world::VoxelBounds),
 }
 
 impl VirtualTerrainOwnership {
     fn from_cut(
         cut: &VirtualTerrainCut,
-        mut page_capability: impl FnMut(
-            TerrainPageKey,
-        ) -> Option<VirtualTerrainCanonicalCapability>,
+        mut page_capability: impl FnMut(TerrainPageKey) -> Option<VirtualTerrainCanonicalCapability>,
     ) -> Result<Self, VirtualTerrainRendererError> {
         let selected = cut.selected_pages.iter().copied().collect::<BTreeSet<_>>();
         let roots = cut
@@ -3176,18 +3210,35 @@ impl VirtualTerrainOwnership {
         let envelope_pages = page_capabilities
             .iter()
             .filter_map(|(key, capability)| {
-                (*capability == VirtualTerrainCanonicalCapability::SurfaceEnvelope).then_some(*key)
+                matches!(
+                    capability,
+                    VirtualTerrainCanonicalCapability::SurfaceEnvelope { .. }
+                )
+                .then_some(*key)
+            })
+            .collect();
+        let edit_patch_pages = page_capabilities
+            .iter()
+            .filter_map(|(key, capability)| {
+                matches!(
+                    capability,
+                    VirtualTerrainCanonicalCapability::SurfaceEnvelope {
+                        includes_edit_patch: true
+                    }
+                )
+                .then_some(*key)
             })
             .collect();
         let full_face_pages = page_capabilities
             .into_iter()
             .filter_map(|(key, capability)| match capability {
                 VirtualTerrainCanonicalCapability::FullFaceDomain(bounds) => Some((key, bounds)),
-                VirtualTerrainCanonicalCapability::SurfaceEnvelope => None,
+                VirtualTerrainCanonicalCapability::SurfaceEnvelope { .. } => None,
             })
             .collect();
         Ok(Self {
             envelope_pages,
+            edit_patch_pages,
             full_face_pages,
         })
     }
@@ -3204,6 +3255,13 @@ impl VirtualTerrainOwnership {
             return false;
         };
         self.full_pages_cover_voxel_bounds(minimum, maximum)
+    }
+
+    fn covers_edit_patch_aabb(&self, minimum: glam::Vec3, maximum: glam::Vec3) -> bool {
+        let Some((minimum, maximum)) = voxel_bounds_from_metres(minimum, maximum) else {
+            return false;
+        };
+        self.pages_cover_voxel_bounds(&self.edit_patch_pages, minimum, maximum)
     }
 
     fn full_pages_cover_voxel_bounds(&self, minimum: [i32; 3], maximum: [i32; 3]) -> bool {
@@ -3275,8 +3333,15 @@ fn virtual_terrain_canonical_capability(
     page: &VirtualTerrainGpuPage,
 ) -> VirtualTerrainCanonicalCapability {
     match page.canonical_ownership {
-        voxels_world::TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits => {
-            VirtualTerrainCanonicalCapability::SurfaceEnvelope
+        voxels_world::TerrainCanonicalOwnership::SurfaceEnvelopeAndEditPatch => {
+            VirtualTerrainCanonicalCapability::SurfaceEnvelope {
+                includes_edit_patch: true,
+            }
+        }
+        voxels_world::TerrainCanonicalOwnership::SurfaceEnvelopeOnly => {
+            VirtualTerrainCanonicalCapability::SurfaceEnvelope {
+                includes_edit_patch: false,
+            }
         }
         voxels_world::TerrainCanonicalOwnership::FullFaceDomain => {
             VirtualTerrainCanonicalCapability::FullFaceDomain(page.bounds)
@@ -4153,6 +4218,7 @@ pub struct Renderer {
     /// cache arrivals, and a newer desired view may replace `virtual_terrain_oracle_cut`, but may
     /// not replace this transaction until it promotes or fails.
     virtual_terrain_publication: Option<VirtualTerrainPublication>,
+    pending_canonical_world_changes: BTreeMap<u64, PendingCanonicalWorldChange>,
     next_virtual_terrain_request: u64,
     /// An encode failure releases the transaction immediately, but expanded candidate geometry is
     /// reclaimed at the next streaming boundary rather than while frame draw lists borrow it.
@@ -5095,6 +5161,7 @@ impl Renderer {
             virtual_terrain_presented_coverage_gap_frames: 0,
             virtual_terrain_presented_invariant_failure_frames: 0,
             virtual_terrain_publication: None,
+            pending_canonical_world_changes: BTreeMap::new(),
             next_virtual_terrain_request: 1,
             virtual_terrain_publication_abort_pending: false,
             virtual_terrain_error_scale: 1.0,
@@ -7318,6 +7385,9 @@ impl Renderer {
         if !publication.certificate.complete {
             return VirtualTerrainReadyStatus::Stale;
         }
+        if !pending_canonical_world_changes_ready(&self.pending_canonical_world_changes) {
+            return VirtualTerrainReadyStatus::Pending;
+        }
         let identity = virtual_terrain_snapshot_identity(
             &publication.cut,
             &publication.envelope,
@@ -7381,6 +7451,7 @@ impl Renderer {
                 if publication.revisions.digest() != ready.revision_digest
                     || !publication.revisions.is_current(authoritative_revisions)
                     || !publication.certificate.complete
+                    || !pending_canonical_world_changes_ready(&self.pending_canonical_world_changes)
                     || !publication
                         .envelope
                         .exact_surface_domain()
@@ -7445,6 +7516,15 @@ impl Renderer {
         };
         let revision_digest = publication.revisions.digest();
         let request = publication.request;
+        let pending_canonical = std::mem::take(&mut self.pending_canonical_world_changes);
+        for pending in pending_canonical.into_values() {
+            let Some(uploads) = pending.uploads else {
+                unreachable!("ready admission requires every canonical epoch to be prepared")
+            };
+            for upload in uploads {
+                self.commit_canonical_chunk_upload(upload);
+            }
+        }
         let committed =
             CommittedVirtualTerrainPresentation::from_publication(publication, generation);
         let receipt = self.mint_published_client_view_receipt(
@@ -7516,7 +7596,11 @@ impl Renderer {
     /// Region retirement moves any removed source allocations into the published-retirement set,
     /// so keeping this snapshot cannot expose freed or repurposed geometry. The replacement still
     /// has to prove current authoritative revisions before it can atomically promote.
-    pub fn invalidate_virtual_terrain_world_change(&mut self, change: &WorldChange) {
+    pub fn invalidate_virtual_terrain_world_change(
+        &mut self,
+        change: &WorldChange,
+        server_revision: u64,
+    ) {
         if self
             .virtual_terrain_reproduction_cut
             .as_ref()
@@ -7537,6 +7621,9 @@ impl Renderer {
                     mark_invalidated_presented_terrain_revision(&mut presented.terrain, change)
                 });
         if invalidated_presented_revision {
+            self.pending_canonical_world_changes
+                .entry(server_revision)
+                .or_insert(PendingCanonicalWorldChange { uploads: None });
             self.invalidate_virtual_terrain_desired_plan();
         }
     }
@@ -7550,6 +7637,7 @@ impl Renderer {
     pub fn reset_virtual_terrain_world(&mut self) {
         self.invalidate_screenshot_reproduction_cut();
         self.virtual_terrain_publication = None;
+        self.discard_all_pending_canonical_world_changes();
         let reset_presented = self
             .presented_client_view
             .as_mut()
@@ -7905,6 +7993,93 @@ impl Renderer {
         self.upload_chunks_atomic(std::iter::once((chunk, mesh)))
     }
 
+    /// Prepares an accepted edit's complete canonical replacement without making it visible ahead
+    /// of the revised virtual owner. Changes unrelated to the presented virtual epoch still publish
+    /// immediately through the ordinary atomic canonical path.
+    pub fn stage_canonical_world_change<'a>(
+        &mut self,
+        server_revision: u64,
+        chunks: impl IntoIterator<Item = (&'a Chunk, &'a MeshedChunk)>,
+    ) -> bool {
+        if !self
+            .pending_canonical_world_changes
+            .contains_key(&server_revision)
+        {
+            return self.upload_chunks_atomic(chunks);
+        }
+        let mut prepared = Vec::new();
+        for (chunk, mesh) in chunks {
+            let Some(upload) = self.prepare_canonical_chunk_upload(chunk, mesh) else {
+                for upload in prepared {
+                    self.discard_canonical_chunk_upload(upload);
+                }
+                return false;
+            };
+            prepared.push(upload);
+        }
+        if prepared.is_empty() {
+            return false;
+        }
+        let prepared_keys = prepared
+            .iter()
+            .map(|upload| upload.key)
+            .collect::<BTreeSet<_>>();
+        let previous = self
+            .pending_canonical_world_changes
+            .get_mut(&server_revision)
+            .and_then(|pending| pending.uploads.replace(prepared));
+        if let Some(previous) = previous {
+            for upload in previous {
+                self.discard_canonical_chunk_upload(upload);
+            }
+        }
+        for key in prepared_keys {
+            self.discard_pending_canonical_chunk_uploads(key, Some(server_revision));
+        }
+        true
+    }
+
+    /// Discards a superseded edit epoch whose canonical requirements are no longer desired.
+    pub fn discard_staged_canonical_world_change(&mut self, server_revision: u64) {
+        let Some(pending) = self
+            .pending_canonical_world_changes
+            .remove(&server_revision)
+        else {
+            return;
+        };
+        if let Some(uploads) = pending.uploads {
+            for upload in uploads {
+                self.discard_canonical_chunk_upload(upload);
+            }
+        }
+    }
+
+    fn discard_all_pending_canonical_world_changes(&mut self) {
+        let pending = std::mem::take(&mut self.pending_canonical_world_changes);
+        for change in pending.into_values() {
+            if let Some(uploads) = change.uploads {
+                for upload in uploads {
+                    self.discard_canonical_chunk_upload(upload);
+                }
+            }
+        }
+    }
+
+    fn discard_pending_canonical_chunk_uploads(
+        &mut self,
+        key: MeshKey,
+        except_revision: Option<u64>,
+    ) {
+        let discarded = take_pending_canonical_chunk_uploads(
+            &mut self.pending_canonical_world_changes,
+            key,
+            except_revision,
+        );
+        for upload in discarded {
+            self.discard_canonical_chunk_upload(upload);
+        }
+    }
+
     /// Publishes one complete canonical edit cut.
     ///
     /// All replacement allocations and queue writes are prepared before any resident directory
@@ -7951,18 +8126,14 @@ impl Renderer {
         };
         let (opaque_quads, [opaque_surface_count, opaque_edit_count]) =
             canonical_gpu_quads_partitioned(
-            origin,
-            &mesh.opaque,
-            mesh.opaque_surface_quads,
-            mesh.opaque_edit_quads,
-        )?;
+                origin,
+                &mesh.opaque,
+                mesh.opaque_surface_quads,
+                mesh.opaque_edit_quads,
+            )?;
         let water_surface_count = mesh.translucent_surface_quads;
         let water_edit_count = mesh.translucent_edit_quads;
-        let water_quads: Vec<_> = mesh
-            .translucent
-            .iter()
-            .map(convert)
-            .collect();
+        let water_quads: Vec<_> = mesh.translucent.iter().map(convert).collect();
         let min = glam::Vec3::from_array(origin.map(|value| value as f32 * VOXEL_SIZE_METRES));
         let max = min + glam::Vec3::splat(CHUNK_EDGE as f32 * VOXEL_SIZE_METRES);
         let quad_bytes = size_of::<GpuQuad>() as u32;
@@ -8124,6 +8295,7 @@ impl Renderer {
 
     pub fn remove_chunk(&mut self, coord: ChunkCoord) {
         let key = (0, coord.x, coord.y, coord.z);
+        self.discard_pending_canonical_chunk_uploads(key, None);
         self.remove_chunk_mesh(key);
         self.chunk_activations.remove(key);
     }
@@ -8420,9 +8592,8 @@ impl Renderer {
         let (virtual_visible, virtual_ownership, committed_horizon_covers_camera) =
             if self.virtual_terrain_mode_from_presented_view() == VirtualTerrainRenderMode::Visible
             {
-                let Some((cut, envelope, certificate, ownership)) = self
-                    .presented_virtual_terrain()
-                    .map(|committed| {
+                let Some((cut, envelope, certificate, ownership)) =
+                    self.presented_virtual_terrain().map(|committed| {
                         (
                             &committed.cut,
                             &committed.envelope,
@@ -8480,11 +8651,7 @@ impl Renderer {
                     envelope.horizon_covers_position(camera.position.to_array()),
                 )
             } else {
-                (
-                    false,
-                    Arc::new(VirtualTerrainOwnership::default()),
-                    true,
-                )
+                (false, Arc::new(VirtualTerrainOwnership::default()), true)
             };
         if !committed_horizon_covers_camera {
             self.virtual_terrain_presented_coverage_gap_frames = self
@@ -10581,11 +10748,15 @@ fn canonical_bounds_owned_by_virtual(
     if virtual_ownership.covers_volume_aabb(bounds_min, bounds_max) {
         return true;
     }
-    matches!(
-        ownership,
-        CanonicalSliceOwnership::SurfaceEnvelope | CanonicalSliceOwnership::EditPatch
-    )
-        && virtual_ownership.covers_envelope_aabb(bounds_min, bounds_max)
+    match ownership {
+        CanonicalSliceOwnership::SurfaceEnvelope => {
+            virtual_ownership.covers_envelope_aabb(bounds_min, bounds_max)
+        }
+        CanonicalSliceOwnership::EditPatch => {
+            virtual_ownership.covers_edit_patch_aabb(bounds_min, bounds_max)
+        }
+        CanonicalSliceOwnership::Volume => false,
+    }
 }
 
 const FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -13264,8 +13435,7 @@ mod tests {
         assert_eq!(surface_count, 4);
         assert_eq!(edit_count, 0);
         assert!(partitioned[..surface_count as usize].iter().all(|quad| {
-            quad.origin == [4, 0, 4]
-                && quad.extent_voxels[0] & CANONICAL_TRIANGLE_FLAG != 0
+            quad.origin == [4, 0, 4] && quad.extent_voxels[0] & CANONICAL_TRIANGLE_FLAG != 0
         }));
         assert_eq!(partitioned[surface_count as usize..].len(), 1);
     }
@@ -14209,6 +14379,75 @@ mod tests {
             panic!("an accepted edit must not create an ownerless frame")
         };
         assert!(!committed.revisions_current);
+    }
+
+    #[test]
+    fn revised_virtual_epoch_waits_for_every_prepared_canonical_change() {
+        let mut pending = BTreeMap::from([(7, PendingCanonicalWorldChange { uploads: None })]);
+        assert!(
+            !pending_canonical_world_changes_ready(&pending),
+            "virtual readiness alone must not expose V_new with C_old"
+        );
+        pending.get_mut(&7).unwrap().uploads = Some(Vec::new());
+        pending.insert(8, PendingCanonicalWorldChange { uploads: None });
+        assert!(
+            !pending_canonical_world_changes_ready(&pending),
+            "one ready edit cannot bypass another unfinished visual epoch"
+        );
+        pending.get_mut(&8).unwrap().uploads = Some(Vec::new());
+        assert!(
+            pending_canonical_world_changes_ready(&pending),
+            "the synchronous commit becomes legal only after all canonical cuts are prepared"
+        );
+    }
+
+    #[test]
+    fn eviction_and_newer_epochs_cannot_resurrect_staged_chunk_geometry() {
+        let key = (0, 4, 5, 6);
+        let other = (0, 7, 8, 9);
+        let upload = |key| PreparedCanonicalChunkUpload {
+            key,
+            opaque: None,
+            translucent: None,
+            local_lights: Vec::new(),
+        };
+        let mut pending = BTreeMap::from([
+            (
+                7,
+                PendingCanonicalWorldChange {
+                    uploads: Some(vec![upload(key), upload(other)]),
+                },
+            ),
+            (
+                8,
+                PendingCanonicalWorldChange {
+                    uploads: Some(vec![upload(key)]),
+                },
+            ),
+        ]);
+        let superseded = take_pending_canonical_chunk_uploads(&mut pending, key, Some(8));
+        assert_eq!(superseded.len(), 1);
+        assert_eq!(superseded[0].key, key);
+        assert_eq!(
+            pending[&7]
+                .uploads
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|upload| upload.key)
+                .collect::<Vec<_>>(),
+            vec![other],
+        );
+        assert_eq!(pending[&8].uploads.as_ref().unwrap().len(), 1);
+
+        let evicted = take_pending_canonical_chunk_uploads(&mut pending, key, None);
+        assert_eq!(evicted.len(), 1);
+        assert!(pending.values().all(|change| {
+            change
+                .uploads
+                .as_ref()
+                .is_some_and(|uploads| uploads.iter().all(|upload| upload.key != key))
+        }));
     }
 
     #[test]
@@ -15529,7 +15768,9 @@ mod tests {
         let incomplete = root.refinement_children().unwrap()[..2].to_vec();
         assert_eq!(
             VirtualTerrainOwnership::from_cut(&virtual_cut_with_selected(incomplete), |_| {
-                Some(VirtualTerrainCanonicalCapability::SurfaceEnvelope)
+                Some(VirtualTerrainCanonicalCapability::SurfaceEnvelope {
+                    includes_edit_patch: false,
+                })
             }),
             Err(VirtualTerrainRendererError::IncompleteRootPartition(root))
         );
@@ -15540,7 +15781,11 @@ mod tests {
         let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 2);
         let ownership = VirtualTerrainOwnership::from_cut(
             &virtual_cut_with_selected(root.refinement_children().unwrap()),
-            |_| Some(VirtualTerrainCanonicalCapability::SurfaceEnvelope),
+            |_| {
+                Some(VirtualTerrainCanonicalCapability::SurfaceEnvelope {
+                    includes_edit_patch: false,
+                })
+            },
         )
         .unwrap();
         assert!(ownership.covers_envelope_aabb(
@@ -15590,7 +15835,11 @@ mod tests {
         let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 2);
         let ownership = VirtualTerrainOwnership::from_cut(
             &virtual_cut_with_selected(root.refinement_children().unwrap()),
-            |_| Some(VirtualTerrainCanonicalCapability::SurfaceEnvelope),
+            |_| {
+                Some(VirtualTerrainCanonicalCapability::SurfaceEnvelope {
+                    includes_edit_patch: false,
+                })
+            },
         )
         .unwrap();
 
@@ -15619,6 +15868,16 @@ mod tests {
                 (0, -1, 0, 66),
                 minimum,
                 maximum,
+                CanonicalSliceOwnership::EditPatch,
+                &ownership,
+            ),
+            "an unedited heightfield has no proof allowing it to suppress authored faces"
+        );
+        assert!(
+            !canonical_bounds_owned_by_virtual(
+                (0, -1, 0, 66),
+                minimum,
+                maximum,
                 CanonicalSliceOwnership::Volume,
                 &ownership,
             ),
@@ -15631,7 +15890,11 @@ mod tests {
         let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 2);
         let ownership = VirtualTerrainOwnership::from_cut(
             &virtual_cut_with_selected(root.refinement_children().unwrap()),
-            |_| Some(VirtualTerrainCanonicalCapability::SurfaceEnvelope),
+            |_| {
+                Some(VirtualTerrainCanonicalCapability::SurfaceEnvelope {
+                    includes_edit_patch: true,
+                })
+            },
         )
         .unwrap();
         let minimum = glam::Vec3::new(-100.0, -10.0, 6_600.0);
