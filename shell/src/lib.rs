@@ -1426,11 +1426,11 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 8;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 60;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 61;
     const FRAME_SAMPLE_WIDTH: u32 = 22;
     const GPU_SAMPLE_WIDTH: u32 = 15;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
-        "cameraX,cameraY,cameraZ,yaw,pitch,grounded,quads,edits,",
+        "cameraX,cameraY,cameraZ,gameplayBodyX,gameplayBodyY,gameplayBodyZ,yaw,pitch,grounded,quads,edits,",
         "residentChunks,trackedChunks,visibleChunks,drawCalls,arenaPages,arenaAllocatedMiB,arenaCapacityMiB,pendingJobs,",
         "frameMs,shadowDrawCalls,shadowCascades,loadP95Frames,loadMaxFrames,remeshP95Frames,remeshMaxFrames,waterQuads,",
         "waterDrawCalls,refractionCopyMiB,immersion,eyeDepthMetres,eyesSubmerged,swimming,targetVoxelX,targetVoxelY,",
@@ -7060,6 +7060,12 @@ mod web {
             let mut values = Vec::new();
             if let Some(engine) = self.engine.as_ref() {
                 let camera = engine.camera.borrow();
+                let gameplay_body_position = engine
+                    .client_view
+                    .borrow()
+                    .current()
+                    .gameplay_body()
+                    .position;
                 let fluid = camera.fluid_state();
                 let diagnostics = engine.scheduler.borrow().diagnostics();
                 let profile = *engine.profile.borrow();
@@ -7386,6 +7392,9 @@ mod web {
                     camera.position.x,
                     camera.position.y,
                     camera.position.z,
+                    gameplay_body_position.x,
+                    gameplay_body_position.y,
+                    gameplay_body_position.z,
                     camera.yaw,
                     camera.pitch,
                     if camera.grounded { 1.0 } else { 0.0 },

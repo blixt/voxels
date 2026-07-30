@@ -59,6 +59,14 @@ function position(snapshot: readonly number[]): readonly [number, number, number
   ];
 }
 
+function gameplayBodyPosition(snapshot: readonly number[]): readonly [number, number, number] {
+  return [
+    snapshotValue(snapshot, "gameplayBodyX"),
+    snapshotValue(snapshot, "gameplayBodyY"),
+    snapshotValue(snapshot, "gameplayBodyZ"),
+  ];
+}
+
 function distance(
   first: readonly [number, number, number],
   second: readonly [number, number, number],
@@ -129,7 +137,7 @@ async function runSpectatorFeed(context: ScenarioContext, arguments_: readonly s
       : {}),
     ...target.clientRoute,
   });
-  const settled = await viewport.engine.waitForSnapshot(
+  await viewport.engine.waitForSnapshot(
     (snapshot) =>
       snapshotValue(snapshot, "terrainReady") === 1 &&
       snapshotValue(snapshot, "residentChunks") > 0,
@@ -138,8 +146,8 @@ async function runSpectatorFeed(context: ScenarioContext, arguments_: readonly s
       description: "spectator feed world did not become renderable",
     },
   );
-  const bodyPosition = position(settled);
   const spectating = await viewport.engine.setSpectator(true);
+  const bodyPosition = gameplayBodyPosition(spectating);
   if (
     (await viewport.engine.submitPlace(0, 0, 0, 1, "cube")) ||
     (await viewport.engine.submitDig(0, 0, 0, "sphere"))

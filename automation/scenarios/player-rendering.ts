@@ -1050,11 +1050,11 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
     const freshRestoredBody = await recorder.guard(engine.setSpectator(false));
     const freshSpectatorBodyRestoreErrorMetres = Math.hypot(
       snapshotValue(freshRestoredBody, "cameraX") -
-        snapshotValue(bodyBeforeFreshSpectator, "cameraX"),
+        snapshotValue(bodyBeforeFreshSpectator, "gameplayBodyX"),
       snapshotValue(freshRestoredBody, "cameraY") -
-        snapshotValue(bodyBeforeFreshSpectator, "cameraY"),
+        snapshotValue(bodyBeforeFreshSpectator, "gameplayBodyY"),
       snapshotValue(freshRestoredBody, "cameraZ") -
-        snapshotValue(bodyBeforeFreshSpectator, "cameraZ"),
+        snapshotValue(bodyBeforeFreshSpectator, "gameplayBodyZ"),
     );
     if (freshSpectatorBodyRestoreErrorMetres > 0.001) {
       throw new Error(
@@ -1374,9 +1374,9 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
     recorder.setPhase("spectator-restore");
     const restoredBody = await recorder.guard(engine.setSpectator(false));
     const bodyRestoreErrorMetres = Math.hypot(
-      snapshotValue(restoredBody, "cameraX") - snapshotValue(bodyBeforeSpectator, "cameraX"),
-      snapshotValue(restoredBody, "cameraY") - snapshotValue(bodyBeforeSpectator, "cameraY"),
-      snapshotValue(restoredBody, "cameraZ") - snapshotValue(bodyBeforeSpectator, "cameraZ"),
+      snapshotValue(restoredBody, "cameraX") - snapshotValue(bodyBeforeSpectator, "gameplayBodyX"),
+      snapshotValue(restoredBody, "cameraY") - snapshotValue(bodyBeforeSpectator, "gameplayBodyY"),
+      snapshotValue(restoredBody, "cameraZ") - snapshotValue(bodyBeforeSpectator, "gameplayBodyZ"),
     );
     if (bodyRestoreErrorMetres > 0.001) {
       throw new Error(

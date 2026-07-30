@@ -279,9 +279,9 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     { description: "server-authorized spectator mode did not activate" },
   );
   const bodyPosition = [
-    snapshotValue(spectating, "cameraX"),
-    snapshotValue(spectating, "cameraY"),
-    snapshotValue(spectating, "cameraZ"),
+    snapshotValue(spectating, "gameplayBodyX"),
+    snapshotValue(spectating, "gameplayBodyY"),
+    snapshotValue(spectating, "gameplayBodyZ"),
   ] as const;
   await page.keyboard.down("Space");
   await page.waitForTimeout(350);

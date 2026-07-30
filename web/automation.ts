@@ -1,7 +1,7 @@
 import type { BrowserPlayerSession } from "./local-player.ts";
 
 export const AUTOMATION_CONTRACT_VERSION = 8;
-export const SNAPSHOT_SCHEMA_VERSION = 60;
+export const SNAPSHOT_SCHEMA_VERSION = 61;
 export const FRAME_SAMPLE_WIDTH = 22;
 export const GPU_SAMPLE_WIDTH = 15;
 
@@ -11,6 +11,9 @@ export const SNAPSHOT_FIELD_NAMES = [
   "cameraX",
   "cameraY",
   "cameraZ",
+  "gameplayBodyX",
+  "gameplayBodyY",
+  "gameplayBodyZ",
   "yaw",
   "pitch",
   "grounded",
