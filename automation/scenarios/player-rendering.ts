@@ -1007,6 +1007,8 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
       engine,
       "fresh-spectator-endpoint",
       0,
+      0.48,
+      false,
     );
     recorder.setPhase("fresh-spectator-restore");
     const freshRestoredBody = await recorder.guard(engine.setSpectator(false));
