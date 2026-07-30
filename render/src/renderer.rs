@@ -5827,6 +5827,7 @@ impl Renderer {
             }
             UiAction::SpectatorRequested(active) => {
                 self.host_ui_action = Some(HostUiAction::SpectatorRequested(active));
+                self.revise_presented_render_state();
             }
             UiAction::PanelOpenChanged(_) => self.revise_presented_render_state(),
             UiAction::None => {}
@@ -6526,6 +6527,8 @@ impl Renderer {
         let protected = resident_virtual_terrain_ancestry(&selected, |key| {
             self.virtual_terrain.resident_page(key).is_some()
         });
+        let mut protected = protected;
+        protected.extend(self.virtual_terrain.transition_resident_pages());
         let removed = self
             .virtual_terrain
             .reclaim_lru_for_admission(pages, &protected)?;
@@ -6613,6 +6616,15 @@ impl Renderer {
             .iter()
             .any(|page| self.virtual_terrain.resident_page(page.key).is_none());
         if logical_replacement_missing {
+            // Prove the complete parent-to-children replacement before evicting unrelated travel
+            // history. Admission and installation below are synchronous, so once this succeeds the
+            // reclaim cannot strand a valid old cut on behalf of an invalid replacement.
+            let parent_page = self
+                .virtual_terrain
+                .resident_page(parent)
+                .ok_or(VirtualTerrainRendererError::IncompleteRootPartition(parent))?;
+            voxels_world::validate_terrain_replacement(parent_page, &pages)
+                .map_err(|_| VirtualTerrainError::IncoherentRootReplacement(parent))?;
             self.reclaim_virtual_terrain_logical_capacity(&pages)?;
             install_virtual_terrain_replacement_pages(
                 &mut self.virtual_terrain,

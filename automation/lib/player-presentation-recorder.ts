@@ -129,6 +129,26 @@ export interface PlayerPresentationRecorderOptions {
   readonly onViolation?: (violation: PlayerPresentationViolation) => Promise<void>;
 }
 
+const FRAME_SEQUENCE_MODULUS = 0x1_0000_0000;
+const FRAME_SEQUENCE_HALF_RANGE = FRAME_SEQUENCE_MODULUS / 2;
+
+export function frameSequenceReached(observed: number, target: number): boolean {
+  if (
+    !Number.isSafeInteger(observed) ||
+    !Number.isSafeInteger(target) ||
+    observed < 0 ||
+    observed >= FRAME_SEQUENCE_MODULUS ||
+    target < 0 ||
+    target >= FRAME_SEQUENCE_MODULUS
+  ) {
+    return false;
+  }
+  return (
+    (observed - target + FRAME_SEQUENCE_MODULUS) % FRAME_SEQUENCE_MODULUS <
+    FRAME_SEQUENCE_HALF_RANGE
+  );
+}
+
 interface FrameWaiter {
   readonly afterSequence: number;
   readonly resolve: (snapshot: readonly number[]) => void;
@@ -553,6 +573,25 @@ export class PlayerPresentationRecorder {
       });
     }
     return current;
+  }
+
+  /// Waits until this recorder's independent frame pump has caught up with an engine operation.
+  ///
+  /// Engine commands return their own snapshots. Using the recorder's older camera/yaw as the
+  /// baseline immediately afterward can misclassify real perpendicular movement as zero.
+  waitUntilObserved(
+    snapshot: readonly number[],
+    options: PresentationFrameWaitOptions = {},
+  ): Promise<readonly number[]> {
+    const target = snapshotValue(snapshot, "frameSequence");
+    return this.waitFor(
+      (observed) => frameSequenceReached(snapshotValue(observed, "frameSequence"), target),
+      {
+        ...options,
+        description:
+          options.description ?? `presentation recorder did not observe engine frame ${target}`,
+      },
+    );
   }
 
   waitForFrameAfter(

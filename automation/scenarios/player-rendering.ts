@@ -1018,7 +1018,8 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
     recorder.setPhase("fresh-spectator-travel");
     const bodyBeforeFreshSpectator = await recorder.guard(engine.setSpectator(true));
     // Fly perpendicular to the later yaw-zero walking route so this probe cannot warm its pages.
-    await recorder.guard(engine.setCameraLook(Math.PI / 2, 0));
+    const freshSpectatorLook = await recorder.guard(engine.setCameraLook(Math.PI / 2, 0));
+    await recorder.waitUntilObserved(freshSpectatorLook);
     const freshSpectatorMotion = await sustainedSpectatorTravel(page, recorder, 5_000, 40);
     // Aim at terrain for the geometry audit. A horizontal elevated view leaves diagnostic sky
     // inside the centre reticle, whose UI ring would otherwise look like an enclosed sky component.
@@ -1075,7 +1076,10 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
     );
 
     recorder.setPhase("pedestal-step");
-    await recorder.guard(engine.setCameraLook(snapshotValue(ready, "yaw"), -0.48));
+    const pedestalLook = await recorder.guard(
+      engine.setCameraLook(snapshotValue(ready, "yaw"), -0.48),
+    );
+    await recorder.waitUntilObserved(pedestalLook);
     const pedestalStepMetres = await shortPlayerStep(page, recorder);
     recorder.setPhase("pedestal-settle");
     const pedestal = await stablePhaseCapture(
@@ -1088,7 +1092,8 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
     );
 
     recorder.setPhase("travel");
-    await recorder.guard(engine.setCameraLook(0, -0.22));
+    const travelLook = await recorder.guard(engine.setCameraLook(0, -0.22));
+    await recorder.waitUntilObserved(travelLook);
     const travelMotion = await walkBeyondProtectedPedestal(context, page, recorder, 32);
     await recorder.waitFor((snapshot) => snapshotValue(snapshot, "grounded") === 1, {
       timeoutMs: 15_000,
@@ -1318,6 +1323,7 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
     // validate dig/place correctness at that body.
     recorder.setPhase("spectator-ascent");
     const bodyBeforeSpectator = await recorder.guard(engine.setSpectator(true));
+    await recorder.waitUntilObserved(bodyBeforeSpectator);
     const spectatorStartY = snapshotValue(recorder.latestSnapshot, "cameraY");
     await page.keyboard.down("Space");
     try {
@@ -1334,7 +1340,8 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
     );
     const spectatorAscentMetres = snapshotValue(spectatorAscended, "cameraY") - spectatorStartY;
     recorder.setPhase("spectator-travel");
-    await recorder.guard(engine.setCameraLook(0, 0));
+    const spectatorTravelLook = await recorder.guard(engine.setCameraLook(0, 0));
+    await recorder.waitUntilObserved(spectatorTravelLook);
     const spectatorMotion = await sustainedSpectatorTravel(page, recorder);
     const spectatorReady = await recorder.waitFor(
       (snapshot) =>
@@ -1376,7 +1383,8 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
         `leaving spectator restored the player body ${bodyRestoreErrorMetres.toFixed(4)}m from its saved position`,
       );
     }
-    await recorder.guard(engine.setCameraLook(Math.PI, -0.48));
+    const restoredLook = await recorder.guard(engine.setCameraLook(Math.PI, -0.48));
+    await recorder.waitUntilObserved(restoredLook);
     await recorder.waitFor(
       (snapshot) =>
         snapshotValue(snapshot, "terrainReady") === 1 &&

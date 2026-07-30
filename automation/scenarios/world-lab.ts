@@ -278,8 +278,6 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     (snapshot) => snapshotValue(snapshot, "spectatorActive") === 1,
     { description: "server-authorized spectator mode did not activate" },
   );
-  await page.keyboard.press("F3");
-  await page.waitForTimeout(100);
   const bodyPosition = [
     snapshotValue(spectating, "cameraX"),
     snapshotValue(spectating, "cameraY"),

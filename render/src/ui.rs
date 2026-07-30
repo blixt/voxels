@@ -1092,6 +1092,7 @@ impl MissionControlUi {
                 UiAction::WeatherChanged(control)
             }
             Some(UiTarget::Spectator) if self.developer_controls && self.spectator_available => {
+                _ = self.set_open(false);
                 UiAction::SpectatorRequested(!self.spectator_active)
             }
             Some(UiTarget::Time(_))
@@ -2449,12 +2450,16 @@ mod tests {
             activate(&mut ui, UiTarget::Spectator, viewport),
             UiAction::SpectatorRequested(true)
         );
+        assert!(!ui.open());
         assert!(!ui.spectator_active);
+        _ = ui.set_open(true);
         ui.set_spectator_active(true);
         assert_eq!(
             activate(&mut ui, UiTarget::Spectator, viewport),
             UiAction::SpectatorRequested(false)
         );
+        assert!(!ui.open());
+        _ = ui.set_open(true);
         assert_eq!(
             activate(&mut ui, UiTarget::Time(TimeControl::FollowServer), viewport),
             UiAction::TimeChanged(TimeControl::FollowServer)

@@ -1844,6 +1844,40 @@ impl VirtualTerrainHierarchy {
         )
     }
 
+    /// Resident proof state required to make the current refinement/balance epoch monotonic.
+    ///
+    /// A selected coarse owner may intentionally wait for several adjacent child groups. Evicting
+    /// the already-complete siblings while the final blocker streams makes those groups alternate
+    /// forever. This set is distinct from a draw cut: it retains only the resident replacement
+    /// evidence that the next cut builder is already committed to finishing.
+    pub(crate) fn transition_resident_pages(&self) -> BTreeSet<TerrainPageKey> {
+        let mut keep = self.refined_last_cut.clone();
+        for (selected, blockers) in &self.balanced_selected_blockers {
+            keep.insert(*selected);
+            for blocker in blockers {
+                keep.insert(*blocker);
+                if let Some(children) = blocker.refinement_children() {
+                    keep.extend(
+                        children
+                            .into_iter()
+                            .filter(|child| self.resident.contains_key(child)),
+                    );
+                }
+            }
+        }
+        for refined in &self.refined_last_cut {
+            if let Some(children) = refined.refinement_children() {
+                keep.extend(
+                    children
+                        .into_iter()
+                        .filter(|child| self.resident.contains_key(child)),
+                );
+            }
+        }
+        keep.retain(|key| self.resident.contains_key(key));
+        keep
+    }
+
     pub(crate) fn reclaim_lru_for_admission(
         &mut self,
         pages: &[TerrainPageV1],
@@ -1873,13 +1907,7 @@ impl VirtualTerrainHierarchy {
                 {
                     return Err(VirtualTerrainError::InvalidPage(page.key));
                 }
-                let encoded_bytes = encode_terrain_page(page)
-                    .map_err(|_| VirtualTerrainError::InvalidPage(page.key))?
-                    .len();
-                if encoded_bytes != node.encoded_bytes as usize {
-                    return Err(VirtualTerrainError::InvalidPage(page.key));
-                }
-                Ok((encoded_bytes, page_primitive_count(page)))
+                Ok((node.encoded_bytes as usize, page_primitive_count(page)))
             })
             .collect::<Result<Vec<_>, VirtualTerrainError>>()?;
         let added_pages = additions.len();
@@ -1901,6 +1929,21 @@ impl VirtualTerrainHierarchy {
                 None
             }
         };
+        let headroom_pages = self.capacity.max_resident_pages / 8;
+        let headroom_bytes = self.capacity.max_resident_encoded_bytes / 8;
+        let headroom_primitives = self.capacity.max_resident_primitives / 8;
+        let has_low_watermark = |pages: usize, bytes: usize, primitives: usize| {
+            pages.saturating_add(added_pages).saturating_add(headroom_pages)
+                <= self.capacity.max_resident_pages
+                && bytes
+                    .saturating_add(added_bytes)
+                    .saturating_add(headroom_bytes)
+                    <= self.capacity.max_resident_encoded_bytes
+                && primitives
+                    .saturating_add(added_primitives)
+                    .saturating_add(headroom_primitives)
+                    <= self.capacity.max_resident_primitives
+        };
         if additions.is_empty()
             || capacity_error(
                 self.resident.len(),
@@ -1918,16 +1961,16 @@ impl VirtualTerrainHierarchy {
             .filter(|(key, _)| !protected.contains(key))
             .map(|(key, resident)| {
                 (
-                    key.level,
                     resident.last_selected_frame,
+                    key.level,
                     *key,
                     resident.encoded_bytes,
                     resident.primitive_count,
                 )
             })
             .collect::<Vec<_>>();
-        // Fine descendants retire before their coarser ancestors, preserving a usable traversal
-        // spine for as long as possible. Within one level, evict the least recently selected page.
+        // Retire true travel history before newer pages. Equal-age descendants retire before their
+        // coarser traversal ancestors, preserving a usable spine for as long as possible.
         candidates.sort_unstable();
         let mut remaining_pages = self.resident.len();
         let mut remaining_bytes = self.resident_encoded_bytes;
@@ -1938,7 +1981,7 @@ impl VirtualTerrainHierarchy {
             remaining_bytes = remaining_bytes.saturating_sub(bytes);
             remaining_primitives = remaining_primitives.saturating_sub(primitives);
             remove.push(key);
-            if capacity_error(remaining_pages, remaining_bytes, remaining_primitives).is_none() {
+            if has_low_watermark(remaining_pages, remaining_bytes, remaining_primitives) {
                 break;
             }
         }
@@ -5477,6 +5520,37 @@ mod tests {
         assert_eq!(hierarchy.resident_usage(), usage);
         assert!(hierarchy.resident_page(pages[0].key).is_some());
         assert!(hierarchy.resident_page(pages[1].key).is_some());
+    }
+
+    #[test]
+    fn transition_residency_keeps_partial_balance_groups_monotonic() {
+        let blocker = TerrainPageKey::surface(1, 0, 0);
+        let children = blocker.refinement_children().unwrap();
+        let selected = TerrainPageKey::surface(1, 1, 0);
+        let mut hierarchy =
+            VirtualTerrainHierarchy::new(VirtualTerrainCapacity::DEVELOPMENT_128_MIB).unwrap();
+        insert_unregistered_resident(&mut hierarchy, flat_heightfield_page(blocker));
+        insert_unregistered_resident(&mut hierarchy, flat_heightfield_page(selected));
+        for child in children.iter().copied().take(3) {
+            insert_unregistered_resident(&mut hierarchy, flat_heightfield_page(child));
+        }
+        hierarchy
+            .balanced_selected_blockers
+            .insert(selected, BTreeSet::from([blocker]));
+
+        let protected = hierarchy.transition_resident_pages();
+
+        assert!(protected.contains(&selected));
+        assert!(protected.contains(&blocker));
+        assert!(
+            children
+                .iter()
+                .copied()
+                .take(3)
+                .all(|child| protected.contains(&child)),
+            "an incomplete neighboring group must retain all siblings already received",
+        );
+        assert!(!protected.contains(&children[3]));
     }
 
     #[test]

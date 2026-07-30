@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
 import { SNAPSHOT, SNAPSHOT_SCHEMA_VERSION } from "./engine.ts";
-import { PlayerPresentationInvariantState } from "./player-presentation-recorder.ts";
+import {
+  frameSequenceReached,
+  PlayerPresentationInvariantState,
+} from "./player-presentation-recorder.ts";
 
 function snapshot(values: Partial<Record<keyof typeof SNAPSHOT, number>>): number[] {
   const result = Array.from<number>({ length: SNAPSHOT.droppedSamples + 1 }).fill(0);
@@ -56,6 +59,15 @@ function playableFrame(
 }
 
 describe("continuous player presentation invariant state", () => {
+  it("orders an independently observed engine frame across u32 wrap", () => {
+    expect(frameSequenceReached(101, 101)).toBe(true);
+    expect(frameSequenceReached(102, 101)).toBe(true);
+    expect(frameSequenceReached(100, 101)).toBe(false);
+    expect(frameSequenceReached(1, 0xffff_fffe)).toBe(true);
+    expect(frameSequenceReached(0xffff_fffe, 1)).toBe(false);
+    expect(frameSequenceReached(-1, 1)).toBe(false);
+  });
+
   it("observes cold start before terrainReady without treating empty shadow state as a regression", () => {
     const state = new PlayerPresentationInvariantState();
 
