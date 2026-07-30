@@ -5,7 +5,11 @@
 //! bit columns, opposing cells are culled a word at a time, and material/AO work is performed only
 //! for surviving faces. The output contract is exactly [`crate::MeshedChunk`].
 
-use crate::{CHUNK_EDGE, Chunk, EmissiveCluster, Material, MeshedChunk, Quad, RenderLayer};
+use crate::mesh::heightfield_owns_face;
+use crate::{
+    CHUNK_EDGE, Chunk, EmissiveCluster, Material, MeshedChunk, MeshingSurfaceEnvelope, Quad,
+    RenderLayer,
+};
 
 const HALO_EDGE: usize = CHUNK_EDGE + 2;
 const HALO_PLANE: usize = HALO_EDGE * HALO_EDGE;
@@ -20,6 +24,7 @@ const EMISSIVE_BIN_COUNT: usize =
 struct FaceKey {
     material: Material,
     ao: u8,
+    surface_owned: bool,
 }
 
 #[derive(Debug)]
@@ -72,15 +77,49 @@ pub fn mesh_chunk_binary(
     chunk: &Chunk,
     outside: impl FnMut(i32, i32, i32) -> Material,
 ) -> MeshedChunk {
-    mesh_chunk_binary_with_scratch(chunk, outside, &mut BinaryMeshScratch::default())
+    mesh_chunk_binary_with_scratch_and_surface(
+        chunk,
+        None,
+        outside,
+        &mut BinaryMeshScratch::default(),
+    )
+}
+
+pub fn mesh_chunk_binary_with_surface(
+    chunk: &Chunk,
+    surface: &MeshingSurfaceEnvelope,
+    outside: impl FnMut(i32, i32, i32) -> Material,
+) -> MeshedChunk {
+    mesh_chunk_binary_with_scratch_and_surface(
+        chunk,
+        Some(surface),
+        outside,
+        &mut BinaryMeshScratch::default(),
+    )
 }
 
 /// Builds a canonical mesh while reusing caller-owned derivation storage.
 pub fn mesh_chunk_binary_with_scratch(
     chunk: &Chunk,
+    outside: impl FnMut(i32, i32, i32) -> Material,
+    scratch: &mut BinaryMeshScratch,
+) -> MeshedChunk {
+    mesh_chunk_binary_with_scratch_and_surface(chunk, None, outside, scratch)
+}
+
+pub fn mesh_chunk_binary_with_scratch_and_surface(
+    chunk: &Chunk,
+    surface: Option<&MeshingSurfaceEnvelope>,
     mut outside: impl FnMut(i32, i32, i32) -> Material,
     scratch: &mut BinaryMeshScratch,
 ) -> MeshedChunk {
+    if let Some(surface) = surface {
+        assert_eq!(
+            surface.coord(),
+            chunk.coord(),
+            "meshing surface must describe the meshed chunk"
+        );
+    }
     scratch.halo.fill(0);
     scratch.opaque_columns.fill(0);
     scratch.translucent_columns.fill(0);
@@ -131,6 +170,8 @@ pub fn mesh_chunk_binary_with_scratch(
     }
 
     let mut mesh = MeshedChunk::default();
+    let mut opaque_volume = Vec::new();
+    let mut translucent_volume = Vec::new();
     append_emissive_clusters(chunk, &scratch.halo, &mut mesh.emissive_clusters);
     build_visible_face_columns(scratch);
 
@@ -143,8 +184,12 @@ pub fn mesh_chunk_binary_with_scratch(
                     slices &= slices - 1;
                     let (axis, u_axis, v_axis, _) = face_axes(face as u8);
                     let local = compose(axis, u_axis, v_axis, slice, u, v);
+                    let (_, _, _, step) = face_axes(face as u8);
+                    let mut neighbor = local.map(|value| value as i32);
+                    neighbor[axis] += step;
+                    let material = chunk.get(local[0], local[1], local[2]);
                     let key = FaceKey {
-                        material: chunk.get(local[0], local[1], local[2]),
+                        material,
                         ao: face_ao(
                             local,
                             axis,
@@ -153,6 +198,16 @@ pub fn mesh_chunk_binary_with_scratch(
                             if face & 1 == 0 { 1 } else { -1 },
                             &scratch.halo,
                         ),
+                        surface_owned: surface.is_some_and(|surface| {
+                            heightfield_owns_face(
+                                surface,
+                                origin,
+                                local,
+                                neighbor,
+                                material,
+                                face as u8,
+                            )
+                        }),
                     };
                     let planes = &mut scratch.keyed_planes[slice];
                     let plane_index = planes
@@ -172,11 +227,23 @@ pub fn mesh_chunk_binary_with_scratch(
 
         for slice in 0..CHUNK_EDGE {
             for plane in &mut scratch.keyed_planes[slice] {
-                append_binary_plane(&mut mesh, face as u8, slice, plane.key, &mut plane.rows);
+                append_binary_plane(
+                    &mut mesh,
+                    &mut opaque_volume,
+                    &mut translucent_volume,
+                    face as u8,
+                    slice,
+                    plane.key,
+                    &mut plane.rows,
+                );
             }
             scratch.keyed_planes[slice].clear();
         }
     }
+    mesh.opaque_surface_quads = mesh.opaque.len() as u32;
+    mesh.translucent_surface_quads = mesh.translucent.len() as u32;
+    mesh.opaque.extend(opaque_volume);
+    mesh.translucent.extend(translucent_volume);
     mesh
 }
 
@@ -208,6 +275,8 @@ fn build_visible_face_columns(scratch: &mut BinaryMeshScratch) {
 
 fn append_binary_plane(
     mesh: &mut MeshedChunk,
+    opaque_volume: &mut Vec<Quad>,
+    translucent_volume: &mut Vec<Quad>,
     face: u8,
     slice: usize,
     key: FaceKey,
@@ -240,8 +309,10 @@ fn append_binary_plane(
                 _pad: 0,
             };
             match key.material.render_layer() {
-                RenderLayer::Opaque => mesh.opaque.push(quad),
-                RenderLayer::Translucent => mesh.translucent.push(quad),
+                RenderLayer::Opaque if key.surface_owned => mesh.opaque.push(quad),
+                RenderLayer::Opaque => opaque_volume.push(quad),
+                RenderLayer::Translucent if key.surface_owned => mesh.translucent.push(quad),
+                RenderLayer::Translucent => translucent_volume.push(quad),
                 RenderLayer::Empty => unreachable!("visible face cannot belong to air"),
             }
         }
@@ -376,7 +447,10 @@ fn compose(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ChunkCoord, Generator, mesh_chunk};
+    use crate::{
+        ChunkCoord, Generator, MeshingSurfaceColumn, MeshingSurfaceEnvelope, mesh_chunk,
+        mesh_chunk_with_surface,
+    };
 
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
     struct UnitFace {
@@ -419,6 +493,36 @@ mod tests {
         assert_eq!(binary.emissive_clusters, scalar.emissive_clusters);
     }
 
+    fn assert_surface_equivalent(
+        chunk: &Chunk,
+        surface: &MeshingSurfaceEnvelope,
+        outside: impl Fn(i32, i32, i32) -> Material + Copy,
+    ) {
+        let scalar = mesh_chunk_with_surface(chunk, Some(surface), outside);
+        let binary = mesh_chunk_binary_with_surface(chunk, surface, outside);
+        assert_eq!(binary.opaque_surface_quads, scalar.opaque_surface_quads);
+        assert_eq!(
+            binary.translucent_surface_quads,
+            scalar.translucent_surface_quads
+        );
+        assert_eq!(
+            unit_faces(&binary.opaque[..binary.opaque_surface_quads as usize]),
+            unit_faces(&scalar.opaque[..scalar.opaque_surface_quads as usize])
+        );
+        assert_eq!(
+            unit_faces(&binary.opaque[binary.opaque_surface_quads as usize..]),
+            unit_faces(&scalar.opaque[scalar.opaque_surface_quads as usize..])
+        );
+        assert_eq!(
+            unit_faces(&binary.translucent[..binary.translucent_surface_quads as usize]),
+            unit_faces(&scalar.translucent[..scalar.translucent_surface_quads as usize])
+        );
+        assert_eq!(
+            unit_faces(&binary.translucent[binary.translucent_surface_quads as usize..]),
+            unit_faces(&scalar.translucent[scalar.translucent_surface_quads as usize..])
+        );
+    }
+
     #[test]
     fn binary_mesh_matches_scalar_for_uniform_and_mixed_layers() {
         assert_equivalent(&Chunk::empty(ChunkCoord::new(0, 0, 0)), |_, _, _| {
@@ -444,6 +548,50 @@ mod tests {
             }
         }
         assert_equivalent(&mixed, |_, _, _| Material::Air);
+    }
+
+    #[test]
+    fn binary_mesh_matches_scalar_surface_partition_across_edits_and_layers() {
+        let coord = ChunkCoord::new(-2, 1, 3);
+        let origin_y = coord.world_origin()[1];
+        let surface = MeshingSurfaceEnvelope::from_columns(
+            coord,
+            vec![
+                MeshingSurfaceColumn {
+                    valid: true,
+                    ground_plane: origin_y + 10,
+                    water_plane: Some(origin_y + 14),
+                };
+                MeshingSurfaceEnvelope::COLUMN_COUNT
+            ],
+        )
+        .unwrap();
+        let mut chunk = Chunk::empty(coord);
+        for y in 0..10 {
+            for z in 0..CHUNK_EDGE {
+                for x in 0..CHUNK_EDGE {
+                    chunk.set(x, y, z, Material::Stone);
+                }
+            }
+        }
+        for y in 10..14 {
+            for z in 0..CHUNK_EDGE {
+                for x in 0..CHUNK_EDGE {
+                    chunk.set(x, y, z, Material::Water);
+                }
+            }
+        }
+        chunk.set(7, 4, 8, Material::Air);
+        chunk.set(9, 17, 10, Material::Basalt);
+        assert_surface_equivalent(&chunk, &surface, |_, y, _| {
+            if y < origin_y + 10 {
+                Material::Stone
+            } else if y < origin_y + 14 {
+                Material::Water
+            } else {
+                Material::Air
+            }
+        });
     }
 
     #[test]

@@ -5,8 +5,9 @@
 //! product codecs. Rust enum layout and serde output are deliberately not part of the contract.
 
 use crate::{
-    ChunkCoord, ChunkSnapshot, Material, MeshingHalo, ModelIdentity, SourceDeviceRequirement,
-    SurfaceRegion, TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError,
+    ChunkCoord, ChunkSnapshot, Material, MeshingHalo, MeshingSurfaceColumn,
+    MeshingSurfaceEnvelope, ModelIdentity, SourceDeviceRequirement, SurfaceRegion,
+    TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError,
     TerrainHierarchyDirectoryV1, TerrainPageBatchRequestV1, TerrainPageBatchResultV1,
     TerrainPageCodecError, TerrainPageKey, TerrainPageTransferCodecError, VOXEL_SIZE_METRES,
     VoxelCoord, WorldId, WorldManifest, WorldProductPriority, WorldSourceError,
@@ -19,7 +20,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 41;
+pub const PROTOCOL_VERSION: u16 = 42;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -1235,6 +1236,7 @@ pub fn encode_chunk_batch_item(
         Ok(snapshot) => {
             if snapshot.chunk.coord() != item.coord
                 || snapshot.meshing_halo.coord() != item.coord
+                || snapshot.meshing_surface.coord() != item.coord
                 || snapshot.source_identity_hash != source_identity_hash
             {
                 return Err(ProtocolError::InvalidPayload(
@@ -1329,7 +1331,10 @@ pub fn decode_chunk_batch_result(bytes: &[u8]) -> Result<ChunkBatchResult, Proto
         let body = cursor.bytes(len)?;
         let result = if status == 0 {
             let snapshot = decode_chunk_snapshot(body, source_identity_hash)?;
-            if snapshot.chunk.coord() != coord || snapshot.meshing_halo.coord() != coord {
+            if snapshot.chunk.coord() != coord
+                || snapshot.meshing_halo.coord() != coord
+                || snapshot.meshing_surface.coord() != coord
+            {
                 return Err(ProtocolError::InvalidPayload("chunk result key mismatch"));
             }
             Ok(snapshot)
@@ -3552,11 +3557,14 @@ fn encode_chunk_snapshot(snapshot: &ChunkSnapshot) -> Vec<u8> {
         snapshot.meshing_halo.coord(),
         snapshot.source_identity_hash,
     );
-    let mut bytes = Vec::with_capacity(core.len() + halo.len() + 8);
+    let surface = encode_meshing_surface(&snapshot.meshing_surface);
+    let mut bytes = Vec::with_capacity(core.len() + halo.len() + surface.len() + 12);
     push_u32(&mut bytes, core.len() as u32);
     bytes.extend_from_slice(&core);
     push_u32(&mut bytes, halo.len() as u32);
     bytes.extend_from_slice(&halo);
+    push_u32(&mut bytes, surface.len() as u32);
+    bytes.extend_from_slice(&surface);
     bytes
 }
 
@@ -3569,12 +3577,80 @@ fn decode_chunk_snapshot(
     let chunk = codec::decode_chunk(cursor.bytes(core_len)?, source_identity_hash)?;
     let halo_len = cursor.u32()? as usize;
     let halo = decode_halo(cursor.bytes(halo_len)?, chunk.coord(), source_identity_hash)?;
+    let surface_len = cursor.u32()? as usize;
+    let surface = decode_meshing_surface(cursor.bytes(surface_len)?, chunk.coord())?;
     cursor.finish()?;
     Ok(ChunkSnapshot {
         source_identity_hash,
         chunk,
         meshing_halo: halo,
+        meshing_surface: surface,
     })
+}
+
+fn encode_meshing_surface(surface: &MeshingSurfaceEnvelope) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(4 + surface.columns().len() * 10);
+    push_u32(&mut bytes, surface.columns().len() as u32);
+    for column in surface.columns() {
+        bytes.push(u8::from(column.valid));
+        push_i32(&mut bytes, column.ground_plane);
+        bytes.push(u8::from(column.water_plane.is_some()));
+        if let Some(water_plane) = column.water_plane {
+            push_i32(&mut bytes, water_plane);
+        }
+    }
+    bytes
+}
+
+fn decode_meshing_surface(
+    bytes: &[u8],
+    coord: ChunkCoord,
+) -> Result<MeshingSurfaceEnvelope, ProtocolError> {
+    let mut cursor = Cursor::new(bytes);
+    let count = cursor.u32()? as usize;
+    if count != MeshingSurfaceEnvelope::COLUMN_COUNT {
+        return Err(ProtocolError::InvalidPayload(
+            "meshing surface column count mismatch",
+        ));
+    }
+    let mut columns = Vec::with_capacity(count);
+    for _ in 0..count {
+        let valid = match cursor.u8()? {
+            0 => false,
+            1 => true,
+            _ => {
+                return Err(ProtocolError::InvalidPayload(
+                    "invalid meshing surface validity marker",
+                ));
+            }
+        };
+        let ground_plane = cursor.i32()?;
+        let water_plane = match cursor.u8()? {
+            0 => None,
+            1 => Some(cursor.i32()?),
+            _ => {
+                return Err(ProtocolError::InvalidPayload(
+                    "invalid meshing surface water marker",
+                ));
+            }
+        };
+        if (!valid && water_plane.is_some())
+            || water_plane.is_some_and(|water| water < ground_plane)
+        {
+            return Err(ProtocolError::InvalidPayload(
+                "meshing surface water precedes ground",
+            ));
+        }
+        columns.push(MeshingSurfaceColumn {
+            valid,
+            ground_plane,
+            water_plane,
+        });
+    }
+    cursor.finish()?;
+    MeshingSurfaceEnvelope::from_columns(coord, columns).ok_or(ProtocolError::InvalidPayload(
+        "invalid meshing surface coordinate",
+    ))
 }
 
 fn encode_halo(

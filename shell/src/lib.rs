@@ -1409,12 +1409,12 @@ mod web {
     use voxels_world::{
         AtmosphereSample, BinaryMeshScratch, CHUNK_EDGE, CHUNK_VOXEL_BYTES,
         CINDER_VAULT_PORTAL_COUNT, CaveStreamInterest, Chunk, ChunkCoord, EditMap, Material,
-        MeshedChunk, MeshingHalo, PortalState, SurfaceRegion, SurfaceSample,
+        MeshedChunk, MeshingHalo, MeshingSurfaceEnvelope, PortalState, SurfaceRegion, SurfaceSample,
         TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_MAX_CHILDREN, TerrainDemandGroup,
         TerrainHierarchyNode, TerrainPageDemand, TerrainPageKey, TerrainPageMemoryCache,
         TerrainPageTransferIdentity, TerrainStreamConfig, TerrainStreamScheduler,
         VOXEL_SIZE_METRES, VoxelCoord, WorldProductPriority, WorldSourceIdentityHash,
-        decode_terrain_page, encode_terrain_page, mesh_chunk_binary_with_scratch,
+        decode_terrain_page, encode_terrain_page, mesh_chunk_binary_with_scratch_and_surface,
         terrain_page_replacement_groups,
     };
     use wasm_bindgen::JsCast;
@@ -2116,6 +2116,7 @@ mod web {
         chunks: RefCell<BTreeMap<(i32, i32, i32), Chunk>>,
         chunk_portals: RefCell<BTreeMap<(i32, i32, i32), ChunkPortalMask>>,
         chunk_halos: RefCell<BTreeMap<(i32, i32, i32), MeshingHalo>>,
+        chunk_surfaces: RefCell<BTreeMap<(i32, i32, i32), MeshingSurfaceEnvelope>>,
         pending_meshes: RefCell<BTreeMap<(i32, i32, i32), PendingCanonicalMesh>>,
         pending_uploads: RefCell<BTreeMap<(i32, i32, i32), voxels_runtime::WorkTicket>>,
         canonical_publications: RefCell<VecDeque<CanonicalPublication>>,
@@ -3594,6 +3595,7 @@ mod web {
             {
                 let chunks = self.chunks.borrow();
                 let halos = self.chunk_halos.borrow();
+                let surfaces = self.chunk_surfaces.borrow();
                 for ticket in work.meshing {
                     let Some(chunk) = chunks.get(&coord_key(ticket.coord)) else {
                         continue;
@@ -3602,9 +3604,14 @@ mod web {
                         let _ = self.scheduler.borrow_mut().retry(ticket);
                         continue;
                     };
+                    let Some(surface) = surfaces.get(&coord_key(ticket.coord)) else {
+                        let _ = self.scheduler.borrow_mut().retry(ticket);
+                        continue;
+                    };
                     let mut halo_contract_valid = true;
-                    let mesh = mesh_chunk_binary_with_scratch(
+                    let mesh = mesh_chunk_binary_with_scratch_and_surface(
                         chunk,
+                        Some(surface),
                         |x, y, z| {
                             let Some(material) = halo.sample_world(x, y, z) else {
                                 halo_contract_valid = false;
@@ -3645,6 +3652,7 @@ mod web {
                 let mut chunks = self.chunks.borrow_mut();
                 let mut portals = self.chunk_portals.borrow_mut();
                 let mut halos = self.chunk_halos.borrow_mut();
+                let mut surfaces = self.chunk_surfaces.borrow_mut();
                 let mut pending = self.pending_meshes.borrow_mut();
                 let mut pending_uploads = self.pending_uploads.borrow_mut();
                 let mut renderer = self.renderer.borrow_mut();
@@ -3653,6 +3661,7 @@ mod web {
                     chunks.remove(&key);
                     portals.remove(&key);
                     halos.remove(&key);
+                    surfaces.remove(&key);
                     pending.remove(&key);
                     pending_uploads.remove(&key);
                     renderer.remove_chunk(eviction.coord);
@@ -5822,6 +5831,7 @@ mod web {
             if snapshot.source_identity_hash != self.source_identity_hash()
                 || snapshot.chunk.coord() != ticket.coord
                 || snapshot.meshing_halo.coord() != ticket.coord
+                || snapshot.meshing_surface.coord() != ticket.coord
             {
                 let _ = self.scheduler.borrow_mut().retry(ticket);
                 return;
@@ -5844,6 +5854,9 @@ mod web {
             self.chunk_halos
                 .borrow_mut()
                 .insert(key, snapshot.meshing_halo);
+            self.chunk_surfaces
+                .borrow_mut()
+                .insert(key, snapshot.meshing_surface);
         }
 
         fn reconcile_chunk_activation(
@@ -7125,6 +7138,17 @@ mod web {
                             .values()
                             .map(MeshingHalo::logical_bytes)
                             .sum::<usize>(),
+                    )
+                    .saturating_add(
+                        engine
+                            .chunk_surfaces
+                            .borrow()
+                            .values()
+                            .map(|surface| {
+                                surface.columns().len()
+                                    * std::mem::size_of::<voxels_world::MeshingSurfaceColumn>()
+                            })
+                            .sum::<usize>(),
                     );
                 let pending_mesh_bytes = engine
                     .pending_meshes
@@ -7949,6 +7973,7 @@ mod web {
             chunks: RefCell::new(BTreeMap::new()),
             chunk_portals: RefCell::new(BTreeMap::new()),
             chunk_halos: RefCell::new(BTreeMap::new()),
+            chunk_surfaces: RefCell::new(BTreeMap::new()),
             pending_meshes: RefCell::new(BTreeMap::new()),
             pending_uploads: RefCell::new(BTreeMap::new()),
             canonical_publications: RefCell::new(VecDeque::new()),

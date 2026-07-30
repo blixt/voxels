@@ -698,6 +698,7 @@ fn validate_spawn_chunk(
     if snapshot.source_identity_hash != source.identity().identity_hash()
         || snapshot.chunk.coord() != coord
         || snapshot.meshing_halo.coord() != coord
+        || snapshot.meshing_surface.coord() != coord
     {
         return Err(WorldServerError::InvalidSpawnProduct);
     }

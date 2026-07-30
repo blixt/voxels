@@ -397,6 +397,7 @@ pub struct ChunkSnapshot {
     pub source_identity_hash: WorldSourceIdentityHash,
     pub chunk: Chunk,
     pub meshing_halo: MeshingHalo,
+    pub meshing_surface: MeshingSurfaceEnvelope,
 }
 
 impl ChunkSnapshot {
@@ -405,12 +406,15 @@ impl ChunkSnapshot {
         source_identity_hash: WorldSourceIdentityHash,
         chunk: Chunk,
         meshing_halo: MeshingHalo,
+        meshing_surface: MeshingSurfaceEnvelope,
     ) -> Option<Self> {
-        (chunk.coord() == meshing_halo.coord()).then_some(Self {
-            source_identity_hash,
-            chunk,
-            meshing_halo,
-        })
+        (chunk.coord() == meshing_halo.coord() && chunk.coord() == meshing_surface.coord())
+            .then_some(Self {
+                source_identity_hash,
+                chunk,
+                meshing_halo,
+                meshing_surface,
+            })
     }
 }
 
@@ -882,6 +886,118 @@ pub struct MeshingHalo {
     voxels: Box<[Material]>,
 }
 
+/// Source-semantic surface planes for the 34x34 X/Z envelope around one canonical chunk.
+///
+/// The values come from the exact same stride-one source samples that define heightfield pages:
+/// `ground_plane` and `water_plane` are the first air Y coordinates above their respective runs.
+/// They are deliberately independent of edited occupancy. The canonical mesher uses this immutable
+/// certificate to separate only the faces represented by a heightfield from caves, overhangs,
+/// features, and edits that remain canonical volume geometry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MeshingSurfaceColumn {
+    pub valid: bool,
+    pub ground_plane: i32,
+    pub water_plane: Option<i32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshingSurfaceEnvelope {
+    coord: ChunkCoord,
+    columns: Box<[MeshingSurfaceColumn]>,
+}
+
+impl MeshingSurfaceEnvelope {
+    pub const EDGE: usize = CHUNK_EDGE + 2;
+    pub const COLUMN_COUNT: usize = Self::EDGE * Self::EDGE;
+
+    /// Checked construction seam used by sibling codecs and source adapters.
+    pub(crate) fn from_columns(
+        coord: ChunkCoord,
+        columns: Vec<MeshingSurfaceColumn>,
+    ) -> Option<Self> {
+        (coord.is_world_representable()
+            && columns.len() == Self::COLUMN_COUNT
+            && columns.iter().all(|column| {
+                (column.valid || column.water_plane.is_none())
+                    && column
+                        .water_plane
+                        .is_none_or(|water| water >= column.ground_plane)
+            }))
+        .then(|| Self {
+            coord,
+            columns: columns.into_boxed_slice(),
+        })
+    }
+
+    pub fn from_sampler(
+        coord: ChunkCoord,
+        mut sample: impl FnMut(i32, i32) -> SurfaceSample,
+    ) -> Option<Self> {
+        if !coord.is_world_representable() {
+            return None;
+        }
+        let origin = coord.world_origin();
+        let edge = CHUNK_EDGE as i32;
+        let mut columns = Vec::with_capacity(Self::COLUMN_COUNT);
+        for z in -1..=edge {
+            for x in -1..=edge {
+                let (Some(world_x), Some(world_z)) =
+                    (origin[0].checked_add(x), origin[2].checked_add(z))
+                else {
+                    columns.push(MeshingSurfaceColumn {
+                        valid: false,
+                        ground_plane: 0,
+                        water_plane: None,
+                    });
+                    continue;
+                };
+                let sample = sample(world_x, world_z);
+                let ground_plane = sample.height.checked_add(1)?;
+                let water_plane = match sample.water_level {
+                    Some(height) => Some(height.checked_add(1)?),
+                    None => None,
+                };
+                if water_plane.is_some_and(|water| water < ground_plane) {
+                    return None;
+                }
+                columns.push(MeshingSurfaceColumn {
+                    valid: true,
+                    ground_plane,
+                    water_plane,
+                });
+            }
+        }
+        Self::from_columns(coord, columns)
+    }
+
+    pub const fn coord(&self) -> ChunkCoord {
+        self.coord
+    }
+
+    pub fn columns(&self) -> &[MeshingSurfaceColumn] {
+        &self.columns
+    }
+
+    pub fn sample_local(&self, x: i32, z: i32) -> Option<MeshingSurfaceColumn> {
+        let edge = CHUNK_EDGE as i32;
+        if x < -1 || x > edge || z < -1 || z > edge {
+            return None;
+        }
+        let local_x = usize::try_from(x + 1).ok()?;
+        let local_z = usize::try_from(z + 1).ok()?;
+        self.columns
+            .get(local_x + local_z * Self::EDGE)
+            .copied()
+    }
+
+    pub fn sample_world(&self, x: i32, z: i32) -> Option<MeshingSurfaceColumn> {
+        let origin = self.coord.world_origin();
+        let local_x = i32::try_from(i64::from(x) - i64::from(origin[0])).ok()?;
+        let local_z = i32::try_from(i64::from(z) - i64::from(origin[2])).ok()?;
+        self.sample_local(local_x, local_z)
+    }
+}
+
 impl MeshingHalo {
     /// Checked construction seam used by sibling codecs and source adapters.
     pub(crate) fn from_voxels(coord: ChunkCoord, voxels: Vec<Material>) -> Option<Self> {
@@ -1220,10 +1336,14 @@ impl ProceduralWorldSource {
         let depth = (i64::from(max_z) - i64::from(min_z) + 1) as usize;
         let region = self.generator.region(min_x, min_z, width, depth);
         let meshing_halo = MeshingHalo::from_sampler(coord, |x, y, z| region.sample(x, y, z));
+        let meshing_surface =
+            MeshingSurfaceEnvelope::from_sampler(coord, |x, z| self.generator.surface_sample(x, z))
+                .expect("representable chunks have representable source surface planes");
         ChunkSnapshot {
             source_identity_hash: self.source_identity_hash(),
             chunk,
             meshing_halo,
+            meshing_surface,
         }
     }
 }
@@ -1826,6 +1946,53 @@ mod tests {
             }
         }
         assert_eq!(indices, (0..MESHING_HALO_VOXELS).collect());
+    }
+
+    #[test]
+    fn meshing_surface_is_stride_one_source_truth_and_matches_adjacent_chunks() {
+        let source = ProceduralWorldSource::new(0x5eed_cafe);
+        let left = source.chunk_with_halo(ChunkCoord::new(0, 0, 0));
+        let right = source.chunk_with_halo(ChunkCoord::new(1, 0, 0));
+        for z in -1..=CHUNK_EDGE as i32 {
+            for x in -1..=CHUNK_EDGE as i32 {
+                let sample = source.generator.surface_sample(x, z);
+                assert_eq!(
+                    left.meshing_surface.sample_world(x, z),
+                    Some(MeshingSurfaceColumn {
+                        valid: true,
+                        ground_plane: sample.height + 1,
+                        water_plane: sample.water_level.map(|height| height + 1),
+                    })
+                );
+            }
+        }
+        for z in -1..=CHUNK_EDGE as i32 {
+            for x in [CHUNK_EDGE as i32 - 1, CHUNK_EDGE as i32] {
+                assert_eq!(
+                    left.meshing_surface.sample_world(x, z),
+                    right.meshing_surface.sample_world(x, z),
+                    "overlapping certificates must be bit-identical"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn meshing_surface_marks_coordinates_outside_the_finite_world_invalid() {
+        let minimum = VoxelCoord::new(i32::MIN, 0, 0).chunk();
+        let envelope = MeshingSurfaceEnvelope::from_sampler(minimum, |x, z| {
+            Generator::new(7).surface_sample(x, z)
+        })
+        .unwrap();
+        assert_eq!(
+            envelope.sample_local(-1, 0),
+            Some(MeshingSurfaceColumn {
+                valid: false,
+                ground_plane: 0,
+                water_plane: None,
+            })
+        );
+        assert!(envelope.sample_local(0, 0).is_some_and(|column| column.valid));
     }
 
     #[test]

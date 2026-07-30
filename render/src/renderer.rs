@@ -379,6 +379,7 @@ struct VirtualTerrainPublication {
     cut: VirtualTerrainCut,
     envelope: PresentationEnvelope,
     certificate: PresentationCoverageCertificate,
+    ownership: VirtualTerrainOwnership,
     revisions: WorldRevisionFence,
     /// Exact GPU generation encoded for this request. The structural bank identity intentionally
     /// remains cut/envelope based; this CPU binding is the trust boundary that prevents a callback
@@ -397,6 +398,7 @@ struct CommittedVirtualTerrainPresentation {
     cut: VirtualTerrainCut,
     envelope: PresentationEnvelope,
     certificate: PresentationCoverageCertificate,
+    ownership: VirtualTerrainOwnership,
     revisions: WorldRevisionFence,
     revisions_current: bool,
     request: VirtualTerrainRequestId,
@@ -409,6 +411,7 @@ impl CommittedVirtualTerrainPresentation {
             cut: publication.cut,
             envelope: publication.envelope,
             certificate: publication.certificate,
+            ownership: publication.ownership,
             revisions: publication.revisions,
             revisions_current: true,
             request: publication.request,
@@ -1844,26 +1847,13 @@ fn virtual_microvoxel_gpu_quads(
         let mut flat_heights = vec![None; cells * cells];
         for z in 0..cells {
             for x in 0..cells {
-                let samples = [
-                    x + z * edge,
-                    x + 1 + z * edge,
-                    x + 1 + (z + 1) * edge,
-                    x + (z + 1) * edge,
-                ];
-                let heights = samples.map(|sample| heightfield.water[sample]);
-                let [Some(left), Some(right), Some(far_right), Some(far_left)] = heights else {
-                    continue;
-                };
-                let [left, right, far_right, far_left] = [
-                    lattice_height(left)?,
-                    lattice_height(right)?,
-                    lattice_height(far_right)?,
-                    lattice_height(far_left)?,
-                ];
-                if left != right || left != far_right || left != far_left {
-                    return Ok(None);
+                // Level-zero water is a 10 cm voxel-cell surface, just like level-zero ground. The
+                // lower-X/Z sample owns the complete cell; consulting four corners would emit
+                // partial shoreline triangles that cannot partition cleanly against a canonical
+                // voxel top face.
+                if let Some(height) = heightfield.water[x + z * edge] {
+                    flat_heights[x + z * cells] = Some(lattice_height(height)?);
                 }
-                flat_heights[x + z * cells] = Some(left);
             }
         }
         let mut water_emitted = vec![false; cells * cells];
@@ -2497,6 +2487,7 @@ fn virtual_terrain_surface_slice(
         bounds_min,
         bounds_max,
         render_layer,
+        ownership: CanonicalSliceOwnership::Volume,
     }
 }
 
@@ -2846,8 +2837,25 @@ fn constrain_bounded_gpu_quads(
     // larger than the packed representation. The introduced tile vertices also become shared
     // lattice endpoints for every neighbor in this same pass.
     let base_quads = split_gpu_quads_for_canonical_triangles(base_quads);
-    constrain_gpu_quad_t_junctions(
+    constrain_split_bounded_gpu_quads(
         &base_quads,
+        bounds_min,
+        bounds_max,
+        preserve_packed_ao,
+    )
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn constrain_split_bounded_gpu_quads(
+    base_quads: &[GpuQuad],
+    bounds_min: [i32; 3],
+    bounds_max: [i32; 3],
+    preserve_packed_ao: bool,
+) -> Vec<Vec<GpuQuad>> {
+    constrain_gpu_quad_t_junctions(
+        base_quads,
         |_, quad| {
             quad.extent_voxels[0] <= CANONICAL_TRIANGLE_OFFSET_MASK
                 && quad.extent_voxels[1] <= CANONICAL_TRIANGLE_OFFSET_MASK
@@ -2868,11 +2876,9 @@ fn constrain_bounded_gpu_quads(
         },
         preserve_packed_ao,
     )
-    .into_iter()
-    .flatten()
-    .collect()
 }
 
+#[cfg(test)]
 fn canonical_gpu_quads(world_origin: [i32; 3], quads: &[Quad]) -> Vec<GpuQuad> {
     let base_quads = quads
         .iter()
@@ -2880,6 +2886,37 @@ fn canonical_gpu_quads(world_origin: [i32; 3], quads: &[Quad]) -> Vec<GpuQuad> {
         .collect::<Vec<_>>();
     let chunk_max = world_origin.map(|value| value.saturating_add(CHUNK_EDGE as i32));
     constrain_bounded_gpu_quads(&base_quads, world_origin, chunk_max, false)
+}
+
+fn canonical_gpu_quads_partitioned(
+    world_origin: [i32; 3],
+    quads: &[Quad],
+    surface_quad_count: u32,
+) -> Option<(Vec<GpuQuad>, u32)> {
+    let surface_quad_count = usize::try_from(surface_quad_count).ok()?;
+    if surface_quad_count > quads.len() {
+        return None;
+    }
+    let base_quads = quads
+        .iter()
+        .map(|quad| canonical_gpu_quad(world_origin, quad))
+        .collect::<Vec<_>>();
+    // Split the two semantic source ranges independently, concatenate them, and only then run one
+    // conformity pass. Every T-junction therefore sees every neighbor while the returned group
+    // index still identifies the immutable source owner.
+    let surface = split_gpu_quads_for_canonical_triangles(&base_quads[..surface_quad_count]);
+    let surface_split_count = surface.len();
+    let volume = split_gpu_quads_for_canonical_triangles(&base_quads[surface_quad_count..]);
+    let split = surface.into_iter().chain(volume).collect::<Vec<_>>();
+    let chunk_max = world_origin.map(|value| value.saturating_add(CHUNK_EDGE as i32));
+    let constrained =
+        constrain_split_bounded_gpu_quads(&split, world_origin, chunk_max, false);
+    let surface_output_count = constrained[..surface_split_count]
+        .iter()
+        .map(Vec::len)
+        .sum::<usize>();
+    let output = constrained.into_iter().flatten().collect::<Vec<_>>();
+    Some((output, u32::try_from(surface_output_count).ok()?))
 }
 
 struct ChunkMesh {
@@ -2998,6 +3035,13 @@ struct MeshSlice {
     bounds_min: glam::Vec3,
     bounds_max: glam::Vec3,
     render_layer: RenderLayer,
+    ownership: CanonicalSliceOwnership,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CanonicalSliceOwnership {
+    SurfaceEnvelope,
+    Volume,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3060,13 +3104,23 @@ struct VirtualTerrainDrawLists {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct VirtualTerrainOwnership {
     surface_pages: BTreeSet<TerrainPageKey>,
+    exact_face_pages: BTreeSet<TerrainPageKey>,
     volumetric_pages: BTreeSet<TerrainPageKey>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VirtualTerrainCanonicalCapability {
+    SurfaceEnvelope,
+    ExactFaceSet,
+    Volumetric,
 }
 
 impl VirtualTerrainOwnership {
     fn from_cut(
         cut: &VirtualTerrainCut,
-        mut page_topology: impl FnMut(TerrainPageKey) -> Option<voxels_world::TerrainTopologyClass>,
+        mut page_capability: impl FnMut(
+            TerrainPageKey,
+        ) -> Option<VirtualTerrainCanonicalCapability>,
     ) -> Result<Self, VirtualTerrainRendererError> {
         let selected = cut.selected_pages.iter().copied().collect::<BTreeSet<_>>();
         let roots = cut
@@ -3088,26 +3142,38 @@ impl VirtualTerrainOwnership {
                 return Err(VirtualTerrainRendererError::IncompleteRootPartition(*root));
             }
         }
-        let page_topologies = cut
+        let page_capabilities = cut
             .selected_pages
             .iter()
             .copied()
             .filter(|key| key.is_surface())
             .map(|key| {
-                page_topology(key)
-                    .map(|topology| (key, topology))
+                page_capability(key)
+                    .map(|capability| (key, capability))
                     .ok_or(VirtualTerrainRendererError::SelectedPageMissingGpu(key))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let surface_pages = page_topologies.iter().map(|(key, _)| *key).collect();
-        let volumetric_pages = page_topologies
+        let surface_pages = page_capabilities
+            .iter()
+            .filter_map(|(key, capability)| {
+                (*capability == VirtualTerrainCanonicalCapability::SurfaceEnvelope).then_some(*key)
+            })
+            .collect();
+        let exact_face_pages = page_capabilities
+            .iter()
+            .filter_map(|(key, capability)| {
+                (*capability == VirtualTerrainCanonicalCapability::ExactFaceSet).then_some(*key)
+            })
+            .collect();
+        let volumetric_pages = page_capabilities
             .into_iter()
-            .filter_map(|(key, topology)| {
-                (topology == voxels_world::TerrainTopologyClass::Volumetric).then_some(key)
+            .filter_map(|(key, capability)| {
+                (capability == VirtualTerrainCanonicalCapability::Volumetric).then_some(key)
             })
             .collect();
         Ok(Self {
             surface_pages,
+            exact_face_pages,
             volumetric_pages,
         })
     }
@@ -3124,6 +3190,13 @@ impl VirtualTerrainOwnership {
             return false;
         };
         self.pages_cover_voxel_bounds(&self.volumetric_pages, minimum, maximum)
+    }
+
+    fn covers_exact_faces_aabb(&self, minimum: glam::Vec3, maximum: glam::Vec3) -> bool {
+        let Some((minimum, maximum)) = voxel_bounds_from_metres(minimum, maximum) else {
+            return false;
+        };
+        self.pages_cover_voxel_bounds(&self.exact_face_pages, minimum, maximum)
     }
 
     fn pages_cover_voxel_bounds(
@@ -3154,6 +3227,22 @@ impl VirtualTerrainOwnership {
                 })
             })
         })
+    }
+}
+
+fn virtual_terrain_canonical_capability(
+    key: TerrainPageKey,
+    page: &VirtualTerrainGpuPage,
+) -> VirtualTerrainCanonicalCapability {
+    if key.level == 0 && page.representation == TerrainPageRepresentationKind::SurfaceCluster {
+        // Exact leaf surface clusters contain every exposed canonical face in the seam-certified
+        // collective cut, including caves, edits, and floating features.
+        VirtualTerrainCanonicalCapability::ExactFaceSet
+    } else if page.topology == voxels_world::TerrainTopologyClass::Volumetric {
+        VirtualTerrainCanonicalCapability::Volumetric
+    } else {
+        // Heightfields and other single-run representations own only the source surface envelope.
+        VirtualTerrainCanonicalCapability::SurfaceEnvelope
     }
 }
 
@@ -5299,6 +5388,7 @@ impl Renderer {
                 bounds_min,
                 bounds_max,
                 render_layer: RenderLayer::Opaque,
+                ownership: CanonicalSliceOwnership::Volume,
             });
         }
         if gpu_quads.is_empty() {
@@ -7152,6 +7242,11 @@ impl Renderer {
                     .ok_or(VirtualTerrainRendererError::SelectedPageMissingGpu(*key))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let ownership = VirtualTerrainOwnership::from_cut(&cut, |key| {
+            self.virtual_terrain_pages
+                .get(&key)
+                .map(|page| virtual_terrain_canonical_capability(key, page))
+        })?;
         let revisions = WorldRevisionFence::new(std::iter::empty(), terrain_revisions)?;
         let request = mint_virtual_terrain_request(&mut self.next_virtual_terrain_request);
         let publication = VirtualTerrainPublication {
@@ -7159,6 +7254,7 @@ impl Renderer {
             cut,
             envelope,
             certificate,
+            ownership,
             revisions,
             candidate_generation: None,
         };
@@ -7813,17 +7909,15 @@ impl Renderer {
             material_face: pack_gpu_material_face(u32::from(quad.material), quad.face),
             ao: u32::from(quad.ao),
         };
-        let opaque_quads = canonical_gpu_quads(origin, &mesh.opaque);
-        let water_surface_count = mesh
-            .translucent
-            .iter()
-            .filter(|quad| quad.face == 2)
-            .count() as u32;
+        let (opaque_quads, opaque_surface_count) = canonical_gpu_quads_partitioned(
+            origin,
+            &mesh.opaque,
+            mesh.opaque_surface_quads,
+        )?;
+        let water_surface_count = mesh.translucent_surface_quads;
         let water_quads: Vec<_> = mesh
             .translucent
             .iter()
-            .filter(|quad| quad.face == 2)
-            .chain(mesh.translucent.iter().filter(|quad| quad.face != 2))
             .map(convert)
             .collect();
         let min = glam::Vec3::from_array(origin.map(|value| value as f32 * VOXEL_SIZE_METRES));
@@ -7833,18 +7927,31 @@ impl Renderer {
         let opaque_update = if opaque_count == 0 {
             None
         } else {
-            let prepared = self.prepare_mesh_sliced(
-                key,
-                &opaque_quads,
-                vec![MeshSlice {
+            let mut slices = Vec::with_capacity(2);
+            if opaque_surface_count != 0 {
+                slices.push(MeshSlice {
                     relative_offset: 0,
-                    size: opaque_count * quad_bytes,
-                    quad_count: opaque_count,
+                    size: opaque_surface_count * quad_bytes,
+                    quad_count: opaque_surface_count,
                     bounds_min: min,
                     bounds_max: max,
                     render_layer: RenderLayer::Opaque,
-                }],
-            )?;
+                    ownership: CanonicalSliceOwnership::SurfaceEnvelope,
+                });
+            }
+            let volume_count = opaque_count.checked_sub(opaque_surface_count)?;
+            if volume_count != 0 {
+                slices.push(MeshSlice {
+                    relative_offset: opaque_surface_count * quad_bytes,
+                    size: volume_count * quad_bytes,
+                    quad_count: volume_count,
+                    bounds_min: min,
+                    bounds_max: max,
+                    render_layer: RenderLayer::Opaque,
+                    ownership: CanonicalSliceOwnership::Volume,
+                });
+            }
+            let prepared = self.prepare_mesh_sliced(key, &opaque_quads, slices)?;
             Some(prepared)
         };
         let translucent_count = mesh.translucent.len() as u32;
@@ -7860,9 +7967,10 @@ impl Renderer {
                     bounds_min: min,
                     bounds_max: max,
                     render_layer: RenderLayer::Translucent,
+                    ownership: CanonicalSliceOwnership::SurfaceEnvelope,
                 });
             }
-            let volume_count = translucent_count - water_surface_count;
+            let volume_count = translucent_count.checked_sub(water_surface_count)?;
             if volume_count != 0 {
                 slices.push(MeshSlice {
                     relative_offset: water_surface_count * quad_bytes,
@@ -7871,6 +7979,7 @@ impl Renderer {
                     bounds_min: min,
                     bounds_max: max,
                     render_layer: RenderLayer::Translucent,
+                    ownership: CanonicalSliceOwnership::Volume,
                 });
             }
             let Some(prepared) = self.prepare_water_mesh_sliced(key, &water_quads, slices) else {
@@ -8244,9 +8353,16 @@ impl Renderer {
         let (virtual_visible, virtual_ownership, committed_horizon_covers_camera) =
             if self.virtual_terrain_mode_from_presented_view() == VirtualTerrainRenderMode::Visible
             {
-                let Some((cut, envelope, certificate)) = self
+                let Some((cut, envelope, certificate, ownership)) = self
                     .presented_virtual_terrain()
-                    .map(|committed| (&committed.cut, &committed.envelope, committed.certificate))
+                    .map(|committed| {
+                        (
+                            &committed.cut,
+                            &committed.envelope,
+                            committed.certificate,
+                            committed.ownership.clone(),
+                        )
+                    })
                 else {
                     self.virtual_terrain_presented_invariant_failure_frames = self
                         .virtual_terrain_presented_invariant_failure_frames
@@ -8287,20 +8403,6 @@ impl Renderer {
                         .saturating_add(1);
                     return None;
                 }
-                let Ok(ownership) = VirtualTerrainOwnership::from_cut(cut, |key| {
-                    self.virtual_terrain_pages
-                        .get(&key)
-                        .or_else(|| self.virtual_terrain_retired_published_pages.get(&key))
-                        .map(|page| page.topology)
-                }) else {
-                    (self.log_error)(
-                        "committed virtual terrain cut cannot construct canonical ownership",
-                    );
-                    self.virtual_terrain_presented_invariant_failure_frames = self
-                        .virtual_terrain_presented_invariant_failure_frames
-                        .saturating_add(1);
-                    return None;
-                };
                 // A committed cut is a complete, certified partition. Keep that one owner visible
                 // while a newer camera-exact cut streams. Replacing the whole bank with whatever
                 // canonical chunks happen to be resident creates terrain islands and turns a
@@ -8356,13 +8458,13 @@ impl Renderer {
                     && key.0 == 0
                     && view_clip.contains_aabb(chunk.bounds_min, chunk.bounds_max)
             },
-            |key, chunk, slice| {
+            |key, _chunk, slice| {
                 slice.render_layer == RenderLayer::Translucent
                     && !canonical_bounds_owned_by_virtual(
                         *key,
-                        chunk.activation_mask,
                         slice.bounds_min,
                         slice.bounds_max,
+                        slice.ownership,
                         &virtual_ownership,
                     )
                     && view_clip.contains_aabb(slice.bounds_min, slice.bounds_max)
@@ -10351,9 +10453,9 @@ fn collect_opaque_draw_lists(
             if slice.render_layer != RenderLayer::Opaque
                 || canonical_bounds_owned_by_virtual(
                     *key,
-                    chunk.activation_mask,
                     slice.bounds_min,
                     slice.bounds_max,
+                    slice.ownership,
                     virtual_ownership,
                 )
             {
@@ -10397,25 +10499,20 @@ fn collect_opaque_draw_lists(
 
 fn canonical_bounds_owned_by_virtual(
     key: MeshKey,
-    activation_mask: u8,
     bounds_min: glam::Vec3,
     bounds_max: glam::Vec3,
+    ownership: CanonicalSliceOwnership,
     virtual_ownership: &VirtualTerrainOwnership,
 ) -> bool {
     if key == EXACT_VOLUME_FRONTIER_MESH_KEY {
         return false;
     }
-    if virtual_ownership.covers_volume_aabb(bounds_min, bounds_max) {
+    if virtual_ownership.covers_volume_aabb(bounds_min, bounds_max)
+        || virtual_ownership.covers_exact_faces_aabb(bounds_min, bounds_max)
+    {
         return true;
     }
-    // A radial canonical chunk supplies collision and interaction data, but the complete virtual
-    // cut is the sole visible terrain-surface owner. Do not submit that same surface twice beneath
-    // a heightfield. Portal, interaction, and enclosed-view activation explicitly request 3D
-    // geometry which a single-run surface page cannot represent, so those slices remain visible.
-    let supplementary_mask = ChunkActivationReason::Portal as u8
-        | ChunkActivationReason::Interaction as u8
-        | ChunkActivationReason::EnclosedView as u8;
-    activation_mask & supplementary_mask == 0
+    ownership == CanonicalSliceOwnership::SurfaceEnvelope
         && virtual_ownership.covers_surface_aabb(bounds_min, bounds_max)
 }
 
@@ -12732,6 +12829,7 @@ mod tests {
                 exact_coverage: 1,
                 horizon_coverage: 1,
             },
+            ownership: VirtualTerrainOwnership::default(),
             revisions,
             candidate_generation,
         }
@@ -13069,6 +13167,33 @@ mod tests {
             1,
             "the unit neighbor already has the exact shared endpoints"
         );
+    }
+
+    #[test]
+    fn canonical_surface_and_volume_partition_share_one_t_junction_conformity_pass() {
+        let top = |origin, extent| Quad {
+            origin,
+            face: 2,
+            extent,
+            material: Material::Stone.id(),
+            ao: 0xff,
+            _pad: 0,
+        };
+        let surface = top([4, 0, 4], [4, 4]);
+        let volume = top([8, 0, 6], [1, 1]);
+        let (partitioned, surface_count) =
+            canonical_gpu_quads_partitioned([0; 3], &[surface, volume], 1).unwrap();
+        assert_eq!(
+            partitioned,
+            canonical_gpu_quads([0; 3], &[surface, volume]),
+            "semantic partitioning must not change the joint conforming geometry"
+        );
+        assert_eq!(surface_count, 4);
+        assert!(partitioned[..surface_count as usize].iter().all(|quad| {
+            quad.origin == [4, 0, 4]
+                && quad.extent_voxels[0] & CANONICAL_TRIANGLE_FLAG != 0
+        }));
+        assert_eq!(partitioned[surface_count as usize..].len(), 1);
     }
 
     #[test]
@@ -15327,7 +15452,7 @@ mod tests {
         let incomplete = root.refinement_children().unwrap()[..2].to_vec();
         assert_eq!(
             VirtualTerrainOwnership::from_cut(&virtual_cut_with_selected(incomplete), |_| Some(
-                voxels_world::TerrainTopologyClass::Volumetric
+                VirtualTerrainCanonicalCapability::Volumetric
             ),),
             Err(VirtualTerrainRendererError::IncompleteRootPartition(root))
         );
@@ -15338,7 +15463,7 @@ mod tests {
         let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 2);
         let ownership = VirtualTerrainOwnership::from_cut(
             &virtual_cut_with_selected(root.refinement_children().unwrap()),
-            |_| Some(voxels_world::TerrainTopologyClass::Volumetric),
+            |_| Some(VirtualTerrainCanonicalCapability::SurfaceEnvelope),
         )
         .unwrap();
         assert!(ownership.covers_surface_aabb(
@@ -15349,18 +15474,18 @@ mod tests {
             glam::Vec3::new(-1.0, -1.0, 6_600.0),
             glam::Vec3::new(1.0, 1.0, 6_650.0),
         ));
-        assert!(ownership.covers_volume_aabb(
+        assert!(!ownership.covers_volume_aabb(
             glam::Vec3::new(-100.0, -10_000.0, 6_600.0),
             glam::Vec3::new(-50.0, 10_000.0, 6_650.0),
         ));
     }
 
     #[test]
-    fn height_surface_ownership_does_not_hide_enclosed_canonical_volume() {
+    fn height_surface_ownership_hides_only_the_certified_surface_slice() {
         let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 2);
         let ownership = VirtualTerrainOwnership::from_cut(
             &virtual_cut_with_selected(root.refinement_children().unwrap()),
-            |_| Some(voxels_world::TerrainTopologyClass::SingleRunColumns),
+            |_| Some(VirtualTerrainCanonicalCapability::SurfaceEnvelope),
         )
         .unwrap();
 
@@ -15377,22 +15502,47 @@ mod tests {
         assert!(
             canonical_bounds_owned_by_virtual(
                 (0, -1, 0, 66),
-                ChunkActivationReason::Radial as u8,
                 minimum,
                 maximum,
+                CanonicalSliceOwnership::SurfaceEnvelope,
                 &ownership,
             ),
-            "radial collision meshes must not redraw the virtual height surface"
+            "canonical meshes must not redraw the certified virtual height surface"
         );
         assert!(
             !canonical_bounds_owned_by_virtual(
                 (0, -1, 0, 66),
-                ChunkActivationReason::Radial as u8 | ChunkActivationReason::EnclosedView as u8,
                 minimum,
                 maximum,
+                CanonicalSliceOwnership::Volume,
                 &ownership,
             ),
-            "height surfaces must preserve explicitly requested enclosed 3D geometry"
+            "height surfaces must preserve caves, overhangs, features, and edits"
         );
+    }
+
+    #[test]
+    fn exact_face_cut_replaces_both_canonical_surface_and_volume_slices() {
+        let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, -1, 2);
+        let ownership = VirtualTerrainOwnership::from_cut(
+            &virtual_cut_with_selected(root.refinement_children().unwrap()),
+            |_| Some(VirtualTerrainCanonicalCapability::ExactFaceSet),
+        )
+        .unwrap();
+        let minimum = glam::Vec3::new(-100.0, -10.0, 6_600.0);
+        let maximum = glam::Vec3::new(-50.0, 10.0, 6_650.0);
+        assert!(ownership.covers_exact_faces_aabb(minimum, maximum));
+        for slice in [
+            CanonicalSliceOwnership::SurfaceEnvelope,
+            CanonicalSliceOwnership::Volume,
+        ] {
+            assert!(canonical_bounds_owned_by_virtual(
+                (0, -1, 0, 66),
+                minimum,
+                maximum,
+                slice,
+                &ownership,
+            ));
+        }
     }
 }

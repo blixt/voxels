@@ -56,7 +56,7 @@ pub use generation::{
 };
 pub use macro_composer::HeightfieldWorldSource;
 pub use material::{Material, MaterialEmission, RenderLayer};
-pub use mesh::{EmissiveCluster, MeshedChunk, Quad, mesh_chunk};
+pub use mesh::{EmissiveCluster, MeshedChunk, Quad, mesh_chunk, mesh_chunk_with_surface};
 pub use route::{
     FIRST_PILGRIM_ROAD_BOUNDS, FIRST_PILGRIM_ROAD_NODES, ROUTE_CORE_HALF_WIDTH_VOXELS,
     ROUTE_SHOULDER_WIDTH_VOXELS, ROUTE_TOKEN_CADENCE_VOXELS, ROUTE_TOKEN_SIDE_OFFSET_VOXELS,
@@ -70,15 +70,15 @@ pub use source::{
     MAX_SURFACE_SAMPLE_BLOCK_SAMPLES, MAX_SURFACE_SEARCH_RADIUS, MAX_VOXEL_BLOCK_SAMPLES,
     MAX_WORLD_PRODUCT_BATCH, MESHING_HALO_VOXELS, MacroBlock, MacroBlockBatch,
     MacroBlockBatchResult, MacroBlockRequest, MacroCoordinateTransform, MacroTerrainSource,
-    MeshingHalo, ModelIdentity, NO_AUTHORED_CONTENT_VERSION, PROCEDURAL_SAMPLER_VERSION,
-    PROCEDURAL_SCHEDULER_VERSION, ProceduralWorldSource, SourceDeviceRequirement,
-    SurfaceSampleBlockRequest, SurfaceSampleBlockSnapshot, SurfaceSearchHit, SurfaceSearchKind,
-    SurfaceSearchRequest, SurfaceSearchSnapshot, VOXEL_COMPOSER_VERSION, VoxelBlockRequest,
-    VoxelBlockSnapshot, WORLD_SCHEMA_VERSION, WorldId, WorldManifest, WorldManifestError,
-    WorldManifestHash, WorldProduct, WorldProductBatch, WorldProductBatchItem,
-    WorldProductBatchResult, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
-    WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind,
-    procedural_world_source,
+    MeshingHalo, MeshingSurfaceColumn, MeshingSurfaceEnvelope, ModelIdentity,
+    NO_AUTHORED_CONTENT_VERSION, PROCEDURAL_SAMPLER_VERSION, PROCEDURAL_SCHEDULER_VERSION,
+    ProceduralWorldSource, SourceDeviceRequirement, SurfaceSampleBlockRequest,
+    SurfaceSampleBlockSnapshot, SurfaceSearchHit, SurfaceSearchKind, SurfaceSearchRequest,
+    SurfaceSearchSnapshot, VOXEL_COMPOSER_VERSION, VoxelBlockRequest, VoxelBlockSnapshot,
+    WORLD_SCHEMA_VERSION, WorldId, WorldManifest, WorldManifestError, WorldManifestHash,
+    WorldProduct, WorldProductBatch, WorldProductBatchItem, WorldProductBatchResult,
+    WorldProductPriority, WorldProductRequest, WorldSourceEngine, WorldSourceError,
+    WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind, procedural_world_source,
 };
 pub use terrain_directory::{
     TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_DIRECTORY_MAX_NODES, TERRAIN_DIRECTORY_MAX_ROOTS,
@@ -142,4 +142,7 @@ pub use atlas::{
     PILGRIM_CHAPTERS, PILGRIM_DESTINATIONS, RouteChapter, RouteChapterId,
     pilgrim_chapter_at_distance,
 };
-pub use binary_mesh::{BinaryMeshScratch, mesh_chunk_binary, mesh_chunk_binary_with_scratch};
+pub use binary_mesh::{
+    BinaryMeshScratch, mesh_chunk_binary, mesh_chunk_binary_with_scratch,
+    mesh_chunk_binary_with_scratch_and_surface, mesh_chunk_binary_with_surface,
+};

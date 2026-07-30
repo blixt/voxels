@@ -10,8 +10,9 @@ use crate::{
     AtmosphereSample, CHUNK_EDGE, Chunk, ChunkCoord, ChunkSnapshot, FEATURE_MAX_RADIUS_VOXELS,
     MACRO_FIELD_SCHEMA_VERSION, MAX_MACRO_BLOCK_SAMPLES, MAX_SURFACE_SAMPLE_BLOCK_SAMPLES,
     MAX_SURFACE_SEARCH_RADIUS, MAX_VOXEL_BLOCK_SAMPLES, MAX_WORLD_PRODUCT_BATCH, MacroBlock,
-    MacroBlockBatch, MacroBlockRequest, MacroTerrainSource, Material, MeshingHalo, SkylineFeature,
-    SkylineFeatureId, SkylineFeatureKind, SurfaceRegion, SurfaceSample, SurfaceSampleBlockRequest,
+    MacroBlockBatch, MacroBlockRequest, MacroTerrainSource, Material, MeshingHalo,
+    MeshingSurfaceColumn, MeshingSurfaceEnvelope, SkylineFeature, SkylineFeatureId,
+    SkylineFeatureKind, SurfaceRegion, SurfaceSample, SurfaceSampleBlockRequest,
     SurfaceSampleBlockSnapshot, SurfaceSearchHit, SurfaceSearchKind, SurfaceSearchRequest,
     SurfaceSearchSnapshot, TreeSpecies, VoxelBlockRequest, VoxelBlockSnapshot, VoxelCoord,
     WorldProduct, WorldProductBatch, WorldProductBatchItem, WorldProductBatchResult,
@@ -379,7 +380,43 @@ impl HeightfieldWorldSource {
             self.material_at_with_features(&region, &features, x, y, z)
                 .unwrap_or(Material::Air)
         });
-        ChunkSnapshot::new(self.identity_hash, chunk, halo)
+        let mut surface_columns = Vec::with_capacity(MeshingSurfaceEnvelope::COLUMN_COUNT);
+        for local_z in -1..=CHUNK_EDGE as i32 {
+            for local_x in -1..=CHUNK_EDGE as i32 {
+                let (Some(x), Some(z)) = (
+                    origin[0].checked_add(local_x),
+                    origin[2].checked_add(local_z),
+                ) else {
+                    surface_columns.push(MeshingSurfaceColumn {
+                        valid: false,
+                        ground_plane: 0,
+                        water_plane: None,
+                    });
+                    continue;
+                };
+                let sample = self.surface_sample_from_region(&region, x, z)?;
+                let ground_plane = sample
+                    .height
+                    .checked_add(1)
+                    .ok_or(WorldSourceError::MalformedMacroBlock)?;
+                let water_plane = match sample.water_level {
+                    Some(height) => Some(
+                        height
+                            .checked_add(1)
+                            .ok_or(WorldSourceError::MalformedMacroBlock)?,
+                    ),
+                    None => None,
+                };
+                surface_columns.push(MeshingSurfaceColumn {
+                    valid: true,
+                    ground_plane,
+                    water_plane,
+                });
+            }
+        }
+        let surface = MeshingSurfaceEnvelope::from_columns(coord, surface_columns)
+            .ok_or(WorldSourceError::MalformedMacroBlock)?;
+        ChunkSnapshot::new(self.identity_hash, chunk, halo, surface)
             .ok_or(WorldSourceError::MalformedMacroBlock)
     }
 
@@ -2374,8 +2411,26 @@ mod tests {
         assert!(MeshingHalo::from_voxels(coord, vec![Material::Air; 1]).is_none());
         let halo = MeshingHalo::from_voxels(coord, vec![Material::Air; MESHING_HALO_VOXELS])
             .expect("exact halo length");
+        let surface = MeshingSurfaceEnvelope::from_columns(
+            coord,
+            vec![
+                MeshingSurfaceColumn {
+                    valid: true,
+                    ground_plane: 1,
+                    water_plane: None,
+                };
+                MeshingSurfaceEnvelope::COLUMN_COUNT
+            ],
+        )
+        .expect("exact surface length");
         assert!(
-            ChunkSnapshot::new(identity, Chunk::empty(ChunkCoord::new(1, 0, 0)), halo).is_none()
+            ChunkSnapshot::new(
+                identity,
+                Chunk::empty(ChunkCoord::new(1, 0, 0)),
+                halo,
+                surface,
+            )
+            .is_none()
         );
         assert!(
             VoxelBlockSnapshot::from_materials(

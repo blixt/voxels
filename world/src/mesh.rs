@@ -1,4 +1,4 @@
-use crate::{CHUNK_EDGE, Chunk, Material, RenderLayer};
+use crate::{CHUNK_EDGE, Chunk, Material, MeshingSurfaceEnvelope, RenderLayer};
 use bytemuck::{Pod, Zeroable};
 
 pub const FACE_POS_X: u8 = 0;
@@ -41,7 +41,11 @@ const _: () = assert!(size_of::<EmissiveCluster>() == 16);
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MeshedChunk {
+    /// Prefix length in `opaque` represented by the source heightfield envelope.
+    pub opaque_surface_quads: u32,
     pub opaque: Vec<Quad>,
+    /// Prefix length in `translucent` represented by the source heightfield envelope.
+    pub translucent_surface_quads: u32,
     pub translucent: Vec<Quad>,
     pub emissive_clusters: Vec<EmissiveCluster>,
 }
@@ -63,15 +67,38 @@ impl MeshedChunk {
 struct FaceKey {
     material: Material,
     ao: u8,
+    surface_owned: bool,
 }
 
 /// Greedily merges coplanar visible faces with the same material. `outside` samples world coordinates
 /// beyond this chunk, preventing hidden seam faces when neighboring chunks are resident or generated.
 pub fn mesh_chunk(
     chunk: &Chunk,
+    outside: impl FnMut(i32, i32, i32) -> Material,
+) -> MeshedChunk {
+    mesh_chunk_with_surface(chunk, None, outside)
+}
+
+/// Greedily meshes a chunk while retaining an exact partition between faces represented by the
+/// source heightfield envelope and canonical volume-only faces.
+///
+/// The partition is semantic, not inferred from a one-voxel air scan: base tops and cliff risers
+/// are heightfield-owned, while caves, undersides, features, and edited departures remain volume.
+pub fn mesh_chunk_with_surface(
+    chunk: &Chunk,
+    surface: Option<&MeshingSurfaceEnvelope>,
     mut outside: impl FnMut(i32, i32, i32) -> Material,
 ) -> MeshedChunk {
+    if let Some(surface) = surface {
+        assert_eq!(
+            surface.coord(),
+            chunk.coord(),
+            "meshing surface must describe the meshed chunk"
+        );
+    }
     let mut mesh = MeshedChunk::default();
+    let mut opaque_volume = Vec::new();
+    let mut translucent_volume = Vec::new();
     let origin = chunk.coord().world_origin();
     let occupancy = build_occupancy_halo(chunk, origin, &mut outside);
     let mut emission_counts = [0u16; Material::ALL.len() * EMISSIVE_BIN_COUNT];
@@ -128,6 +155,11 @@ pub fn mesh_chunk(
                         FaceKey {
                             material,
                             ao: face_ao(local, axis, u_axis, v_axis, step, &occupancy),
+                            surface_owned: surface.is_some_and(|surface| {
+                                heightfield_owns_face(
+                                    surface, origin, local, neighbor, material, face,
+                                )
+                            }),
                         }
                     };
                 }
@@ -170,8 +202,12 @@ pub fn mesh_chunk(
                         _pad: 0,
                     };
                     match key.material.render_layer() {
-                        RenderLayer::Opaque => mesh.opaque.push(quad),
-                        RenderLayer::Translucent => mesh.translucent.push(quad),
+                        RenderLayer::Opaque if key.surface_owned => mesh.opaque.push(quad),
+                        RenderLayer::Opaque => opaque_volume.push(quad),
+                        RenderLayer::Translucent if key.surface_owned => {
+                            mesh.translucent.push(quad);
+                        }
+                        RenderLayer::Translucent => translucent_volume.push(quad),
                         RenderLayer::Empty => {}
                     }
                     u += width;
@@ -180,7 +216,49 @@ pub fn mesh_chunk(
             }
         }
     }
+    mesh.opaque_surface_quads = mesh.opaque.len() as u32;
+    mesh.translucent_surface_quads = mesh.translucent.len() as u32;
+    mesh.opaque.extend(opaque_volume);
+    mesh.translucent.extend(translucent_volume);
     mesh
+}
+
+pub(crate) fn heightfield_owns_face(
+    surface: &MeshingSurfaceEnvelope,
+    world_origin: [i32; 3],
+    local: [usize; 3],
+    neighbor: [i32; 3],
+    material: Material,
+    face: u8,
+) -> bool {
+    let current_y = world_origin[1].saturating_add(local[1] as i32);
+    if material == Material::Water {
+        // Level-zero virtual water follows the same lower-X/Z voxel-cell convention as ground.
+        // Only top faces exist in that representation; water sides and bottoms remain canonical.
+        return face == FACE_POS_Y
+            && surface
+                .sample_local(local[0] as i32, local[2] as i32)
+                .filter(|column| column.valid)
+                .and_then(|column| column.water_plane)
+                == current_y.checked_add(1);
+    }
+    if material.render_layer() != RenderLayer::Opaque {
+        return false;
+    }
+    let Some(current) = surface
+        .sample_local(local[0] as i32, local[2] as i32)
+        .filter(|column| column.valid)
+    else {
+        return false;
+    };
+    let Some(neighbor_column) = surface
+        .sample_local(neighbor[0], neighbor[2])
+        .filter(|column| column.valid)
+    else {
+        return false;
+    };
+    let neighbor_y = world_origin[1].saturating_add(neighbor[1]);
+    current_y < current.ground_plane && neighbor_y >= neighbor_column.ground_plane
 }
 
 fn emitter_is_exposed(occupancy: &[u8], local: [usize; 3]) -> bool {
@@ -337,8 +415,40 @@ fn compose(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ChunkCoord, VoxelCoord};
+    use crate::{ChunkCoord, MeshingSurfaceColumn, VoxelCoord};
     use std::collections::BTreeSet;
+
+    fn flat_surface(
+        coord: ChunkCoord,
+        ground_plane: i32,
+        water_plane: Option<i32>,
+    ) -> MeshingSurfaceEnvelope {
+        MeshingSurfaceEnvelope::from_columns(
+            coord,
+            vec![
+                MeshingSurfaceColumn {
+                    valid: true,
+                    ground_plane,
+                    water_plane,
+                };
+                MeshingSurfaceEnvelope::COLUMN_COUNT
+            ],
+        )
+        .unwrap()
+    }
+
+    fn fill_below(chunk: &mut Chunk, plane: impl Fn(usize, usize) -> i32) {
+        let origin_y = chunk.coord().world_origin()[1];
+        for y in 0..CHUNK_EDGE {
+            for z in 0..CHUNK_EDGE {
+                for x in 0..CHUNK_EDGE {
+                    if origin_y + (y as i32) < plane(x, z) {
+                        chunk.set(x, y, z, Material::Stone);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn filled_chunk_merges_to_six_quads() {
@@ -476,6 +586,103 @@ mod tests {
                 .all(|quad| quad.material == Material::Water.id())
         );
         assert!(mesh.translucent.iter().all(|quad| quad.extent == [32, 32]));
+    }
+
+    #[test]
+    fn source_surface_partition_keeps_caves_features_and_remote_ceilings_canonical() {
+        let coord = ChunkCoord::new(0, 0, 0);
+        let surface = flat_surface(coord, 10, None);
+        let mut chunk = Chunk::empty(coord);
+        fill_below(&mut chunk, |_, _| 10);
+        chunk.set(8, 5, 8, Material::Air);
+        chunk.set(12, 14, 12, Material::Stone);
+        let mesh = mesh_chunk_with_surface(&chunk, Some(&surface), |_, y, _| {
+            if y < 10 {
+                Material::Stone
+            } else {
+                Material::Air
+            }
+        });
+        assert!(mesh.opaque_surface_quads > 0);
+        assert!(
+            mesh.opaque[..mesh.opaque_surface_quads as usize]
+                .iter()
+                .all(|quad| quad.face == FACE_POS_Y),
+            "the flat source envelope owns only its ground tops"
+        );
+        let volume = &mesh.opaque[mesh.opaque_surface_quads as usize..];
+        assert!(
+            volume.iter().any(|quad| quad.origin[1] <= 6),
+            "the excavated cave must remain canonical volume"
+        );
+        assert!(
+            volume.iter().any(|quad| quad.origin[1] >= 14),
+            "the floating feature must remain canonical volume"
+        );
+
+        let remote_coord = ChunkCoord::new(0, 2, 0);
+        let remote_surface = flat_surface(remote_coord, 10, None);
+        let mut remote = Chunk::empty(remote_coord);
+        remote.set(9, 12, 9, Material::Stone);
+        let remote_mesh =
+            mesh_chunk_with_surface(&remote, Some(&remote_surface), |_, _, _| Material::Air);
+        assert_eq!(remote_mesh.opaque_surface_quads, 0);
+        assert_eq!(remote_mesh.opaque.len(), 6);
+    }
+
+    #[test]
+    fn source_surface_partition_owns_ground_cliff_risers_and_only_water_tops() {
+        let coord = ChunkCoord::new(0, 0, 0);
+        let mut columns = Vec::with_capacity(MeshingSurfaceEnvelope::COLUMN_COUNT);
+        for _z in -1..=CHUNK_EDGE as i32 {
+            for x in -1..=CHUNK_EDGE as i32 {
+                columns.push(MeshingSurfaceColumn {
+                    valid: true,
+                    ground_plane: if x < 16 { 10 } else { 5 },
+                    water_plane: None,
+                });
+            }
+        }
+        let surface = MeshingSurfaceEnvelope::from_columns(coord, columns).unwrap();
+        let mut chunk = Chunk::empty(coord);
+        fill_below(&mut chunk, |x, _| if x < 16 { 10 } else { 5 });
+        let mesh = mesh_chunk_with_surface(&chunk, Some(&surface), |x, y, _| {
+            let plane = if x < 16 { 10 } else { 5 };
+            if y < plane {
+                Material::Stone
+            } else {
+                Material::Air
+            }
+        });
+        assert_eq!(mesh.opaque_surface_quads as usize, mesh.opaque.len());
+        assert!(
+            mesh.opaque
+                .iter()
+                .any(|quad| quad.face == FACE_POS_X && quad.origin[0] == 15),
+            "the heightfield owns the exact vertical cliff riser"
+        );
+
+        let water_surface = flat_surface(coord, 0, Some(5));
+        let mut water = Chunk::empty(coord);
+        for y in 0..5 {
+            for z in 0..CHUNK_EDGE {
+                for x in 0..CHUNK_EDGE {
+                    water.set(x, y, z, Material::Water);
+                }
+            }
+        }
+        let water_mesh = mesh_chunk_with_surface(&water, Some(&water_surface), |_, y, _| {
+            if (0..5).contains(&y) {
+                Material::Water
+            } else {
+                Material::Air
+            }
+        });
+        assert_eq!(water_mesh.translucent_surface_quads, 1);
+        assert_eq!(
+            water_mesh.translucent[0].face, FACE_POS_Y,
+            "the heightfield water contract owns only voxel-cell top faces"
+        );
     }
 
     #[test]
