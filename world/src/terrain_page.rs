@@ -16,7 +16,7 @@ use std::io::Read;
 #[cfg(feature = "terrain-page-builder")]
 use crate::terrain_error::certify_bidirectional_surface_error;
 
-pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 9;
+pub const TERRAIN_PAGE_SCHEMA_VERSION: u16 = 10;
 pub const TERRAIN_PAGE_EDGE_SAMPLES: u32 = 32;
 pub const TERRAIN_HEIGHTFIELD_BOUNDARY_SIDES: usize = 4;
 pub const TERRAIN_HEIGHTFIELD_BOUNDARY_MIDPOINTS: usize =
@@ -369,6 +369,17 @@ pub enum TerrainPageRepresentationKind {
     HeightfieldGrid = 5,
 }
 
+/// Explicit proof describing which canonical face partitions a page may replace.
+///
+/// Representation shape and topology are deliberately insufficient: an edited SurfaceCluster can
+/// be an exact envelope/edit patch while omitting unrelated source-volume caves.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerrainCanonicalOwnership {
+    SurfaceEnvelopeAndEdits = 0,
+    FullFaceDomain = 1,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TerrainPageV1 {
     pub source_identity_hash: WorldSourceIdentityHash,
@@ -378,6 +389,7 @@ pub struct TerrainPageV1 {
     pub children: Vec<TerrainPageChild>,
     pub errors: TerrainErrorBounds,
     pub topology: TerrainTopologyClass,
+    pub canonical_ownership: TerrainCanonicalOwnership,
     pub boundary_fingerprints: [[u8; 32]; 6],
     pub materials: Vec<TerrainMaterialCoverage>,
     pub representation: TerrainPageRepresentation,
@@ -399,6 +411,11 @@ impl TerrainPageV1 {
                 .materials
                 .iter()
                 .all(|coverage| coverage.material.is_renderable())
+            && (!matches!(
+                self.representation,
+                TerrainPageRepresentation::HeightfieldGrid(_)
+            ) || self.canonical_ownership
+                == TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits)
             && representation_is_valid(self)
             && self.content_fingerprint == terrain_page_fingerprint(self)
     }
@@ -750,6 +767,7 @@ fn build_exact_terrain_page_with_policy(
         children: Vec::new(),
         errors: TerrainErrorBounds::EXACT,
         topology,
+        canonical_ownership: TerrainCanonicalOwnership::FullFaceDomain,
         boundary_fingerprints,
         materials,
         representation,
@@ -770,8 +788,58 @@ pub fn build_exact_surface_terrain_page(
     key: TerrainPageKey,
     revision: u64,
     vertical_bounds: [i32; 2],
-    mut material_at: impl FnMut(VoxelCoord) -> Material,
+    material_at: impl FnMut(VoxelCoord) -> Material,
 ) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    let (bounds, samples) = sample_exact_surface_page(key, vertical_bounds, material_at)?;
+    finish_exact_surface_page(
+        source_identity_hash,
+        key,
+        revision,
+        bounds,
+        &samples,
+        &samples,
+        TerrainCanonicalOwnership::FullFaceDomain,
+        |_| true,
+    )
+}
+
+/// Builds an exact authored surface patch without claiming unrelated source-volume faces sampled
+/// for transport convenience.
+///
+/// `material_at` supplies the combined exact occupancy used to derive candidate faces.
+/// `handoff_material_at` supplies the source-envelope-plus-authored semantic field used for
+/// boundary certificates and material coverage. `face_owned` is the shared normalized unit-face
+/// owner predicate; it must retain only envelope or edit-incident faces.
+pub fn build_owned_exact_surface_terrain_page(
+    source_identity_hash: WorldSourceIdentityHash,
+    key: TerrainPageKey,
+    revision: u64,
+    vertical_bounds: [i32; 2],
+    material_at: impl FnMut(VoxelCoord) -> Material,
+    handoff_material_at: impl FnMut(VoxelCoord) -> Material,
+    face_owned: impl FnMut(&CanonicalFaceKey) -> bool,
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    let (bounds, samples) = sample_exact_surface_page(key, vertical_bounds, material_at)?;
+    let (handoff_bounds, handoff_samples) =
+        sample_exact_surface_page(key, vertical_bounds, handoff_material_at)?;
+    debug_assert_eq!(bounds, handoff_bounds);
+    finish_exact_surface_page(
+        source_identity_hash,
+        key,
+        revision,
+        bounds,
+        &samples,
+        &handoff_samples,
+        TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits,
+        face_owned,
+    )
+}
+
+fn sample_exact_surface_page(
+    key: TerrainPageKey,
+    vertical_bounds: [i32; 2],
+    mut material_at: impl FnMut(VoxelCoord) -> Material,
+) -> Result<(VoxelBounds, ExactPageSamples), TerrainPageBuildError> {
     if key.level != 0 || !key.is_surface() || vertical_bounds[0] >= vertical_bounds[1] {
         return Err(TerrainPageBuildError::InvalidPageKey);
     }
@@ -837,13 +905,29 @@ pub fn build_exact_surface_terrain_page(
             }
         }
     }
-    let samples = ExactPageSamples {
-        halo_min,
-        halo_shape,
-        materials: sampled,
-    };
-    let faces = directionally_owned_surface_faces(bounds, |coord| samples.sample(coord));
-    let certificate = BoundaryCertificate::build(bounds, |coord| samples.sample(coord));
+    Ok((
+        bounds,
+        ExactPageSamples {
+            halo_min,
+            halo_shape,
+            materials: sampled,
+        },
+    ))
+}
+
+fn finish_exact_surface_page(
+    source_identity_hash: WorldSourceIdentityHash,
+    key: TerrainPageKey,
+    revision: u64,
+    bounds: VoxelBounds,
+    samples: &ExactPageSamples,
+    handoff_samples: &ExactPageSamples,
+    canonical_ownership: TerrainCanonicalOwnership,
+    mut face_owned: impl FnMut(&CanonicalFaceKey) -> bool,
+) -> Result<TerrainPageV1, TerrainPageBuildError> {
+    let mut faces = directionally_owned_surface_faces(bounds, |coord| samples.sample(coord));
+    faces.retain(|face| face_owned(face));
+    let certificate = BoundaryCertificate::build(bounds, |coord| handoff_samples.sample(coord));
     let mut boundary_fingerprints =
         std::array::from_fn(|index| certificate.side(BoundarySide::ALL[index]).fingerprint);
     for side in [
@@ -853,9 +937,9 @@ pub fn build_exact_surface_terrain_page(
         BoundarySide::PositiveZ,
     ] {
         boundary_fingerprints[side as usize] =
-            exact_surface_handoff_fingerprint(bounds, &samples, side);
+            exact_surface_handoff_fingerprint(bounds, handoff_samples, side);
     }
-    let (materials, palette_indices) = material_coverage(bounds, &samples, &faces)?;
+    let (materials, palette_indices) = material_coverage(bounds, handoff_samples, &faces)?;
     let representation =
         TerrainPageRepresentation::SurfaceCluster(merge_surface_faces(&faces, &palette_indices));
     if representation_bytes(&representation).len() > TERRAIN_PAGE_MAX_PAYLOAD_BYTES {
@@ -869,6 +953,7 @@ pub fn build_exact_surface_terrain_page(
         children: Vec::new(),
         errors: TerrainErrorBounds::EXACT,
         topology: TerrainTopologyClass::Volumetric,
+        canonical_ownership,
         boundary_fingerprints,
         materials,
         representation,
@@ -1110,6 +1195,7 @@ pub fn build_sampled_heightfield_terrain_page(
         children: Vec::new(),
         errors,
         topology: TerrainTopologyClass::SingleRunColumns,
+        canonical_ownership: TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits,
         boundary_fingerprints,
         materials,
         representation: TerrainPageRepresentation::HeightfieldGrid(grid),
@@ -1449,6 +1535,14 @@ pub fn assemble_terrain_parent(
         key.bounds().ok_or(TerrainReplacementError::InvalidParent)?
     };
     let source_identity_hash = children[0].source_identity_hash;
+    let canonical_ownership = if children
+        .iter()
+        .all(|child| child.canonical_ownership == TerrainCanonicalOwnership::FullFaceDomain)
+    {
+        TerrainCanonicalOwnership::FullFaceDomain
+    } else {
+        TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits
+    };
     let boundary_fingerprints = aggregate_child_boundaries(key, children)?;
     let mut child_references = children
         .iter()
@@ -1467,6 +1561,7 @@ pub fn assemble_terrain_parent(
         children: child_references,
         errors,
         topology,
+        canonical_ownership,
         boundary_fingerprints,
         materials,
         representation,
@@ -2974,7 +3069,11 @@ fn terrain_page_fingerprint(page: &TerrainPageV1) -> [u8; 32] {
     hasher.update(&page.revision.to_le_bytes());
     hash_bounds(&mut hasher, page.bounds);
     hash_errors(&mut hasher, page.errors);
-    hasher.update(&[page.topology as u8, page.representation.kind() as u8]);
+    hasher.update(&[
+        page.topology as u8,
+        page.canonical_ownership as u8,
+        page.representation.kind() as u8,
+    ]);
     hasher.update(&(page.children.len() as u16).to_le_bytes());
     for child in &page.children {
         hash_key(&mut hasher, child.key);
@@ -3502,7 +3601,8 @@ pub fn encode_terrain_page(page: &TerrainPageV1) -> Result<Vec<u8>, TerrainPageC
     push_u16(&mut encoded, PAGE_HEADER_LEN);
     encoded.extend_from_slice(page.source_identity_hash.as_bytes());
     encoded.push(page.key.level);
-    encoded.extend_from_slice(&[0; 3]);
+    encoded.push(page.canonical_ownership as u8);
+    encoded.extend_from_slice(&[0; 2]);
     for component in page.key.coord {
         push_i32(&mut encoded, component);
     }
@@ -3575,7 +3675,16 @@ pub fn decode_terrain_page(
         return Err(TerrainPageCodecError::SourceIdentityMismatch);
     }
     let level = cursor.u8()?;
-    if cursor.bytes(3)? != [0; 3] {
+    let canonical_ownership = match cursor.u8()? {
+        0 => TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits,
+        1 => TerrainCanonicalOwnership::FullFaceDomain,
+        _ => {
+            return Err(TerrainPageCodecError::InvalidHeader(
+                "unknown canonical ownership",
+            ));
+        }
+    };
+    if cursor.bytes(2)? != [0; 2] {
         return Err(TerrainPageCodecError::InvalidHeader(
             "reserved key bytes are nonzero",
         ));
@@ -3711,12 +3820,17 @@ pub fn decode_terrain_page(
         children,
         errors,
         topology,
+        canonical_ownership,
         boundary_fingerprints,
         materials,
         representation,
         content_fingerprint,
     };
     if !representation_is_valid(&page)
+        || (matches!(
+            page.representation,
+            TerrainPageRepresentation::HeightfieldGrid(_)
+        ) && page.canonical_ownership != TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits)
         || !page_bounds_match_key(page.key, page.bounds)
         || !children_are_complete(&page)
     {
@@ -4289,6 +4403,83 @@ mod tests {
             lower_heightfield.boundary_fingerprints[BoundarySide::PositiveX as usize],
             opened_exact.boundary_fingerprints[BoundarySide::NegativeX as usize],
             "an opening on the handed-off column must invalidate a mixed representation seam",
+        );
+    }
+
+    #[test]
+    fn owned_edit_surface_excludes_unrelated_volume_inside_its_sample_aabb() {
+        let key = TerrainPageKey::surface(0, 0, 0);
+        let edit = VoxelCoord::new(2, 9, 2);
+        let cave = VoxelCoord::new(10, 5, 10);
+        let combined = |coord: VoxelCoord| {
+            if coord == cave {
+                Material::Air
+            } else if coord == edit {
+                Material::Basalt
+            } else if coord.y < 10 {
+                Material::Stone
+            } else {
+                Material::Air
+            }
+        };
+        let handoff = |coord: VoxelCoord| {
+            if coord == edit {
+                Material::Basalt
+            } else if coord.y < 10 {
+                Material::Stone
+            } else {
+                Material::Air
+            }
+        };
+        let page = build_owned_exact_surface_terrain_page(
+            identity(),
+            key,
+            7,
+            [0, 12],
+            combined,
+            handoff,
+            |face| {
+                let mut neighbor = face.solid_side;
+                let solid_component = match face.axis {
+                    FaceAxis::X => face.solid_side.x,
+                    FaceAxis::Y => face.solid_side.y,
+                    FaceAxis::Z => face.solid_side.z,
+                };
+                let component = match face.axis {
+                    FaceAxis::X => &mut neighbor.x,
+                    FaceAxis::Y => &mut neighbor.y,
+                    FaceAxis::Z => &mut neighbor.z,
+                };
+                *component += if face.plane > solid_component { 1 } else { -1 };
+                face.solid_side == edit
+                    || neighbor == edit
+                    || (face.axis == FaceAxis::Y && face.plane == 10)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            page.canonical_ownership,
+            TerrainCanonicalOwnership::SurfaceEnvelopeAndEdits
+        );
+        let TerrainPageRepresentation::SurfaceCluster(quads) = &page.representation else {
+            panic!("owned exact surface must remain a clustered face patch");
+        };
+        assert!(
+            quads
+                .iter()
+                .all(|quad| quad.axis == FaceAxis::Y && quad.plane == 10),
+            "the sampled cave is transport context, not virtual ownership"
+        );
+        let basalt = page
+            .materials
+            .iter()
+            .position(|coverage| coverage.material == Material::Basalt)
+            .unwrap() as u8;
+        assert!(
+            quads
+                .iter()
+                .any(|quad| quad.material_index == basalt && quad.u == 2 && quad.v == 2),
+            "the material-only authored face must remain in the exact edit patch"
         );
     }
 

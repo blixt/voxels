@@ -7,8 +7,8 @@
 
 use crate::mesh::heightfield_owns_face;
 use crate::{
-    CHUNK_EDGE, Chunk, EmissiveCluster, Material, MeshedChunk, MeshingSurfaceEnvelope, Quad,
-    RenderLayer,
+    CHUNK_EDGE, Chunk, EmissiveCluster, Material, MeshedChunk, MeshingEditEnvelope,
+    MeshingSurfaceEnvelope, Quad, RenderLayer,
 };
 
 const HALO_EDGE: usize = CHUNK_EDGE + 2;
@@ -25,6 +25,7 @@ struct FaceKey {
     material: Material,
     ao: u8,
     surface_owned: bool,
+    edit_owned: bool,
 }
 
 #[derive(Debug)]
@@ -80,6 +81,7 @@ pub fn mesh_chunk_binary(
     mesh_chunk_binary_with_scratch_and_surface(
         chunk,
         None,
+        None,
         outside,
         &mut BinaryMeshScratch::default(),
     )
@@ -93,6 +95,7 @@ pub fn mesh_chunk_binary_with_surface(
     mesh_chunk_binary_with_scratch_and_surface(
         chunk,
         Some(surface),
+        None,
         outside,
         &mut BinaryMeshScratch::default(),
     )
@@ -104,12 +107,13 @@ pub fn mesh_chunk_binary_with_scratch(
     outside: impl FnMut(i32, i32, i32) -> Material,
     scratch: &mut BinaryMeshScratch,
 ) -> MeshedChunk {
-    mesh_chunk_binary_with_scratch_and_surface(chunk, None, outside, scratch)
+    mesh_chunk_binary_with_scratch_and_surface(chunk, None, None, outside, scratch)
 }
 
 pub fn mesh_chunk_binary_with_scratch_and_surface(
     chunk: &Chunk,
     surface: Option<&MeshingSurfaceEnvelope>,
+    edits: Option<&MeshingEditEnvelope>,
     mut outside: impl FnMut(i32, i32, i32) -> Material,
     scratch: &mut BinaryMeshScratch,
 ) -> MeshedChunk {
@@ -118,6 +122,13 @@ pub fn mesh_chunk_binary_with_scratch_and_surface(
             surface.coord(),
             chunk.coord(),
             "meshing surface must describe the meshed chunk"
+        );
+    }
+    if let Some(edits) = edits {
+        assert_eq!(
+            edits.coord(),
+            chunk.coord(),
+            "meshing edit provenance must describe the meshed chunk"
         );
     }
     scratch.halo.fill(0);
@@ -170,7 +181,9 @@ pub fn mesh_chunk_binary_with_scratch_and_surface(
     }
 
     let mut mesh = MeshedChunk::default();
+    let mut opaque_edits = Vec::new();
     let mut opaque_volume = Vec::new();
+    let mut translucent_edits = Vec::new();
     let mut translucent_volume = Vec::new();
     append_emissive_clusters(chunk, &scratch.halo, &mut mesh.emissive_clusters);
     build_visible_face_columns(scratch);
@@ -208,6 +221,13 @@ pub fn mesh_chunk_binary_with_scratch_and_surface(
                                 face as u8,
                             )
                         }),
+                        edit_owned: edits.is_some_and(|edits| {
+                            edits.sample_local(
+                                local[0] as i32,
+                                local[1] as i32,
+                                local[2] as i32,
+                            ) || edits.sample_local(neighbor[0], neighbor[1], neighbor[2])
+                        }),
                     };
                     let planes = &mut scratch.keyed_planes[slice];
                     let plane_index = planes
@@ -229,7 +249,9 @@ pub fn mesh_chunk_binary_with_scratch_and_surface(
             for plane in &mut scratch.keyed_planes[slice] {
                 append_binary_plane(
                     &mut mesh,
+                    &mut opaque_edits,
                     &mut opaque_volume,
+                    &mut translucent_edits,
                     &mut translucent_volume,
                     face as u8,
                     slice,
@@ -242,7 +264,11 @@ pub fn mesh_chunk_binary_with_scratch_and_surface(
     }
     mesh.opaque_surface_quads = mesh.opaque.len() as u32;
     mesh.translucent_surface_quads = mesh.translucent.len() as u32;
+    mesh.opaque_edit_quads = opaque_edits.len() as u32;
+    mesh.translucent_edit_quads = translucent_edits.len() as u32;
+    mesh.opaque.extend(opaque_edits);
     mesh.opaque.extend(opaque_volume);
+    mesh.translucent.extend(translucent_edits);
     mesh.translucent.extend(translucent_volume);
     mesh
 }
@@ -275,7 +301,9 @@ fn build_visible_face_columns(scratch: &mut BinaryMeshScratch) {
 
 fn append_binary_plane(
     mesh: &mut MeshedChunk,
+    opaque_edits: &mut Vec<Quad>,
     opaque_volume: &mut Vec<Quad>,
+    translucent_edits: &mut Vec<Quad>,
     translucent_volume: &mut Vec<Quad>,
     face: u8,
     slice: usize,
@@ -309,8 +337,10 @@ fn append_binary_plane(
                 _pad: 0,
             };
             match key.material.render_layer() {
+                RenderLayer::Opaque if key.edit_owned => opaque_edits.push(quad),
                 RenderLayer::Opaque if key.surface_owned => mesh.opaque.push(quad),
                 RenderLayer::Opaque => opaque_volume.push(quad),
+                RenderLayer::Translucent if key.edit_owned => translucent_edits.push(quad),
                 RenderLayer::Translucent if key.surface_owned => mesh.translucent.push(quad),
                 RenderLayer::Translucent => translucent_volume.push(quad),
                 RenderLayer::Empty => unreachable!("visible face cannot belong to air"),
@@ -501,9 +531,14 @@ mod tests {
         let scalar = mesh_chunk_with_surface(chunk, Some(surface), outside);
         let binary = mesh_chunk_binary_with_surface(chunk, surface, outside);
         assert_eq!(binary.opaque_surface_quads, scalar.opaque_surface_quads);
+        assert_eq!(binary.opaque_edit_quads, scalar.opaque_edit_quads);
         assert_eq!(
             binary.translucent_surface_quads,
             scalar.translucent_surface_quads
+        );
+        assert_eq!(
+            binary.translucent_edit_quads,
+            scalar.translucent_edit_quads
         );
         assert_eq!(
             unit_faces(&binary.opaque[..binary.opaque_surface_quads as usize]),
@@ -560,6 +595,7 @@ mod tests {
                 MeshingSurfaceColumn {
                     valid: true,
                     ground_plane: origin_y + 10,
+                    ground_material: Material::Stone,
                     water_plane: Some(origin_y + 14),
                 };
                 MeshingSurfaceEnvelope::COLUMN_COUNT

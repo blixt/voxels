@@ -12,12 +12,13 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use voxels_world::{
-    FEATURE_MAX_RADIUS_VOXELS, Material, TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_EDGE_SAMPLES,
-    TERRAIN_PAGE_TARGET_COMPRESSED_BYTES, TERRAIN_REGION_ROOT_LEVEL, TerrainErrorBounds,
-    TerrainHierarchyDirectoryV1, TerrainPageKey, TerrainPageTransferIdentity, TerrainPageV1,
-    TerrainRegionBuildV1, TerrainSimplificationBudget, VoxelBlockRequest, VoxelCoord, WorldProduct,
-    WorldProductBatch, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
-    WorldSourceIdentityHash, build_exact_surface_terrain_page,
+    CanonicalFaceKey, FEATURE_MAX_RADIUS_VOXELS, FaceAxis, Material,
+    TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_PAGE_EDGE_SAMPLES, TERRAIN_PAGE_TARGET_COMPRESSED_BYTES,
+    TERRAIN_REGION_ROOT_LEVEL, TerrainErrorBounds, TerrainHierarchyDirectoryV1, TerrainPageKey,
+    TerrainPageTransferIdentity, TerrainPageV1, TerrainRegionBuildV1,
+    TerrainSimplificationBudget, VoxelBlockRequest, VoxelCoord, WorldProduct, WorldProductBatch,
+    WorldProductPriority, WorldProductRequest, WorldSourceEngine, WorldSourceIdentityHash,
+    build_owned_exact_surface_terrain_page,
     build_terrain_coverage_root_with_revisions, build_terrain_region, decode_terrain_page,
     encode_terrain_directory, encode_terrain_page,
 };
@@ -475,12 +476,14 @@ fn build_coverage_region(
             .ok_or(VirtualTerrainError::InvalidRoot)?
         {
             let revision = revision_at(child).ok_or(VirtualTerrainError::InvalidRoot)?;
-            let page = build_exact_surface_terrain_page(
+            let page = build_owned_exact_surface_terrain_page(
                 source_identity_hash,
                 child,
                 revision,
                 exact_scan.vertical_bounds,
                 |coord| exact_scan.sample(coord),
+                |coord| exact_scan.handoff_sample(coord),
+                |face| exact_scan.owns_face(face),
             )
             .map_err(|error| VirtualTerrainError::Build(error.to_string()))?;
             let encoded_bytes = encode_terrain_page(&page)
@@ -604,6 +607,8 @@ struct ExactSurfaceScan {
     shape: [usize; 3],
     vertical_bounds: [i32; 2],
     materials: Vec<Material>,
+    source_predictor: Vec<voxels_world::SurfaceSample>,
+    edits: voxels_world::EditMap,
 }
 
 impl ExactSurfaceScan {
@@ -620,6 +625,73 @@ impl ExactSurfaceScan {
         }
         let [x, y, z] = local.map(|component| component as usize);
         self.materials[x + y * self.shape[0] + z * self.shape[0] * self.shape[1]]
+    }
+
+    fn source_sample(&self, x: i32, z: i32) -> Option<voxels_world::SurfaceSample> {
+        let local_x = usize::try_from(i64::from(x) - i64::from(self.minimum.x)).ok()?;
+        let local_z = usize::try_from(i64::from(z) - i64::from(self.minimum.z)).ok()?;
+        (local_x < self.shape[0] && local_z < self.shape[2])
+            .then(|| self.source_predictor[local_x + local_z * self.shape[0]])
+    }
+
+    fn handoff_sample(&self, coord: VoxelCoord) -> Material {
+        let Some(column) = self.source_sample(coord.x, coord.z) else {
+            return Material::Air;
+        };
+        let generated = if coord.y <= column.height {
+            column.material
+        } else if column
+            .water_level
+            .is_some_and(|water_level| coord.y <= water_level)
+        {
+            Material::Water
+        } else {
+            Material::Air
+        };
+        self.edits.resolve_generated(coord, generated)
+    }
+
+    fn owns_face(&self, face: &CanonicalFaceKey) -> bool {
+        let mut neighbor = face.solid_side;
+        let component = match face.axis {
+            FaceAxis::X => &mut neighbor.x,
+            FaceAxis::Y => &mut neighbor.y,
+            FaceAxis::Z => &mut neighbor.z,
+        };
+        let solid_component = match face.axis {
+            FaceAxis::X => face.solid_side.x,
+            FaceAxis::Y => face.solid_side.y,
+            FaceAxis::Z => face.solid_side.z,
+        };
+        *component = component.saturating_add(if face.plane > solid_component {
+            1
+        } else {
+            -1
+        });
+        if self.edits.override_at(face.solid_side).is_some()
+            || self.edits.override_at(neighbor).is_some()
+        {
+            return true;
+        }
+        let Some(material) = Material::from_id(face.material_id) else {
+            return false;
+        };
+        let Some(current) = self.source_sample(face.solid_side.x, face.solid_side.z) else {
+            return false;
+        };
+        if material == Material::Water {
+            return face.axis == FaceAxis::Y
+                && face.plane == current.water_level.and_then(|height| height.checked_add(1)).unwrap_or(i32::MIN);
+        }
+        if material.render_layer() != voxels_world::RenderLayer::Opaque
+            || material != current.material
+        {
+            return false;
+        }
+        let Some(neighbor_column) = self.source_sample(neighbor.x, neighbor.z) else {
+            return false;
+        };
+        face.solid_side.y <= current.height && neighbor.y > neighbor_column.height
     }
 }
 
@@ -713,6 +785,8 @@ fn sample_exact_surface_edits(
         shape,
         vertical_bounds,
         materials: vec![Material::Air; sample_count],
+        source_predictor: Vec::new(),
+        edits: snapshot.edits.clone(),
     };
 
     // The ordinary surface predictor already certifies the unedited part of this page. Populate
@@ -732,6 +806,7 @@ fn sample_exact_surface_edits(
             "source returned a mismatched edited surface predictor".to_owned(),
         ));
     }
+    exact.source_predictor.clone_from(&predictor);
     for z in 0..EXACT_SAMPLE_EDGE {
         for y in 0..shape_y {
             let world_y = sample_minimum.y + y as i32;

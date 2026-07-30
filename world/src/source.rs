@@ -25,6 +25,10 @@ pub const MAX_SURFACE_SAMPLE_BLOCK_SAMPLES: usize = 65_536;
 pub const MAX_SURFACE_SEARCH_RADIUS: u16 = 512;
 pub const MESHING_HALO_VOXELS: usize =
     (CHUNK_EDGE + 2) * (CHUNK_EDGE + 2) * (CHUNK_EDGE + 2) - CHUNK_EDGE * CHUNK_EDGE * CHUNK_EDGE;
+/// Version of the stride-one source-surface plane contract shared by chunk meshing and terrain
+/// heightfield pages. Changing sample ownership or plane semantics requires both this value and the
+/// source sampler identity to advance.
+pub const MESHING_SURFACE_CONTRACT_VERSION: u16 = 2;
 
 const IDENTITY_HASH_DOMAIN: &[u8] = b"voxels-world-source-identity-v1\0";
 const MANIFEST_HASH_DOMAIN: &[u8] = b"voxels-world-manifest-v1\0";
@@ -398,6 +402,7 @@ pub struct ChunkSnapshot {
     pub chunk: Chunk,
     pub meshing_halo: MeshingHalo,
     pub meshing_surface: MeshingSurfaceEnvelope,
+    pub meshing_edits: MeshingEditEnvelope,
 }
 
 impl ChunkSnapshot {
@@ -407,13 +412,17 @@ impl ChunkSnapshot {
         chunk: Chunk,
         meshing_halo: MeshingHalo,
         meshing_surface: MeshingSurfaceEnvelope,
+        meshing_edits: MeshingEditEnvelope,
     ) -> Option<Self> {
-        (chunk.coord() == meshing_halo.coord() && chunk.coord() == meshing_surface.coord())
-            .then_some(Self {
+        (chunk.coord() == meshing_halo.coord()
+            && chunk.coord() == meshing_surface.coord()
+            && chunk.coord() == meshing_edits.coord())
+        .then_some(Self {
                 source_identity_hash,
                 chunk,
                 meshing_halo,
                 meshing_surface,
+                meshing_edits,
             })
     }
 }
@@ -897,6 +906,7 @@ pub struct MeshingHalo {
 pub struct MeshingSurfaceColumn {
     pub valid: bool,
     pub ground_plane: i32,
+    pub ground_material: Material,
     pub water_plane: Option<i32>,
 }
 
@@ -904,6 +914,106 @@ pub struct MeshingSurfaceColumn {
 pub struct MeshingSurfaceEnvelope {
     coord: ChunkCoord,
     columns: Box<[MeshingSurfaceColumn]>,
+}
+
+/// Sparse edit provenance over the 34-cubed meshing envelope.
+///
+/// A visible face belongs to the edit handoff whenever either incident voxel is authored. Keeping
+/// that provenance separate from final material lets the renderer replace edited faces atomically
+/// without claiming unrelated caves or source features in the same vertical column.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshingEditEnvelope {
+    coord: ChunkCoord,
+    edited: Box<[u16]>,
+}
+
+impl MeshingEditEnvelope {
+    pub const EDGE: usize = CHUNK_EDGE + 2;
+    pub const VOXEL_COUNT: usize = Self::EDGE * Self::EDGE * Self::EDGE;
+
+    pub(crate) fn from_indices(coord: ChunkCoord, edited: Vec<u16>) -> Option<Self> {
+        (coord.is_world_representable()
+            && edited.windows(2).all(|pair| pair[0] < pair[1])
+            && edited
+                .last()
+                .is_none_or(|index| usize::from(*index) < Self::VOXEL_COUNT))
+        .then(|| Self {
+            coord,
+            edited: edited.into_boxed_slice(),
+        })
+    }
+
+    pub fn empty(coord: ChunkCoord) -> Option<Self> {
+        Self::from_indices(coord, Vec::new())
+    }
+
+    pub fn from_sampler(
+        coord: ChunkCoord,
+        mut edited_at: impl FnMut(i32, i32, i32) -> bool,
+    ) -> Option<Self> {
+        if !coord.is_world_representable() {
+            return None;
+        }
+        let origin = coord.world_origin();
+        let edge = CHUNK_EDGE as i32;
+        let mut edited = Vec::new();
+        for y in -1..=edge {
+            for z in -1..=edge {
+                for x in -1..=edge {
+                    let [Some(world_x), Some(world_y), Some(world_z)] = [
+                        origin[0].checked_add(x),
+                        origin[1].checked_add(y),
+                        origin[2].checked_add(z),
+                    ] else {
+                        continue;
+                    };
+                    if edited_at(world_x, world_y, world_z) {
+                        let index = usize::try_from(x + 1).ok()?
+                            + usize::try_from(z + 1).ok()? * Self::EDGE
+                            + usize::try_from(y + 1).ok()? * Self::EDGE * Self::EDGE;
+                        edited.push(u16::try_from(index).ok()?);
+                    }
+                }
+            }
+        }
+        Self::from_indices(coord, edited)
+    }
+
+    pub const fn coord(&self) -> ChunkCoord {
+        self.coord
+    }
+
+    pub fn indices(&self) -> &[u16] {
+        &self.edited
+    }
+
+    pub fn logical_bytes(&self) -> usize {
+        self.edited.len() * size_of::<u16>()
+    }
+
+    pub fn sample_local(&self, x: i32, y: i32, z: i32) -> bool {
+        let edge = CHUNK_EDGE as i32;
+        if x < -1 || x > edge || y < -1 || y > edge || z < -1 || z > edge {
+            return false;
+        }
+        let Some(index) = usize::try_from(x + 1)
+            .ok()
+            .and_then(|x| {
+                usize::try_from(z + 1)
+                    .ok()
+                    .map(|z| x + z * Self::EDGE)
+            })
+            .and_then(|xz| {
+                usize::try_from(y + 1)
+                    .ok()
+                    .map(|y| xz + y * Self::EDGE * Self::EDGE)
+            })
+            .and_then(|index| u16::try_from(index).ok())
+        else {
+            return false;
+        };
+        self.edited.binary_search(&index).is_ok()
+    }
 }
 
 impl MeshingSurfaceEnvelope {
@@ -918,7 +1028,9 @@ impl MeshingSurfaceEnvelope {
         (coord.is_world_representable()
             && columns.len() == Self::COLUMN_COUNT
             && columns.iter().all(|column| {
-                (column.valid || column.water_plane.is_none())
+                (column.valid
+                    || (column.water_plane.is_none()
+                        && column.ground_material == Material::Air))
                     && column
                         .water_plane
                         .is_none_or(|water| water >= column.ground_plane)
@@ -947,6 +1059,7 @@ impl MeshingSurfaceEnvelope {
                     columns.push(MeshingSurfaceColumn {
                         valid: false,
                         ground_plane: 0,
+                        ground_material: Material::Air,
                         water_plane: None,
                     });
                     continue;
@@ -963,6 +1076,7 @@ impl MeshingSurfaceEnvelope {
                 columns.push(MeshingSurfaceColumn {
                     valid: true,
                     ground_plane,
+                    ground_material: sample.material,
                     water_plane,
                 });
             }
@@ -976,6 +1090,10 @@ impl MeshingSurfaceEnvelope {
 
     pub fn columns(&self) -> &[MeshingSurfaceColumn] {
         &self.columns
+    }
+
+    pub fn logical_bytes(&self) -> usize {
+        self.columns.len() * size_of::<MeshingSurfaceColumn>()
     }
 
     pub fn sample_local(&self, x: i32, z: i32) -> Option<MeshingSurfaceColumn> {
@@ -1344,6 +1462,8 @@ impl ProceduralWorldSource {
             chunk,
             meshing_halo,
             meshing_surface,
+            meshing_edits: MeshingEditEnvelope::empty(coord)
+                .expect("representable chunks have a representable empty edit envelope"),
         }
     }
 }
@@ -1662,6 +1782,55 @@ mod tests {
     }
 
     #[test]
+    fn surface_contract_is_identical_across_stride_priority_and_block_partition() {
+        let source = ProceduralWorldSource::new(7);
+        let origin = [-19, -31];
+        let dense = source
+            .surface_sample_lattice(
+                WorldProductPriority::CollisionCritical,
+                origin,
+                [9, 9],
+                1,
+            )
+            .unwrap();
+        let coarse = source
+            .surface_sample_lattice(WorldProductPriority::VirtualTerrain, origin, [5, 5], 2)
+            .unwrap();
+        for z in 0..5usize {
+            for x in 0..5usize {
+                assert_eq!(
+                    coarse[x + z * 5],
+                    dense[x * 2 + z * 2 * 9],
+                    "equal world coordinates must not depend on stride or priority"
+                );
+            }
+        }
+        let left = source
+            .surface_sample_lattice(
+                WorldProductPriority::Prefetch,
+                origin,
+                [5, 9],
+                1,
+            )
+            .unwrap();
+        let right = source
+            .surface_sample_lattice(
+                WorldProductPriority::VisibleChunk,
+                [origin[0] + 4, origin[1]],
+                [5, 9],
+                1,
+            )
+            .unwrap();
+        for z in 0..9usize {
+            assert_eq!(
+                left[4 + z * 5],
+                right[z * 5],
+                "partitioned blocks must publish the same shared lattice sample"
+            );
+        }
+    }
+
+    #[test]
     fn surface_lattice_rejects_empty_oversized_and_overflowing_requests() {
         let source = ProceduralWorldSource::new(7);
         assert_eq!(
@@ -1961,6 +2130,7 @@ mod tests {
                     Some(MeshingSurfaceColumn {
                         valid: true,
                         ground_plane: sample.height + 1,
+                        ground_material: sample.material,
                         water_plane: sample.water_level.map(|height| height + 1),
                     })
                 );
@@ -1989,6 +2159,7 @@ mod tests {
             Some(MeshingSurfaceColumn {
                 valid: false,
                 ground_plane: 0,
+                ground_material: Material::Air,
                 water_plane: None,
             })
         );

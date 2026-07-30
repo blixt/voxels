@@ -390,6 +390,7 @@ impl HeightfieldWorldSource {
                     surface_columns.push(MeshingSurfaceColumn {
                         valid: false,
                         ground_plane: 0,
+                        ground_material: Material::Air,
                         water_plane: None,
                     });
                     continue;
@@ -410,13 +411,16 @@ impl HeightfieldWorldSource {
                 surface_columns.push(MeshingSurfaceColumn {
                     valid: true,
                     ground_plane,
+                    ground_material: sample.material,
                     water_plane,
                 });
             }
         }
         let surface = MeshingSurfaceEnvelope::from_columns(coord, surface_columns)
             .ok_or(WorldSourceError::MalformedMacroBlock)?;
-        ChunkSnapshot::new(self.identity_hash, chunk, halo, surface)
+        let edits =
+            crate::MeshingEditEnvelope::empty(coord).ok_or(WorldSourceError::MalformedMacroBlock)?;
+        ChunkSnapshot::new(self.identity_hash, chunk, halo, surface, edits)
             .ok_or(WorldSourceError::MalformedMacroBlock)
     }
 
@@ -2417,6 +2421,7 @@ mod tests {
                 MeshingSurfaceColumn {
                     valid: true,
                     ground_plane: 1,
+                    ground_material: Material::Stone,
                     water_plane: None,
                 };
                 MeshingSurfaceEnvelope::COLUMN_COUNT
@@ -2429,6 +2434,7 @@ mod tests {
                 Chunk::empty(ChunkCoord::new(1, 0, 0)),
                 halo,
                 surface,
+                crate::MeshingEditEnvelope::empty(coord).unwrap(),
             )
             .is_none()
         );

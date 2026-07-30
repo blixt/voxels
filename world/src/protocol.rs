@@ -5,12 +5,13 @@
 //! product codecs. Rust enum layout and serde output are deliberately not part of the contract.
 
 use crate::{
-    ChunkCoord, ChunkSnapshot, Material, MeshingHalo, MeshingSurfaceColumn,
-    MeshingSurfaceEnvelope, ModelIdentity, SourceDeviceRequirement, SurfaceRegion,
-    TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError,
-    TerrainHierarchyDirectoryV1, TerrainPageBatchRequestV1, TerrainPageBatchResultV1,
-    TerrainPageCodecError, TerrainPageKey, TerrainPageTransferCodecError, VOXEL_SIZE_METRES,
-    VoxelCoord, WorldId, WorldManifest, WorldProductPriority, WorldSourceError,
+    ChunkCoord, ChunkSnapshot, MESHING_SURFACE_CONTRACT_VERSION, Material, MeshingEditEnvelope,
+    MeshingHalo, MeshingSurfaceColumn, MeshingSurfaceEnvelope, ModelIdentity,
+    SourceDeviceRequirement, SurfaceRegion, TERRAIN_COVERAGE_ROOT_LEVEL,
+    TERRAIN_REGION_ROOT_LEVEL, TerrainDirectoryError, TerrainHierarchyDirectoryV1,
+    TerrainPageBatchRequestV1, TerrainPageBatchResultV1, TerrainPageCodecError, TerrainPageKey,
+    TerrainPageTransferCodecError, VOXEL_SIZE_METRES, VoxelCoord, WorldId, WorldManifest,
+    WorldProductPriority, WorldSourceError,
     WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind, codec, decode_terrain_directory,
     decode_terrain_page_batch_request, decode_terrain_page_batch_result, encode_terrain_directory,
     encode_terrain_page_batch_request, encode_terrain_page_batch_result,
@@ -20,7 +21,7 @@ use std::fmt;
 use std::io::Read;
 
 pub const PROTOCOL_MAGIC: &[u8; 4] = b"VXWP";
-pub const PROTOCOL_VERSION: u16 = 42;
+pub const PROTOCOL_VERSION: u16 = 43;
 pub const FRAME_HEADER_BYTES: usize = 24;
 pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CHUNKS_PER_BATCH: usize = 256;
@@ -1237,6 +1238,7 @@ pub fn encode_chunk_batch_item(
             if snapshot.chunk.coord() != item.coord
                 || snapshot.meshing_halo.coord() != item.coord
                 || snapshot.meshing_surface.coord() != item.coord
+                || snapshot.meshing_edits.coord() != item.coord
                 || snapshot.source_identity_hash != source_identity_hash
             {
                 return Err(ProtocolError::InvalidPayload(
@@ -1334,6 +1336,7 @@ pub fn decode_chunk_batch_result(bytes: &[u8]) -> Result<ChunkBatchResult, Proto
             if snapshot.chunk.coord() != coord
                 || snapshot.meshing_halo.coord() != coord
                 || snapshot.meshing_surface.coord() != coord
+                || snapshot.meshing_edits.coord() != coord
             {
                 return Err(ProtocolError::InvalidPayload("chunk result key mismatch"));
             }
@@ -3558,13 +3561,16 @@ fn encode_chunk_snapshot(snapshot: &ChunkSnapshot) -> Vec<u8> {
         snapshot.source_identity_hash,
     );
     let surface = encode_meshing_surface(&snapshot.meshing_surface);
-    let mut bytes = Vec::with_capacity(core.len() + halo.len() + surface.len() + 12);
+    let edits = encode_meshing_edits(&snapshot.meshing_edits);
+    let mut bytes = Vec::with_capacity(core.len() + halo.len() + surface.len() + edits.len() + 16);
     push_u32(&mut bytes, core.len() as u32);
     bytes.extend_from_slice(&core);
     push_u32(&mut bytes, halo.len() as u32);
     bytes.extend_from_slice(&halo);
     push_u32(&mut bytes, surface.len() as u32);
     bytes.extend_from_slice(&surface);
+    push_u32(&mut bytes, edits.len() as u32);
+    bytes.extend_from_slice(&edits);
     bytes
 }
 
@@ -3579,21 +3585,50 @@ fn decode_chunk_snapshot(
     let halo = decode_halo(cursor.bytes(halo_len)?, chunk.coord(), source_identity_hash)?;
     let surface_len = cursor.u32()? as usize;
     let surface = decode_meshing_surface(cursor.bytes(surface_len)?, chunk.coord())?;
+    let edits_len = cursor.u32()? as usize;
+    let edits = decode_meshing_edits(cursor.bytes(edits_len)?, chunk.coord())?;
     cursor.finish()?;
     Ok(ChunkSnapshot {
         source_identity_hash,
         chunk,
         meshing_halo: halo,
         meshing_surface: surface,
+        meshing_edits: edits,
     })
 }
 
+fn encode_meshing_edits(edits: &MeshingEditEnvelope) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(2 + edits.indices().len() * 2);
+    push_u16(&mut bytes, edits.indices().len() as u16);
+    for index in edits.indices() {
+        push_u16(&mut bytes, *index);
+    }
+    bytes
+}
+
+fn decode_meshing_edits(
+    bytes: &[u8],
+    coord: ChunkCoord,
+) -> Result<MeshingEditEnvelope, ProtocolError> {
+    let mut cursor = Cursor::new(bytes);
+    let count = cursor.u16()? as usize;
+    let mut edited = Vec::with_capacity(count);
+    for _ in 0..count {
+        edited.push(cursor.u16()?);
+    }
+    cursor.finish()?;
+    MeshingEditEnvelope::from_indices(coord, edited)
+        .ok_or(ProtocolError::InvalidPayload("invalid meshing edit envelope"))
+}
+
 fn encode_meshing_surface(surface: &MeshingSurfaceEnvelope) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(4 + surface.columns().len() * 10);
+    let mut bytes = Vec::with_capacity(6 + surface.columns().len() * 12);
+    push_u16(&mut bytes, MESHING_SURFACE_CONTRACT_VERSION);
     push_u32(&mut bytes, surface.columns().len() as u32);
     for column in surface.columns() {
         bytes.push(u8::from(column.valid));
         push_i32(&mut bytes, column.ground_plane);
+        push_u16(&mut bytes, column.ground_material.id());
         bytes.push(u8::from(column.water_plane.is_some()));
         if let Some(water_plane) = column.water_plane {
             push_i32(&mut bytes, water_plane);
@@ -3607,6 +3642,11 @@ fn decode_meshing_surface(
     coord: ChunkCoord,
 ) -> Result<MeshingSurfaceEnvelope, ProtocolError> {
     let mut cursor = Cursor::new(bytes);
+    if cursor.u16()? != MESHING_SURFACE_CONTRACT_VERSION {
+        return Err(ProtocolError::InvalidPayload(
+            "unsupported meshing surface contract",
+        ));
+    }
     let count = cursor.u32()? as usize;
     if count != MeshingSurfaceEnvelope::COLUMN_COUNT {
         return Err(ProtocolError::InvalidPayload(
@@ -3625,6 +3665,8 @@ fn decode_meshing_surface(
             }
         };
         let ground_plane = cursor.i32()?;
+        let ground_material = Material::from_id(cursor.u16()?)
+            .ok_or(ProtocolError::InvalidPayload("invalid meshing surface material"))?;
         let water_plane = match cursor.u8()? {
             0 => None,
             1 => Some(cursor.i32()?),
@@ -3644,6 +3686,7 @@ fn decode_meshing_surface(
         columns.push(MeshingSurfaceColumn {
             valid,
             ground_plane,
+            ground_material,
             water_plane,
         });
     }
@@ -4510,7 +4553,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_snapshot_round_trip_preserves_exact_core_and_halo() {
+    fn chunk_snapshot_round_trip_preserves_core_halo_and_surface_contract() {
         let source = ProceduralWorldSource::new(42);
         let coord = ChunkCoord::new(-2, 1, 3);
         let batch = source

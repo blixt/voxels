@@ -1,4 +1,6 @@
-use crate::{CHUNK_EDGE, Chunk, Material, MeshingSurfaceEnvelope, RenderLayer};
+use crate::{
+    CHUNK_EDGE, Chunk, Material, MeshingEditEnvelope, MeshingSurfaceEnvelope, RenderLayer,
+};
 use bytemuck::{Pod, Zeroable};
 
 pub const FACE_POS_X: u8 = 0;
@@ -43,9 +45,13 @@ const _: () = assert!(size_of::<EmissiveCluster>() == 16);
 pub struct MeshedChunk {
     /// Prefix length in `opaque` represented by the source heightfield envelope.
     pub opaque_surface_quads: u32,
+    /// Length immediately after the surface prefix that belongs to authored edit handoff.
+    pub opaque_edit_quads: u32,
     pub opaque: Vec<Quad>,
     /// Prefix length in `translucent` represented by the source heightfield envelope.
     pub translucent_surface_quads: u32,
+    /// Length immediately after the surface prefix that belongs to authored edit handoff.
+    pub translucent_edit_quads: u32,
     pub translucent: Vec<Quad>,
     pub emissive_clusters: Vec<EmissiveCluster>,
 }
@@ -68,6 +74,7 @@ struct FaceKey {
     material: Material,
     ao: u8,
     surface_owned: bool,
+    edit_owned: bool,
 }
 
 /// Greedily merges coplanar visible faces with the same material. `outside` samples world coordinates
@@ -76,7 +83,7 @@ pub fn mesh_chunk(
     chunk: &Chunk,
     outside: impl FnMut(i32, i32, i32) -> Material,
 ) -> MeshedChunk {
-    mesh_chunk_with_surface(chunk, None, outside)
+    mesh_chunk_with_ownership(chunk, None, None, outside)
 }
 
 /// Greedily meshes a chunk while retaining an exact partition between faces represented by the
@@ -87,6 +94,15 @@ pub fn mesh_chunk(
 pub fn mesh_chunk_with_surface(
     chunk: &Chunk,
     surface: Option<&MeshingSurfaceEnvelope>,
+    outside: impl FnMut(i32, i32, i32) -> Material,
+) -> MeshedChunk {
+    mesh_chunk_with_ownership(chunk, surface, None, outside)
+}
+
+pub fn mesh_chunk_with_ownership(
+    chunk: &Chunk,
+    surface: Option<&MeshingSurfaceEnvelope>,
+    edits: Option<&MeshingEditEnvelope>,
     mut outside: impl FnMut(i32, i32, i32) -> Material,
 ) -> MeshedChunk {
     if let Some(surface) = surface {
@@ -96,8 +112,17 @@ pub fn mesh_chunk_with_surface(
             "meshing surface must describe the meshed chunk"
         );
     }
+    if let Some(edits) = edits {
+        assert_eq!(
+            edits.coord(),
+            chunk.coord(),
+            "meshing edit provenance must describe the meshed chunk"
+        );
+    }
     let mut mesh = MeshedChunk::default();
+    let mut opaque_edits = Vec::new();
     let mut opaque_volume = Vec::new();
+    let mut translucent_edits = Vec::new();
     let mut translucent_volume = Vec::new();
     let origin = chunk.coord().world_origin();
     let occupancy = build_occupancy_halo(chunk, origin, &mut outside);
@@ -155,6 +180,13 @@ pub fn mesh_chunk_with_surface(
                         FaceKey {
                             material,
                             ao: face_ao(local, axis, u_axis, v_axis, step, &occupancy),
+                            edit_owned: edits.is_some_and(|edits| {
+                                edits.sample_local(
+                                    local[0] as i32,
+                                    local[1] as i32,
+                                    local[2] as i32,
+                                ) || edits.sample_local(neighbor[0], neighbor[1], neighbor[2])
+                            }),
                             surface_owned: surface.is_some_and(|surface| {
                                 heightfield_owns_face(
                                     surface, origin, local, neighbor, material, face,
@@ -202,8 +234,12 @@ pub fn mesh_chunk_with_surface(
                         _pad: 0,
                     };
                     match key.material.render_layer() {
+                        RenderLayer::Opaque if key.edit_owned => opaque_edits.push(quad),
                         RenderLayer::Opaque if key.surface_owned => mesh.opaque.push(quad),
                         RenderLayer::Opaque => opaque_volume.push(quad),
+                        RenderLayer::Translucent if key.edit_owned => {
+                            translucent_edits.push(quad);
+                        }
                         RenderLayer::Translucent if key.surface_owned => {
                             mesh.translucent.push(quad);
                         }
@@ -218,7 +254,11 @@ pub fn mesh_chunk_with_surface(
     }
     mesh.opaque_surface_quads = mesh.opaque.len() as u32;
     mesh.translucent_surface_quads = mesh.translucent.len() as u32;
+    mesh.opaque_edit_quads = opaque_edits.len() as u32;
+    mesh.translucent_edit_quads = translucent_edits.len() as u32;
+    mesh.opaque.extend(opaque_edits);
     mesh.opaque.extend(opaque_volume);
+    mesh.translucent.extend(translucent_edits);
     mesh.translucent.extend(translucent_volume);
     mesh
 }
@@ -233,8 +273,8 @@ pub(crate) fn heightfield_owns_face(
 ) -> bool {
     let current_y = world_origin[1].saturating_add(local[1] as i32);
     if material == Material::Water {
-        // Level-zero virtual water follows the same lower-X/Z voxel-cell convention as ground.
-        // Only top faces exist in that representation; water sides and bottoms remain canonical.
+        // The virtual water contract currently contains only complete +Y voxel-cell tops.
+        // Sides and bottoms remain canonical until that representation grows matching faces.
         return face == FACE_POS_Y
             && surface
                 .sample_local(local[0] as i32, local[2] as i32)
@@ -258,7 +298,9 @@ pub(crate) fn heightfield_owns_face(
         return false;
     };
     let neighbor_y = world_origin[1].saturating_add(neighbor[1]);
-    current_y < current.ground_plane && neighbor_y >= neighbor_column.ground_plane
+    material == current.ground_material
+        && current_y < current.ground_plane
+        && neighbor_y >= neighbor_column.ground_plane
 }
 
 fn emitter_is_exposed(occupancy: &[u8], local: [usize; 3]) -> bool {
@@ -429,6 +471,7 @@ mod tests {
                 MeshingSurfaceColumn {
                     valid: true,
                     ground_plane,
+                    ground_material: Material::Stone,
                     water_plane,
                 };
                 MeshingSurfaceEnvelope::COLUMN_COUNT
@@ -639,6 +682,7 @@ mod tests {
                 columns.push(MeshingSurfaceColumn {
                     valid: true,
                     ground_plane: if x < 16 { 10 } else { 5 },
+                    ground_material: Material::Stone,
                     water_plane: None,
                 });
             }
@@ -682,6 +726,41 @@ mod tests {
         assert_eq!(
             water_mesh.translucent[0].face, FACE_POS_Y,
             "the heightfield water contract owns only voxel-cell top faces"
+        );
+    }
+
+    #[test]
+    fn material_only_surface_edit_has_one_disjoint_edit_owner() {
+        let coord = ChunkCoord::new(0, 0, 0);
+        let surface = flat_surface(coord, 10, None);
+        let mut chunk = Chunk::empty(coord);
+        fill_below(&mut chunk, |_, _| 10);
+        chunk.set(5, 9, 5, Material::Basalt);
+        let edits = MeshingEditEnvelope::from_sampler(coord, |x, y, z| {
+            [x, y, z] == [5, 9, 5]
+        })
+        .unwrap();
+        let mesh = mesh_chunk_with_ownership(
+            &chunk,
+            Some(&surface),
+            Some(&edits),
+            |_, y, _| {
+                if y < 10 {
+                    Material::Stone
+                } else {
+                    Material::Air
+                }
+            },
+        );
+        assert_eq!(mesh.opaque_edit_quads, 1);
+        let edit = mesh.opaque[mesh.opaque_surface_quads as usize];
+        assert_eq!(edit.material, Material::Basalt.id());
+        assert_eq!(edit.face, FACE_POS_Y);
+        assert!(
+            mesh.opaque[mesh.opaque_surface_quads as usize
+                + mesh.opaque_edit_quads as usize..]
+                .is_empty(),
+            "an edit patch must not move unrelated source volume into its ownership range"
         );
     }
 

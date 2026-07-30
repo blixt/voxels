@@ -699,6 +699,7 @@ fn validate_spawn_chunk(
         || snapshot.chunk.coord() != coord
         || snapshot.meshing_halo.coord() != coord
         || snapshot.meshing_surface.coord() != coord
+        || snapshot.meshing_edits.coord() != coord
     {
         return Err(WorldServerError::InvalidSpawnProduct);
     }
@@ -3718,6 +3719,14 @@ fn generate_chunk_products(
                     let pristine = pristine_halo.sample_world(x, y, z).unwrap_or(Material::Air);
                     snapshot.edits.resolve_generated(voxel, pristine)
                 });
+                chunk.meshing_edits =
+                    voxels_world::MeshingEditEnvelope::from_sampler(coord, |x, y, z| {
+                        snapshot
+                            .edits
+                            .override_at(voxels_world::VoxelCoord::new(x, y, z))
+                            .is_some()
+                    })
+                    .ok_or_else(|| "could not build meshing edit envelope".to_owned())?;
                 Ok(chunk)
             }
             Ok(_) => return Err("world source returned a non-chunk product".to_owned()),
