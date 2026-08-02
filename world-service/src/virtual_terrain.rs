@@ -332,7 +332,10 @@ impl VirtualTerrainAuthority {
         horizontal_root
             .horizontal_bounds()
             .ok_or(VirtualTerrainError::InvalidRoot)?;
-        let revision = self.edits.revision();
+        let revision = self
+            .edits
+            .surface_terrain_revision(horizontal_root)
+            .ok_or(VirtualTerrainError::InvalidRoot)?;
         let roots = vec![horizontal_root];
         Ok(PreparedTerrainRegionColumn {
             column,
@@ -1130,13 +1133,91 @@ fn sample_region(
 )]
 mod tests {
     use super::*;
-    use voxels_world::ProceduralWorldSource;
+    use voxels_world::protocol::{EditAction, EditCommand, EditShape, PlayerId, PlayerResume};
+    use voxels_world::{ProceduralWorldSource, WorldId};
 
     fn root() -> TerrainPageKey {
         TerrainPageKey {
             level: TERRAIN_REGION_ROOT_LEVEL,
             coord: [-1, 0, 1],
         }
+    }
+
+    fn virtual_terrain_authority(seed: u8) -> Arc<VirtualTerrainAuthority> {
+        let source = Arc::new(ProceduralWorldSource::new(u64::from(seed)));
+        let edits = EditAuthority::in_memory(WorldId::from_bytes([seed; 16]), source.as_ref(), 8)
+            .expect("in-memory edit authority");
+        VirtualTerrainAuthority::new(
+            source,
+            edits,
+            PriorityGenerationLimiter::new(1),
+            1,
+            1_048_576,
+        )
+    }
+
+    #[test]
+    fn region_column_revision_ignores_edits_in_other_columns() {
+        let authority = virtual_terrain_authority(23);
+        let edited_column = [0, 0];
+        let untouched_column = [1, 0];
+        let before_edited = authority
+            .build_region_column(edited_column, WorldProductPriority::VirtualTerrain)
+            .expect("edited column before edit");
+        let before_untouched = authority
+            .build_region_column(untouched_column, WorldProductPriority::VirtualTerrain)
+            .expect("untouched column before edit");
+        let edited_root = before_edited.roots[0];
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] =
+            edited_root.horizontal_bounds().expect("column bounds");
+        let edit = VoxelCoord::new(
+            minimum_x + (maximum_x - minimum_x) / 2,
+            -100,
+            minimum_z + (maximum_z - minimum_z) / 2,
+        );
+        let player = PlayerId::from_bytes([23; 16]);
+        authority
+            .edits
+            .load_player(
+                player,
+                PlayerResume {
+                    revision: 1,
+                    eye_position_metres: [0.0, 20.0, 0.0],
+                    look_yaw_radians: 0.0,
+                    look_pitch_radians: 0.0,
+                },
+            )
+            .expect("load player");
+        let session = authority
+            .edits
+            .begin_player_session(player)
+            .expect("begin edit session");
+        authority
+            .edits
+            .apply(
+                authority.source.as_ref(),
+                player,
+                23,
+                EditCommand {
+                    operation_id: 1,
+                    edit_session_id: session,
+                    action: EditAction::Dig {
+                        hit: edit,
+                        shape: EditShape::Cube,
+                    },
+                },
+            )
+            .expect("edit column");
+
+        let after_edited = authority
+            .build_region_column(edited_column, WorldProductPriority::VirtualTerrain)
+            .expect("edited column after edit");
+        let after_untouched = authority
+            .build_region_column(untouched_column, WorldProductPriority::VirtualTerrain)
+            .expect("untouched column after edit");
+
+        assert!(after_edited.revision > before_edited.revision);
+        assert_eq!(after_untouched.revision, before_untouched.revision);
     }
 
     #[test]
