@@ -241,18 +241,19 @@ vp run automation -- run world-source
 The command reports the selected source kind and stable source-identity hash. In Terrain Diffusion
 mode it runs the full coarse, base, and decoder chain natively in Rust on Metal.
 
-The browser always consumes the daemon's canonical chunk and progressive surface-LOD products. The
-client never branches on provider selection; changing the daemon source and restarting it is
-sufficient to switch between procedural and learned terrain. The transport bounds total accepted
-connections and queued work, and the per-client worker cap prevents one connection from occupying
-the complete local generation pool. `product_cache_bytes` bounds an LRU of validated encoded product
-items. `virtual_terrain_cache_bytes` separately bounds complete encoded fixed-region directories
-and page payloads; stale revisions and least-recently-used regions are evicted atomically.
+The browser always consumes the daemon's canonical chunks and progressive virtual-terrain
+directories/pages. The client never branches on provider selection; changing the daemon source and
+restarting it is sufficient to switch between procedural and learned terrain. The transport bounds
+total accepted connections and queued work, and the per-client worker cap prevents one connection
+from occupying the complete local generation pool. `product_cache_bytes` bounds an LRU of validated
+encoded product items. `virtual_terrain_cache_bytes` separately bounds complete encoded fixed-region
+directories and page payloads; stale revisions and least-recently-used regions are evicted atomically.
 `response_cache_bytes` separately bounds complete compressed batches shared by co-located
 clients and exact retries, so retaining a dense multiplayer working set does not evict the products
-needed for responsive traversal. Concurrent overlapping batches single-flight each chunk or surface
-tile through one CPU/Metal generation, then assemble their requested order into independently
-request-ID-keyed VXWP responses. Priority and batch shape affect scheduling, not cache identity.
+needed for responsive traversal. Concurrent overlapping batches single-flight each canonical chunk,
+directory, or page through one CPU/Metal generation, then assemble their requested order into
+independently request-ID-keyed VXWP responses. Priority and batch shape affect scheduling, not cache
+identity.
 
 `[edits].database` is the native authoritative world/player SQLite file. Relative paths resolve from
 the service configuration, not the process working directory. The Rust service expands
@@ -261,9 +262,10 @@ three, so changing a storage schema or any immutable world/source identity start
 and leaves the previous world untouched. This also prevents an old and new daemon from opening the
 same filename during hot reload. Paths without tokens are opened exactly as configured and remain
 strict: startup rejects another schema or a database bound to a different world/source manifest;
-there are no migrations or fallback authorities. Schema 13 owns compact per-chunk sparse edit blobs,
-player material inventories, a bounded exact-retry window for edit sessions, product revisions, and
-authoritative resume poses.
+there are no migrations or fallback authorities. Schema 14 owns compact per-chunk sparse edit blobs,
+player material inventories, a bounded exact-retry window for edit sessions, canonical chunk
+revisions, and authoritative resume poses. Virtual-terrain revision floors derive from those chunk
+revisions instead of a second persisted surface authority.
 `change_queue_capacity` bounds each interested client's commit queue.
 
 The presence section controls the independent low-latency delta stream. `spatial_cell_metres`,

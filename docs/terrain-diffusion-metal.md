@@ -90,7 +90,7 @@ moving or regenerating a tile cannot reuse an incompatible cache identity.
 
 This is the checked-in default source for the native world service. The WASM shell never hosts the
 Metal executor or branches on provider choice: the service composes learned macro fields into the
-same canonical chunks and progressive surface products consumed for procedural worlds. Set
+same canonical chunks and progressive virtual-terrain pages consumed for procedural worlds. Set
 `source = "procedural-v16"` to compare the deterministic authored generator without changing the
 client.
 

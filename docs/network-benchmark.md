@@ -27,18 +27,19 @@ canonical timing source here.
 ## Metrics
 
 The Rust renderer hashes the content and coordinates of opaque and water meshes selected by its
-actual frustum/LOD draw list. The harness samples at 16 ms and records snapshots until all canonical
-generation/mesh/upload work and every surface queue/in-flight/revision stage are settled with the
-same presented geometry for three consecutive samples. Full-coverage timing reports the first
-sample in that streak, not the third. A turn is timed from look-input issuance rather than from its
-80 ms fixture validation; walking convergence begins after the fixed target distance is reached.
+actual frustum/LOD draw list. The harness samples at 16 ms and records snapshots until canonical
+generation/mesh/upload work and virtual-terrain directory, page, publication, and revision stages
+are settled with the same presented geometry for three consecutive samples. Full-coverage timing
+reports the first sample in that streak, not the third. A turn is timed from look-input issuance
+rather than from its 80 ms fixture validation; walking convergence begins after the fixed target
+distance is reached.
 
 `viewportFullyInformedMs` is retrospective: it is the first post-action sample whose presented
 geometry fingerprint equals the final fully settled viewport and never changes again. This lets
-view-priority changes improve visible completion even if background rings are still loading.
-`fullCoverageSettledMs` is the stricter all-rings measurement. The split is analogous to Cesium's
-view-complete contract, where all tiles needed for the current screen-space target must be loaded,
-processed, and rendered before the view is complete.
+view-priority changes improve visible completion while lower-priority hierarchy refinement remains.
+`fullCoverageSettledMs` is the stricter complete-working-set measurement. The split is analogous to
+Cesium's view-complete contract, where all tiles needed for the current screen-space target must be
+loaded, processed, and rendered before the view is complete.
 
 Fixed-distance movement also reports `longestNoProgressMs`. A sample advances after at least 2.5 cm
 of horizontal movement; the deterministic route fails if held movement makes no progress for more

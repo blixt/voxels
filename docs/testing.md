@@ -143,7 +143,7 @@ pointer is intentionally replaced by the next run.
 Generated terrain is deterministic derived data and is cached in RAM, not persisted. An explorer can
 travel indefinitely without making the database contain every visited chunk. Durable growth comes
 from player resumes, per-material inventories, sparse voxel overrides, edit idempotency history, and
-the chunk/surface revision index required to stream those edits.
+the canonical chunk revisions from which virtual-terrain revision floors are derived.
 
 Physical SQLite file growth is bursty because the WAL grows and checkpoints into the main file.
 Compare both total bytes and logical row counts. For a long-duration result, the most useful ratios

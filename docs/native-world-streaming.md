@@ -278,9 +278,9 @@ vp run automation -- run multiplayer
 It launches six independent browser contexts with shaped links and fresh identities, keeps five
 builders visible while an observer walks about 120 m away, then has each builder mine material and
 collectively place a 4.5 m column with a 1.7 m crossbar (77 authoritative voxels) from within
-validated reach. The gate waits until every browser
-has applied all commits, the far observer has accepted and uploaded the revised stride-16 surface
-tile, and a before/after pixel comparison proves the aimed tower is visibly legible. It owns a
+validated reach. The gate waits until every browser has applied all commits and the far observer has
+published a revision-current virtual-terrain cut, then a before/after pixel comparison proves the
+aimed tower is visibly legible. It owns a
 temporary native edit database, rejects browser/WGPU/socket errors, and writes ignored
 metrics/screenshots under
 `target/automation/multiplayer/<run-id>/`; the stable

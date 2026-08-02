@@ -123,7 +123,7 @@ change_queue_capacity = 1024
 [spawn]
 # Must lie inside the selected source's valid coverage. New players begin on a server-authored
 # approximately 5-metre-wide stone platform, raised 5 metres above the highest source surface
-# under its footprint. The complete pillar appears in canonical chunks and far-surface products.
+# under its footprint. The complete pillar appears in canonical chunks and virtual-terrain pages.
 xz_voxels = [0, 0]
 pillar_height_voxels = 50
 pillar_radius_voxels = 25

@@ -27,9 +27,9 @@ The file controls:
 - the authoritative world and presence endpoints, authorization token, and backpressure windows;
 - pose cadence, clock synchronization, adaptive interpolation bounds, and extrapolation horizon;
 - fixed-step timing, catch-up limit, and edit-tracker capacity;
-- chunk and surface-LOD load/retention radii, pipeline budgets, interest capacity, and deterministic
-  canonical-chunk view-cone/velocity look-ahead priority;
-- view/shadow settings;
+- canonical-chunk load/retention radii, pipeline budgets, interest capacity, and deterministic
+  view-cone/velocity look-ahead priority;
+- virtual-terrain view distance plus view/shadow settings;
 - the fixed rendering feature baseline and the World Lab's initial open state;
 - whether local developer controls expose time/weather visualization overrides and the
   server-authorized spectator-mode request;
@@ -57,8 +57,9 @@ Diffusion deployment settings such as precision, model cache, model-space origin
 [World service configuration](world-service-config.md) for commands and the complete server schema.
 
 The browser has no embedded world-generation mode. It always negotiates the same provider-neutral
-chunk and surface-LOD protocol with this service, so editing `source` and restarting the daemon is
-the only experience switch. Reconnect refuses a changed manifest rather than mixing worlds.
+canonical-chunk and virtual-terrain directory/page protocol with this service, so editing `source`
+and restarting the daemon is the only experience switch. Reconnect refuses a changed manifest rather
+than mixing worlds.
 
 Provider selection is fail-closed. A Terrain Diffusion selection without the native Metal feature,
 Apple Metal, or the pinned verified model is an error; it never falls back to another world.

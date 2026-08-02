@@ -79,49 +79,44 @@ internal reflection. Simulation values remain fixed-step and unsmoothed. Rust/WG
 immersion/depth and re-opens a Rust-rendered swim-help toast on entry. Disabling animated water
 changes rendering only, never authoritative fluid physics.
 
-Eight independently streamable surface levels derive from the same generator and sparse edit overlay
-at 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, and 25.6 m sampling strides. The first four are interactive
-rings; the four coarsest are horizon-only prefetches. Each tile covers 32 samples per side and emits a
-top plus vertical boundary faces down to lower neighbors, including samples across tile boundaries,
-so separately generated tiles form a closed shell. The outer levels extend beyond the 220 m
-shadow/fog detail range to the configured 2.4 km view distance; missing finer levels temporarily
-reveal complete coarse parents instead of a hole. All surface meshes remain disposable derivatives:
-the generator, 10 cm voxels, and sparse edits stay authoritative.
+The disposable rendering hierarchy begins with independently renderable roots discovered from
+bounded horizontal region columns. Compact directories declare each root's complete refinement tree,
+payload kind, content identity, boundary witnesses, and conservative geometric, silhouette,
+material, normal, and unresolved-topology error. The client evaluates those bounds against the live
+viewport and requests complete child replacement groups by expected error reduction per byte and
+time to exposure. There are no fixed distance rings or parallel surface-tile authority.
 
-Each surface level also derives an edit-aware, 2D-greedy water mask at the exact canonical sea Y.
-Water patches use the same CPU ownership bounds as terrain, but never inherit the lowered crack-hiding
-terrain underlay. Opaque terrain and water use independent GPU arenas. One refractive, depth-writing
-water pass samples the copied opaque color and reverse-Z depth without alpha blending; a matching
-transition variant preserves ownership handoffs. The shader combines multi-directional procedural
-wave normals, Schlick Fresnel reflection, the shared sky/sun environment, bottom-resolved
-Beer-Lambert absorption and scattering, HDR fog, and the same presentation transform as land.
+Virtual-terrain pages can encode exact stepped surfaces, sparse voxel bricks, quad or triangle
+clusters, or sampled heightfields. Representation does not change the shared half-open spatial
+ownership lattice. Every page is authenticated against the world/source identity, directory
+declaration, revision, payload bounds, semantic content hash, and persisted boundary certificates
+before residency. A parent remains visible until all children are resident and the CPU ownership
+oracle plus bounded GPU traversal certify the same complete cut; refinement therefore creates
+neither parent/child overlap nor a temporary hole.
 
-Every terrain surface tile is one opaque-arena allocation partitioned into sixteen contiguous
-8x8-cell draw patches; a non-empty water derivative uses the parallel water arena. Each terrain patch
-also owns four separately addressable boundary-face ranges. At a resolution handoff the renderer
-suppresses the coarse generic boundary face and emits an exact connector from the resident coarse and
-fine height profiles. Complete sibling activation and retained parents ensure the connector is never
-built against a missing representation.
+Canonical 10 cm chunks remain collision, interaction, and edit authority, but their exact geometry
+enters that same selected hierarchy instead of a second near-field draw path. Edits advance canonical
+chunk revisions, from which affected hierarchy revision floors are derived. Old geometry stays
+presented while a complete replacement is prepared, then publication switches the immutable terrain
+snapshot atomically. Every hierarchy page is a disposable cache that can be rebuilt from source
+identity plus sparse edits.
 
-Coverage ownership changes at grid-snapped, half-open square boundaries aligned to every participating
-patch size. Rust selects whole canonical chunks and surface patches on the CPU, then uses the identical
-selection for color and all shadow cascades; no fragment-level discard is needed after a complete
-coverage set becomes active. During initial fill, the former continuous shader predicate remains a
-safe fallback over complete coarse underlays. A pending focus retains the last active surface set until
-all replacement tiles are resident, so movement changes ownership transactionally instead of exposing
-partially streamed rings. Landmarks remain canonical near-field geometry; they are withheld only
-during the first incomplete fine-field load so isolated upper geometry cannot appear before its
-supporting columns.
+Opaque terrain and water remain separate GPU streams inside each selected page. The refractive,
+depth-writing water pass samples copied opaque color and reverse-Z depth without alpha blending; it
+combines world-anchored wave normals, Schlick Fresnel reflection, the shared sky/sun environment,
+bottom-resolved Beer-Lambert absorption and scattering, HDR fog, and the same presentation transform
+as land. Color, depth, and all shadow cascades reuse the identical certified ownership cut.
 
 Each region owns an analytic `SkylineFeature` archetype shared by canonical chunk decoration,
-random-access voxel sampling, edit invalidation, and surface LOD generation: broadleaf, limestone tor,
-alpine needle, clay hoodoo, oriented dune arch, or basalt-column cluster. All are ordinary canonical
-10 cm voxels rather than renderer entities, so picking, collision, removal, restoration, codecs, and
-sparse persistence require no special case. An anchor-owned surface patch appends at most four cuboid
-proxies (24 quads) using the same stable materials and conservative bounds, adding no per-landmark draw
-object or allocation. Any canonical edit that touches generated feature material suppresses its
-disposable proxy at every level; reverting the edit restores it. The canonical boundary snaps to the
-96-voxel feature placement grid, keeping a whole landmark on one side of the canonical/proxy handoff.
+random-access voxel sampling, edit invalidation, and hierarchy-page generation: broadleaf, limestone
+tor, alpine needle, clay hoodoo, oriented dune arch, or basalt-column cluster. All are ordinary
+canonical 10 cm voxels rather than renderer entities, so picking, collision, removal, restoration,
+codecs, and sparse persistence require no special case. An anchor-owned hierarchy representation
+appends at most four cuboid proxies (24 quads) using the same stable materials and conservative bounds,
+adding no per-landmark draw object or allocation. Any canonical edit that touches generated feature
+material suppresses its disposable proxy at every level; reverting the edit restores it. The
+canonical boundary snaps to the 96-voxel feature placement grid, keeping a whole landmark on one side
+of the canonical/hierarchy handoff.
 
 Independent placement probability made the landmark catalog read as uniform scatter even when each
 archetype was distinct. Generator v8 adds a deterministic 8x8-feature-cell (76.8 m) composition layer
@@ -130,7 +125,7 @@ procession grammar; its pure influence field modulates the existing regional pro
 one hero candidate. Background, companion, and hero prominence increase height by 0%, 25%, and 50% and
 expand canonical/proxy radii within the existing ten-voxel conservative bound. The representation still
 returns at most one feature per 96-voxel cell, so stable identity, fixed column storage, 24-quad proxy
-caps, editing, and LOD handoff remain unchanged. A fixed-seed checksum covers placement, archetype,
+caps, editing, and hierarchy handoff remain unchanged. A fixed-seed checksum covers placement, archetype,
 anchor, height, orientation, variant, and prominence across positive and negative cells.
 
 Generator v9 adds the First Pilgrim Road as a versioned six-node polyline in canonical 10 cm
@@ -158,14 +153,15 @@ route identities retain their previous anchors and smaller bounds. Disposable hi
 at most four boxes (24 quads), stay anchor-owned, and disappear when any canonical feature voxel is
 edited; restoring the generated material removes the sparse override and recreates the exact proxy.
 Ordinary candidates reject water before computing composition identity, so rare hero work does not
-inflate every column's hot path. The SQLite world record advances generator identity without dropping
-existing sparse edits.
+inflate every column's hot path. A generator-identity change selects a fresh source-hash-bound SQLite
+path; the previous database and its sparse edits remain untouched but are not migrated into the new
+world.
 
 Generator v12 extends the First Pilgrim Road from 164.7 m to 753.0 m with 42 frozen canonical nodes.
 A deterministic terrain-aware Rust search crosses verdant forest, wind moor, volcanic terrain, and
 alpine country before terminating beside a Needle Gate. Exact 10 cm replay proves a dry player-width
 bed, no more than 30 cm cut or 20 cm fill, a maximum authored grade below 12%, and cardinal continuity
-on every surface-LOD lattice. The same cadence now yields 26 stable editable route landmarks. Their
+on every hierarchy sampling lattice. The same cadence now yields 26 stable editable route landmarks. Their
 ordinal catalog and feature-cell lookup are immutable derived indices, so ambient feature generation
 does not rebuild or linearly scan every station.
 
@@ -211,15 +207,13 @@ root. Sampling preserves the earlier nearest-segment/tie behavior exactly, cumul
 use binary partitioning over stored lengths, and station reconstruction retains identical rounded
 anchors. Segment identity is `u16`, decoupling route length from per-column arithmetic.
 
-An edit invalidates every surface tile whose sampling footprint depends on that X/Z column. Resident
-geometry stays active while its replacement is generated and allocated, then the renderer switches
-the mesh and releases the old allocation atomically. Dirty work that leaves the retained streaming
-window is discarded because any later load samples the authoritative edit overlay again. Feature
-edits additionally invalidate the feature anchor's tile when generated geometry crosses a tile edge.
-Retained tiles just outside active coverage still record affected revisions without spending immediate
-remesh work. If focus returns before eviction, revision comparison marks the cached mesh stale and
-blocks coverage activation until its replacement is uploaded; this prevents out-of-order server edits from
-reviving an old retained LOD mesh.
+An edit advances every affected canonical chunk revision. Virtual-terrain region and surface
+revisions are derived from those chunk revisions, so pages whose sampling footprint depends on an
+edited X/Z column cannot reuse an older identity. Resident geometry stays presented while complete
+replacement groups are generated and allocated, then publication switches the immutable terrain
+snapshot atomically. Work that leaves the retained hierarchy is discarded because any later request
+samples the authoritative edit overlay again. This prevents out-of-order products from reviving an
+older terrain cut without persisting a parallel surface-revision index.
 
 Near meshes also bake the established four-level voxel ambient-occlusion term from two side samples
 and the diagonal at each face corner. Four 2-bit values participate in the greedy merge key, and the
@@ -287,8 +281,8 @@ neighboring texels and mip levels. The box-filtered mip chain remains in place s
 not regress to a shimmering level-zero sample.
 
 Axis-aligned face bases derive planar coordinates from world position, so greedy quads never stretch
-detail and adjacent canonical chunks, surface LODs, boundary connectors, and landmark proxies sample
-the same coordinates without new vertex attributes. Before atlas lookup, those coordinates snap to three
+detail and adjacent canonical chunks, hierarchy pages, and landmark proxies sample the same
+coordinates without new vertex attributes. Before atlas lookup, those coordinates snap to three
 world-aligned cells per canonical voxel axis: every face therefore exposes exactly 3x3 blocks at
 3.33 cm spacing, including faces embedded in a larger greedy quad. Explicit texture gradients come
 from the unsnapped coordinates, retaining stable mip selection despite the piecewise-constant lookup.
@@ -393,8 +387,8 @@ assets, where their topology compression is a better fit.
 
 Native SQLite owned by `voxels-worldd` is the sole durable gameplay authority. Its database is bound
 to the immutable world/source manifest and stores sparse voxel overrides, player inventory, accepted
-pose, and resume state. Idempotent edit operations advance global order plus local chunk/surface
-revisions, and browsers treat returned products as authority.
+pose, and resume state. Idempotent edit operations advance global order plus local chunk revisions,
+and browsers treat returned products as authority.
 
 The browser stores only a versioned local mapping from friendly player selectors to opaque IDs.
 That registry uses `localStorage` and a Web Lock to avoid simultaneous first-open races; it contains
@@ -403,22 +397,21 @@ server-owned resume state. During play the presence channel continuously submits
 clean shutdown sends one final pose before closing its sockets. Obsolete browser OPFS databases are
 left untouched but are no longer opened or written.
 
-Every server edit captures the post-invalidation revision of each desired canonical chunk and a
-monotonic revision for every affected active or pending surface tile. The shell considers the edit
-converged only when those canonical chunks and LOD replacements are resident and the renderer confirms
-that the replacement frame reached WGPU submission. Focus eviction explicitly waives representations
-that are no longer visible; a later load samples the authoritative edit map again. This makes edit
-latency a user-visible, revision-backed measurement rather than a queue-length approximation.
+Every server edit returns its post-invalidation global revision and affected canonical chunks. The
+shell applies the authoritative mutation set, records those chunk revisions, and invalidates the
+dependent virtual-terrain hierarchy. The edit is visibly converged only after the revision-current
+terrain cut reaches WGPU submission. Focus eviction waives representations that are no longer
+visible; a later load samples the authoritative edit map again. This makes edit latency a
+user-visible, revision-backed measurement rather than a queue-length approximation.
 
 ## Performance policy
 
 - Never allocate or send one JavaScript object per input sample, voxel, face, or chunk.
 - Generate and mesh only dirty/resident chunks, with bounded work admitted each frame.
 - Mesh chunk boundaries using neighbor samples so hidden seam faces are not emitted.
-- Suballocate immutable chunk and surface-ring meshes from separate coalescing opaque/water GPU arena
-  pages, replacing only the allocation whose source changes. Pack common patch bodies before optional
-  boundary-face ranges, generate active LOD connectors separately, and coalesce adjacent selected
-  ranges into draw spans.
+- Suballocate immutable selected-page geometry from separate coalescing opaque/water GPU arena pages,
+  replacing only the allocation whose source changes and publishing a replacement group only after
+  its complete certified cut is GPU-ready.
 - Frustum-cull chunks on CPU; add occlusion/indirect drawing only after GPU captures justify it.
 - Keep deterministic host benchmarks for generation, codec round-trips, meshing, and edit replay.
 - Expose lightweight browser frame and residency snapshots for end-to-end regression automation.

@@ -113,20 +113,18 @@ there so local contention regressions are visible rather than hidden behind one 
 This deliberately does not reuse the persistence browser test's same-profile BroadcastChannel. The
 strict scenario uses five distinct world sockets to submit 40 reachable voxels through the production
 server edit path while the sixth browser observes from about 120 m away. Every client must apply all 40
-commits, and the observer's resident stride-16 tile must advance to its required server revision and
-finish clean rather than remain dirty. A before/after pixel gate also requires a legible tall change
-around the aimed tower; revision bookkeeping alone cannot pass. Use the explicit strict form in
-release checks:
+commits, and the observer must publish a settled revision-current virtual-terrain hierarchy. A
+before/after pixel gate also requires a legible tall change around the aimed tower; revision
+bookkeeping alone cannot pass. Use the explicit strict form in release checks:
 
 ```sh
 vp run automation -- run multiplayer
 ```
 
-The run records convergence time, edit-only world traffic, the observer's required/accepted surface
-revision, pre/post GPU mesh fingerprints, pixel evidence, per-client frame health, and screenshots in
-`target/automation/multiplayer/<run-id>/`. A separate native WebSocket regression decodes the resulting coarse
-mesh and proves the tower's top survives stride-16; the browser gate proves the real worker uploads
-that revised product and changes the rendered silhouette.
+The run records convergence time, edit-only world traffic, pre/post viewport fingerprints, pixel
+evidence, per-client frame health, and screenshots in
+`target/automation/multiplayer/<run-id>/`. The browser gate proves the real worker publishes revised
+hierarchy geometry and changes the rendered silhouette.
 
 As a pre-reach-enforcement baseline on 2026-07-14 on an M3 Max with Chrome 150, the old 10 m/
 100-voxel tower converged in the far observer in 170.6 ms. After world coverage had settled, the
@@ -177,7 +175,7 @@ horizontal/vertical movement credit; a client discontinuity bit cannot authorize
 require a fresh same-connection pose and bounded reach. A WAN game still needs server-owned input and
 collision simulation plus authenticated identity.
 
-Voxel edits and per-material inventories are native server authority: strict SQLite schema 13 is bound
+Voxel edits and per-material inventories are native server authority: strict SQLite schema 14 is bound
 to the world/source manifest, sparse overrides are stored once in compact chunk blobs, and each
 player retains a bounded 64-operation exact-retry window. Edits take sorted locks for every touched
 25.6 m horizontal region, so overlapping columns serialize while unrelated source and LOD planning
