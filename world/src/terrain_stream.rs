@@ -213,6 +213,7 @@ pub struct TerrainRequestBatch {
 pub enum TerrainStreamError {
     InvalidConfig,
     InvalidDemandGroup,
+    UnschedulableDemandGroup,
     UnknownPending(TerrainPageTransferIdentity),
     UnknownInFlight(TerrainPageTransferIdentity),
 }
@@ -223,6 +224,9 @@ impl fmt::Display for TerrainStreamError {
             Self::InvalidConfig => formatter.write_str("invalid virtual terrain stream capacity"),
             Self::InvalidDemandGroup => {
                 formatter.write_str("invalid or incomplete virtual terrain demand group")
+            }
+            Self::UnschedulableDemandGroup => {
+                formatter.write_str("virtual terrain demand group exceeds stream batch capacity")
             }
             Self::UnknownPending(identity) => {
                 write!(
@@ -298,6 +302,23 @@ impl TerrainStreamScheduler {
         let mut groups = groups.into_iter().collect::<Vec<_>>();
         if groups.iter().any(|group| !group.validates()) {
             return Err(TerrainStreamError::InvalidDemandGroup);
+        }
+        if groups.iter().any(|group| {
+            let mut missing_pages = 0usize;
+            let mut missing_bytes = 0usize;
+            for page in &group.pages {
+                if available.contains(&page.identity) || self.in_flight.contains_key(&page.identity)
+                {
+                    continue;
+                }
+                missing_pages = missing_pages.saturating_add(1);
+                missing_bytes = missing_bytes.saturating_add(page.estimated_encoded_bytes as usize);
+            }
+            missing_pages > self.config.max_batch_items
+                || missing_pages > self.config.max_in_flight_pages
+                || missing_bytes > self.config.max_batch_bytes
+        }) {
+            return Err(TerrainStreamError::UnschedulableDemandGroup);
         }
         let demanded_missing = groups
             .iter()
@@ -821,6 +842,121 @@ mod tests {
             .unwrap();
         let batch = scheduler.peek_batch(0).unwrap();
         assert_eq!(batch.pages.into_iter().collect::<BTreeSet<_>>(), expected);
+    }
+
+    #[test]
+    fn unschedulable_atomic_replacement_fails_instead_of_remaining_pending() {
+        let parent = TerrainPageKey {
+            level: 1,
+            coord: [0, 0, 0],
+        };
+        let pages = parent
+            .refinement_children()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| {
+                demand(
+                    TerrainPageTransferIdentity {
+                        key,
+                        revision: 1,
+                        content_fingerprint: [index as u8 + 1; 32],
+                    },
+                    100,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut scheduler = TerrainStreamScheduler::new(TerrainStreamConfig {
+            max_in_flight_pages: 4,
+            max_batch_items: 4,
+            ..TerrainStreamConfig::INTERACTIVE_CLIENT
+        })
+        .unwrap();
+
+        assert_eq!(
+            scheduler.reconcile([TerrainDemandGroup::replacement(parent, pages).unwrap()]),
+            Err(TerrainStreamError::UnschedulableDemandGroup)
+        );
+        assert_eq!(scheduler.stats().pending_pages, 0);
+        assert!(scheduler.peek_batch(0).is_none());
+    }
+
+    #[test]
+    fn partially_available_replacement_can_use_a_smaller_scheduler() {
+        let parent = TerrainPageKey {
+            level: 1,
+            coord: [0, 0, 0],
+        };
+        let pages = parent
+            .refinement_children()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| {
+                demand(
+                    TerrainPageTransferIdentity {
+                        key,
+                        revision: 1,
+                        content_fingerprint: [index as u8 + 1; 32],
+                    },
+                    100,
+                )
+            })
+            .collect::<Vec<_>>();
+        let available = pages
+            .iter()
+            .take(4)
+            .map(|page| page.identity)
+            .collect::<Vec<_>>();
+        let mut scheduler = TerrainStreamScheduler::new(TerrainStreamConfig {
+            max_in_flight_pages: 4,
+            max_batch_items: 4,
+            ..TerrainStreamConfig::INTERACTIVE_CLIENT
+        })
+        .unwrap();
+
+        scheduler
+            .reconcile_with_available(
+                [TerrainDemandGroup::replacement(parent, pages).unwrap()],
+                available,
+            )
+            .unwrap();
+
+        assert_eq!(scheduler.peek_batch(0).unwrap().pages.len(), 4);
+    }
+
+    #[test]
+    fn replacement_estimate_must_fit_one_transport_batch() {
+        let parent = TerrainPageKey::surface(1, 0, 0);
+        let pages = parent
+            .refinement_children()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| {
+                let mut page = demand(
+                    TerrainPageTransferIdentity {
+                        key,
+                        revision: 1,
+                        content_fingerprint: [index as u8 + 1; 32],
+                    },
+                    100,
+                );
+                page.estimated_encoded_bytes = TERRAIN_PAGE_MAX_COMPRESSED_BYTES as u32;
+                page
+            })
+            .collect::<Vec<_>>();
+        let mut scheduler = TerrainStreamScheduler::new(TerrainStreamConfig {
+            max_batch_bytes: TERRAIN_PAGE_MAX_COMPRESSED_BYTES,
+            ..TerrainStreamConfig::INTERACTIVE_CLIENT
+        })
+        .unwrap();
+
+        assert_eq!(
+            scheduler.reconcile([TerrainDemandGroup::replacement(parent, pages).unwrap()]),
+            Err(TerrainStreamError::UnschedulableDemandGroup)
+        );
+        assert_eq!(scheduler.stats().pending_pages, 0);
     }
 
     #[test]
