@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { terminateProcessTree } from "../../scripts/process-tree.ts";
 import type { ScenarioContext } from "./scenario.ts";
 
 export interface ManagedProcess {
@@ -28,16 +29,6 @@ function completion(child: ChildProcess, label: string): Promise<void> {
   });
 }
 
-function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  try {
-    if (process.platform !== "win32" && child.pid !== undefined) process.kill(-child.pid, signal);
-    else child.kill(signal);
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
-  }
-}
-
 export function startProcess(
   context: ScenarioContext,
   command: string,
@@ -55,19 +46,11 @@ export function startProcess(
   const stop = async (signal = stopSignal): Promise<void> => {
     if (stopped || child.exitCode !== null || child.signalCode !== null) return;
     stopped = true;
-    signalProcessTree(child, signal);
+    await terminateProcessTree(child, 2_000, false, signal);
     try {
-      await Promise.race([completed, new Promise<void>((resolve) => setTimeout(resolve, 2_000))]);
+      await completed;
     } catch (error) {
-      if (child.signalCode !== signal) throw error;
-    }
-    if (child.exitCode === null && child.signalCode === null) {
-      signalProcessTree(child, "SIGKILL");
-      try {
-        await completed;
-      } catch (error) {
-        if (child.signalCode !== "SIGKILL") throw error;
-      }
+      if (child.signalCode !== signal && child.signalCode !== "SIGKILL") throw error;
     }
   };
   const abort = (): void => {
