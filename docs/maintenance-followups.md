@@ -4,6 +4,23 @@ This is the small running list of repository improvements that have concrete evi
 safe to land as incidental cleanup. An item leaves this list only after its decision or measurement
 gate is satisfied.
 
+## Recreate a lost WebGPU surface
+
+`Renderer::render` currently handles `CurrentSurfaceTexture::Lost` and `Outdated` identically by
+configuring the existing `Surface`. In wgpu 30, `Outdated` calls for reconfiguration, while `Lost`
+requires a new `Surface` from `Instance::create_surface` before configuration. The renderer consumes
+its `SurfaceTarget` during construction and retains neither the target nor a host callback that can
+create a replacement, so the correct recovery is larger than a local match-arm change.
+
+Define surface ownership across `shell` and `render`, then add deterministic fault injection that
+proves:
+
+- `Outdated` reconfigures the existing surface and skips only the affected frame;
+- `Lost` creates and configures a new surface without rebuilding unrelated GPU resources;
+- device loss escalates to complete device/resource reconstruction instead of retrying the surface.
+
+Reference: [wgpu 30 `CurrentSurfaceTexture`](https://docs.rs/wgpu/30.0.0/wgpu/enum.CurrentSurfaceTexture.html).
+
 ## Reuse procedural chunk generation for meshing halos
 
 `ProceduralWorldSource::chunk_with_halo` currently calls `Generator::generate_chunk`, then builds a
