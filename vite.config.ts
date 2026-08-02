@@ -1,7 +1,6 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { get as httpGet } from "node:http";
 import { createConnection } from "node:net";
 import path from "node:path";
 import { defineConfig, type Plugin } from "vite-plus";
@@ -15,6 +14,9 @@ import {
 import type { WasmBuildProfile } from "./scripts/build-wasm.ts";
 import { worldServiceBuildCargoArgs } from "./scripts/world-service-command.ts";
 import type { WorldServiceCargoProfile } from "./scripts/world-service-command.ts";
+import { worldServiceHealthNonce } from "./scripts/world-service-health.ts";
+
+export { worldServiceHealthNonce } from "./scripts/world-service-health.ts";
 
 interface RustInputWatcher {
   on(event: "add" | "change" | "unlink", listener: (file: string) => void): unknown;
@@ -464,37 +466,6 @@ function portAcceptsConnections(host: string, port: number): Promise<boolean> {
     socket.setTimeout(250, () => finish(false));
     socket.once("connect", () => finish(true));
     socket.once("error", () => finish(false));
-  });
-}
-
-export function worldServiceHealthNonce(host: string, port: number): Promise<string | null> {
-  return new Promise((resolve) => {
-    const request = httpGet(
-      {
-        hostname: host,
-        port,
-        path: "/healthz",
-        timeout: 250,
-      },
-      (response) => {
-        if (response.statusCode !== 200) {
-          response.resume();
-          resolve(null);
-          return;
-        }
-        let body = "";
-        response.setEncoding("utf8");
-        response.on("data", (chunk: string) => {
-          if (body.length <= 256) body += chunk;
-        });
-        response.once("end", () => resolve(body.length <= 256 ? body : null));
-      },
-    );
-    request.once("timeout", () => {
-      request.destroy();
-      resolve(null);
-    });
-    request.once("error", () => resolve(null));
   });
 }
 

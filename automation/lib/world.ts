@@ -1,10 +1,9 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { connect } from "node:net";
 import { promisify } from "node:util";
 import { build, createServer, preview } from "vite-plus";
 import type { PreviewServer, ViteDevServer } from "vite-plus";
@@ -19,6 +18,7 @@ import {
   worldServiceExecutablePath,
 } from "../../scripts/world-service-command.ts";
 import type { WorldServiceCargoProfile } from "../../scripts/world-service-command.ts";
+import { worldServiceHealthNonce } from "../../scripts/world-service-health.ts";
 
 const execFileAsync = promisify(execFile);
 const AUTOMATION_FIXTURE_SCHEMA_VERSION = 9;
@@ -401,21 +401,6 @@ export async function prepareWorldFixture({
   }
 }
 
-function portAcceptsConnections(port: number): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    const socket = connect({ host: "127.0.0.1", port });
-    socket.setTimeout(250, () => {
-      socket.destroy();
-      resolve(false);
-    });
-    socket.once("connect", () => {
-      socket.destroy();
-      resolve(true);
-    });
-    socket.once("error", () => resolve(false));
-  });
-}
-
 export async function startWorldService(
   context: ScenarioContext,
   fixture: WorldFixture,
@@ -429,6 +414,7 @@ export async function startWorldService(
       stdio: "inherit",
     });
   }
+  const startupNonce = randomUUID();
   const process_ = startProcess(
     context,
     worldServiceExecutablePath(profile),
@@ -436,7 +422,7 @@ export async function startWorldService(
     {
       label: "world service",
       cwd: process.cwd(),
-      env: process.env,
+      env: { ...process.env, VOXELS_DEV_INSTANCE_NONCE: startupNonce },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -455,7 +441,7 @@ export async function startWorldService(
     if (child.exitCode !== null || child.signalCode !== null) {
       throw new Error(`world service exited before readiness:\n${logs.join("")}`);
     }
-    if (await portAcceptsConnections(fixture.backendPort)) {
+    if ((await worldServiceHealthNonce("127.0.0.1", fixture.backendPort)) === startupNonce) {
       return { child, logs, close: () => process_.stop() };
     }
     await context.wait(75);
