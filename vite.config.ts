@@ -745,6 +745,9 @@ function nativeWorldService(): Plugin {
       };
 
       server.httpServer?.once("close", () => void stop());
+      // A listen failure (most commonly EADDRINUSE) does not reliably emit `close`. The native
+      // daemon has already started by this point, so tie it to the HTTP error as well.
+      server.httpServer?.once("error", () => void stop());
       process.once("SIGINT", handleSignal);
       process.once("SIGTERM", handleSignal);
       for (const input of nativeInputs) server.watcher.add(input);
@@ -786,7 +789,9 @@ export default defineConfig(({ command, mode }) => ({
         ],
   // A renderer failure belongs in the console. Vite's default HMR overlay appends a shadow-DOM
   // element over the canvas, which violates the engine's canvas-only host contract.
-  server: { hmr: { overlay: false } },
+  // The world-service origin allowlist is bound to this development origin. Refuse to start when
+  // the port is occupied instead of silently moving the browser to an unauthorized origin.
+  server: { port: 5173, strictPort: true, hmr: { overlay: false } },
   // Current engines support modulepreload. Avoid Vite's compatibility shim because its feature probe
   // constructs detached DOM elements even though the application itself owns only one canvas.
   build: { modulePreload: { polyfill: false } },

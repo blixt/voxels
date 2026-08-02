@@ -18,6 +18,7 @@ import {
   worldServiceDevelopmentProfile,
   worldServiceListenAddress,
 } from "./vite.config.ts";
+import viteConfiguration from "./vite.config.ts";
 import {
   worldServiceBuildCargoArgs,
   worldServiceCargoArgs,
@@ -61,6 +62,22 @@ function waitForOutput(
     poll();
   });
 }
+
+describe("development server configuration", () => {
+  it("pins the authorized browser origin instead of silently choosing another port", () => {
+    const resolved =
+      typeof viteConfiguration === "function"
+        ? viteConfiguration({
+            command: "serve",
+            mode: "development",
+            isSsrBuild: false,
+            isPreview: false,
+          })
+        : viteConfiguration;
+
+    expect(resolved.server).toMatchObject({ port: 5173, strictPort: true });
+  });
+});
 
 describe("Rust WASM development watcher", () => {
   it("rebuilds for changed, added, and removed Rust inputs", () => {
