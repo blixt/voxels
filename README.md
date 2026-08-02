@@ -14,7 +14,9 @@ and streaming while the native Rust world service owns generation and durable wo
 4. Run `vp dev`; it owns both the native world service and browser development server.
 5. Run TypeScript checks and tests with `vp check` and `vp test`.
 6. Run host Rust tests and host/WASM Clippy with `vp run check:rust`.
-7. Build production WASM and assets with `vp build`; inspect them with `vp preview`.
+7. Build release WASM and browser assets with `vp build`. `vp preview` serves only those static
+   assets, so start a compatible native world service separately before inspecting them. Use
+   `vp run build:production` when the browser bundle must embed the deployment client config.
 8. Launch six isolated release clients with shaped links and verify avatars plus a five-builder
    tower across canonical and virtual-terrain ownership in real Chrome with
    `vp run automation -- run multiplayer`.
