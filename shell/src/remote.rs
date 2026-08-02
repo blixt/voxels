@@ -1061,22 +1061,11 @@ impl RemoteInner {
                 "batch contains duplicate chunk coordinates",
             ));
         }
+        // Check transport capacity before preempting useful lower-priority work. A request that
+        // cannot be sent must not consume a request-window slot or cancel its current owner.
+        let socket = self.request_socket()?;
         if !self.ensure_request_window(priority) {
             return Err(RemoteWorldError::RequestWindowFull);
-        }
-        let Some(socket) = self.socket.borrow().clone() else {
-            return Err(RemoteWorldError::NotOpen);
-        };
-        let buffered = socket.buffered_amount();
-        if self.send_paused.get() {
-            if buffered > self.config.buffered_amount_low_water_bytes {
-                return Err(RemoteWorldError::Backpressured);
-            }
-            self.send_paused.set(false);
-        }
-        if buffered >= self.config.buffered_amount_high_water_bytes {
-            self.send_paused.set(true);
-            return Err(RemoteWorldError::Backpressured);
         }
 
         let request_id = self.allocate_request_id()?;
@@ -1125,10 +1114,10 @@ impl RemoteInner {
             columns: columns.clone(),
         })
         .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
+        let socket = self.request_socket()?;
         if !self.ensure_request_window(priority) {
             return Err(RemoteWorldError::RequestWindowFull);
         }
-        let socket = self.request_socket()?;
         let request_id = self.allocate_request_id()?;
         let frame =
             protocol::encode_terrain_region_column_batch(&TerrainRegionColumnBatchRequest {
@@ -1163,10 +1152,10 @@ impl RemoteInner {
             roots: roots.clone(),
         })
         .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
+        let socket = self.request_socket()?;
         if !self.ensure_request_window(priority) {
             return Err(RemoteWorldError::RequestWindowFull);
         }
-        let socket = self.request_socket()?;
         let request_id = self.allocate_request_id()?;
         let frame = protocol::encode_terrain_directory_batch(&TerrainDirectoryBatchRequest {
             request_id,
@@ -1211,10 +1200,10 @@ impl RemoteInner {
             },
         })
         .map_err(|error| RemoteWorldError::Protocol(error.to_string()))?;
+        let socket = self.request_socket()?;
         if !self.ensure_request_window(priority) {
             return Err(RemoteWorldError::RequestWindowFull);
         }
-        let socket = self.request_socket()?;
         let request_id = self.allocate_request_id()?;
         let frame = protocol::encode_virtual_terrain_page_batch(&VirtualTerrainPageBatchRequest {
             request_id,
