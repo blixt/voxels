@@ -93,6 +93,24 @@ describe("public client authorization", () => {
     expect(storage.values.get("voxels.public-identity.v1.default")).toBe("vxi1.durable-credential");
   });
 
+  it("inserts every valid WebSocket token character literally", async () => {
+    const result = await authorizeClientBootstrap(
+      'auth_subprotocol_token = "session:/api/session" # deployment\n',
+      LOCAL_PLAYER,
+      "https://voxels.lol/",
+      new MemoryStorage(),
+      async () =>
+        Response.json({
+          ...LOCAL_PLAYER,
+          authSubprotocolToken: "vxs1.$&-signed",
+          identityCredential: "vxi1.durable-credential",
+          expiresAt: 1_800_043_200,
+        }),
+    );
+
+    expect(result.configToml).toBe('auth_subprotocol_token = "vxs1.$&-signed" # deployment\n');
+  });
+
   it("reissues an identity once when a stored credential is no longer valid", async () => {
     const storage = new MemoryStorage();
     storage.setItem("voxels.public-identity.v1.default", "vxi1.expired-credential");

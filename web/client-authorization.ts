@@ -55,7 +55,11 @@ export async function authorizeClientBootstrap(
     throw new Error(`Could not persist the public player credential: ${String(error)}`);
   }
   return {
-    configToml: configToml.replace(AUTH_TOKEN_LINE, `$1${value.authSubprotocolToken}$3`),
+    configToml: configToml.replace(
+      AUTH_TOKEN_LINE,
+      (_line, prefix: string, _configuredToken: string, suffix: string) =>
+        `${prefix}${value.authSubprotocolToken}${suffix}`,
+    ),
     player: {
       browserUserId: value.browserUserId,
       playerId: value.playerId,
