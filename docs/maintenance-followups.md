@@ -39,6 +39,22 @@ and `MeshingHalo` from it. Before replacing the current path, require:
 Relevant code: `world/src/source.rs` (`chunk_with_halo`) and `world/src/generation.rs`
 (`generate_chunk`, `GeneratedRegion`).
 
+## Reserve memory before world response assembly
+
+`max_queued_outbound_bytes_per_client` is acquired in `GenerationFrameDelivery::send`, after a
+generation task has assembled and compressed its complete response. A slow client can therefore
+retain up to its negotiated 16 in-flight responses outside the advertised 32 MiB outbound bound;
+each response may approach the separate 16 MiB frame limit. Multiplying that gap across the public
+128-client limit is not compatible with treating the outbound semaphore as a complete process-memory
+bound.
+
+The response size is not exact until compression finishes, so choose an explicit ownership model
+before changing the scheduler: either reserve a conservative maximum before assembly and refund the
+difference, or add a process-wide assembly budget that transfers the exact retained-byte permit to
+the outbound frame. Then add an adversarial slow-reader test that fills every in-flight slot across
+multiple clients and proves peak retained response bytes remain bounded, cancellation releases every
+reservation, and collision-critical traffic cannot deadlock behind its own reservation.
+
 ## Decide exact-corner voxel ray semantics
 
 The portable DDA traversal in `core/src/lib.rs` advances one axis when two or three boundary times
@@ -61,7 +77,7 @@ candidate would violate the single-cut ownership contract.
 
 Do not solve this by admitting the children independently or weakening replacement validation.
 First add a world-service fixture that generates the parent and all four child-root pages through
-their real directory requests, then compare their persisted schema-v7 boundary witnesses and
+their real directory requests, then compare their persisted schema-v11 boundary witnesses and
 reconstructed shared edges. The eventual fix belongs in generation/persistence if those products
 disagree; renderer admission should continue failing closed. Re-run `world-lab` through exact
 coverage and GPU certification before revisiting bounded staging retention.

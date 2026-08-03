@@ -111,11 +111,13 @@ result JSON from the runner; exact p95, maximum, over-33.33 ms count, and droppe
 there so local contention regressions are visible rather than hidden behind one final-frame sample.
 
 This deliberately does not reuse the persistence browser test's same-profile BroadcastChannel. The
-strict scenario uses five distinct world sockets to submit 40 reachable voxels through the production
-server edit path while the sixth browser observes from about 120 m away. Every client must apply all 40
-commits, and the observer must publish a settled revision-current virtual-terrain hierarchy. A
-before/after pixel gate also requires a legible tall change around the aimed tower; revision
-bookkeeping alone cannot pass. Use the explicit strict form in release checks:
+strict scenario uses five distinct world sockets to submit one reachable one-cubic-metre brush each
+through the production server edit path while the sixth browser observes from about 120 m away. The
+five adjacent brushes form a 5 m tower containing 5,000 authoritative voxel mutations. Every client
+must apply all five submissions and mutations, and the observer must publish a settled
+revision-current virtual-terrain hierarchy. A before/after pixel gate also requires a legible tall
+change around the aimed tower; revision bookkeeping alone cannot pass. Use the explicit strict form
+in release checks:
 
 ```sh
 vp run automation -- run multiplayer

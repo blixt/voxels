@@ -21,7 +21,8 @@ and streaming while the native Rust world service owns generation and durable wo
    tower across canonical and virtual-terrain ownership in real Chrome with
    `vp run automation -- run multiplayer`.
 
-`vp run verify` runs the complete TypeScript, Rust, test, lint, and production-build gate.
+`vp run verify` runs the complete TypeScript, Rust, test, lint, and optimized-browser-build gate.
+Use `vp run build:production` separately to embed the deployment client configuration.
 The production deployment serves the browser and session Worker at <https://voxels.lol> and runs
 the authoritative server on Fly.io. See [Deployment](docs/deployment.md) for topology, secrets,
 release commands, smoke tests, persistence, and rollback notes.

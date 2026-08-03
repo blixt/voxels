@@ -31,8 +31,9 @@ vp run automation -- run storage-benchmark
 ```
 
 `vp run verify` is the complete static and build gate: TypeScript checks, TypeScript tests, host Rust
-tests, host/WASM Clippy, and the production browser build. The specialized harnesses below provide
-behavioral, visual, resource, or transport evidence that the general gate cannot.
+tests, host/WASM Clippy, and an optimized browser build with the ordinary client configuration. Use
+`vp run build:production` to embed the deployment client configuration. The specialized harnesses
+below provide behavioral, visual, resource, or transport evidence that the general gate cannot.
 
 ## Test surfaces
 
@@ -40,7 +41,7 @@ behavioral, visual, resource, or transport evidence that the general gate cannot
 | ------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | TypeScript          | `vp check`, `vp test`                                                                                   | Formatting, lint, types, and isolated unit contracts                                                       |
 | Rust and WASM       | `vp run check:rust`                                                                                     | Workspace tests plus host and WASM Clippy; no browser-runtime claim                                        |
-| Production build    | `vp build`                                                                                              | Optimized WASM, shaders, and web assets compile; no runtime claim                                          |
+| Optimized build     | `vp build`                                                                                              | Optimized WASM, shaders, and web assets compile with the selected client config; no runtime claim          |
 | Player rendering    | `vp run automation -- run player-rendering`                                                             | Real spawn, input, travel, exact 10 cm ownership, edit revision, screenshots, and diagnostic-sky gaps      |
 | Native bot smoke    | `vp run automation -- run bot-load --counts=4 --duration=3 --service-profile=worldgen-dev --no-browser` | Four real VXWP clients and the actual daemon; no renderer or browser-input claim                           |
 | Bot population/load | `vp run automation -- run bot-load`                                                                     | Mixed real-protocol bots plus a real browser observer, process resources, disk, and wire                   |

@@ -150,15 +150,18 @@ at that window, pauses sends above its high `bufferedAmount` watermark, resumes 
 watermark, times out requests, and reconnects with bounded backoff. The daemon independently limits
 frame bytes, accepted connections, admitted requests, the generation queue, global blocking jobs,
 and blocking jobs per client.
-Generation runs off the async socket loop. This makes memory proportional to configured bounds, not
-camera speed or server response latency.
+Generation runs off the async socket loop, and request admission plus active generation are
+proportional to configured bounds rather than camera speed. Completed response assembly still needs
+the separate [pre-assembly memory reservation](maintenance-followups.md#reserve-memory-before-world-response-assembly)
+before the outbound byte limit is a complete slow-client memory bound.
 
-The daemon refuses non-loopback listeners, checks the browser `Origin`, and requires a random token
-as a second offered WebSocket subprotocol because browser WebSockets cannot set an authorization
-header. This token is a local cross-site request defense, not production authentication: it is
-present in client configuration. Browser-generated user/player IDs are likewise untrusted local
-claims, not proof of identity. A future network deployment must use `wss://`, real credentials,
-server-validated player ownership, authorization, quotas, and the same exact VXWP version checks.
+The checked-in development daemon refuses non-loopback listeners, checks the browser `Origin`, and
+requires a random static token as a second offered WebSocket subprotocol because browser WebSockets
+cannot set an authorization header. The production configuration explicitly allows its Fly listener
+and HTTPS origin; Fly terminates `wss://`, while the same-origin Cloudflare Worker issues short-lived
+HMAC-signed session tokens bound to the exact browser and player IDs. The daemon validates those
+claims and the same exact VXWP version before admitting either socket. The static-token mode and
+browser-generated local player registry remain development conveniences, not Internet identity.
 
 Chrome 147 added [Local Network Access restrictions for WebSockets][chrome-147], so Chrome 150+
 prompts before a page may connect to loopback. Grant the prompt for the Vite origin. Local development
@@ -202,9 +205,9 @@ server gives each connection one bounded collision-generation lane and wakes col
 queued ordinary generation without increasing the process-wide worker cap. This urgent set is
 bounded secondary interest: it neither increases residency limits nor cancels in-flight work. Beyond
 it, queued work inside the cone wins over side and rear work, while velocity look-ahead orders that
-cone toward where the player will be. Surface tiles retain spatial order: browser measurements
-showed that directional surface ordering only disrupted generation locality because a partial level
-cannot be presented.
+cone toward where the player will be. Virtual-terrain replacement groups retain spatial locality:
+browser measurements showed that aggressively direction-ordering their pages only disrupted
+generation locality because a partial replacement group cannot be presented.
 
 Ensure the Vite origin is in the server's `allowed_origins`. Terrain Diffusion is the checked-in
 default. Fetch the pinned model once, then start the Metal-capable daemon:
@@ -277,10 +280,10 @@ vp run automation -- run multiplayer
 
 It launches six independent browser contexts with shaped links and fresh identities, keeps five
 builders visible while an observer walks about 120 m away, then has each builder mine material and
-collectively place a 4.5 m column with a 1.7 m crossbar (77 authoritative voxels) from within
-validated reach. The gate waits until every browser has applied all commits and the far observer has
-published a revision-current virtual-terrain cut, then a before/after pixel comparison proves the
-aimed tower is visibly legible. It owns a
+place one adjacent one-cubic-metre brush, forming a 5 m tower with 5,000 authoritative voxel
+mutations from within validated reach. The gate waits until every browser has applied all five
+submissions and mutations and the far observer has published a revision-current virtual-terrain cut,
+then a before/after pixel comparison proves the aimed tower is visibly legible. It owns a
 temporary native edit database, rejects browser/WGPU/socket errors, and writes ignored
 metrics/screenshots under
 `target/automation/multiplayer/<run-id>/`; the stable

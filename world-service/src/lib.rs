@@ -83,7 +83,7 @@ pub struct LoopbackTransportConfig {
     pub outbound_max_frame_fragment_bytes: usize,
     /// Per-connection request window negotiated with each browser.
     pub max_in_flight_batches: u16,
-    /// Hard process-wide connection bound. Each accepted WebSocket holds one permit.
+    /// Hard connection bound per world/presence endpoint. Each accepted WebSocket holds one permit.
     pub max_connections: u16,
     /// Bounded process-wide queue shared by all clients.
     pub global_queue_capacity: u16,

@@ -162,8 +162,10 @@ Collision/startup data, authoritative world changes, realtime presence, visible 
 prefetch then use weighted, work-conserving service; an idle class gives its capacity to active
 classes.
 
-`max_queued_outbound_bytes_per_client` is a separate memory-safety bound on completed world
-products. It is not a rate limit.
+`max_queued_outbound_bytes_per_client` bounds completed world products after they enter outbound
+delivery. It is not a rate limit. Response assembly currently happens before that reservation; the
+[maintenance follow-up](maintenance-followups.md#reserve-memory-before-world-response-assembly)
+defines the remaining slow-client memory-bound work.
 
 The absolute world-day anchor is evaluated against Unix time and then transmitted with the server's
 monotonic clock, so daemon restarts and multiple clients retain one sky. Year, lunar orbit, local
