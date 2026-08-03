@@ -175,9 +175,7 @@ artifact directory and test timeout. A single `.test.ts` file can define the wor
 screenshot, inspect typed engine state or pixels, and fail normally:
 
 ```ts
-const scenario = defineScenario({
-  /* setup, capture, assertions */
-});
+const scenario = defineScenario({/* setup, capture, assertions */});
 scenarioTest(scenario);
 ```
 

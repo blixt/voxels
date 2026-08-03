@@ -594,7 +594,13 @@ export default defineConfig(({ command, mode }) => ({
   // constructs detached DOM elements even though the application itself owns only one canvas.
   build: { modulePreload: { polyfill: false } },
   fmt: {
-    ignorePatterns: ["docs/20260311-*.md", "docs/loop/**", "web/generated/**"],
+    ignorePatterns: [
+      "docs/20260311-*.md",
+      "docs/loop/**",
+      "web/generated/**",
+      // Wrangler owns this generated file; keep it byte-identical to `wrangler types`.
+      "worker-configuration.d.ts",
+    ],
   },
   lint: {
     jsPlugins: [{ name: "vite-plus", specifier: "vite-plus/oxlint-plugin" }],
