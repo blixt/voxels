@@ -782,6 +782,7 @@ impl BotRuntime {
             self.chunk_requests.reset_after_resync();
             self.report.resyncs = self.report.resyncs.saturating_add(1);
         } else {
+            self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
             self.record_error(format!("unexpected world message kind {kind}"));
         }
         Ok(())
@@ -871,6 +872,7 @@ impl BotRuntime {
             self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
             self.record_error(format!("presence: {message}"));
         } else {
+            self.report.protocol_errors = self.report.protocol_errors.saturating_add(1);
             self.record_error(format!("unexpected presence message kind {kind}"));
         }
         Ok(())
@@ -1025,6 +1027,7 @@ fn is_authority_guard_rejection(message: &str) -> bool {
         message,
         "interaction target is out of reach"
             | "player pose is stale"
+            | "placement volume intersects the player"
             | "the starting area is protected from world edits"
     )
 }
@@ -1273,6 +1276,7 @@ mod tests {
         for message in [
             "interaction target is out of reach",
             "player pose is stale",
+            "placement volume intersects the player",
             "the starting area is protected from world edits",
         ] {
             assert!(is_authority_guard_rejection(message));
