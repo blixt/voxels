@@ -1,7 +1,7 @@
 #[cfg(not(target_os = "macos"))]
 compile_error!("voxels-terrain-diffusion requires macOS and Apple Metal");
 
-use std::{collections::VecDeque, path::PathBuf};
+use std::{collections::VecDeque, ffi::OsString, path::PathBuf};
 use voxels_world_terrain_diffusion::{
     DetailTile, MetalTerrainDiffusion, TerrainDiffusionConfig, TerrainPrecision, fetch_pinned_model,
 };
@@ -11,12 +11,10 @@ use voxels_world_terrain_diffusion::{
     reason = "this diagnostic CLI reports model and benchmark results"
 )]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut arguments = std::env::args_os().skip(1);
-    let command = arguments
-        .next()
-        .and_then(|value| value.into_string().ok())
-        .unwrap_or_else(|| "smoke".to_owned());
-    let cache = arguments.next().map_or_else(default_cache, PathBuf::from);
+    let Some((command, cache)) = parse_arguments(std::env::args_os().skip(1))? else {
+        println!("{USAGE}");
+        return Ok(());
+    };
     let model_root = if command == "fetch" || !cache.join("config.json").is_file() {
         fetch_pinned_model(&cache)?
     } else {
@@ -25,18 +23,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if command == "fetch" {
         println!("{}", model_root.display());
         return Ok(());
-    }
-    if command != "smoke"
-        && command != "base-smoke"
-        && command != "detail-smoke"
-        && command != "detail-survey"
-        && command != "survey-smoke"
-        && command != "counterproof"
-    {
-        return Err(format!(
-            "unknown command {command}; expected fetch, smoke, base-smoke, detail-smoke, detail-survey, survey-smoke, or counterproof"
-        )
-        .into());
     }
     let seed = std::env::var("VOXELS_TERRAIN_SEED")
         .ok()
@@ -449,6 +435,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tile.elapsed_seconds * 1_000.0
     );
     Ok(())
+}
+
+const COMMANDS: [&str; 7] = [
+    "fetch",
+    "smoke",
+    "base-smoke",
+    "detail-smoke",
+    "detail-survey",
+    "survey-smoke",
+    "counterproof",
+];
+const USAGE: &str = "usage: voxels-terrain-diffusion [fetch|smoke|base-smoke|detail-smoke|detail-survey|survey-smoke|counterproof] [cache-directory]";
+
+fn parse_arguments(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<Option<(String, PathBuf)>, Box<dyn std::error::Error>> {
+    let command = match arguments.next() {
+        Some(value) => value
+            .into_string()
+            .map_err(|_| -> Box<dyn std::error::Error> { "command must be valid UTF-8".into() })?,
+        None => "smoke".to_owned(),
+    };
+    if command == "--help" || command == "-h" || command == "help" {
+        return Ok(None);
+    }
+    if !COMMANDS.contains(&command.as_str()) {
+        return Err(format!(
+            "unknown command {command}; expected {}",
+            COMMANDS.join(", ")
+        )
+        .into());
+    }
+    let cache = arguments.next().map_or_else(default_cache, PathBuf::from);
+    if arguments.next().is_some() {
+        return Err(format!("too many arguments; {USAGE}").into());
+    }
+    Ok(Some((command, cache)))
 }
 
 fn default_cache() -> PathBuf {
@@ -972,6 +995,45 @@ fn write_hillshade_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_arguments_are_validated_before_model_access() {
+        assert!(
+            parse_arguments([OsString::from("--help")].into_iter())
+                .expect("help parses")
+                .is_none()
+        );
+        assert!(
+            parse_arguments(
+                [
+                    OsString::from("detail-smoke"),
+                    OsString::from("model-cache"),
+                ]
+                .into_iter()
+            )
+            .expect("known command parses")
+            .is_some()
+        );
+        assert!(
+            parse_arguments([OsString::from("detail-smkoe")].into_iter())
+                .expect_err("unknown command must fail")
+                .to_string()
+                .contains("unknown command detail-smkoe")
+        );
+        assert!(
+            parse_arguments(
+                [
+                    OsString::from("smoke"),
+                    OsString::from("model-cache"),
+                    OsString::from("unexpected"),
+                ]
+                .into_iter()
+            )
+            .expect_err("extra arguments must fail")
+            .to_string()
+            .contains("too many arguments")
+        );
+    }
 
     #[test]
     fn sea_mask_excludes_landlocked_water() {
