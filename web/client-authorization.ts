@@ -4,6 +4,7 @@ const SESSION_TOKEN_PREFIX = "session:";
 const AUTH_TOKEN_LINE = /^(auth_subprotocol_token\s*=\s*")([^"]+)("\s*(?:#.*)?)$/mu;
 const WEBSOCKET_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 interface SessionResponse extends BrowserPlayerSession {
   authSubprotocolToken: string;
@@ -48,7 +49,7 @@ export async function authorizeClientBootstrap(
   if (!response.ok) {
     throw new Error(`session authorization failed (${response.status} ${response.statusText})`);
   }
-  const value = validateSessionResponse(await response.json());
+  const value = validateSessionResponse(await response.json(), localPlayer.playerName);
   try {
     storage.setItem(storageKey, value.identityCredential);
   } catch (error) {
@@ -84,7 +85,7 @@ async function requestSession(
   });
 }
 
-function validateSessionResponse(value: unknown): SessionResponse {
+function validateSessionResponse(value: unknown, requestedPlayerName: string): SessionResponse {
   if (!isRecord(value)) throw new Error("session authorization returned invalid JSON");
   const authSubprotocolToken = requiredString(value.authSubprotocolToken, "session token");
   const identityCredential = requiredString(value.identityCredential, "identity credential");
@@ -95,8 +96,9 @@ function validateSessionResponse(value: unknown): SessionResponse {
     !WEBSOCKET_TOKEN.test(authSubprotocolToken) ||
     authSubprotocolToken.length > 128 ||
     identityCredential.length > 512 ||
-    !UUID_PATTERN.test(browserUserId) ||
-    !UUID_PATTERN.test(playerId) ||
+    !isNonNilUuid(browserUserId) ||
+    !isNonNilUuid(playerId) ||
+    playerName !== requestedPlayerName ||
     typeof value.expiresAt !== "number" ||
     !Number.isSafeInteger(value.expiresAt)
   ) {
@@ -110,6 +112,10 @@ function validateSessionResponse(value: unknown): SessionResponse {
     playerName,
     expiresAt: value.expiresAt,
   };
+}
+
+function isNonNilUuid(value: string): boolean {
+  return UUID_PATTERN.test(value) && value !== NIL_UUID;
 }
 
 function requiredString(value: unknown, field: string): string {

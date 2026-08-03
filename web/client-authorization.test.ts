@@ -143,4 +143,42 @@ describe("public client authorization", () => {
       "vxi1.reissued-credential",
     );
   });
+
+  it("rejects mismatched and nil session identities", async () => {
+    for (const identity of [
+      {
+        browserUserId: "00000000-0000-4000-8000-000000000010",
+        playerId: "00000000-0000-4000-8000-000000000011",
+        playerName: "alice",
+      },
+      {
+        browserUserId: "00000000-0000-0000-0000-000000000000",
+        playerId: "00000000-0000-4000-8000-000000000011",
+        playerName: "default",
+      },
+      {
+        browserUserId: "00000000-0000-4000-8000-000000000010",
+        playerId: "00000000-0000-0000-0000-000000000000",
+        playerName: "default",
+      },
+    ]) {
+      const storage = new MemoryStorage();
+      await expect(
+        authorizeClientBootstrap(
+          'auth_subprotocol_token = "session:/api/session"\n',
+          LOCAL_PLAYER,
+          "https://voxels.lol/",
+          storage,
+          async () =>
+            Response.json({
+              ...identity,
+              authSubprotocolToken: "vxs1.signed-token",
+              identityCredential: "vxi1.durable-credential",
+              expiresAt: 1_800_043_200,
+            }),
+        ),
+      ).rejects.toThrow("session authorization returned invalid credentials");
+      expect(storage.values.size).toBe(0);
+    }
+  });
 });
