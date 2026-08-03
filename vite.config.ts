@@ -12,7 +12,10 @@ import {
   rustTool,
 } from "./scripts/build-wasm.ts";
 import type { WasmBuildProfile } from "./scripts/build-wasm.ts";
-import { worldServiceBuildCargoArgs } from "./scripts/world-service-command.ts";
+import {
+  worldServiceBuildCargoArgs,
+  worldServiceExecutablePath,
+} from "./scripts/world-service-command.ts";
 import type { WorldServiceCargoProfile } from "./scripts/world-service-command.ts";
 import { worldServiceHealthNonce } from "./scripts/world-service-health.ts";
 import { terminateProcessTree } from "./scripts/process-tree.ts";
@@ -427,11 +430,7 @@ function nativeWorldService(): Plugin {
       const launch = async (): Promise<void> => {
         await assertWorldServicePortAvailable(WORLD_SERVICE_CONFIG_SOURCE);
         const startupNonce = randomUUID();
-        const executable = path.resolve(
-          process.env.CARGO_TARGET_DIR ?? "target",
-          profile,
-          process.platform === "win32" ? "voxels-worldd.exe" : "voxels-worldd",
-        );
+        const executable = worldServiceExecutablePath(profile);
         server.config.logger.info("[voxels-world-service] starting native daemon");
         const child = spawn(executable, [WORLD_SERVICE_CONFIG_SOURCE], {
           cwd: process.cwd(),
