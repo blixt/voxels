@@ -4,7 +4,7 @@ mod scheduler;
 mod synthetic_map;
 
 #[cfg(feature = "download")]
-use crate::{MODEL_FILES, MODEL_REPOSITORY, MODEL_REVISION};
+use crate::{MODEL_REPOSITORY, MODEL_REVISION, PINNED_MODEL_FILES, validate_hash};
 use crate::{
     TerrainDiffusionConfig, TerrainDiffusionError, TerrainPrecision, validate_model_root,
     validate_terrain_generation_parameters,
@@ -1275,41 +1275,59 @@ pub fn fetch_pinned_model(cache_root: &Path) -> Result<PathBuf, TerrainDiffusion
         .user_agent("voxels-terrain-diffusion/0.0.0")
         .build()
         .map_err(|error| TerrainDiffusionError::ModelDownload(error.to_string()))?;
-    for file in MODEL_FILES {
+    for (file, expected_hash) in PINNED_MODEL_FILES {
         let path = root.join(file);
-        if path.is_file() {
-            continue;
-        }
-        let parent = path.parent().ok_or_else(|| {
-            TerrainDiffusionError::ModelDownload("model path has no parent".to_owned())
-        })?;
-        std::fs::create_dir_all(parent)
-            .map_err(|error| TerrainDiffusionError::ModelDownload(error.to_string()))?;
-        let partial = path.with_extension("partial");
         let url = format!(
             "https://huggingface.co/{MODEL_REPOSITORY}/resolve/{MODEL_REVISION}/{file}?download=true"
         );
-        let mut last_error = None;
-        for attempt in 0..4 {
-            match download_to_partial(&client, &url, &partial) {
-                Ok(()) => {
-                    last_error = None;
-                    break;
-                }
-                Err(error) => {
-                    last_error = Some(error);
-                    std::thread::sleep(std::time::Duration::from_millis(250 << attempt));
-                }
-            }
-        }
-        if let Some(error) = last_error {
-            return Err(TerrainDiffusionError::ModelDownload(error));
-        }
-        std::fs::rename(&partial, &path)
-            .map_err(|error| TerrainDiffusionError::ModelDownload(error.to_string()))?;
+        ensure_model_file(
+            &path,
+            expected_hash,
+            |partial| download_to_partial(&client, &url, partial),
+            std::thread::sleep,
+        )?;
     }
     validate_model_root(&root)?;
     Ok(root)
+}
+
+#[cfg(feature = "download")]
+fn ensure_model_file(
+    path: &Path,
+    expected_hash: &str,
+    mut download: impl FnMut(&Path) -> Result<(), String>,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> Result<(), TerrainDiffusionError> {
+    if path.is_file() && validate_hash(path, expected_hash).is_ok() {
+        return Ok(());
+    }
+    let parent = path.parent().ok_or_else(|| {
+        TerrainDiffusionError::ModelDownload("model path has no parent".to_owned())
+    })?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| TerrainDiffusionError::ModelDownload(error.to_string()))?;
+    let partial = path.with_extension("partial");
+    let mut last_error = None;
+    for attempt in 0..4 {
+        match download(&partial).and_then(|()| {
+            validate_hash(&partial, expected_hash).map_err(|error| error.to_string())
+        }) {
+            Ok(()) => {
+                std::fs::rename(&partial, path)
+                    .map_err(|error| TerrainDiffusionError::ModelDownload(error.to_string()))?;
+                return Ok(());
+            }
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 3 {
+                    sleep(std::time::Duration::from_millis(250 << attempt));
+                }
+            }
+        }
+    }
+    Err(TerrainDiffusionError::ModelDownload(
+        last_error.unwrap_or_else(|| "model download failed without an error".to_owned()),
+    ))
 }
 
 #[cfg(feature = "download")]
@@ -1331,7 +1349,66 @@ fn download_to_partial(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use voxels_world::{MacroBlockRequest, WorldProductPriority};
+
+    #[test]
+    fn model_fetch_replaces_corruption_only_after_hash_validation() {
+        let root = std::env::temp_dir().join(format!(
+            "voxels-terrain-diffusion-fetch-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("model.bin");
+        std::fs::create_dir_all(&root).expect("create model fetch fixture");
+        std::fs::write(&path, b"corrupt").expect("write corrupt cached model");
+        let expected = format!("{:x}", Sha256::digest(b"valid"));
+        let mut downloads = 0;
+
+        ensure_model_file(
+            &path,
+            &expected,
+            |partial| {
+                downloads += 1;
+                std::fs::write(partial, b"valid").map_err(|error| error.to_string())
+            },
+            |_| {},
+        )
+        .expect("replace corrupt model");
+        assert_eq!(downloads, 1);
+        assert_eq!(std::fs::read(&path).expect("read repaired model"), b"valid");
+
+        ensure_model_file(
+            &path,
+            &expected,
+            |_| {
+                downloads += 1;
+                Err("valid cached model must not download".to_owned())
+            },
+            |_| {},
+        )
+        .expect("reuse valid model");
+        assert_eq!(downloads, 1);
+
+        std::fs::write(&path, b"corrupt-again").expect("corrupt model again");
+        let failure = ensure_model_file(
+            &path,
+            &expected,
+            |partial| {
+                downloads += 1;
+                std::fs::write(partial, b"still-corrupt").map_err(|error| error.to_string())
+            },
+            |_| {},
+        )
+        .expect_err("invalid downloads must fail");
+        assert!(matches!(failure, TerrainDiffusionError::ModelDownload(_)));
+        assert_eq!(downloads, 5);
+        assert_eq!(
+            std::fs::read(&path).expect("read retained cached model"),
+            b"corrupt-again"
+        );
+        std::fs::remove_dir_all(root).expect("remove model fetch fixture");
+    }
 
     #[test]
     fn base_conditioning_has_the_published_58_components() {

@@ -41,14 +41,23 @@ pub const MAX_LATENT_WINDOW_COORDINATE: i32 = (i32::MAX - 511) / 256;
 pub const MIN_QUALITY_HISTOGRAM_LOGIT: f32 = -10.0;
 pub const MAX_QUALITY_HISTOGRAM_LOGIT: f32 = 10.0;
 
-pub const MODEL_FILES: [&str; 7] = [
-    "config.json",
-    "coarse_model/config.json",
-    "coarse_model/diffusion_pytorch_model.safetensors",
-    "base_model/config.json",
-    "base_model/diffusion_pytorch_model.safetensors",
-    "decoder_model/config.json",
-    "decoder_model/diffusion_pytorch_model.safetensors",
+pub const PINNED_MODEL_FILES: [(&str, &str); 7] = [
+    ("config.json", ROOT_CONFIG_SHA256),
+    ("coarse_model/config.json", COARSE_CONFIG_SHA256),
+    (
+        "coarse_model/diffusion_pytorch_model.safetensors",
+        COARSE_WEIGHT_SHA256,
+    ),
+    ("base_model/config.json", BASE_CONFIG_SHA256),
+    (
+        "base_model/diffusion_pytorch_model.safetensors",
+        BASE_WEIGHT_SHA256,
+    ),
+    ("decoder_model/config.json", DECODER_CONFIG_SHA256),
+    (
+        "decoder_model/diffusion_pytorch_model.safetensors",
+        DECODER_WEIGHT_SHA256,
+    ),
 ];
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -244,30 +253,13 @@ pub fn validate_terrain_generation_parameters(
 }
 
 pub fn validate_model_root(root: &Path) -> Result<(), TerrainDiffusionError> {
-    for relative in MODEL_FILES {
+    for (relative, _) in PINNED_MODEL_FILES {
         let path = root.join(relative);
         if !path.is_file() {
             return Err(TerrainDiffusionError::MissingModelFile(path));
         }
     }
-    for (relative, expected) in [
-        ("config.json", ROOT_CONFIG_SHA256),
-        ("coarse_model/config.json", COARSE_CONFIG_SHA256),
-        (
-            "coarse_model/diffusion_pytorch_model.safetensors",
-            COARSE_WEIGHT_SHA256,
-        ),
-        ("base_model/config.json", BASE_CONFIG_SHA256),
-        (
-            "base_model/diffusion_pytorch_model.safetensors",
-            BASE_WEIGHT_SHA256,
-        ),
-        ("decoder_model/config.json", DECODER_CONFIG_SHA256),
-        (
-            "decoder_model/diffusion_pytorch_model.safetensors",
-            DECODER_WEIGHT_SHA256,
-        ),
-    ] {
+    for (relative, expected) in PINNED_MODEL_FILES {
         validate_hash(&root.join(relative), expected)?;
     }
     Ok(())
@@ -482,7 +474,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        for relative in MODEL_FILES {
+        for (relative, _) in PINNED_MODEL_FILES {
             let path = root.join(relative);
             std::fs::create_dir_all(path.parent().expect("model file has a parent"))
                 .expect("create model fixture directory");
