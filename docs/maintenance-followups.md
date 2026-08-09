@@ -72,6 +72,21 @@ browser reauthorize and replace its token after an authentication-specific disco
 - staged Fly and Cloudflare updates never create an interval in which neither side accepts the same
   session key.
 
+## Validate browser URLs without growing the client
+
+The portable client-config validator accepts some authorities that the browser rejects, including
+`ws://999.999.999.999/` and `ws://[not-an-ip]/`. The world-service origin validator similarly accepts
+malformed authorities and user information. A prototype using the standards-compatible `url` crate
+fixed those cases, but pulled Unicode host processing into the shipped WASM: the optimized module
+grew from 6,502,233 to 6,726,961 bytes (+224,728, 3.5%), and local gzip output grew from 1,701,951 to
+1,779,656 bytes (+77,705, 4.6%). That regression is too large for startup-only validation.
+
+Choose a lightweight parser or move canonical browser parsing to a boundary that preserves Rust's
+host-testable configuration contract. Require a shared corpus covering DNS, IPv4, bracketed IPv6,
+ports, user information, paths, queries, fragments, escapes, and whitespace; compare every client
+case against the browser `URL`/`WebSocket` constructors; and measure optimized raw and compressed
+WASM size before landing it.
+
 ## Decide exact-corner voxel ray semantics
 
 The portable DDA traversal in `core/src/lib.rs` advances one axis when two or three boundary times
