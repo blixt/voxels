@@ -55,6 +55,23 @@ the outbound frame. Then add an adversarial slow-reader test that fills every in
 multiple clients and proves peak retained response bytes remain bounded, cancellation releases every
 reservation, and collision-critical traffic cannot deadlock behind its own reservation.
 
+## Recover active tabs after session-key rotation
+
+The browser obtains one 12-hour session token during bootstrap and reloads five minutes before its
+scheduled expiry. If `VOXELS_SESSION_SIGNING_KEY` rotates earlier, a tab that was already open keeps
+retrying the invalid in-memory token until that reload or a manual refresh. A normal Fly deploy also
+drops its sockets, so key rotation can leave otherwise healthy active tabs disconnected for most of
+the token lifetime even though their durable identity credential remains valid.
+
+Choose whether rotation uses an overlap window that verifies the previous session key or lets the
+browser reauthorize and replace its token after an authentication-specific disconnect. Then prove:
+
+- a tab opened before rotation reconnects both world and presence sockets within a bounded interval
+  without changing its browser or player identity;
+- ordinary transient failures do not cause authorization traffic or page-reload loops;
+- staged Fly and Cloudflare updates never create an interval in which neither side accepts the same
+  session key.
+
 ## Decide exact-corner voxel ray semantics
 
 The portable DDA traversal in `core/src/lib.rs` advances one axis when two or three boundary times

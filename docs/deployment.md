@@ -49,8 +49,10 @@ unset session_signing_key
 The next Fly deploy activates its staged secret. Existing short-lived session tokens become invalid,
 but browser identity credentials remain valid. Schedule rotation as a brief authentication
 maintenance window because Cloudflare and Fly will disagree between the secret update and completed
-Fly deploy. Rotating `VOXELS_IDENTITY_SIGNING_KEY` intentionally resets anonymous identities unless a
-migration or previous-key verification path is deployed first.
+Fly deploy. A tab loaded before activation keeps retrying its original token, so reload active tabs
+during the window; automatic recovery remains tracked in the maintenance follow-ups. Rotating
+`VOXELS_IDENTITY_SIGNING_KEY` intentionally resets anonymous identities unless a migration or
+previous-key verification path is deployed first.
 
 New identity issuance is limited per client address at the Worker edge. Refreshes with an existing
 credential do not consume that stricter quota. Session tokens live for 12 hours; the browser reloads
