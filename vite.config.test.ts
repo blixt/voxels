@@ -178,6 +178,49 @@ describe("native world-service development command", () => {
     }
   });
 
+  it("bounds health responses by bytes and total elapsed time", async () => {
+    let connections = 0;
+    const server = createHttpServer((_request, response) => {
+      response.statusCode = 200;
+      response.flushHeaders();
+      connections += 1;
+      if (connections === 1) response.write("x".repeat(257));
+      else response.write("x");
+      const drip = setInterval(() => response.write("x"), 25);
+      response.once("close", () => clearInterval(drip));
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
+      });
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        throw new Error("test server did not expose a TCP address");
+      }
+      const failAfter = (milliseconds: number): Promise<never> =>
+        new Promise((_resolve, reject) => {
+          setTimeout(
+            () => reject(new Error("health probe exceeded its deadline")),
+            milliseconds,
+          ).unref();
+        });
+
+      await expect(
+        Promise.race([
+          Promise.all([
+            worldServiceHealthNonce("127.0.0.1", address.port),
+            worldServiceHealthNonce("127.0.0.1", address.port),
+          ]),
+          failAfter(600),
+        ]),
+      ).resolves.toEqual([null, null]);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("waits for and escalates a stubborn descendant in direct-child fallback", async () => {
     if (process.platform === "win32") return;
     const grandchildSource = [
