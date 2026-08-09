@@ -32,8 +32,9 @@ vp run automation -- run storage-benchmark
 
 `vp run verify` is the complete static and build gate: TypeScript checks, TypeScript tests, host Rust
 tests, host/WASM Clippy, and an optimized browser build with the ordinary client configuration. Use
-`vp run build:production` to embed the deployment client configuration. The specialized harnesses
-below provide behavioral, visual, resource, or transport evidence that the general gate cannot.
+`vp run build:production` to copy the deployment client configuration into the build. The
+specialized harnesses below provide behavioral, visual, resource, or transport evidence that the
+general gate cannot.
 
 ## Test surfaces
 

@@ -16,13 +16,14 @@ and streaming while the native Rust world service owns generation and durable wo
 6. Run host Rust tests and host/WASM Clippy with `vp run check:rust`.
 7. Build release WASM and browser assets with `vp build`. `vp preview` serves only those static
    assets, so start a compatible native world service separately before inspecting them. Use
-   `vp run build:production` when the browser bundle must embed the deployment client config.
+   `vp run build:production` when the build output must include the deployment client config.
 8. Launch six isolated release clients with shaped links and verify avatars plus a five-builder
    tower across canonical and virtual-terrain ownership in real Chrome with
    `vp run automation -- run multiplayer`.
 
 `vp run verify` runs the complete TypeScript, Rust, test, lint, and optimized-browser-build gate.
-Use `vp run build:production` separately to embed the deployment client configuration.
+Use `vp run build:production` separately to copy the deployment client configuration into the
+build.
 The production deployment serves the browser and session Worker at <https://voxels.lol> and runs
 the authoritative server on Fly.io. See [Deployment](docs/deployment.md) for topology, secrets,
 release commands, smoke tests, persistence, and rollback notes.
