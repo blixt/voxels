@@ -71,7 +71,8 @@ async function createSession(request: Request, env: Env): Promise<Response> {
         : null;
   if (
     identityCredential === null ||
-    (identityCredential !== undefined && identityCredential.length > 512)
+    (identityCredential !== undefined &&
+      (identityCredential.length === 0 || identityCredential.length > 512))
   ) {
     return Response.json({ error: "Invalid session request" }, { status: 400 });
   }

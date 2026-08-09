@@ -71,6 +71,9 @@ describe("public session credentials", () => {
     await expect(
       issueSessionCredentials(SESSION_SIGNING_KEY, IDENTITY_SIGNING_KEY, "Alice", undefined, NOW),
     ).resolves.toBeNull();
+    await expect(
+      issueSessionCredentials(SESSION_SIGNING_KEY, IDENTITY_SIGNING_KEY, "alice", "", NOW),
+    ).resolves.toBeNull();
   });
 
   it("treats invalid signing-key configuration as an operational failure", async () => {

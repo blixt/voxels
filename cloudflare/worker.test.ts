@@ -126,7 +126,7 @@ describe("session Worker", () => {
       const invalidName = await worker.fetch(sessionRequest({ playerName }), env);
       expect(invalidName.status).toBe(400);
     }
-    for (const identityCredential of [42, "a".repeat(513)]) {
+    for (const identityCredential of [42, "", "a".repeat(513)]) {
       const invalidCredential = await worker.fetch(
         sessionRequest({ identityCredential, playerName: "default" }),
         env,

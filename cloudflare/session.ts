@@ -35,13 +35,14 @@ export async function issueSessionCredentials(
     importSigningKey(sessionSigningKey),
     importSigningKey(identitySigningKey),
   ]);
-  const identity = identityCredential
-    ? await verifyIdentityCredential(identityKey, identityCredential, playerName, nowSeconds)
-    : {
-        browserUserId: crypto.randomUUID(),
-        playerId: crypto.randomUUID(),
-        playerName,
-      };
+  const identity =
+    identityCredential !== undefined
+      ? await verifyIdentityCredential(identityKey, identityCredential, playerName, nowSeconds)
+      : {
+          browserUserId: crypto.randomUUID(),
+          playerId: crypto.randomUUID(),
+          playerName,
+        };
   if (identity === null) return null;
 
   const identityExpiresAt = nowSeconds + IDENTITY_LIFETIME_SECONDS;
