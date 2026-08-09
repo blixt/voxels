@@ -205,14 +205,20 @@ struct InFlightDemand {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TerrainRequestBatch {
-    pub pages: Vec<TerrainPageTransferIdentity>,
-    pub estimated_bytes: usize,
+    pages: Vec<TerrainPageTransferIdentity>,
+}
+
+impl TerrainRequestBatch {
+    pub fn pages(&self) -> &[TerrainPageTransferIdentity] {
+        &self.pages
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerrainStreamError {
     InvalidConfig,
     InvalidDemandGroup,
+    InvalidRequestBatch,
     UnschedulableDemandGroup,
     UnknownPending(TerrainPageTransferIdentity),
     UnknownInFlight(TerrainPageTransferIdentity),
@@ -224,6 +230,9 @@ impl fmt::Display for TerrainStreamError {
             Self::InvalidConfig => formatter.write_str("invalid virtual terrain stream capacity"),
             Self::InvalidDemandGroup => {
                 formatter.write_str("invalid or incomplete virtual terrain demand group")
+            }
+            Self::InvalidRequestBatch => {
+                formatter.write_str("invalid or duplicate virtual terrain request batch")
             }
             Self::UnschedulableDemandGroup => {
                 formatter.write_str("virtual terrain demand group exceeds stream batch capacity")
@@ -415,13 +424,15 @@ impl TerrainStreamScheduler {
             estimated_bytes = estimated_bytes.saturating_add(group_bytes);
             pages.extend(group.into_iter().map(|pending| pending.demand.identity));
         }
-        (!pages.is_empty()).then_some(TerrainRequestBatch {
-            pages,
-            estimated_bytes,
-        })
+        (!pages.is_empty()).then_some(TerrainRequestBatch { pages })
     }
 
     pub fn commit_batch(&mut self, batch: &TerrainRequestBatch) -> Result<(), TerrainStreamError> {
+        if batch.pages.is_empty()
+            || batch.pages.iter().copied().collect::<BTreeSet<_>>().len() != batch.pages.len()
+        {
+            return Err(TerrainStreamError::InvalidRequestBatch);
+        }
         if let Some(identity) = batch
             .pages
             .iter()
@@ -841,7 +852,35 @@ mod tests {
             .reconcile([TerrainDemandGroup::replacement(parent, pages).unwrap()])
             .unwrap();
         let batch = scheduler.peek_batch(0).unwrap();
-        assert_eq!(batch.pages.into_iter().collect::<BTreeSet<_>>(), expected);
+        assert_eq!(
+            batch.pages().iter().copied().collect::<BTreeSet<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn duplicate_batch_is_rejected_without_partially_committing() {
+        let identity = TerrainPageTransferIdentity {
+            key: TerrainPageKey::surface(0, 0, 0),
+            revision: 1,
+            content_fingerprint: [1; 32],
+        };
+        let mut scheduler =
+            TerrainStreamScheduler::new(TerrainStreamConfig::INTERACTIVE_CLIENT).unwrap();
+        scheduler
+            .reconcile([TerrainDemandGroup::singleton(demand(identity, 100))])
+            .unwrap();
+        let before = scheduler.stats();
+        let duplicate = TerrainRequestBatch {
+            pages: vec![identity, identity],
+        };
+
+        assert_eq!(
+            scheduler.commit_batch(&duplicate),
+            Err(TerrainStreamError::InvalidRequestBatch)
+        );
+        assert_eq!(scheduler.stats(), before);
+        assert_eq!(scheduler.peek_batch(0).unwrap().pages(), &[identity]);
     }
 
     #[test]
@@ -998,10 +1037,10 @@ mod tests {
             ])
             .unwrap();
         let batch = scheduler.next_batch(0).unwrap();
-        assert_eq!(batch.pages.len(), 4);
+        assert_eq!(batch.pages().len(), 4);
         assert_eq!(
             batch
-                .pages
+                .pages()
                 .iter()
                 .map(|identity| identity.key)
                 .collect::<BTreeSet<_>>(),
@@ -1038,16 +1077,16 @@ mod tests {
             .reconcile_with_available([group.clone()], [first])
             .unwrap();
         let batch = scheduler.peek_batch(0).unwrap();
-        assert_eq!(batch.pages.len(), 3);
-        assert!(!batch.pages.contains(&first));
+        assert_eq!(batch.pages().len(), 3);
+        assert!(!batch.pages().contains(&first));
 
         scheduler
             .reconcile_with_available([group], [first, second])
             .unwrap();
         let batch = scheduler.peek_batch(0).unwrap();
-        assert_eq!(batch.pages.len(), 2);
-        assert!(!batch.pages.contains(&first));
-        assert!(!batch.pages.contains(&second));
+        assert_eq!(batch.pages().len(), 2);
+        assert!(!batch.pages().contains(&first));
+        assert!(!batch.pages().contains(&second));
     }
 
     #[test]
@@ -1089,7 +1128,7 @@ mod tests {
         assert!(
             scheduler
                 .peek_batch(0)
-                .is_none_or(|batch| !batch.pages.contains(&cached_while_in_flight)),
+                .is_none_or(|batch| !batch.pages().contains(&cached_while_in_flight)),
             "a cached identity is never retransmitted"
         );
     }

@@ -4750,7 +4750,7 @@ mod web {
             if let Some(batch) = batch {
                 match self
                     .remote
-                    .submit_terrain_page_batch(priority, batch.pages.clone())
+                    .submit_terrain_page_batch(priority, batch.pages().to_vec())
                 {
                     Ok(_) => {
                         if let Err(error) = self
@@ -4770,7 +4770,7 @@ mod web {
                                 | RemoteWorldError::RequestWindowFull
                                 | RemoteWorldError::NotOpen
                         );
-                        let page_count = batch.pages.len() as u64;
+                        let page_count = batch.pages().len() as u64;
                         let mut state = self.virtual_terrain.borrow_mut();
                         if deferred {
                             state.stats.page_submit_deferred =
