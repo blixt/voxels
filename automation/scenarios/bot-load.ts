@@ -161,6 +161,7 @@ function parseArguments(values: readonly string[]): BotLoadOptions {
     serviceProfile: arguments_.choice("service-profile", ["worldgen", "worldgen-dev"], "worldgen"),
     botProfile: arguments_.choice("bot-profile", ["worldgen", "worldgen-dev"], "worldgen-dev"),
     generationWorkers: arguments_.number("generation-workers", {
+      integer: true,
       minimum: 3,
       maximum: 256,
     }),

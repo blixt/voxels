@@ -31,4 +31,9 @@ describe("scenario arguments", () => {
     const blankPair = new ScenarioArguments(["--spawn=,"]);
     expect(() => blankPair.pair("spawn", { integer: true })).toThrow(/invalid value/u);
   });
+
+  it("rejects fractional values for integer options", () => {
+    const arguments_ = new ScenarioArguments(["--workers=3.5"]);
+    expect(() => arguments_.number("workers", { integer: true })).toThrow(/integer/u);
+  });
 });
