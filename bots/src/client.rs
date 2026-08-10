@@ -1,7 +1,7 @@
 use crate::run::TrafficCounters;
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::{ORIGIN, SEC_WEBSOCKET_PROTOCOL};
@@ -14,6 +14,7 @@ use voxels_world::protocol::{
 };
 
 pub type BotSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+const BOT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct ConnectedBot {
     pub world: BotSocket,
@@ -24,6 +25,55 @@ pub struct ConnectedBot {
 }
 
 pub async fn connect_bot(
+    world_url: &str,
+    presence_url: &str,
+    origin: &str,
+    subprotocol: &str,
+    auth_token: &str,
+    identity: PlayerIdentity,
+) -> Result<ConnectedBot> {
+    connect_bot_with_timeout(
+        world_url,
+        presence_url,
+        origin,
+        subprotocol,
+        auth_token,
+        identity,
+        BOT_HANDSHAKE_TIMEOUT,
+    )
+    .await
+}
+
+async fn connect_bot_with_timeout(
+    world_url: &str,
+    presence_url: &str,
+    origin: &str,
+    subprotocol: &str,
+    auth_token: &str,
+    identity: PlayerIdentity,
+    handshake_timeout: Duration,
+) -> Result<ConnectedBot> {
+    tokio::time::timeout(
+        handshake_timeout,
+        connect_bot_inner(
+            world_url,
+            presence_url,
+            origin,
+            subprotocol,
+            auth_token,
+            identity,
+        ),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "bot connection handshake timed out after {} ms",
+            handshake_timeout.as_millis()
+        )
+    })?
+}
+
+async fn connect_bot_inner(
     world_url: &str,
     presence_url: &str,
     origin: &str,
@@ -122,4 +172,44 @@ async fn next_binary(socket: &mut BotSocket) -> Result<Vec<u8>> {
         }
     }
     bail!("server ended WebSocket during handshake")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+    use voxels_world::protocol::{BrowserUserId, PlayerId};
+
+    #[tokio::test]
+    async fn silent_endpoint_cannot_stall_the_bot_population() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let silent_server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let url = format!("ws://{address}/world");
+        let identity = PlayerIdentity {
+            browser_user_id: BrowserUserId::from_bytes([1; 16]),
+            player_id: PlayerId::from_bytes([2; 16]),
+            player_name: "timeout-test".to_owned(),
+        };
+
+        let result = connect_bot_with_timeout(
+            &url,
+            &url,
+            "http://127.0.0.1",
+            "voxels.v1",
+            "test-token",
+            identity,
+            Duration::from_millis(25),
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("silent endpoint must hit the bounded handshake deadline");
+        };
+
+        assert!(format!("{error:#}").contains("timed out after 25 ms"));
+        silent_server.abort();
+    }
 }
