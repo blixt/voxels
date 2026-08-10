@@ -9,6 +9,7 @@ import {
   browserWasmProfile,
   assertWorldServicePortAvailable,
   isNativeWorldServiceInput,
+  NativeRebuildQueue,
   pathBelongsTo,
   signalOwnedProcessGroup,
   terminateProcessTree,
@@ -144,6 +145,37 @@ describe("Rust WASM development watcher", () => {
 });
 
 describe("native world-service development command", () => {
+  it("serializes an initial build with source-triggered rebuilds", async () => {
+    const rebuilds = new NativeRebuildQueue();
+    let releaseInitial = (): void => undefined;
+    const initialBlocked = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    let active = 0;
+    let maximumActive = 0;
+    const reloads: boolean[] = [];
+    const rebuild = async (reload: boolean): Promise<boolean> => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      reloads.push(reload);
+      if (reloads.length === 1) await initialBlocked;
+      active -= 1;
+      return true;
+    };
+
+    rebuilds.request(false);
+    const initial = rebuilds.drain(rebuild, () => false);
+    await Promise.resolve();
+    rebuilds.request(true);
+    await expect(rebuilds.drain(rebuild, () => false)).resolves.toBe(false);
+    expect(reloads).toEqual([false]);
+
+    releaseInitial();
+    await expect(initial).resolves.toBe(true);
+    expect(reloads).toEqual([false, true]);
+    expect(maximumActive).toBe(1);
+  });
+
   it("reports denied process-group signals without skipping the direct fallback", () => {
     const denied = Object.assign(new Error("denied"), { code: "EPERM" });
     expect(

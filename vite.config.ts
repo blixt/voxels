@@ -210,6 +210,41 @@ export class WatchedInputContentChanges {
   }
 }
 
+export class NativeRebuildQueue {
+  #building = false;
+  #dirty = false;
+  #reloadRequested = false;
+
+  request(reload: boolean): void {
+    this.#dirty = true;
+    this.#reloadRequested ||= reload;
+  }
+
+  get pending(): boolean {
+    return this.#dirty;
+  }
+
+  async drain(
+    rebuild: (reload: boolean) => Promise<boolean>,
+    stopping: () => boolean,
+  ): Promise<boolean> {
+    if (this.#building || stopping()) return false;
+    this.#building = true;
+    let latestSucceeded = true;
+    try {
+      while (this.#dirty && !stopping()) {
+        this.#dirty = false;
+        const reload = this.#reloadRequested;
+        this.#reloadRequested = false;
+        latestSucceeded = await rebuild(reload);
+      }
+      return latestSucceeded && !stopping();
+    } finally {
+      this.#building = false;
+    }
+  }
+}
+
 function rustWasm(profile: WasmBuildProfile): Plugin {
   const directories = RUST_SOURCE_DIRS.map((source) => path.resolve(source));
   const files = RUST_INPUT_FILES.map((source) => path.resolve(source));
@@ -336,9 +371,6 @@ function nativeWorldService(): Plugin {
   let buildChild: ChildProcess | undefined;
   let daemonChild: ChildProcess | undefined;
   let stopping = false;
-  let building = false;
-  let dirty = false;
-  let reloadRequested = false;
   let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   let crashAttempts = 0;
   let finishInitialBuild: (() => Promise<void>) | undefined;
@@ -355,6 +387,8 @@ function nativeWorldService(): Plugin {
     },
     configureServer(server) {
       let handleSignal: (() => void) | undefined;
+      let allowInitialLaunch: (() => void) | undefined;
+      const rebuilds = new NativeRebuildQueue();
       const contentChanges = new WatchedInputContentChanges();
       const nativeInputs = [
         ...NATIVE_WORLD_SERVICE_SOURCE_DIRS,
@@ -366,6 +400,8 @@ function nativeWorldService(): Plugin {
         stopPromise ??= (async () => {
           stopping = true;
           if (rebuildTimer) clearTimeout(rebuildTimer);
+          allowInitialLaunch?.();
+          allowInitialLaunch = undefined;
           if (handleSignal) {
             process.off("SIGINT", handleSignal);
             process.off("SIGTERM", handleSignal);
@@ -469,9 +505,10 @@ function nativeWorldService(): Plugin {
         server.config.logger.info("[voxels-world-service] native daemon ready");
       };
 
-      const rebuild = async (reload: boolean): Promise<boolean> => {
-        if (stopping) return false;
-        const compiled = await compile();
+      const activateCompiledBuild = async (
+        compiled: boolean,
+        reload: boolean,
+      ): Promise<boolean> => {
         if (!compiled || stopping) return false;
         if (!sharedBrowserBuildReady) {
           const error = new Error(
@@ -505,26 +542,26 @@ function nativeWorldService(): Plugin {
         return true;
       };
 
-      const drainRebuilds = async (): Promise<void> => {
-        if (building || stopping) return;
-        building = true;
+      const rebuild = async (reload: boolean): Promise<boolean> => {
+        if (stopping) return false;
+        return activateCompiledBuild(await compile(), reload);
+      };
+
+      const drainRebuilds = async (): Promise<boolean> => {
+        let failed = false;
         try {
-          while (dirty && !stopping) {
-            dirty = false;
-            const reload = reloadRequested;
-            reloadRequested = false;
-            await rebuild(reload);
-          }
+          return await rebuilds.drain(rebuild, () => stopping);
+        } catch (error) {
+          failed = true;
+          throw error;
         } finally {
-          building = false;
-          if (dirty && !stopping) scheduleRebuild(reloadRequested, 0);
+          if (failed && rebuilds.pending && !stopping) scheduleRebuild(false, 0);
         }
       };
 
       function scheduleRebuild(reload: boolean, delayMs = 100): void {
         if (stopping) return;
-        dirty = true;
-        reloadRequested ||= reload;
+        rebuilds.request(reload);
         if (rebuildTimer) clearTimeout(rebuildTimer);
         rebuildTimer = setTimeout(() => {
           rebuildTimer = undefined;
@@ -561,15 +598,26 @@ function nativeWorldService(): Plugin {
       // Vite runs configureServer before buildStart. Start native compilation immediately, let the
       // preceding Rust/WASM buildStart hook use the other cores, then launch only after both
       // artifacts succeeded. The HTTP server does not listen until every buildStart hook completes.
-      const compiled = compile();
+      let releaseInitialLaunch = (): void => undefined;
+      const initialLaunchAllowed = new Promise<void>((resolve) => {
+        releaseInitialLaunch = resolve;
+      });
+      allowInitialLaunch = releaseInitialLaunch;
+      rebuilds.request(false);
+      const initialBuild = rebuilds.drain(
+        async (reload) => {
+          const compiled = await compile();
+          await initialLaunchAllowed;
+          return activateCompiledBuild(compiled, reload);
+        },
+        () => stopping,
+      );
       finishInitialBuild = async (): Promise<void> => {
-        if (!(await compiled) || stopping) {
+        allowInitialLaunch?.();
+        allowInitialLaunch = undefined;
+        if (!(await initialBuild) || stopping || daemonChild === undefined) {
           throw new Error("initial native world-service build failed");
         }
-        if (!sharedBrowserBuildReady) {
-          throw new Error("matching browser WASM build failed");
-        }
-        await launch();
       };
     },
   };
