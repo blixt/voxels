@@ -3765,6 +3765,51 @@ struct ScreenshotReadbackState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ScreenshotReadbackLayout {
+    color_bytes_per_row: u32,
+    color_buffer_size: u64,
+    diagnostic_identity_bytes_per_row: u32,
+    diagnostic_identity_buffer_size: u64,
+    diagnostic_depth_bytes_per_row: u32,
+    buffer_size: u64,
+}
+
+impl ScreenshotReadbackLayout {
+    fn new(width: u32, height: u32, diagnostics: bool) -> Option<Self> {
+        let padded_bytes_per_row = |bytes_per_pixel: u32| {
+            width
+                .checked_mul(bytes_per_pixel)?
+                .checked_add(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1)?
+                .div_euclid(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+                .checked_mul(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        };
+        let color_bytes_per_row = padded_bytes_per_row(4)?;
+        let color_buffer_size = u64::from(color_bytes_per_row).checked_mul(u64::from(height))?;
+        let diagnostic_identity_bytes_per_row = if diagnostics {
+            padded_bytes_per_row(16)?
+        } else {
+            0
+        };
+        let diagnostic_identity_buffer_size =
+            u64::from(diagnostic_identity_bytes_per_row).checked_mul(u64::from(height))?;
+        let diagnostic_depth_bytes_per_row = if diagnostics { color_bytes_per_row } else { 0 };
+        let diagnostic_depth_buffer_size =
+            u64::from(diagnostic_depth_bytes_per_row).checked_mul(u64::from(height))?;
+        let buffer_size = color_buffer_size
+            .checked_add(diagnostic_identity_buffer_size)?
+            .checked_add(diagnostic_depth_buffer_size)?;
+        Some(Self {
+            color_bytes_per_row,
+            color_buffer_size,
+            diagnostic_identity_bytes_per_row,
+            diagnostic_identity_buffer_size,
+            diagnostic_depth_bytes_per_row,
+            buffer_size,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalLightVisibility {
     Visible,
     Occluded,
@@ -8588,6 +8633,20 @@ impl Renderer {
             .presented_client_view
             .as_ref()
             .map(|presented| (presented.state.camera, presented.receipt))?;
+        if self.screenshot_requested {
+            let maximum = self.device.limits().max_buffer_size;
+            let layout = ScreenshotReadbackLayout::new(self.config.width, self.config.height, true);
+            if !layout.is_some_and(|layout| layout.buffer_size <= maximum) {
+                let required = layout.map(|layout| layout.buffer_size);
+                (self.log_error)(&format!(
+                    "screenshot capture unavailable: {} readback exceeds the device's {maximum}-byte buffer limit",
+                    required
+                        .map_or_else(|| "overflowing".to_owned(), |bytes| format!("{bytes}-byte"))
+                ));
+                self.screenshot_requested = false;
+                self.report_screenshot_result(false);
+            }
+        }
         let camera = &camera;
         let dt = bounded_frame_delta(dt);
         let reproduction_active = self
@@ -10046,45 +10105,16 @@ impl Renderer {
         };
         let width = self.config.width;
         let height = self.config.height;
-        let Some(unpadded_bytes_per_row) = width.checked_mul(4) else {
-            self.report_screenshot_result(false);
-            return;
-        };
-        let padded_bytes_per_row = unpadded_bytes_per_row
-            .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let color_buffer_size = u64::from(padded_bytes_per_row) * u64::from(height);
-        let diagnostic_identity_unpadded_bytes_per_row = if diagnostic_targets.is_some() {
-            match width.checked_mul(16) {
-                Some(bytes) => bytes,
-                None => {
-                    self.report_screenshot_result(false);
-                    return;
-                }
-            }
-        } else {
-            0
-        };
-        let diagnostic_identity_padded_bytes_per_row = diagnostic_identity_unpadded_bytes_per_row
-            .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let diagnostic_identity_buffer_size = diagnostic_targets.map_or(0, |_| {
-            u64::from(diagnostic_identity_padded_bytes_per_row) * u64::from(height)
-        });
-        let diagnostic_depth_padded_bytes_per_row =
-            diagnostic_targets.map_or(0, |_| padded_bytes_per_row);
-        let diagnostic_depth_buffer_size =
-            u64::from(diagnostic_depth_padded_bytes_per_row) * u64::from(height);
-        let Some(buffer_size) = color_buffer_size
-            .checked_add(diagnostic_identity_buffer_size)
-            .and_then(|size| size.checked_add(diagnostic_depth_buffer_size))
+        let Some(layout) =
+            ScreenshotReadbackLayout::new(width, height, diagnostic_targets.is_some())
+                .filter(|layout| layout.buffer_size <= self.device.limits().max_buffer_size)
         else {
             self.report_screenshot_result(false);
             return;
         };
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("screenshot readback"),
-            size: buffer_size,
+            size: layout.buffer_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -10094,7 +10124,7 @@ impl Renderer {
                 buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
+                    bytes_per_row: Some(layout.color_bytes_per_row),
                     rows_per_image: Some(height),
                 },
             },
@@ -10110,8 +10140,8 @@ impl Renderer {
                 wgpu::TexelCopyBufferInfo {
                     buffer: &buffer,
                     layout: wgpu::TexelCopyBufferLayout {
-                        offset: color_buffer_size,
-                        bytes_per_row: Some(diagnostic_identity_padded_bytes_per_row),
+                        offset: layout.color_buffer_size,
+                        bytes_per_row: Some(layout.diagnostic_identity_bytes_per_row),
                         rows_per_image: Some(height),
                     },
                 },
@@ -10126,8 +10156,8 @@ impl Renderer {
                 wgpu::TexelCopyBufferInfo {
                     buffer: &buffer,
                     layout: wgpu::TexelCopyBufferLayout {
-                        offset: color_buffer_size + diagnostic_identity_buffer_size,
-                        bytes_per_row: Some(diagnostic_depth_padded_bytes_per_row),
+                        offset: layout.color_buffer_size + layout.diagnostic_identity_buffer_size,
+                        bytes_per_row: Some(layout.diagnostic_depth_bytes_per_row),
                         rows_per_image: Some(height),
                     },
                 },
@@ -10162,43 +10192,45 @@ impl Renderer {
                     .get_mapped_range(..)
                     .ok()
                     .and_then(|mapped| {
-                        let color_end = usize::try_from(color_buffer_size).ok()?;
-                        let identity_end =
-                            usize::try_from(color_buffer_size + diagnostic_identity_buffer_size)
-                                .ok()?;
+                        let color_end = usize::try_from(layout.color_buffer_size).ok()?;
+                        let identity_end = usize::try_from(
+                            layout.color_buffer_size + layout.diagnostic_identity_buffer_size,
+                        )
+                        .ok()?;
                         let rgba = unpack_screenshot_rgba(
                             mapped.get(..color_end)?,
                             width,
                             height,
-                            padded_bytes_per_row,
+                            layout.color_bytes_per_row,
                             bgra,
                         )?;
-                        let terrain_diagnostic_u32x5 = if diagnostic_identity_buffer_size == 0 {
-                            Vec::new()
-                        } else {
-                            let diagnostic_identity = mapped.get(color_end..identity_end)?;
-                            let diagnostic_depth = mapped.get(identity_end..)?;
-                            let diagnostic_identity = unpack_screenshot_diagnostic_rows(
-                                diagnostic_identity,
-                                width,
-                                height,
-                                16,
-                                diagnostic_identity_padded_bytes_per_row,
-                            )?;
-                            let diagnostic_depth = unpack_screenshot_diagnostic_rows(
-                                diagnostic_depth,
-                                width,
-                                height,
-                                4,
-                                diagnostic_depth_padded_bytes_per_row,
-                            )?;
-                            interleave_screenshot_diagnostic(
-                                &diagnostic_identity,
-                                &diagnostic_depth,
-                                width,
-                                height,
-                            )?
-                        };
+                        let terrain_diagnostic_u32x5 =
+                            if layout.diagnostic_identity_buffer_size == 0 {
+                                Vec::new()
+                            } else {
+                                let diagnostic_identity = mapped.get(color_end..identity_end)?;
+                                let diagnostic_depth = mapped.get(identity_end..)?;
+                                let diagnostic_identity = unpack_screenshot_diagnostic_rows(
+                                    diagnostic_identity,
+                                    width,
+                                    height,
+                                    16,
+                                    layout.diagnostic_identity_bytes_per_row,
+                                )?;
+                                let diagnostic_depth = unpack_screenshot_diagnostic_rows(
+                                    diagnostic_depth,
+                                    width,
+                                    height,
+                                    4,
+                                    layout.diagnostic_depth_bytes_per_row,
+                                )?;
+                                interleave_screenshot_diagnostic(
+                                    &diagnostic_identity,
+                                    &diagnostic_depth,
+                                    width,
+                                    height,
+                                )?
+                            };
                         Some(ScreenshotCapture {
                             filename,
                             metadata,
@@ -13184,6 +13216,19 @@ mod tests {
             json_string("gpu \"driver\"\\Málaga\n\u{0001}"),
             "\"gpu \\\"driver\\\"\\\\M\\u00e1laga\\n\\u0001\""
         );
+    }
+
+    #[test]
+    fn screenshot_readback_layout_respects_the_device_buffer_limit() {
+        let maximum = wgpu::Limits::default().max_buffer_size;
+        let four_k = ScreenshotReadbackLayout::new(3_840, 2_160, true).unwrap();
+        let five_k = ScreenshotReadbackLayout::new(5_120, 2_880, true).unwrap();
+
+        assert_eq!(four_k.buffer_size, 199_065_600);
+        assert!(four_k.buffer_size <= maximum);
+        assert_eq!(five_k.buffer_size, 353_894_400);
+        assert!(five_k.buffer_size > maximum);
+        assert!(ScreenshotReadbackLayout::new(u32::MAX, 2, true).is_none());
     }
 
     #[test]
