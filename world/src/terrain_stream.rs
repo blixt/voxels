@@ -732,17 +732,6 @@ impl TerrainPageMemoryCache {
         self.by_identity.contains_key(&identity)
     }
 
-    pub fn set_pinned(&mut self, identity: TerrainPageTransferIdentity, pinned: bool) -> bool {
-        let Some(fingerprint) = self.by_identity.get(&identity).copied() else {
-            return false;
-        };
-        let Some(entry) = self.entries.get_mut(&fingerprint) else {
-            return false;
-        };
-        entry.pinned = pinned;
-        true
-    }
-
     pub const fn resident_bytes(&self) -> usize {
         self.resident_bytes
     }

@@ -201,20 +201,7 @@ impl RemoteWorldClient {
             ));
         }
         let coords = tickets.iter().map(|ticket| ticket.coord).collect();
-        self.inner
-            .send_chunk_request(priority, coords, ChunkDelivery::Drain(tickets))
-    }
-
-    /// One-shot bootstrap path for camera restoration and other work before the frame pump starts.
-    pub async fn request_chunks(
-        &self,
-        priority: WorldProductPriority,
-        coords: Vec<ChunkCoord>,
-    ) -> Result<ChunkBatchResult, RemoteWorldError> {
-        let (sender, receiver) = local_channel();
-        self.inner
-            .send_chunk_request(priority, coords, ChunkDelivery::OneShot(sender))?;
-        receiver.await
+        self.inner.send_chunk_request(priority, coords, tickets)
     }
 
     /// Removes a request locally before emitting best-effort cancellation. A late response for the
@@ -352,7 +339,7 @@ enum PendingBatch {
     Chunks {
         priority: WorldProductPriority,
         expected_coords: Vec<ChunkCoord>,
-        delivery: ChunkDelivery,
+        tickets: Vec<WorkTicket>,
     },
     TerrainDirectories {
         priority: WorldProductPriority,
@@ -394,11 +381,6 @@ impl PendingBatch {
             Self::TerrainPages { .. } => PendingBatchKind::TerrainPages,
         }
     }
-}
-
-enum ChunkDelivery {
-    Drain(Vec<WorkTicket>),
-    OneShot(LocalSender<Result<ChunkBatchResult, RemoteWorldError>>),
 }
 
 struct SocketHandlers {
@@ -1047,7 +1029,7 @@ impl RemoteInner {
         self: &Rc<Self>,
         priority: WorldProductPriority,
         coords: Vec<ChunkCoord>,
-        delivery: ChunkDelivery,
+        tickets: Vec<WorkTicket>,
     ) -> Result<RemoteRequestId, RemoteWorldError> {
         if self.state.get() != RemoteConnectionState::Open {
             return Err(self.terminal_error().unwrap_or(RemoteWorldError::NotOpen));
@@ -1083,7 +1065,7 @@ impl RemoteInner {
             PendingBatch::Chunks {
                 priority,
                 expected_coords: coords,
-                delivery,
+                tickets,
             },
         );
         let weak = Rc::downgrade(self);
@@ -1347,15 +1329,9 @@ impl RemoteInner {
             .iter()
             .filter_map(|(&request_id, pending)| match pending {
                 PendingBatch::Chunks {
-                    expected_coords,
-                    delivery: ChunkDelivery::Drain(_),
-                    ..
+                    expected_coords, ..
                 } if expected_coords.iter().all(|coord| !keep(*coord)) => Some(request_id),
-                PendingBatch::Chunks {
-                    delivery: ChunkDelivery::OneShot(_),
-                    ..
-                }
-                | PendingBatch::TerrainRegionColumns { .. }
+                PendingBatch::TerrainRegionColumns { .. }
                 | PendingBatch::TerrainDirectories { .. }
                 | PendingBatch::TerrainPages { .. }
                 | PendingBatch::Chunks { .. } => None,
@@ -1410,21 +1386,16 @@ impl RemoteInner {
         let Some(pending) = self.pending.borrow_mut().remove(&request_id) else {
             return;
         };
-        let PendingBatch::Chunks { delivery, .. } = pending else {
+        let PendingBatch::Chunks { tickets, .. } = pending else {
             return;
         };
-        match delivery {
-            ChunkDelivery::Drain(tickets) => {
-                self.completions
-                    .borrow_mut()
-                    .push_back(RemoteChunkCompletion {
-                        request_id,
-                        tickets,
-                        result,
-                    });
-            }
-            ChunkDelivery::OneShot(sender) => sender.send(result),
-        }
+        self.completions
+            .borrow_mut()
+            .push_back(RemoteChunkCompletion {
+                request_id,
+                tickets,
+                result,
+            });
     }
 
     fn finish_terrain_directory_request(

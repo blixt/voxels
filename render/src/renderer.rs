@@ -243,16 +243,6 @@ pub enum VirtualTerrainRenderMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VirtualTerrainRequestId(u64);
 
-impl VirtualTerrainRequestId {
-    /// Stable numeric identity for diagnostics only.
-    ///
-    /// Hosts still cannot construct an identity, but can record both sides of a presentation
-    /// transaction and prove that the renderer publication and coordinator attempt remain joined.
-    pub const fn diagnostic_value(self) -> u64 {
-        self.0
-    }
-}
-
 /// Semantic session whose camera and reproduction-visible state are presented atomically.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ClientViewSession {
@@ -6512,15 +6502,6 @@ impl Renderer {
         Ok(())
     }
 
-    /// Registers replacement data without making any of its roots visible.
-    pub fn register_virtual_terrain_staging_directory(
-        &mut self,
-        directory: &TerrainHierarchyDirectoryV1,
-    ) -> Result<(), VirtualTerrainRendererError> {
-        self.virtual_terrain.register_staging_directory(directory)?;
-        Ok(())
-    }
-
     /// Extends one resident surface node with an independently streamed four-child segment.
     pub fn register_virtual_terrain_refinement_directory(
         &mut self,
@@ -6528,18 +6509,6 @@ impl Renderer {
     ) -> Result<(), VirtualTerrainRendererError> {
         self.virtual_terrain
             .register_refinement_directory(directory)?;
-        self.invalidate_virtual_terrain_desired_plan();
-        Ok(())
-    }
-
-    /// Atomically transfers terrain ownership between complete registered root partitions.
-    pub fn set_virtual_terrain_active_roots(
-        &mut self,
-        roots: impl IntoIterator<Item = TerrainPageKey>,
-    ) -> Result<(), VirtualTerrainRendererError> {
-        let next = roots.into_iter().collect::<BTreeSet<_>>();
-        self.virtual_terrain
-            .set_active_roots(next.iter().copied())?;
         self.invalidate_virtual_terrain_desired_plan();
         Ok(())
     }
@@ -7220,10 +7189,6 @@ impl Renderer {
         Ok(rebuilt)
     }
 
-    pub fn virtual_terrain_cut(&self) -> Option<&VirtualTerrainCut> {
-        self.committed_virtual_terrain_cut()
-    }
-
     /// Whether the validated logical hierarchy currently owns this page.
     ///
     /// Replacement children may arrive in the encoded cache before their parent is installed.
@@ -7273,11 +7238,6 @@ impl Renderer {
 
     pub fn virtual_terrain_committed_envelope(&self) -> Option<&PresentationEnvelope> {
         self.committed_virtual_terrain_envelope()
-    }
-
-    pub fn virtual_terrain_committed_locus(&self) -> Option<PresentationLocus> {
-        self.committed_virtual_terrain_envelope()
-            .and_then(PresentationEnvelope::locus)
     }
 
     pub fn virtual_terrain_committed_covers_position(&self, position_metres: [f32; 3]) -> bool {
@@ -7796,14 +7756,6 @@ impl Renderer {
         self.virtual_terrain_mode_from_presented_view()
     }
 
-    pub fn virtual_terrain_region_roots(&self) -> Vec<TerrainPageKey> {
-        self.virtual_terrain.roots().collect()
-    }
-
-    pub fn registered_virtual_terrain_region_roots(&self) -> Vec<TerrainPageKey> {
-        self.virtual_terrain.registered_roots().collect()
-    }
-
     /// Retires immutable region directories outside the current streaming working set.
     ///
     /// Removing directory roots invalidates the next candidate snapshot. Pages belonging to the
@@ -7883,48 +7835,6 @@ impl Renderer {
             }
         }
         removed_pages.len()
-    }
-
-    pub fn remove_virtual_terrain_page(
-        &mut self,
-        key: TerrainPageKey,
-    ) -> Result<bool, VirtualTerrainRendererError> {
-        if !self.virtual_terrain.remove_page(key) {
-            return Ok(false);
-        }
-        if self
-            .virtual_terrain_reproduction_cut
-            .as_ref()
-            .is_some_and(|pinned| pinned.cut.selected_pages.contains(&key))
-        {
-            self.invalidate_screenshot_reproduction_cut();
-        }
-        if self
-            .virtual_terrain_publication
-            .as_ref()
-            .is_some_and(|publication| publication.cut.selected_pages.contains(&key))
-        {
-            self.abort_virtual_terrain_publication();
-        }
-        self.invalidate_virtual_terrain_desired_plan();
-        let published = self
-            .committed_virtual_terrain_cut()
-            .is_some_and(|cut| cut.selected_pages.contains(&key));
-        // Invalidate any pending absolute handles before this allocation can be released or reused.
-        self.virtual_terrain_gpu.remove_page_geometry(key);
-        if let Some(page) = self.virtual_terrain_pages.remove(&key) {
-            if published
-                && !self
-                    .virtual_terrain_retired_published_pages
-                    .contains_key(&key)
-            {
-                self.virtual_terrain_retired_published_pages
-                    .insert(key, page);
-            } else {
-                discard_virtual_terrain_mesh(&mut self.virtual_terrain_arena, page.mesh);
-            }
-        }
-        Ok(true)
     }
 
     /// Retains only expanded GPU geometry that can contribute to a certified ownership cut.
