@@ -106,9 +106,18 @@ fly logs --app voxels-world-blixt --no-tail
 vp run wrangler versions list
 ```
 
-Fly retains release history for `fly releases` and `fly releases rollback`. Cloudflare Worker
-versions are visible through Wrangler and the dashboard. Roll back the Worker and Fly independently:
-the website publish succeeding does not prove the server deploy or its volume migration succeeded.
-Never delete or replace `world_data` as part of a code rollback. Automatic snapshots are disabled;
-if a suitable manual or older snapshot exists, restore it into a new volume and inspect it before
-changing the production mount.
+Fly retains the exact image for each release, but it does not provide a dedicated rollback command.
+Following Fly's [rollback guide](https://fly.io/docs/blueprints/rollback-guide/), select the last
+known-good image and deploy it directly:
+
+```sh
+fly releases --app voxels-world-blixt --image
+fly deploy --image registry.fly.io/voxels-world-blixt:<known-good-tag> --config fly.toml --ha=false --yes
+curl --fail https://voxels-world-blixt.fly.dev/healthz
+```
+
+Cloudflare Worker versions are visible through Wrangler and the dashboard. Roll back the Worker and
+Fly independently: the website publish succeeding does not prove the server deploy or its volume
+migration succeeded. Never delete or replace `world_data` as part of a code rollback. Automatic
+snapshots are disabled; if a suitable manual or older snapshot exists, restore it into a new volume
+and inspect it before changing the production mount.
