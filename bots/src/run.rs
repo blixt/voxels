@@ -35,6 +35,7 @@ const REPORT_SCHEMA_VERSION: u32 = 5;
 const SIMULATION_HZ: u64 = 60;
 const POSE_HZ: u64 = 30;
 const PING_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_PENDING_PINGS: usize = 64;
 const CHUNK_CACHE_CAPACITY: usize = 96;
 const MAX_DIG_SURFACE_SCAN_VOXELS: i32 = 40;
 const MAX_TOWER_COLUMN_SCAN_VOXELS: i32 = 48;
@@ -292,7 +293,7 @@ struct BotRuntime {
     frame_reassembler: FrameReassembler,
     chunk_requests: ChunkRequests,
     pending_edits: HashMap<u64, PendingEdit>,
-    pending_pings: HashMap<u32, Instant>,
+    pending_pings: BTreeMap<u32, Instant>,
     leader_connection_id: Option<u64>,
     leader_pose: Option<LeaderPose>,
     next_request_id: u64,
@@ -443,7 +444,7 @@ impl BotRuntime {
             frame_reassembler: FrameReassembler::default(),
             chunk_requests: ChunkRequests::default(),
             pending_edits: HashMap::new(),
-            pending_pings: HashMap::new(),
+            pending_pings: BTreeMap::new(),
             leader_connection_id: None,
             leader_pose: None,
             next_request_id: 1,
@@ -570,8 +571,7 @@ impl BotRuntime {
         })?;
         self.traffic.sent(&bytes)?;
         self.presence.send(Message::Binary(bytes.into())).await?;
-        self.pending_pings
-            .insert(self.ping_sequence, Instant::now());
+        remember_pending_ping(&mut self.pending_pings, self.ping_sequence, Instant::now());
         self.report.pings = self.report.pings.saturating_add(1);
         Ok(())
     }
@@ -947,6 +947,17 @@ fn player_pose_flags(camera: &CameraState) -> u16 {
     flags
 }
 
+fn remember_pending_ping(
+    pending_pings: &mut BTreeMap<u32, Instant>,
+    sequence: u32,
+    sent_at: Instant,
+) {
+    pending_pings.insert(sequence, sent_at);
+    while pending_pings.len() > MAX_PENDING_PINGS {
+        pending_pings.pop_first();
+    }
+}
+
 fn identity_for(index: usize, seed: u64) -> PlayerIdentity {
     let kind = BehaviorKind::for_index(index);
     let name = format!("bot-{}-{index:03}", behavior_name(kind));
@@ -1269,6 +1280,31 @@ mod tests {
         assert_eq!(summary.p95_ms, 95.0);
         assert_eq!(summary.p99_ms, 99.0);
         assert_eq!(summary.max_ms, 100.0);
+    }
+
+    #[test]
+    fn unanswered_pings_keep_only_the_recent_response_window() {
+        let now = Instant::now();
+        let first_sent = now - Duration::from_secs((MAX_PENDING_PINGS + 8) as u64);
+        let mut pending = BTreeMap::new();
+        for sequence in 1..=(MAX_PENDING_PINGS as u32 + 8) {
+            remember_pending_ping(
+                &mut pending,
+                sequence,
+                first_sent + Duration::from_secs(u64::from(sequence)),
+            );
+        }
+
+        assert_eq!(pending.len(), MAX_PENDING_PINGS);
+        assert_eq!(
+            pending.first_key_value().map(|(&sequence, _)| sequence),
+            Some(9)
+        );
+        assert!(pending.remove(&1).is_none());
+        let latest = pending
+            .remove(&(MAX_PENDING_PINGS as u32 + 8))
+            .expect("latest ping remains available for latency measurement");
+        assert!(latest.elapsed() <= Duration::from_secs(1));
     }
 
     #[test]
