@@ -411,28 +411,47 @@ impl EditMap {
         if min_x > max_x || min_z > max_z {
             return Self::default();
         }
+        if self.chunks.is_empty() {
+            return Self::default();
+        }
         let minimum_chunk = VoxelCoord::new(min_x, 0, min_z).chunk();
         let maximum_chunk = VoxelCoord::new(max_x, 0, max_z).chunk();
         let mut changes = Vec::new();
-        for chunk_x in minimum_chunk.x..=maximum_chunk.x {
-            for chunk_z in minimum_chunk.z..=maximum_chunk.z {
-                for (&key, chunk) in self
-                    .chunks
-                    .range((chunk_x, chunk_z, i32::MIN)..=(chunk_x, chunk_z, i32::MAX))
-                {
-                    let origin = ChunkCoord::new(key.0, key.2, key.1).world_origin();
-                    for &(index, material) in &chunk.overrides {
-                        let local = local_coord(index);
-                        let coord = VoxelCoord::new(
-                            origin[0] + local[0] as i32,
-                            origin[1] + local[1] as i32,
-                            origin[2] + local[2] as i32,
-                        );
-                        if (min_x..=max_x).contains(&coord.x) && (min_z..=max_z).contains(&coord.z)
-                        {
-                            changes.push((coord, Some(material)));
-                        }
-                    }
+        let mut append_chunk = |key: &(i32, i32, i32), chunk: &EditedChunk| {
+            let origin = ChunkCoord::new(key.0, key.2, key.1).world_origin();
+            for &(index, material) in &chunk.overrides {
+                let local = local_coord(index);
+                let coord = VoxelCoord::new(
+                    origin[0] + local[0] as i32,
+                    origin[1] + local[1] as i32,
+                    origin[2] + local[2] as i32,
+                );
+                if (min_x..=max_x).contains(&coord.x) && (min_z..=max_z).contains(&coord.z) {
+                    changes.push((coord, Some(material)));
+                }
+            }
+        };
+        let chunk_x_count =
+            usize::try_from(i64::from(maximum_chunk.x) - i64::from(minimum_chunk.x) + 1)
+                .unwrap_or(usize::MAX);
+        let search_depth = usize::BITS as usize - self.chunks.len().max(1).leading_zeros() as usize;
+        let indexed_x_cost = chunk_x_count.saturating_mul(2).saturating_mul(search_depth);
+        // Wide sparse regions are cheaper to filter from one X-slab scan. Narrow rectangles in a
+        // large journal retain logarithmic row lookups instead of walking every edited chunk.
+        if self.chunks.len() <= indexed_x_cost {
+            for (key, chunk) in self.chunks.range(
+                (minimum_chunk.x, i32::MIN, i32::MIN)..=(maximum_chunk.x, i32::MAX, i32::MAX),
+            ) {
+                if (minimum_chunk.z..=maximum_chunk.z).contains(&key.1) {
+                    append_chunk(key, chunk);
+                }
+            }
+        } else {
+            for chunk_x in minimum_chunk.x..=maximum_chunk.x {
+                for (key, chunk) in self.chunks.range(
+                    (chunk_x, minimum_chunk.z, i32::MIN)..=(chunk_x, maximum_chunk.z, i32::MAX),
+                ) {
+                    append_chunk(key, chunk);
                 }
             }
         }
@@ -1102,6 +1121,70 @@ mod tests {
         ]);
 
         let snapshot = edits.snapshot_for_voxel_columns(-33, -33, 31, 31);
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot.override_at(requested_low), Some(Material::Stone));
+        assert_eq!(snapshot.override_at(requested_high), Some(Material::Wood));
+        assert_eq!(snapshot.override_at(adjacent), None);
+    }
+
+    #[test]
+    fn coverage_column_snapshot_includes_exact_boundaries_at_every_height() {
+        let root = crate::TerrainPageKey::surface(crate::TERRAIN_COVERAGE_ROOT_LEVEL, -2, 3);
+        let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = root.horizontal_bounds().unwrap();
+        let included = [
+            (
+                VoxelCoord::new(minimum_x, -1_000, minimum_z),
+                Material::Stone,
+            ),
+            (VoxelCoord::new(minimum_x, 64, maximum_z), Material::Wood),
+            (VoxelCoord::new(maximum_x, -64, minimum_z), Material::Clay),
+            (
+                VoxelCoord::new(maximum_x, 1_000, maximum_z),
+                Material::Basalt,
+            ),
+        ];
+        let excluded = [
+            VoxelCoord::new(minimum_x - 1, 0, minimum_z),
+            VoxelCoord::new(maximum_x + 1, 0, maximum_z),
+            VoxelCoord::new(minimum_x, 0, minimum_z - 1),
+            VoxelCoord::new(maximum_x, 0, maximum_z + 1),
+            VoxelCoord::new(minimum_x, 0, maximum_z + CHUNK_EDGE as i32 * 4),
+        ];
+        let mut edits = EditMap::default();
+        for &(coord, material) in &included {
+            edits.insert_override(coord, material);
+        }
+        for &coord in &excluded {
+            edits.insert_override(coord, Material::GlowCrystal);
+        }
+
+        let snapshot = edits.snapshot_for_voxel_columns(minimum_x, maximum_x, minimum_z, maximum_z);
+        assert_eq!(snapshot.len(), included.len());
+        for (coord, material) in included {
+            assert_eq!(snapshot.override_at(coord), Some(material));
+        }
+        for coord in excluded {
+            assert_eq!(snapshot.override_at(coord), None);
+        }
+    }
+
+    #[test]
+    fn narrow_column_snapshot_stays_exact_in_a_dense_edit_map() {
+        let mut edits = EditMap::default();
+        for chunk_x in 1..=64 {
+            edits.insert_override(
+                VoxelCoord::new(chunk_x * CHUNK_EDGE as i32, 0, 10 * CHUNK_EDGE as i32),
+                Material::Clay,
+            );
+        }
+        let requested_low = VoxelCoord::new(0, -64, 0);
+        let requested_high = VoxelCoord::new(0, 64, 0);
+        let adjacent = VoxelCoord::new(1, 0, 0);
+        edits.insert_override(requested_low, Material::Stone);
+        edits.insert_override(requested_high, Material::Wood);
+        edits.insert_override(adjacent, Material::Basalt);
+
+        let snapshot = edits.snapshot_for_voxel_columns(0, 0, 0, 0);
         assert_eq!(snapshot.len(), 2);
         assert_eq!(snapshot.override_at(requested_low), Some(Material::Stone));
         assert_eq!(snapshot.override_at(requested_high), Some(Material::Wood));

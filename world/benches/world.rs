@@ -12,9 +12,10 @@ use voxels_world::protocol::{
     encode_chunk_batch_result,
 };
 use voxels_world::{
-    BinaryMeshScratch, CHUNK_EDGE, CINDER_VAULT, ChunkCoord, Generator, MeshingHalo,
-    ProceduralWorldSource, SkylineFeatureKind, VoxelCoord, WorldProduct, WorldProductBatch,
-    WorldProductPriority, WorldProductRequest, WorldSourceEngine, first_pilgrim_road_length_voxels,
+    BinaryMeshScratch, CHUNK_EDGE, CINDER_VAULT, ChunkCoord, EditMap, Generator, Material,
+    MeshingHalo, ProceduralWorldSource, SkylineFeatureKind, TERRAIN_COVERAGE_ROOT_LEVEL,
+    TerrainPageKey, VoxelCoord, WorldProduct, WorldProductBatch, WorldProductPriority,
+    WorldProductRequest, WorldSourceEngine, first_pilgrim_road_length_voxels,
     first_pilgrim_road_point_at_distance, first_pilgrim_route_anchor,
     first_pilgrim_route_anchor_for_feature_cell, mesh_chunk_binary_with_scratch,
     sample_first_pilgrim_road,
@@ -124,6 +125,75 @@ fn route_queries(criterion: &mut Criterion) {
             });
         });
     }
+    group.finish();
+}
+
+fn edit_column_snapshots(criterion: &mut Criterion) {
+    let root = TerrainPageKey::surface(TERRAIN_COVERAGE_ROOT_LEVEL, 0, 0);
+    let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = root
+        .horizontal_bounds()
+        .expect("fixed level-10 surface root must have finite bounds");
+    let empty = EditMap::default();
+
+    let mut sparse = EditMap::default();
+    for index in 0..64 {
+        sparse.insert_override(
+            VoxelCoord::new(index * 32, index * 32, index * 32),
+            Material::Stone,
+        );
+    }
+    for chunk_x in 0..64 {
+        for chunk_z in 2_048..2_112 {
+            sparse.insert_override(
+                VoxelCoord::new(chunk_x * 32, 0, chunk_z * 32),
+                Material::Basalt,
+            );
+        }
+    }
+
+    let mut dense = EditMap::default();
+    for chunk_x in -32..32 {
+        for chunk_z in -32..32 {
+            dense.insert_override(
+                VoxelCoord::new(chunk_x * 32, 0, chunk_z * 32),
+                Material::Clay,
+            );
+        }
+    }
+    dense.insert_override(VoxelCoord::new(0, -64, 0), Material::Stone);
+    dense.insert_override(VoxelCoord::new(0, 64, 0), Material::Wood);
+
+    let mut group = criterion.benchmark_group("edit column snapshot");
+    group.bench_function("level-10 empty", |bencher| {
+        bencher.iter(|| {
+            black_box(black_box(&empty).snapshot_for_voxel_columns(
+                black_box(minimum_x),
+                black_box(maximum_x),
+                black_box(minimum_z),
+                black_box(maximum_z),
+            ))
+        });
+    });
+    group.bench_function("level-10 sparse root plus far edits", |bencher| {
+        bencher.iter(|| {
+            black_box(black_box(&sparse).snapshot_for_voxel_columns(
+                black_box(minimum_x),
+                black_box(maximum_x),
+                black_box(minimum_z),
+                black_box(maximum_z),
+            ))
+        });
+    });
+    group.bench_function("one column in dense journal", |bencher| {
+        bencher.iter(|| {
+            black_box(black_box(&dense).snapshot_for_voxel_columns(
+                black_box(0),
+                black_box(0),
+                black_box(0),
+                black_box(0),
+            ))
+        });
+    });
     group.finish();
 }
 
@@ -325,6 +395,7 @@ criterion_group!(
     source_products,
     semantic_hero_generation,
     route_queries,
+    edit_column_snapshots,
     codec,
     streaming_codec,
     meshing,
