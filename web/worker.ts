@@ -6,6 +6,7 @@ import init, {
 import { embedPngBinary, embedPngText } from "./png-metadata.ts";
 import type { FromWorker, InitMessage, ToWorker } from "./protocol.ts";
 import { disposeWorkerEngine } from "./worker-lifecycle.ts";
+import { enqueueBeforeWorkerBoot, type QueuedWorkerMessage } from "./worker-queue.ts";
 
 const scope = self as unknown as {
   postMessage(message: FromWorker): void;
@@ -22,7 +23,7 @@ let screenshotTimer: ReturnType<typeof setInterval> | undefined;
 let screenshotDeadline = 0;
 let screenshotEncoding = false;
 let disposal: Promise<void> | null = null;
-const pending: Exclude<ToWorker, InitMessage>[] = [];
+const pending: QueuedWorkerMessage[] = [];
 const STARTUP_PROGRESS_VERSION = 7;
 const STARTUP_PROGRESS_WORDS = 99;
 const STARTUP_SCHEMA_MISMATCH_TIMEOUT_MS = 5_000;
@@ -654,7 +655,7 @@ scope.onmessage = (event) => {
         fail(String(error));
       });
   } else if (!handle && message.kind !== "destroy") {
-    pending.push(message);
+    enqueueBeforeWorkerBoot(pending, message);
   } else {
     dispatch(message);
   }
