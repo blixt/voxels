@@ -531,23 +531,25 @@ fn inspect_database(path: &Path) -> Result<DatabaseInspection, Box<dyn std::erro
     let page_count = pragma_u64(&connection, "page_count")?;
     let freelist_pages = pragma_u64(&connection, "freelist_count")?;
     let mut tables = BTreeMap::new();
-    for table in [
-        "metadata",
-        "edit_chunks",
-        "chunk_revisions",
-        "surface_revisions",
-        "players",
-        "player_inventory",
-        "edit_operations",
-    ] {
-        let rows = connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
-            row.get::<_, i64>(0)
-        })?;
+    let mut table_query = connection.prepare(
+        "SELECT name FROM sqlite_schema
+         WHERE type='table' AND name NOT LIKE 'sqlite_%'
+         ORDER BY name",
+    )?;
+    let table_names = table_query
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for table in table_names {
+        let quoted_table = format!("\"{}\"", table.replace('"', "\"\""));
+        let rows =
+            connection.query_row(&format!("SELECT count(*) FROM {quoted_table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })?;
         let (pages, payload_bytes, unused_bytes, storage_bytes) = connection.query_row(
             "SELECT count(*), coalesce(sum(payload), 0), coalesce(sum(unused), 0),
                     coalesce(sum(pgsize), 0)
              FROM dbstat WHERE name=?1",
-            [table],
+            [table.as_str()],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -558,7 +560,7 @@ fn inspect_database(path: &Path) -> Result<DatabaseInspection, Box<dyn std::erro
             },
         )?;
         tables.insert(
-            table.to_owned(),
+            table,
             TableStats {
                 rows: nonnegative(rows, "table row count")?,
                 pages: nonnegative(pages, "table page count")?,
