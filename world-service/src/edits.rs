@@ -153,6 +153,8 @@ impl ProtectedSpawn {
 
 struct EditState {
     connection: Connection,
+    durable_edits: EditMap,
+    /// Effective world overrides: durable player edits plus server-authored runtime geometry.
     edits: EditMap,
     revision: u64,
     chunk_revisions: BTreeMap<ChunkCoord, u64>,
@@ -325,12 +327,13 @@ impl EditAuthority {
             )
             .map_err(sql_error("configure edit database"))?;
         initialize_schema(&mut connection, world_id, source.identity().identity_hash())?;
-        let (edits, revision) = load_edits(&connection)?;
+        let (durable_edits, revision) = load_edits(&connection)?;
         let chunk_revisions = load_product_revisions(&connection, revision)?;
         Ok(Arc::new(Self {
             inner: Mutex::new(EditState {
                 connection,
-                edits,
+                edits: durable_edits.clone(),
+                durable_edits,
                 revision,
                 chunk_revisions,
             }),
@@ -371,6 +374,7 @@ impl EditAuthority {
     pub(crate) fn install_protected_spawn(&self, spawn: ProtectedSpawn) {
         {
             let mut state = self.lock();
+            state.edits = state.durable_edits.clone();
             let changes = spawn
                 .overrides
                 .iter()
@@ -759,15 +763,22 @@ impl EditAuthority {
         } else {
             state.revision
         };
-        let previous_overrides = mutations
+        let previous_effective_overrides = mutations
             .iter()
             .map(|mutation| state.edits.override_at(mutation.coord))
+            .collect::<Vec<_>>();
+        let previous_durable_overrides = mutations
+            .iter()
+            .map(|mutation| state.durable_edits.override_at(mutation.coord))
             .collect::<Vec<_>>();
         let durable_changes = mutations
             .iter()
             .zip(&durable_overrides)
             .map(|(mutation, durable_override)| (mutation.coord, *durable_override))
             .collect::<Vec<_>>();
+        state
+            .durable_edits
+            .replace_durable_overrides(&durable_changes);
         state.edits.replace_durable_overrides(&durable_changes);
         let commit = EditCommit {
             operation_id: command.operation_id,
@@ -779,7 +790,7 @@ impl EditAuthority {
             affected_chunks: affected_chunks.clone(),
             editor_inventory: Some(inventory),
         };
-        let durable_chunks = encode_durable_chunks(&state.edits, &mutations);
+        let durable_chunks = encode_durable_chunks(&state.durable_edits, &mutations);
 
         if let Err(error) = persist_action(
             &mut state.connection,
@@ -792,7 +803,12 @@ impl EditAuthority {
             &durable_chunks,
             &affected_chunks,
         ) {
-            restore_overrides(&mut state.edits, &mutations, &previous_overrides);
+            restore_overrides(
+                &mut state.durable_edits,
+                &mutations,
+                &previous_durable_overrides,
+            );
+            restore_overrides(&mut state.edits, &mutations, &previous_effective_overrides);
             return Err(error);
         }
         if changed {
@@ -2194,6 +2210,63 @@ mod tests {
                 .expect("a dig volume wholly outside the protected radius")
                 .changed
         );
+    }
+
+    #[test]
+    fn protected_spawn_geometry_is_not_persisted_with_same_chunk_player_edits() {
+        let source = ProceduralWorldSource::new(0x5afe_0029);
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "voxels-protected-spawn-{}-{unique}.sqlite3",
+            std::process::id()
+        ));
+        let spawn_coord = VoxelCoord::new(0, 300, 0);
+        let player_coord = VoxelCoord::new(9, 300, 9);
+        assert_eq!(spawn_coord.chunk(), player_coord.chunk());
+
+        {
+            let authority = EditAuthority::open_with_inventory(
+                &path,
+                world_id(31),
+                &source,
+                8,
+                (EDIT_CUBE_VOLUME_VOXELS * 2) as u32,
+            )
+            .unwrap();
+            authority.install_protected_spawn(ProtectedSpawn::new(
+                [0, 0],
+                4,
+                vec![VoxelMutation {
+                    coord: spawn_coord,
+                    material: Material::GlowCrystal,
+                }],
+            ));
+            let player = player_id(31);
+            let (_, session) = admit_player(&authority, player, resume(1));
+            assert!(
+                authority
+                    .apply(
+                        &source,
+                        player,
+                        31,
+                        place(1, session, player_coord, Material::Stone),
+                    )
+                    .unwrap()
+                    .changed
+            );
+        }
+
+        {
+            let reopened =
+                EditAuthority::open_with_inventory(&path, world_id(31), &source, 8, 99).unwrap();
+            let edits = reopened.snapshot_chunks(&[spawn_coord.chunk()]).edits;
+            assert_eq!(edits.override_at(spawn_coord), None);
+            assert_eq!(edits.override_at(player_coord), Some(Material::Stone));
+        }
+        remove_sqlite_files(&path);
     }
 
     #[test]
