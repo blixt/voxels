@@ -1384,6 +1384,9 @@ pub fn decode_terrain_directory_batch(
 ) -> Result<TerrainDirectoryBatchRequest, ProtocolError> {
     let frame = decode_frame(bytes)?;
     expect_kind(&frame, KIND_TERRAIN_DIRECTORY_BATCH)?;
+    if frame.request_id == 0 {
+        return Err(ProtocolError::InvalidPayload("request id must be nonzero"));
+    }
     let mut cursor = Cursor::new(frame.payload);
     let priority = decode_priority(cursor.u8()?)?;
     if cursor.bytes(3)? != [0; 3] {
@@ -1392,6 +1395,9 @@ pub fn decode_terrain_directory_batch(
         ));
     }
     let count = usize::from(cursor.u16()?);
+    if count == 0 || count > MAX_TERRAIN_DIRECTORIES_PER_BATCH {
+        return Err(ProtocolError::LimitExceeded("terrain directory batch"));
+    }
     if cursor.u16()? != 0 {
         return Err(ProtocolError::InvalidPayload(
             "reserved terrain directory request field is nonzero",
@@ -1544,6 +1550,9 @@ pub fn decode_terrain_region_column_batch(
 ) -> Result<TerrainRegionColumnBatchRequest, ProtocolError> {
     let frame = decode_frame(bytes)?;
     expect_kind(&frame, KIND_TERRAIN_REGION_COLUMN_BATCH)?;
+    if frame.request_id == 0 {
+        return Err(ProtocolError::InvalidPayload("request id must be nonzero"));
+    }
     let mut cursor = Cursor::new(frame.payload);
     let priority = decode_priority(cursor.u8()?)?;
     if cursor.bytes(3)? != [0; 3] {
@@ -1552,6 +1561,9 @@ pub fn decode_terrain_region_column_batch(
         ));
     }
     let count = usize::from(cursor.u16()?);
+    if count == 0 || count > MAX_TERRAIN_REGION_COLUMNS_PER_BATCH {
+        return Err(ProtocolError::LimitExceeded("terrain region column batch"));
+    }
     if cursor.u16()? != 0 {
         return Err(ProtocolError::InvalidPayload(
             "reserved terrain region column request field is nonzero",
@@ -4965,6 +4977,38 @@ mod tests {
                 priority: WorldProductPriority::VisibleChunk,
                 coords: vec![ChunkCoord::new(0, 0, 0)],
             }),
+            Err(ProtocolError::InvalidPayload("request id must be nonzero"))
+        );
+    }
+
+    #[test]
+    fn terrain_request_limits_are_checked_before_item_payloads() {
+        fn request_frame(kind: u16, request_id: u64, count: u16) -> Vec<u8> {
+            let mut payload = vec![WorldProductPriority::VirtualTerrain as u8, 0, 0, 0];
+            push_u16(&mut payload, count);
+            push_u16(&mut payload, 0);
+            encode_frame(kind, request_id, &payload)
+        }
+
+        let oversized_directories = request_frame(KIND_TERRAIN_DIRECTORY_BATCH, 1, u16::MAX);
+        assert_eq!(
+            decode_terrain_directory_batch(&oversized_directories),
+            Err(ProtocolError::LimitExceeded("terrain directory batch"))
+        );
+        let oversized_columns = request_frame(KIND_TERRAIN_REGION_COLUMN_BATCH, 1, u16::MAX);
+        assert_eq!(
+            decode_terrain_region_column_batch(&oversized_columns),
+            Err(ProtocolError::LimitExceeded("terrain region column batch"))
+        );
+
+        let zero_id_directory = request_frame(KIND_TERRAIN_DIRECTORY_BATCH, 0, 1);
+        assert_eq!(
+            decode_terrain_directory_batch(&zero_id_directory),
+            Err(ProtocolError::InvalidPayload("request id must be nonzero"))
+        );
+        let zero_id_column = request_frame(KIND_TERRAIN_REGION_COLUMN_BATCH, 0, 1);
+        assert_eq!(
+            decode_terrain_region_column_batch(&zero_id_column),
             Err(ProtocolError::InvalidPayload("request id must be nonzero"))
         );
     }
