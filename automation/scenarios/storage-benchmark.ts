@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { ScenarioArguments } from "../lib/arguments.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { rustTool } from "../../scripts/build-wasm.ts";
+import { cargoProfileExecutablePath } from "../../scripts/world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
 const SCHEMA_VERSION = 5;
@@ -101,14 +102,6 @@ function parseArguments(values: readonly string[]): StorageBenchmarkOptions {
   }
   arguments_.assertEmpty();
   return options;
-}
-
-function executablePath(): string {
-  return path.resolve(
-    process.env.CARGO_TARGET_DIR ?? "target",
-    "worldgen",
-    process.platform === "win32" ? `${BINARY}.exe` : BINARY,
-  );
 }
 
 function assertBenchmarkResult(value: unknown): asserts value is BenchmarkResult {
@@ -207,7 +200,7 @@ async function runNative(
     )}\n`,
   );
   context.log(`running ${profile} durability corpus`);
-  await execFileAsync(executablePath(), [requestPath, responsePath], {
+  await execFileAsync(cargoProfileExecutablePath(BINARY), [requestPath, responsePath], {
     cwd: process.cwd(),
     maxBuffer: 16 * 1024 * 1024,
   });

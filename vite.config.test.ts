@@ -21,6 +21,7 @@ import {
 } from "./vite.config.ts";
 import viteConfiguration from "./vite.config.ts";
 import {
+  cargoProfileExecutablePath,
   worldServiceBuildCargoArgs,
   worldServiceCargoArgs,
 } from "./scripts/world-service-command.ts";
@@ -390,6 +391,16 @@ describe("native world-service development command", () => {
       "--bin",
       "voxels-worldd",
     ]);
+  });
+
+  it("resolves every Cargo profile binary through the shared target layout", () => {
+    expect(cargoProfileExecutablePath("voxels-bots", "worldgen-dev")).toBe(
+      path.resolve(
+        process.env.CARGO_TARGET_DIR ?? "target",
+        "worldgen-dev",
+        process.platform === "win32" ? "voxels-bots.exe" : "voxels-bots",
+      ),
+    );
   });
 
   it("defaults Vite to the fast profile while allowing explicit optimized profiling", () => {

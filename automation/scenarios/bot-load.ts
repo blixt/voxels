@@ -25,6 +25,7 @@ import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import type { WorldFixture, WorldService, WorldSource } from "../lib/world.ts";
 import { rustTool } from "../../scripts/build-wasm.ts";
 import {
+  cargoProfileExecutablePath,
   worldServiceBuildCargoArgs,
   type WorldServiceCargoProfile,
 } from "../../scripts/world-service-command.ts";
@@ -170,14 +171,6 @@ function parseArguments(values: readonly string[]): BotLoadOptions {
   };
   arguments_.assertEmpty();
   return options;
-}
-
-function executablePath(profile: WorldServiceCargoProfile, binary: string): string {
-  return path.resolve(
-    process.env.CARGO_TARGET_DIR ?? "target",
-    profile,
-    process.platform === "win32" ? `${binary}.exe` : binary,
-  );
 }
 
 async function fileBytes(file: string): Promise<number> {
@@ -754,7 +747,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
       stdio: "inherit",
     },
   );
-  const botBinary = executablePath(options.botProfile, "voxels-bots");
+  const botBinary = cargoProfileExecutablePath("voxels-bots", options.botProfile);
   const result: BotLoadResult = {
     schemaVersion: RESULT_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),

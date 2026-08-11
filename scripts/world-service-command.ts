@@ -47,11 +47,19 @@ export function worldServiceBuildCargoArgs({
   ];
 }
 
-/** Direct daemon path after [`worldServiceBuildCargoArgs`] completes. */
-export function worldServiceExecutablePath(profile: WorldServiceCargoProfile = "worldgen"): string {
+/** Resolves a native Cargo binary built under one of the repository's service profiles. */
+export function cargoProfileExecutablePath(
+  binary: string,
+  profile: WorldServiceCargoProfile = "worldgen",
+): string {
   return path.resolve(
     process.env.CARGO_TARGET_DIR ?? "target",
     profile,
-    process.platform === "win32" ? "voxels-worldd.exe" : "voxels-worldd",
+    process.platform === "win32" ? `${binary}.exe` : binary,
   );
+}
+
+/** Direct daemon path after [`worldServiceBuildCargoArgs`] completes. */
+export function worldServiceExecutablePath(profile: WorldServiceCargoProfile = "worldgen"): string {
+  return cargoProfileExecutablePath("voxels-worldd", profile);
 }
