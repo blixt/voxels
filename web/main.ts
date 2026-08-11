@@ -3,6 +3,7 @@ import { authorizeClientBootstrap } from "./client-authorization.ts";
 import { loadClientConfig } from "./client-config.ts";
 import { writeClipboardText } from "./clipboard.ts";
 import { downloadBlob } from "./download.ts";
+import { initializeEngineWorker } from "./engine-worker-startup.ts";
 import {
   type EngineAutomationApi,
   type EngineAutomationContract,
@@ -99,15 +100,38 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     return;
   }
   if (player.playerName !== "default") document.title = `Voxels · ${player.playerName}`;
+  const bounds = canvas.getBoundingClientRect();
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  let worker: TypedWorker;
+  try {
+    worker = initializeEngineWorker(
+      () =>
+        new Worker(new URL("./worker.ts", import.meta.url), {
+          type: "module",
+        }) as TypedWorker,
+      () => canvas.transferControlToOffscreen(),
+      {
+        kind: "init",
+        cssWidth: bounds.width,
+        cssHeight: bounds.height,
+        dpr: window.devicePixelRatio || 1,
+        reducedMotion: reducedMotion.matches,
+        configToml,
+        browserUserId: player.browserUserId,
+        playerId: player.playerId,
+        playerName: player.playerName,
+      },
+    );
+  } catch (error) {
+    fail(`Could not start the engine worker. Reload the page to retry.\n${String(error)}`);
+    return;
+  }
   if (sessionExpiresAt !== undefined) {
     const refreshAheadMs = 5 * 60 * 1_000;
     const refreshDelayMs = Math.max(0, sessionExpiresAt * 1_000 - Date.now() - refreshAheadMs);
     window.setTimeout(() => location.reload(), refreshDelayMs);
   }
 
-  const worker = new Worker(new URL("./worker.ts", import.meta.url), {
-    type: "module",
-  }) as TypedWorker;
   let uiCursorMode = false;
   let playable = false;
   let shutdownPromise: Promise<void> | undefined;
@@ -425,25 +449,6 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     showLoading("Updating native world", "Saving player state before restarting the server…", 0.1);
     await shutdownWorker();
   });
-
-  const offscreen = canvas.transferControlToOffscreen();
-  const bounds = canvas.getBoundingClientRect();
-  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-  worker.postMessage(
-    {
-      kind: "init",
-      canvas: offscreen,
-      cssWidth: bounds.width,
-      cssHeight: bounds.height,
-      dpr: window.devicePixelRatio || 1,
-      reducedMotion: reducedMotion.matches,
-      configToml,
-      browserUserId: player.browserUserId,
-      playerId: player.playerId,
-      playerName: player.playerName,
-    },
-    [offscreen],
-  );
 
   let pending: InputSample[] = [];
   let scheduled = false;
