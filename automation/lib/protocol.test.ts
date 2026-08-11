@@ -9,11 +9,14 @@ function requiredMatch(source: string, pattern: RegExp, description: string): st
 }
 
 describe("VXWP script contract", () => {
-  it("matches the Rust protocol, server routes, and checked-in client config", () => {
+  it("matches the Rust protocol, server routes, and checked-in client configs", () => {
     const protocolSource = readFileSync("world/src/protocol.rs", "utf8");
     const terrainPageSource = readFileSync("world/src/terrain_page.rs", "utf8");
     const serverSource = readFileSync("world-service/src/server.rs", "utf8");
-    const clientConfig = readFileSync("config/client.toml", "utf8");
+    const clientConfigs = ["config/client.toml", "config/client.production.toml"].map((path) => ({
+      path,
+      source: readFileSync(path, "utf8"),
+    }));
     const streamingDocs = readFileSync("docs/native-world-streaming.md", "utf8");
 
     expect(
@@ -46,22 +49,25 @@ describe("VXWP script contract", () => {
         "world WebSocket subprotocol",
       ),
     ).toBe(WORLD_SUBPROTOCOL);
-    expect(
-      new URL(requiredMatch(clientConfig, /^endpoint = "([^"]+)"$/mu, "client world endpoint"))
-        .pathname,
-    ).toBe(WORLD_PATH);
-    expect(
-      new URL(
-        requiredMatch(
-          clientConfig,
-          /^presence_endpoint = "([^"]+)"$/mu,
-          "client presence endpoint",
-        ),
-      ).pathname,
-    ).toBe(PRESENCE_PATH);
-    expect(requiredMatch(clientConfig, /^subprotocol = "([^"]+)"$/mu, "client subprotocol")).toBe(
-      WORLD_SUBPROTOCOL,
-    );
+    for (const config of clientConfigs) {
+      expect(
+        new URL(
+          requiredMatch(config.source, /^endpoint = "([^"]+)"$/mu, `${config.path} world endpoint`),
+        ).pathname,
+      ).toBe(WORLD_PATH);
+      expect(
+        new URL(
+          requiredMatch(
+            config.source,
+            /^presence_endpoint = "([^"]+)"$/mu,
+            `${config.path} presence endpoint`,
+          ),
+        ).pathname,
+      ).toBe(PRESENCE_PATH);
+      expect(
+        requiredMatch(config.source, /^subprotocol = "([^"]+)"$/mu, `${config.path} subprotocol`),
+      ).toBe(WORLD_SUBPROTOCOL);
+    }
     expect(
       Number(
         requiredMatch(
