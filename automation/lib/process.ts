@@ -42,19 +42,24 @@ export function startProcess(
     detached: spawnOptions.detached ?? process.platform !== "win32",
   });
   const completed = completion(child, label);
-  let stopped = false;
-  const stop = async (signal = stopSignal): Promise<void> => {
-    if (stopped || child.exitCode !== null || child.signalCode !== null) return;
-    stopped = true;
-    await terminateProcessTree(child, 2_000, false, signal);
-    try {
-      await completed;
-    } catch (error) {
-      if (child.signalCode !== signal && child.signalCode !== "SIGKILL") throw error;
-    }
+  let stopPromise: Promise<void> | undefined;
+  const stop = (signal = stopSignal): Promise<void> => {
+    if (stopPromise !== undefined) return stopPromise;
+    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+    stopPromise = (async () => {
+      await terminateProcessTree(child, 2_000, false, signal);
+      try {
+        await completed;
+      } catch (error) {
+        if (child.signalCode !== signal && child.signalCode !== "SIGKILL") throw error;
+      }
+    })();
+    return stopPromise;
   };
   const abort = (): void => {
-    void stop();
+    // Cleanup awaits this same promise and reports any termination failure. Attach a handler here
+    // so a failure cannot become an unhandled rejection before cleanup starts.
+    void stop().catch(() => {});
   };
   context.signal.addEventListener("abort", abort, { once: true });
   void completed.finally(() => context.signal.removeEventListener("abort", abort)).catch(() => {});

@@ -3,6 +3,33 @@ import { startProcess } from "./process.ts";
 import { defineScenario, runScenario } from "./scenario.ts";
 
 describe("managed automation processes", () => {
+  it("shares an in-flight stop between concurrent callers", async () => {
+    const scenario = defineScenario({
+      id: "process-concurrent-stop",
+      kind: "validation",
+      summary: "Exercises concurrent process cleanup.",
+      uses: {},
+      async run(context) {
+        const managed = startProcess(
+          context,
+          process.execPath,
+          ["-e", "setInterval(() => {}, 10_000)"],
+          { label: "concurrent-stop node fixture", stdio: "ignore" },
+        );
+        const first = managed.stop();
+        expect(managed.stop()).toBe(first);
+        await first;
+      },
+    });
+
+    await expect(
+      runScenario(scenario, [], {
+        artifacts: { root: "target/automation-tests", runId: "process-concurrent-stop" },
+        log: () => {},
+      }),
+    ).resolves.toMatchObject({ status: "passed" });
+  });
+
   it("terminates an owned process when the scenario deadline expires", async () => {
     let childPid: number | undefined;
     const scenario = defineScenario({
