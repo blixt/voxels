@@ -16,8 +16,10 @@ layer:
 - concurrency: one or more sorted 25.6 m horizontal edit-region locks plus one player lock.
 
 SQLite remains the durable transaction engine. The schema is intentionally replaced rather than
-migrated. The checked-in `{edit_schema}` path token gives schema 13 a fresh database while preserving
-older local files.
+migrated. At the time of this decision, the checked-in `{edit_schema}` path token gave schema 13 a
+fresh database while preserving older local files. The current version is defined by
+[`EDIT_DATABASE_SCHEMA_VERSION`](../world-service/src/lib.rs); the token behavior and current storage
+layout remain documented in [World service configuration](world-service-config.md).
 
 ## Measured outcome
 
