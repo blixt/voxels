@@ -2,12 +2,35 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   PressedKeys,
   WheelAccumulator,
+  inputAllowedWhileLoading,
   keyCode,
   requestPointerLockSafely,
   shouldCancelInputForVisibility,
 } from "./input.ts";
+import { INPUT_CANCEL, INPUT_KEY_DOWN, INPUT_POINTER_DOWN, type InputSample } from "./protocol.ts";
 
 describe("browser key state", () => {
+  const sample = (kind: number, code: number): InputSample => ({
+    kind,
+    code,
+    buttons: 0,
+    x: 0,
+    y: 0,
+    dx: 0,
+    dy: 0,
+    flags: 0,
+  });
+
+  it("allows only cancellation and F2 evidence capture while loading", () => {
+    expect(inputAllowedWhileLoading(sample(INPUT_CANCEL, 0))).toBe(true);
+    expect(inputAllowedWhileLoading(sample(INPUT_KEY_DOWN, keyCode("F2")))).toBe(true);
+    expect(inputAllowedWhileLoading({ ...sample(INPUT_KEY_DOWN, keyCode("F2")), flags: 1 })).toBe(
+      false,
+    );
+    expect(inputAllowedWhileLoading(sample(INPUT_KEY_DOWN, keyCode("KeyW")))).toBe(false);
+    expect(inputAllowedWhileLoading(sample(INPUT_POINTER_DOWN, 0))).toBe(false);
+  });
+
   it("keeps aliased Shift input active until both physical keys are released", () => {
     const keys = new PressedKeys();
 

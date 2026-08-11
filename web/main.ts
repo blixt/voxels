@@ -13,6 +13,7 @@ import { terminateAfterAcknowledgement } from "./hmr-lifecycle.ts";
 import {
   PressedKeys,
   WheelAccumulator,
+  inputAllowedWhileLoading,
   requestPointerLockSafely,
   shouldCancelInputForVisibility,
 } from "./input.ts";
@@ -453,7 +454,7 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     worker.postMessage({ kind: "input", buffer }, [buffer]);
   };
   const enqueue = (sample: InputSample, immediate = false): void => {
-    if (!playable && sample.kind !== INPUT_CANCEL) return;
+    if (!playable && !inputAllowedWhileLoading(sample)) return;
     pending.push(sample);
     if (immediate) {
       flush();

@@ -1,3 +1,7 @@
+import { INPUT_CANCEL, INPUT_KEY_DOWN, type InputSample } from "./protocol.ts";
+
+export const SCREENSHOT_KEY_CODE = 19;
+
 const KEY_CODES: Readonly<Record<string, number>> = {
   KeyW: 1,
   KeyA: 2,
@@ -8,7 +12,7 @@ const KEY_CODES: Readonly<Record<string, number>> = {
   ShiftRight: 6,
   KeyQ: 7,
   F3: 8,
-  F2: 19,
+  F2: SCREENSHOT_KEY_CODE,
   Digit1: 9,
   Digit2: 10,
   Digit3: 11,
@@ -20,6 +24,16 @@ const KEY_CODES: Readonly<Record<string, number>> = {
   Digit9: 17,
   Digit0: 18,
 };
+
+/** Keeps evidence capture reachable while exact geometry is still visibly converging. */
+export function inputAllowedWhileLoading(sample: InputSample): boolean {
+  return (
+    sample.kind === INPUT_CANCEL ||
+    (sample.kind === INPUT_KEY_DOWN &&
+      sample.code === SCREENSHOT_KEY_CODE &&
+      (sample.flags & 1) === 0)
+  );
+}
 
 export function keyCode(code: string): number {
   return KEY_CODES[code] ?? 0;
