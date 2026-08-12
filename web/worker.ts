@@ -391,7 +391,11 @@ async function encodeScreenshot(capture: MissionControlScreenshot): Promise<void
     const canvas = new OffscreenCanvas(width, height);
     const context = canvas.getContext("2d");
     if (!context) throw new Error("browser could not create a PNG encoding canvas");
-    const pixels = new Uint8ClampedArray(rgba);
+    const pixels = new Uint8ClampedArray(
+      rgba.buffer as ArrayBuffer,
+      rgba.byteOffset,
+      rgba.byteLength,
+    );
     context.putImageData(new ImageData(pixels, width, height), 0, 0);
     const browserPng = await canvas.convertToBlob({ type: "image/png" });
     if (browserPng.type !== "image/png" || browserPng.size < 8) {
@@ -405,11 +409,14 @@ async function encodeScreenshot(capture: MissionControlScreenshot): Promise<void
     let png = metadataPng;
     if (diagnosticPopulated) {
       const compressor = new CompressionStream("deflate");
+      const diagnosticBytes = new Uint8Array(
+        terrainDiagnostic.buffer as ArrayBuffer,
+        terrainDiagnostic.byteOffset,
+        terrainDiagnostic.byteLength,
+      );
       const compressedDiagnostic = new Uint8Array(
         await new Response(
-          new Blob([terrainDiagnostic.slice().buffer as ArrayBuffer])
-            .stream()
-            .pipeThrough(compressor),
+          new Blob([diagnosticBytes]).stream().pipeThrough(compressor),
         ).arrayBuffer(),
       );
       // Big-endian framing makes the attachment self-describing without relying on JS typed-array

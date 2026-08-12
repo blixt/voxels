@@ -10120,25 +10120,13 @@ impl Renderer {
                             } else {
                                 let diagnostic_identity = mapped.get(color_end..identity_end)?;
                                 let diagnostic_depth = mapped.get(identity_end..)?;
-                                let diagnostic_identity = unpack_screenshot_diagnostic_rows(
+                                interleave_screenshot_diagnostic_rows(
                                     diagnostic_identity,
-                                    width,
-                                    height,
-                                    16,
-                                    layout.diagnostic_identity_bytes_per_row,
-                                )?;
-                                let diagnostic_depth = unpack_screenshot_diagnostic_rows(
                                     diagnostic_depth,
                                     width,
                                     height,
-                                    4,
+                                    layout.diagnostic_identity_bytes_per_row,
                                     layout.diagnostic_depth_bytes_per_row,
-                                )?;
-                                interleave_screenshot_diagnostic(
-                                    &diagnostic_identity,
-                                    &diagnostic_depth,
-                                    width,
-                                    height,
                                 )?
                             };
                         Some(ScreenshotCapture {
@@ -12540,49 +12528,44 @@ fn unpack_screenshot_rgba(
     Some(rgba)
 }
 
-fn unpack_screenshot_diagnostic_rows(
-    padded: &[u8],
+fn interleave_screenshot_diagnostic_rows(
+    padded_identity: &[u8],
+    padded_reverse_z: &[u8],
     width: u32,
     height: u32,
-    bytes_per_pixel: u32,
-    padded_bytes_per_row: u32,
+    padded_identity_bytes_per_row: u32,
+    padded_reverse_z_bytes_per_row: u32,
 ) -> Option<Vec<u8>> {
-    let row_bytes = usize::try_from(width.checked_mul(bytes_per_pixel)?).ok()?;
-    let padded_row_bytes = usize::try_from(padded_bytes_per_row).ok()?;
+    let identity_row_bytes = usize::try_from(width.checked_mul(16)?).ok()?;
+    let reverse_z_row_bytes = usize::try_from(width.checked_mul(4)?).ok()?;
+    let output_row_bytes = usize::try_from(width.checked_mul(20)?).ok()?;
+    let padded_identity_row_bytes = usize::try_from(padded_identity_bytes_per_row).ok()?;
+    let padded_reverse_z_row_bytes = usize::try_from(padded_reverse_z_bytes_per_row).ok()?;
     let height = usize::try_from(height).ok()?;
-    if padded_row_bytes < row_bytes || padded.len() < padded_row_bytes.checked_mul(height)? {
-        return None;
-    }
-    let mut attachment = vec![0; row_bytes.checked_mul(height)?];
-    for (source, destination) in padded
-        .chunks_exact(padded_row_bytes)
-        .take(height)
-        .zip(attachment.chunks_exact_mut(row_bytes))
+    if padded_identity_row_bytes < identity_row_bytes
+        || padded_reverse_z_row_bytes < reverse_z_row_bytes
+        || padded_identity.len() < padded_identity_row_bytes.checked_mul(height)?
+        || padded_reverse_z.len() < padded_reverse_z_row_bytes.checked_mul(height)?
     {
-        destination.copy_from_slice(&source[..row_bytes]);
-    }
-    Some(attachment)
-}
-
-fn interleave_screenshot_diagnostic(
-    identity: &[u8],
-    reverse_z: &[u8],
-    width: u32,
-    height: u32,
-) -> Option<Vec<u8>> {
-    let pixels = usize::try_from(width.checked_mul(height)?).ok()?;
-    if identity.len() != pixels.checked_mul(16)? || reverse_z.len() != pixels.checked_mul(4)? {
         return None;
     }
-    let mut interleaved = vec![0; pixels.checked_mul(20)?];
-    for pixel in 0..pixels {
-        let identity_start = pixel * 16;
-        let depth_start = pixel * 4;
-        let destination = pixel * 20;
-        interleaved[destination..destination + 16]
-            .copy_from_slice(&identity[identity_start..identity_start + 16]);
-        interleaved[destination + 16..destination + 20]
-            .copy_from_slice(&reverse_z[depth_start..depth_start + 4]);
+    let mut interleaved = vec![0; output_row_bytes.checked_mul(height)?];
+    for row in 0..height {
+        let identity_start = row.checked_mul(padded_identity_row_bytes)?;
+        let reverse_z_start = row.checked_mul(padded_reverse_z_row_bytes)?;
+        let output_start = row.checked_mul(output_row_bytes)?;
+        let identity = padded_identity.get(identity_start..identity_start + identity_row_bytes)?;
+        let reverse_z =
+            padded_reverse_z.get(reverse_z_start..reverse_z_start + reverse_z_row_bytes)?;
+        let output = interleaved.get_mut(output_start..output_start + output_row_bytes)?;
+        for ((identity_pixel, reverse_z_pixel), output_pixel) in identity
+            .chunks_exact(16)
+            .zip(reverse_z.chunks_exact(4))
+            .zip(output.chunks_exact_mut(20))
+        {
+            output_pixel[..16].copy_from_slice(identity_pixel);
+            output_pixel[16..].copy_from_slice(reverse_z_pixel);
+        }
     }
     Some(interleaved)
 }
@@ -13308,6 +13291,61 @@ mod tests {
             unpack_screenshot_rgba(&padded, 2, 3, 256, false),
             None,
             "incomplete mapped rows must never become a truncated PNG"
+        );
+    }
+
+    #[test]
+    fn screenshot_diagnostic_interleaves_padded_rows_without_temporary_attachments() {
+        let mut identity = vec![0xee; 128];
+        let mut reverse_z = vec![0xdd; 32];
+        let first_identity = (0_u8..32).collect::<Vec<_>>();
+        let second_identity = (32_u8..64).collect::<Vec<_>>();
+        identity[..32].copy_from_slice(&first_identity);
+        identity[64..96].copy_from_slice(&second_identity);
+        reverse_z[..8].copy_from_slice(&[100, 101, 102, 103, 104, 105, 106, 107]);
+        reverse_z[16..24].copy_from_slice(&[108, 109, 110, 111, 112, 113, 114, 115]);
+
+        let depths = [
+            100_u8, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
+        ];
+        let expected = [
+            &first_identity[..16],
+            &depths[..4],
+            &first_identity[16..],
+            &depths[4..8],
+            &second_identity[..16],
+            &depths[8..12],
+            &second_identity[16..],
+            &depths[12..],
+        ]
+        .concat();
+
+        assert_eq!(
+            interleave_screenshot_diagnostic_rows(&identity, &reverse_z, 2, 2, 64, 16),
+            Some(expected)
+        );
+        assert_eq!(
+            interleave_screenshot_diagnostic_rows(&identity[..127], &reverse_z, 2, 2, 64, 16),
+            None
+        );
+        assert_eq!(
+            interleave_screenshot_diagnostic_rows(&identity, &reverse_z[..31], 2, 2, 64, 16),
+            None
+        );
+        assert_eq!(
+            interleave_screenshot_diagnostic_rows(&identity, &reverse_z, 2, 2, 31, 16),
+            None
+        );
+        assert_eq!(
+            interleave_screenshot_diagnostic_rows(
+                &identity,
+                &reverse_z,
+                u32::MAX,
+                2,
+                u32::MAX,
+                u32::MAX,
+            ),
+            None
         );
     }
 
