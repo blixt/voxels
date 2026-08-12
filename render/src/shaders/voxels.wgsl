@@ -830,9 +830,6 @@ fn hash31(position: vec3<f32>) -> f32 {
   return fract(sin(value) * 43758.5453);
 }
 
-@fragment
-fn fs_depth_transition() {}
-
 fn cloud_surface_weather(world: vec3<f32>) -> vec2<f32> {
   let coverage_control = clamp(frame.fog_exposure.z, 0.0, 1.0);
   if coverage_control < 0.08 {
