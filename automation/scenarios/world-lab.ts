@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import type { Page } from "playwright";
 import { BrowserCapability } from "../lib/browser.ts";
 import { type EngineClient, snapshotValue } from "../lib/engine.ts";
 import { analyzeDiagnosticSky } from "../lib/image.ts";
@@ -7,19 +8,24 @@ import { startWorldStack } from "../lib/world.ts";
 import { readPngText } from "../../web/png-metadata.ts";
 
 const VIEWPORT = { width: 1280, height: 720 };
+const DIAGNOSTIC_SKY_REGION = { x0: 0.02, x1: 0.7, y0: 0.02, y1: 0.28 } as const;
 
 function near(value: number, target: number, tolerance = 0.002): boolean {
   return Math.abs(value - target) <= tolerance;
 }
 
-async function waitForSettledWorld(engine: EngineClient): Promise<readonly number[]> {
-  return engine.waitForSnapshot(
+async function waitForSettledWorld(engine: EngineClient, page: Page): Promise<readonly number[]> {
+  const settled = await engine.waitForSnapshot(
     (snapshot) =>
       snapshotValue(snapshot, "terrainReady") === 1 &&
       snapshotValue(snapshot, "pendingJobs") === 0 &&
       snapshotValue(snapshot, "residentChunks") > 0,
     { description: "World Lab fixture did not settle", timeoutMs: 60_000 },
   );
+  await page.waitForFunction(() => !document.body.classList.contains("loading"), undefined, {
+    timeout: 60_000,
+  });
+  return settled;
 }
 
 async function runWorldLab(context: ScenarioContext, arguments_: readonly string[]) {
@@ -46,7 +52,7 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     ...world.clientRoute,
   });
   const { page } = viewport;
-  const settled = await waitForSettledWorld(viewport.engine);
+  const settled = await waitForSettledWorld(viewport.engine, page);
   const expectedYearFraction = 0.5 / world.fixture.daysPerYear;
   const expectedMoonOrbitFraction =
     (0.5 / world.fixture.moonSiderealOrbitDays + world.fixture.moonOrbitPhaseAtWorldEpoch) % 1;
@@ -67,6 +73,8 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     throw new Error(`synchronized celestial anchor is incorrect: ${JSON.stringify(settled)}`);
   }
 
+  await page.mouse.click(VIEWPORT.width / 2, VIEWPORT.height / 2);
+  await page.waitForFunction(() => document.pointerLockElement instanceof HTMLCanvasElement);
   await page.keyboard.press("F3");
   await page.waitForTimeout(250);
   await viewport.screenshot("World Lab", { filename: "world-lab.png" });
@@ -74,14 +82,19 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
   // Toggle the Rust-owned control rather than the automation API, then prove both that the sky
   // override reached the presented canvas and that the adjacent control downloads that canvas.
   await page.mouse.click(945, 444); // MAGENTA DEBUG SKY
-  await page.waitForTimeout(150);
-  const diagnosticCapture = await page.screenshot();
-  const diagnosticSky = await analyzeDiagnosticSky(page, diagnosticCapture, {
-    x0: 0.02,
-    x1: 0.7,
-    y0: 0.02,
-    y1: 0.28,
-  });
+  let diagnosticCapture = await page.screenshot();
+  let diagnosticSky = await analyzeDiagnosticSky(page, diagnosticCapture, DIAGNOSTIC_SKY_REGION);
+  for (let attempt = 0; diagnosticSky.diagnosticSkyFraction < 0.5 && attempt < 19; attempt += 1) {
+    await page.waitForTimeout(100);
+    diagnosticCapture = await page.screenshot();
+    diagnosticSky = await analyzeDiagnosticSky(page, diagnosticCapture, DIAGNOSTIC_SKY_REGION);
+  }
+  await context.artifacts.write(
+    "World Lab diagnostic sky",
+    "world-lab-diagnostic-sky.png",
+    diagnosticCapture,
+    "image/png",
+  );
   if (diagnosticSky.diagnosticSkyFraction < 0.5) {
     throw new Error(
       `World Lab diagnostic-sky toggle did not reach the canvas: ${JSON.stringify(diagnosticSky)}; browser failures: ${JSON.stringify(browser.failures)}`,
@@ -119,12 +132,7 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
     downloadedCapture,
     "image/png",
   );
-  const downloadedSky = await analyzeDiagnosticSky(page, downloadedCapture, {
-    x0: 0.02,
-    x1: 0.7,
-    y0: 0.02,
-    y1: 0.28,
-  });
+  const downloadedSky = await analyzeDiagnosticSky(page, downloadedCapture, DIAGNOSTIC_SKY_REGION);
   if (downloadedSky.diagnosticSkyFraction < 0.5) {
     throw new Error(
       `downloaded screenshot does not contain the presented diagnostic canvas; browser failures: ${JSON.stringify(browser.failures.slice(0, 16))}`,
@@ -138,12 +146,11 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
   }
   await page.mouse.click(945, 444); // restore ordinary sky
   await page.waitForTimeout(100);
-  const restoredSky = await analyzeDiagnosticSky(page, await page.screenshot(), {
-    x0: 0.02,
-    x1: 0.7,
-    y0: 0.02,
-    y1: 0.28,
-  });
+  const restoredSky = await analyzeDiagnosticSky(
+    page,
+    await page.screenshot(),
+    DIAGNOSTIC_SKY_REGION,
+  );
   if (restoredSky.diagnosticSkyPixels !== 0) {
     throw new Error("World Lab diagnostic-sky toggle did not restore the ordinary atmosphere");
   }
