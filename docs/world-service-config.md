@@ -130,11 +130,12 @@ sea_level_voxels = 52
 ```
 
 The checked-in development configuration remains loopback-only. A public listener must explicitly
-set `allow_non_loopback = true`, and every allowed origin must use HTTPS. Setting
-`auth_session_hmac_key_env` switches authorization from the static development token to short-lived
-signed session tokens bound to the exact browser and player IDs in the opening protocol frame. The
-named environment variable must contain at least 32 bytes and is never serialized into configuration
-or sent to the browser. See [Deployment](deployment.md) for the production secret flow.
+set `allow_non_loopback = true`, every allowed origin must use HTTPS, and
+`auth_session_hmac_key_env` is required so authorization cannot fall back to the static development
+token. Public clients use short-lived signed session tokens bound to the exact browser and player
+IDs in the opening protocol frame. The named environment variable must contain at least 32 bytes and
+is never serialized into configuration or sent to the browser. See [Deployment](deployment.md) for
+the production secret flow.
 
 `outbound_bandwidth_floor_bytes_per_second` is the safe VXWP payload rate shared by a player's world
 and presence WebSockets. When the receiver reports end-to-end RTT and the connection has queued

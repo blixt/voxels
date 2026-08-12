@@ -473,6 +473,11 @@ impl WorldServiceConfig {
         {
             return Err(WorldServiceConfigError::InsecurePublicOrigin);
         }
+        if !self.transport.listen.ip().is_loopback()
+            && self.transport.auth_session_hmac_key_env.is_none()
+        {
+            return Err(WorldServiceConfigError::MissingPublicSessionAuthorization);
+        }
         if !valid_websocket_protocol_token(&self.transport.auth_subprotocol_token) {
             return Err(WorldServiceConfigError::InvalidAuthSubprotocolToken);
         }
@@ -819,6 +824,7 @@ pub enum WorldServiceConfigError {
     },
     ListenIsNotLoopback(SocketAddr),
     InsecurePublicOrigin,
+    MissingPublicSessionAuthorization,
     EmptyAllowedOrigins,
     InvalidAllowedOrigin(String),
     InvalidAuthSubprotocolToken,
@@ -864,6 +870,9 @@ impl fmt::Display for WorldServiceConfigError {
             ),
             Self::InsecurePublicOrigin => formatter
                 .write_str("public world-service transports require https:// allowed origins"),
+            Self::MissingPublicSessionAuthorization => formatter.write_str(
+                "public world-service transports require auth_session_hmac_key_env so player identities are signed",
+            ),
             Self::EmptyAllowedOrigins => {
                 formatter.write_str("world-service transport requires at least one allowed origin")
             }
@@ -1427,6 +1436,28 @@ sea_level_voxels = 52
             config.validate(),
             Err(WorldServiceConfigError::InvalidAuthSubprotocolToken)
         );
+    }
+
+    #[test]
+    fn public_transport_requires_player_bound_session_authorization() {
+        let mut config = test_config(WorldSourceMode::ProceduralV16);
+        config.transport.listen = SocketAddr::from(([0, 0, 0, 0], 9_777));
+        config.transport.allow_non_loopback = true;
+        config.transport.allowed_origins = vec!["https://voxels.example".to_owned()];
+
+        assert_eq!(
+            config.validate(),
+            Err(WorldServiceConfigError::MissingPublicSessionAuthorization)
+        );
+
+        config.transport.auth_session_hmac_key_env = Some("VOXELS_SESSION_SIGNING_KEY".to_owned());
+        config
+            .validate()
+            .expect("signed public player identities are valid");
+
+        test_config(WorldSourceMode::ProceduralV16)
+            .validate()
+            .expect("loopback development retains static-token authorization");
     }
 
     #[test]
