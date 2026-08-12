@@ -15,6 +15,7 @@ export const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const localDir = resolve(rootDir, ".wrangler-local");
 const localEnvPath = resolve(rootDir, ".env.cloudflare.local");
 const cloudflareAuthEnvNames = [
+  "CF_ACCOUNT_ID",
   "CF_API_KEY",
   "CF_API_TOKEN",
   "CF_EMAIL",
@@ -26,6 +27,17 @@ const cloudflareAuthEnvNames = [
   "CLOUDFLARE_API_USER_SERVICE_KEY",
   "CLOUDFLARE_EMAIL",
 ];
+
+/** Removes global Cloudflare credentials before repository-local credentials are loaded. */
+export function stripAmbientCloudflareAuth(sourceEnv, inheritAuth) {
+  const env = { ...sourceEnv };
+  if (!inheritAuth) {
+    for (const name of cloudflareAuthEnvNames) {
+      delete env[name];
+    }
+  }
+  return env;
+}
 
 function parseEnvLine(line) {
   const trimmed = line.trim();
@@ -57,31 +69,26 @@ export function buildCloudflareLocalEnv() {
   mkdirSync(localDir, { recursive: true });
 
   const inheritAuth = process.env.VOXELS_WRANGLER_INHERIT_AUTH === "true";
+  const ambientEnv = stripAmbientCloudflareAuth(process.env, inheritAuth);
   const env = {
-    ...process.env,
+    ...ambientEnv,
     XDG_CACHE_HOME:
-      inheritAuth && process.env.XDG_CACHE_HOME
-        ? process.env.XDG_CACHE_HOME
+      inheritAuth && ambientEnv.XDG_CACHE_HOME
+        ? ambientEnv.XDG_CACHE_HOME
         : resolve(localDir, "xdg-cache"),
     XDG_CONFIG_HOME:
-      inheritAuth && process.env.XDG_CONFIG_HOME
-        ? process.env.XDG_CONFIG_HOME
+      inheritAuth && ambientEnv.XDG_CONFIG_HOME
+        ? ambientEnv.XDG_CONFIG_HOME
         : resolve(localDir, "xdg-config"),
     XDG_DATA_HOME:
-      inheritAuth && process.env.XDG_DATA_HOME
-        ? process.env.XDG_DATA_HOME
+      inheritAuth && ambientEnv.XDG_DATA_HOME
+        ? ambientEnv.XDG_DATA_HOME
         : resolve(localDir, "xdg-data"),
     XDG_STATE_HOME:
-      inheritAuth && process.env.XDG_STATE_HOME
-        ? process.env.XDG_STATE_HOME
+      inheritAuth && ambientEnv.XDG_STATE_HOME
+        ? ambientEnv.XDG_STATE_HOME
         : resolve(localDir, "xdg-state"),
   };
-
-  if (!inheritAuth) {
-    for (const name of cloudflareAuthEnvNames) {
-      delete env[name];
-    }
-  }
 
   if (existsSync(localEnvPath)) {
     for (const line of readFileSync(localEnvPath, "utf8").split(/\r?\n/)) {
