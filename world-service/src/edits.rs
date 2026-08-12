@@ -8,12 +8,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use tokio::sync::mpsc;
 use uuid::Uuid;
-#[cfg(test)]
-use voxels_world::protocol::{EDIT_CUBE_VOLUME_VOXELS, EDIT_MAX_VOLUME_VOXELS};
 use voxels_world::protocol::{
     EDIT_SESSION_NOT_CURRENT, EditAction, EditCommand, EditCommit, EditSessionId, EditShape,
     EditVolume, MATERIAL_INVENTORY_SLOTS, MAX_EDIT_AFFECTED_CHUNKS, MAX_EDIT_MUTATIONS,
     MaterialInventory, PlayerId, PlayerResume, ProtocolError, VoxelMutation, encode_edit_commit,
+};
+#[cfg(test)]
+use voxels_world::{
+    CHUNK_EDGE,
+    protocol::{EDIT_CUBE_VOLUME_VOXELS, EDIT_MAX_VOLUME_VOXELS},
 };
 use voxels_world::{
     ChunkCoord, EditMap, Material, TERRAIN_REGION_ROOT_LEVEL, TerrainPageKey, VOXEL_SIZE_METRES,
@@ -158,6 +161,7 @@ struct EditState {
     edits: EditMap,
     revision: u64,
     chunk_revisions: BTreeMap<ChunkCoord, u64>,
+    surface_revisions: BTreeMap<i32, BTreeMap<i32, u64>>,
 }
 
 struct EditSubscriber {
@@ -329,6 +333,7 @@ impl EditAuthority {
         initialize_schema(&mut connection, world_id, source.identity().identity_hash())?;
         let (durable_edits, revision) = load_edits(&connection)?;
         let chunk_revisions = load_product_revisions(&connection, revision)?;
+        let surface_revisions = build_surface_revision_index(&chunk_revisions);
         Ok(Arc::new(Self {
             inner: Mutex::new(EditState {
                 connection,
@@ -336,6 +341,7 @@ impl EditAuthority {
                 durable_edits,
                 revision,
                 chunk_revisions,
+                surface_revisions,
             }),
             player_edit_locks: KeyedLocks::default(),
             region_edit_locks: KeyedLocks::default(),
@@ -641,15 +647,20 @@ impl EditAuthority {
         let edits = state
             .edits
             .snapshot_for_voxel_columns(minimum_x, maximum_x, minimum_z, maximum_z);
-        let revision =
-            surface_terrain_revision_in(&state, minimum_x, maximum_x, minimum_z, maximum_z);
+        let revision = surface_terrain_revision_in(
+            &state.surface_revisions,
+            minimum_x,
+            maximum_x,
+            minimum_z,
+            maximum_z,
+        );
         Some(TerrainEditSnapshot { edits, revision })
     }
 
     pub(crate) fn surface_terrain_revision(&self, root: TerrainPageKey) -> Option<u64> {
         let [[minimum_x, minimum_z], [maximum_x, maximum_z]] = root.horizontal_bounds()?;
         Some(surface_terrain_revision_in(
-            &self.lock(),
+            &self.lock().surface_revisions,
             minimum_x,
             maximum_x,
             minimum_z,
@@ -815,6 +826,7 @@ impl EditAuthority {
             state.revision = revision;
             for coord in &affected_chunks {
                 state.chunk_revisions.insert(*coord, revision);
+                record_surface_revision(&mut state.surface_revisions, *coord, revision);
             }
         }
         Ok(AppliedEdit { commit, changed })
@@ -1293,8 +1305,31 @@ fn terrain_region_revision(state: &EditState, chunks: &[ChunkCoord]) -> u64 {
         .unwrap_or(INITIAL_REVISION)
 }
 
+fn build_surface_revision_index(
+    chunk_revisions: &BTreeMap<ChunkCoord, u64>,
+) -> BTreeMap<i32, BTreeMap<i32, u64>> {
+    let mut surface_revisions = BTreeMap::new();
+    for (coord, revision) in chunk_revisions {
+        record_surface_revision(&mut surface_revisions, *coord, *revision);
+    }
+    surface_revisions
+}
+
+fn record_surface_revision(
+    surface_revisions: &mut BTreeMap<i32, BTreeMap<i32, u64>>,
+    coord: ChunkCoord,
+    revision: u64,
+) {
+    surface_revisions
+        .entry(coord.x)
+        .or_default()
+        .entry(coord.z)
+        .and_modify(|current| *current = (*current).max(revision))
+        .or_insert(revision);
+}
+
 fn surface_terrain_revision_in(
-    state: &EditState,
+    surface_revisions: &BTreeMap<i32, BTreeMap<i32, u64>>,
     minimum_x: i32,
     maximum_x: i32,
     minimum_z: i32,
@@ -1302,14 +1337,13 @@ fn surface_terrain_revision_in(
 ) -> u64 {
     let minimum_chunk = VoxelCoord::new(minimum_x, 0, minimum_z).chunk();
     let maximum_chunk = VoxelCoord::new(maximum_x, 0, maximum_z).chunk();
-    state
-        .chunk_revisions
-        .iter()
-        .filter(|(coord, _)| {
-            (minimum_chunk.x..=maximum_chunk.x).contains(&coord.x)
-                && (minimum_chunk.z..=maximum_chunk.z).contains(&coord.z)
+    surface_revisions
+        .range(minimum_chunk.x..=maximum_chunk.x)
+        .flat_map(|(_, revisions_by_z)| {
+            revisions_by_z
+                .range(minimum_chunk.z..=maximum_chunk.z)
+                .map(|(_, revision)| *revision)
         })
-        .map(|(_, revision)| *revision)
         .max()
         .unwrap_or(INITIAL_REVISION)
 }
@@ -1975,6 +2009,32 @@ mod tests {
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
     use voxels_world::ProceduralWorldSource;
+
+    #[test]
+    fn surface_revision_index_preserves_vertical_maxima_and_exact_horizontal_bounds() {
+        let chunks = BTreeMap::from([
+            (ChunkCoord::new(0, -5, 0), 4),
+            (ChunkCoord::new(0, 8, 0), 7),
+            (ChunkCoord::new(1, 0, 0), 9),
+            (ChunkCoord::new(20, 0, 20), 100),
+        ]);
+        let index = build_surface_revision_index(&chunks);
+        let edge = CHUNK_EDGE as i32;
+
+        assert_eq!(
+            surface_terrain_revision_in(&index, 0, edge - 1, 0, edge - 1),
+            7
+        );
+        assert_eq!(surface_terrain_revision_in(&index, 0, edge, 0, edge - 1), 9);
+        assert_eq!(
+            surface_terrain_revision_in(&index, edge * 20, edge * 20, edge * 20, edge * 20),
+            100
+        );
+        assert_eq!(
+            surface_terrain_revision_in(&index, -edge, -1, -edge, -1),
+            INITIAL_REVISION
+        );
+    }
 
     struct ConcurrentProbeSource {
         inner: ProceduralWorldSource,
