@@ -1595,10 +1595,12 @@ pub fn encode_terrain_region_column_batch_result(
         push_i32(&mut payload, item.column[1]);
         match &item.result {
             Ok(column) => {
+                let root_count = u16::try_from(column.roots.len())
+                    .map_err(|_| ProtocolError::LimitExceeded("terrain region column roots"))?;
                 payload.push(0);
                 payload.extend_from_slice(&[0; 3]);
                 push_u64(&mut payload, column.revision);
-                push_u16(&mut payload, column.roots.len() as u16);
+                push_u16(&mut payload, root_count);
                 push_u16(&mut payload, 0);
                 for root in &column.roots {
                     push_i32(&mut payload, root.coord[1]);
@@ -1854,17 +1856,22 @@ fn validate_terrain_region_column_result(
         .collect::<Vec<_>>();
     validate_terrain_region_columns(result.request_id, &columns)?;
     for item in &result.items {
-        if let Ok(column) = &item.result
-            && (column.column != item.column
-                || column.revision == 0
-                || column.roots.is_empty()
-                || !column.roots.windows(2).all(|pair| pair[0] < pair[1])
-                || column.roots.iter().any(|root| {
-                    root.level != TERRAIN_COVERAGE_ROOT_LEVEL
-                        || !root.is_surface()
-                        || [root.coord[0], root.coord[2]] != item.column
-                        || root.horizontal_bounds().is_none()
-                }))
+        let Ok(column) = &item.result else {
+            continue;
+        };
+        if column.roots.len() > usize::from(u16::MAX) {
+            return Err(ProtocolError::LimitExceeded("terrain region column roots"));
+        }
+        if column.column != item.column
+            || column.revision == 0
+            || column.roots.is_empty()
+            || !column.roots.windows(2).all(|pair| pair[0] < pair[1])
+            || column.roots.iter().any(|root| {
+                root.level != TERRAIN_COVERAGE_ROOT_LEVEL
+                    || !root.is_surface()
+                    || [root.coord[0], root.coord[2]] != item.column
+                    || root.horizontal_bounds().is_none()
+            })
         {
             return Err(ProtocolError::InvalidPayload(
                 "terrain region column result identity mismatch",
@@ -5272,6 +5279,34 @@ mod tests {
             Err(ProtocolError::InvalidPayload(
                 "invalid terrain region columns"
             ))
+        );
+    }
+
+    #[test]
+    fn virtual_terrain_region_column_rejects_unencodable_root_count() {
+        let column = [0, 0];
+        let roots = (0..=u16::MAX)
+            .map(|y| TerrainPageKey {
+                level: TERRAIN_COVERAGE_ROOT_LEVEL,
+                coord: [column[0], i32::from(y), column[1]],
+            })
+            .collect();
+        let result = TerrainRegionColumnBatchResult {
+            request_id: 73,
+            source_identity_hash: WorldSourceIdentityHash::from_bytes([43; 32]),
+            items: vec![TerrainRegionColumnBatchItem {
+                column,
+                result: Ok(TerrainRegionColumn {
+                    column,
+                    revision: 17,
+                    roots,
+                }),
+            }],
+        };
+
+        assert_eq!(
+            encode_terrain_region_column_batch_result(&result),
+            Err(ProtocolError::LimitExceeded("terrain region column roots"))
         );
     }
 
