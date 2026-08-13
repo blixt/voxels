@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vite-plus/test";
 import worker from "./worker.ts";
 
@@ -48,6 +49,37 @@ function testEnv(success: boolean, keys: string[]): Env {
 }
 
 describe("session Worker", () => {
+  it("allows every configured production WebSocket origin through the asset CSP", async () => {
+    const productionConfig = readFileSync("config/client.production.toml", "utf8");
+    const endpointOrigins = [
+      ...productionConfig.matchAll(/^(?:presence_)?endpoint = "([^"]+)"$/gmu),
+    ]
+      .map((match) => match[1])
+      .filter((endpoint): endpoint is string => endpoint !== undefined)
+      .map((endpoint) => new URL(endpoint).origin);
+    expect(endpointOrigins).toHaveLength(2);
+    const env = {
+      ...testEnv(true, []),
+      ASSETS: { fetch: async () => new Response("asset") },
+    } as unknown as Env;
+
+    const response = await worker.fetch(
+      new Request("https://voxels.lol/", { headers: { Accept: "text/html" } }) as Parameters<
+        typeof worker.fetch
+      >[0],
+      env,
+    );
+    const policy = response.headers.get("Content-Security-Policy") ?? "";
+    const connectSources = policy
+      .split(";")
+      .map((directive) => directive.trim().split(/\s+/u))
+      .find(([name]) => name === "connect-src")
+      ?.slice(1);
+
+    expect(connectSources).toBeDefined();
+    for (const origin of endpointOrigins) expect(connectSources).toContain(origin);
+  });
+
   it("rate-limits only requests that mint a new durable identity", async () => {
     const keys: string[] = [];
     const env = testEnv(true, keys);
