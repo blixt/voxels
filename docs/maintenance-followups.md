@@ -121,3 +121,18 @@ is exhausted. A bounded frontier must therefore prove both liveness and a hard m
 published cut, its causal balancing closure, and one maximum replacement group. The direct-child
 prototype bounded memory but did not converge; retaining every historical descendant progressed
 farther but exposed the incoherent root above and is not safe to ship.
+
+## Cancel completed browser request timeouts
+
+Every streamed world request schedules a JavaScript timeout for the full request deadline, but
+`schedule_after` discards the timeout handle. Successful, canceled, and preempted requests leave
+their closure and timer registered until that deadline expires, even though the pending request has
+already been removed. A continuously streaming client can therefore retain approximately ten
+seconds of completed-request callbacks and later wake them in no-op bursts.
+
+The fix needs one owner for each timer handle across chunk, terrain-directory, terrain-column, and
+terrain-page request lifecycles rather than a local timeout-helper change. Before landing it, add
+injectable timer scheduling/cancellation tests that prove exactly-once cleanup after success,
+explicit cancellation, priority preemption, timeout, scheduling failure, and socket close. Then run
+a sustained high-throughput stream and compare retained callbacks or heap growth plus callback CPU
+before and after the change.
