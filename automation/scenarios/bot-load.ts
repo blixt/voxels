@@ -32,6 +32,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const RESULT_SCHEMA_VERSION = 7;
+const BOT_REPORT_SCHEMA_VERSION = 5;
 const SAMPLE_INTERVAL_MS = 250;
 const OBSERVER_SAMPLE_INTERVAL_MS = 500;
 const MAX_AUTHORITY_REJECTION_RATE = 0.02;
@@ -82,7 +83,8 @@ interface BotClientReport {
   };
 }
 
-interface BotHarnessReport {
+export interface BotHarnessReport {
+  readonly schemaVersion: number;
   readonly wallTimeMs: number;
   readonly connectionCount: number;
   readonly posesSent: number;
@@ -96,6 +98,82 @@ interface BotHarnessReport {
   readonly mutationsCommitted: number;
   readonly behaviors: Readonly<Record<string, number | undefined>>;
   readonly reports: readonly BotClientReport[];
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function finiteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function numericRecord(value: unknown): boolean {
+  return isRecord(value) && Object.values(value).every(finiteNumber);
+}
+
+function validLatency(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    Number.isSafeInteger(value.samples) &&
+    (value.samples as number) >= 0 &&
+    finiteNumber(value.p95Ms)
+  );
+}
+
+function validClientReport(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.traffic)) return false;
+  const receivedByKind = value.traffic.receivedByKind;
+  return (
+    validLatency(value.chunkLatency) &&
+    validLatency(value.editLatency) &&
+    [
+      value.maxVisiblePlayers,
+      value.resyncs,
+      value.protocolErrors,
+      value.finalOutboundRateBytesPerSecond,
+      value.maxOutboundRateBytesPerSecond,
+      value.traffic.receivedPayloadBytes,
+    ].every(finiteNumber) &&
+    (value.traffic.maxReceivedFrameBytes === undefined ||
+      finiteNumber(value.traffic.maxReceivedFrameBytes)) &&
+    Array.isArray(value.errorSamples) &&
+    value.errorSamples.every((sample) => typeof sample === "string") &&
+    (receivedByKind === undefined ||
+      (isRecord(receivedByKind) &&
+        Object.values(receivedByKind).every(
+          (entry) =>
+            isRecord(entry) &&
+            (entry.payloadBytes === undefined || finiteNumber(entry.payloadBytes)),
+        )))
+  );
+}
+
+/** Validates the versioned native bot artifact before benchmark calculations consume it. */
+export function parseBotHarnessReport(value: unknown): BotHarnessReport {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== BOT_REPORT_SCHEMA_VERSION ||
+    ![
+      value.wallTimeMs,
+      value.connectionCount,
+      value.posesSent,
+      value.maxVisiblePlayers,
+      value.editsAccepted,
+      value.editsSubmitted,
+      value.editsRejected,
+      value.editConflicts,
+      value.editAuthorityRejections,
+      value.mutationsCommitted,
+    ].every(finiteNumber) ||
+    !numericRecord(value.authorityRejectionReasons) ||
+    !numericRecord(value.behaviors) ||
+    !Array.isArray(value.reports) ||
+    !value.reports.every(validClientReport)
+  ) {
+    throw new Error("native bot load returned an incompatible report");
+  }
+  return value as unknown as BotHarnessReport;
 }
 
 interface DatabaseFiles {
@@ -496,7 +574,7 @@ async function runPopulation({
   const wallTimeMs = performance.now() - started;
   const samples = await samplesPromise;
   const observerReport = await observerPromise;
-  const report = JSON.parse(await readFile(reportPath, "utf8")) as BotHarnessReport;
+  const report = parseBotHarnessReport(JSON.parse(await readFile(reportPath, "utf8")) as unknown);
   const after = await databaseFiles(fixture.databasePath);
   const contents = await databaseContents(fixture.databasePath);
   return {
