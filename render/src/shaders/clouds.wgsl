@@ -30,12 +30,7 @@ fn screen_triangle(index: u32, depth: f32) -> vec4<f32> {
 }
 
 @vertex
-fn vs_trace(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
-  return screen_triangle(index, 0.0);
-}
-
-@vertex
-fn vs_composite(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
   return screen_triangle(index, 0.0);
 }
 

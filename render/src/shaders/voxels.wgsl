@@ -547,20 +547,6 @@ fn virtual_cluster_vertex(
 }
 
 @vertex
-fn vs_virtual_cluster(
-  @location(0) position_voxels: vec3<f32>,
-  @location(1) material: u32,
-  @location(2) packed_normal: vec4<f32>,
-) -> VertexOut {
-  return virtual_cluster_vertex(
-    position_voxels,
-    material,
-    packed_normal,
-    vec4<u32>(0u),
-  );
-}
-
-@vertex
 fn vs_virtual_triangle_handle(
   @builtin(vertex_index) vertex_index: u32,
 ) -> VertexOut {

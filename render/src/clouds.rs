@@ -170,7 +170,7 @@ impl VolumetricCloudGpu {
             "volumetric cloud trace pipeline",
             &trace_pipeline_layout,
             &shader,
-            "vs_trace",
+            "vs_main",
             "fs_trace",
             CLOUD_FORMAT,
             None,
@@ -181,7 +181,7 @@ impl VolumetricCloudGpu {
             "volumetric cloud composite pipeline",
             &composite_pipeline_layout,
             &shader,
-            "vs_composite",
+            "vs_main",
             "fs_composite",
             scene_format,
             Some(BlendState {
