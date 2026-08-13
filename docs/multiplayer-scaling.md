@@ -140,10 +140,14 @@ The aimed screenshot contained 125 materially changed pixels in a 34-pixel-tall 
 
 ## Capacity and backpressure
 
-The checked-in service admits 512 world sockets plus 512 independently bounded presence sockets.
-The world request queue holds 8,192 jobs, exactly one negotiated 16-request window per admitted world
-connection. Each session can occupy at most two of the eight blocking generation workers. The world
-and presence sockets share one priority scheduler and one adaptive byte budget. Receiver-reported
+The checked-in development configuration admits up to 1,024 world connections and 1,024 presence
+players, with a 16,384-job world request queue: exactly one negotiated 16-request window per
+admitted world connection. It has eight blocking generation workers; each client can occupy two
+ordinary workers plus one separately bounded collision-critical worker. Production is deliberately
+smaller: 128 world connections, 128 presence players, a 2,048-job queue, two generation workers,
+one ordinary worker per client, and one collision-critical worker per client. Treat the versioned
+development and production config files as the authority when planning capacity. The world and
+presence sockets share one priority scheduler and one adaptive byte budget. Receiver-reported
 RTT unlocks bandwidth above the configured safe floor only while queued demand exists; excess RTT
 cuts the rate quickly and missing feedback returns it to the floor. Rate-aware VXWP fragmentation
 turns large world products into bounded scheduling units so critical traffic can preempt bulk
@@ -175,7 +179,7 @@ and per-region reservations are the next server-throughput step; they do not req
 Browsers still simulate movement locally, but the server admits poses through bounded receipt-time
 horizontal/vertical movement credit; a client discontinuity bit cannot authorize a jump. Edits also
 require a fresh same-connection pose and bounded reach. A WAN game still needs server-owned input and
-collision simulation plus authenticated identity.
+collision simulation plus account-level authorization and policy.
 
 Voxel edits and per-material inventories are native server authority: strict SQLite schema 14 is bound
 to the world/source manifest, sparse overrides are stored once in compact chunk blobs, and each
@@ -186,8 +190,10 @@ revisions prevent unrelated cache invalidation. The presence spatial index
 also acts as the inverse edit-interest subscription, so a player 1 km away receives zero commit bytes.
 Bounded per-client queues fail into an explicit full-product resync instead of silently dropping state.
 
-The remaining WAN trust boundary is authenticated ownership and world policy. The local token and
-claimed player ID do not prove ownership. Although the server accepts only typed dig/place actions
-and enforces fresh poses, bounded reach and movement, and material inventory, Internet deployment
-still needs authenticated accounts, permissions, protected regions, moderation/audit policy, and
-server-owned movement.
+Public deployment no longer trusts a claimed player ID: its listener requires an expiry-checked HMAC
+session token that binds one browser identity and player identity, minted by the same-origin
+Cloudflare Worker from a durable signed browser credential. Loopback development intentionally uses
+one unbound static token instead. These identities are not user accounts or a complete world policy.
+Although the server accepts only typed dig/place actions and enforces fresh poses, bounded reach and
+movement, and material inventory, Internet deployment still needs account ownership and recovery,
+permissions, protected regions, moderation/audit policy, and server-owned movement.
