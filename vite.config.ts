@@ -662,6 +662,10 @@ export default defineConfig(({ command, mode }) => ({
         cache: false,
       },
       "check:rust": { command: "node scripts/check-rust.ts", cache: false },
+      "check:wrangler-types": {
+        command: "node scripts/wrangler-local.mjs types --check",
+        cache: false,
+      },
       wrangler: {
         command: "node scripts/wrangler-local.mjs",
         cache: false,
@@ -676,7 +680,13 @@ export default defineConfig(({ command, mode }) => ({
         cache: false,
       },
       verify: {
-        command: ["vp check", "vp test", "vp run check:rust", "vp build"],
+        command: [
+          "vp check",
+          "vp test",
+          "vp run check:rust",
+          "vp run check:wrangler-types",
+          "vp build",
+        ],
         cache: false,
       },
     },
