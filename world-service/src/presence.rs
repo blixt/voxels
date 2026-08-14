@@ -104,7 +104,12 @@ pub(crate) struct PresenceAttachment {
     pub(crate) connection_id: u64,
     session_id: PresenceSessionId,
     player_id: PlayerId,
-    browser_user_id: BrowserUserId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PresenceAttachError {
+    InvalidOrAlreadyAttached,
+    IdentityMismatch,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -378,25 +383,41 @@ impl PresenceHub {
         })
     }
 
-    pub(crate) fn attach(
+    pub(crate) fn attach_authorized(
         self: &Arc<Self>,
         session_id: PresenceSessionId,
-    ) -> Option<PresenceAttachment> {
+        authorized_player: Option<(BrowserUserId, PlayerId)>,
+    ) -> Result<PresenceAttachment, PresenceAttachError> {
         let mut inner = self.lock();
-        let player_id = *inner.sessions.get(&session_id)?;
-        let player = inner.players.get_mut(&player_id)?;
+        let player_id = *inner
+            .sessions
+            .get(&session_id)
+            .ok_or(PresenceAttachError::InvalidOrAlreadyAttached)?;
+        let player = inner
+            .players
+            .get_mut(&player_id)
+            .ok_or(PresenceAttachError::InvalidOrAlreadyAttached)?;
         if player.session_id != session_id || player.presence_attached {
-            return None;
+            return Err(PresenceAttachError::InvalidOrAlreadyAttached);
+        }
+        if authorized_player.is_some_and(|(browser_user_id, authorized_player_id)| {
+            browser_user_id != player.browser_user_id || authorized_player_id != player_id
+        }) {
+            return Err(PresenceAttachError::IdentityMismatch);
         }
         player.presence_attached = true;
         player.discontinuity_on_next_accept = true;
-        Some(PresenceAttachment {
+        Ok(PresenceAttachment {
             hub: Arc::clone(self),
             connection_id: player.connection_id,
             session_id,
             player_id,
-            browser_user_id: player.browser_user_id,
         })
+    }
+
+    #[cfg(test)]
+    fn attach(self: &Arc<Self>, session_id: PresenceSessionId) -> Option<PresenceAttachment> {
+        self.attach_authorized(session_id, None).ok()
     }
 
     pub(crate) fn accept_pose(
@@ -831,16 +852,6 @@ impl Drop for PresenceAttachment {
     }
 }
 
-impl PresenceAttachment {
-    pub(crate) const fn browser_user_id(&self) -> BrowserUserId {
-        self.browser_user_id
-    }
-
-    pub(crate) const fn player_id(&self) -> PlayerId {
-        self.player_id
-    }
-}
-
 fn choose_color(
     player_id: PlayerId,
     players: &HashMap<PlayerId, PlayerSession>,
@@ -1051,6 +1062,60 @@ mod tests {
             PoseAdmission::Accepted
         );
         (claim, attachment)
+    }
+
+    #[test]
+    fn presence_attachment_validates_identity_before_mutating_player_state() {
+        let hub = security_hub(GameplayConfig::default());
+        let player_identity = identity(40);
+        let claim = hub
+            .join(&player_identity, resume(0.0, 1.62, 0.0))
+            .expect("join");
+        {
+            let mut inner = hub.lock();
+            inner
+                .players
+                .get_mut(&player_identity.player_id)
+                .expect("player")
+                .discontinuity_on_next_accept = false;
+        }
+        let wrong_identity = identity(41);
+
+        assert!(matches!(
+            hub.attach_authorized(
+                claim.session_id,
+                Some((wrong_identity.browser_user_id, wrong_identity.player_id)),
+            ),
+            Err(PresenceAttachError::IdentityMismatch)
+        ));
+        {
+            let inner = hub.lock();
+            let player = inner
+                .players
+                .get(&player_identity.player_id)
+                .expect("player");
+            assert!(!player.presence_attached);
+            assert!(!player.discontinuity_on_next_accept);
+            assert_eq!(player.cell, None);
+        }
+
+        let attachment = hub
+            .attach_authorized(
+                claim.session_id,
+                Some((player_identity.browser_user_id, player_identity.player_id)),
+            )
+            .expect("authorized attach");
+        assert_eq!(
+            hub.accept_pose(&attachment, pose(1, 0.0, 0.0)),
+            PoseAdmission::Accepted
+        );
+        let inner = hub.lock();
+        let player = inner
+            .players
+            .get(&player_identity.player_id)
+            .expect("player");
+        assert!(player.presence_attached);
+        assert!(player.cell.is_some());
     }
 
     #[test]

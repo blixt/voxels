@@ -5,7 +5,7 @@ use crate::{
     WorldServiceSourceError,
     edits::{ChunkEditSnapshot, EditAuthority, LoadedPlayer, ProtectedSpawn},
     generation_limiter::PriorityGenerationLimiter,
-    presence::{PoseAdmission, PresenceHub, PresenceStreamState},
+    presence::{PoseAdmission, PresenceAttachError, PresenceHub, PresenceStreamState},
     traffic::{ClientTrafficRegistry, ClientTrafficShaper, TrafficPriority},
     virtual_terrain::{PreparedTerrainRegion, VirtualTerrainAuthority, VirtualTerrainError},
 };
@@ -842,6 +842,16 @@ impl AuthorizedIdentity {
                 browser_user_id: expected_browser,
                 player_id: expected_player,
             } => expected_browser == browser_user_id && expected_player == player_id,
+        }
+    }
+
+    const fn bound_player(self) -> Option<(BrowserUserId, PlayerId)> {
+        match self {
+            Self::Unbound => None,
+            Self::Player {
+                browser_user_id,
+                player_id,
+            } => Some((browser_user_id, player_id)),
         }
     }
 }
@@ -2031,22 +2041,26 @@ async fn run_presence_session(
             return;
         }
     };
-    let Some(attachment) = state.presence.attach(open.session_id) else {
-        let _ = socket
-            .send(Message::Binary(
-                encode_error(0, "presence session is invalid or already attached").into(),
-            ))
-            .await;
-        return;
+    let attachment = match state
+        .presence
+        .attach_authorized(open.session_id, authorized_identity.bound_player())
+    {
+        Ok(attachment) => attachment,
+        Err(error) => {
+            let message = match error {
+                PresenceAttachError::InvalidOrAlreadyAttached => {
+                    "presence session is invalid or already attached"
+                }
+                PresenceAttachError::IdentityMismatch => {
+                    "session credential does not own the presence player"
+                }
+            };
+            let _ = socket
+                .send(Message::Binary(encode_error(0, message).into()))
+                .await;
+            return;
+        }
     };
-    if !authorized_identity.matches(attachment.browser_user_id(), attachment.player_id()) {
-        let _ = socket
-            .send(Message::Binary(
-                encode_error(0, "session credential does not own the presence player").into(),
-            ))
-            .await;
-        return;
-    }
     let Some(traffic) = state.traffic.get(attachment.connection_id) else {
         let _ = socket
             .send(Message::Binary(
