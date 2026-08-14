@@ -56,6 +56,18 @@ describe("typed engine client", () => {
     expect(snapshotValue(result, "pitch")).toBe(-0.1);
   });
 
+  it("bounds the automation contract handshake with the readiness timeout", async () => {
+    const page = {
+      waitForFunction: async () => {},
+      evaluate: async () => new Promise<never>(() => undefined),
+    } as unknown as Page;
+    const engine = new EngineClient(page);
+
+    await expect(engine.ready(5)).rejects.toThrow(
+      "engine automation contract did not respond within 5ms",
+    );
+  });
+
   it("reports named convergence failures", async () => {
     const latest = snapshot({ pendingJobs: 3 });
     const page = pageReturning([contract, latest]);

@@ -44,6 +44,7 @@ export class EngineClient {
   }
 
   async ready(timeoutMs = 30_000): Promise<EngineAutomationContract> {
+    const deadline = timeoutMs === 0 ? Number.POSITIVE_INFINITY : performance.now() + timeoutMs;
     await this.#page.waitForFunction(
       () =>
         typeof globalThis.__VOXELS__?.contract === "function" &&
@@ -51,7 +52,25 @@ export class EngineClient {
       undefined,
       { timeout: timeoutMs },
     );
-    const contract = await this.#page.evaluate(() => globalThis.__VOXELS__!.contract());
+    const remainingMs = deadline - performance.now();
+    if (remainingMs <= 0) {
+      throw new Error(`engine automation contract did not respond within ${timeoutMs}ms`);
+    }
+    const contractRequest = this.#page.evaluate(() => globalThis.__VOXELS__!.contract());
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const contract = await Promise.race([
+      contractRequest,
+      new Promise<never>((_resolve, reject) => {
+        if (!Number.isFinite(remainingMs)) return;
+        timeout = setTimeout(
+          () =>
+            reject(new Error(`engine automation contract did not respond within ${timeoutMs}ms`)),
+          remainingMs,
+        );
+      }),
+    ]).finally(() => {
+      if (timeout !== undefined) clearTimeout(timeout);
+    });
     assertAutomationContract(contract);
     this.#contract = contract;
     return contract;
