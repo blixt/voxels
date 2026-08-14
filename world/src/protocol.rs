@@ -900,6 +900,11 @@ pub fn encode_world_opened(opened: &WorldOpened) -> Result<Vec<u8>, ProtocolErro
     if opened.edit_session_id.is_nil() {
         return Err(ProtocolError::InvalidPayload("edit session id is nil"));
     }
+    if opened.spawn.water_level == Some(i32::MIN) {
+        return Err(ProtocolError::InvalidPayload(
+            "spawn water level uses the absent-value sentinel",
+        ));
+    }
     if ![
         opened.spawn.moisture,
         opened.spawn.temperature,
@@ -4295,6 +4300,33 @@ mod tests {
         assert_eq!(
             decode_world_opened(&encode_world_opened(&opened).expect("encode WorldOpened")),
             Ok(opened)
+        );
+    }
+
+    #[test]
+    fn world_opened_water_level_preserves_the_optional_wire_sentinel() {
+        let dry = world_opened_fixture();
+        assert_eq!(
+            decode_world_opened(&encode_world_opened(&dry).expect("encode dry spawn")),
+            Ok(dry)
+        );
+
+        let mut lowest_water = world_opened_fixture();
+        lowest_water.spawn.water_level = Some(i32::MIN + 1);
+        assert_eq!(
+            decode_world_opened(
+                &encode_world_opened(&lowest_water).expect("encode lowest water level")
+            ),
+            Ok(lowest_water)
+        );
+
+        let mut sentinel = world_opened_fixture();
+        sentinel.spawn.water_level = Some(i32::MIN);
+        assert_eq!(
+            encode_world_opened(&sentinel),
+            Err(ProtocolError::InvalidPayload(
+                "spawn water level uses the absent-value sentinel"
+            ))
         );
     }
 
