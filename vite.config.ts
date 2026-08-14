@@ -245,6 +245,13 @@ export class NativeRebuildQueue {
   }
 }
 
+export function observeBackgroundFailure(
+  operation: Promise<unknown>,
+  report: (error: unknown) => void,
+): void {
+  void operation.catch(report);
+}
+
 function rustWasm(profile: WasmBuildProfile): Plugin {
   const directories = RUST_SOURCE_DIRS.map((source) => path.resolve(source));
   const files = RUST_INPUT_FILES.map((source) => path.resolve(source));
@@ -559,13 +566,19 @@ function nativeWorldService(): Plugin {
         }
       };
 
+      const reportBackgroundFailure = (operation: Promise<unknown>, context: string): void => {
+        observeBackgroundFailure(operation, (error) => {
+          server.config.logger.error(`[voxels-world-service] ${context} failed: ${String(error)}`);
+        });
+      };
+
       function scheduleRebuild(reload: boolean, delayMs = 100): void {
         if (stopping) return;
         rebuilds.request(reload);
         if (rebuildTimer) clearTimeout(rebuildTimer);
         rebuildTimer = setTimeout(() => {
           rebuildTimer = undefined;
-          void drainRebuilds();
+          reportBackgroundFailure(drainRebuilds(), "background rebuild");
         }, delayMs);
       }
 
@@ -579,10 +592,14 @@ function nativeWorldService(): Plugin {
           });
       };
 
-      server.httpServer?.once("close", () => void stop());
+      server.httpServer?.once("close", () => {
+        reportBackgroundFailure(stop(), "shutdown after HTTP close");
+      });
       // A listen failure (most commonly EADDRINUSE) does not reliably emit `close`. The native
       // daemon has already started by this point, so tie it to the HTTP error as well.
-      server.httpServer?.once("error", () => void stop());
+      server.httpServer?.once("error", () => {
+        reportBackgroundFailure(stop(), "shutdown after HTTP error");
+      });
       process.once("SIGINT", handleSignal);
       process.once("SIGTERM", handleSignal);
       for (const input of nativeInputs) server.watcher.add(input);

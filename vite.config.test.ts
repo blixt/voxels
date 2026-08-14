@@ -10,6 +10,7 @@ import {
   assertWorldServicePortAvailable,
   isNativeWorldServiceInput,
   NativeRebuildQueue,
+  observeBackgroundFailure,
   pathBelongsTo,
   signalOwnedProcessGroup,
   terminateProcessTree,
@@ -82,6 +83,15 @@ describe("development server configuration", () => {
 });
 
 describe("Rust WASM development watcher", () => {
+  it("reports detached operation failures instead of leaving them unhandled", async () => {
+    let reported: unknown;
+    observeBackgroundFailure(Promise.reject(new Error("rebuild failed")), (error) => {
+      reported = error;
+    });
+    await Promise.resolve();
+    expect(reported).toEqual(new Error("rebuild failed"));
+  });
+
   it("rebuilds for changed, added, and removed Rust inputs", () => {
     const registrations = new Map<string, (file: string) => void>();
     const observed: string[] = [];
