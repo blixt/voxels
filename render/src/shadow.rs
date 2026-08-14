@@ -1,6 +1,6 @@
 //! Pure cascaded directional-shadow projection math.
 //!
-//! The light direction points from the light toward the scene. Each cascade encloses one camera
+//! The light direction points from the light toward the scene. Each cascade encloses one
 //! camera-centred receiver sphere in a square, texel-snapped orthographic projection. The sphere
 //! makes both projection and cascade selection invariant under camera rotation, so turning cannot
 //! move a directional light across the terrain. Only the receiver volume expands toward the light.
