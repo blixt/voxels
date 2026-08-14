@@ -535,6 +535,10 @@ pub trait WorldSourceEngine: Send + Sync {
             priority,
             requests: vec![WorldProductRequest::SurfaceSampleBlock(request)],
         })?;
+        if result.source_identity_hash != self.identity().identity_hash() || result.items.len() != 1
+        {
+            return Err(WorldSourceError::MalformedMacroBlock);
+        }
         let Some(item) = result.items.into_iter().next() else {
             return Err(WorldSourceError::MalformedMacroBlock);
         };
@@ -605,9 +609,14 @@ pub trait WorldSourceEngine: Send + Sync {
                         return Err(WorldSourceError::MalformedMacroBlock);
                     }
                     for (expected, item) in expected.into_iter().zip(result.items) {
+                        let WorldProductRequest::SurfaceSampleBlock(expected_request) = expected
+                        else {
+                            return Err(WorldSourceError::MalformedMacroBlock);
+                        };
                         match (item.request, item.result) {
                             (actual, Ok(WorldProduct::SurfaceSampleBlock(snapshot)))
                                 if actual == expected
+                                    && snapshot.request == expected_request
                                     && snapshot.source_identity_hash
                                         == self.identity().identity_hash()
                                     && snapshot.samples().len() == 1 =>
@@ -1664,6 +1673,7 @@ mod tests {
     struct BatchOnlySource {
         inner: ProceduralWorldSource,
         batch_calls: AtomicUsize,
+        corrupt: Option<fn(&mut WorldProductBatchResult)>,
     }
 
     impl BatchOnlySource {
@@ -1671,6 +1681,15 @@ mod tests {
             Self {
                 inner: ProceduralWorldSource::new(seed),
                 batch_calls: AtomicUsize::new(0),
+                corrupt: None,
+            }
+        }
+
+        fn corrupting(seed: u64, corrupt: fn(&mut WorldProductBatchResult)) -> Self {
+            Self {
+                inner: ProceduralWorldSource::new(seed),
+                batch_calls: AtomicUsize::new(0),
+                corrupt: Some(corrupt),
             }
         }
     }
@@ -1685,7 +1704,11 @@ mod tests {
             request: WorldProductBatch,
         ) -> Result<WorldProductBatchResult, WorldSourceError> {
             self.batch_calls.fetch_add(1, Ordering::Relaxed);
-            self.inner.generate_batch(request)
+            let mut result = self.inner.generate_batch(request)?;
+            if let Some(corrupt) = self.corrupt {
+                corrupt(&mut result);
+            }
+            Ok(result)
         }
 
         fn atmosphere_sample(&self, x: i32, z: i32) -> (AtmosphereSample, SurfaceRegion) {
@@ -1772,6 +1795,56 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(samples, expected);
         assert_eq!(source.batch_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn default_surface_helpers_reject_malformed_batch_identity_and_cardinality() {
+        fn replace_outer_identity(result: &mut WorldProductBatchResult) {
+            result.source_identity_hash = WorldSourceIdentityHash::from_bytes([0xff; 32]);
+        }
+        fn append_extra_item(result: &mut WorldProductBatchResult) {
+            if let Some(item) = result.items.first().cloned() {
+                result.items.push(item);
+            }
+        }
+        for corrupt in [
+            replace_outer_identity as fn(&mut WorldProductBatchResult),
+            append_extra_item,
+        ] {
+            let source = BatchOnlySource::corrupting(7, corrupt);
+            assert_eq!(
+                source.conservative_surface_height_bounds(
+                    WorldProductPriority::VirtualTerrain,
+                    [[-3, -5], [2, 4]],
+                ),
+                Err(WorldSourceError::MalformedMacroBlock)
+            );
+        }
+    }
+
+    #[test]
+    fn default_surface_lattice_rejects_a_mislabeled_snapshot() {
+        fn replace_snapshot_request(result: &mut WorldProductBatchResult) {
+            let Some(WorldProductBatchItem {
+                result: Ok(WorldProduct::SurfaceSampleBlock(snapshot)),
+                ..
+            }) = result.items.first_mut()
+            else {
+                return;
+            };
+            snapshot.request.origin[0] += 1;
+        }
+        let source = BatchOnlySource::corrupting(7, replace_snapshot_request);
+
+        assert_eq!(
+            source.surface_sample_lattice(
+                WorldProductPriority::VirtualTerrain,
+                [-19, -31],
+                [1, 1],
+                7,
+            ),
+            Err(WorldSourceError::MalformedMacroBlock)
+        );
     }
 
     #[test]
