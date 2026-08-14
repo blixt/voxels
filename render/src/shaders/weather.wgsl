@@ -106,13 +106,6 @@ fn vs_main(
     vertical_phase + vertical_cell * PRECIPITATION_HEIGHT_METRES,
     (absolute_cell.y + 0.10 + random_z * 0.80) * cell_size,
   );
-  // The visible cloud volume and precipitation use the same server-seeded footprint. Keeping this
-  // test after the cheap random activation avoids evaluating the three-octave field for inactive
-  // lanes, while guaranteeing that clear gaps never contain local rain.
-  let rain_cloud = atmosphere_cloud_envelope_world(world.xz);
-  if rain_cloud <= 0.08 {
-    return hidden_vertex();
-  }
   if snow == 1u {
     let flutter_phase = random_shape * 6.2831853 + server_time * mix(1.1, 2.4, random_x);
     let horizontal_offset = wind * age_seconds * 0.34
@@ -121,6 +114,13 @@ fn vs_main(
   } else {
     let horizontal_offset = wind * age_seconds * 0.52;
     world = world + vec3<f32>(horizontal_offset.x, 0.0, horizontal_offset.y);
+  }
+  // The visible cloud volume and precipitation use the same server-seeded final footprint. Keeping
+  // this test after cheap random activation avoids the three-octave field for inactive lanes; doing
+  // it after wind and snow flutter guarantees that clear gaps contain no displaced precipitation.
+  let rain_cloud = atmosphere_cloud_envelope_world(world.xz);
+  if rain_cloud <= 0.08 {
+    return hidden_vertex();
   }
 
   let radial_distance = length(world.xz - frame.camera_time.xz);

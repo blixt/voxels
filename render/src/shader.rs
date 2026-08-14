@@ -33,7 +33,7 @@ fn shader_from_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::Vec3;
+    use glam::{Vec2, Vec3};
 
     #[test]
     fn shared_frame_source_matches_the_host_uniform_order() {
@@ -421,6 +421,34 @@ mod tests {
         assert!(!weather.contains("world.xz ="));
         assert!(!weather.contains("position.xy / frame.viewport_voxel.xy"));
         assert!(!weather.contains("fn rain_layer("));
+        let module = wgpu::naga::front::wgsl::parse_str(&[FRAME_SOURCE, weather].join("\n"))
+            .expect("weather shader parses");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("weather shader validates");
+
+        let displacement = weather
+            .rfind("world = world + vec3<f32>(horizontal_offset.x, 0.0, horizontal_offset.y);")
+            .expect("rain and snow displace their world-space footprint");
+        let cloud_test = weather
+            .find("let rain_cloud = atmosphere_cloud_envelope_world(world.xz);")
+            .expect("precipitation samples the shared cloud footprint");
+        assert!(
+            displacement < cloud_test,
+            "cloud coverage must be sampled after wind moves the rendered particle"
+        );
+
+        let production_wind = Vec2::new(5.5, 1.6);
+        let slow_snow_age_seconds = 32.0 / 1.25;
+        let final_position = production_wind * slow_snow_age_seconds * 0.34;
+        let reference_cloud_envelope =
+            |position: Vec2| if position.length() < 10.0 { 0.8 } else { 0.0 };
+        assert!(reference_cloud_envelope(Vec2::ZERO) > 0.08);
+        assert!(reference_cloud_envelope(final_position) <= 0.08);
+        assert!(final_position.length() > 49.0);
     }
 
     #[test]
