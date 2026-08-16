@@ -3078,6 +3078,11 @@ fn validate_presence_players(players: &[PlayerPresenceState]) -> Result<(), Prot
 }
 
 fn validate_presence_delta(delta: &PresenceDelta) -> Result<(), ProtocolError> {
+    if usize::from(delta.visible_player_count) < delta.enters.len() + delta.updates.len() {
+        return Err(ProtocolError::InvalidPayload(
+            "presence delta contains more current records than visible players",
+        ));
+    }
     validate_presence_players(&delta.enters)?;
     let entered = delta
         .enters
@@ -4500,6 +4505,24 @@ mod tests {
         assert_eq!(
             decode_presence_delta(&encode_presence_delta(&delta).expect("encode presence delta")),
             Ok(delta.clone())
+        );
+        let mut contradictory = delta.clone();
+        contradictory.visible_player_count = 1;
+        assert_eq!(
+            encode_presence_delta(&contradictory),
+            Err(ProtocolError::InvalidPayload(
+                "presence delta contains more current records than visible players"
+            ))
+        );
+        let mut contradictory_wire =
+            encode_presence_delta(&delta).expect("encode valid presence delta");
+        contradictory_wire[FRAME_HEADER_BYTES + 16..FRAME_HEADER_BYTES + 18]
+            .copy_from_slice(&1_u16.to_le_bytes());
+        assert_eq!(
+            decode_presence_delta(&contradictory_wire),
+            Err(ProtocolError::InvalidPayload(
+                "presence delta contains more current records than visible players"
+            ))
         );
 
         let update_delta = PresenceDelta {
