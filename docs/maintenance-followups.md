@@ -39,7 +39,7 @@ and `MeshingHalo` from it. Before replacing the current path, require:
 Relevant code: `world/src/source.rs` (`chunk_with_halo`) and `world/src/generation.rs`
 (`generate_chunk`, `GeneratedRegion`).
 
-## Reserve memory before world response assembly
+## Bound world-response memory end to end
 
 `max_queued_outbound_bytes_per_client` is acquired in `GenerationFrameDelivery::send`, after a
 generation task has assembled and compressed its complete response. A slow client can therefore
@@ -51,9 +51,51 @@ bound.
 The response size is not exact until compression finishes, so choose an explicit ownership model
 before changing the scheduler: either reserve a conservative maximum before assembly and refund the
 difference, or add a process-wide assembly budget that transfers the exact retained-byte permit to
-the outbound frame. Then add an adversarial slow-reader test that fills every in-flight slot across
-multiple clients and proves peak retained response bytes remain bounded, cancellation releases every
-reservation, and collision-critical traffic cannot deadlock behind its own reservation.
+the outbound frame.
+
+Two adjacent queues need to share that ownership model. `FrameReassembler` allows 32 concurrent
+16 MiB transfers without an aggregate retained-byte cap, so a peer can make a client retain roughly
+512 MiB of partial frames. On the server, `write_frames` drains the bounded outbound channel into
+unbounded per-priority `VecDeque`s while traffic permits are pending. Generated products carry byte
+permits, but direct edit and control frames do not, so a slow socket can bypass both the outbound-byte
+limit and the documented edit subscriber queue capacity.
+
+Then add adversarial slow-reader tests that prove:
+
+- response assembly, fragmented-frame reassembly, and writer queues each have an aggregate byte
+  owner rather than only item-count bounds;
+- cancellation, malformed transfers, disconnect, and shutdown release every reservation;
+- the reserved priority headroom still lets collision-critical and control traffic preempt bulk
+  terrain without an unbounded side queue or head-of-line deadlock.
+
+## Make shutdown independent of client backpressure
+
+`run_session` polls the process-shutdown watch at the top of its loop, but several selected branches
+then await a bounded outbound-channel send. `write_frames` can simultaneously wait indefinitely on
+the network sink. Once a slow client fills the channel, the session stops polling shutdown, Axum's
+graceful shutdown waits for that session, and the SQLite checkpoint after `serve` may never run. The
+existing writer-abort timeout begins only after the session loop exits, so it does not bound this
+path.
+
+Make both queue admission and socket writes process-shutdown-aware, without weakening delivery
+ordering during normal operation. Add a deterministic stalled-sink test that fills the outbound
+channel, triggers shutdown, and proves the session cancels its generation work, unregisters
+presence/edit state, aborts the writer within its configured bound, reaches the checkpoint, and
+returns from `serve_until` before a short deadline.
+
+## Own automation setup processes before awaiting them
+
+`runScenario` races the scenario promise against its abort signal, but raw `execFileAsync` children
+are not part of that cancellation tree. `prepareWorldFixture` allocates a temporary world, awaits an
+unowned Cargo process, and only then registers cleanup. Storage benchmarks have the same pattern for
+build/native commands. If timeout or SIGINT arrives during setup, the child and descendants keep
+running, the temporary world can leak, and the detached scenario may later attempt to register
+cleanup after cleanup has already completed.
+
+Route long-running setup commands through the existing process-tree-owned runner and register each
+temporary path for cleanup immediately after allocation. Add a short-timeout fixture whose setup
+command spawns a descendant, then prove the descendant is gone, the temporary world is removed, and
+no late cleanup registration or unhandled rejection occurs.
 
 ## Recover active tabs after session-key rotation
 
