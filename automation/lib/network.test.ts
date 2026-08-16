@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vite-plus/test";
 import { PassThrough } from "node:stream";
 import { reserveEphemeralPort } from "./browser.ts";
@@ -128,14 +129,35 @@ describe("network benchmark link", () => {
   it("decodes world-product priority from the typed VXWP request payload", () => {
     const request = Buffer.alloc(25);
     request.write("VXWP");
-    request[24] = 1;
-    expect(testInternals.worldProductPriorityName(request)).toBe("collision_critical");
-    request[24] = 3;
-    expect(testInternals.worldProductPriorityName(request)).toBe("immediate_surface");
-    request[24] = 6;
-    expect(testInternals.worldProductPriorityName(request)).toBe("prefetch");
-    request[24] = 0;
-    expect(testInternals.worldProductPriorityName(request)).toBeNull();
+    for (const [value, name] of [
+      [1, "collision_critical"],
+      [2, "visible_chunk"],
+      [3, "prefetch"],
+      [4, "virtual_terrain"],
+    ] as const) {
+      request[24] = value;
+      expect(testInternals.worldProductPriorityName(request)).toBe(name);
+    }
+    for (const value of [0, 5, 6]) {
+      request[24] = value;
+      expect(testInternals.worldProductPriorityName(request)).toBeNull();
+    }
+  });
+
+  it("keeps benchmark priority names aligned with Rust wire discriminants", () => {
+    const source = readFileSync("world/src/source.rs", "utf8");
+    const declaration = /pub enum WorldProductPriority \{(?<body>[\s\S]*?)\n\}/u.exec(source)
+      ?.groups?.body;
+    if (declaration === undefined) throw new Error("could not read WorldProductPriority");
+    const variants = [...declaration.matchAll(/^\s*(\w+)\s*=\s*(\d+),/gmu)].map(
+      ([, variant, value]) => [variant, Number(value)] as const,
+    );
+    expect(variants).toEqual([
+      ["CollisionCritical", 1],
+      ["VisibleChunk", 2],
+      ["Prefetch", 3],
+      ["VirtualTerrain", 4],
+    ]);
   });
 
   it("measures ping to pong inside the proxy without client scheduling time", () => {

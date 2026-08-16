@@ -207,13 +207,9 @@ function worldProductPriorityName(payload: Buffer): string | null {
     case 2:
       return "visible_chunk";
     case 3:
-      return "immediate_surface";
-    case 4:
-      return "visible_surface";
-    case 5:
-      return "replacement_surface";
-    case 6:
       return "prefetch";
+    case 4:
+      return "virtual_terrain";
     default:
       return null;
   }
