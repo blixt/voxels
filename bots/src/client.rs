@@ -230,18 +230,16 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let text_server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
-            let mut websocket = accept_hdr_async(
-                socket,
-                |_request: &Request, mut response: Response| {
+            let mut websocket =
+                accept_hdr_async(socket, |_request: &Request, mut response: Response| {
                     response.headers_mut().insert(
                         SEC_WEBSOCKET_PROTOCOL,
                         HeaderValue::from_static("voxels.v1"),
                     );
                     Ok(response)
-                },
-            )
-            .await
-            .unwrap();
+                })
+                .await
+                .unwrap();
             websocket
                 .send(Message::Text("not VXWP".into()))
                 .await

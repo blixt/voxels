@@ -1414,8 +1414,8 @@ mod web {
         TerrainDemandGroup, TerrainHierarchyNode, TerrainPageDemand, TerrainPageKey,
         TerrainPageMemoryCache, TerrainPageTransferIdentity, TerrainStreamConfig,
         TerrainStreamScheduler, VOXEL_SIZE_METRES, VoxelCoord, WorldProductPriority,
-        WorldSourceIdentityHash, encode_terrain_page,
-        mesh_chunk_binary_with_scratch_and_surface, terrain_page_replacement_groups,
+        WorldSourceIdentityHash, encode_terrain_page, mesh_chunk_binary_with_scratch_and_surface,
+        terrain_page_replacement_groups,
     };
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
