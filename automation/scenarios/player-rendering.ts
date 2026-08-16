@@ -1047,20 +1047,24 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
       false,
     );
     recorder.setPhase("fresh-spectator-restore");
-    const freshRestoredBody = await recorder.guard(engine.setSpectator(false));
-    const freshSpectatorBodyRestoreErrorMetres = Math.hypot(
-      snapshotValue(freshRestoredBody, "cameraX") -
+    // Check the suspended body before resuming gameplay physics. Sampling the camera returned by
+    // setSpectator(false) races the first walking simulation step, so that snapshot can include
+    // unrelated post-transition motion even when spectator flight retained the exact saved body.
+    const freshSavedBody = await recorder.guard(engine.snapshot());
+    const freshSpectatorSavedBodyDriftMetres = Math.hypot(
+      snapshotValue(freshSavedBody, "gameplayBodyX") -
         snapshotValue(bodyBeforeFreshSpectator, "gameplayBodyX"),
-      snapshotValue(freshRestoredBody, "cameraY") -
+      snapshotValue(freshSavedBody, "gameplayBodyY") -
         snapshotValue(bodyBeforeFreshSpectator, "gameplayBodyY"),
-      snapshotValue(freshRestoredBody, "cameraZ") -
+      snapshotValue(freshSavedBody, "gameplayBodyZ") -
         snapshotValue(bodyBeforeFreshSpectator, "gameplayBodyZ"),
     );
-    if (freshSpectatorBodyRestoreErrorMetres > 0.001) {
+    if (freshSpectatorSavedBodyDriftMetres > 0.001) {
       throw new Error(
-        `fresh spectator flight restored the player body ${freshSpectatorBodyRestoreErrorMetres.toFixed(4)}m from its saved position`,
+        `fresh spectator flight moved the saved player body ${freshSpectatorSavedBodyDriftMetres.toFixed(4)}m`,
       );
     }
+    await recorder.guard(engine.setSpectator(false));
     await recorder.waitFor(
       (snapshot) =>
         snapshotValue(snapshot, "terrainReady") === 1 &&
@@ -1372,17 +1376,21 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
       true,
     );
     recorder.setPhase("spectator-restore");
-    const restoredBody = await recorder.guard(engine.setSpectator(false));
-    const bodyRestoreErrorMetres = Math.hypot(
-      snapshotValue(restoredBody, "cameraX") - snapshotValue(bodyBeforeSpectator, "gameplayBodyX"),
-      snapshotValue(restoredBody, "cameraY") - snapshotValue(bodyBeforeSpectator, "gameplayBodyY"),
-      snapshotValue(restoredBody, "cameraZ") - snapshotValue(bodyBeforeSpectator, "gameplayBodyZ"),
+    const savedBody = await recorder.guard(engine.snapshot());
+    const spectatorSavedBodyDriftMetres = Math.hypot(
+      snapshotValue(savedBody, "gameplayBodyX") -
+        snapshotValue(bodyBeforeSpectator, "gameplayBodyX"),
+      snapshotValue(savedBody, "gameplayBodyY") -
+        snapshotValue(bodyBeforeSpectator, "gameplayBodyY"),
+      snapshotValue(savedBody, "gameplayBodyZ") -
+        snapshotValue(bodyBeforeSpectator, "gameplayBodyZ"),
     );
-    if (bodyRestoreErrorMetres > 0.001) {
+    if (spectatorSavedBodyDriftMetres > 0.001) {
       throw new Error(
-        `leaving spectator restored the player body ${bodyRestoreErrorMetres.toFixed(4)}m from its saved position`,
+        `spectator flight moved the saved player body ${spectatorSavedBodyDriftMetres.toFixed(4)}m`,
       );
     }
+    await recorder.guard(engine.setSpectator(false));
     const restoredLook = await recorder.guard(engine.setCameraLook(Math.PI, -0.48));
     await recorder.waitUntilObserved(restoredLook);
     await recorder.waitFor(
@@ -1417,7 +1425,7 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
           freshSpectatorMotion.committedExactEpochTransitions,
         freshSpectatorEndpointExactPages: freshSpectatorEndpoint.exactPages,
         freshSpectatorEndpointCut: freshSpectatorEndpoint.cutFingerprint,
-        freshSpectatorBodyRestoreErrorMetres,
+        freshSpectatorSavedBodyDriftMetres,
         walkedMetres: travelMotion.distanceMetres,
         playerLongestNoProgressMs: travelMotion.longestNoProgressMs,
         playerLongestFrameWaitMs: travelMotion.longestFrameWaitMs,
@@ -1431,7 +1439,7 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
         spectatorLongestFrameWaitMs: spectatorMotion.longestFrameWaitMs,
         spectatorTravelFrames: spectatorMotion.frames,
         spectatorExactPages: spectator.exactPages,
-        spectatorBodyRestoreErrorMetres: bodyRestoreErrorMetres,
+        spectatorSavedBodyDriftMetres,
         postSpectatorStepMetres,
         postSpectatorJumpAscentMetres,
         pedestalStepMetres,
