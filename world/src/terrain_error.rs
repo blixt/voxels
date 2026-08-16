@@ -34,8 +34,8 @@ pub(crate) fn certify_bidirectional_surface_error(
     }
     let exact_triangles = cluster_triangles(exact, origin)?;
     let simplified_triangles = cluster_triangles(simplified, origin)?;
-    let exact_bvh = TriangleBvh::build(exact_triangles.clone())?;
-    let simplified_bvh = TriangleBvh::build(simplified_triangles.clone())?;
+    let exact_bvh = TriangleBvh::build(&exact_triangles)?;
+    let simplified_bvh = TriangleBvh::build(&simplified_triangles)?;
     let spacing = f64::from(sample_spacing_millivoxels) / 1_000.0;
     let maximum = f64::from(maximum_error_millivoxels) / 1_000.0;
 
@@ -68,7 +68,7 @@ struct DirectedSurfaceError {
 
 fn directed_surface_error(
     source: &[Triangle],
-    target: &TriangleBvh,
+    target: &TriangleBvh<'_>,
     spacing: f64,
     maximum: f64,
 ) -> Result<DirectedSurfaceError, TerrainPageBuildError> {
@@ -269,14 +269,14 @@ impl BvhNode {
 }
 
 #[derive(Clone, Debug)]
-struct TriangleBvh {
-    triangles: Vec<Triangle>,
+struct TriangleBvh<'a> {
+    triangles: &'a [Triangle],
     nodes: Vec<BvhNode>,
     root: usize,
 }
 
-impl TriangleBvh {
-    fn build(triangles: Vec<Triangle>) -> Result<Self, TerrainPageBuildError> {
+impl<'a> TriangleBvh<'a> {
+    fn build(triangles: &'a [Triangle]) -> Result<Self, TerrainPageBuildError> {
         if triangles.is_empty() {
             return Err(TerrainPageBuildError::InvalidSimplification);
         }
