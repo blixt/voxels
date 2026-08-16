@@ -7,6 +7,8 @@ const LOCAL_PLAYER: BrowserPlayerSession = {
   playerId: "00000000-0000-4000-8000-000000000002",
   playerName: "default",
 };
+const NOW_SECONDS = 1_800_000_000;
+const VALID_EXPIRY = NOW_SECONDS + 12 * 60 * 60;
 
 class MemoryStorage implements LocalPlayerStorage {
   readonly values = new Map<string, string>();
@@ -81,15 +83,16 @@ describe("public client authorization", () => {
           ...serverPlayer,
           authSubprotocolToken: "vxs1.signed-token",
           identityCredential: "vxi1.durable-credential",
-          expiresAt: 1_800_043_200,
+          expiresAt: VALID_EXPIRY,
         });
       },
+      NOW_SECONDS,
     );
 
     expect(requestBody).toEqual({ playerName: "default" });
     expect(result.player).toEqual(serverPlayer);
     expect(result.configToml).toContain('auth_subprotocol_token = "vxs1.signed-token"');
-    expect(result.sessionExpiresAt).toBe(1_800_043_200);
+    expect(result.sessionExpiresAt).toBe(VALID_EXPIRY);
     expect(storage.values.get("voxels.public-identity.v1.default")).toBe("vxi1.durable-credential");
   });
 
@@ -104,8 +107,9 @@ describe("public client authorization", () => {
           ...LOCAL_PLAYER,
           authSubprotocolToken: "vxs1.$&-signed",
           identityCredential: "vxi1.durable-credential",
-          expiresAt: 1_800_043_200,
+          expiresAt: VALID_EXPIRY,
         }),
+      NOW_SECONDS,
     );
 
     expect(result.configToml).toBe('auth_subprotocol_token = "vxs1.$&-signed" # deployment\n');
@@ -129,9 +133,10 @@ describe("public client authorization", () => {
           playerName: "default",
           authSubprotocolToken: "vxs1.reissued-token",
           identityCredential: "vxi1.reissued-credential",
-          expiresAt: 1_800_043_200,
+          expiresAt: VALID_EXPIRY,
         });
       },
+      NOW_SECONDS,
     );
 
     expect(requestBodies).toEqual([
@@ -174,11 +179,37 @@ describe("public client authorization", () => {
               ...identity,
               authSubprotocolToken: "vxs1.signed-token",
               identityCredential: "vxi1.durable-credential",
-              expiresAt: 1_800_043_200,
+              expiresAt: VALID_EXPIRY,
             }),
+          NOW_SECONDS,
         ),
       ).rejects.toThrow("session authorization returned invalid credentials");
       expect(storage.values.size).toBe(0);
+    }
+  });
+
+  it("rejects expiries that would reload immediately or outlive the server window", async () => {
+    for (const expiresAt of [
+      NOW_SECONDS - 1,
+      NOW_SECONDS + 5 * 60,
+      NOW_SECONDS + 13 * 60 * 60 + 1,
+    ]) {
+      await expect(
+        authorizeClientBootstrap(
+          'auth_subprotocol_token = "session:/api/session"\n',
+          LOCAL_PLAYER,
+          "https://voxels.lol/",
+          new MemoryStorage(),
+          async () =>
+            Response.json({
+              ...LOCAL_PLAYER,
+              authSubprotocolToken: "vxs1.signed-token",
+              identityCredential: "vxi1.durable-credential",
+              expiresAt,
+            }),
+          NOW_SECONDS,
+        ),
+      ).rejects.toThrow("session authorization returned invalid credentials");
     }
   });
 });

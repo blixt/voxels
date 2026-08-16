@@ -5,6 +5,8 @@ const AUTH_TOKEN_LINE = /^(auth_subprotocol_token\s*=\s*")([^"]+)("\s*(?:#.*)?)$
 const WEBSOCKET_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+export const SESSION_REFRESH_AHEAD_SECONDS = 5 * 60;
+const SESSION_MAX_FUTURE_SECONDS = 13 * 60 * 60;
 
 interface SessionResponse extends BrowserPlayerSession {
   authSubprotocolToken: string;
@@ -24,6 +26,7 @@ export async function authorizeClientBootstrap(
   baseUrl: string | URL = location.href,
   storage: LocalPlayerStorage = localStorage,
   fetchResponse: typeof fetch = fetch,
+  nowSeconds = Math.floor(Date.now() / 1_000),
 ): Promise<AuthorizedClientBootstrap> {
   const match = AUTH_TOKEN_LINE.exec(configToml);
   const configuredToken = match?.[2];
@@ -49,7 +52,7 @@ export async function authorizeClientBootstrap(
   if (!response.ok) {
     throw new Error(`session authorization failed (${response.status} ${response.statusText})`);
   }
-  const value = validateSessionResponse(await response.json(), localPlayer.playerName);
+  const value = validateSessionResponse(await response.json(), localPlayer.playerName, nowSeconds);
   try {
     storage.setItem(storageKey, value.identityCredential);
   } catch (error) {
@@ -85,7 +88,11 @@ async function requestSession(
   });
 }
 
-function validateSessionResponse(value: unknown, requestedPlayerName: string): SessionResponse {
+function validateSessionResponse(
+  value: unknown,
+  requestedPlayerName: string,
+  nowSeconds: number,
+): SessionResponse {
   if (!isRecord(value)) throw new Error("session authorization returned invalid JSON");
   const authSubprotocolToken = requiredString(value.authSubprotocolToken, "session token");
   const identityCredential = requiredString(value.identityCredential, "identity credential");
@@ -100,7 +107,9 @@ function validateSessionResponse(value: unknown, requestedPlayerName: string): S
     !isNonNilUuid(playerId) ||
     playerName !== requestedPlayerName ||
     typeof value.expiresAt !== "number" ||
-    !Number.isSafeInteger(value.expiresAt)
+    !Number.isSafeInteger(value.expiresAt) ||
+    value.expiresAt <= nowSeconds + SESSION_REFRESH_AHEAD_SECONDS ||
+    value.expiresAt > nowSeconds + SESSION_MAX_FUTURE_SECONDS
   ) {
     throw new Error("session authorization returned invalid credentials");
   }

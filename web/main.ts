@@ -1,5 +1,5 @@
 import "./style.css";
-import { authorizeClientBootstrap } from "./client-authorization.ts";
+import { authorizeClientBootstrap, SESSION_REFRESH_AHEAD_SECONDS } from "./client-authorization.ts";
 import { loadClientConfig } from "./client-config.ts";
 import { writeClipboardText } from "./clipboard.ts";
 import { downloadBlob } from "./download.ts";
@@ -127,7 +127,7 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     return;
   }
   if (sessionExpiresAt !== undefined) {
-    const refreshAheadMs = 5 * 60 * 1_000;
+    const refreshAheadMs = SESSION_REFRESH_AHEAD_SECONDS * 1_000;
     const refreshDelayMs = Math.max(0, sessionExpiresAt * 1_000 - Date.now() - refreshAheadMs);
     window.setTimeout(() => location.reload(), refreshDelayMs);
   }
