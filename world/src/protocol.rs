@@ -169,7 +169,9 @@ impl PlayerIdentity {
             return Err("player id is nil");
         }
         if !valid_player_name(&self.player_name) {
-            return Err("player name must be 1-32 lowercase ASCII letters, digits, '_' or '-'");
+            return Err(
+                "player name must start with a lowercase ASCII letter or digit and contain at most 32 lowercase ASCII letters, digits, '_' or '-'",
+            );
         }
         Ok(())
     }
@@ -3229,9 +3231,12 @@ fn validate_player_identity(identity: &PlayerIdentity) -> Result<(), ProtocolErr
 }
 
 fn valid_player_name(name: &str) -> bool {
-    !name.is_empty()
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
         && name.len() <= MAX_PLAYER_NAME_BYTES
-        && name.bytes().all(|byte| {
+        && bytes.all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
         })
 }
@@ -4205,6 +4210,14 @@ mod tests {
             decode_open_world(&encode_open_world(&open).expect("encode")),
             Ok(open.clone())
         );
+        let digit_leading = OpenWorld {
+            identity: player_identity(2, "7-player"),
+            ..open.clone()
+        };
+        assert_eq!(
+            decode_open_world(&encode_open_world(&digit_leading).expect("encode")),
+            Ok(digit_leading)
+        );
         assert_eq!(
             BrowserUserId::from_uuid_str("00112233-4455-6677-8899-aabbccddeeff")
                 .map(|id| id.to_string()),
@@ -4221,6 +4234,20 @@ mod tests {
         invalid.identity = player_identity(1, "Alice");
         assert!(matches!(
             encode_open_world(&invalid),
+            Err(ProtocolError::InvalidPayload(_))
+        ));
+        for player_name in ["_alice", "-alice"] {
+            invalid.identity = player_identity(1, player_name);
+            assert!(matches!(
+                encode_open_world(&invalid),
+                Err(ProtocolError::InvalidPayload(_))
+            ));
+        }
+        let mut invalid_wire = encode_open_world(&open).expect("encode valid identity");
+        let name_start = invalid_wire.len() - open.identity.player_name.len();
+        invalid_wire[name_start] = b'_';
+        assert!(matches!(
+            decode_open_world(&invalid_wire),
             Err(ProtocolError::InvalidPayload(_))
         ));
         invalid.identity = player_identity(1, "a-player_name-that-is-far-too-long");
