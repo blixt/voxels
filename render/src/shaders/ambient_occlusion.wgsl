@@ -46,17 +46,32 @@ fn reconstructed_normal(
   let top = load_position(pixel + vec2<i32>(0, -1), dimensions);
   let bottom = load_position(pixel + vec2<i32>(0, 1), dimensions);
   let center_depth = view_depth(center.xyz);
+  let maximum_pixel = vec2<i32>(dimensions) - vec2<i32>(1);
+  let use_right = pixel.x <= 0 || (
+    pixel.x < maximum_pixel.x
+      && abs(view_depth(right.xyz) - center_depth) < abs(view_depth(left.xyz) - center_depth)
+  );
+  let use_bottom = pixel.y <= 0 || (
+    pixel.y < maximum_pixel.y
+      && abs(view_depth(bottom.xyz) - center_depth) < abs(view_depth(top.xyz) - center_depth)
+  );
   let horizontal = select(
     left.xyz - center.xyz,
     right.xyz - center.xyz,
-    abs(view_depth(right.xyz) - center_depth) < abs(view_depth(left.xyz) - center_depth),
+    use_right,
   );
   let vertical = select(
     top.xyz - center.xyz,
     bottom.xyz - center.xyz,
-    abs(view_depth(bottom.xyz) - center_depth) < abs(view_depth(top.xyz) - center_depth),
+    use_bottom,
   );
-  var normal = normalize(cross(vertical, horizontal));
+  let surface_normal = cross(vertical, horizontal);
+  let surface_normal_length_squared = dot(surface_normal, surface_normal);
+  if surface_normal_length_squared <= 0.000000000001 {
+    let view_direction = frame.camera_time.xyz - center.xyz;
+    return view_direction * inverseSqrt(max(dot(view_direction, view_direction), 0.000000000001));
+  }
+  var normal = surface_normal * inverseSqrt(surface_normal_length_squared);
   if dot(normal, frame.camera_time.xyz - center.xyz) < 0.0 {
     normal = -normal;
   }

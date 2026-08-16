@@ -369,4 +369,33 @@ mod tests {
         let bytes = u64::from(half_extent(1_280)) * u64::from(half_extent(720)) * 8;
         assert_eq!(bytes, 1_843_200);
     }
+
+    #[test]
+    fn reconstructed_normals_use_real_neighbors_at_screen_boundaries() {
+        let shader = include_str!("shaders/ambient_occlusion.wgsl");
+        assert!(shader.contains("pixel.x <= 0 || ("));
+        assert!(shader.contains("pixel.x < maximum_pixel.x"));
+        assert!(shader.contains("pixel.y <= 0 || ("));
+        assert!(shader.contains("pixel.y < maximum_pixel.y"));
+        assert!(shader.contains("if surface_normal_length_squared <= 0.000000000001"));
+
+        let source = [include_str!("shaders/frame.wgsl"), shader].join("\n");
+        let parsed = wgpu::naga::front::wgsl::parse_str(&source);
+        assert!(
+            parsed.is_ok(),
+            "ambient occlusion shader must parse: {parsed:?}"
+        );
+        let Ok(module) = parsed else {
+            return;
+        };
+        let validation = wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::empty(),
+        )
+        .validate(&module);
+        assert!(
+            validation.is_ok(),
+            "ambient occlusion shader must validate: {validation:?}"
+        );
+    }
 }
