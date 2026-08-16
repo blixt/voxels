@@ -720,12 +720,31 @@ impl TerrainPageMemoryCache {
         Ok(identity)
     }
 
-    pub fn get_encoded(&mut self, identity: TerrainPageTransferIdentity) -> Option<Vec<u8>> {
-        let fingerprint = *self.by_identity.get(&identity)?;
-        let entry = self.entries.get_mut(&fingerprint)?;
-        self.clock = self.clock.wrapping_add(1);
-        entry.last_used = self.clock;
-        Some(entry.encoded.clone())
+    pub fn get_decoded_group(
+        &mut self,
+        identities: &[TerrainPageTransferIdentity],
+        maximum_encoded_bytes: usize,
+    ) -> Option<(Vec<TerrainPageV1>, usize)> {
+        let mut encoded_bytes = 0usize;
+        for identity in identities {
+            let fingerprint = *self.by_identity.get(identity)?;
+            let entry = self.entries.get_mut(&fingerprint)?;
+            self.clock = self.clock.wrapping_add(1);
+            entry.last_used = self.clock;
+            encoded_bytes = encoded_bytes.checked_add(entry.encoded.len())?;
+        }
+        if encoded_bytes > maximum_encoded_bytes {
+            return None;
+        }
+        let pages = identities
+            .iter()
+            .map(|identity| {
+                let fingerprint = *self.by_identity.get(identity)?;
+                let entry = self.entries.get(&fingerprint)?;
+                decode_terrain_page(&entry.encoded, self.source_identity_hash).ok()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some((pages, encoded_bytes))
     }
 
     pub fn contains(&self, identity: TerrainPageTransferIdentity) -> bool {
@@ -1322,8 +1341,44 @@ mod tests {
         cache.insert(first.1.clone(), true).unwrap();
         cache.insert(second.1.clone(), false).unwrap();
         cache.insert(third.1.clone(), false).unwrap();
-        assert!(cache.get_encoded(first.0).is_some());
-        assert!(cache.get_encoded(second.0).is_none());
-        assert!(cache.get_encoded(third.0).is_some());
+        assert!(cache.get_decoded_group(&[first.0], usize::MAX).is_some());
+        assert!(cache.get_decoded_group(&[second.0], usize::MAX).is_none());
+        assert!(cache.get_decoded_group(&[third.0], usize::MAX).is_some());
+    }
+
+    #[test]
+    fn cache_decodes_atomic_groups_within_the_encoded_byte_budget() {
+        let first = page(
+            TerrainPageKey {
+                level: 0,
+                coord: [0, 0, 0],
+            },
+            1,
+        );
+        let second = page(
+            TerrainPageKey {
+                level: 0,
+                coord: [1, 0, 0],
+            },
+            1,
+        );
+        let encoded_bytes = first.1.len() + second.1.len();
+        let mut cache = TerrainPageMemoryCache::new(source(), encoded_bytes).unwrap();
+        cache.insert(first.1, false).unwrap();
+        cache.insert(second.1, false).unwrap();
+
+        assert!(
+            cache
+                .get_decoded_group(&[first.0, second.0], encoded_bytes - 1)
+                .is_none()
+        );
+        let (pages, measured_bytes) = cache
+            .get_decoded_group(&[first.0, second.0], encoded_bytes)
+            .unwrap();
+        assert_eq!(measured_bytes, encoded_bytes);
+        assert_eq!(
+            pages.iter().map(page_identity).collect::<Vec<_>>(),
+            vec![first.0, second.0]
+        );
     }
 }

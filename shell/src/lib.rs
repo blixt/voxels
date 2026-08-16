@@ -1414,7 +1414,7 @@ mod web {
         TerrainDemandGroup, TerrainHierarchyNode, TerrainPageDemand, TerrainPageKey,
         TerrainPageMemoryCache, TerrainPageTransferIdentity, TerrainStreamConfig,
         TerrainStreamScheduler, VOXEL_SIZE_METRES, VoxelCoord, WorldProductPriority,
-        WorldSourceIdentityHash, decode_terrain_page, encode_terrain_page,
+        WorldSourceIdentityHash, encode_terrain_page,
         mesh_chunk_binary_with_scratch_and_surface, terrain_page_replacement_groups,
     };
     use wasm_bindgen::JsCast;
@@ -5094,32 +5094,17 @@ mod web {
                     {
                         continue;
                     }
-                    let encoded = identities
-                        .iter()
-                        .map(|identity| {
-                            self.virtual_terrain_cache
-                                .borrow_mut()
-                                .get_encoded(*identity)
-                        })
-                        .collect::<Option<Vec<_>>>();
-                    let Some(encoded) = encoded else {
+                    let decoded = self
+                        .virtual_terrain_cache
+                        .borrow_mut()
+                        .get_decoded_group(&identities, remaining_bytes);
+                    let Some((pages, encoded_bytes)) = decoded else {
                         continue;
                     };
-                    let encoded_bytes = encoded.iter().map(Vec::len).sum::<usize>();
-                    if encoded_bytes > remaining_bytes {
-                        continue;
-                    }
-                    ready = Some((group.replacement_parent, identities, encoded, encoded_bytes));
+                    ready = Some((group.replacement_parent, identities, pages, encoded_bytes));
                     break;
                 }
-                let Some((parent, identities, encoded, encoded_bytes)) = ready else {
-                    break;
-                };
-                let pages = encoded
-                    .iter()
-                    .map(|encoded| decode_terrain_page(encoded, self.source_identity_hash()).ok())
-                    .collect::<Option<Vec<_>>>();
-                let Some(pages) = pages else {
+                let Some((parent, identities, pages, encoded_bytes)) = ready else {
                     break;
                 };
                 let result = if let Some(parent) = parent {
