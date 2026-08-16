@@ -199,8 +199,23 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_hdr_async;
-    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+    use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
     use voxels_world::protocol::{BrowserUserId, PlayerId};
+
+    #[allow(
+        clippy::result_large_err,
+        reason = "Tungstenite fixes this callback's rejection type to a full HTTP response"
+    )]
+    fn select_test_subprotocol(
+        _request: &Request,
+        mut response: Response,
+    ) -> std::result::Result<Response, ErrorResponse> {
+        response.headers_mut().insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("voxels.v1"),
+        );
+        Ok(response)
+    }
 
     #[test]
     fn websocket_data_messages_are_binary_only() {
@@ -230,14 +245,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let text_server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
-            let mut websocket =
-                accept_hdr_async(socket, |_request: &Request, mut response: Response| {
-                    response.headers_mut().insert(
-                        SEC_WEBSOCKET_PROTOCOL,
-                        HeaderValue::from_static("voxels.v1"),
-                    );
-                    Ok(response)
-                })
+            let mut websocket = accept_hdr_async(socket, select_test_subprotocol)
                 .await
                 .unwrap();
             websocket
