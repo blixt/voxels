@@ -54,19 +54,6 @@ fn vs_main(
   return out;
 }
 
-fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
-  let low = srgb / 12.92;
-  let high = pow((srgb + 0.055) / 1.055, vec3<f32>(2.4));
-  return select(high, low, srgb <= vec3<f32>(0.04045));
-}
-
-fn environment_radiance(direction: vec3<f32>) -> vec3<f32> {
-  let sky_height = pow(clamp(direction.y * 0.5 + 0.5, 0.0, 1.0), 0.58);
-  var radiance = mix(frame.ground_atmosphere.rgb, frame.sky_zenith.rgb, sky_height);
-  radiance = mix(radiance, frame.sky_horizon.rgb, exp(-abs(direction.y) * 5.5) * 0.46);
-  return radiance;
-}
-
 fn cascade_shadow(world: vec3<f32>, normal: vec3<f32>, cascade: u32) -> f32 {
   let normal_offset = normal * (frame.viewport_voxel.z * 0.22 + frame.shadow_texel_sizes[cascade] * 0.6);
   let clip = frame.shadow_view_projection[cascade] * vec4<f32>(world + normal_offset, 1.0);

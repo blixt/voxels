@@ -108,6 +108,29 @@ mod tests {
     }
 
     #[test]
+    fn shared_pbr_helpers_validate_in_every_composed_shader() {
+        for required in ["fn srgb_to_linear(", "fn environment_radiance("] {
+            assert_eq!(PBR_SOURCE.matches(required).count(), 1);
+            assert!(!include_str!("shaders/voxels.wgsl").contains(required));
+            assert!(!include_str!("shaders/avatar.wgsl").contains(required));
+        }
+        for shader in [
+            include_str!("shaders/voxels.wgsl"),
+            include_str!("shaders/avatar.wgsl"),
+        ] {
+            let source = [FRAME_SOURCE, PBR_SOURCE, shader].join("\n");
+            let module = wgpu::naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|error| panic!("composed PBR shader failed to parse: {error}"));
+            wgpu::naga::valid::Validator::new(
+                wgpu::naga::valid::ValidationFlags::all(),
+                wgpu::naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("composed PBR shader failed to validate: {error}"));
+        }
+    }
+
+    #[test]
     fn rain_uses_one_cloud_sample_to_create_a_physical_water_film() {
         let voxels = include_str!("shaders/voxels.wgsl");
         assert!(voxels.contains("fn cloud_surface_weather("));

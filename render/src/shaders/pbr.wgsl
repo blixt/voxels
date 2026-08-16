@@ -2,6 +2,19 @@ const PI: f32 = 3.14159265359;
 const DIELECTRIC_F0: vec3<f32> = vec3<f32>(0.04);
 const MIN_PERCEPTUAL_ROUGHNESS: f32 = 0.089;
 
+fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
+  let low = srgb / 12.92;
+  let high = pow((srgb + 0.055) / 1.055, vec3<f32>(2.4));
+  return select(high, low, srgb <= vec3<f32>(0.04045));
+}
+
+fn environment_radiance(direction: vec3<f32>) -> vec3<f32> {
+  let sky_height = pow(clamp(direction.y * 0.5 + 0.5, 0.0, 1.0), 0.58);
+  var radiance = mix(frame.ground_atmosphere.rgb, frame.sky_zenith.rgb, sky_height);
+  radiance = mix(radiance, frame.sky_horizon.rgb, exp(-abs(direction.y) * 5.5) * 0.46);
+  return radiance;
+}
+
 fn pow5(value: f32) -> f32 {
   let squared = value * value;
   return squared * squared * value;

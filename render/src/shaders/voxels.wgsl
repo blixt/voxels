@@ -606,12 +606,6 @@ fn vs_main_fixed_diagnostic(
   );
 }
 
-fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
-  let low = srgb / 12.92;
-  let high = pow((srgb + 0.055) / 1.055, vec3<f32>(2.4));
-  return select(high, low, srgb <= vec3<f32>(0.04045));
-}
-
 struct SurfaceBasis {
   uv: vec2<f32>,
   tangent: vec3<f32>,
@@ -947,13 +941,6 @@ fn water_wave_normal(world: vec3<f32>, water_depth: f32) -> vec3<f32> {
   // bank instead of intersecting it.
   slope *= smoothstep(0.08, 1.15, water_depth);
   return normalize(vec3<f32>(-slope.x, 1.0, -slope.y));
-}
-
-fn environment_radiance(direction: vec3<f32>) -> vec3<f32> {
-  let sky_height = pow(clamp(direction.y * 0.5 + 0.5, 0.0, 1.0), 0.58);
-  var radiance = mix(frame.ground_atmosphere.rgb, frame.sky_zenith.rgb, sky_height);
-  radiance = mix(radiance, frame.sky_horizon.rgb, exp(-abs(direction.y) * 5.5) * 0.46);
-  return radiance;
 }
 
 fn reflected_environment(direction: vec3<f32>) -> vec3<f32> {
