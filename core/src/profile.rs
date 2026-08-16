@@ -23,10 +23,6 @@ impl ProfileConfig {
     fn total_seconds(self) -> f32 {
         self.warmup_seconds + self.measure_seconds
     }
-
-    fn loop_metres(self) -> f32 {
-        self.speed_metres_per_second * self.warmup_seconds
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -182,7 +178,7 @@ impl ProfileAutomation {
         // Warm the exact route measured by the allocator gate. The configured warmup completes one
         // lap and discovers its geometry; measurement then revisits the same canonical/LOD working
         // set so allocator growth can be distinguished from page reuse.
-        let loop_metres = self.config.loop_metres();
+        let loop_metres = self.speed_metres_per_second() * self.config.warmup_seconds;
         let radius = loop_metres / std::f32::consts::TAU;
         let angle = (self.distance_metres() % loop_metres) / radius;
         let offset = Vec2::new(radius * angle.sin(), radius * (1.0 - angle.cos()));
@@ -327,5 +323,27 @@ mod tests {
                 .velocity_xz,
             Vec2::new(0.0, -7.0)
         );
+    }
+
+    #[test]
+    fn loop_speed_override_still_warms_exactly_one_lap() {
+        let config = ProfileConfig {
+            fixed_step_seconds: 0.25,
+            speed_metres_per_second: 12.0,
+            warmup_seconds: 2.0,
+            measure_seconds: 4.0,
+        };
+        let origin = Vec3::new(2.0, 3.0, -4.0);
+        let mut profile = ProfileAutomation::with_config(config);
+        profile.start_route_at_speed(origin, ProfileRoute::Loop, Some(6.0));
+        for _ in 0..8 {
+            profile.advance_fixed_step();
+        }
+
+        assert_eq!(profile.phase(), ProfilePhase::Measured);
+        assert!((profile.distance_metres() - 12.0).abs() < 0.01);
+        let pose = profile.pose().expect("measured lap has a pose");
+        assert!((pose.position_xz - Vec2::new(origin.x, origin.z)).length() < 0.001);
+        assert_eq!(pose.velocity_xz, Vec2::new(6.0, 0.0));
     }
 }
