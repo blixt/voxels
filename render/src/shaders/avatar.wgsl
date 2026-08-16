@@ -2,6 +2,9 @@
 @group(0) @binding(1) var shadow_map: texture_depth_2d_array;
 @group(0) @binding(2) var shadow_sampler: sampler_comparison;
 
+const SHADOW_VOXEL_NORMAL_BIAS: f32 = 0.22;
+const SHADOW_TEXEL_NORMAL_BIAS: f32 = 0.60;
+
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
   @location(0) world: vec3<f32>,
@@ -52,57 +55,6 @@ fn vs_main(
   out.normal = normal;
   out.color = color;
   return out;
-}
-
-fn cascade_shadow(world: vec3<f32>, normal: vec3<f32>, cascade: u32) -> f32 {
-  let normal_offset = normal * (frame.viewport_voxel.z * 0.22 + frame.shadow_texel_sizes[cascade] * 0.6);
-  let clip = frame.shadow_view_projection[cascade] * vec4<f32>(world + normal_offset, 1.0);
-  let projected = clip.xyz / clip.w;
-  let uv = projected.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
-  if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || projected.z <= 0.0 || projected.z >= 1.0 {
-    return 1.0;
-  }
-  let depth_ref = projected.z - 0.00035;
-  // WebGPU requires every comparison-sampler offset to be a shader-creation-time constant.
-  // Spell out the compact 3x3 PCF kernel so Chrome, Metal, and native wgpu validate identically.
-  var visibility = textureSampleCompareLevel(
-    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(-1, -1),
-  );
-  visibility += textureSampleCompareLevel(
-    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(0, -1),
-  );
-  visibility += textureSampleCompareLevel(
-    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(1, -1),
-  );
-  visibility += textureSampleCompareLevel(
-    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(-1, 0),
-  );
-  visibility += textureSampleCompareLevel(
-    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(0, 0),
-  );
-  visibility += textureSampleCompareLevel(
-    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(1, 0),
-  );
-  visibility += textureSampleCompareLevel(
-    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(-1, 1),
-  );
-  visibility += textureSampleCompareLevel(
-    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(0, 1),
-  );
-  visibility += textureSampleCompareLevel(
-    shadow_map, shadow_sampler, uv, i32(cascade), depth_ref, vec2<i32>(1, 1),
-  );
-  return visibility / 9.0;
-}
-
-fn sun_visibility(world: vec3<f32>, normal: vec3<f32>) -> f32 {
-  if frame.shadow_splits.w < 0.5 { return 1.0; }
-  let view_depth = distance(world, frame.camera_time.xyz);
-  var cascade = 0u;
-  if view_depth > frame.shadow_splits.x { cascade = 1u; }
-  if view_depth > frame.shadow_splits.y { cascade = 2u; }
-  if view_depth > frame.shadow_splits.z { return 1.0; }
-  return cascade_shadow(world, normal, cascade);
 }
 
 @fragment

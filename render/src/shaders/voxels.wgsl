@@ -23,6 +23,9 @@ struct LocalLightUniform {
 @group(3) @binding(1) var<storage, read> virtual_geometry_segment_0: array<u32>;
 @group(3) @binding(2) var<storage, read> virtual_geometry_segment_1: array<u32>;
 
+const SHADOW_VOXEL_NORMAL_BIAS: f32 = 0.24;
+const SHADOW_TEXEL_NORMAL_BIAS: f32 = 0.65;
+
 override MATERIAL_DETAIL: u32 = 1u;
 
 struct VertexOut {
@@ -832,52 +835,6 @@ fn cloud_surface_weather(world: vec3<f32>) -> vec2<f32> {
   );
   let local_precipitation = liquid_precipitation() * smoothstep(0.08, 0.42, cloud);
   return vec2<f32>(sun_visibility, local_precipitation);
-}
-
-fn cascade_shadow(world: vec3<f32>, normal: vec3<f32>, cascade: u32) -> f32 {
-  let texel_world_size = frame.shadow_texel_sizes[cascade];
-  let normal_offset = normal * (frame.viewport_voxel.z * 0.24 + texel_world_size * 0.65);
-  let clip = frame.shadow_view_projection[cascade] * vec4<f32>(world + normal_offset, 1.0);
-  let projected = clip.xyz / clip.w;
-  let uv = projected.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
-  if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || projected.z <= 0.0 || projected.z >= 1.0 {
-    return 1.0;
-  }
-  let layer = i32(cascade);
-  let depth_ref = projected.z - 0.00035;
-  var visibility = 0.0;
-  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>(-1, -1));
-  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 0, -1));
-  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 1, -1));
-  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>(-1,  0));
-  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 0,  0));
-  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 1,  0));
-  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>(-1,  1));
-  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 0,  1));
-  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 1,  1));
-  return visibility / 9.0;
-}
-
-fn sun_visibility(world: vec3<f32>, normal: vec3<f32>) -> f32 {
-  if frame.shadow_splits.w < 0.5 {
-    return 1.0;
-  }
-  let view_depth = distance(world, frame.camera_time.xyz);
-  var cascade = 0u;
-  if view_depth > frame.shadow_splits.x { cascade = 1u; }
-  if view_depth > frame.shadow_splits.y { cascade = 2u; }
-  if view_depth > frame.shadow_splits.z { return 1.0; }
-  let visibility = cascade_shadow(world, normal, cascade);
-  if cascade >= 2u {
-    return visibility;
-  }
-  var near_split = 0.0;
-  if cascade > 0u {
-    near_split = frame.shadow_splits[cascade - 1u];
-  }
-  let far_split = frame.shadow_splits[cascade];
-  let blend = smoothstep(mix(near_split, far_split, 0.88), far_split, view_depth);
-  return mix(visibility, cascade_shadow(world, normal, cascade + 1u), blend);
 }
 
 fn scene_sample(uv: vec2<f32>) -> vec4<f32> {

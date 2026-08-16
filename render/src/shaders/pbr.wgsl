@@ -15,6 +15,56 @@ fn environment_radiance(direction: vec3<f32>) -> vec3<f32> {
   return radiance;
 }
 
+fn cascade_shadow(world: vec3<f32>, normal: vec3<f32>, cascade: u32) -> f32 {
+  let texel_world_size = frame.shadow_texel_sizes[cascade];
+  let normal_offset = normal
+    * (frame.viewport_voxel.z * SHADOW_VOXEL_NORMAL_BIAS
+      + texel_world_size * SHADOW_TEXEL_NORMAL_BIAS);
+  let clip = frame.shadow_view_projection[cascade] * vec4<f32>(world + normal_offset, 1.0);
+  let projected = clip.xyz / clip.w;
+  let uv = projected.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+  if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || projected.z <= 0.0 || projected.z >= 1.0 {
+    return 1.0;
+  }
+  let layer = i32(cascade);
+  let depth_ref = projected.z - 0.00035;
+  // WebGPU requires every comparison-sampler offset to be a shader-creation-time constant.
+  // Spell out the compact 3x3 PCF kernel so Chrome, Metal, and native wgpu validate identically.
+  var visibility = 0.0;
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>(-1, -1));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 0, -1));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 1, -1));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>(-1,  0));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 0,  0));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 1,  0));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>(-1,  1));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 0,  1));
+  visibility += textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth_ref, vec2<i32>( 1,  1));
+  return visibility / 9.0;
+}
+
+fn sun_visibility(world: vec3<f32>, normal: vec3<f32>) -> f32 {
+  if frame.shadow_splits.w < 0.5 {
+    return 1.0;
+  }
+  let view_depth = distance(world, frame.camera_time.xyz);
+  var cascade = 0u;
+  if view_depth > frame.shadow_splits.x { cascade = 1u; }
+  if view_depth > frame.shadow_splits.y { cascade = 2u; }
+  if view_depth > frame.shadow_splits.z { return 1.0; }
+  let visibility = cascade_shadow(world, normal, cascade);
+  if cascade >= 2u {
+    return visibility;
+  }
+  var near_split = 0.0;
+  if cascade > 0u {
+    near_split = frame.shadow_splits[cascade - 1u];
+  }
+  let far_split = frame.shadow_splits[cascade];
+  let blend = smoothstep(mix(near_split, far_split, 0.88), far_split, view_depth);
+  return mix(visibility, cascade_shadow(world, normal, cascade + 1u), blend);
+}
+
 fn pow5(value: f32) -> f32 {
   let squared = value * value;
   return squared * squared * value;

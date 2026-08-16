@@ -109,11 +109,17 @@ mod tests {
 
     #[test]
     fn shared_pbr_helpers_validate_in_every_composed_shader() {
-        for required in ["fn srgb_to_linear(", "fn environment_radiance("] {
+        for required in [
+            "fn srgb_to_linear(",
+            "fn environment_radiance(",
+            "fn cascade_shadow(",
+            "fn sun_visibility(",
+        ] {
             assert_eq!(PBR_SOURCE.matches(required).count(), 1);
             assert!(!include_str!("shaders/voxels.wgsl").contains(required));
             assert!(!include_str!("shaders/avatar.wgsl").contains(required));
         }
+        assert!(PBR_SOURCE.contains("let blend = smoothstep("));
         for shader in [
             include_str!("shaders/voxels.wgsl"),
             include_str!("shaders/avatar.wgsl"),
