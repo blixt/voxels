@@ -303,7 +303,7 @@ impl<'a> TriangleBvh<'a> {
             });
             return node;
         }
-        let axis = Aabb::longest_centroid_axis(&self.triangles, indices);
+        let axis = Aabb::longest_centroid_axis(self.triangles, indices);
         indices.sort_unstable_by(|left, right| {
             self.triangles[*left].centroid[axis]
                 .total_cmp(&self.triangles[*right].centroid[axis])
