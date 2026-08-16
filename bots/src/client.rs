@@ -92,7 +92,7 @@ async fn connect_bot_inner(
     })?;
     traffic.sent(&open_world)?;
     world.send(Message::Binary(open_world.into())).await?;
-    let opened_bytes = next_binary(&mut world).await?;
+    let opened_bytes = next_binary(&mut world, "world server").await?;
     traffic.received(&opened_bytes)?;
     let opened = decode_world_opened(&opened_bytes)?;
     opened
@@ -117,7 +117,7 @@ async fn connect_bot_inner(
     })?;
     traffic.sent(&open_presence)?;
     presence.send(Message::Binary(open_presence.into())).await?;
-    let presence_opened_bytes = next_binary(&mut presence).await?;
+    let presence_opened_bytes = next_binary(&mut presence, "presence server").await?;
     traffic.received(&presence_opened_bytes)?;
     let presence_opened = decode_presence_opened(&presence_opened_bytes)?;
     if presence_opened.connection_id != opened.connection_id {
@@ -161,14 +161,34 @@ async fn connect_socket(
     Ok(socket)
 }
 
-async fn next_binary(socket: &mut BotSocket) -> Result<Vec<u8>> {
+pub(crate) enum BotSocketMessage<'a> {
+    Binary(&'a [u8]),
+    Close(String),
+    Control,
+}
+
+pub(crate) fn classify_bot_socket_message<'a>(
+    message: &'a Message,
+    peer: &str,
+) -> Result<BotSocketMessage<'a>> {
+    match message {
+        Message::Binary(bytes) => Ok(BotSocketMessage::Binary(bytes)),
+        Message::Close(frame) => Ok(BotSocketMessage::Close(format!("{frame:?}"))),
+        Message::Ping(_) | Message::Pong(_) => Ok(BotSocketMessage::Control),
+        Message::Text(_) => bail!("{peer} sent text data; VXWP is binary-only"),
+        Message::Frame(_) => bail!("{peer} delivered an unexpected raw WebSocket frame"),
+    }
+}
+
+async fn next_binary(socket: &mut BotSocket, peer: &str) -> Result<Vec<u8>> {
     while let Some(message) = socket.next().await {
-        match message? {
-            Message::Binary(bytes) => return Ok(bytes.to_vec()),
-            Message::Close(frame) => {
-                bail!("server closed during handshake: {frame:?}");
+        let message = message?;
+        match classify_bot_socket_message(&message, peer)? {
+            BotSocketMessage::Binary(bytes) => return Ok(bytes.to_vec()),
+            BotSocketMessage::Close(frame) => {
+                bail!("server closed during handshake: {frame}");
             }
-            _ => {}
+            BotSocketMessage::Control => {}
         }
     }
     bail!("server ended WebSocket during handshake")
@@ -178,7 +198,79 @@ async fn next_binary(socket: &mut BotSocket) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_hdr_async;
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
     use voxels_world::protocol::{BrowserUserId, PlayerId};
+
+    #[test]
+    fn websocket_data_messages_are_binary_only() {
+        let text = Message::Text("not VXWP".into());
+        let error = match classify_bot_socket_message(&text, "world server") {
+            Err(error) => error,
+            Ok(_) => panic!("text data must be rejected"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "world server sent text data; VXWP is binary-only"
+        );
+
+        assert!(matches!(
+            classify_bot_socket_message(&Message::Ping(Vec::new().into()), "world server"),
+            Ok(BotSocketMessage::Control)
+        ));
+        assert!(matches!(
+            classify_bot_socket_message(&Message::Pong(Vec::new().into()), "world server"),
+            Ok(BotSocketMessage::Control)
+        ));
+    }
+
+    #[tokio::test]
+    async fn text_handshake_message_fails_without_waiting_for_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let text_server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_hdr_async(
+                socket,
+                |_request: &Request, mut response: Response| {
+                    response.headers_mut().insert(
+                        SEC_WEBSOCKET_PROTOCOL,
+                        HeaderValue::from_static("voxels.v1"),
+                    );
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            websocket
+                .send(Message::Text("not VXWP".into()))
+                .await
+                .unwrap();
+        });
+        let url = format!("ws://{address}/world");
+        let identity = PlayerIdentity {
+            browser_user_id: BrowserUserId::from_bytes([1; 16]),
+            player_id: PlayerId::from_bytes([2; 16]),
+            player_name: "text-test".to_owned(),
+        };
+
+        let result = connect_bot_with_timeout(
+            &url,
+            &url,
+            "http://127.0.0.1",
+            "voxels.v1",
+            "test-token",
+            identity,
+            Duration::from_secs(1),
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("text handshake data must be rejected");
+        };
+
+        assert!(format!("{error:#}").contains("VXWP is binary-only"));
+        text_server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn silent_endpoint_cannot_stall_the_bot_population() {

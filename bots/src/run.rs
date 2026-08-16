@@ -2,7 +2,9 @@ use crate::behavior::{
     BehaviorContext, BehaviorKind, BehaviorState, BotLayout, LeaderPose, ObservedAction,
 };
 use crate::cache::ChunkCache;
-use crate::client::{BotSocket, ConnectedBot, connect_bot};
+use crate::client::{
+    BotSocket, BotSocketMessage, ConnectedBot, classify_bot_socket_message, connect_bot,
+};
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt, future::join_all};
 use glam::Vec3;
@@ -642,10 +644,11 @@ impl BotRuntime {
         let Some(message) = message else {
             bail!("world socket closed before the run completed");
         };
-        match message? {
-            Message::Binary(bytes) => self.handle_world_binary(&bytes).await,
-            Message::Close(frame) => bail!("world socket closed early: {frame:?}"),
-            _ => Ok(()),
+        let message = message?;
+        match classify_bot_socket_message(&message, "world server")? {
+            BotSocketMessage::Binary(bytes) => self.handle_world_binary(bytes).await,
+            BotSocketMessage::Close(frame) => bail!("world socket closed early: {frame}"),
+            BotSocketMessage::Control => Ok(()),
         }
     }
 
@@ -795,13 +798,14 @@ impl BotRuntime {
         let Some(message) = message else {
             bail!("presence socket closed before the run completed");
         };
-        match message? {
-            Message::Binary(bytes) => self.handle_presence_binary(&bytes),
-            Message::Close(frame) => bail!(
-                "presence socket closed early: {frame:?}; recent errors: {:?}",
+        let message = message?;
+        match classify_bot_socket_message(&message, "presence server")? {
+            BotSocketMessage::Binary(bytes) => self.handle_presence_binary(bytes),
+            BotSocketMessage::Close(frame) => bail!(
+                "presence socket closed early: {frame}; recent errors: {:?}",
                 self.report.error_samples
             ),
-            _ => Ok(()),
+            BotSocketMessage::Control => Ok(()),
         }
     }
 
