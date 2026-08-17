@@ -45,7 +45,6 @@ export function startProcess(
   let stopPromise: Promise<void> | undefined;
   const stop = (signal = stopSignal): Promise<void> => {
     if (stopPromise !== undefined) return stopPromise;
-    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
     stopPromise = (async () => {
       await terminateProcessTree(child, 2_000, false, signal);
       try {

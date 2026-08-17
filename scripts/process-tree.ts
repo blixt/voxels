@@ -68,7 +68,7 @@ function signalProcessTree(
   signal: NodeJS.Signals,
   forceDirectFallback: boolean,
 ): number[] {
-  if (child.exitCode !== null || child.signalCode !== null) return [];
+  const rootExited = child.exitCode !== null || child.signalCode !== null;
   const descendants =
     process.platform === "win32" || child.pid === undefined ? [] : ownedProcessTreeIds(child.pid);
   try {
@@ -80,7 +80,7 @@ function signalProcessTree(
     ) {
       return descendants;
     }
-    child.kill(signal);
+    if (!rootExited) child.kill(signal);
     signalProcessIds(descendants.reverse(), signal);
     return descendants;
   } catch (error) {
@@ -140,9 +140,12 @@ export async function terminateProcessTree(
   forceDirectFallback = false,
   initialSignal: NodeJS.Signals = "SIGTERM",
 ): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
   const rootPid = child.pid;
-  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  const rootExited = child.exitCode !== null || child.signalCode !== null;
+  if (rootExited && (process.platform === "win32" || rootPid === undefined)) return;
+  const exited = rootExited
+    ? Promise.resolve()
+    : new Promise<void>((resolve) => child.once("exit", () => resolve()));
   const descendants = signalProcessTree(child, initialSignal, forceDirectFallback);
   const [, termSurvivors] = await Promise.all([
     Promise.race([exited, wait(timeoutMs)]),
