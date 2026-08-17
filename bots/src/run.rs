@@ -248,6 +248,10 @@ struct ChunkRequests {
 }
 
 impl ChunkRequests {
+    fn has_capacity(&self, max_in_flight_batches: usize) -> bool {
+        self.pending.len() < max_in_flight_batches
+    }
+
     fn needs(&self, cache: &ChunkCache, coord: ChunkCoord) -> bool {
         !cache.contains(coord) && !self.in_flight.contains(&coord)
     }
@@ -287,6 +291,7 @@ struct BotRuntime {
     connection_id: u64,
     source_identity_hash: WorldSourceIdentityHash,
     edit_session_id: voxels_world::protocol::EditSessionId,
+    max_in_flight_batches: usize,
     camera: CameraState,
     inventory: MaterialInventory,
     traffic: TrafficCounters,
@@ -438,6 +443,7 @@ impl BotRuntime {
             connection_id: connection.opened.connection_id,
             source_identity_hash: connection.opened.manifest.source_identity_hash(),
             edit_session_id: connection.opened.edit_session_id,
+            max_in_flight_batches: usize::from(connection.opened.recommended_in_flight_batches),
             camera,
             inventory: connection.opened.inventory,
             traffic: connection.traffic,
@@ -579,6 +585,9 @@ impl BotRuntime {
     }
 
     async fn request_local_chunks(&mut self) -> Result<()> {
+        if !self.chunk_requests.has_capacity(self.max_in_flight_batches) {
+            return Ok(());
+        }
         let voxel = position_voxel(self.camera.position);
         let center = voxel.chunk();
         let mut coords = Vec::new();
@@ -1487,6 +1496,16 @@ mod tests {
         cache.insert(Chunk::filled(second, Material::Stone));
         assert!(requests.needs(&cache, first));
         assert_eq!(requests.unique_count(), 1);
+    }
+
+    #[test]
+    fn chunk_requests_respect_the_negotiated_batch_window() {
+        let mut requests = ChunkRequests::default();
+        assert!(requests.has_capacity(1));
+        requests.begin(1, vec![ChunkCoord::new(0, 0, 0)], Instant::now());
+        assert!(!requests.has_capacity(1));
+        requests.finish(1);
+        assert!(requests.has_capacity(1));
     }
 
     #[test]
