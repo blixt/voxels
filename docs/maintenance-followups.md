@@ -178,3 +178,20 @@ injectable timer scheduling/cancellation tests that prove exactly-once cleanup a
 explicit cancellation, priority preemption, timeout, scheduling failure, and socket close. Then run
 a sustained high-throughput stream and compare retained callbacks or heap growth plus callback CPU
 before and after the change.
+
+## Avoid allocating disabled screen-space AO
+
+`screen_space_ambient_occlusion` is disabled in both shipped client configurations, but
+`AmbientOcclusionGpu::new` still creates both half-resolution RG16F targets, their depth and denoise
+bindings, and both render pipelines. Resizing the surface recreates the targets even though the AO
+passes remain gated off. The two textures alone retain 4,147,200 bytes at 1920 by 1080 and
+11,878,272 bytes at 3024 by 1964, before driver-owned pipeline and bind-group memory.
+
+Keep the always-required world-sampling layout and bind group backed by a neutral one-pixel texture
+when the feature is disabled, and move the full targets, pass bindings, and pipelines into an active
+bundle. Before landing that ownership change, prove:
+
+- disabled AO reports only the neutral allocation, does not rebuild targets on resize, and leaves
+  default and production renders unchanged;
+- enabled AO retains identical evaluation, denoise, resize, timing, and memory-accounting behavior;
+- odd surface extents still round half-resolution targets up correctly.
