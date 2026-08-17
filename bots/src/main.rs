@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::path::PathBuf;
 use voxels_bots::{BotLayout, BotRunConfig, run_bots};
+use voxels_world::protocol::PROTOCOL_VERSION;
 
 struct Cli {
     config: BotRunConfig,
@@ -32,7 +33,7 @@ fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Cli> {
     let mut world_url = None;
     let mut presence_url = None;
     let mut origin = "http://127.0.0.1:5173".to_owned();
-    let mut subprotocol = "voxels.world.v44".to_owned();
+    let mut subprotocol = format!("voxels.world.v{PROTOCOL_VERSION}");
     let mut auth_token = None;
     let mut bots = 4_usize;
     let mut duration_seconds = 10.0_f64;
@@ -101,6 +102,10 @@ mod tests {
         assert_eq!(cli.config.duration_seconds, 30.0);
         assert_eq!(cli.config.seed, 42);
         assert_eq!(cli.config.layout, BotLayout::Dense);
+        assert_eq!(
+            cli.config.subprotocol,
+            format!("voxels.world.v{PROTOCOL_VERSION}")
+        );
         assert_eq!(cli.report_path, Some(PathBuf::from("target/bots.json")));
         Ok(())
     }
