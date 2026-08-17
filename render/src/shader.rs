@@ -430,6 +430,23 @@ mod tests {
     }
 
     #[test]
+    fn horizontal_cloud_rays_only_reject_cameras_outside_the_layer() {
+        let clouds = include_str!("shaders/clouds.wgsl");
+        assert!(
+            clouds.contains("camera.y <= clouds.layer.x || camera.y >= clouds.layer.y"),
+            "a camera inside the cloud slab must trace near-horizontal rays"
+        );
+        let module = wgpu::naga::front::wgsl::parse_str(&[FRAME_SOURCE, clouds].join("\n"))
+            .expect("cloud shader parses");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("cloud shader validates");
+    }
+
+    #[test]
     fn precipitation_is_world_space_depth_tested_geometry_that_falls_downward() {
         let weather = include_str!("shaders/weather.wgsl");
         assert!(weather.contains("@builtin(instance_index) instance_index: u32"));

@@ -151,13 +151,18 @@ fn fs_trace(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   }
   let ray = camera_ray(position.xy, clouds.target_size.xy);
   let camera = frame.camera_time.xyz;
+  var trace_start = 0.0;
+  var trace_end = clouds.layer.z;
   if abs(ray.y) < 0.001 {
-    return vec4<f32>(0.0);
+    if camera.y <= clouds.layer.x || camera.y >= clouds.layer.y {
+      return vec4<f32>(0.0);
+    }
+  } else {
+    let lower = (clouds.layer.x - camera.y) / ray.y;
+    let upper = (clouds.layer.y - camera.y) / ray.y;
+    trace_start = max(min(lower, upper), 0.0);
+    trace_end = min(max(lower, upper), clouds.layer.z);
   }
-  let lower = (clouds.layer.x - camera.y) / ray.y;
-  let upper = (clouds.layer.y - camera.y) / ray.y;
-  var trace_start = max(min(lower, upper), 0.0);
-  var trace_end = min(max(lower, upper), clouds.layer.z);
   if trace_end <= trace_start {
     return vec4<f32>(0.0);
   }
