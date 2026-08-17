@@ -152,7 +152,7 @@ frame bytes, accepted connections, admitted requests, the generation queue, glob
 and blocking jobs per client.
 Generation runs off the async socket loop, and request admission plus active generation are
 proportional to configured bounds rather than camera speed. Completed response assembly still needs
-the separate [pre-assembly memory reservation](maintenance-followups.md#reserve-memory-before-world-response-assembly)
+the separate [pre-assembly memory reservation](maintenance-followups.md#bound-world-response-memory-end-to-end)
 before the outbound byte limit is a complete slow-client memory bound.
 
 The checked-in development daemon refuses non-loopback listeners, checks the browser `Origin`, and

@@ -165,7 +165,7 @@ classes.
 
 `max_queued_outbound_bytes_per_client` bounds completed world products after they enter outbound
 delivery. It is not a rate limit. Response assembly currently happens before that reservation; the
-[maintenance follow-up](maintenance-followups.md#reserve-memory-before-world-response-assembly)
+[maintenance follow-up](maintenance-followups.md#bound-world-response-memory-end-to-end)
 defines the remaining slow-client memory-bound work.
 
 The absolute world-day anchor is evaluated against Unix time and then transmitted with the server's
