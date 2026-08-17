@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { parseBotHarnessReport } from "./bot-load.ts";
+import { parseBotHarnessReport, settlePopulationSampling } from "./bot-load.ts";
 
 function report(): unknown {
   return {
@@ -48,5 +48,38 @@ describe("native bot report boundary", () => {
     expect(() =>
       parseBotHarnessReport({ ...(report() as object), reports: [{ protocolErrors: 0 }] }),
     ).toThrow("incompatible report");
+  });
+});
+
+describe("bot load process settlement", () => {
+  it("settles both samplers without masking the bot process failure", async () => {
+    const primary = new Error("bot failed");
+    const secondary = new Error("observer stopped");
+    let resolveSamples: ((value: string) => void) | undefined;
+    let rejectObserver: ((reason: Error) => void) | undefined;
+    const samples = new Promise<string>((resolve) => {
+      resolveSamples = resolve;
+    });
+    const observer = new Promise<number>((_resolve, reject) => {
+      rejectObserver = reject;
+    });
+    const settled = settlePopulationSampling(Promise.reject(primary), samples, observer, () => {
+      resolveSamples?.("samples stopped");
+      rejectObserver?.(secondary);
+    });
+
+    await expect(settled).rejects.toBe(primary);
+  });
+
+  it("reports sampler failures after a successful bot process", async () => {
+    const samplingFailure = new Error("sampling failed");
+    await expect(
+      settlePopulationSampling(
+        Promise.resolve(),
+        Promise.reject(samplingFailure),
+        Promise.resolve(1),
+        () => {},
+      ),
+    ).rejects.toBe(samplingFailure);
   });
 });

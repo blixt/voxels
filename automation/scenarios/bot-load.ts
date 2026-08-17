@@ -556,7 +556,8 @@ async function runPopulation({
   });
   const started = performance.now();
   const observerPromise = collectObserverSamples(observer, count, started, done);
-  try {
+  let wallTimeMs = 0;
+  const processCompletion = (async () => {
     try {
       await botProcess.completed;
     } catch (error) {
@@ -567,13 +568,18 @@ async function runPopulation({
         }`,
         { cause: error },
       );
+    } finally {
+      wallTimeMs = performance.now() - started;
     }
-  } finally {
-    done.value = true;
-  }
-  const wallTimeMs = performance.now() - started;
-  const samples = await samplesPromise;
-  const observerReport = await observerPromise;
+  })();
+  const [samples, observerReport] = await settlePopulationSampling(
+    processCompletion,
+    samplesPromise,
+    observerPromise,
+    () => {
+      done.value = true;
+    },
+  );
   const report = parseBotHarnessReport(JSON.parse(await readFile(reportPath, "utf8")) as unknown);
   const after = await databaseFiles(fixture.databasePath);
   const contents = await databaseContents(fixture.databasePath);
@@ -591,6 +597,38 @@ async function runPopulation({
     database: summarizeDatabase(samples.database, before, after, contents),
     observer: observerReport,
   };
+}
+
+export async function settlePopulationSampling<Samples, ObserverReport>(
+  completion: Promise<void>,
+  samples: Promise<Samples>,
+  observer: Promise<ObserverReport>,
+  markDone: () => void,
+): Promise<[Samples, ObserverReport]> {
+  let completionFailed = false;
+  let completionError: unknown;
+  try {
+    await completion;
+  } catch (error) {
+    completionFailed = true;
+    completionError = error;
+  } finally {
+    markDone();
+  }
+
+  const [samplesResult, observerResult] = await Promise.allSettled([samples, observer]);
+  if (completionFailed) throw completionError;
+  const samplingErrors = [samplesResult, observerResult]
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => result.reason as unknown);
+  if (samplingErrors.length === 1) throw samplingErrors[0];
+  if (samplingErrors.length > 1) {
+    throw new AggregateError(samplingErrors, "bot load samplers failed");
+  }
+  return [
+    (samplesResult as PromiseFulfilledResult<Samples>).value,
+    (observerResult as PromiseFulfilledResult<ObserverReport>).value,
+  ];
 }
 
 type BotLoadStageBase = Awaited<ReturnType<typeof runPopulation>>;
