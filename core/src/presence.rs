@@ -366,17 +366,24 @@ impl PlayerTrack {
         let elapsed_ms = (target_time_ms - last.pose.sample_server_time_ms as f64).max(0.0);
         let extrapolation_ms = elapsed_ms.min(max_extrapolation_ms);
         let extrapolation_seconds = (extrapolation_ms / 1_000.0) as f32;
-        let velocity = last.pose.linear_velocity_metres_per_second;
-        let horizontal_speed = Vec3::new(velocity.x, 0.0, velocity.z).length();
+        let extrapolation_velocity = last.pose.linear_velocity_metres_per_second;
+        let horizontal_speed =
+            Vec3::new(extrapolation_velocity.x, 0.0, extrapolation_velocity.z).length();
+        let extrapolated = extrapolation_ms > 0.0 && elapsed_ms <= max_extrapolation_ms;
         Some(SampledPose {
-            eye_position_metres: last.pose.eye_position_metres + velocity * extrapolation_seconds,
-            velocity,
+            eye_position_metres: last.pose.eye_position_metres
+                + extrapolation_velocity * extrapolation_seconds,
+            velocity: if elapsed_ms <= max_extrapolation_ms {
+                extrapolation_velocity
+            } else {
+                Vec3::ZERO
+            },
             look_yaw_radians: last.pose.look_yaw_radians,
             look_pitch_radians: last.pose.look_pitch_radians,
             locomotion_distance_metres: last.locomotion_distance_metres
                 + horizontal_speed * extrapolation_seconds,
             flags: last.pose.flags,
-            extrapolated: extrapolation_ms > 0.0 && elapsed_ms <= max_extrapolation_ms,
+            extrapolated,
         })
     }
 
@@ -604,7 +611,13 @@ mod tests {
             well_after.eye_position_metres,
             at_horizon.eye_position_metres
         );
+        assert_eq!(well_after.linear_velocity_metres_per_second, Vec3::ZERO);
         assert!(!well_after.extrapolated);
+        let mut settled = well_after;
+        for _ in 0..120 {
+            settled = timeline.sample(2_000.0, 1.0 / 60.0)[0];
+        }
+        assert!(settled.locomotion_speed_metres_per_second < 0.001);
     }
 
     #[test]
