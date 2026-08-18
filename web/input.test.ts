@@ -100,7 +100,13 @@ describe("inventory wheel normalization", () => {
     expect(wheel.consume(70, 0, 800)).toEqual([]);
     expect(wheel.consume(-20, 0, 800)).toEqual([]);
     expect(wheel.consume(-80, 0, 800)).toEqual([-1]);
-    wheel.clear();
+  });
+
+  it("clears partial input across a non-playable boundary", () => {
+    const wheel = new WheelAccumulator();
     expect(wheel.consume(99, 0, 800)).toEqual([]);
+    wheel.clear();
+    expect(wheel.consume(1, 0, 800)).toEqual([]);
+    expect(wheel.consume(99, 0, 800)).toEqual([1]);
   });
 });

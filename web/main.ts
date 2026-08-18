@@ -530,6 +530,12 @@ async function start(canvas: HTMLCanvasElement): Promise<void> {
     "wheel",
     (event) => {
       event.preventDefault();
+      if (!playable) {
+        // Loading-time input is discarded, so its high-resolution remainder must not leak into
+        // the first deliberate inventory selection after the world becomes playable.
+        wheelAccumulator.clear();
+        return;
+      }
       for (const direction of wheelAccumulator.consume(
         event.deltaY,
         event.deltaMode,
