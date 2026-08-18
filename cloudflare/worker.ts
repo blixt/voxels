@@ -3,6 +3,9 @@ import { isValidPlayerName, issueSessionCredentials } from "./session.ts";
 const PUBLIC_ORIGIN = "https://voxels.lol";
 const MAX_SESSION_REQUEST_BYTES = 4_096;
 const RATE_LIMIT_WINDOW_SECONDS = 60;
+const API_CONTENT_SECURITY_POLICY = "default-src 'none'";
+const ASSET_CONTENT_SECURITY_POLICY =
+  "default-src 'self'; base-uri 'none'; connect-src 'self' wss://voxels-world-blixt.fly.dev; font-src 'self'; form-action 'none'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; worker-src 'self'";
 
 class SessionRequestError extends Error {
   readonly status: 400 | 413;
@@ -17,25 +20,32 @@ class SessionRequestError extends Error {
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
+    let response: Response;
+    let contentSecurityPolicy = API_CONTENT_SECURITY_POLICY;
     try {
-      if (url.pathname === "/api/session") return await createSession(request, env);
-      if (url.pathname.startsWith("/api/")) {
-        return Response.json({ error: "Not found" }, { status: 404 });
+      if (url.pathname === "/api/session") {
+        response = await createSession(request, env);
+      } else if (url.pathname.startsWith("/api/")) {
+        response = Response.json({ error: "Not found" }, { status: 404 });
+      } else {
+        response = await env.ASSETS.fetch(request);
+        contentSecurityPolicy = ASSET_CONTENT_SECURITY_POLICY;
       }
-      return withSecurityHeaders(await env.ASSETS.fetch(request));
     } catch (error) {
       if (error instanceof SessionRequestError) {
-        return Response.json({ error: error.message }, { status: error.status });
+        response = Response.json({ error: error.message }, { status: error.status });
+      } else {
+        console.error(
+          JSON.stringify({
+            message: "request failed",
+            path: url.pathname,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+        response = Response.json({ error: "Internal server error" }, { status: 500 });
       }
-      console.error(
-        JSON.stringify({
-          message: "request failed",
-          path: url.pathname,
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      );
-      return Response.json({ error: "Internal server error" }, { status: 500 });
     }
+    return withSecurityHeaders(response, contentSecurityPolicy);
   },
 } satisfies ExportedHandler<Env>;
 
@@ -106,7 +116,6 @@ async function createSession(request: Request, env: Env): Promise<Response> {
   return Response.json(credentials, {
     headers: {
       "Cache-Control": "no-store",
-      "Content-Security-Policy": "default-src 'none'",
     },
   });
 }
@@ -147,12 +156,9 @@ async function readBoundedJson(request: Request): Promise<unknown> {
   }
 }
 
-function withSecurityHeaders(response: Response): Response {
+function withSecurityHeaders(response: Response, contentSecurityPolicy: string): Response {
   const headers = new Headers(response.headers);
-  headers.set(
-    "Content-Security-Policy",
-    "default-src 'self'; base-uri 'none'; connect-src 'self' wss://voxels-world-blixt.fly.dev; font-src 'self'; form-action 'none'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; worker-src 'self'",
-  );
+  headers.set("Content-Security-Policy", contentSecurityPolicy);
   headers.set("Cross-Origin-Opener-Policy", "same-origin");
   headers.set("Cross-Origin-Resource-Policy", "same-origin");
   headers.set("Permissions-Policy", "camera=(), geolocation=(), microphone=()");

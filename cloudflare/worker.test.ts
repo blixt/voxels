@@ -1,9 +1,21 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import worker from "./worker.ts";
 
 const SESSION_SIGNING_KEY = "test-only-session-signing-key-that-is-long-enough";
 const IDENTITY_SIGNING_KEY = "test-only-identity-signing-key-that-is-long-enough";
+
+function expectBaselineSecurityHeaders(response: Response, contentSecurityPolicy: string): void {
+  expect(response.headers.get("Content-Security-Policy")).toBe(contentSecurityPolicy);
+  expect(response.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
+  expect(response.headers.get("Cross-Origin-Resource-Policy")).toBe("same-origin");
+  expect(response.headers.get("Permissions-Policy")).toBe(
+    "camera=(), geolocation=(), microphone=()",
+  );
+  expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
+  expect(response.headers.get("Strict-Transport-Security")).toBe("max-age=31536000");
+  expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+}
 
 function sessionRequest(body: unknown): Parameters<typeof worker.fetch>[0] {
   return new Request("https://voxels.lol/api/session", {
@@ -70,6 +82,7 @@ describe("session Worker", () => {
       env,
     );
     const policy = response.headers.get("Content-Security-Policy") ?? "";
+    expectBaselineSecurityHeaders(response, policy);
     const connectSources = policy
       .split(";")
       .map((directive) => directive.trim().split(/\s+/u))
@@ -78,6 +91,30 @@ describe("session Worker", () => {
 
     expect(connectSources).toBeDefined();
     for (const origin of endpointOrigins) expect(connectSources).toContain(origin);
+  });
+
+  it("applies the baseline security policy to API success, errors, and unknown routes", async () => {
+    const env = testEnv(true, []);
+    const success = await worker.fetch(sessionRequest({ playerName: "default" }), env);
+    const requestError = await worker.fetch(rawSessionRequest("{"), env);
+    const unknown = await worker.fetch(
+      new Request("https://voxels.lol/api/missing") as Parameters<typeof worker.fetch>[0],
+      env,
+    );
+    const report = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const internalError = await worker
+      .fetch(sessionRequest({ playerName: "default" }), {
+        ...env,
+        VOXELS_SESSION_SIGNING_KEY: "too-short",
+      })
+      .finally(() => report.mockRestore());
+
+    expect([success.status, requestError.status, unknown.status, internalError.status]).toEqual([
+      200, 400, 404, 500,
+    ]);
+    for (const response of [success, requestError, unknown, internalError]) {
+      expectBaselineSecurityHeaders(response, "default-src 'none'");
+    }
   });
 
   it("rate-limits only requests that mint a new durable identity", async () => {
