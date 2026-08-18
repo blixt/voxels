@@ -254,8 +254,10 @@ impl VirtualTerrainAuthority {
             let generated = authority.build_current_region(root, priority);
             if let Ok(region) = &generated {
                 authority.lock_cache().insert(Arc::clone(region));
+                authority.finish_flight(root, &flight);
+            } else {
+                authority.abandon_flight(root, &flight);
             }
-            authority.finish_flight(root, &flight);
             generated
         })
         .await
@@ -374,6 +376,20 @@ impl VirtualTerrainAuthority {
             .get(&root)
             .and_then(Weak::upgrade)
             .is_some_and(|current| Arc::ptr_eq(&current, flight))
+        {
+            flights.remove(&root);
+        }
+    }
+
+    /// Releases a failed owner without detaching waiters from its flight. The owner retains both
+    /// this `Arc` and the `OwnedMutexGuard`'s `Arc`, so only that baseline count can be removed.
+    fn abandon_flight(&self, root: TerrainPageKey, flight: &Arc<AsyncMutex<()>>) {
+        let mut flights = self.lock_flights();
+        if Arc::strong_count(flight) == 2
+            && flights
+                .get(&root)
+                .and_then(Weak::upgrade)
+                .is_some_and(|current| Arc::ptr_eq(&current, flight))
         {
             flights.remove(&root);
         }
@@ -1154,6 +1170,28 @@ mod tests {
             1,
             1_048_576,
         )
+    }
+
+    #[tokio::test]
+    async fn failed_region_owner_preserves_the_single_flight_for_waiters() {
+        let authority = virtual_terrain_authority(29);
+        let root = root();
+        let owner = authority.flight_lock(root);
+        let owner_guard = Arc::clone(&owner).lock_owned().await;
+        let waiter = authority.flight_lock(root);
+
+        authority.abandon_flight(root, &owner);
+        let joined = authority.flight_lock(root);
+        assert!(Arc::ptr_eq(&waiter, &joined));
+
+        drop(owner_guard);
+        drop(owner);
+        drop(joined);
+        let waiter_guard = Arc::clone(&waiter).lock_owned().await;
+        authority.abandon_flight(root, &waiter);
+        let next = authority.flight_lock(root);
+        assert!(!Arc::ptr_eq(&waiter, &next));
+        drop(waiter_guard);
     }
 
     #[test]
