@@ -83,6 +83,21 @@ channel, triggers shutdown, and proves the session cancels its generation work, 
 presence/edit state, aborts the writer within its configured bound, reaches the checkpoint, and
 returns from `serve_until` before a short deadline.
 
+## Reserve Fly connection headroom at player capacity
+
+Production admits 128 world sockets and 128 presence sockets through separate application
+semaphores. One fully attached player owns one of each, so the advertised 128-player ceiling exactly
+fills Fly's aggregate `hard_limit = 256` connection limit. That leaves no proxy-level headroom for a
+replacement socket while an old connection is draining, even though the application has explicit
+endpoint-specific admission bounds.
+
+Choose whether Fly should omit its hard limit or retain a higher infrastructure guard above the
+application ceilings. Before changing `fly.toml`, run a persistent 128-player load with both sockets
+attached, continuously probe `/healthz`, and force world and presence reconnects while the old
+connections are closing. Require successful replacement handshakes, stable service memory/CPU, and
+the intended autostop behavior, then document the measured headroom rather than deriving a new
+limit from the current exact-capacity arithmetic.
+
 ## Own automation setup processes before awaiting them
 
 `runScenario` races the scenario promise against its abort signal, but raw `execFileAsync` children
