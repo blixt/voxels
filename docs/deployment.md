@@ -76,7 +76,7 @@ vp install --frozen-lockfile
 vp run verify
 vp run build:production
 vp run wrangler deploy --dry-run
-fly config validate -c fly.toml
+fly config validate --strict -c fly.toml
 ```
 
 Deploy the server first, confirm its health, and then publish the browser/Worker bundle:
