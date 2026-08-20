@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tokio::task::JoinHandle;
+use tokio::task::{Id, JoinSet};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use voxels_core::{CameraState, InputState};
 use voxels_runtime::{AuthoritativeEditRevisions, revision_satisfies};
@@ -375,41 +375,84 @@ pub async fn run_bots(config: BotRunConfig) -> Result<BotRunReport> {
     let duration = Duration::from_secs_f64(config.duration_seconds);
     let start = Instant::now();
     let end = start + duration;
-    let tasks = connections
-        .into_iter()
-        .enumerate()
-        .map(|(index, connection)| {
-            let leader_player_id = follower_leader(index)
-                .and_then(|leader| identities.get(leader))
-                .map(|identity| identity.player_id);
-            let runtime = BotRuntime::new(
+    let mut tasks = JoinSet::new();
+    let mut task_indices = HashMap::new();
+    for (index, connection) in connections.into_iter().enumerate() {
+        let leader_player_id = follower_leader(index)
+            .and_then(|leader| identities.get(leader))
+            .map(|identity| identity.player_id);
+        let runtime = BotRuntime::new(
+            index,
+            connection,
+            BehaviorState::new(
+                BehaviorKind::for_index(index),
+                config.layout,
                 index,
-                connection,
-                BehaviorState::new(
-                    BehaviorKind::for_index(index),
-                    config.layout,
+                config.seed,
+            ),
+            leader_player_id,
+            start,
+            end,
+            Arc::clone(&shared),
+        );
+        let task = tasks.spawn(async move { (index, runtime.run().await) });
+        task_indices.insert(task.id(), index);
+    }
+    let reports = collect_bot_reports(tasks, task_indices, config.bots).await?;
+    Ok(aggregate_report(config, whole_start.elapsed(), reports))
+}
+
+async fn collect_bot_reports<T: Send + 'static>(
+    mut tasks: JoinSet<(usize, Result<T>)>,
+    mut task_indices: HashMap<Id, usize>,
+    bot_count: usize,
+) -> Result<Vec<T>> {
+    let mut reports = (0..bot_count).map(|_| None).collect::<Vec<_>>();
+    while let Some(joined) = tasks.join_next_with_id().await {
+        let (index, report) = match joined {
+            Ok((task_id, (index, report))) => {
+                task_indices.remove(&task_id);
+                (
                     index,
-                    config.seed,
-                ),
-                leader_player_id,
-                start,
-                end,
-                Arc::clone(&shared),
-            );
-            tokio::spawn(runtime.run())
-        })
-        .collect::<Vec<JoinHandle<Result<BotReport>>>>();
-    let reports = join_all(tasks)
-        .await
+                    report.with_context(|| format!("bot {index} runtime")),
+                )
+            }
+            Err(error) => {
+                let index = task_indices.remove(&error.id());
+                let result = Err(error).with_context(|| match index {
+                    Some(index) => format!("bot {index} task join"),
+                    None => "unknown bot task join".to_owned(),
+                });
+                abort_bot_tasks(&mut tasks).await;
+                return result;
+            }
+        };
+        let report = match report {
+            Ok(report) => report,
+            Err(error) => {
+                abort_bot_tasks(&mut tasks).await;
+                return Err(error);
+            }
+        };
+        let Some(slot) = reports.get_mut(index) else {
+            abort_bot_tasks(&mut tasks).await;
+            bail!("bot task returned out-of-range index {index}");
+        };
+        if slot.replace(report).is_some() {
+            abort_bot_tasks(&mut tasks).await;
+            bail!("bot task returned duplicate index {index}");
+        }
+    }
+    reports
         .into_iter()
         .enumerate()
-        .map(|(index, joined)| {
-            joined
-                .with_context(|| format!("bot {index} task join"))?
-                .with_context(|| format!("bot {index} runtime"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(aggregate_report(config, whole_start.elapsed(), reports))
+        .map(|(index, report)| report.with_context(|| format!("bot {index} task did not finish")))
+        .collect()
+}
+
+async fn abort_bot_tasks<T: 'static>(tasks: &mut JoinSet<T>) {
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
 }
 
 impl BotRuntime {
@@ -1242,8 +1285,53 @@ const fn splitmix64(mut value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::oneshot;
     use voxels_core::{PLAYER_EYE_HEIGHT_METRES, VoxelPhysics};
     use voxels_world::{CHUNK_EDGE, Chunk};
+
+    struct DropNotice(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropNotice {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bot_runtime_failure_aborts_remaining_tasks() {
+        let mut tasks = JoinSet::<(usize, Result<u8>)>::new();
+        let mut task_indices = HashMap::new();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+
+        let pending = tasks.spawn(async move {
+            let _drop_notice = DropNotice(Some(dropped_tx));
+            let _ = ready_tx.send(());
+            let report = std::future::pending::<Result<u8>>().await;
+            (1, report)
+        });
+        task_indices.insert(pending.id(), 1);
+        let failing = tasks.spawn(async move {
+            let _ = ready_rx.await;
+            (0, Err(anyhow::anyhow!("runtime failed")))
+        });
+        task_indices.insert(failing.id(), 0);
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            collect_bot_reports(tasks, task_indices, 2),
+        )
+        .await
+        .expect("supervisor must not wait for the pending bot")
+        .expect_err("one bot runtime must fail the population");
+
+        assert!(format!("{error:#}").contains("bot 0 runtime: runtime failed"));
+        dropped_rx
+            .await
+            .expect("the pending bot task must be aborted and dropped");
+    }
 
     #[test]
     fn bot_pose_flags_preserve_swim_hysteresis_and_ground_contact() {
