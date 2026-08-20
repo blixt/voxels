@@ -98,6 +98,23 @@ connections are closing. Require successful replacement handshakes, stable servi
 the intended autostop behavior, then document the measured headroom rather than deriving a new
 limit from the current exact-capacity arithmetic.
 
+## Align remote-avatar atmosphere and emissive lighting
+
+`avatar.wgsl` duplicates only the terrain shader's basic distance/height fog. It omits the shared
+surface transport's forward sun aureole, cave-air extinction, and partial underwater attenuation,
+so a remote avatar can remain visually detached from terrain in caves or across the water surface.
+The avatar scene pipeline already uses the frame layout containing the 16-light uniform, but its
+fragment shader also ignores those local emissive lights.
+
+Do not add both costs incidentally. One player can contribute 13 avatar parts and the renderer
+accepts up to 1,024 avatars, so evaluating every active local light for every avatar fragment needs
+an explicit quality/performance decision. First move the common atmosphere transport into shared
+PBR WGSL and prove surface-equivalent behavior with controlled multiplayer captures above water,
+partially submerged, fully underwater, and inside a cave. Separately compare zero, bounded-nearest,
+and all-16 local-light evaluation around a GlowCrystal with representative one-, 64-, and
+1,024-avatar scenes. Record GPU fragment cost and visual error before choosing the avatar-lighting
+budget.
+
 ## Own automation setup processes before awaiting them
 
 `runScenario` races the scenario promise against its abort signal, but raw `execFileAsync` children
