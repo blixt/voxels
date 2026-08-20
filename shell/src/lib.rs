@@ -90,6 +90,18 @@ fn presence_heartbeat_expired(
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn sorted_chunk_coords_contains(
+    coords: &[voxels_world::ChunkCoord],
+    target: voxels_world::ChunkCoord,
+) -> bool {
+    coords
+        .binary_search_by_key(&(target.x, target.y, target.z), |coord| {
+            (coord.x, coord.y, coord.z)
+        })
+        .is_ok()
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn inventory_swipe(anchor: [f32; 2], current: [f32; 2]) -> Option<(i32, [f32; 2])> {
     if !anchor.into_iter().chain(current).all(f32::is_finite) {
         return None;
@@ -1364,8 +1376,9 @@ mod web {
         RemoteWorldError,
     };
     use crate::{
-        ChunkPortalMask, predictive_stream_position, virtual_terrain_column_working_set,
-        virtual_terrain_pending_columns, virtual_terrain_root_working_set, world_environment_at,
+        ChunkPortalMask, predictive_stream_position, sorted_chunk_coords_contains,
+        virtual_terrain_column_working_set, virtual_terrain_pending_columns,
+        virtual_terrain_root_working_set, world_environment_at,
     };
     use bytemuck::{Pod, Zeroable};
     use glam::{Vec2, Vec3};
@@ -3535,7 +3548,6 @@ mod web {
             urgent_interest.extend(enclosed_view_interest.iter().copied());
             urgent_interest.sort_unstable_by_key(|coord| (coord.x, coord.y, coord.z));
             urgent_interest.dedup();
-            let interest = urgent_interest.clone();
             let priority_hint = directional_stream_priority(
                 &canonical_focus_camera,
                 canonical_focus_velocity,
@@ -3547,7 +3559,7 @@ mod web {
             let (focus_changed, scheduler_update_ms, work, scheduler_admit_ms) = {
                 let mut scheduler = self.scheduler.borrow_mut();
                 let update_start = performance_now(performance);
-                let changed = scheduler.update_focus_with_interest(focus, &interest);
+                let changed = scheduler.update_focus_with_interest(focus, &urgent_interest);
                 let scheduler_update_ms = (performance_now(performance) - update_start) as f32;
                 let admit_start = performance_now(performance);
                 let work = scheduler.schedule_frame_prioritized_with_urgency(
@@ -3570,15 +3582,13 @@ mod web {
             }
             let mut uploaded = false;
 
-            let urgent_interest_keys: BTreeSet<_> =
-                urgent_interest.iter().copied().map(coord_key).collect();
             let mut collision_generation = Vec::new();
             let mut background_generation = Vec::new();
             for ticket in work.generation {
                 let dx = i64::from(ticket.coord.x) - i64::from(focus.x);
                 let dz = i64::from(ticket.coord.z) - i64::from(focus.z);
                 let radius = i64::from(self.config.startup_ready_radius_chunks);
-                if urgent_interest_keys.contains(&coord_key(ticket.coord))
+                if sorted_chunk_coords_contains(&urgent_interest, ticket.coord)
                     || (!self.startup_ready.get() && dx * dx + dz * dz <= radius * radius)
                 {
                     collision_generation.push(ticket);
@@ -8382,6 +8392,28 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.contains(&voxels_world::ChunkCoord::new(-2, 0, -2)));
         assert!(first.iter().any(|coord| coord.y < 0));
+    }
+
+    #[test]
+    fn sorted_chunk_membership_matches_signed_coordinate_ordering() {
+        let coords = [
+            voxels_world::ChunkCoord::new(-3, 8, 4),
+            voxels_world::ChunkCoord::new(-3, 9, -12),
+            voxels_world::ChunkCoord::new(0, -7, 5),
+            voxels_world::ChunkCoord::new(2, 0, 0),
+        ];
+
+        for coord in coords {
+            assert!(sorted_chunk_coords_contains(&coords, coord));
+        }
+        for absent in [
+            voxels_world::ChunkCoord::new(-4, 8, 4),
+            voxels_world::ChunkCoord::new(-3, 8, 5),
+            voxels_world::ChunkCoord::new(0, -7, 4),
+            voxels_world::ChunkCoord::new(3, 0, 0),
+        ] {
+            assert!(!sorted_chunk_coords_contains(&coords, absent));
+        }
     }
 
     #[test]
