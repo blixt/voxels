@@ -306,7 +306,8 @@ disposable rendering cache and can be rebuilt from canonical source identity plu
 
 Terrain Diffusion currently yields one finite 512x512 height tile at 30 m native resolution. The
 checked-in `horizontal_scale = 1` preserves that spacing, making the tile 15.36 km square,
-with its minimum corner placed by `world_origin_voxels` (the checked-in value centers it on spawn).
+with its minimum corner placed by `world_origin_voxels` (the checked-in value keeps spawn safely
+inside the tile, about 810 m from its center).
 Heights are bilinearly sampled into canonical 10 cm columns. The canonical composer adds bounded,
 source-identity-bound subgrid relief, climate-classified surface materials, shallow soil, and
 coherent stone/limestone/basalt strata. It still does not invent caves, vegetation, roads,
