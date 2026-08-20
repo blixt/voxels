@@ -1008,8 +1008,21 @@ impl SessionRequests {
             return Err(RequestAdmissionError::Closed);
         }
         let mut in_flight = self.lock();
+        // The socket writer can close the session while an admission waits for this lock. Recheck
+        // under the same exclusion used by `cancel_all` so no uncancelled request can appear after
+        // the closing sweep.
+        if self.closed.load(Ordering::Acquire) {
+            return Err(RequestAdmissionError::Closed);
+        }
         if in_flight.contains_key(&request_id) {
             return Err(RequestAdmissionError::Duplicate);
+        }
+        // Cancellation releases the negotiated active window immediately so urgent replacement
+        // work is not blocked by asynchronous cleanup. Retain at most one complete replacement
+        // window of cancelled tombstones, though, or a cancel storm could spawn and retain tasks
+        // without a per-session bound.
+        if in_flight.len() >= self.max_in_flight.saturating_mul(2) {
+            return Err(RequestAdmissionError::SettlingBacklogFull);
         }
         let active = in_flight
             .values()
@@ -1091,6 +1104,7 @@ impl CancellationSignal {
 enum RequestAdmissionError {
     Closed,
     Duplicate,
+    SettlingBacklogFull,
     WindowFull,
 }
 
@@ -1101,6 +1115,7 @@ fn admit_tracked_request(
     let cancelled = session.insert(request_id).map_err(|error| match error {
         RequestAdmissionError::Closed => "world session is closing",
         RequestAdmissionError::Duplicate => "request id is already in flight",
+        RequestAdmissionError::SettlingBacklogFull => "request cancellation backlog is full",
         RequestAdmissionError::WindowFull => "negotiated request window is full",
     })?;
     Ok(TrackedRequest {
@@ -1803,6 +1818,9 @@ async fn run_session(
                     let message = match error {
                         RequestAdmissionError::Closed => "world session is closing",
                         RequestAdmissionError::Duplicate => "request id is already in flight",
+                        RequestAdmissionError::SettlingBacklogFull => {
+                            "request cancellation backlog is full"
+                        }
                         RequestAdmissionError::WindowFull => "negotiated request window is full",
                     };
                     let _ = send_control_error(&outbound, request.request_id, message).await;
@@ -4820,6 +4838,50 @@ mod tests {
         ));
         session.finish(8, &replacement);
         assert!(session.insert(7).is_ok());
+    }
+
+    #[test]
+    fn cancellation_backlog_allows_one_bounded_replacement_window() {
+        let session = SessionRequests::new(1, 1, 1, 1024, Arc::new(Notify::new()));
+        let first = session.insert(1).ok().expect("first request");
+        assert!(session.cancel(1));
+
+        let replacement = session
+            .insert(2)
+            .ok()
+            .expect("one full replacement window must remain available");
+        assert!(session.cancel(2));
+        assert!(matches!(
+            session.insert(3),
+            Err(RequestAdmissionError::SettlingBacklogFull)
+        ));
+        assert!(matches!(
+            session.insert(1),
+            Err(RequestAdmissionError::Duplicate)
+        ));
+
+        session.finish(1, &first);
+        let next = session
+            .insert(3)
+            .ok()
+            .expect("settling one request must reopen backlog capacity");
+        session.finish(2, &replacement);
+        session.finish(3, &next);
+        assert!(session.lock().is_empty());
+    }
+
+    #[test]
+    fn closing_a_session_permanently_closes_request_admission() {
+        let session = SessionRequests::new(1, 1, 1, 1024, Arc::new(Notify::new()));
+        let tracked = session.insert(1).ok().expect("request before close");
+
+        session.cancel_all();
+
+        assert!(tracked.is_cancelled());
+        assert!(matches!(
+            session.insert(2),
+            Err(RequestAdmissionError::Closed)
+        ));
     }
 
     #[test]
