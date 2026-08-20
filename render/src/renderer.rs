@@ -8746,7 +8746,7 @@ impl Renderer {
             &virtual_ownership,
         );
         let virtual_world_draw_lists = if virtual_visible {
-            match self.collect_virtual_terrain_draw_list(view_clip) {
+            match self.collect_virtual_terrain_draw_list(view_clip, self.screenshot_requested) {
                 Ok(draw_lists) => draw_lists,
                 Err(error) => {
                     (self.log_error)(&format!(
@@ -10209,14 +10209,15 @@ impl Renderer {
     fn collect_virtual_terrain_draw_list(
         &self,
         view_clip: AabbClipVolume,
+        collect_diagnostic_spans: bool,
     ) -> Result<VirtualTerrainDrawLists, VirtualTerrainRendererError> {
         let Some(cut) = self.committed_virtual_terrain_cut() else {
             return Ok(VirtualTerrainDrawLists::default());
         };
-        let mut surface_items = Vec::new();
-        let mut triangle_items = Vec::new();
-        let mut water_surface_items = Vec::new();
-        let mut water_triangle_items = Vec::new();
+        let mut surface_items = collect_diagnostic_spans.then(Vec::new);
+        let mut triangle_items = collect_diagnostic_spans.then(Vec::new);
+        let mut water_surface_items = collect_diagnostic_spans.then(Vec::new);
+        let mut water_triangle_items = collect_diagnostic_spans.then(Vec::new);
         let mut mesh_count = 0u32;
         let mut primitive_count = 0u32;
         let mut surface_mesh_count = 0u32;
@@ -10269,12 +10270,14 @@ impl Renderer {
                                 water_selected_slices = water_selected_slices.saturating_add(1);
                                 water_surface_quads =
                                     water_surface_quads.saturating_add(slice.quad_count);
-                                water_surface_items.push(DrawItem {
-                                    page: mesh.allocation.page,
-                                    offset: mesh.allocation.offset + slice.relative_offset,
-                                    size: slice.size,
-                                    quad_count: slice.quad_count,
-                                });
+                                if let Some(items) = water_surface_items.as_mut() {
+                                    items.push(DrawItem {
+                                        page: mesh.allocation.page,
+                                        offset: mesh.allocation.offset + slice.relative_offset,
+                                        size: slice.size,
+                                        quad_count: slice.quad_count,
+                                    });
+                                }
                                 water_surface_fingerprint = fingerprint_value(
                                     water_surface_fingerprint,
                                     mesh.content_fingerprint,
@@ -10286,12 +10289,14 @@ impl Renderer {
                             RenderLayer::Empty => continue,
                         }
                         selected_slices = selected_slices.saturating_add(1);
-                        surface_items.push(DrawItem {
-                            page: mesh.allocation.page,
-                            offset: mesh.allocation.offset + slice.relative_offset,
-                            size: slice.size,
-                            quad_count: slice.quad_count,
-                        });
+                        if let Some(items) = surface_items.as_mut() {
+                            items.push(DrawItem {
+                                page: mesh.allocation.page,
+                                offset: mesh.allocation.offset + slice.relative_offset,
+                                size: slice.size,
+                                quad_count: slice.quad_count,
+                            });
+                        }
                         surface_quad_count = surface_quad_count.saturating_add(slice.quad_count);
                         primitive_count =
                             primitive_count.saturating_add(slice.quad_count.saturating_mul(2));
@@ -10309,14 +10314,17 @@ impl Renderer {
                     triangle_fingerprint =
                         fingerprint_value(triangle_fingerprint, mesh.content_fingerprint);
                     if mesh.opaque_vertex_count > 0 {
-                        triangle_items.push(TerrainTriangleDrawSpan {
-                            page: mesh.allocation.page,
-                            offset: mesh.allocation.offset,
-                            size: mesh
-                                .opaque_vertex_count
-                                .saturating_mul(size_of::<GpuTerrainVertex>() as u32),
-                            vertex_count: mesh.opaque_vertex_count,
-                        });
+                        let size = mesh
+                            .opaque_vertex_count
+                            .saturating_mul(size_of::<GpuTerrainVertex>() as u32);
+                        if let Some(items) = triangle_items.as_mut() {
+                            items.push(TerrainTriangleDrawSpan {
+                                page: mesh.allocation.page,
+                                offset: mesh.allocation.offset,
+                                size,
+                                vertex_count: mesh.opaque_vertex_count,
+                            });
+                        }
                         triangle_vertex_count =
                             triangle_vertex_count.saturating_add(mesh.opaque_vertex_count);
                     }
@@ -10328,14 +10336,17 @@ impl Renderer {
                             mesh.opaque_vertex_count
                                 .saturating_mul(size_of::<GpuTerrainVertex>() as u32),
                         );
-                        water_triangle_items.push(TerrainTriangleDrawSpan {
-                            page: mesh.allocation.page,
-                            offset,
-                            size: mesh
-                                .water_vertex_count
-                                .saturating_mul(size_of::<GpuTerrainVertex>() as u32),
-                            vertex_count: mesh.water_vertex_count,
-                        });
+                        let size = mesh
+                            .water_vertex_count
+                            .saturating_mul(size_of::<GpuTerrainVertex>() as u32);
+                        if let Some(items) = water_triangle_items.as_mut() {
+                            items.push(TerrainTriangleDrawSpan {
+                                page: mesh.allocation.page,
+                                offset,
+                                size,
+                                vertex_count: mesh.water_vertex_count,
+                            });
+                        }
                         water_triangle_fingerprint =
                             fingerprint_value(water_triangle_fingerprint, mesh.content_fingerprint);
                     }
@@ -10345,7 +10356,7 @@ impl Renderer {
         }
         Ok(VirtualTerrainDrawLists {
             surfaces: DrawList {
-                spans: coalesce_draw_items(surface_items),
+                spans: finish_diagnostic_spans(surface_items, coalesce_draw_items),
                 mesh_count: surface_mesh_count,
                 quad_count: surface_quad_count,
                 fingerprint: surface_fingerprint,
@@ -10353,13 +10364,13 @@ impl Renderer {
                 selected_slices,
             },
             triangles: TerrainTriangleDrawList {
-                spans: coalesce_triangle_draw_spans(triangle_items),
+                spans: finish_diagnostic_spans(triangle_items, coalesce_triangle_draw_spans),
                 mesh_count: triangle_mesh_count,
                 vertex_count: triangle_vertex_count,
                 fingerprint: triangle_fingerprint,
             },
             water_surfaces: DrawList {
-                spans: coalesce_draw_items(water_surface_items),
+                spans: finish_diagnostic_spans(water_surface_items, coalesce_draw_items),
                 mesh_count: water_surface_mesh_count,
                 quad_count: water_surface_quads,
                 fingerprint: water_surface_fingerprint,
@@ -10367,7 +10378,7 @@ impl Renderer {
                 selected_slices: water_selected_slices,
             },
             water_triangles: TerrainTriangleDrawList {
-                spans: coalesce_triangle_draw_spans(water_triangle_items),
+                spans: finish_diagnostic_spans(water_triangle_items, coalesce_triangle_draw_spans),
                 mesh_count: water_triangle_mesh_count,
                 vertex_count: water_triangle_vertices,
                 fingerprint: water_triangle_fingerprint,
@@ -11210,6 +11221,13 @@ fn coalesce_draw_items(mut items: Vec<DrawItem>) -> Vec<DrawSpan> {
         });
     }
     spans
+}
+
+fn finish_diagnostic_spans<Item, Span>(
+    items: Option<Vec<Item>>,
+    coalesce: impl FnOnce(Vec<Item>) -> Vec<Span>,
+) -> Vec<Span> {
+    items.map_or_else(Vec::new, coalesce)
 }
 
 fn coalesce_triangle_draw_spans(
@@ -13917,6 +13935,45 @@ mod tests {
         assert_eq!(
             diagnostic_owner_id(3, 255, 2, 0, 0),
             [964_022_151, 1_104_392_134]
+        );
+    }
+
+    #[test]
+    fn virtual_diagnostic_spans_are_built_only_for_capture_frames() {
+        let coalesced_without_capture = std::cell::Cell::new(false);
+        let ordinary_spans: Vec<DrawSpan> =
+            finish_diagnostic_spans(None::<Vec<DrawItem>>, |items| {
+                coalesced_without_capture.set(true);
+                coalesce_draw_items(items)
+            });
+        assert!(ordinary_spans.is_empty());
+        assert!(!coalesced_without_capture.get());
+
+        let capture_spans = finish_diagnostic_spans(
+            Some(vec![
+                DrawItem {
+                    page: 3,
+                    offset: 16,
+                    size: 32,
+                    quad_count: 2,
+                },
+                DrawItem {
+                    page: 3,
+                    offset: 48,
+                    size: 16,
+                    quad_count: 1,
+                },
+            ]),
+            coalesce_draw_items,
+        );
+        assert_eq!(
+            capture_spans,
+            vec![DrawSpan {
+                page: 3,
+                offset: 16,
+                size: 48,
+                quad_count: 3,
+            }]
         );
     }
 
