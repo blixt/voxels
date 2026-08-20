@@ -116,7 +116,11 @@ impl PresentPipeline {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/ui_present.wgsl"));
+        let shader = crate::shader::ui_display_shader(
+            device,
+            "scene present shader",
+            include_str!("shaders/ui_present.wgsl"),
+        );
         let pipeline = screen_pipeline(
             device,
             "scene present pipeline",
@@ -231,7 +235,11 @@ impl GlassPipeline {
             bind_group_layouts: &[Some(&instance_layout), Some(&backdrop_layout)],
             immediate_size: 0,
         });
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/ui_glass.wgsl"));
+        let shader = crate::shader::ui_display_shader(
+            device,
+            "glass shader",
+            include_str!("shaders/ui_glass.wgsl"),
+        );
         let pipeline = screen_pipeline(
             device,
             "glass pipeline",

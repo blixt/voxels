@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 const FRAME_SOURCE: &str = include_str!("shaders/frame.wgsl");
 const PBR_SOURCE: &str = include_str!("shaders/pbr.wgsl");
+const UI_DISPLAY_SOURCE: &str = include_str!("shaders/ui_display.wgsl");
 
 pub(crate) fn frame_shader(
     device: &wgpu::Device,
@@ -17,6 +18,14 @@ pub(crate) fn frame_pbr_shader(
     source: &'static str,
 ) -> wgpu::ShaderModule {
     shader_from_sources(device, label, &[FRAME_SOURCE, PBR_SOURCE, source])
+}
+
+pub(crate) fn ui_display_shader(
+    device: &wgpu::Device,
+    label: &'static str,
+    source: &'static str,
+) -> wgpu::ShaderModule {
+    shader_from_sources(device, label, &[UI_DISPLAY_SOURCE, source])
 }
 
 fn shader_from_sources(
@@ -133,6 +142,29 @@ mod tests {
             )
             .validate(&module)
             .unwrap_or_else(|error| panic!("composed PBR shader failed to validate: {error}"));
+        }
+    }
+
+    #[test]
+    fn shared_ui_display_helpers_validate_in_every_composed_shader() {
+        let leaf_shaders = [
+            include_str!("shaders/ui_present.wgsl"),
+            include_str!("shaders/ui_glass.wgsl"),
+        ];
+        for required in ["fn pbr_neutral(", "fn linear_to_srgb("] {
+            assert_eq!(UI_DISPLAY_SOURCE.matches(required).count(), 1);
+            assert!(leaf_shaders.iter().all(|shader| !shader.contains(required)));
+        }
+        for shader in leaf_shaders {
+            let source = [UI_DISPLAY_SOURCE, shader].join("\n");
+            let module = wgpu::naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|error| panic!("composed UI shader failed to parse: {error}"));
+            wgpu::naga::valid::Validator::new(
+                wgpu::naga::valid::ValidationFlags::all(),
+                wgpu::naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("composed UI shader failed to validate: {error}"));
         }
     }
 
