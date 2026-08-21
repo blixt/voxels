@@ -44,7 +44,6 @@ features = [
   "Performance",
   "BinaryType",
   "CloseEvent",
-  "ErrorEvent",
   "Event",
   "MessageEvent",
   "WebSocket",
