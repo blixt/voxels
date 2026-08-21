@@ -4846,10 +4846,12 @@ impl Renderer {
         let opaque_depth = DepthTarget::opaque_snapshot(&device, config.width, config.height);
         let ambient_occlusion_gpu = AmbientOcclusionGpu::new(
             &device,
+            &queue,
             &frame_layout,
             depth.view(),
             config.width,
             config.height,
+            options.screen_space_ambient_occlusion,
         );
         let volumetric_cloud_gpu = VolumetricCloudGpu::new(
             &device,
@@ -8964,6 +8966,7 @@ impl Renderer {
                     multiview_mask: None,
                 });
                 pass.set_bind_group(0, &self.frame_bind_group, &[]);
+                pass.set_bind_group(2, self.ambient_occlusion_gpu.sample_bind_group(), &[]);
                 if virtual_visible {
                     pass.set_bind_group(
                         3,

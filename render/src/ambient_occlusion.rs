@@ -6,16 +6,25 @@
 
 use wgpu::{
     BindGroup, BindGroupLayout, Color, ColorTargetState, ColorWrites, CommandEncoder, Device,
-    Extent3d, FragmentState, LoadOp, MultisampleState, Operations, PipelineLayoutDescriptor,
-    PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor, RenderPassTimestampWrites,
-    RenderPipeline, RenderPipelineDescriptor, ShaderStages, StoreOp, Texture, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
-    TextureViewDescriptor, TextureViewDimension, VertexState,
+    Extent3d, FragmentState, LoadOp, MultisampleState, Operations, Origin3d,
+    PipelineLayoutDescriptor, PrimitiveState, Queue, RenderPassColorAttachment,
+    RenderPassDescriptor, RenderPassTimestampWrites, RenderPipeline, RenderPipelineDescriptor,
+    ShaderStages, StoreOp, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect,
+    TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+    TextureView, TextureViewDescriptor, TextureViewDimension, VertexState,
 };
 
 const AO_FORMAT: TextureFormat = TextureFormat::Rg16Float;
+const NEUTRAL_AO_BYTES: u64 = 4;
 
 pub(crate) struct AmbientOcclusionGpu {
+    _neutral_texture: Option<Texture>,
+    sample_layout: BindGroupLayout,
+    sample_bind_group: BindGroup,
+    active: Option<ActiveAmbientOcclusionGpu>,
+}
+
+struct ActiveAmbientOcclusionGpu {
     _raw_texture: Texture,
     raw_view: TextureView,
     _filtered_texture: Texture,
@@ -26,8 +35,6 @@ pub(crate) struct AmbientOcclusionGpu {
     depth_bind_group: BindGroup,
     denoise_layout: BindGroupLayout,
     denoise_bind_group: BindGroup,
-    sample_layout: BindGroupLayout,
-    sample_bind_group: BindGroup,
     evaluate_pipeline: RenderPipeline,
     denoise_pipeline: RenderPipeline,
 }
@@ -35,14 +42,33 @@ pub(crate) struct AmbientOcclusionGpu {
 impl AmbientOcclusionGpu {
     pub(crate) fn new(
         device: &Device,
+        queue: &Queue,
         frame_layout: &BindGroupLayout,
         depth_view: &TextureView,
         width: u32,
         height: u32,
+        enabled: bool,
     ) -> Self {
+        let sample_layout = ao_layout(device, "spatial AO world sample layout", 0);
+        if !enabled {
+            let neutral_texture = neutral_texture(device, queue);
+            let neutral_view = neutral_texture.create_view(&TextureViewDescriptor::default());
+            let sample_bind_group = ao_bind_group(
+                device,
+                "neutral spatial AO world sample bind group",
+                &sample_layout,
+                0,
+                &neutral_view,
+            );
+            return Self {
+                _neutral_texture: Some(neutral_texture),
+                sample_layout,
+                sample_bind_group,
+                active: None,
+            };
+        }
         let depth_layout = depth_layout(device);
         let denoise_layout = ao_layout(device, "spatial AO denoise layout", 1);
-        let sample_layout = ao_layout(device, "spatial AO world sample layout", 0);
         let shader = crate::shader::frame_shader(
             device,
             "spatial ambient occlusion shader",
@@ -89,20 +115,23 @@ impl AmbientOcclusionGpu {
             &targets.filtered_view,
         );
         Self {
-            _raw_texture: targets.raw_texture,
-            raw_view: targets.raw_view,
-            _filtered_texture: targets.filtered_texture,
-            filtered_view: targets.filtered_view,
-            width: targets.width,
-            height: targets.height,
-            depth_layout,
-            depth_bind_group,
-            denoise_layout,
-            denoise_bind_group,
+            _neutral_texture: None,
             sample_layout,
             sample_bind_group,
-            evaluate_pipeline,
-            denoise_pipeline,
+            active: Some(ActiveAmbientOcclusionGpu {
+                _raw_texture: targets.raw_texture,
+                raw_view: targets.raw_view,
+                _filtered_texture: targets.filtered_texture,
+                filtered_view: targets.filtered_view,
+                width: targets.width,
+                height: targets.height,
+                depth_layout,
+                depth_bind_group,
+                denoise_layout,
+                denoise_bind_group,
+                evaluate_pipeline,
+                denoise_pipeline,
+            }),
         }
     }
 
@@ -121,32 +150,37 @@ impl AmbientOcclusionGpu {
         width: u32,
         height: u32,
     ) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
         let targets = targets(device, width, height);
-        self._raw_texture = targets.raw_texture;
-        self.raw_view = targets.raw_view;
-        self._filtered_texture = targets.filtered_texture;
-        self.filtered_view = targets.filtered_view;
-        self.width = targets.width;
-        self.height = targets.height;
-        self.depth_bind_group = depth_bind_group(device, &self.depth_layout, depth_view);
-        self.denoise_bind_group = ao_bind_group(
+        active._raw_texture = targets.raw_texture;
+        active.raw_view = targets.raw_view;
+        active._filtered_texture = targets.filtered_texture;
+        active.filtered_view = targets.filtered_view;
+        active.width = targets.width;
+        active.height = targets.height;
+        active.depth_bind_group = depth_bind_group(device, &active.depth_layout, depth_view);
+        active.denoise_bind_group = ao_bind_group(
             device,
             "spatial AO denoise bind group",
-            &self.denoise_layout,
+            &active.denoise_layout,
             1,
-            &self.raw_view,
+            &active.raw_view,
         );
         self.sample_bind_group = ao_bind_group(
             device,
             "spatial AO world sample bind group",
             &self.sample_layout,
             0,
-            &self.filtered_view,
+            &active.filtered_view,
         );
     }
 
-    pub(crate) const fn bytes(&self) -> u64 {
-        self.width as u64 * self.height as u64 * 8
+    pub(crate) fn bytes(&self) -> u64 {
+        self.active.as_ref().map_or(NEUTRAL_AO_BYTES, |active| {
+            target_bytes(active.width, active.height)
+        })
     }
 
     pub(crate) fn evaluate<'query>(
@@ -155,10 +189,13 @@ impl AmbientOcclusionGpu {
         frame_bind_group: &BindGroup,
         timestamp_writes: Option<RenderPassTimestampWrites<'query>>,
     ) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
         let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("half-resolution spatial AO pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
-                view: &self.raw_view,
+                view: &active.raw_view,
                 resolve_target: None,
                 depth_slice: None,
                 ops: Operations {
@@ -171,9 +208,9 @@ impl AmbientOcclusionGpu {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.evaluate_pipeline);
+        pass.set_pipeline(&active.evaluate_pipeline);
         pass.set_bind_group(0, frame_bind_group, &[]);
-        pass.set_bind_group(1, &self.depth_bind_group, &[]);
+        pass.set_bind_group(1, &active.depth_bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -183,10 +220,13 @@ impl AmbientOcclusionGpu {
         frame_bind_group: &BindGroup,
         timestamp_writes: Option<RenderPassTimestampWrites<'query>>,
     ) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
         let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("depth-aware spatial AO denoise pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
-                view: &self.filtered_view,
+                view: &active.filtered_view,
                 resolve_target: None,
                 depth_slice: None,
                 ops: Operations {
@@ -199,9 +239,9 @@ impl AmbientOcclusionGpu {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.denoise_pipeline);
+        pass.set_pipeline(&active.denoise_pipeline);
         pass.set_bind_group(0, frame_bind_group, &[]);
-        pass.set_bind_group(1, &self.denoise_bind_group, &[]);
+        pass.set_bind_group(1, &active.denoise_bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
 }
@@ -217,6 +257,49 @@ struct Targets {
 
 const fn half_extent(value: u32) -> u32 {
     if value <= 1 { 1 } else { value / 2 + value % 2 }
+}
+
+const fn target_bytes(width: u32, height: u32) -> u64 {
+    width as u64 * height as u64 * 8
+}
+
+fn neutral_texture(device: &Device, queue: &Queue) -> Texture {
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some("neutral spatial AO"),
+        size: Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: AO_FORMAT,
+        usage: TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    // RG16F encodes full visibility and a background depth. Disabled pipelines do not sample this
+    // binding, but keeping it neutral makes the always-required world layout safe by construction.
+    queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        &[0x00, 0x3c, 0x00, 0x00],
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    texture
 }
 
 fn targets(device: &Device, width: u32, height: u32) -> Targets {
@@ -366,8 +449,11 @@ mod tests {
 
     #[test]
     fn two_rg16_targets_have_exact_bounded_size() {
-        let bytes = u64::from(half_extent(1_280)) * u64::from(half_extent(720)) * 8;
+        let bytes = target_bytes(half_extent(1_280), half_extent(720));
         assert_eq!(bytes, 1_843_200);
+        let odd_bytes = target_bytes(half_extent(3_024), half_extent(1_964));
+        assert_eq!(odd_bytes, 11_878_272);
+        assert_eq!(NEUTRAL_AO_BYTES, 4);
     }
 
     #[test]
