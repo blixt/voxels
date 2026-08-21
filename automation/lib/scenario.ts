@@ -1,4 +1,7 @@
 import { inspect } from "node:util";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { ArtifactStore, type ArtifactOptions, type ArtifactRecord } from "./artifacts.ts";
 
 export type ScenarioKind =
@@ -63,6 +66,11 @@ export interface ScenarioRunOptions {
 }
 
 type Cleanup = () => void | Promise<void>;
+
+export interface TemporaryDirectory {
+  readonly path: string;
+  cleanup(): Promise<void>;
+}
 
 function abortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error("automation scenario aborted");
@@ -142,6 +150,24 @@ export class ScenarioContext {
       };
       this.signal.addEventListener("abort", onAbort, { once: true });
     });
+  }
+
+  async temporaryDirectory(prefix: string, label: string): Promise<TemporaryDirectory> {
+    this.throwIfAborted();
+    const directory = await mkdtemp(path.join(tmpdir(), prefix));
+    let cleanupPromise: Promise<void> | undefined;
+    const cleanup = (): Promise<void> => {
+      cleanupPromise ??= rm(directory, { force: true, recursive: true });
+      return cleanupPromise;
+    };
+    try {
+      this.defer(label, cleanup);
+      this.throwIfAborted();
+    } catch (error) {
+      await cleanup();
+      throw error;
+    }
+    return Object.freeze({ path: directory, cleanup });
   }
 
   cleanup(): Promise<readonly Error[]> {

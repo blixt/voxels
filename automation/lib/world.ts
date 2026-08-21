@@ -1,10 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { tmpdir } from "node:os";
-import { promisify } from "node:util";
 import { build, createServer, preview } from "vite-plus";
 import type { PreviewServer, ViteDevServer } from "vite-plus";
 import type { BrowserContext, Page } from "playwright";
@@ -20,7 +17,6 @@ import {
 import type { WorldServiceCargoProfile } from "../../scripts/world-service-command.ts";
 import { worldServiceHealthNonce } from "../../scripts/world-service-health.ts";
 
-const execFileAsync = promisify(execFile);
 const AUTOMATION_FIXTURE_SCHEMA_VERSION = 9;
 
 export type WorldSource = "procedural-v16" | "terrain-diffusion-30m";
@@ -248,6 +244,7 @@ function parseFixtureResponse(value: unknown): FixtureResolved {
 }
 
 async function writeTypedFixture(
+  context: ScenarioContext,
   directory: string,
   clientPorts: readonly number[],
   overlay: Readonly<Record<string, unknown>>,
@@ -277,7 +274,8 @@ async function writeTypedFixture(
       2,
     )}\n`,
   );
-  await execFileAsync(
+  await runProcess(
+    context,
     rustTool("cargo"),
     [
       "run",
@@ -294,7 +292,12 @@ async function writeTypedFixture(
       requestPath,
       responsePath,
     ],
-    { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 },
+    {
+      label: "world fixture generation",
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: "inherit",
+    },
   );
   return {
     resolved: parseFixtureResponse(JSON.parse(await readFile(responsePath, "utf8"))),
@@ -302,47 +305,51 @@ async function writeTypedFixture(
   };
 }
 
-export async function prepareWorldFixture({
-  originPort,
-  clientPorts = [],
-  prefix = "voxels-browser-world-",
-  source = "procedural-v16",
-  spawnVoxels,
-  spawnPillarHeightVoxels,
-  spawnPillarRadiusVoxels,
-  spawnProtectionRadiusVoxels,
-  generationWorkers,
-  generationWorkersPerClient,
-  cascadedShadows,
-  screenSpaceAmbientOcclusion,
-  diagnosticSkyRgb,
-  profilingWarmupSeconds,
-  profilingMeasureSeconds,
-  dayLengthSeconds,
-  worldDayNumberAtUnixEpoch,
-  dayFractionAtUnixEpoch,
-  daysPerYear,
-  moonSiderealOrbitDays,
-  moonOrbitPhaseAtWorldEpoch,
-  planetCircumferenceMetres,
-  axialTiltDegrees,
-  moonOrbitInclinationDegrees,
-  celestialSeed,
-  celestialRevision,
-  weatherCycleSeconds,
-  weatherFractionAtUnixEpoch,
-  cloudVelocityMetresPerSecond,
-  cloudCoverage,
-  cloudBaseMetres,
-  cloudTopMetres,
-}: WorldFixtureOptions): Promise<WorldFixture> {
-  const directory = await mkdtemp(path.join(tmpdir(), prefix));
+export async function prepareWorldFixture(
+  context: ScenarioContext,
+  {
+    originPort,
+    clientPorts = [],
+    prefix = "voxels-browser-world-",
+    source = "procedural-v16",
+    spawnVoxels,
+    spawnPillarHeightVoxels,
+    spawnPillarRadiusVoxels,
+    spawnProtectionRadiusVoxels,
+    generationWorkers,
+    generationWorkersPerClient,
+    cascadedShadows,
+    screenSpaceAmbientOcclusion,
+    diagnosticSkyRgb,
+    profilingWarmupSeconds,
+    profilingMeasureSeconds,
+    dayLengthSeconds,
+    worldDayNumberAtUnixEpoch,
+    dayFractionAtUnixEpoch,
+    daysPerYear,
+    moonSiderealOrbitDays,
+    moonOrbitPhaseAtWorldEpoch,
+    planetCircumferenceMetres,
+    axialTiltDegrees,
+    moonOrbitInclinationDegrees,
+    celestialSeed,
+    celestialRevision,
+    weatherCycleSeconds,
+    weatherFractionAtUnixEpoch,
+    cloudVelocityMetresPerSecond,
+    cloudCoverage,
+    cloudBaseMetres,
+    cloudTopMetres,
+  }: WorldFixtureOptions,
+): Promise<WorldFixture> {
+  const temporary = await context.temporaryDirectory(prefix, "world fixture temporary directory");
+  const directory = temporary.path;
   try {
     const backendPort = await reserveEphemeralPort();
     const authToken = randomBytes(32).toString("hex");
     const serviceConfigPath = path.join(directory, "world-service.toml");
     const clientConfigPath = path.join(directory, "client.toml");
-    const generated = await writeTypedFixture(directory, clientPorts, {
+    const generated = await writeTypedFixture(context, directory, clientPorts, {
       schemaVersion: AUTOMATION_FIXTURE_SCHEMA_VERSION,
       browserPort: originPort,
       backendPort,
@@ -392,11 +399,11 @@ export async function prepareWorldFixture({
       async cleanup() {
         if (cleaned) return;
         cleaned = true;
-        await rm(directory, { recursive: true, force: true });
+        await temporary.cleanup();
       },
     };
   } catch (error) {
-    await rm(directory, { recursive: true, force: true });
+    await temporary.cleanup();
     throw error;
   }
 }
@@ -514,11 +521,10 @@ export async function startWorldStack(
     );
   }
   const port = await reserveEphemeralPort();
-  const fixture = await prepareWorldFixture({
+  const fixture = await prepareWorldFixture(context, {
     ...options.fixture,
     originPort: port,
   });
-  context.defer("world fixture", () => fixture.cleanup());
   const web = await startWebPreview(context, {
     ...options.web,
     port,
@@ -552,11 +558,10 @@ export async function startDevelopmentWorldStack(
     );
   }
   const port = await reserveEphemeralPort();
-  const fixture = await prepareWorldFixture({
+  const fixture = await prepareWorldFixture(context, {
     ...options.fixture,
     originPort: port,
   });
-  context.defer("development world fixture", () => fixture.cleanup());
 
   const environment = {
     VOXELS_CLIENT_CONFIG_PATH: fixture.clientConfigPath,

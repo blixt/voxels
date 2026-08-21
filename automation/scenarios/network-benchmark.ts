@@ -1079,14 +1079,13 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
   options.assertEmpty();
   const proxyPort = await reserveEphemeralPort();
   const previewPort = await reserveEphemeralPort();
-  const fixture = await prepareWorldFixture({
+  const fixture = await prepareWorldFixture(context, {
     originPort: previewPort,
     clientPorts: [proxyPort],
     prefix: "voxels-network-benchmark-",
     source: worldSource,
     generationWorkersPerClient,
   });
-  context.defer("network benchmark fixture", () => fixture.cleanup());
   await startWebPreview(context, {
     port: previewPort,
     buildProfile: "release",

@@ -891,7 +891,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
       const proxyPort = growthLink?.port ?? (await reserveEphemeralPort());
       let fixture = growthFixture;
       if (fixture === undefined) {
-        const createdFixture = await prepareWorldFixture({
+        const createdFixture = await prepareWorldFixture(context, {
           originPort: previewPort ?? (await reserveEphemeralPort()),
           clientPorts: [proxyPort],
           prefix: `voxels-bots-${count}-`,
@@ -902,7 +902,6 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
           spawnProtectionRadiusVoxels: BOT_SPAWN_PROTECTION_RADIUS_VOXELS,
           generationWorkers: options.generationWorkers,
         });
-        context.defer(`bot fixture ${count}`, () => createdFixture.cleanup());
         fixture = createdFixture;
       }
       const service: WorldService =

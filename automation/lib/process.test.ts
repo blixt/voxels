@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { describe, expect, it } from "vite-plus/test";
 import { startProcess } from "./process.ts";
 import { defineScenario, runScenario } from "./scenario.ts";
@@ -79,23 +80,42 @@ describe("managed automation processes", () => {
     ).resolves.toMatchObject({ status: "passed" });
   });
 
-  it("terminates an owned process when the scenario deadline expires", async () => {
+  it("removes owned processes and temporary state when the scenario deadline expires", async () => {
     let childPid: number | undefined;
+    let descendantPid: number | undefined;
+    let directory: string | undefined;
+    let continuedAfterSetup = false;
+    const descendantSource = "setInterval(() => {}, 10_000)";
+    const launcherSource = [
+      'const { spawn } = require("node:child_process");',
+      `const child = spawn(process.execPath, ["-e", ${JSON.stringify(descendantSource)}],`,
+      '  { stdio: "ignore" });',
+      "process.stdout.write(String(child.pid));",
+      "setInterval(() => {}, 10_000);",
+    ].join("");
     const scenario = defineScenario({
       id: "process-timeout",
       kind: "validation",
       summary: "Exercises process cancellation.",
       uses: {},
-      timeoutMs: 50,
+      timeoutMs: 100,
       async run(context) {
-        const managed = startProcess(
-          context,
-          process.execPath,
-          ["-e", "setInterval(() => {}, 10_000)"],
-          { label: "long-lived node fixture", stdio: "ignore" },
+        const temporary = await context.temporaryDirectory(
+          "voxels-process-timeout-",
+          "process timeout fixture",
         );
+        directory = temporary.path;
+        const managed = startProcess(context, process.execPath, ["-e", launcherSource], {
+          label: "long-lived node fixture",
+          stdio: ["ignore", "pipe", "inherit"],
+        });
         childPid = managed.child.pid;
+        descendantPid = await new Promise<number>((resolve, reject) => {
+          managed.child.once("error", reject);
+          managed.child.stdout?.once("data", (chunk: Buffer) => resolve(Number(chunk.toString())));
+        });
         await managed.completed;
+        continuedAfterSetup = true;
       },
     });
 
@@ -104,8 +124,14 @@ describe("managed automation processes", () => {
         artifacts: { root: "target/automation-tests", runId: "process-timeout" },
         log: () => {},
       }),
-    ).rejects.toThrow("scenario timed out after 50ms");
+    ).rejects.toThrow("scenario timed out after 100ms");
     expect(childPid).toBeDefined();
+    expect(descendantPid).toBeDefined();
+    expect(directory).toBeDefined();
     expect(() => process.kill(childPid!, 0)).toThrow();
+    expect(() => process.kill(descendantPid!, 0)).toThrow();
+    await expect(stat(directory!)).rejects.toMatchObject({ code: "ENOENT" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(continuedAfterSetup).toBe(false);
   });
 });

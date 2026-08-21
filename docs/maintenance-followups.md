@@ -115,20 +115,6 @@ and all-16 local-light evaluation around a GlowCrystal with representative one-,
 1,024-avatar scenes. Record GPU fragment cost and visual error before choosing the avatar-lighting
 budget.
 
-## Own automation setup processes before awaiting them
-
-`runScenario` races the scenario promise against its abort signal, but raw `execFileAsync` children
-are not part of that cancellation tree. `prepareWorldFixture` allocates a temporary world, awaits an
-unowned Cargo process, and only then registers cleanup. Storage benchmarks have the same pattern for
-build/native commands. If timeout or SIGINT arrives during setup, the child and descendants keep
-running, the temporary world can leak, and the detached scenario may later attempt to register
-cleanup after cleanup has already completed.
-
-Route long-running setup commands through the existing process-tree-owned runner and register each
-temporary path for cleanup immediately after allocation. Add a short-timeout fixture whose setup
-command spawns a descendant, then prove the descendant is gone, the temporary world is removed, and
-no late cleanup registration or unhandled rejection occurs.
-
 ## Recover active tabs after session-key rotation
 
 The browser obtains one 12-hour session token during bootstrap and reloads five minutes before its

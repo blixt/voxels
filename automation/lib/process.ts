@@ -73,4 +73,5 @@ export async function runProcess(
   options: StartProcessOptions,
 ): Promise<void> {
   await startProcess(context, command, arguments_, options).completed;
+  context.throwIfAborted();
 }

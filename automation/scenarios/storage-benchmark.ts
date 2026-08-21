@@ -1,14 +1,11 @@
-import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import { ScenarioArguments } from "../lib/arguments.ts";
+import { runProcess } from "../lib/process.ts";
 import { defineScenario, type ScenarioContext } from "../lib/scenario.ts";
 import { rustTool } from "../../scripts/build-wasm.ts";
 import { cargoProfileExecutablePath } from "../../scripts/world-service-command.ts";
 
-const execFileAsync = promisify(execFile);
 const SCHEMA_VERSION = 5;
 const BINARY = "voxels-storage-benchmark";
 
@@ -200,9 +197,11 @@ async function runNative(
     )}\n`,
   );
   context.log(`running ${profile} durability corpus`);
-  await execFileAsync(cargoProfileExecutablePath(BINARY), [requestPath, responsePath], {
+  await runProcess(context, cargoProfileExecutablePath(BINARY), [requestPath, responsePath], {
+    label: `${profile} storage benchmark`,
     cwd: process.cwd(),
-    maxBuffer: 16 * 1024 * 1024,
+    env: process.env,
+    stdio: "inherit",
   });
   const result: unknown = JSON.parse(await readFile(responsePath, "utf8"));
   assertBenchmarkResult(result);
@@ -211,7 +210,8 @@ async function runNative(
 
 async function main(context: ScenarioContext, values: readonly string[]) {
   const options = parseArguments(values);
-  await execFileAsync(
+  await runProcess(
+    context,
     rustTool("cargo"),
     [
       "build",
@@ -224,11 +224,16 @@ async function main(context: ScenarioContext, values: readonly string[]) {
       "--bin",
       BINARY,
     ],
-    { cwd: process.cwd(), maxBuffer: 16 * 1024 * 1024 },
+    {
+      label: "storage benchmark build",
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: "inherit",
+    },
   );
-  const directory = await mkdtemp(path.join(tmpdir(), "voxels-storage-benchmark-"));
-  context.defer("storage benchmark temporary databases", () =>
-    rm(directory, { force: true, recursive: true }),
+  const { path: directory } = await context.temporaryDirectory(
+    "voxels-storage-benchmark-",
+    "storage benchmark temporary databases",
   );
   const results = [];
   for (const profile of options.profiles) {

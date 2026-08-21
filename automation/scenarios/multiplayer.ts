@@ -417,13 +417,12 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
   const previewPort = await reserveEphemeralPort();
   const names = ["observer", "builder-1", "builder-2", "builder-3", "builder-4", "builder-5"];
   const ports = await Promise.all(names.map(() => reserveEphemeralPort()));
-  const fixture = await prepareWorldFixture({
+  const fixture = await prepareWorldFixture(scenario, {
     originPort: previewPort,
     clientPorts: ports,
     prefix: "voxels-multiplayer-browser-",
     source: "terrain-diffusion-30m",
   });
-  scenario.defer("multiplayer fixture", () => fixture.cleanup());
   await startWebPreview(scenario, { port: previewPort, buildProfile: "release" });
   const service = await startWorldService(scenario, fixture, { metal: true });
   const links = await Promise.all(
