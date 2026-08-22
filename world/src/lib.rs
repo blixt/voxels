@@ -79,7 +79,6 @@ pub use source::{
     WorldManifestHash, WorldProduct, WorldProductBatch, WorldProductBatchItem,
     WorldProductBatchResult, WorldProductPriority, WorldProductRequest, WorldSourceEngine,
     WorldSourceError, WorldSourceIdentity, WorldSourceIdentityHash, WorldSourceKind,
-    procedural_world_source,
 };
 pub use terrain_directory::{
     TERRAIN_COVERAGE_ROOT_LEVEL, TERRAIN_DIRECTORY_MAX_NODES, TERRAIN_DIRECTORY_MAX_ROOTS,

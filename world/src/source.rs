@@ -1262,11 +1262,6 @@ pub struct ProceduralWorldSource {
     identity: WorldSourceIdentity,
 }
 
-/// Selects the current portable provider behind the source-neutral engine boundary.
-pub fn procedural_world_source(seed: u64) -> Box<dyn WorldSourceEngine> {
-    Box::new(ProceduralWorldSource::new(seed))
-}
-
 impl ProceduralWorldSource {
     pub fn new(seed: u64) -> Self {
         Self {
