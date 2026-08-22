@@ -21,6 +21,24 @@ proves:
 
 Reference: [wgpu 30 `CurrentSurfaceTexture`](https://docs.rs/wgpu/30.0.0/wgpu/enum.CurrentSurfaceTexture.html).
 
+## Define the remaining far-terrain feature contract
+
+`rendering.features.far_terrain` is still part of the strict client config, renderer options,
+screenshot reproduction contract, diagnostics, and frame uniform. The single-cut virtual-terrain
+migration removed its last behavioral consumers, however, and no current WGSL reads the remaining
+uniform value. Setting it to `false` therefore records a different feature state while streaming and
+rendering the same far terrain.
+
+Removing the field changes the versioned config and screenshot contract. Reintroducing a draw or
+streaming gate is not a local fix either: the virtual hierarchy now supplies one complete ownership
+cut, and hiding it without a replacement can create an uncovered horizon.
+
+Choose whether the next schema retires the setting or defines a supported canonical-only mode. If it
+is retained, add an isolated `far_terrain = false` browser scenario that proves complete visible
+coverage, no virtual directory/page requests or GPU publication, bounded resident canonical chunks,
+and lower measured CPU/GPU/RAM use. If it is retired, add explicit config and screenshot migration
+tests so old artifacts fail with an actionable version error instead of silently changing meaning.
+
 ## Reuse procedural chunk generation for meshing halos
 
 `ProceduralWorldSource::chunk_with_halo` currently calls `Generator::generate_chunk`, then builds a
