@@ -60,6 +60,7 @@ use wgpu::{
 
 const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
 const MAX_SHADOW_ALLOCATION_BYTES: u64 = 256 * 1024 * 1024;
+const NEUTRAL_SHADOW_MAP_RESOLUTION: u32 = 1;
 const MAX_ACTIVE_LOCAL_LIGHTS: usize = 16;
 const MAX_LOCAL_LIGHT_VISIBILITY_TESTS: usize = 32;
 const _: () = assert!(MAX_LOCAL_LIGHT_VISIBILITY_TESTS >= MAX_ACTIVE_LOCAL_LIGHTS);
@@ -4349,6 +4350,7 @@ struct ShadowGpu {
     _texture: Texture,
     sample_view: TextureView,
     sampler: wgpu::Sampler,
+    resolution: u32,
     layer_views: [TextureView; CASCADE_COUNT],
     uniform_buffers: [Buffer; CASCADE_COUNT],
     bind_groups: [BindGroup; CASCADE_COUNT],
@@ -4425,6 +4427,18 @@ fn validate_shadow_allocation(
     Ok(())
 }
 
+const fn retained_shadow_map_resolution(configured: u32, enabled: bool) -> u32 {
+    if enabled {
+        configured
+    } else {
+        NEUTRAL_SHADOW_MAP_RESOLUTION
+    }
+}
+
+const fn shadow_map_bytes(resolution: u32) -> u64 {
+    resolution as u64 * resolution as u64 * CASCADE_COUNT as u64 * size_of::<f32>() as u64
+}
+
 impl ShadowGpu {
     fn new(
         device: &Device,
@@ -4432,14 +4446,16 @@ impl ShadowGpu {
         camera: &CameraState,
         light_basis: DirectionalShadowBasis,
         config: DirectionalShadowConfig,
+        enabled: bool,
     ) -> Result<Self, String> {
         let cascades = build_directional_shadow_cascades(camera, 1.0, light_basis, config)
             .map_err(|error| format!("build initial shadow cascades: {error:?}"))?;
+        let resolution = retained_shadow_map_resolution(config.shadow_map_resolution, enabled);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("sun shadow cascade array"),
             size: wgpu::Extent3d {
-                width: config.shadow_map_resolution,
-                height: config.shadow_map_resolution,
+                width: resolution,
+                height: resolution,
                 depth_or_array_layers: CASCADE_COUNT as u32,
             },
             mip_level_count: 1,
@@ -4543,6 +4559,7 @@ impl ShadowGpu {
             _texture: texture,
             sample_view,
             sampler,
+            resolution,
             layer_views,
             uniform_buffers,
             bind_groups,
@@ -4566,6 +4583,10 @@ impl ShadowGpu {
                 bytemuck::bytes_of(&uniform),
             );
         }
+    }
+
+    const fn bytes(&self) -> u64 {
+        shadow_map_bytes(self.resolution)
     }
 }
 
@@ -4632,7 +4653,10 @@ impl Renderer {
             limits: format!("{:?}", device.limits()),
         };
         validate_shadow_allocation(
-            runtime_config.directional_shadows.shadow_map_resolution,
+            retained_shadow_map_resolution(
+                runtime_config.directional_shadows.shadow_map_resolution,
+                runtime_config.features.cascaded_sun_shadows,
+            ),
             device.limits().max_texture_dimension_2d,
         )?;
         device.on_uncaptured_error(Arc::new(move |error| {
@@ -4702,6 +4726,7 @@ impl Renderer {
             &initial_camera,
             shadow_direction.basis(),
             runtime_config.directional_shadows,
+            options.shadows,
         )?;
         let material_detail = MaterialDetailGpu::new(&device, &queue);
         let shadow_cascades = directional_shadow_cascades(
@@ -9310,12 +9335,7 @@ impl Renderer {
         let water_arena = self.water_arena.stats();
         let virtual_terrain_arena = self.virtual_terrain_arena.stats();
         let scene_pixels = u64::from(self.config.width) * u64::from(self.config.height);
-        let shadow_resolution = u64::from(
-            self.runtime_config
-                .directional_shadows
-                .shadow_map_resolution,
-        );
-        let shadow_bytes = shadow_resolution * shadow_resolution * CASCADE_COUNT as u64 * 4;
+        let shadow_bytes = self.shadow_gpu.bytes();
         let gpu_timing = self.gpu_timer.as_ref().and_then(GpuTimer::latest);
         let terrain_fingerprint = if virtual_visible {
             fingerprint_value(
@@ -13868,6 +13888,14 @@ mod tests {
         assert!(validate_shadow_allocation(0, 8_192).is_err());
         assert!(validate_shadow_allocation(4_096, 2_048).is_err());
         assert!(validate_shadow_allocation(8_192, 16_384).is_err());
+    }
+
+    #[test]
+    fn disabled_shadows_retain_only_a_neutral_depth_array() {
+        assert_eq!(retained_shadow_map_resolution(1_024, true), 1_024);
+        assert_eq!(retained_shadow_map_resolution(4_096, false), 1);
+        assert_eq!(shadow_map_bytes(1_024), 12_582_912);
+        assert_eq!(shadow_map_bytes(NEUTRAL_SHADOW_MAP_RESOLUTION), 12);
     }
 
     #[test]
