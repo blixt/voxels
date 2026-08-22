@@ -373,6 +373,14 @@ function childExitReason(code: number | null, signal: NodeJS.Signals | null): st
   return signal ? `signal ${signal}` : `status ${code ?? "unknown"}`;
 }
 
+export async function waitForNativeRestartDrain(
+  isStopping: () => boolean,
+  wait: (milliseconds: number) => Promise<void> = delay,
+): Promise<boolean> {
+  await wait(1_050);
+  return !isStopping();
+}
+
 function nativeWorldService(): Plugin {
   const profile = worldServiceDevelopmentProfile();
   let buildChild: ChildProcess | undefined;
@@ -529,7 +537,7 @@ function nativeWorldService(): Plugin {
           // Let every open browser close its world/presence sockets first so the authoritative
           // service can checkpoint the latest player pose before this development-only swap.
           server.ws.send({ type: "custom", event: "voxels:before-world-restart", data: {} });
-          await delay(1_050);
+          if (!(await waitForNativeRestartDrain(() => stopping))) return false;
         }
         daemonChild = undefined;
         if (previous) await terminateProcessTree(previous);

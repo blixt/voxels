@@ -15,6 +15,7 @@ import {
   signalOwnedProcessGroup,
   terminateProcessTree,
   WatchedInputContentChanges,
+  waitForNativeRestartDrain,
   watchRustInputChanges,
   worldServiceHealthNonce,
   worldServiceDevelopmentProfile,
@@ -156,6 +157,16 @@ describe("Rust WASM development watcher", () => {
 });
 
 describe("native world-service development command", () => {
+  it("cancels a replacement launch when shutdown begins during the socket drain", async () => {
+    let stopping = false;
+    const wait = async (milliseconds: number): Promise<void> => {
+      expect(milliseconds).toBe(1_050);
+      stopping = true;
+    };
+
+    await expect(waitForNativeRestartDrain(() => stopping, wait)).resolves.toBe(false);
+  });
+
   it("serializes an initial build with source-triggered rebuilds", async () => {
     const rebuilds = new NativeRebuildQueue();
     let releaseInitial = (): void => undefined;
