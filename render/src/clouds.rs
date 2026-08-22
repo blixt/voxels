@@ -75,6 +75,11 @@ struct CloudUniform {
 const _: () = assert!(size_of::<CloudUniform>() == 64);
 
 pub(crate) struct VolumetricCloudGpu {
+    active: Option<ActiveVolumetricCloudGpu>,
+    config: VolumetricCloudConfig,
+}
+
+struct ActiveVolumetricCloudGpu {
     target: Texture,
     target_view: TextureView,
     noise: Texture,
@@ -87,7 +92,6 @@ pub(crate) struct VolumetricCloudGpu {
     width: u32,
     height: u32,
     noise_seed: u64,
-    config: VolumetricCloudConfig,
 }
 
 impl VolumetricCloudGpu {
@@ -106,6 +110,12 @@ impl VolumetricCloudGpu {
         config: VolumetricCloudConfig,
     ) -> Self {
         let config = config.sanitized();
+        if !config.enabled {
+            return Self {
+                active: None,
+                config,
+            };
+        }
         let (target, target_view, width, height) =
             cloud_target(device, width, height, config.resolution_scale);
         let noise = noise_texture(device);
@@ -205,31 +215,36 @@ impl VolumetricCloudGpu {
             }),
         );
         Self {
-            target,
-            target_view,
-            noise,
-            uniform,
-            trace_bind_group,
-            composite_layout,
-            composite_bind_group,
-            trace_pipeline,
-            composite_pipeline,
-            width,
-            height,
-            noise_seed: 0,
+            active: Some(ActiveVolumetricCloudGpu {
+                target,
+                target_view,
+                noise,
+                uniform,
+                trace_bind_group,
+                composite_layout,
+                composite_bind_group,
+                trace_pipeline,
+                composite_pipeline,
+                width,
+                height,
+                noise_seed: 0,
+            }),
             config,
         }
     }
 
     pub(crate) fn resize(&mut self, device: &Device, width: u32, height: u32) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
         let (target, target_view, width, height) =
             cloud_target(device, width, height, self.config.resolution_scale);
-        self.target = target;
-        self.target_view = target_view;
-        self.width = width;
-        self.height = height;
-        self.composite_bind_group =
-            composite_bind_group(device, &self.composite_layout, &self.target_view);
+        active.target = target;
+        active.target_view = target_view;
+        active.width = width;
+        active.height = height;
+        active.composite_bind_group =
+            composite_bind_group(device, &active.composite_layout, &active.target_view);
     }
 
     pub(crate) fn update(
@@ -238,12 +253,15 @@ impl VolumetricCloudGpu {
         state: WorldEnvironmentState,
         environment: OutdoorEnvironment,
     ) {
-        if self.noise_seed != state.weather_seed {
-            write_noise(queue, &self.noise, state.weather_seed);
-            self.noise_seed = state.weather_seed;
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        if active.noise_seed != state.weather_seed {
+            write_noise(queue, &active.noise, state.weather_seed);
+            active.noise_seed = state.weather_seed;
         }
         let uniform = CloudUniform {
-            target_size: target_size(self.width, self.height),
+            target_size: target_size(active.width, active.height),
             layer: [
                 state.cloud_base_metres,
                 state.cloud_top_metres,
@@ -265,7 +283,7 @@ impl VolumetricCloudGpu {
                 environment.storminess,
             ],
         };
-        queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
+        queue.write_buffer(&active.uniform, 0, bytemuck::bytes_of(&uniform));
     }
 
     pub(crate) fn trace<'query>(
@@ -274,10 +292,13 @@ impl VolumetricCloudGpu {
         frame_bind_group: &BindGroup,
         timestamp_writes: Option<RenderPassTimestampWrites<'query>>,
     ) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
         let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("half-resolution volumetric cloud trace"),
             color_attachments: &[Some(RenderPassColorAttachment {
-                view: &self.target_view,
+                view: &active.target_view,
                 resolve_target: None,
                 depth_slice: None,
                 ops: Operations {
@@ -290,9 +311,9 @@ impl VolumetricCloudGpu {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.trace_pipeline);
+        pass.set_pipeline(&active.trace_pipeline);
         pass.set_bind_group(0, frame_bind_group, &[]);
-        pass.set_bind_group(1, &self.trace_bind_group, &[]);
+        pass.set_bind_group(1, &active.trace_bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -305,6 +326,9 @@ impl VolumetricCloudGpu {
         depth_store: StoreOp,
         timestamp_writes: Option<RenderPassTimestampWrites<'query>>,
     ) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
         let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("full-resolution volumetric cloud composite"),
             color_attachments: &[Some(RenderPassColorAttachment {
@@ -328,24 +352,26 @@ impl VolumetricCloudGpu {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.composite_pipeline);
+        pass.set_pipeline(&active.composite_pipeline);
         pass.set_bind_group(0, frame_bind_group, &[]);
-        pass.set_bind_group(2, &self.composite_bind_group, &[]);
+        pass.set_bind_group(2, &active.composite_bind_group, &[]);
         pass.draw(0..3, 0..1);
     }
 
     pub(crate) const fn enabled(&self) -> bool {
-        self.config.enabled
+        self.active.is_some()
     }
 
-    pub(crate) const fn bytes(&self) -> u64 {
-        self.width as u64 * self.height as u64 * 8
-            + noise_mip_bytes()
-            + size_of::<CloudUniform>() as u64
+    pub(crate) fn bytes(&self) -> u64 {
+        self.active.as_ref().map_or(0, |active| {
+            cloud_resource_bytes(active.width, active.height)
+        })
     }
 
-    pub(crate) const fn resolution(&self) -> [u32; 2] {
-        [self.width, self.height]
+    pub(crate) fn resolution(&self) -> [u32; 2] {
+        self.active
+            .as_ref()
+            .map_or([0, 0], |active| [active.width, active.height])
     }
 
     pub(crate) const fn quality(&self) -> [u32; 2] {
@@ -368,6 +394,10 @@ fn target_size(width: u32, height: u32) -> [f32; 4] {
         1.0 / width.max(1) as f32,
         1.0 / height.max(1) as f32,
     ]
+}
+
+const fn cloud_resource_bytes(width: u32, height: u32) -> u64 {
+    width as u64 * height as u64 * 8 + noise_mip_bytes() + size_of::<CloudUniform>() as u64
 }
 
 fn cloud_target(
@@ -664,6 +694,12 @@ mod tests {
         assert_eq!(scaled_extent(1, 0.5), 1);
         assert_eq!(scaled_extent(1_279, 0.5), 640);
         assert_eq!(scaled_extent(1_280, 0.5), 640);
+    }
+
+    #[test]
+    fn enabled_cloud_resources_have_an_exact_bounded_size() {
+        assert_eq!(cloud_resource_bytes(640, 360), 2_142_857);
+        assert_eq!(cloud_resource_bytes(1_280, 720), 7_672_457);
     }
 
     #[test]
