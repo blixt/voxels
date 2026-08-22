@@ -428,7 +428,7 @@ impl ClientConfig {
         ensure_integer_range(
             shadows.shadow_map_resolution,
             "rendering.shadows.shadow_map_resolution",
-            1,
+            2,
             MAX_SHADOW_MAP_RESOLUTION,
         )?;
         ensure_finite_range(
@@ -1114,6 +1114,10 @@ mod tests {
         let mut config = valid_config();
         config.rendering.shadows.split_lambda = 1.01;
         assert_invalid_field(&config, "rendering.shadows.split_lambda");
+
+        let mut config = valid_config();
+        config.rendering.shadows.shadow_map_resolution = 1;
+        assert_invalid_field(&config, "rendering.shadows.shadow_map_resolution");
 
         let mut config = valid_config();
         config.rendering.shadows.shadow_map_resolution = MAX_SHADOW_MAP_RESOLUTION + 1;
