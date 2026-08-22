@@ -503,11 +503,14 @@ export async function startWebPreview(
     });
   }
   context.throwIfAborted();
-  const server = await preview({
-    logLevel: "warn",
-    preview: { host: "127.0.0.1", port, strictPort: true },
-  });
-  context.defer("web preview", () => server.close());
+  const server = await context.acquire(
+    "web preview",
+    preview({
+      logLevel: "warn",
+      preview: { host: "127.0.0.1", port, strictPort: true },
+    }),
+    (resource) => resource.close(),
+  );
   return { port, url: `http://127.0.0.1:${port}`, server };
 }
 
@@ -579,14 +582,23 @@ export async function startDevelopmentWorldStack(
   delete process.env.VOXELS_EXTERNAL_WORLD_SERVICE;
   let server: ViteDevServer | undefined;
   try {
-    server = await createServer({
-      logLevel: "info",
-      server: { host: "127.0.0.1", port, strictPort: true },
-    });
-    await server.listen();
-  } catch (error) {
-    await server?.close();
-    throw error;
+    server = await context.acquire(
+      "development web and native world stack",
+      (async () => {
+        const candidate = await createServer({
+          logLevel: "info",
+          server: { host: "127.0.0.1", port, strictPort: true },
+        });
+        try {
+          await candidate.listen();
+          return candidate;
+        } catch (error) {
+          await candidate.close();
+          throw error;
+        }
+      })(),
+      (resource) => resource.close(),
+    );
   } finally {
     for (const key of environmentKeys) {
       const value = previous[key];
@@ -600,7 +612,6 @@ export async function startDevelopmentWorldStack(
   if (server === undefined) {
     throw new Error("development Vite server was not created");
   }
-  context.defer("development web and native world stack", () => server.close());
   return {
     port,
     url: `http://127.0.0.1:${port}`,

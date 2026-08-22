@@ -1093,12 +1093,15 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
   const service = await startWorldService(context, fixture, {
     metal: worldSource === "terrain-diffusion-30m",
   });
-  const link = await createShapedLink({
-    listenPort: proxyPort,
-    targetPort: fixture.backendPort,
-    profile,
-  });
-  context.defer("network benchmark shaped link", () => link.close());
+  const link = await context.acquire(
+    "network benchmark shaped link",
+    createShapedLink({
+      listenPort: proxyPort,
+      targetPort: fixture.backendPort,
+      profile,
+    }),
+    (resource) => resource.close(),
+  );
   const clientRoute = routeWorldClient(fixture, 0);
   const browser = await BrowserCapability.start(context, { warningPattern: FAILURE });
   try {

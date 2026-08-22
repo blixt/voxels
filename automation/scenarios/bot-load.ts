@@ -913,12 +913,15 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         }));
       let proxy: ShapedLink | undefined = growthLink;
       if (proxy === undefined) {
-        const createdProxy = await createShapedLink({
-          listenPort: proxyPort,
-          targetPort: fixture.backendPort,
-          profile: NETWORK_PROFILE,
-        });
-        context.defer(`bot shaped link ${count}`, () => createdProxy.close());
+        const createdProxy = await context.acquire(
+          `bot shaped link ${count}`,
+          createShapedLink({
+            listenPort: proxyPort,
+            targetPort: fixture.backendPort,
+            profile: NETWORK_PROFILE,
+          }),
+          (link) => link.close(),
+        );
         proxy = createdProxy;
       }
       if (options.mode === "growth" && growthFixture === undefined) {

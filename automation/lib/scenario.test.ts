@@ -95,4 +95,80 @@ describe("automation scenario runner", () => {
     expect(performance.now() - started).toBeLessThan(250);
     expect(cleaned).toBe(true);
   });
+
+  it("releases a resource whose acquisition finishes after the deadline cleanup", async () => {
+    let finishAcquisition: ((resource: object) => void) | undefined;
+    let ownership: Promise<object> | undefined;
+    let releases = 0;
+    const scenario = defineScenario({
+      id: "runner-late-acquisition",
+      kind: "validation",
+      summary: "Exercises resource acquisition across deadline cancellation.",
+      uses: {},
+      timeoutMs: 25,
+      async run(context) {
+        ownership = context.acquire(
+          "late resource",
+          new Promise<object>((resolve) => {
+            finishAcquisition = resolve;
+          }),
+          () => {
+            releases += 1;
+          },
+        );
+        await ownership;
+      },
+    });
+
+    await expect(
+      runScenario(scenario, [], {
+        artifacts: { root: "target/automation-tests", runId: "runner-late-acquisition" },
+        log: () => {},
+      }),
+    ).rejects.toThrow("scenario timed out after 25ms");
+    finishAcquisition?.({});
+    await expect(ownership).rejects.toThrow("scenario timed out after 25ms");
+    expect(releases).toBe(1);
+  });
+
+  it("releases a parallel acquisition that finishes after a sibling fails", async () => {
+    let finishAcquisition: ((resource: object) => void) | undefined;
+    let ownership: Promise<object> | undefined;
+    let releases = 0;
+    const scenario = defineScenario({
+      id: "runner-partial-acquisition",
+      kind: "validation",
+      summary: "Exercises partial parallel resource acquisition.",
+      uses: {},
+      async run(context) {
+        ownership = context.acquire(
+          "successful sibling",
+          new Promise<object>((resolve) => {
+            finishAcquisition = resolve;
+          }),
+          () => {
+            releases += 1;
+          },
+        );
+        await Promise.all([
+          ownership,
+          context.acquire("failed sibling", Promise.reject(new Error("acquisition failed")), () => {
+            throw new Error("unreachable cleanup");
+          }),
+        ]);
+      },
+    });
+
+    await expect(
+      runScenario(scenario, [], {
+        artifacts: { root: "target/automation-tests", runId: "runner-partial-acquisition" },
+        log: () => {},
+      }),
+    ).rejects.toThrow("acquisition failed");
+    finishAcquisition?.({});
+    await expect(ownership).rejects.toThrow(
+      "cannot register cleanup successful sibling after scenario cleanup started",
+    );
+    expect(releases).toBe(1);
+  });
 });

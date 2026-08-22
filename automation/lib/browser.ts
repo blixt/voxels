@@ -102,13 +102,17 @@ export class BrowserCapability {
     if (!scenario.definition.uses.browser && scenario.definition.uses.viewport !== "browser") {
       throw new Error(`scenario ${scenario.definition.id} did not declare browser automation`);
     }
-    const browser = await chromium.launch(options.launch ?? chromeWebGpuLaunchOptions());
-    const capability = new BrowserCapability(
+    let capability: BrowserCapability | undefined;
+    const browser = await scenario.acquire(
+      "browser",
+      chromium.launch(options.launch ?? chromeWebGpuLaunchOptions()),
+      (resource) => capability?.close() ?? resource.close(),
+    );
+    capability = new BrowserCapability(
       scenario,
       browser,
       options.warningPattern ?? /wgpu|webgpu|panic|unreachable|runtimeerror/iu,
     );
-    scenario.defer("browser", () => capability.close());
     return capability;
   }
 

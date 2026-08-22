@@ -129,6 +129,30 @@ export class ScenarioContext {
     this.#cleanups.push({ label, cleanup });
   }
 
+  async acquire<T>(
+    label: string,
+    acquisition: PromiseLike<T>,
+    cleanup: (resource: T) => void | Promise<void>,
+  ): Promise<T> {
+    const resource = await acquisition;
+    const release = (): void | Promise<void> => cleanup(resource);
+    try {
+      this.throwIfAborted();
+      this.defer(label, release);
+    } catch (error) {
+      try {
+        await release();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          `failed to release ${label} acquired after scenario cleanup started`,
+        );
+      }
+      throw error;
+    }
+    return resource;
+  }
+
   throwIfAborted(): void {
     if (this.signal.aborted) throw abortReason(this.signal);
   }

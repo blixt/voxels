@@ -426,17 +426,18 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
   await startWebPreview(scenario, { port: previewPort, buildProfile: "release" });
   const service = await startWorldService(scenario, fixture, { metal: true });
   const links = await Promise.all(
-    ports.map((port) =>
-      createShapedLink({
-        listenPort: port,
-        targetPort: fixture.backendPort,
-        profile: LINK_PROFILE,
-      }),
+    ports.map((port, index) =>
+      scenario.acquire(
+        `multiplayer shaped link ${index + 1}`,
+        createShapedLink({
+          listenPort: port,
+          targetPort: fixture.backendPort,
+          profile: LINK_PROFILE,
+        }),
+        (link) => link.close(),
+      ),
     ),
   );
-  for (const [index, link] of links.entries()) {
-    scenario.defer(`multiplayer shaped link ${index + 1}`, () => link.close());
-  }
   const launch = chromeWebGpuLaunchOptions();
   const browser = await BrowserCapability.start(scenario, {
     warningPattern: FAILURE,
