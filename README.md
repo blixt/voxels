@@ -31,8 +31,8 @@ release commands, smoke tests, persistence, and rollback notes.
 `vp run automation -- list` is the single index for behavioral tests, benchmarks, bot loads,
 screenshots, traces, video, and provider setup. Every run is isolated under `target/automation/`;
 see [Automation scenarios](docs/automation.md) for the authoring API and composition model.
-`vp run automation -- run bench-world` runs native Criterion baselines for chunk generation,
-stream codecs, meshing, and virtual hierarchy pages. Each ignored
+`vp run automation -- run bench-world` runs native Criterion baselines for generation, source
+products, route and edit queries, stream codecs, and meshing. Each ignored
 `target/automation/bench-world/<run-id>/criterion/` directory retains the full report.
 `vp run automation -- run bench-core` compares 120 dry and submerged fixed simulation steps.
 `vp run automation -- run storage-benchmark` measures production edit latency, compact overlay RAM,

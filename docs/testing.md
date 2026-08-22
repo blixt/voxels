@@ -54,7 +54,7 @@ or transport evidence that the general gate cannot.
 | Screenshot replay   | `vp run automation -- run replay-screenshot --input=FILE.png --url=http://localhost:5173/`              | Reapplies embedded camera, environment, render, streaming, and cut metadata against the same mutable world |
 | Spectator feed      | `vp run automation -- run spectator-feed`                                                               | Bodyless read-only camera, movement, body restore, screenshots, and video                                  |
 | Weather motion      | `vp run automation -- run weather-motion`                                                               | World-anchored clouds and downward precipitation                                                           |
-| Portable world      | `vp run automation -- run bench-world`                                                                  | Focused generation, stream-codec, meshing, and far-surface Criterion baselines                             |
+| Portable world      | `vp run automation -- run bench-world`                                                                  | Focused generation, source-product, route/edit, codec, and meshing Criterion baselines                     |
 | Portable simulation | `vp run automation -- run bench-core`                                                                   | Focused dry/submerged fixed-step simulation baselines                                                      |
 | Streaming runtime   | `vp run automation -- run bench-runtime`                                                                | Focused portable scheduler baselines using current client streaming limits                                 |
 
