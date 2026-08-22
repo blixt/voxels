@@ -381,6 +381,14 @@ export async function waitForNativeRestartDrain(
   return !isStopping();
 }
 
+export async function admitNativeLaunch(
+  isStopping: () => boolean,
+  assertPortAvailable: () => Promise<void>,
+): Promise<boolean> {
+  await assertPortAvailable();
+  return !isStopping();
+}
+
 function nativeWorldService(): Plugin {
   const profile = worldServiceDevelopmentProfile();
   let buildChild: ChildProcess | undefined;
@@ -478,8 +486,15 @@ function nativeWorldService(): Plugin {
         });
       };
 
-      const launch = async (): Promise<void> => {
-        await assertWorldServicePortAvailable(WORLD_SERVICE_CONFIG_SOURCE);
+      const launch = async (): Promise<boolean> => {
+        if (
+          !(await admitNativeLaunch(
+            () => stopping,
+            async () => assertWorldServicePortAvailable(WORLD_SERVICE_CONFIG_SOURCE),
+          ))
+        ) {
+          return false;
+        }
         const startupNonce = randomUUID();
         const executable = worldServiceExecutablePath(profile);
         server.config.logger.info("[voxels-world-service] starting native daemon");
@@ -518,6 +533,7 @@ function nativeWorldService(): Plugin {
           throw new Error("native daemon was replaced before becoming ready");
         }
         server.config.logger.info("[voxels-world-service] native daemon ready");
+        return true;
       };
 
       const activateCompiledBuild = async (
@@ -542,7 +558,7 @@ function nativeWorldService(): Plugin {
         daemonChild = undefined;
         if (previous) await terminateProcessTree(previous);
         try {
-          await launch();
+          if (!(await launch())) return false;
         } catch (error) {
           const failedDaemon = daemonChild;
           daemonChild = undefined;

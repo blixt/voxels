@@ -6,6 +6,7 @@ import { createServer as createTcpServer } from "node:net";
 import path from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import {
+  admitNativeLaunch,
   browserWasmProfile,
   assertWorldServicePortAvailable,
   isNativeWorldServiceInput,
@@ -157,6 +158,15 @@ describe("Rust WASM development watcher", () => {
 });
 
 describe("native world-service development command", () => {
+  it("cancels a launch when shutdown begins during the port probe", async () => {
+    let stopping = false;
+    const probe = async (): Promise<void> => {
+      stopping = true;
+    };
+
+    await expect(admitNativeLaunch(() => stopping, probe)).resolves.toBe(false);
+  });
+
   it("cancels a replacement launch when shutdown begins during the socket drain", async () => {
     let stopping = false;
     const wait = async (milliseconds: number): Promise<void> => {
