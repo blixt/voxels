@@ -15,7 +15,7 @@ use crate::shadow::{
 };
 use crate::ui::{Color, InventoryItem, LiveStats, MissionControlUi, UiAction, UiKey, Viewport};
 pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
-use crate::ui_gpu::{SCENE_FORMAT, UiGpu};
+use crate::ui_gpu::{SCENE_FORMAT, UiGpu, retained_refraction_extent};
 use crate::virtual_terrain::{
     ExactSurfaceDomain, PresentationEnvelope, PresentationLocus, VirtualTerrainCapacity,
     VirtualTerrainCut, VirtualTerrainError, VirtualTerrainHierarchy, VirtualTerrainView,
@@ -4181,6 +4181,10 @@ impl DepthTarget {
         &self.view
     }
 
+    const fn bytes(&self) -> u64 {
+        depth_target_bytes(self.width, self.height)
+    }
+
     fn copy_to(&self, encoder: &mut wgpu::CommandEncoder, destination: &Self) {
         debug_assert_eq!(
             (self.width, self.height),
@@ -4196,6 +4200,10 @@ impl DepthTarget {
             },
         );
     }
+}
+
+const fn depth_target_bytes(width: u32, height: u32) -> u64 {
+    width as u64 * height as u64 * size_of::<f32>() as u64
 }
 
 fn world_depth_usage() -> TextureUsages {
@@ -4868,7 +4876,10 @@ impl Renderer {
             ],
         });
         let depth = DepthTarget::world(&device, config.width, config.height);
-        let opaque_depth = DepthTarget::opaque_snapshot(&device, config.width, config.height);
+        let opaque_depth_extent =
+            retained_refraction_extent(config.width, config.height, options.water);
+        let opaque_depth =
+            DepthTarget::opaque_snapshot(&device, opaque_depth_extent.0, opaque_depth_extent.1);
         let ambient_occlusion_gpu = AmbientOcclusionGpu::new(
             &device,
             &queue,
@@ -5155,7 +5166,14 @@ impl Renderer {
             &virtual_water_pipeline_layout,
             &voxel_shader,
         );
-        let ui_gpu = UiGpu::new(&device, format, config.width, config.height, dpr)?;
+        let ui_gpu = UiGpu::new(
+            &device,
+            format,
+            config.width,
+            config.height,
+            dpr,
+            options.water,
+        )?;
         let water_scene_bind_group =
             ui_gpu.water_scene_bind_group(&device, &water_scene_layout, opaque_depth.view());
 
@@ -5324,7 +5342,12 @@ impl Renderer {
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
             self.depth = DepthTarget::world(&self.device, width, height);
-            self.opaque_depth = DepthTarget::opaque_snapshot(&self.device, width, height);
+            let opaque_depth_extent = retained_refraction_extent(width, height, self.options.water);
+            self.opaque_depth = DepthTarget::opaque_snapshot(
+                &self.device,
+                opaque_depth_extent.0,
+                opaque_depth_extent.1,
+            );
             self.ambient_occlusion_gpu
                 .resize(&self.device, self.depth.view(), width, height);
             self.volumetric_cloud_gpu
@@ -9334,7 +9357,6 @@ impl Renderer {
         let arena = self.arena.stats();
         let water_arena = self.water_arena.stats();
         let virtual_terrain_arena = self.virtual_terrain_arena.stats();
-        let scene_pixels = u64::from(self.config.width) * u64::from(self.config.height);
         let shadow_bytes = self.shadow_gpu.bytes();
         let gpu_timing = self.gpu_timer.as_ref().and_then(GpuTimer::latest);
         let terrain_fingerprint = if virtual_visible {
@@ -9700,8 +9722,9 @@ impl Renderer {
                 .saturating_add(water_arena.capacity_bytes)
                 .saturating_add(virtual_terrain_arena.capacity_bytes)
                 .saturating_add(self.virtual_terrain_gpu.handle_bank_capacity_bytes())
-                // Two RGBA16F scene targets plus writable and sampled Depth32Float targets.
-                .saturating_add(scene_pixels.saturating_mul(24))
+                .saturating_add(self.ui_gpu.bytes())
+                .saturating_add(self.depth.bytes())
+                .saturating_add(self.opaque_depth.bytes())
                 .saturating_add(shadow_bytes)
                 .saturating_add(self.ambient_occlusion_gpu.bytes())
                 .saturating_add(self.volumetric_cloud_gpu.bytes())
@@ -14115,6 +14138,12 @@ mod tests {
         assert!(opaque.contains(TextureUsages::TEXTURE_BINDING));
         assert!(opaque.contains(TextureUsages::COPY_DST));
         assert!(!opaque.contains(TextureUsages::RENDER_ATTACHMENT));
+    }
+
+    #[test]
+    fn disabled_refraction_retains_only_one_neutral_depth_texel() {
+        assert_eq!(depth_target_bytes(1_280, 720), 3_686_400);
+        assert_eq!(depth_target_bytes(1, 1), 4);
     }
 
     #[test]

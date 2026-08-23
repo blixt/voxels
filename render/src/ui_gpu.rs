@@ -21,7 +21,27 @@ use wgpu_text::glyph_brush::{HorizontalAlign, Layout, Section, Text, VerticalAli
 use wgpu_text::{BrushBuilder, TextBrush};
 
 const GLASS_CAPACITY: usize = 192;
+const NEUTRAL_REFRACTION_EXTENT: u32 = 1;
 pub(crate) const SCENE_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+
+pub(crate) const fn retained_refraction_extent(
+    width: u32,
+    height: u32,
+    enabled: bool,
+) -> (u32, u32) {
+    if enabled {
+        (
+            if width == 0 { 1 } else { width },
+            if height == 0 { 1 } else { height },
+        )
+    } else {
+        (NEUTRAL_REFRACTION_EXTENT, NEUTRAL_REFRACTION_EXTENT)
+    }
+}
+
+const fn scene_target_bytes(width: u32, height: u32) -> u64 {
+    width as u64 * height as u64 * 8
+}
 
 pub struct SceneTarget {
     texture: Texture,
@@ -74,6 +94,10 @@ impl SceneTarget {
 
     pub const fn view(&self) -> &TextureView {
         &self.view
+    }
+
+    const fn bytes(&self) -> u64 {
+        scene_target_bytes(self.width, self.height)
     }
 
     fn copy_to(&self, encoder: &mut CommandEncoder, destination: &Self) {
@@ -393,6 +417,7 @@ pub struct UiGpu {
     height: u32,
     dpr: f32,
     glass_count: usize,
+    retain_opaque_scene: bool,
 }
 
 impl UiGpu {
@@ -402,8 +427,10 @@ impl UiGpu {
         width: u32,
         height: u32,
         dpr: f32,
+        retain_opaque_scene: bool,
     ) -> Result<Self, String> {
-        let opaque_scene = SceneTarget::new(device, width, height);
+        let opaque_extent = retained_refraction_extent(width, height, retain_opaque_scene);
+        let opaque_scene = SceneTarget::new(device, opaque_extent.0, opaque_extent.1);
         let scene = SceneTarget::new(device, width, height);
         let present = PresentPipeline::new(device, format, &scene);
         let glass = GlassPipeline::new(device, format, &scene);
@@ -418,7 +445,12 @@ impl UiGpu {
             height: height.max(1),
             dpr: valid_dpr(dpr),
             glass_count: 0,
+            retain_opaque_scene,
         })
+    }
+
+    pub const fn bytes(&self) -> u64 {
+        self.opaque_scene.bytes().saturating_add(self.scene.bytes())
     }
 
     pub const fn scene_view(&self) -> &TextureView {
@@ -470,7 +502,11 @@ impl UiGpu {
         self.width = width.max(1);
         self.height = height.max(1);
         self.dpr = valid_dpr(dpr);
-        let opaque_resized = self.opaque_scene.resize(device, self.width, self.height);
+        let opaque_extent =
+            retained_refraction_extent(self.width, self.height, self.retain_opaque_scene);
+        let opaque_resized = self
+            .opaque_scene
+            .resize(device, opaque_extent.0, opaque_extent.1);
         let scene_resized = self.scene.resize(device, self.width, self.height);
         if scene_resized {
             self.present.rebind(device, &self.scene);
@@ -591,4 +627,17 @@ fn screen_pipeline(
         multiview_mask: None,
         cache: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_refraction_retains_only_one_neutral_scene_texel() {
+        assert_eq!(retained_refraction_extent(1_280, 720, true), (1_280, 720));
+        assert_eq!(retained_refraction_extent(3_840, 2_160, false), (1, 1));
+        assert_eq!(scene_target_bytes(1_280, 720), 7_372_800);
+        assert_eq!(scene_target_bytes(1, 1), 8);
+    }
 }
