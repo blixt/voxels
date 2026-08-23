@@ -126,6 +126,27 @@ describe("network benchmark link", () => {
     ]);
   });
 
+  it("counts interleaved WebSocket control frames without classifying them as VXWP", () => {
+    const stats = testInternals.blankStats();
+    const inspector = new testInternals.ConnectionInspector({ current: stats });
+    inspector.path = "/v44/world";
+    inspector.upgraded.upstream = true;
+    const first = maskedFrame(Buffer.from("VXWP "), { opcode: 0x2, final: false });
+    const ping = maskedFrame(Buffer.from("ping"), { opcode: 0x9 });
+    const second = maskedFrame(Buffer.from("fixture"), { opcode: 0x0 });
+
+    inspector.observe("upstream", Buffer.concat([first, ping, second]));
+
+    const snapshot = testInternals.clonedStats(stats);
+    expect(snapshot.upstream.frames).toBe(3);
+    expect(snapshot.upstream.websocketFrameBytes).toBe(first.length + ping.length + second.length);
+    expect(snapshot.paths["/v44/world"]?.upstream).toMatchObject({
+      frames: 3,
+      websocketFrameBytes: first.length + ping.length + second.length,
+    });
+    expect(snapshot.messages).toEqual({});
+  });
+
   it("decodes world-product priority from the typed VXWP request payload", () => {
     const request = Buffer.alloc(25);
     request.write("VXWP");

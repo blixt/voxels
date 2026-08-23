@@ -295,7 +295,10 @@ class WebSocketFrameParser {
     readonly payload: Buffer;
     readonly frameLength: number;
   }): void {
-    if (opcode === 0x8 || opcode === 0x9 || opcode === 0x0a) return;
+    if (opcode === 0x8 || opcode === 0x9 || opcode === 0x0a) {
+      this.onMessage(opcode, payload, frameLength, 1);
+      return;
+    }
     if (opcode === 0x0) {
       if (this.fragmentOpcode === null) throw new Error("unexpected continuation frame");
       this.fragments.push(payload);
