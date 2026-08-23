@@ -1,8 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { spawn } from "node:child_process";
 import { buildCloudflareLocalEnv, rootDir } from "./cf-env.mjs";
-import { mirrorChildExit } from "./child-process-exit.mjs";
+import { mirrorOwnedChildExit, spawnOwnedChild } from "./child-process-exit.ts";
 
 // Run the locally-installed Wrangler under this repo's directory-local
 // Cloudflare auth (see cf-env.mjs).
@@ -14,10 +13,10 @@ if (!existsSync(wranglerBin)) {
   process.exit(1);
 }
 
-const child = spawn(process.execPath, [wranglerBin, ...process.argv.slice(2)], {
+const child = spawnOwnedChild(process.execPath, [wranglerBin, ...process.argv.slice(2)], {
   cwd: rootDir,
   env: buildCloudflareLocalEnv(),
   stdio: "inherit",
 });
 
-mirrorChildExit(child);
+mirrorOwnedChildExit(child);
