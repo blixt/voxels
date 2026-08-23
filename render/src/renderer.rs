@@ -9373,12 +9373,11 @@ impl Renderer {
                 } else {
                     0
                 });
-        let visible_water_draw_calls = water_draw_list
-            .spans
-            .len()
-            .saturating_add(usize::from(virtual_visible && refract_water) * 2)
-            as u32;
-        let visible_water_primitives =
+        let (visible_water_draw_calls, visible_water_primitives) = visible_water_diagnostics(
+            water_draw_list
+                .spans
+                .len()
+                .saturating_add(usize::from(virtual_visible) * 2) as u32,
             water_draw_list
                 .quad_count
                 .saturating_add(if virtual_visible {
@@ -9388,7 +9387,9 @@ impl Renderer {
                         .saturating_add(virtual_world_draw_lists.water_triangles.vertex_count / 3)
                 } else {
                     0
-                });
+                }),
+            refract_water,
+        );
         let gpu_virtual_feedback = self.virtual_terrain_gpu.latest_feedback();
         let certification_cut = self
             .virtual_terrain_publication
@@ -11716,6 +11717,14 @@ const fn refraction_copy_bytes(width: u32, height: u32, active: bool) -> u64 {
         width as u64 * height as u64 * 12
     } else {
         0
+    }
+}
+
+const fn visible_water_diagnostics(draw_calls: u32, primitives: u32, active: bool) -> (u32, u32) {
+    if active {
+        (draw_calls, primitives)
+    } else {
+        (0, 0)
     }
 }
 
@@ -14088,6 +14097,12 @@ mod tests {
     fn refraction_bandwidth_is_paid_only_for_visible_water() {
         assert_eq!(refraction_copy_bytes(1_280, 720, false), 0);
         assert_eq!(refraction_copy_bytes(1_280, 720, true), 11_059_200);
+    }
+
+    #[test]
+    fn disabled_water_does_not_report_hidden_geometry() {
+        assert_eq!(visible_water_diagnostics(7, 4_096, false), (0, 0));
+        assert_eq!(visible_water_diagnostics(7, 4_096, true), (7, 4_096));
     }
 
     #[test]
