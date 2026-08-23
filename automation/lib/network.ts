@@ -583,6 +583,7 @@ function shapeDirection(
   inspector: TrafficInspector,
   direction: LinkDirection,
   settings: DirectionSettings,
+  onFailure: (error: unknown) => void,
 ): void {
   const queue: QueuedChunk[] = [];
   let queuedBytes = 0;
@@ -592,21 +593,28 @@ function shapeDirection(
   const drain = async (): Promise<void> => {
     if (draining) return;
     draining = true;
-    while (queue.length > 0 && !destination.destroyed) {
-      const item = queue.shift();
-      if (item === undefined) break;
-      queuedBytes -= item.bytes.length;
-      if (source.isPaused() && queuedBytes < settings.maxQueuedBytes / 2) source.resume();
-      const delay = item.deliverAtMs - performance.now();
-      if (delay > 0) await new Promise<void>((resolve) => setTimeout(resolve, delay));
-      if (destination.destroyed) break;
-      inspector.observe(direction, item.bytes);
-      if (!destination.write(item.bytes)) {
-        await new Promise<void>((resolve) => destination.once("drain", resolve));
+    try {
+      while (queue.length > 0 && !destination.destroyed) {
+        const item = queue.shift();
+        if (item === undefined) break;
+        queuedBytes -= item.bytes.length;
+        if (source.isPaused() && queuedBytes < settings.maxQueuedBytes / 2) source.resume();
+        const delay = item.deliverAtMs - performance.now();
+        if (delay > 0) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        if (destination.destroyed) break;
+        inspector.observe(direction, item.bytes);
+        if (!destination.write(item.bytes)) {
+          await new Promise<void>((resolve) => destination.once("drain", resolve));
+        }
       }
+    } finally {
+      draining = false;
     }
-    draining = false;
     if (sourceEnded && !destination.destroyed) destination.end();
+  };
+
+  const startDrain = (): void => {
+    void drain().catch(onFailure);
   };
 
   source.on("data", (chunk: Buffer) => {
@@ -635,13 +643,13 @@ function shapeDirection(
       source.pause();
       inspector.observeBackpressure(direction);
     }
-    void drain();
+    startDrain();
   });
   // TCP EOF is ordered after every byte already read from the source. Preserve that ordering
   // across artificial latency instead of truncating the delayed queue as soon as `end` fires.
   source.on("end", () => {
     sourceEnded = true;
-    void drain();
+    startDrain();
   });
   source.on("error", () => destination.destroy());
 }
@@ -712,6 +720,7 @@ export async function createShapedLink({
   const statsRef = { current: blankStats() };
   const sockets = new Set<Socket>();
   const inspectors = new Set<ConnectionInspector>();
+  let backgroundFailure: Error | undefined;
   const normalized: NormalizedShapedLinkProfile = {
     oneWayLatencyMs: profile.oneWayLatencyMs,
     upstreamMegabitsPerSecond: profile.upstreamMegabitsPerSecond,
@@ -744,20 +753,42 @@ export async function createShapedLink({
     sockets.add(backend);
     const inspector = new ConnectionInspector(statsRef);
     inspectors.add(inspector);
-    shapeDirection(client, backend, inspector, "upstream", {
-      oneWayLatencyMs: normalized.oneWayLatencyMs,
-      megabitsPerSecond: normalized.upstreamMegabitsPerSecond,
-      quantumBytes: normalized.quantumBytes,
-      maxQueuedBytes: normalized.upstreamMaxQueuedBytes,
-      clock: clocks.upstream,
-    });
-    shapeDirection(backend, client, inspector, "downstream", {
-      oneWayLatencyMs: normalized.oneWayLatencyMs,
-      megabitsPerSecond: normalized.downstreamMegabitsPerSecond,
-      quantumBytes: normalized.quantumBytes,
-      maxQueuedBytes: normalized.downstreamMaxQueuedBytes,
-      clock: clocks.downstream,
-    });
+    const failConnection = (direction: LinkDirection, error: unknown): void => {
+      backgroundFailure ??= new Error(
+        `shaped link ${direction} failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+      client.destroy();
+      backend.destroy();
+    };
+    shapeDirection(
+      client,
+      backend,
+      inspector,
+      "upstream",
+      {
+        oneWayLatencyMs: normalized.oneWayLatencyMs,
+        megabitsPerSecond: normalized.upstreamMegabitsPerSecond,
+        quantumBytes: normalized.quantumBytes,
+        maxQueuedBytes: normalized.upstreamMaxQueuedBytes,
+        clock: clocks.upstream,
+      },
+      (error) => failConnection("upstream", error),
+    );
+    shapeDirection(
+      backend,
+      client,
+      inspector,
+      "downstream",
+      {
+        oneWayLatencyMs: normalized.oneWayLatencyMs,
+        megabitsPerSecond: normalized.downstreamMegabitsPerSecond,
+        quantumBytes: normalized.quantumBytes,
+        maxQueuedBytes: normalized.downstreamMaxQueuedBytes,
+        clock: clocks.downstream,
+      },
+      (error) => failConnection("downstream", error),
+    );
     const forget = (socket: Socket): void => {
       sockets.delete(socket);
       inspectors.delete(inspector);
@@ -786,6 +817,7 @@ export async function createShapedLink({
         await new Promise<void>((resolve, reject) =>
           server.close((error) => (error ? reject(error) : resolve())),
         );
+        if (backgroundFailure !== undefined) throw backgroundFailure;
       })();
       return closePromise;
     },

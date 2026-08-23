@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createConnection, createServer as createTcpServer } from "node:net";
 import { describe, expect, it } from "vite-plus/test";
 import { PassThrough } from "node:stream";
 import { reserveEphemeralPort } from "./browser.ts";
@@ -248,13 +249,22 @@ describe("network benchmark link", () => {
       observeQueue: () => {},
       observeBackpressure: () => {},
     };
-    testInternals.shapeDirection(source, destination, inspector, "downstream", {
-      oneWayLatencyMs: 10,
-      megabitsPerSecond: 1_000,
-      quantumBytes: 3,
-      maxQueuedBytes: 1_024,
-      clock: new testInternals.SerializationClock(),
-    });
+    testInternals.shapeDirection(
+      source,
+      destination,
+      inspector,
+      "downstream",
+      {
+        oneWayLatencyMs: 10,
+        megabitsPerSecond: 1_000,
+        quantumBytes: 3,
+        maxQueuedBytes: 1_024,
+        clock: new testInternals.SerializationClock(),
+      },
+      (error) => {
+        throw error;
+      },
+    );
 
     source.end(Buffer.from("final VXWP error"));
     await ended;
@@ -280,5 +290,57 @@ describe("network benchmark link", () => {
 
     await link.close();
     await expect(link.close()).resolves.toBeUndefined();
+  });
+
+  it("surfaces asynchronous inspector failures through close", async () => {
+    const [listenPort, targetPort] = await Promise.all([
+      reserveEphemeralPort(),
+      reserveEphemeralPort(),
+    ]);
+    const target = createTcpServer((socket) => {
+      socket.on("error", () => {});
+      socket.once("data", () => {
+        socket.end(
+          Buffer.concat([
+            Buffer.from(
+              "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            ),
+            Buffer.from([0x80, 0]),
+          ]),
+        );
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      target.once("error", reject);
+      target.listen(targetPort, "127.0.0.1", resolve);
+    });
+    const link = await createShapedLink({
+      listenPort,
+      targetPort,
+      profile: {
+        name: "inspector-failure-test",
+        oneWayLatencyMs: 0,
+        upstreamMegabitsPerSecond: 1_000,
+        downstreamMegabitsPerSecond: 1_000,
+      },
+    });
+    const client = createConnection({ host: "127.0.0.1", port: listenPort });
+    client.on("error", () => {});
+    try {
+      await new Promise<void>((resolve, reject) => {
+        client.once("error", reject);
+        client.once("connect", resolve);
+      });
+      client.write("GET /v44/world HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+      await new Promise<void>((resolve) => client.once("close", resolve));
+
+      await expect(link.close()).rejects.toThrow(
+        "shaped link downstream failed: unexpected continuation frame",
+      );
+    } finally {
+      client.destroy();
+      await link.close().catch(() => {});
+      await new Promise<void>((resolve) => target.close(() => resolve()));
+    }
   });
 });
