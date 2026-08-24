@@ -976,19 +976,17 @@ impl StreamScheduler {
     ) -> bool {
         let (secondary_interest, capacity_truncated) =
             normalized_interest(focus, interest, self.config.max_secondary_interest_chunks);
-        if self.focus_initialized
-            && self.focus == focus
-            && self.secondary_interest == secondary_interest
-            && self.secondary_interest_requested == interest.len()
-            && self.secondary_interest_capacity_truncated == capacity_truncated
-        {
+        let desired_changed = !self.focus_initialized
+            || self.focus != focus
+            || self.secondary_interest != secondary_interest;
+        self.secondary_interest_requested = interest.len();
+        self.secondary_interest_capacity_truncated = capacity_truncated;
+        if !desired_changed {
             return false;
         }
         self.focus = focus;
         self.focus_initialized = true;
         self.secondary_interest = secondary_interest;
-        self.secondary_interest_requested = interest.len();
-        self.secondary_interest_capacity_truncated = capacity_truncated;
         let desired = self.desired_coordinates(focus);
         let desired_keys: BTreeSet<_> = desired.iter().copied().map(coord_key).collect();
 
@@ -2068,9 +2066,9 @@ mod tests {
             max_secondary_interest_chunks: MAX_SECONDARY_INTEREST_CHUNKS,
         });
 
-        scheduler.update_focus_with_interest(focus, &with_duplicate);
+        assert!(scheduler.update_focus_with_interest(focus, &with_duplicate));
         assert_eq!(scheduler.diagnostics().secondary_interest_truncated, 0);
-        scheduler.update_focus_with_interest(focus, &with_rejected);
+        assert!(!scheduler.update_focus_with_interest(focus, &with_rejected));
         assert_eq!(scheduler.diagnostics().secondary_interest_truncated, 1);
     }
 
