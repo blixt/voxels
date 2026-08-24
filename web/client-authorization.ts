@@ -20,6 +20,11 @@ export interface AuthorizedClientBootstrap {
   sessionExpiresAt?: number;
 }
 
+export type PublicIdentityLock = <T>(
+  storageKey: string,
+  operation: () => Promise<T> | T,
+) => Promise<T>;
+
 export async function authorizeClientBootstrap(
   configToml: string,
   localPlayer: BrowserPlayerSession,
@@ -27,6 +32,7 @@ export async function authorizeClientBootstrap(
   storage: LocalPlayerStorage = localStorage,
   fetchResponse: typeof fetch = fetch,
   nowSeconds = Math.floor(Date.now() / 1_000),
+  identityLock: PublicIdentityLock = withBrowserPublicIdentityLock,
 ): Promise<AuthorizedClientBootstrap> {
   const match = AUTH_TOKEN_LINE.exec(configToml);
   const configuredToken = match?.[2];
@@ -39,38 +45,52 @@ export async function authorizeClientBootstrap(
     throw new Error("session authorization endpoint must be same-origin");
   }
   const storageKey = `voxels.public-identity.v1.${localPlayer.playerName}`;
-  const identityCredential = storage.getItem(storageKey) ?? undefined;
-  let response = await requestSession(
-    endpoint,
-    localPlayer.playerName,
-    identityCredential,
-    fetchResponse,
-  );
-  if (response.status === 401 && identityCredential !== undefined) {
-    response = await requestSession(endpoint, localPlayer.playerName, undefined, fetchResponse);
-  }
-  if (!response.ok) {
-    throw new Error(`session authorization failed (${response.status} ${response.statusText})`);
-  }
-  const value = validateSessionResponse(await response.json(), localPlayer.playerName, nowSeconds);
-  try {
-    storage.setItem(storageKey, value.identityCredential);
-  } catch (error) {
-    throw new Error(`Could not persist the public player credential: ${String(error)}`);
-  }
-  return {
-    configToml: configToml.replace(
-      AUTH_TOKEN_LINE,
-      (_line, prefix: string, _configuredToken: string, suffix: string) =>
-        `${prefix}${value.authSubprotocolToken}${suffix}`,
-    ),
-    player: {
-      browserUserId: value.browserUserId,
-      playerId: value.playerId,
-      playerName: value.playerName,
-    },
-    sessionExpiresAt: value.expiresAt,
-  };
+  return identityLock(storageKey, async () => {
+    const identityCredential = storage.getItem(storageKey) ?? undefined;
+    let response = await requestSession(
+      endpoint,
+      localPlayer.playerName,
+      identityCredential,
+      fetchResponse,
+    );
+    if (response.status === 401 && identityCredential !== undefined) {
+      response = await requestSession(endpoint, localPlayer.playerName, undefined, fetchResponse);
+    }
+    if (!response.ok) {
+      throw new Error(`session authorization failed (${response.status} ${response.statusText})`);
+    }
+    const value = validateSessionResponse(
+      await response.json(),
+      localPlayer.playerName,
+      nowSeconds,
+    );
+    try {
+      storage.setItem(storageKey, value.identityCredential);
+    } catch (error) {
+      throw new Error(`Could not persist the public player credential: ${String(error)}`);
+    }
+    return {
+      configToml: configToml.replace(
+        AUTH_TOKEN_LINE,
+        (_line, prefix: string, _configuredToken: string, suffix: string) =>
+          `${prefix}${value.authSubprotocolToken}${suffix}`,
+      ),
+      player: {
+        browserUserId: value.browserUserId,
+        playerId: value.playerId,
+        playerName: value.playerName,
+      },
+      sessionExpiresAt: value.expiresAt,
+    };
+  });
+}
+
+async function withBrowserPublicIdentityLock<T>(
+  storageKey: string,
+  operation: () => Promise<T> | T,
+): Promise<T> {
+  if (navigator.locks === undefined) return operation();
+  return navigator.locks.request(storageKey, { mode: "exclusive" }, operation);
 }
 
 async function requestSession(

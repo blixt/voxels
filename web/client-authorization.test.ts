@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { authorizeClientBootstrap } from "./client-authorization.ts";
+import { authorizeClientBootstrap, type PublicIdentityLock } from "./client-authorization.ts";
 import type { BrowserPlayerSession, LocalPlayerStorage } from "./local-player.ts";
 
 const LOCAL_PLAYER: BrowserPlayerSession = {
@@ -20,6 +20,25 @@ class MemoryStorage implements LocalPlayerStorage {
   setItem(key: string, value: string): void {
     this.values.set(key, value);
   }
+}
+
+function serialIdentityLock(): PublicIdentityLock {
+  const tails = new Map<string, Promise<void>>();
+  return async (storageKey, operation) => {
+    const previous = tails.get(storageKey) ?? Promise.resolve();
+    let release = (): void => undefined;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    tails.set(storageKey, current);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (tails.get(storageKey) === current) tails.delete(storageKey);
+    }
+  };
 }
 
 describe("public client authorization", () => {
@@ -147,6 +166,61 @@ describe("public client authorization", () => {
     expect(storage.values.get("voxels.public-identity.v1.default")).toBe(
       "vxi1.reissued-credential",
     );
+  });
+
+  it("serializes simultaneous first loads before issuing a durable identity", async () => {
+    const storage = new MemoryStorage();
+    const requestBodies: Array<Record<string, unknown>> = [];
+    let releaseFirstResponse = (): void => undefined;
+    const firstResponseGate = new Promise<void>((resolve) => {
+      releaseFirstResponse = resolve;
+    });
+    const fetchResponse: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+      requestBodies.push(body);
+      if (requestBodies.length === 1) await firstResponseGate;
+      return Response.json({
+        browserUserId: "00000000-0000-4000-8000-000000000030",
+        playerId: "00000000-0000-4000-8000-000000000031",
+        playerName: "default",
+        authSubprotocolToken: `vxs1.signed-token-${requestBodies.length}`,
+        identityCredential: "vxi1.shared-durable-credential",
+        expiresAt: VALID_EXPIRY,
+      });
+    };
+    const lock = serialIdentityLock();
+    const configToml = 'auth_subprotocol_token = "session:/api/session"\n';
+
+    const first = authorizeClientBootstrap(
+      configToml,
+      LOCAL_PLAYER,
+      "https://voxels.lol/",
+      storage,
+      fetchResponse,
+      NOW_SECONDS,
+      lock,
+    );
+    await Promise.resolve();
+    const second = authorizeClientBootstrap(
+      configToml,
+      LOCAL_PLAYER,
+      "https://voxels.lol/",
+      storage,
+      fetchResponse,
+      NOW_SECONDS,
+      lock,
+    );
+    await Promise.resolve();
+    expect(requestBodies).toEqual([{ playerName: "default" }]);
+
+    releaseFirstResponse();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(secondResult.player).toEqual(firstResult.player);
+    expect(requestBodies).toEqual([
+      { playerName: "default" },
+      { identityCredential: "vxi1.shared-durable-credential", playerName: "default" },
+    ]);
   });
 
   it("rejects mismatched and nil session identities", async () => {
