@@ -81,8 +81,7 @@ pub struct TerrainPageDemand {
 
 impl TerrainPageDemand {
     pub fn validates(self) -> bool {
-        self.identity.key.level <= crate::TERRAIN_PAGE_MAX_LEVEL
-            && self.identity.content_fingerprint != [0; 32]
+        self.identity.validates()
             && self.occlusion_confidence_millis <= 1_000
             && self.estimated_encoded_bytes > 0
             && self.estimated_encoded_bytes as usize <= TERRAIN_PAGE_MAX_COMPRESSED_BYTES
@@ -91,7 +90,9 @@ impl TerrainPageDemand {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TerrainDemandGroup {
-    /// `Some(parent)` means all eight exact children form one atomic replacement unit.
+    /// `Some(parent)` means every exact child forms one atomic replacement unit.
+    ///
+    /// Volumetric octree parents have eight children; surface quadtree parents have four.
     pub replacement_parent: Option<TerrainPageKey>,
     pub pages: Vec<TerrainPageDemand>,
 }
@@ -808,6 +809,49 @@ mod tests {
             silhouette_critical: false,
             estimated_encoded_bytes: 1_024,
         }
+    }
+
+    #[test]
+    fn demands_require_wire_representable_volume_and_surface_bounds() {
+        let demand_for = |key| {
+            demand(
+                TerrainPageTransferIdentity {
+                    key,
+                    revision: 1,
+                    content_fingerprint: [1; 32],
+                },
+                100,
+            )
+        };
+        let page_span = i32::try_from(crate::TERRAIN_PAGE_EDGE_SAMPLES).unwrap();
+        let maximum_valid_page_coord = i32::MAX.div_euclid(page_span) - 1;
+        let minimum_valid_page_coord = i32::MIN.div_euclid(page_span);
+
+        assert!(
+            demand_for(TerrainPageKey {
+                level: 0,
+                coord: [maximum_valid_page_coord, minimum_valid_page_coord, 0],
+            })
+            .validates()
+        );
+        assert!(
+            demand_for(TerrainPageKey::surface(
+                0,
+                maximum_valid_page_coord,
+                minimum_valid_page_coord,
+            ))
+            .validates()
+        );
+        assert!(
+            !demand_for(TerrainPageKey {
+                level: 0,
+                coord: [maximum_valid_page_coord + 1, 0, 0],
+            })
+            .validates()
+        );
+        assert!(
+            !demand_for(TerrainPageKey::surface(0, maximum_valid_page_coord + 1, 0,)).validates()
+        );
     }
 
     #[test]

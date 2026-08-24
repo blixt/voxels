@@ -36,7 +36,7 @@ impl TerrainPageTransferIdentity {
             && self.content_fingerprint == page.content_fingerprint
     }
 
-    fn validates(self) -> bool {
+    pub(crate) fn validates(self) -> bool {
         (if self.key.is_surface() {
             self.key.horizontal_bounds().is_some()
         } else {
