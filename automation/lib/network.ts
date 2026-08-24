@@ -577,6 +577,20 @@ interface TrafficInspector {
   observeBackpressure(direction: LinkDirection): void;
 }
 
+function waitForDrainOrClose(destination: Duplex): Promise<void> {
+  if (destination.destroyed) return Promise.resolve();
+  return new Promise((resolve) => {
+    const settle = (): void => {
+      destination.off("drain", settle);
+      destination.off("close", settle);
+      resolve();
+    };
+    destination.once("drain", settle);
+    destination.once("close", settle);
+    if (destination.destroyed) settle();
+  });
+}
+
 function shapeDirection(
   source: Duplex,
   destination: Duplex,
@@ -604,10 +618,15 @@ function shapeDirection(
         if (destination.destroyed) break;
         inspector.observe(direction, item.bytes);
         if (!destination.write(item.bytes)) {
-          await new Promise<void>((resolve) => destination.once("drain", resolve));
+          await waitForDrainOrClose(destination);
         }
       }
     } finally {
+      if (destination.destroyed) {
+        queue.length = 0;
+        queuedBytes = 0;
+        if (source.isPaused() && !source.destroyed) source.resume();
+      }
       draining = false;
     }
     if (sourceEnded && !destination.destroyed) destination.end();
@@ -618,6 +637,7 @@ function shapeDirection(
   };
 
   source.on("data", (chunk: Buffer) => {
+    if (destination.destroyed) return;
     for (let offset = 0; offset < chunk.length; offset += settings.quantumBytes) {
       const bytes = Buffer.from(chunk.subarray(offset, offset + settings.quantumBytes));
       const enqueuedMs = performance.now();

@@ -272,6 +272,50 @@ describe("network benchmark link", () => {
     expect(Buffer.concat(received).toString("utf8")).toBe("final VXWP error");
   });
 
+  it("releases a backpressured queue when the destination closes before drain", async () => {
+    const source = new PassThrough();
+    const destination = new PassThrough({ highWaterMark: 1 });
+    destination.pause();
+    let observedFirstWrite: (() => void) | undefined;
+    const firstWrite = new Promise<void>((resolve) => {
+      observedFirstWrite = resolve;
+    });
+    testInternals.shapeDirection(
+      source,
+      destination,
+      {
+        observe: () => observedFirstWrite?.(),
+        observeQueue: () => {},
+        observeBackpressure: () => {},
+      },
+      "downstream",
+      {
+        oneWayLatencyMs: 0,
+        megabitsPerSecond: 1_000,
+        quantumBytes: 64,
+        maxQueuedBytes: 64,
+        clock: new testInternals.SerializationClock(),
+      },
+      (error) => {
+        throw error;
+      },
+    );
+
+    source.write(Buffer.alloc(128));
+    await firstWrite;
+    expect(source.isPaused()).toBe(true);
+    expect(destination.listenerCount("drain")).toBe(1);
+
+    const closed = new Promise<void>((resolve) => destination.once("close", resolve));
+    destination.destroy();
+    await closed;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(destination.listenerCount("drain")).toBe(0);
+    expect(source.isPaused()).toBe(false);
+    source.destroy();
+  });
+
   it("can be closed explicitly before scenario cleanup", async () => {
     const [listenPort, targetPort] = await Promise.all([
       reserveEphemeralPort(),
