@@ -6,8 +6,11 @@
 .wrangler-local
 .env*
 artifacts
+automation
+cloudflare
 dist
+docs
 node_modules
 target
 tmp
-web/generated
+web
