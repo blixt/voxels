@@ -135,7 +135,7 @@ async function readBoundedJson(request: Request): Promise<unknown> {
       if (done) break;
       length += value.length;
       if (length > MAX_SESSION_REQUEST_BYTES) {
-        await reader.cancel();
+        await reader.cancel().catch(() => undefined);
         throw new SessionRequestError(413, "Session request is too large");
       }
       chunks.push(value);

@@ -176,6 +176,40 @@ describe("session Worker", () => {
     expect(exactLimit.status).toBe(200);
   });
 
+  it("preserves the oversized-body response when stream cancellation fails", async () => {
+    let canceled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(4_097));
+      },
+      cancel() {
+        canceled = true;
+        throw new Error("cancel failed");
+      },
+    });
+    const request = new Request("https://voxels.lol/api/session", {
+      method: "POST",
+      headers: {
+        "CF-Connecting-IP": "203.0.113.10",
+        "Content-Type": "application/json",
+        Origin: "https://voxels.lol",
+        "Sec-Fetch-Site": "same-origin",
+      },
+      body,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" }) as Parameters<typeof worker.fetch>[0];
+    const report = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await worker
+      .fetch(request, testEnv(true, []))
+      .finally(() => report.mockRestore());
+
+    expect(canceled).toBe(true);
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({ error: "Session request is too large" });
+    expect(report).not.toHaveBeenCalled();
+  });
+
   it("requires JSON and rejects invalid request fields before rate limiting", async () => {
     const keys: string[] = [];
     const env = testEnv(true, keys);
