@@ -14,25 +14,30 @@ export const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const localDir = resolve(rootDir, ".wrangler-local");
 const localEnvPath = resolve(rootDir, ".env.cloudflare.local");
-const cloudflareAuthEnvNames = [
+const cloudflareAuthAndTargetEnvNames = [
   "CF_ACCOUNT_ID",
+  "CF_API_BASE_URL",
   "CF_API_KEY",
   "CF_API_TOKEN",
   "CF_EMAIL",
   "CLOUDFLARE_ACCESS_CLIENT_ID",
   "CLOUDFLARE_ACCESS_CLIENT_SECRET",
   "CLOUDFLARE_ACCOUNT_ID",
+  "CLOUDFLARE_API_BASE_URL",
   "CLOUDFLARE_API_KEY",
   "CLOUDFLARE_API_TOKEN",
   "CLOUDFLARE_API_USER_SERVICE_KEY",
+  "CLOUDFLARE_COMPLIANCE_REGION",
   "CLOUDFLARE_EMAIL",
+  "CLOUDFLARE_ENV",
+  "WRANGLER_API_ENVIRONMENT",
 ];
 
-/** Removes global Cloudflare credentials before repository-local credentials are loaded. */
+/** Removes global Cloudflare credentials and target selectors before local values are loaded. */
 export function stripAmbientCloudflareAuth(sourceEnv, inheritAuth) {
   const env = { ...sourceEnv };
   if (!inheritAuth) {
-    for (const name of cloudflareAuthEnvNames) {
+    for (const name of cloudflareAuthAndTargetEnvNames) {
       delete env[name];
     }
   }
