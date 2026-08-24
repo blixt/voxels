@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
-import { parseBotHarnessReport, settlePopulationSampling } from "./bot-load.ts";
+import {
+  parseBotHarnessReport,
+  parseBotLoadArguments,
+  settlePopulationSampling,
+} from "./bot-load.ts";
 
 function report(): unknown {
   return {
@@ -48,6 +52,42 @@ describe("native bot report boundary", () => {
     expect(() =>
       parseBotHarnessReport({ ...(report() as object), reports: [{ protocolErrors: 0 }] }),
     ).toThrow("incompatible report");
+  });
+});
+
+describe("bot load worker envelope", () => {
+  it("accepts the checked-in production worker envelope", () => {
+    expect(
+      parseBotLoadArguments([
+        "--counts=4",
+        "--duration=3",
+        "--no-browser",
+        "--generation-workers=2",
+        "--generation-workers-per-client=1",
+      ]),
+    ).toMatchObject({
+      counts: [4],
+      durationSeconds: 3,
+      browser: false,
+      generationWorkers: 2,
+      generationWorkersPerClient: 1,
+    });
+  });
+
+  it("keeps global-only development envelopes and rejects incomplete lane budgets", () => {
+    expect(parseBotLoadArguments(["--generation-workers=3"])).toMatchObject({
+      generationWorkers: 3,
+      generationWorkersPerClient: undefined,
+    });
+    expect(() => parseBotLoadArguments(["--generation-workers=2"])).toThrow(
+      "requires --generation-workers-per-client",
+    );
+    expect(() => parseBotLoadArguments(["--generation-workers-per-client=1"])).toThrow(
+      "requires --generation-workers",
+    );
+    expect(() =>
+      parseBotLoadArguments(["--generation-workers=2", "--generation-workers-per-client=2"]),
+    ).toThrow("leave at least one global collision worker");
   });
 });
 

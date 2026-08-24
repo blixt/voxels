@@ -101,7 +101,15 @@ vp run automation -- run bot-load --counts=256,512,1000 --duration=10 --no-brows
   --service-profile=worldgen --bot-profile=worldgen
 vp run automation -- run bot-load --counts=512 --duration=10 --no-browser \
   --service-profile=worldgen --bot-profile=worldgen --generation-workers=12
+vp run automation -- run bot-load --counts=4 --duration=10 --no-browser \
+  --service-profile=worldgen --bot-profile=worldgen \
+  --generation-workers=2 --generation-workers-per-client=1
 ```
+
+The last command reproduces the checked-in production generation envelope: two global workers, one
+ordinary worker per client, and the base configuration's one collision-critical worker per client.
+The global and ordinary-per-client overrides are paired so the collision lane always retains at
+least one global worker.
 
 Use growth mode to retain one temporary database and daemon across successive waves. Stable bot
 identities resume their server-owned position, inventory, and edited world:

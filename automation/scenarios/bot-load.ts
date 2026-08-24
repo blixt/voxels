@@ -31,7 +31,7 @@ import {
 } from "../../scripts/world-service-command.ts";
 
 const execFileAsync = promisify(execFile);
-const RESULT_SCHEMA_VERSION = 7;
+const RESULT_SCHEMA_VERSION = 8;
 const BOT_REPORT_SCHEMA_VERSION = 5;
 const SAMPLE_INTERVAL_MS = 250;
 const OBSERVER_SAMPLE_INTERVAL_MS = 500;
@@ -63,6 +63,7 @@ interface BotLoadOptions {
   serviceProfile: WorldServiceCargoProfile;
   botProfile: WorldServiceCargoProfile;
   generationWorkers: number | undefined;
+  generationWorkersPerClient: number | undefined;
   browser: boolean;
   recordVideo: boolean;
 }
@@ -209,7 +210,7 @@ interface ObserverSample {
   readonly terrainReady: boolean;
 }
 
-function parseArguments(values: readonly string[]): BotLoadOptions {
+export function parseBotLoadArguments(values: readonly string[]): BotLoadOptions {
   const arguments_ = new ScenarioArguments(values);
   const countsSource = arguments_.string("counts", "4,8,16,32,64") ?? "";
   const counts = countsSource.split(",").map((value) => Number(value.trim()));
@@ -222,6 +223,31 @@ function parseArguments(values: readonly string[]): BotLoadOptions {
   const browser = !arguments_.flag("no-browser");
   const recordVideo = arguments_.flag("video");
   if (recordVideo && !browser) throw new Error("--video requires the browser observer");
+  const generationWorkers = arguments_.number("generation-workers", {
+    integer: true,
+    minimum: 2,
+    maximum: 256,
+  });
+  const generationWorkersPerClient = arguments_.number("generation-workers-per-client", {
+    integer: true,
+    minimum: 1,
+    maximum: 255,
+  });
+  if (generationWorkersPerClient !== undefined && generationWorkers === undefined) {
+    throw new Error("--generation-workers-per-client requires --generation-workers");
+  }
+  if (generationWorkers === 2 && generationWorkersPerClient === undefined) {
+    throw new Error("--generation-workers=2 requires --generation-workers-per-client");
+  }
+  if (
+    generationWorkers !== undefined &&
+    generationWorkersPerClient !== undefined &&
+    generationWorkersPerClient >= generationWorkers
+  ) {
+    throw new Error(
+      "--generation-workers-per-client must leave at least one global collision worker",
+    );
+  }
   const options: BotLoadOptions = {
     counts,
     durationSeconds:
@@ -239,11 +265,8 @@ function parseArguments(values: readonly string[]): BotLoadOptions {
     mode: arguments_.flag("growth") ? "growth" : "scale",
     serviceProfile: arguments_.choice("service-profile", ["worldgen", "worldgen-dev"], "worldgen"),
     botProfile: arguments_.choice("bot-profile", ["worldgen", "worldgen-dev"], "worldgen-dev"),
-    generationWorkers: arguments_.number("generation-workers", {
-      integer: true,
-      minimum: 3,
-      maximum: 256,
-    }),
+    generationWorkers,
+    generationWorkersPerClient,
     browser,
     recordVideo,
   };
@@ -586,6 +609,7 @@ async function runPopulation({
   return {
     count,
     generationWorkers: fixture.generationWorkers,
+    generationWorkersPerClient: fixture.generationWorkersPerClient,
     wallTimeMs,
     botReport: report,
     trafficBudget: summarizeTrafficBudget(report, fixture),
@@ -651,10 +675,10 @@ function markdownReport(result: BotLoadResult): string {
   const lines = [
     "# Voxels bot population benchmark",
     "",
-    `Mode: **${result.options.mode}** · layout: **${result.options.layout}** · duration: **${result.options.durationSeconds}s per population** · source: **${result.options.source}** · generation workers: **${result.options.generationWorkers ?? "config default"}**`,
+    `Mode: **${result.options.mode}** · layout: **${result.options.layout}** · duration: **${result.options.durationSeconds}s per population** · source: **${result.options.source}** · generation workers: **${result.options.generationWorkers ?? "config default"} global / ${result.options.generationWorkersPerClient ?? "config default"} ordinary per client**`,
     "",
-    "| Bots | Workers | Server CPU p95 | Server RSS peak | Bot CPU p95 | TCP down/up | VXWP down/up | DB growth | Edits accepted/conflicts/guards | Mutations | Chunk p95 | Edit p95 | Visible | Roster ready | Observer LOD | Observer frame p95 |",
-    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| Bots | Global workers | Ordinary/client | Server CPU p95 | Server RSS peak | Bot CPU p95 | TCP down/up | VXWP down/up | DB growth | Edits accepted/conflicts/guards | Mutations | Chunk p95 | Edit p95 | Visible | Roster ready | Observer LOD | Observer frame p95 |",
+    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ];
   for (const stage of result.stages) {
     const bot = stage.botReport;
@@ -685,7 +709,7 @@ function markdownReport(result: BotLoadResult): string {
             ? `ready ${stage.observer.terrainReadyMs.toFixed(0)} ms`
             : `partial ${stage.observer.finalWorld?.residentChunks ?? 0} resident`;
     lines.push(
-      `| ${stage.count} | ${stage.generationWorkers} | ${stage.process.service.cpuPercent.p95.toFixed(1)}% | ${stage.process.service.rssMiB.max.toFixed(1)} MiB | ${stage.process.bots.cpuPercent.p95.toFixed(1)}% | ${(stage.network.downstream.streamBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.streamBytes / 1_048_576).toFixed(2)} MiB | ${(stage.network.downstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} MiB | ${(stage.database.deltaBytes / 1_024).toFixed(1)} KiB | ${bot.editsAccepted}/${bot.editConflicts}/${bot.editAuthorityRejections} | ${bot.mutationsCommitted} | ${chunkP95.toFixed(1)} ms | ${editP95.toFixed(1)} ms | ${bot.maxVisiblePlayers} | ${rosterReady} | ${observerLod} | ${observerFrame} |`,
+      `| ${stage.count} | ${stage.generationWorkers} | ${stage.generationWorkersPerClient} | ${stage.process.service.cpuPercent.p95.toFixed(1)}% | ${stage.process.service.rssMiB.max.toFixed(1)} MiB | ${stage.process.bots.cpuPercent.p95.toFixed(1)}% | ${(stage.network.downstream.streamBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.streamBytes / 1_048_576).toFixed(2)} MiB | ${(stage.network.downstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} / ${(stage.network.upstream.vxwpPayloadBytes / 1_048_576).toFixed(2)} MiB | ${(stage.database.deltaBytes / 1_024).toFixed(1)} KiB | ${bot.editsAccepted}/${bot.editConflicts}/${bot.editAuthorityRejections} | ${bot.mutationsCommitted} | ${chunkP95.toFixed(1)} ms | ${editP95.toFixed(1)} ms | ${bot.maxVisiblePlayers} | ${rosterReady} | ${observerLod} | ${observerFrame} |`,
     );
   }
   lines.push(
@@ -839,7 +863,7 @@ async function startObserver(
 }
 
 async function main(context: ScenarioContext, arguments_: readonly string[]) {
-  const options = parseArguments(arguments_);
+  const options = parseBotLoadArguments(arguments_);
   const metal = options.source === "terrain-diffusion-30m";
   await runProcess(
     context,
@@ -901,6 +925,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
           spawnPillarRadiusVoxels: BOT_SPAWN_PILLAR_RADIUS_VOXELS,
           spawnProtectionRadiusVoxels: BOT_SPAWN_PROTECTION_RADIUS_VOXELS,
           generationWorkers: options.generationWorkers,
+          generationWorkersPerClient: options.generationWorkersPerClient,
         });
         fixture = createdFixture;
       }
