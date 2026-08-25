@@ -4506,6 +4506,14 @@ mod tests {
             decode_presence_delta(&encode_presence_delta(&delta).expect("encode presence delta")),
             Ok(delta.clone())
         );
+        let mut spectator_enter = delta.clone();
+        spectator_enter.enters[0].pose.flags = PLAYER_POSE_SPECTATOR;
+        assert_eq!(
+            encode_presence_delta(&spectator_enter),
+            Err(ProtocolError::InvalidPayload(
+                "spectators cannot be replicated as player presence"
+            ))
+        );
         let mut contradictory = delta.clone();
         contradictory.visible_player_count = 1;
         assert_eq!(
@@ -4543,7 +4551,15 @@ mod tests {
             decode_presence_delta(
                 &encode_presence_delta(&update_delta).expect("encode update delta")
             ),
-            Ok(update_delta)
+            Ok(update_delta.clone())
+        );
+        let mut spectator_update = update_delta;
+        spectator_update.updates[0].pose.flags = PLAYER_POSE_SPECTATOR;
+        assert_eq!(
+            encode_presence_delta(&spectator_update),
+            Err(ProtocolError::InvalidPayload(
+                "spectators cannot be replicated as player presence"
+            ))
         );
 
         let ping = PresencePing {
