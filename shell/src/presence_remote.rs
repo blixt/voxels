@@ -79,7 +79,7 @@ impl RemotePresenceClient {
             last_pose_send_ms: Cell::new(f64::NEG_INFINITY),
             pose_schedule_ms: Cell::new(f64::NEG_INFINITY),
             last_ping_send_ms: Cell::new(f64::NEG_INFINITY),
-            unanswered_ping_since_ms: Cell::new(f64::NEG_INFINITY),
+            heartbeat_probe_since_ms: Cell::new(f64::NEG_INFINITY),
             reconnect_after_ms: Cell::new(0.0),
             clock: Cell::new(clock),
             timeline: RefCell::new(timeline),
@@ -182,7 +182,7 @@ struct PresenceInner {
     last_pose_send_ms: Cell<f64>,
     pose_schedule_ms: Cell<f64>,
     last_ping_send_ms: Cell<f64>,
-    unanswered_ping_since_ms: Cell<f64>,
+    heartbeat_probe_since_ms: Cell<f64>,
     reconnect_after_ms: Cell<f64>,
     clock: Cell<ClockSync>,
     timeline: RefCell<RemotePresenceTimeline>,
@@ -405,7 +405,7 @@ impl PresenceInner {
             self.clock.set(clock);
             self.state.set(PresenceConnectionState::Open);
             self.last_ping_send_ms.set(f64::NEG_INFINITY);
-            self.unanswered_ping_since_ms.set(f64::NEG_INFINITY);
+            self.heartbeat_probe_since_ms.set(f64::NEG_INFINITY);
             self.last_pose_send_ms.set(f64::NEG_INFINITY);
             self.pose_schedule_ms.set(f64::NEG_INFINITY);
         } else if kind == protocol::presence_delta_kind() {
@@ -482,7 +482,7 @@ impl PresenceInner {
             let now = local_now_ms();
             clock.observe_pong(now, pong);
             self.clock.set(clock);
-            self.unanswered_ping_since_ms.set(f64::NEG_INFINITY);
+            self.heartbeat_probe_since_ms.set(f64::NEG_INFINITY);
         } else if kind == protocol::error_kind() {
             let message = protocol::decode_error(&bytes)
                 .map(|(_, message)| message)
@@ -565,9 +565,17 @@ impl PresenceInner {
         {
             return;
         }
+        self.heartbeat_probe_since_ms
+            .set(crate::heartbeat_probe_started_at(
+                self.heartbeat_probe_since_ms.get(),
+                local_time_ms,
+            ));
         let Some(socket) = self.socket.borrow().clone() else {
             return;
         };
+        // Being unable to enqueue even the small heartbeat is itself a liveness failure. Keep the
+        // probe deadline running while application bytes remain backpressured so a stuck ordered
+        // WebSocket cannot suppress both pings and the reconnect timeout forever.
         if socket.buffered_amount() >= self.config.buffered_amount_high_water_bytes {
             return;
         }
@@ -589,16 +597,13 @@ impl PresenceInner {
         }
         self.next_ping_sequence.set(sequence.wrapping_add(1).max(1));
         self.last_ping_send_ms.set(local_time_ms);
-        if !self.unanswered_ping_since_ms.get().is_finite() {
-            self.unanswered_ping_since_ms.set(local_time_ms);
-        }
     }
 
     fn check_liveness(&self, local_time_ms: f64) {
         if self.state.get() == PresenceConnectionState::Open
             && crate::presence_heartbeat_expired(
                 local_time_ms,
-                self.unanswered_ping_since_ms.get(),
+                self.heartbeat_probe_since_ms.get(),
                 self.transport.request_timeout_ms,
             )
         {

@@ -81,12 +81,21 @@ const INVENTORY_SWIPE_THRESHOLD_CSS_PIXELS: f32 = 34.0;
 #[cfg(any(target_arch = "wasm32", test))]
 fn presence_heartbeat_expired(
     local_time_ms: f64,
-    unanswered_ping_since_ms: f64,
+    heartbeat_probe_since_ms: f64,
     timeout_ms: u32,
 ) -> bool {
     local_time_ms.is_finite()
-        && unanswered_ping_since_ms.is_finite()
-        && local_time_ms - unanswered_ping_since_ms >= f64::from(timeout_ms)
+        && heartbeat_probe_since_ms.is_finite()
+        && local_time_ms - heartbeat_probe_since_ms >= f64::from(timeout_ms)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn heartbeat_probe_started_at(current_ms: f64, local_time_ms: f64) -> f64 {
+    if current_ms.is_finite() {
+        current_ms
+    } else {
+        local_time_ms
+    }
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -8355,9 +8364,12 @@ mod tests {
     }
 
     #[test]
-    fn presence_heartbeat_expires_only_after_a_complete_timeout_window() {
-        assert!(!presence_heartbeat_expired(10_249.0, 250.0, 10_000));
-        assert!(presence_heartbeat_expired(10_250.0, 250.0, 10_000));
+    fn presence_heartbeat_keeps_one_probe_deadline_until_response() {
+        let started = heartbeat_probe_started_at(f64::NEG_INFINITY, 250.0);
+        assert_eq!(started, 250.0);
+        assert_eq!(heartbeat_probe_started_at(started, 500.0), started);
+        assert!(!presence_heartbeat_expired(10_249.0, started, 10_000));
+        assert!(presence_heartbeat_expired(10_250.0, started, 10_000));
         assert!(!presence_heartbeat_expired(
             10_250.0,
             f64::NEG_INFINITY,
