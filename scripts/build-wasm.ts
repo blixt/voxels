@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, delimiter as pathDelimiter, dirname, join } from "node:path";
+import { basename, delimiter as pathDelimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = process.cwd();
@@ -47,6 +47,14 @@ export function prependPathEntry(
   delimiter = pathDelimiter,
 ): string {
   return currentPath === "" ? entry : `${entry}${delimiter}${currentPath}`;
+}
+
+/** Resolves Cargo's configured WASM output instead of assuming the default target directory. */
+export function wasmArtifactPath(
+  profile: WasmBuildProfile,
+  targetDirectory = process.env.CARGO_TARGET_DIR,
+): string {
+  return join(resolve(ROOT, targetDirectory ?? "target"), TARGET, profile, "voxels.wasm");
 }
 
 export function validateWasmBindgenCliVersion(output: string, expected: string): void {
@@ -179,6 +187,8 @@ export function buildWasm(profile: WasmBuildProfile = "wasm-dev"): void {
     VOXELS_BUILD_PROFILE: identity.profile,
   });
 
+  // Keep publication staging inside the repository so artifact renames remain same-filesystem and
+  // atomic even when Cargo itself writes into an external CARGO_TARGET_DIR.
   mkdirSync(join(ROOT, "target"), { recursive: true });
   const staging = mkdtempSync(join(ROOT, "target/wasm-bindgen-"));
   try {
@@ -189,7 +199,7 @@ export function buildWasm(profile: WasmBuildProfile = "wasm-dev"): void {
       staging,
       "--out-name",
       "voxels",
-      join(ROOT, "target", TARGET, profile, "voxels.wasm"),
+      wasmArtifactPath(profile),
     ]);
     writeFileSync(join(staging, PROFILE_MARKER), `${profile}\n`);
     writeFileSync(join(staging, IDENTITY_MARKER), `${JSON.stringify(identity)}\n`);

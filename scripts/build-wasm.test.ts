@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { strict as assert } from "node:assert";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, it } from "vite-plus/test";
 import {
   normalizeWasmDeclaration,
@@ -10,6 +10,7 @@ import {
   RUST_INPUT_FILES,
   RUST_SOURCE_DIRS,
   validateWasmBindgenCliVersion,
+  wasmArtifactPath,
   wasmBuildIsCurrent,
 } from "./build-wasm.ts";
 
@@ -118,6 +119,18 @@ export interface InitOutput {
       "C:\\cargo\\bin;C:\\Windows",
     );
     assert.equal(prependPathEntry("/cargo/bin", "", ":"), "/cargo/bin");
+  });
+
+  it("reads the compiled WASM from Cargo's configured target directory", () => {
+    assert.equal(
+      wasmArtifactPath("wasm-dev", "isolated-target"),
+      resolve("isolated-target", "wasm32-unknown-unknown", "wasm-dev", "voxels.wasm"),
+    );
+    const absolute = join(tmpdir(), "voxels-absolute-target");
+    assert.equal(
+      wasmArtifactPath("release", absolute),
+      join(absolute, "wasm32-unknown-unknown", "release", "voxels.wasm"),
+    );
   });
 
   it("invalidates an installed artifact set before publishing replacements", () => {
