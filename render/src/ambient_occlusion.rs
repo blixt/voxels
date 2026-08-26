@@ -98,6 +98,7 @@ impl AmbientOcclusionGpu {
             &shader,
             "fs_denoise",
         );
+        let (width, height) = target_extent(width, height);
         let targets = targets(device, width, height);
         let depth_bind_group = depth_bind_group(device, &depth_layout, depth_view);
         let denoise_bind_group = ao_bind_group(
@@ -153,6 +154,11 @@ impl AmbientOcclusionGpu {
         let Some(active) = self.active.as_mut() else {
             return;
         };
+        active.depth_bind_group = depth_bind_group(device, &active.depth_layout, depth_view);
+        let (width, height) = target_extent(width, height);
+        if !target_extent_changed([active.width, active.height], (width, height)) {
+            return;
+        }
         let targets = targets(device, width, height);
         active._raw_texture = targets.raw_texture;
         active.raw_view = targets.raw_view;
@@ -160,7 +166,6 @@ impl AmbientOcclusionGpu {
         active.filtered_view = targets.filtered_view;
         active.width = targets.width;
         active.height = targets.height;
-        active.depth_bind_group = depth_bind_group(device, &active.depth_layout, depth_view);
         active.denoise_bind_group = ao_bind_group(
             device,
             "spatial AO denoise bind group",
@@ -259,6 +264,14 @@ const fn half_extent(value: u32) -> u32 {
     if value <= 1 { 1 } else { value / 2 + value % 2 }
 }
 
+const fn target_extent(width: u32, height: u32) -> (u32, u32) {
+    (half_extent(width), half_extent(height))
+}
+
+fn target_extent_changed(current: [u32; 2], next: (u32, u32)) -> bool {
+    current != [next.0, next.1]
+}
+
 const fn target_bytes(width: u32, height: u32) -> u64 {
     width as u64 * height as u64 * 8
 }
@@ -303,8 +316,6 @@ fn neutral_texture(device: &Device, queue: &Queue) -> Texture {
 }
 
 fn targets(device: &Device, width: u32, height: u32) -> Targets {
-    let width = half_extent(width);
-    let height = half_extent(height);
     let make = |label| {
         device.create_texture(&TextureDescriptor {
             label: Some(label),
@@ -445,6 +456,11 @@ mod tests {
         assert_eq!(half_extent(3), 2);
         assert_eq!(half_extent(1_279), 640);
         assert_eq!(half_extent(1_280), 640);
+        assert_eq!(target_extent(1_280, 720), (640, 360));
+        assert_eq!(target_extent(1_279, 720), (640, 360));
+        assert_eq!(target_extent(1_278, 720), (639, 360));
+        assert!(!target_extent_changed([640, 360], (640, 360)));
+        assert!(target_extent_changed([640, 360], (639, 360)));
     }
 
     #[test]

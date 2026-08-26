@@ -116,8 +116,8 @@ impl VolumetricCloudGpu {
                 config,
             };
         }
-        let (target, target_view, width, height) =
-            cloud_target(device, width, height, config.resolution_scale);
+        let (width, height) = cloud_target_extent(width, height, config.resolution_scale);
+        let (target, target_view) = cloud_target(device, width, height);
         let noise = noise_texture(device);
         let noise_view = noise.create_view(&TextureViewDescriptor {
             label: Some("volumetric cloud noise view"),
@@ -237,8 +237,11 @@ impl VolumetricCloudGpu {
         let Some(active) = self.active.as_mut() else {
             return;
         };
-        let (target, target_view, width, height) =
-            cloud_target(device, width, height, self.config.resolution_scale);
+        let (width, height) = cloud_target_extent(width, height, self.config.resolution_scale);
+        if !target_extent_changed([active.width, active.height], (width, height)) {
+            return;
+        }
+        let (target, target_view) = cloud_target(device, width, height);
         active.target = target;
         active.target_view = target_view;
         active.width = width;
@@ -387,6 +390,14 @@ fn scaled_extent(value: u32, scale: f32) -> u32 {
     ((value.max(1) as f32 * scale).ceil() as u32).max(1)
 }
 
+fn cloud_target_extent(width: u32, height: u32, scale: f32) -> (u32, u32) {
+    (scaled_extent(width, scale), scaled_extent(height, scale))
+}
+
+fn target_extent_changed(current: [u32; 2], next: (u32, u32)) -> bool {
+    current != [next.0, next.1]
+}
+
 fn target_size(width: u32, height: u32) -> [f32; 4] {
     [
         width as f32,
@@ -400,14 +411,7 @@ const fn cloud_resource_bytes(width: u32, height: u32) -> u64 {
     width as u64 * height as u64 * 8 + noise_mip_bytes() + size_of::<CloudUniform>() as u64
 }
 
-fn cloud_target(
-    device: &Device,
-    width: u32,
-    height: u32,
-    scale: f32,
-) -> (Texture, TextureView, u32, u32) {
-    let width = scaled_extent(width, scale);
-    let height = scaled_extent(height, scale);
+fn cloud_target(device: &Device, width: u32, height: u32) -> (Texture, TextureView) {
     let target = device.create_texture(&TextureDescriptor {
         label: Some("half-resolution volumetric cloud target"),
         size: Extent3d {
@@ -423,7 +427,7 @@ fn cloud_target(
         view_formats: &[],
     });
     let target_view = target.create_view(&TextureViewDescriptor::default());
-    (target, target_view, width, height)
+    (target, target_view)
 }
 
 fn noise_texture(device: &Device) -> Texture {
@@ -694,6 +698,11 @@ mod tests {
         assert_eq!(scaled_extent(1, 0.5), 1);
         assert_eq!(scaled_extent(1_279, 0.5), 640);
         assert_eq!(scaled_extent(1_280, 0.5), 640);
+        assert_eq!(cloud_target_extent(1_280, 720, 0.5), (640, 360));
+        assert_eq!(cloud_target_extent(1_279, 720, 0.5), (640, 360));
+        assert_eq!(cloud_target_extent(1_278, 720, 0.5), (639, 360));
+        assert!(!target_extent_changed([640, 360], (640, 360)));
+        assert!(target_extent_changed([640, 360], (639, 360)));
     }
 
     #[test]
