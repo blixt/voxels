@@ -14,3 +14,13 @@ node_modules
 target
 tmp
 web
+# Cargo still discovers every workspace member, but the service build needs only these target roots
+# from members outside its normal dependency graph.
+bots/src/*
+!bots/src/lib.rs
+!bots/src/main.rs
+render/src/*
+!render/src/lib.rs
+render/OFL.txt
+shell/src/*
+!shell/src/lib.rs
