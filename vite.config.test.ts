@@ -82,6 +82,22 @@ describe("development server configuration", () => {
 
     expect(resolved.server).toMatchObject({ port: 5173, strictPort: true });
   });
+
+  it("refuses to overwrite conflicting remote Worker changes", () => {
+    const resolved =
+      typeof viteConfiguration === "function"
+        ? viteConfiguration({
+            command: "build",
+            mode: "production",
+            isSsrBuild: false,
+            isPreview: false,
+          })
+        : viteConfiguration;
+
+    expect(resolved.run?.tasks?.deploy).toMatchObject({
+      command: "node scripts/wrangler-local.mjs deploy --strict",
+    });
+  });
 });
 
 describe("Rust WASM development watcher", () => {

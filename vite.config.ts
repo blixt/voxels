@@ -716,7 +716,7 @@ export default defineConfig(({ command, mode }) => ({
         cache: false,
       },
       deploy: {
-        command: "node scripts/wrangler-local.mjs deploy",
+        command: "node scripts/wrangler-local.mjs deploy --strict",
         dependsOn: ["build:production"],
         cache: false,
       },

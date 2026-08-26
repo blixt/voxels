@@ -75,7 +75,7 @@ Run the repository gate and validate both provider configurations before changin
 vp install --frozen-lockfile
 vp run verify
 vp run build:production
-vp run wrangler deploy --dry-run
+vp run wrangler deploy --dry-run --strict
 fly config validate --strict -c fly.toml
 ```
 
