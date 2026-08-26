@@ -8830,7 +8830,7 @@ impl Renderer {
         let cpu_cull_ms = (now_ms() - cull_started).max(0.0) as f32;
         let encode_started = now_ms();
         self.avatar_gpu
-            .prepare(&self.queue, &self.remote_avatars, frame_time);
+            .prepare(&self.device, &self.queue, &self.remote_avatars, frame_time);
         let avatar_instances = self.avatar_gpu.instance_count();
         let has_avatars = avatar_instances != 0;
         let refract_water = self.options.water

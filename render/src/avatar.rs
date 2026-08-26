@@ -27,6 +27,7 @@ pub(crate) struct AvatarGpu {
     depth_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
     instances: Vec<GpuAvatarPart>,
+    instance_capacity: usize,
     instance_count: u32,
     avatar_count: u32,
 }
@@ -39,12 +40,8 @@ impl AvatarGpu {
         scene_format: wgpu::TextureFormat,
         depth_format: wgpu::TextureFormat,
     ) -> Self {
-        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("articulated avatar instances"),
-            size: (MAX_PARTS * size_of::<GpuAvatarPart>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let instance_capacity = avatar_part_capacity(0);
+        let instance_buffer = avatar_instance_buffer(device, instance_capacity);
         let scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("avatar scene pipeline layout"),
             bind_group_layouts: &[Some(frame_layout)],
@@ -135,7 +132,8 @@ impl AvatarGpu {
             spatial_ao_pipeline,
             depth_pipeline,
             shadow_pipeline,
-            instances: Vec::with_capacity(MAX_PARTS),
+            instances: Vec::new(),
+            instance_capacity,
             instance_count: 0,
             avatar_count: 0,
         }
@@ -143,15 +141,29 @@ impl AvatarGpu {
 
     pub(crate) fn prepare(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         avatars: &[RemoteAvatarPose],
         animation_time_seconds: f32,
     ) {
         self.instances.clear();
+        let avatar_count = avatars
+            .iter()
+            .take(MAX_AVATARS)
+            .filter(|avatar| avatar.eye_position_metres.is_finite())
+            .count();
+        let required_capacity = avatar_part_capacity(avatar_count);
+        if self.instances.capacity() < required_capacity {
+            self.instances.reserve_exact(required_capacity);
+        }
         for avatar in avatars.iter().take(MAX_AVATARS) {
             if avatar.eye_position_metres.is_finite() {
                 append_avatar_parts(&mut self.instances, avatar, animation_time_seconds);
             }
+        }
+        if required_capacity > self.instance_capacity {
+            self.instance_buffer = avatar_instance_buffer(device, required_capacity);
+            self.instance_capacity = required_capacity;
         }
         self.avatar_count = u32::try_from(self.instances.len() / PARTS_PER_AVATAR).unwrap_or(0);
         self.instance_count = u32::try_from(self.instances.len()).unwrap_or(0);
@@ -173,7 +185,7 @@ impl AvatarGpu {
     }
 
     pub(crate) const fn buffer_bytes(&self) -> u64 {
-        (MAX_PARTS * size_of::<GpuAvatarPart>()) as u64
+        (self.instance_capacity * size_of::<GpuAvatarPart>()) as u64
     }
 
     pub(crate) fn draw_scene<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, spatial_ao: bool) {
@@ -206,6 +218,23 @@ impl AvatarGpu {
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
         pass.draw(0..36, 0..self.instance_count);
     }
+}
+
+fn avatar_part_capacity(avatar_count: usize) -> usize {
+    avatar_count
+        .clamp(1, MAX_AVATARS)
+        .next_power_of_two()
+        .saturating_mul(PARTS_PER_AVATAR)
+        .min(MAX_PARTS)
+}
+
+fn avatar_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("articulated avatar instances"),
+        size: (capacity * size_of::<GpuAvatarPart>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 fn avatar_scene_pipeline(
@@ -436,6 +465,17 @@ mod tests {
                 && instance.rotation.into_iter().all(f32::is_finite)
                 && instance.half_yz.into_iter().all(f32::is_finite)
         }));
+    }
+
+    #[test]
+    fn avatar_capacity_grows_geometrically_to_the_server_limit() {
+        assert_eq!(avatar_part_capacity(0), PARTS_PER_AVATAR);
+        assert_eq!(avatar_part_capacity(1), PARTS_PER_AVATAR);
+        assert_eq!(avatar_part_capacity(2), PARTS_PER_AVATAR * 2);
+        assert_eq!(avatar_part_capacity(3), PARTS_PER_AVATAR * 4);
+        assert_eq!(avatar_part_capacity(127), PARTS_PER_AVATAR * 128);
+        assert_eq!(avatar_part_capacity(MAX_AVATARS), MAX_PARTS);
+        assert_eq!(avatar_part_capacity(MAX_AVATARS + 1), MAX_PARTS);
     }
 
     #[test]
