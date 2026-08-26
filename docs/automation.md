@@ -109,8 +109,8 @@ child-process failure. Scenario files must not install their own process signal 
 
 Every run has one `target/automation/<scenario>/<run-id>/` directory containing `manifest.json` and
 scenario outputs. `target/automation/<scenario>/latest.json` points to the last completed run while
-timestamped results remain comparison-safe. Screenshots, raw video, browser traces, logs, and metric
-reports all use the same artifact API.
+timestamped results remain comparison-safe. Screenshots, raw video, diagnostic JSON traces, logs,
+and metric reports all use the same artifact API.
 
 Criterion scenarios use the same ownership. Their shared runner accepts `--filter=<text>`,
 `--quick`, `--sample-size=<n>`, and `--measurement-seconds=<seconds>`, rejects unknown or conflicting

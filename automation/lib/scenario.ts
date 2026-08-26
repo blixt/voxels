@@ -19,7 +19,6 @@ export interface ScenarioUses {
   readonly viewport?: ViewportKind;
   readonly screenshots?: boolean;
   readonly video?: boolean;
-  readonly trace?: boolean;
   readonly bots?: boolean;
   readonly network?: boolean;
   readonly metrics?: boolean;
@@ -226,7 +225,7 @@ function validateDefinition(definition: ScenarioDefinition): void {
     throw new Error(`scenario ${definition.id} must have a summary`);
   }
   const uses = definition.uses;
-  if ((uses.screenshots || uses.video || uses.trace) && uses.viewport === undefined) {
+  if ((uses.screenshots || uses.video) && uses.viewport === undefined) {
     throw new Error(`scenario ${definition.id} captures a viewport without declaring one`);
   }
   if (uses.viewport === "browser" && uses.browser !== true) {
