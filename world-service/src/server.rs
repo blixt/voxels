@@ -2859,6 +2859,7 @@ async fn write_frames(
         }
     }
     session.cancel_all();
+    let _ = sink.close().await;
 }
 
 struct WorldTrafficPermit {
@@ -5014,6 +5015,45 @@ mod tests {
         cache.abandon_flight(&key, &waiter);
         let next = cache.flight_lock(&key);
         assert!(!Arc::ptr_eq(&waiter, &next));
+    }
+
+    #[tokio::test]
+    async fn protocol_rejection_closes_world_socket_gracefully()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = test_config();
+        let listener = TcpListener::bind(config.transport.listen).await?;
+        let address = listener.local_addr()?;
+        let server = WorldServer::new(
+            config.clone(),
+            Box::new(ProceduralWorldSource::new(config.world_seed)),
+        )?;
+        let server_task = tokio::spawn(server.serve(listener));
+        let identity = player_identity(31, 32, "duplicate-open");
+        let (mut socket, _) = connect_test_client(address, identity.clone()).await?;
+
+        socket
+            .send(ClientMessage::Binary(
+                encode_open_world(&OpenWorld {
+                    max_in_flight_batches: 2,
+                    identity,
+                })?
+                .into(),
+            ))
+            .await?;
+        let error =
+            tokio::time::timeout(Duration::from_secs(2), next_client_binary(&mut socket)).await??;
+        assert_eq!(
+            decode_error(&error)?,
+            (0, "world session is already open".to_owned())
+        );
+        let close = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await?
+            .ok_or("server ended without a WebSocket Close frame")??;
+        assert!(matches!(close, ClientMessage::Close(_)));
+
+        server_task.abort();
+        let _ = server_task.await;
+        Ok(())
     }
 
     #[tokio::test]
