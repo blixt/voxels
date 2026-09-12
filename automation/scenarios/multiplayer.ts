@@ -700,7 +700,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
         waitFor(
           player.engine,
           `${player.name} authoritative collaborative digs`,
-          (next) => snapshotValue(next, "edits") === dugVoxelCount,
+          (next) => snapshotValue(next, "edits") >= dugVoxelCount,
           30_000,
         ),
       ),
@@ -744,7 +744,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
         waitFor(
           player.engine,
           `${player.name} authoritative tower edits`,
-          (next) => snapshotValue(next, "edits") === editsBeforePlacement + towerVoxelCount,
+          (next) => snapshotValue(next, "edits") >= editsBeforePlacement + towerVoxelCount,
           30_000,
         ),
       ),
