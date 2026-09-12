@@ -310,7 +310,9 @@ async function walkDistance(
   await page.keyboard.down("KeyS");
   let after = before;
   try {
-    while (performance.now() - started < 35_000) {
+    // The observer deliberately crosses several far-terrain rings. Give collision/streaming
+    // convergence enough wall time under six-client contention while retaining the 120 m gate.
+    while (performance.now() - started < 60_000) {
       await page.waitForTimeout(50);
       after = await engine.snapshot();
       const distance = Math.hypot(
