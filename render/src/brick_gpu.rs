@@ -5,8 +5,8 @@
 //! bytes and descriptors use the layouts documented by [`crate::brick_residency`].
 
 use wgpu::{
-    BindGroupLayout, Buffer, BufferUsages, ComputePipeline, Device, PipelineLayoutDescriptor,
-    Queue, ShaderStages,
+    BindGroup, BindGroupLayout, Buffer, BufferUsages, CommandEncoder, ComputePipeline, Device,
+    PipelineLayoutDescriptor, Queue, ShaderStages,
 };
 
 use crate::brick_residency::{
@@ -16,6 +16,22 @@ use crate::brick_hash::{BrickHashItem, BrickHashTable, GpuBrickHashEntry};
 
 pub const GPU_BRICK_DESCRIPTOR_WORDS: usize = 8;
 pub const GPU_BRICK_DESCRIPTOR_BYTES: u64 = (GPU_BRICK_DESCRIPTOR_WORDS * size_of::<u32>()) as u64;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TraceRay {
+    pub origin: [f32; 4],
+    pub direction: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TraceParams {
+    pub hash_mask: u32,
+    pub max_distance_voxels: f32,
+    pub ray_count: u32,
+    pub reserved: u32,
+}
 
 #[derive(Debug)]
 pub struct GpuBrickAtlas {
@@ -214,6 +230,61 @@ impl GpuBrickAtlas {
         &self.traversal_pipeline
     }
 
+    pub fn create_traversal_bind_group(
+        &self,
+        device: &Device,
+        rays: &Buffer,
+        results: &Buffer,
+        params: &Buffer,
+    ) -> BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("direct voxel traversal bind group"),
+            layout: &self.traversal_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.hash_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.material_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: rays.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: results.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: params.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    /// Encodes a bounded traversal dispatch. The caller owns ray/result buffers so it can choose
+    /// resolution and readback policy; the atlas resources stay immutable during the pass.
+    pub fn encode_traversal(
+        &self,
+        encoder: &mut CommandEncoder,
+        bind_group: &BindGroup,
+        ray_count: u32,
+    ) {
+        if ray_count == 0 {
+            return;
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("direct voxel traversal pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.traversal_pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.dispatch_workgroups(ray_count.saturating_add(63) / 64, 1, 1);
+    }
+
     /// Uploads a complete, bounded hash-table snapshot. The caller chooses when to rebuild and
     /// can keep the previous table active until this queue write is ordered before dispatch.
     pub fn upload_hash_table(&self, queue: &Queue, table: &BrickHashTable) -> Result<(), String> {
@@ -278,6 +349,8 @@ mod tests {
     fn atlas_layout_is_fixed_and_word_aligned() {
         assert_eq!(BRICK_VOXEL_COUNT % 4, 0);
         assert_eq!(GPU_BRICK_DESCRIPTOR_BYTES, 32);
+        assert_eq!(size_of::<TraceRay>(), 32);
+        assert_eq!(size_of::<TraceParams>(), 16);
         assert_eq!(descriptor_offset_for_slot(3), 96);
     }
 
