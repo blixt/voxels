@@ -183,7 +183,7 @@ impl HeightfieldWorldSource {
                 maximum_ridge = maximum_ridge.max(column.ridge);
             }
         }
-        let relief_bound = terrain_diffusion_micro_relief_abs_bound(maximum_ridge);
+        let relief_bound = micro_relief_abs_bound(maximum_ridge);
         Ok([
             minimum_height.saturating_sub(relief_bound),
             maximum_height
@@ -1478,9 +1478,9 @@ fn downscaled_climate(
     moisture: f32,
     ridge: f32,
 ) -> (f32, f32, f32) {
-    // Terrain Diffusion climate is intentionally macro-scale (its climate grid is much coarser
-    // than the 30 m elevation product). Add bounded, seamless local variation as an ecological
-    // downscaling layer; never normalize a requested tile, so overlapping products stay exact.
+    // Macro climate is intentionally coarse. Add bounded, seamless local variation as an
+    // ecological downscaling layer; never normalize a requested tile, so overlapping products
+    // stay exact.
     let temperature_offset = coherent_noise(seed ^ 0x243f_6a88, x, z, 4_200) * 0.026
         + coherent_noise(seed ^ 0x85a3_08d3, x, z, 1_100) * 0.014;
     let drainage = coherent_noise(seed ^ 0x1319_8a2e, x, z, 3_200) * 0.72
@@ -1505,7 +1505,7 @@ fn micro_relief_voxels(seed: u64, x: i32, z: i32, ridge: f32, lattice: SubgridLa
         + fine * (2.2 + ridge * 1.8)
 }
 
-fn terrain_diffusion_micro_relief_abs_bound(ridge: f32) -> i32 {
+fn micro_relief_abs_bound(ridge: f32) -> i32 {
     // Every residual term is the difference of two coherent-noise values in [-1, 1]. At a fixed
     // ridge the four maximum coefficients sum to 10.7 + 27.8 * ridge^1.35; multiply by two for
     // the residual range and round outward once more for floating-point evaluation.
@@ -1687,7 +1687,7 @@ mod tests {
             }
         }
 
-        fn terrain_diffusion(elevation: f32, temperature: f32, moisture: f32, ridge: f32) -> Self {
+        fn legacy_30m(elevation: f32, temperature: f32, moisture: f32, ridge: f32) -> Self {
             let mut source = Self::new(FakeBehavior::Valid, elevation);
             source.identity.source_kind = crate::WorldSourceKind::TerrainDiffusion30m;
             source
@@ -1749,17 +1749,17 @@ mod tests {
             .expect("valid fake source identity")
     }
 
-    fn diffusion_heightfield() -> HeightfieldWorldSource {
+    fn legacy_30m_heightfield() -> HeightfieldWorldSource {
         HeightfieldWorldSource::new(
-            Box::new(FakeMacroSource::terrain_diffusion(12.0, 0.58, 0.62, 0.12)),
+            Box::new(FakeMacroSource::legacy_30m(12.0, 0.58, 0.62, 0.12)),
             0,
         )
-        .expect("valid Terrain Diffusion fake source")
+        .expect("valid legacy 30 m fake source")
     }
 
     #[test]
-    fn diffusion_lattice_bounds_conservatively_enclose_dense_micro_relief() {
-        let source = diffusion_heightfield();
+    fn legacy_30m_lattice_bounds_conservatively_enclose_dense_micro_relief() {
+        let source = legacy_30m_heightfield();
         let bounds = [[-47, -31], [94, 83]];
         let [minimum, maximum] = source
             .conservative_surface_height_bounds(WorldProductPriority::VirtualTerrain, bounds)
@@ -1781,7 +1781,7 @@ mod tests {
         }));
         assert_eq!(
             maximum - minimum,
-            terrain_diffusion_micro_relief_abs_bound(0.12) * 2,
+            micro_relief_abs_bound(0.12) * 2,
             "constant macro elevation should expose only the analytical micro-relief envelope"
         );
     }
