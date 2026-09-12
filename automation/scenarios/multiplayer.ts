@@ -335,7 +335,14 @@ async function walkDistance(
   );
   if (distanceMetres < targetDistanceMetres) {
     throw new Error(
-      `observer covered ${distanceMetres.toFixed(2)} of ${targetDistanceMetres} metres`,
+      `observer covered ${distanceMetres.toFixed(2)} of ${targetDistanceMetres} metres ` +
+        `(camera=${JSON.stringify([
+          snapshotValue(after, "cameraX"),
+          snapshotValue(after, "cameraY"),
+          snapshotValue(after, "cameraZ"),
+        ])}, grounded=${snapshotValue(after, "grounded")}, ` +
+        `swimming=${snapshotValue(after, "swimming")}, ` +
+        `streamInFlight=${snapshotValue(after, "virtualTerrainStreamInFlight")})`,
     );
   }
   return { before, after, distanceMetres, durationMs: performance.now() - started };
@@ -515,7 +522,12 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     await Promise.all(players.map(waitForSettledWorld));
     // Keep the builders together while moving beyond the protected 6.4 m starting area. The later
     // dig and tower remain ordinary reach-checked player actions at this editable worksite.
-    const builderWalks = builders.map(({ engine, page }) => walkDistance(page, engine, 10));
+    const builderWalks = builders.map(async ({ engine, page }, index) => {
+      // Avoid synchronizing five first movement packets onto one server tick; clients still move
+      // concurrently, but each gets a chance to establish its collision corridor first.
+      await page.waitForTimeout(index * 150);
+      return walkDistance(page, engine, 10);
+    });
     await observer.page.waitForTimeout(350);
     const walkingScreenshot = scenario.artifacts.resolve("observer-near-five-walking.png");
     await observer.page.screenshot({ path: walkingScreenshot });
