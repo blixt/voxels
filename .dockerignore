@@ -1,6 +1,7 @@
 .git
 .gitignore
 .cache
+.coce
 .tmp
 .wrangler
 .wrangler-local

@@ -21,7 +21,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::stream::{FuturesUnordered, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -3821,6 +3821,33 @@ mod tests {
         }
         encoded.reverse();
         String::from_utf8(encoded).expect("ASCII base36")
+    }
+
+    #[test]
+    fn signed_session_cryptography_matches_the_webcrypto_golden_vector() {
+        // Generated with Node 26.7.0's WebCrypto HMAC-SHA-256, independently of RustCrypto.
+        // The fixed timestamp only pins the signed bytes; the next test covers clock validation.
+        let payload = "vxs1.tro8w0.AAECAwQFBgcICQoLDA0ODw.8PHy8_T19vf4-fr7_P3-_w.gIGCg4SFhoeIiYqL";
+        let signature = "pdN_5fjshyR4v0ux5bPmrRCXWweUBYAvCQbyZnv3B8w";
+        let browser: [u8; 16] = std::array::from_fn(|index| index as u8);
+        let player: [u8; 16] = std::array::from_fn(|index| 0xf0 + index as u8);
+        assert_eq!(decode_uuid("AAECAwQFBgcICQoLDA0ODw"), Some(browser));
+        assert_eq!(decode_uuid("8PHy8_T19vf4-fr7_P3-_w"), Some(player));
+        assert_eq!(
+            URL_SAFE_NO_PAD.decode("gIGCg4SFhoeIiYqL").expect("nonce"),
+            (0x80_u8..=0x8b).collect::<Vec<_>>()
+        );
+        let mut verifier =
+            HmacSha256::new_from_slice(b"test-only-session-signing-key-that-is-long-enough")
+                .expect("test-only HMAC key");
+        verifier.update(payload.as_bytes());
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(verifier.clone().finalize().into_bytes()),
+            signature
+        );
+        verifier
+            .verify_slice(&URL_SAFE_NO_PAD.decode(signature).expect("signature"))
+            .expect("WebCrypto signature remains valid");
     }
 
     #[test]

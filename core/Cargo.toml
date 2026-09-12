@@ -12,7 +12,7 @@ workspace = true
 name = "voxels_core"
 
 [dependencies]
-glam = "0.33"
+glam = "0.33.7"
 
 [dev-dependencies]
 criterion = "0.8.2"

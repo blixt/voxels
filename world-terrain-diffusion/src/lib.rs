@@ -285,7 +285,7 @@ fn validate_hash(path: &Path, expected: &str) -> Result<(), TerrainDiffusionErro
         }
         hasher.update(&buffer[..read]);
     }
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = WorldSourceIdentityHash::from_bytes(hasher.finalize().into()).to_string();
     if actual != expected {
         return Err(TerrainDiffusionError::ModelHashMismatch {
             path: path.to_owned(),
@@ -303,7 +303,7 @@ fn parse_sha256(value: &str) -> Result<WorldSourceIdentityHash, TerrainDiffusion
         ));
     }
     let mut output = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let high = parse_hex_nibble(pair[0]).ok_or_else(|| {
             TerrainDiffusionError::Inference("pinned SHA-256 digest is not hexadecimal".to_owned())
         })?;
@@ -343,7 +343,10 @@ mod tests {
     #[test]
     fn bundled_synthetic_map_data_matches_the_pinned_identity_hash() {
         let actual = Sha256::digest(include_bytes!("../fixtures/pipeline-data.json"));
-        assert_eq!(format!("{actual:x}"), SYNTHETIC_MAP_DATA_SHA256);
+        assert_eq!(
+            WorldSourceIdentityHash::from_bytes(actual.into()).to_string(),
+            SYNTHETIC_MAP_DATA_SHA256
+        );
     }
 
     #[test]

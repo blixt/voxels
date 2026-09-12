@@ -6116,7 +6116,7 @@ mod web {
         }
 
         fn feed_input(&self, bytes: &[u8]) -> bool {
-            for chunk in bytes.chunks_exact(INPUT_RECORD_SIZE) {
+            for chunk in bytes.as_chunks::<INPUT_RECORD_SIZE>().0 {
                 let record = bytemuck::pod_read_unaligned::<InputRecord>(chunk);
                 match record.kind {
                     KIND_POINTER_DOWN => {

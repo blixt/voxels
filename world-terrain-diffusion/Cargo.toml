@@ -19,17 +19,17 @@ download = ["metal", "dep:reqwest"]
 
 [dependencies]
 voxels-world = { path = "../world" }
-serde = { version = "1", features = ["derive"] }
-sha2 = "0.10"
+serde = { version = "1.0.229", features = ["derive"] }
+sha2 = "0.11.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 candle-core = { version = "0.11.0", features = ["metal"], optional = true }
 candle-nn = { version = "0.11.0", features = ["metal"], optional = true }
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13.5", default-features = false, features = [
   "blocking",
-  "rustls-tls",
+  "rustls",
 ], optional = true }
-serde_json = { version = "1", optional = true }
+serde_json = { version = "1.0.151", optional = true }
 
 [[bin]]
 name = "voxels-terrain-diffusion"

@@ -1,4 +1,4 @@
-FROM rust:1.97.0-bookworm AS builder
+FROM rust:1.98.1-trixie AS builder
 
 WORKDIR /src
 COPY . .
@@ -6,7 +6,7 @@ RUN cargo build --locked --profile worldgen \
     --package voxels-world-service \
     --bin voxels-worldd
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates gosu \

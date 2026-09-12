@@ -528,7 +528,7 @@ mod tests {
             assert_eq!(mip.width, expected_width);
             assert_eq!(mip.albedo.len(), expected_bytes);
             assert_eq!(mip.normal_roughness.len(), expected_bytes);
-            for texel in mip.normal_roughness.chunks_exact(4) {
+            for texel in mip.normal_roughness.as_chunks::<4>().0 {
                 let normal = glam::Vec3::new(
                     texel[0] as f32 / 255.0 * 2.0 - 1.0,
                     texel[1] as f32 / 255.0 * 2.0 - 1.0,

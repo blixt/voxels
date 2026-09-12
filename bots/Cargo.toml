@@ -9,13 +9,13 @@ publish = false
 workspace = true
 
 [dependencies]
-anyhow = "1"
-futures-util = { version = "0.3", features = ["sink"] }
-glam = "0.33"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
-tokio-tungstenite = "0.29"
+anyhow = "1.0.104"
+futures-util = { version = "0.3.34", features = ["sink"] }
+glam = "0.33.7"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = "0.30.0"
 voxels-core = { path = "../core" }
 voxels-runtime = { path = "../runtime" }
 voxels-world = { path = "../world" }

@@ -4146,6 +4146,39 @@ mod tests {
     }
 
     #[test]
+    fn pre_upgrade_brotli_page_result_preserves_wire_and_transfer_identity() {
+        let source = WorldSourceIdentityHash::from_bytes([42; 32]);
+        let page = crate::decode_terrain_page(
+            include_bytes!("../fixtures/codec-compatibility/terrain-page.brotli8.vxtp"),
+            source,
+        )
+        .expect("pre-upgrade persisted page");
+        let requested = crate::TerrainPageTransferIdentity {
+            key: page.key,
+            revision: page.revision,
+            content_fingerprint: page.content_fingerprint,
+        };
+        let decoded = decode_virtual_terrain_page_batch_result(
+            include_bytes!("../fixtures/codec-compatibility/terrain-page-result.brotli8.vxwp"),
+            source,
+        )
+        .expect("pre-upgrade compressed result envelope");
+        assert_eq!(
+            decoded,
+            VirtualTerrainPageBatchResult {
+                request_id: 73,
+                batch: TerrainPageBatchResultV1 {
+                    source_identity_hash: source,
+                    items: vec![crate::TerrainPageBatchItemV1 {
+                        requested,
+                        result: Ok(page),
+                    }],
+                },
+            }
+        );
+    }
+
+    #[test]
     fn edit_sphere_uses_the_symmetric_one_cubic_metre_stencil() {
         let hit = VoxelCoord::new(10, -20, 30);
         let volume = EditVolume::for_hit(hit, EditShape::Sphere).expect("bounded edit volume");

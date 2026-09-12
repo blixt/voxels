@@ -2125,7 +2125,7 @@ fn compact_simplified_cluster(
         vertices.push(vertex);
     }
     let mut triangles = Vec::with_capacity(simplified_indices.len() / 3);
-    for indices in simplified_indices.chunks_exact(3) {
+    for indices in simplified_indices.as_chunks::<3>().0 {
         let old = [indices[0], indices[1], indices[2]];
         let source_vertices = old.map(|index| {
             input
@@ -4204,6 +4204,46 @@ mod tests {
 
     fn identity() -> WorldSourceIdentityHash {
         WorldSourceIdentityHash::from_bytes([0x5a; 32])
+    }
+
+    #[test]
+    fn pre_upgrade_brotli_terrain_page_preserves_canonical_content() {
+        let source = WorldSourceIdentityHash::from_bytes([42; 32]);
+        let encoded = include_bytes!("../fixtures/codec-compatibility/terrain-page.brotli8.vxtp");
+        let decoded = decode_terrain_page(encoded, source).unwrap();
+        let expected = build_exact_terrain_page(
+            source,
+            TerrainPageKey {
+                level: 0,
+                coord: [-2, 1, 7],
+            },
+            93,
+            |coord| {
+                if coord.y < 37 {
+                    Material::Stone
+                } else if coord.y == 37 {
+                    Material::Dirt
+                } else if coord.y == 38 && coord.x.rem_euclid(8) == 0 {
+                    Material::Wood
+                } else if coord.y == 39 && coord.x.rem_euclid(8) <= 2 {
+                    Material::Leaves
+                } else if coord.y == 38 && coord.z.rem_euclid(8) < 2 {
+                    Material::Water
+                } else {
+                    Material::Air
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(decoded, expected);
+        assert_eq!(
+            decoded.content_fingerprint,
+            [
+                0x1c, 0x82, 0x02, 0x21, 0x8a, 0x35, 0xae, 0x22, 0xd4, 0x1a, 0x5f, 0x9e, 0x11, 0xc7,
+                0xa8, 0x22, 0xaf, 0x05, 0x0f, 0xb9, 0x80, 0xcb, 0x14, 0x40, 0x1f, 0x2d, 0xf6, 0x53,
+                0x0d, 0xb4, 0x70, 0xb9,
+            ]
+        );
     }
 
     fn sampled_surface(height: i32, material: Material, water_level: Option<i32>) -> SurfaceSample {

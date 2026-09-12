@@ -4074,7 +4074,7 @@ impl GpuTimer {
                 let mut parsed = None;
                 if let Ok(mapped) = callback_buffer.get_mapped_range(..) {
                     let mut timestamps = [0u64; GPU_QUERY_COUNT as usize];
-                    for (timestamp, bytes) in timestamps.iter_mut().zip(mapped.chunks_exact(8)) {
+                    for (timestamp, bytes) in timestamps.iter_mut().zip(mapped.as_chunks::<8>().0) {
                         let mut raw = [0u8; 8];
                         raw.copy_from_slice(bytes);
                         *timestamp = u64::from_le_bytes(raw);
@@ -12593,7 +12593,7 @@ fn unpack_screenshot_rgba(
     {
         destination.copy_from_slice(&source[..row_bytes]);
         if bgra {
-            for pixel in destination.chunks_exact_mut(4) {
+            for pixel in destination.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
             }
         }
@@ -12632,9 +12632,11 @@ fn interleave_screenshot_diagnostic_rows(
             padded_reverse_z.get(reverse_z_start..reverse_z_start + reverse_z_row_bytes)?;
         let output = interleaved.get_mut(output_start..output_start + output_row_bytes)?;
         for ((identity_pixel, reverse_z_pixel), output_pixel) in identity
-            .chunks_exact(16)
-            .zip(reverse_z.chunks_exact(4))
-            .zip(output.chunks_exact_mut(20))
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .zip(reverse_z.as_chunks::<4>().0)
+            .zip(output.as_chunks_mut::<20>().0)
         {
             output_pixel[..16].copy_from_slice(identity_pixel);
             output_pixel[16..].copy_from_slice(reverse_z_pixel);
@@ -15082,7 +15084,7 @@ mod tests {
                     .count()
                     == 1
         }));
-        assert!(vertices.chunks_exact(3).all(|triangle| {
+        assert!(vertices.as_chunks::<3>().0.iter().all(|triangle| {
             (0..3).any(|axis| {
                 triangle[0].position[axis] == triangle[1].position[axis]
                     && triangle[1].position[axis] == triangle[2].position[axis]
@@ -15195,7 +15197,7 @@ mod tests {
         let midpoint_x = minimum_x + grid.sample_stride_voxels as f32 * 0.5;
         let end_x = minimum_x + grid.sample_stride_voxels as f32;
         let has_boundary_edge = |left: [f32; 3], right: [f32; 3]| {
-            vertices.chunks_exact(3).any(|triangle| {
+            vertices.as_chunks::<3>().0.iter().any(|triangle| {
                 triangle.iter().any(|vertex| vertex.position == left)
                     && triangle.iter().any(|vertex| vertex.position == right)
             })
@@ -15250,7 +15252,7 @@ mod tests {
         let midpoint_x = minimum_x + 1.0;
         let end_x = minimum_x + 2.0;
         let has_boundary_edge = |left: [f32; 3], right: [f32; 3]| {
-            vertices.chunks_exact(3).any(|triangle| {
+            vertices.as_chunks::<3>().0.iter().any(|triangle| {
                 triangle.iter().any(|vertex| vertex.position == left)
                     && triangle.iter().any(|vertex| vertex.position == right)
             })
@@ -15372,7 +15374,7 @@ mod tests {
         .unwrap();
 
         let has_boundary_edge = |left_x: f32, right_x: f32, height: f32| {
-            vertices.chunks_exact(3).any(|triangle| {
+            vertices.as_chunks::<3>().0.iter().any(|triangle| {
                 let boundary = triangle
                     .iter()
                     .filter(|vertex| vertex.position[2] == 2.0)

@@ -1362,7 +1362,8 @@ mod tests {
         let path = root.join("model.bin");
         std::fs::create_dir_all(&root).expect("create model fetch fixture");
         std::fs::write(&path, b"corrupt").expect("write corrupt cached model");
-        let expected = format!("{:x}", Sha256::digest(b"valid"));
+        let expected =
+            WorldSourceIdentityHash::from_bytes(Sha256::digest(b"valid").into()).to_string();
         let mut downloads = 0;
 
         ensure_model_file(

@@ -9,7 +9,7 @@ and streaming while the native Rust world service owns generation and durable wo
 1. Install the Vite+ CLI from <https://viteplus.dev/> and Rust through
    [rustup](https://rustup.rs/).
 2. Install the CLI version paired with the pinned Rust library using
-   `cargo install --locked wasm-bindgen-cli --version 0.2.117`.
+   `cargo install --locked wasm-bindgen-cli --version 0.2.128`.
 3. Install managed Node, pnpm, and project dependencies with `vp install`.
 4. Run `vp dev`; it owns both the native world service and browser development server.
 5. Run TypeScript checks and tests with `vp check` and `vp test`.

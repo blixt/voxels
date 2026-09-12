@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import path from "node:path";
-import { defineConfig, type Plugin } from "vite-plus";
+import { defaultExclude, defineConfig, type Plugin } from "vite-plus";
 import {
   buildWasm,
   ensureWasmBuilt,
@@ -674,6 +674,8 @@ export default defineConfig(({ command, mode }) => ({
           canvasRuntimeReload(),
           nativeWorldService(),
         ],
+  // Nested task worktrees are independent checkouts, not part of this test suite.
+  test: { exclude: [...defaultExclude, "**/.coce/**"] },
   // A renderer failure belongs in the console. Vite's default HMR overlay appends a shadow-DOM
   // element over the canvas, which violates the engine's canvas-only host contract.
   // The world-service origin allowlist is bound to this development origin. Refuse to start when

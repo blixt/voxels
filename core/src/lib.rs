@@ -696,8 +696,7 @@ impl CameraState {
         if was_swimming && self.locomotion == LocomotionMode::Gliding {
             self.locomotion = LocomotionMode::Walking;
         }
-        let horizontal_grounded;
-        if was_swimming {
+        let horizontal_grounded = if was_swimming {
             let forward = self.forward();
             let horizontal_forward = Vec3::new(self.yaw.sin(), 0.0, -self.yaw.cos());
             let right = Vec3::new(-horizontal_forward.z, 0.0, horizontal_forward.x);
@@ -730,7 +729,7 @@ impl CameraState {
             self.jump_was_down = input.jump;
             self.ground_grace_seconds = 0.0;
             self.assisted_step_seconds = 0.0;
-            horizontal_grounded = input.jump;
+            input.jump
         } else {
             let forward = Vec3::new(self.yaw.sin(), 0.0, -self.yaw.cos());
             let right = Vec3::new(-forward.z, 0.0, forward.x);
@@ -803,8 +802,8 @@ impl CameraState {
                 self.velocity.y =
                     (self.velocity.y - GRAVITY * gravity_scale * dt).max(-WALK_TERMINAL_FALL_SPEED);
             }
-            horizontal_grounded = self.grounded || self.ground_grace_seconds > 0.0;
-        }
+            self.grounded || self.ground_grace_seconds > 0.0
+        };
 
         let maximum_step_height = if horizontal_grounded {
             ASSISTED_STEP_HEIGHT

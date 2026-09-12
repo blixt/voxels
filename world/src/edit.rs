@@ -597,7 +597,7 @@ impl EditMap {
         }
         let mut decoded = Vec::with_capacity(count);
         let mut previous = None;
-        for entry in entries.chunks_exact(EDIT_CHUNK_ENTRY_BYTES) {
+        for entry in entries.as_chunks::<EDIT_CHUNK_ENTRY_BYTES>().0 {
             let index = u16::from_le_bytes([entry[0], entry[1]]);
             if usize::from(index) >= crate::CHUNK_VOLUME
                 || previous.is_some_and(|previous| previous >= index)
