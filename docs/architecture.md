@@ -42,6 +42,7 @@ until benchmarks show generation or meshing is the frame-time bottleneck.
 
 `render/src/brick_residency.rs` is the first direct-traversal seam: it owns fixed-capacity 8³ material
 bricks, stable slot generations, coalesced revisions, bounded uploads, and a fail-closed DDA.
+Its pending queue has a fixed four-times-capacity ceiling and reports backpressure explicitly.
 `render/src/brick_gpu.rs` provides the matching bounded WGPU material atlas, descriptor table, and
 power-of-two hash-table storage buffer, plus the compute pipeline and bind-group layout for the
 validated traversal shader and typed ray/parameter dispatch API. The

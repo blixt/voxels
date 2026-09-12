@@ -107,6 +107,8 @@ pub enum QueueUpdate {
     InvalidRevision,
     /// Every resident brick has one complete 8³ material payload.
     InvalidPayload,
+    /// The bounded pending queue is full; callers should defer and retry this brick.
+    Capacity,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -132,6 +134,7 @@ pub struct BrickResidency {
     pending: BTreeMap<BrickCoord, Pending>,
     sequence: u64,
     next_generation: u64,
+    pending_capacity: usize,
 }
 
 impl BrickResidency {
@@ -143,6 +146,7 @@ impl BrickResidency {
             pending: BTreeMap::new(),
             sequence: 0,
             next_generation: 1,
+            pending_capacity: (capacity as usize).saturating_mul(4).max(1),
         }
     }
 
@@ -156,6 +160,10 @@ impl BrickResidency {
 
     pub fn pending_len(&self) -> usize {
         self.pending.len()
+    }
+
+    pub const fn pending_capacity(&self) -> usize {
+        self.pending_capacity
     }
 
     pub fn address(&self, coord: BrickCoord) -> Option<BrickAddress> {
@@ -377,6 +385,9 @@ impl BrickResidency {
         {
             return QueueUpdate::Stale;
         }
+        if !self.pending.contains_key(&coord) && self.pending.len() >= self.pending_capacity {
+            return QueueUpdate::Capacity;
+        }
         self.sequence = self.sequence.wrapping_add(1);
         let replaced = self.pending.insert(
             coord,
@@ -532,6 +543,30 @@ mod tests {
         assert_eq!(uploads[0].coord, resident);
         assert_eq!(uploads[0].revision, 2);
         assert_eq!(cache.pending_len(), 1);
+    }
+
+    #[test]
+    fn pending_queue_is_bounded_but_existing_bricks_can_still_be_revised() {
+        let mut cache = BrickResidency::new(1);
+        assert_eq!(cache.pending_capacity(), 4);
+        for index in 0..4 {
+            assert_eq!(
+                cache.queue_update(
+                    BrickCoord::new(index, 0, 0),
+                    1,
+                    payload(index as u8)
+                ),
+                QueueUpdate::Queued
+            );
+        }
+        assert_eq!(
+            cache.queue_update(BrickCoord::new(4, 0, 0), 1, payload(4)),
+            QueueUpdate::Capacity
+        );
+        assert_eq!(
+            cache.queue_update(BrickCoord::new(0, 0, 0), 2, payload(9)),
+            QueueUpdate::ReplacedPending
+        );
     }
 
     #[test]
