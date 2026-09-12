@@ -20,7 +20,8 @@ pub use crate::ui::{MissionControlConfig, RendererFeatureConfig};
 use crate::ui_gpu::{SCENE_FORMAT, UiGpu, retained_refraction_extent};
 use crate::virtual_terrain::{
     ExactSurfaceDomain, PresentationEnvelope, PresentationLocus, VirtualTerrainCapacity,
-    VirtualTerrainCut, VirtualTerrainError, VirtualTerrainHierarchy, VirtualTerrainView,
+    VirtualTerrainCut, VirtualTerrainError, VirtualTerrainHierarchy, VirtualTerrainSelectionMode,
+    VirtualTerrainView,
 };
 use crate::virtual_terrain_gpu::{
     GpuVirtualTerrainFeedback, VIRTUAL_TERRAIN_SURFACE_HANDLE_SOURCE_BYTES,
@@ -102,6 +103,7 @@ const DIRECT_TRACE_RAY_COUNT: u32 = DIRECT_TRACE_WIDTH * DIRECT_TRACE_HEIGHT;
 const VIRTUAL_TERRAIN_GPU_POOL_BYTES: u64 = 192 * 1024 * 1024;
 const VIRTUAL_TERRAIN_GPU_POOL_PAGES: usize = 2;
 const VIRTUAL_TERRAIN_GPU_ARENA_PAGE_BYTES: u32 = 96 * 1024 * 1024;
+const VIRTUAL_TERRAIN_QUALITY_RESELECTION_SKIP_FRAMES: u8 = 3;
 const GPU_FACE_SHIFT: u32 = 16;
 const GPU_FACE_MASK: u32 = 0b111 << GPU_FACE_SHIFT;
 const GPU_SOURCE_SHIFT: u32 = 5;
@@ -4508,6 +4510,9 @@ pub struct Renderer {
     /// Hysteretic screen-error scale selected by the compact-output capacity solver.
     virtual_terrain_error_scale: f64,
     virtual_terrain_headroom_frames: u16,
+    /// Quality selection is allowed to remain stable for a few frames while the camera moves.
+    /// Page residency and edit invalidations reset this counter; safety selection never skips.
+    virtual_terrain_reselection_skip: u8,
     /// Unmodified camera/error request used to cache the CPU selection decision.
     virtual_terrain_requested_view: Option<VirtualTerrainView>,
     /// Capacity-adjusted view used by the CPU oracle and handle-snapshot encoder.
@@ -5522,6 +5527,7 @@ impl Renderer {
             virtual_terrain_publication_abort_pending: false,
             virtual_terrain_error_scale: 1.0,
             virtual_terrain_headroom_frames: 0,
+            virtual_terrain_reselection_skip: 0,
             virtual_terrain_requested_view: None,
             virtual_terrain_oracle_view: None,
             virtual_terrain_exact_surface_domain: None,
@@ -6761,6 +6767,7 @@ impl Renderer {
         self.virtual_terrain_requested_view = None;
         self.virtual_terrain_oracle_view = None;
         self.virtual_terrain_headroom_frames = 0;
+        self.virtual_terrain_reselection_skip = 0;
     }
 
     fn committed_virtual_terrain_cut(&self) -> Option<&VirtualTerrainCut> {
@@ -7358,6 +7365,21 @@ impl Renderer {
             self.virtual_terrain_oracle_cut = Some(cut.clone());
             return Ok(cut);
         }
+        if view.selection_mode == VirtualTerrainSelectionMode::Quality
+            && self.virtual_terrain_reselection_skip < VIRTUAL_TERRAIN_QUALITY_RESELECTION_SKIP_FRAMES
+            && let Some(cached_cut) = self.virtual_terrain_oracle_cut.as_ref()
+            && self
+                .virtual_terrain_exact_surface_domain
+                .as_ref()
+                .is_some_and(|domain| domain == exact_surface_domain)
+            && cached_cut.covers_presentation_envelope(presentation_envelope)
+        {
+            self.virtual_terrain_reselection_skip = self
+                .virtual_terrain_reselection_skip
+                .saturating_add(1);
+            self.virtual_terrain_requested_view = Some(view);
+            return Ok(cached_cut.clone());
+        }
         let known_fitting_scale = self.virtual_terrain_error_scale.max(1.0);
         let mut recovery_probe = false;
         if self.virtual_terrain_requested_view == Some(view)
@@ -7447,6 +7469,7 @@ impl Renderer {
         self.virtual_terrain_requested_view = Some(view);
         self.virtual_terrain_oracle_view = Some(oracle_view);
         self.virtual_terrain_exact_surface_domain = Some(exact_surface_domain.clone());
+        self.virtual_terrain_reselection_skip = 0;
         self.virtual_terrain_oracle_cut = Some(cut.clone());
         self.virtual_terrain_plan_event_serial = self
             .virtual_terrain_plan_event_serial
