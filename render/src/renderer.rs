@@ -2,7 +2,7 @@ use crate::ambient_occlusion::AmbientOcclusionGpu;
 use crate::arena::{Allocation, ArenaAllocator};
 use crate::avatar::AvatarGpu;
 use crate::brick_gpu::GpuBrickAtlas;
-use crate::brick_residency::{BRICK_EDGE, BrickCoord};
+use crate::brick_residency::{BRICK_EDGE, BrickCoord, QueueUpdate};
 pub use crate::clouds::VolumetricCloudConfig;
 use crate::clouds::VolumetricCloudGpu;
 use crate::environment::{
@@ -3567,6 +3567,9 @@ pub struct RenderDiagnostics {
     pub shadow_cascades: u32,
     pub quads: u32,
     pub water_quads: u32,
+    pub direct_brick_resident: u32,
+    pub direct_brick_pending: u32,
+    pub direct_brick_capacity_drops: u64,
     pub virtual_terrain_cpu_selected_pages: u32,
     pub virtual_terrain_cpu_requested_pages: u32,
     pub virtual_terrain_cpu_refinement_roots: u32,
@@ -4262,6 +4265,7 @@ pub struct Renderer {
     local_light_buffer: Buffer,
     direct_brick_atlas: GpuBrickAtlas,
     next_direct_brick_revision: u64,
+    direct_brick_capacity_drops: u64,
     material_detail: MaterialDetailGpu,
     chunks: BTreeMap<MeshKey, ChunkMesh>,
     water_chunks: BTreeMap<MeshKey, ChunkMesh>,
@@ -5255,6 +5259,7 @@ impl Renderer {
             local_light_buffer,
             direct_brick_atlas,
             next_direct_brick_revision: 1,
+            direct_brick_capacity_drops: 0,
             material_detail,
             chunks: BTreeMap::new(),
             water_chunks: BTreeMap::new(),
@@ -7678,9 +7683,14 @@ impl Renderer {
             }
         }
         for update in pending_direct_bricks.into_values().flatten() {
-            let _ = self
+            if matches!(
+                self
                 .direct_brick_atlas
-                .queue_update(update.coord, update.revision, update.payload);
+                .queue_update(update.coord, update.revision, update.payload),
+                QueueUpdate::Capacity
+            ) {
+                self.direct_brick_capacity_drops = self.direct_brick_capacity_drops.saturating_add(1);
+            }
         }
         let committed =
             CommittedVirtualTerrainPresentation::from_publication(publication, generation);
@@ -8293,9 +8303,14 @@ impl Renderer {
         for update in self.build_direct_bricks(chunk, revision) {
             // A full atlas or stale revision is expected during bounded migration; the certified
             // mesh path remains the source of truth until residency catches up.
-            let _ = self
+            if matches!(
+                self
                 .direct_brick_atlas
-                .queue_update(update.coord, update.revision, update.payload);
+                .queue_update(update.coord, update.revision, update.payload),
+                QueueUpdate::Capacity
+            ) {
+                self.direct_brick_capacity_drops = self.direct_brick_capacity_drops.saturating_add(1);
+            }
         }
     }
 
@@ -9702,6 +9717,9 @@ impl Renderer {
             },
             quads: visible_terrain_primitives,
             water_quads: visible_water_primitives,
+            direct_brick_resident: self.direct_brick_atlas.resident_len() as u32,
+            direct_brick_pending: self.direct_brick_atlas.pending_len() as u32,
+            direct_brick_capacity_drops: self.direct_brick_capacity_drops,
             virtual_terrain_cpu_selected_pages: oracle_virtual_selected_pages as u32,
             virtual_terrain_cpu_requested_pages: oracle_virtual_requested_pages as u32,
             virtual_terrain_cpu_refinement_roots: oracle_virtual_refinement_roots as u32,
