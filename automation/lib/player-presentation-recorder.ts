@@ -26,6 +26,16 @@ export interface PlayerPresentationTraceFrame {
   readonly cpuMs: number;
   readonly simulationMs: number;
   readonly streamMs: number;
+  readonly streamRemoteMs: number;
+  readonly streamPlanMs: number;
+  readonly streamMeshMs: number;
+  readonly streamPublishMs: number;
+  readonly streamVirtualTerrainMs: number;
+  readonly streamInterestMs: number;
+  readonly streamSchedulerUpdateMs: number;
+  readonly streamSchedulerAdmitMs: number;
+  readonly streamCollisionInterestMs: number;
+  readonly streamEnclosedInterestMs: number;
   readonly renderMs: number;
   readonly gpuTotalMs: number;
   readonly gpuDirectTraversalMs: number;
@@ -199,6 +209,16 @@ function traceFrame(
     cpuMs: snapshotValue(snapshot, "cpuMs"),
     simulationMs: snapshotValue(snapshot, "simulationMs"),
     streamMs: snapshotValue(snapshot, "streamMs"),
+    streamRemoteMs: snapshotValue(snapshot, "streamRemoteMs"),
+    streamPlanMs: snapshotValue(snapshot, "streamPlanMs"),
+    streamMeshMs: snapshotValue(snapshot, "streamMeshMs"),
+    streamPublishMs: snapshotValue(snapshot, "streamPublishMs"),
+    streamVirtualTerrainMs: snapshotValue(snapshot, "streamVirtualTerrainMs"),
+    streamInterestMs: snapshotValue(snapshot, "streamInterestMs"),
+    streamSchedulerUpdateMs: snapshotValue(snapshot, "streamSchedulerUpdateMs"),
+    streamSchedulerAdmitMs: snapshotValue(snapshot, "streamSchedulerAdmitMs"),
+    streamCollisionInterestMs: snapshotValue(snapshot, "streamCollisionInterestMs"),
+    streamEnclosedInterestMs: snapshotValue(snapshot, "streamEnclosedInterestMs"),
     renderMs: snapshotValue(snapshot, "renderMs"),
     gpuTotalMs: snapshotValue(snapshot, "gpuTotalMs"),
     gpuDirectTraversalMs: snapshotValue(snapshot, "gpuDirectTraversalMs"),

@@ -1448,7 +1448,7 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 8;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 62;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 63;
     const FRAME_SAMPLE_WIDTH: u32 = 22;
     const GPU_SAMPLE_WIDTH: u32 = 16;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
@@ -1456,7 +1456,8 @@ mod web {
         "residentChunks,trackedChunks,visibleChunks,drawCalls,arenaPages,arenaAllocatedMiB,arenaCapacityMiB,pendingJobs,",
         "frameMs,shadowDrawCalls,shadowCascades,loadP95Frames,loadMaxFrames,remeshP95Frames,remeshMaxFrames,waterQuads,",
         "waterDrawCalls,refractionCopyMiB,immersion,eyeDepthMetres,eyesSubmerged,swimming,targetVoxelX,targetVoxelY,",
-        "targetVoxelZ,targetPresent,coreGpuMiB,cpuMs,simulationMs,streamMs,renderMs,gpuSampleId,",
+        "targetVoxelZ,targetPresent,coreGpuMiB,cpuMs,simulationMs,streamMs,",
+        "streamRemoteMs,streamPlanMs,streamMeshMs,streamPublishMs,streamVirtualTerrainMs,streamInterestMs,streamSchedulerUpdateMs,streamSchedulerAdmitMs,streamCollisionInterestMs,streamEnclosedInterestMs,renderMs,gpuSampleId,",
         "gpuTotalMs,gpuShadowMs,gpuWorldMs,gpuWaterMs,gpuUiMs,gpuDirectTraversalMs,wasmCommittedMiB,canonicalVoxelMiB,pendingMeshMiB,",
         "editLogicalMiB,totalEvictions,staleCompletions,profilePhase,profileElapsedSeconds,profileDistanceMetres,profileComplete,profileTrackedHigh,",
         "profilePendingHigh,profilePendingMeshHigh,profileArenaCapacityHighMiB,profileWasmHighMiB,profileEvictions,materialDetail,daylightPhase,surfaceRegion,",
@@ -2169,6 +2170,7 @@ mod web {
         cpu_milliseconds: Cell<f32>,
         simulation_milliseconds: Cell<f32>,
         stream_milliseconds: Cell<f32>,
+        stream_breakdown: Cell<StreamFrameSample>,
         render_milliseconds: Cell<f32>,
         frame_history: RefCell<FrameHistory>,
         edit_trackers: RefCell<VecDeque<EditTracker>>,
@@ -3169,6 +3171,7 @@ mod web {
                 &prediction_domain,
                 performance.as_ref(),
             );
+            self.stream_breakdown.set(stream_breakdown);
             if self.renderer.borrow().screenshot_reproduction_invalidated() {
                 // Exact replay is impossible after an intersecting authoritative change. Cancel
                 // the pending handoff or restore the interactive session instead of allowing a
@@ -7539,7 +7542,17 @@ mod web {
                     render.core_gpu_bytes as f32 / (1024.0 * 1024.0),
                     engine.cpu_milliseconds.get(),
                     engine.simulation_milliseconds.get(),
-                    engine.stream_milliseconds.get(),
+            engine.stream_milliseconds.get(),
+                    engine.stream_breakdown.get().remote_ms,
+                    engine.stream_breakdown.get().plan_ms,
+                    engine.stream_breakdown.get().mesh_ms,
+                    engine.stream_breakdown.get().publish_ms,
+                    engine.stream_breakdown.get().virtual_terrain_ms,
+                    engine.stream_breakdown.get().interest_ms,
+                    engine.stream_breakdown.get().scheduler_update_ms,
+                    engine.stream_breakdown.get().scheduler_admit_ms,
+                    engine.stream_breakdown.get().collision_interest_ms,
+                    engine.stream_breakdown.get().enclosed_interest_ms,
                     engine.render_milliseconds.get(),
                     render.gpu_sample_id as f32,
                     render.gpu_total_ms.unwrap_or(-1.0),
@@ -8178,6 +8191,7 @@ mod web {
             cpu_milliseconds: Cell::new(0.0),
             simulation_milliseconds: Cell::new(0.0),
             stream_milliseconds: Cell::new(0.0),
+            stream_breakdown: Cell::new(StreamFrameSample::default()),
             render_milliseconds: Cell::new(0.0),
             frame_history: RefCell::new(FrameHistory::new()),
             edit_trackers: RefCell::new(VecDeque::new()),

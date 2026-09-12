@@ -1,7 +1,7 @@
 import type { BrowserPlayerSession } from "./local-player.ts";
 
 export const AUTOMATION_CONTRACT_VERSION = 8;
-export const SNAPSHOT_SCHEMA_VERSION = 62;
+export const SNAPSHOT_SCHEMA_VERSION = 63;
 export const FRAME_SAMPLE_WIDTH = 22;
 export const GPU_SAMPLE_WIDTH = 16;
 
@@ -49,6 +49,16 @@ export const SNAPSHOT_FIELD_NAMES = [
   "cpuMs",
   "simulationMs",
   "streamMs",
+  "streamRemoteMs",
+  "streamPlanMs",
+  "streamMeshMs",
+  "streamPublishMs",
+  "streamVirtualTerrainMs",
+  "streamInterestMs",
+  "streamSchedulerUpdateMs",
+  "streamSchedulerAdmitMs",
+  "streamCollisionInterestMs",
+  "streamEnclosedInterestMs",
   "renderMs",
   "gpuSampleId",
   "gpuTotalMs",

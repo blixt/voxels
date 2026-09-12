@@ -1435,6 +1435,20 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
             .filter((value) => Number.isFinite(value) && value > 0),
           3,
         ),
+        browserSimulationTiming: numericSummary(
+          recorder
+            .trace()
+            .map((frame) => frame.simulationMs)
+            .filter((value) => Number.isFinite(value) && value > 0),
+          3,
+        ),
+        browserStreamTiming: numericSummary(
+          recorder
+            .trace()
+            .map((frame) => frame.streamMs)
+            .filter((value) => Number.isFinite(value) && value > 0),
+          3,
+        ),
         browserRenderTiming: numericSummary(
           recorder
             .trace()
@@ -1442,6 +1456,48 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
             .filter((value) => Number.isFinite(value) && value > 0),
           3,
         ),
+        streamPhaseTiming: {
+          remote: numericSummary(
+            recorder.trace().map((frame) => frame.streamRemoteMs),
+            3,
+          ),
+          plan: numericSummary(
+            recorder.trace().map((frame) => frame.streamPlanMs),
+            3,
+          ),
+          mesh: numericSummary(
+            recorder.trace().map((frame) => frame.streamMeshMs),
+            3,
+          ),
+          publish: numericSummary(
+            recorder.trace().map((frame) => frame.streamPublishMs),
+            3,
+          ),
+          virtualTerrain: numericSummary(
+            recorder.trace().map((frame) => frame.streamVirtualTerrainMs),
+            3,
+          ),
+          interest: numericSummary(
+            recorder.trace().map((frame) => frame.streamInterestMs),
+            3,
+          ),
+          schedulerUpdate: numericSummary(
+            recorder.trace().map((frame) => frame.streamSchedulerUpdateMs),
+            3,
+          ),
+          schedulerAdmit: numericSummary(
+            recorder.trace().map((frame) => frame.streamSchedulerAdmitMs),
+            3,
+          ),
+          collisionInterest: numericSummary(
+            recorder.trace().map((frame) => frame.streamCollisionInterestMs),
+            3,
+          ),
+          enclosedInterest: numericSummary(
+            recorder.trace().map((frame) => frame.streamEnclosedInterestMs),
+            3,
+          ),
+        },
         browserGpuTiming: numericSummary(
           recorder
             .trace()
