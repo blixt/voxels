@@ -390,9 +390,11 @@ impl BrickResidency {
     pub fn drain_uploads(&mut self, max_uploads: usize) -> Vec<BrickUpload> {
         let mut uploads = Vec::with_capacity(max_uploads);
         for _ in 0..max_uploads {
+            let free_slot = self.slots.iter().position(Option::is_none);
             let Some(coord) = self
                 .pending
                 .iter()
+                .filter(|(coord, _)| free_slot.is_some() || self.residents.contains_key(coord))
                 .min_by_key(|(_, pending)| pending.sequence)
                 .map(|(coord, _)| *coord)
             else {
@@ -402,7 +404,7 @@ impl BrickResidency {
             let address = if let Some(resident) = self.residents.get(&coord) {
                 resident.address
             } else {
-                let Some(slot) = self.slots.iter().position(Option::is_none) else {
+                let Some(slot) = free_slot else {
                     break;
                 };
                 let address = BrickAddress {
@@ -505,6 +507,22 @@ mod tests {
         let uploads = cache.drain_uploads(8);
         assert_eq!(uploads.len(), 1);
         assert_ne!(uploads[0].address.generation, first[0].address.generation);
+    }
+
+    #[test]
+    fn full_cache_newcomers_do_not_block_edits_to_resident_bricks() {
+        let mut cache = BrickResidency::new(1);
+        let resident = BrickCoord::new(0, 0, 0);
+        let newcomer = BrickCoord::new(1, 0, 0);
+        cache.queue_update(resident, 1, payload(1));
+        cache.drain_uploads(1);
+        cache.queue_update(newcomer, 1, payload(2));
+        cache.queue_update(resident, 2, payload(3));
+        let uploads = cache.drain_uploads(1);
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].coord, resident);
+        assert_eq!(uploads[0].revision, 2);
+        assert_eq!(cache.pending_len(), 1);
     }
 
     #[test]
