@@ -370,6 +370,14 @@ proof and bounded edit-interest path made the corrected fixed-sky gate pass; com
 alone was insufficient, but the combined path now demonstrates far edit presentation at the tested
 109.8 m distance.
 
+An opt-in uncapped Chrome run (`VOXELS_AUTOMATION_UNCAPPED_FPS=1`) on the same M3 Max completed
+the full player/edit scenario cleanly. With Chrome's compositor frame cap and GPU vsync disabled,
+the 240-sample browser frame timing was **7.628 ms mean / 13.617 ms p95** (6.696 / 12.048 ms
+CPU, 2.286 ms GPU), and direct traversal was **0.295 ms mean / 0.524 ms p95**. This demonstrates
+roughly 131 FPS average under the harness workload, but only about 73 FPS at p95; it is headroom
+evidence, not a 1080p/120 FPS claim. The run also peaked at 311.5 MiB and retained zero edit,
+replay, restore, or terrain-continuity failures.
+
 ## Older references retained for specific reasons
 
 - [HashDAG (2020)](https://github.com/Phyronnaz/HashDAG) and

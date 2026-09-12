@@ -204,11 +204,13 @@ export class BrowserCapability {
 }
 
 export function chromeWebGpuLaunchOptions(): LaunchOptions {
+  const uncappedFrameRate = process.env.VOXELS_AUTOMATION_UNCAPPED_FPS === "1";
   return {
     channel: "chrome",
     headless: false,
     args: [
       "--headless=new",
+      ...(uncappedFrameRate ? ["--disable-frame-rate-limit", "--disable-gpu-vsync"] : []),
       "--disable-features=LocalNetworkAccessChecks",
       "--no-sandbox",
       "--hide-scrollbars",
