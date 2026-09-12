@@ -330,6 +330,12 @@ authoritative voxels, all clients converged, the far observer was 109.7 m away, 
 164 changed pixels, and browser/protocol errors were zero. This fixes measurement synchronization;
 it does not claim that far-LOD publication latency is optimal.
 
+The automation ABI now exposes the direct traversal timestamp separately from total GPU time.
+The latest player run recorded 64 valid direct-traversal samples at 0.066 ms mean/p95 on the M3
+Max. This is the current 320x180 probe/composite cost, not full-resolution voxel rendering; the
+low sample count reflects timestamp readback availability and should be improved before using it
+as a sustained quality target.
+
 ## Older references retained for specific reasons
 
 - [HashDAG (2020)](https://github.com/Phyronnaz/HashDAG) and
