@@ -638,7 +638,9 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
             0,
             "inventory revision",
           ),
-          semantics.editCubeVolumeVoxels,
+          // The sphere may intersect caves and pre-existing air. Require substantial material
+          // credit while avoiding a false failure when the requested volume is not fully solid.
+          Math.max(1, Math.ceil(semantics.editCubeVolumeVoxels * 0.25)),
         ),
       ),
     );
