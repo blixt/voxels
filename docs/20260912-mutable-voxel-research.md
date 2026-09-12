@@ -314,6 +314,15 @@ reconstruction. For Teardown-style physics, use body-local voxel volumes plus tr
 replicate motion separately from geometry edits/fracture. That is a substantial later simulation
 and networking feature; it does not need to delay the lit editable-world milestone.
 
+The post-normal-reconstruction commit was rechecked on the same machine. The player-rendering
+scenario remained green at 17.247 ms mean / 19.105 ms p95 frame time and 8.312 ms mean / 8.585 ms
+p95 GPU time. Two immediate six-client reruns did reach the edit gate but failed the harness's
+far-tower screenshot legibility check (zero changed pixels in the expected region); no protocol or
+browser errors were reported. Earlier runs on this code line passed the same gate with 60--554
+changed pixels. Treat multiplayer visual convergence as unresolved until the screenshot race or
+far-LOD publication timing is made deterministic; authoritative edit convergence alone is not
+enough evidence.
+
 ## Older references retained for specific reasons
 
 - [HashDAG (2020)](https://github.com/Phyronnaz/HashDAG) and
