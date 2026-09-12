@@ -42,6 +42,21 @@ pub struct BrickUpload {
     pub payload: Arc<[u8]>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrickVoxelHit {
+    pub voxel: [i32; 3],
+    pub material: u8,
+    pub distance_voxels: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BrickTrace {
+    Hit(BrickVoxelHit),
+    Miss,
+    /// Traversal reached a brick that is not resident. Callers must not treat this as empty space.
+    Unknown(BrickCoord),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueueUpdate {
     /// A new brick was queued for upload.
@@ -54,10 +69,11 @@ pub enum QueueUpdate {
     InvalidRevision,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Resident {
     address: BrickAddress,
     revision: u64,
+    payload: Arc<[u8]>,
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +131,110 @@ impl BrickResidency {
             .get(&coord)
             .map(|resident| resident.revision)
             .or_else(|| self.pending.get(&coord).map(|pending| pending.revision))
+    }
+
+    /// Samples a resident voxel using the canonical x + z*edge + y*edge² layout. Missing bricks
+    /// return `None`; this distinction is required by a renderer that must fail closed while
+    /// streaming.
+    pub fn sample(&self, voxel: [i32; 3]) -> Option<u8> {
+        let brick = BrickCoord::new(
+            voxel[0].div_euclid(BRICK_EDGE as i32),
+            voxel[1].div_euclid(BRICK_EDGE as i32),
+            voxel[2].div_euclid(BRICK_EDGE as i32),
+        );
+        let resident = self.residents.get(&brick)?;
+        let x = voxel[0].rem_euclid(BRICK_EDGE as i32) as usize;
+        let y = voxel[1].rem_euclid(BRICK_EDGE as i32) as usize;
+        let z = voxel[2].rem_euclid(BRICK_EDGE as i32) as usize;
+        resident.payload.get(x + z * BRICK_EDGE as usize + y * BRICK_EDGE as usize * BRICK_EDGE as usize).copied()
+    }
+
+    /// Traverses resident bricks in voxel space. A missing brick is an explicit `Unknown` result,
+    /// never a transparent gap, so callers can keep the last certified image while streaming.
+    pub fn trace(
+        &self,
+        origin: [f32; 3],
+        direction: [f32; 3],
+        max_distance_voxels: f32,
+    ) -> BrickTrace {
+        if !origin.iter().all(|value| value.is_finite())
+            || !direction.iter().all(|value| value.is_finite())
+            || !max_distance_voxels.is_finite()
+            || max_distance_voxels <= 0.0
+        {
+            return BrickTrace::Miss;
+        }
+        let length = direction.iter().map(|value| value * value).sum::<f32>().sqrt();
+        if !length.is_finite() || length <= f32::EPSILON {
+            return BrickTrace::Miss;
+        }
+        let direction = direction.map(|value| value / length);
+        let mut voxel = [
+            origin[0].floor() as i32,
+            origin[1].floor() as i32,
+            origin[2].floor() as i32,
+        ];
+        let axis_step = |value: f32| value.partial_cmp(&0.0).map_or(0, |ordering| match ordering {
+            std::cmp::Ordering::Greater => 1,
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+        });
+        let step = direction.map(axis_step);
+        let mut next = [f32::INFINITY; 3];
+        let mut delta = [f32::INFINITY; 3];
+        for axis in 0..3 {
+            if step[axis] == 0 {
+                continue;
+            }
+            let boundary = if step[axis] > 0 {
+                voxel[axis] as f32 + 1.0
+            } else {
+                voxel[axis] as f32
+            };
+            next[axis] = (boundary - origin[axis]) / direction[axis];
+            delta[axis] = 1.0 / direction[axis].abs();
+        }
+
+        let mut distance = 0.0;
+        let max_steps = max_distance_voxels.ceil() as usize + 3;
+        for _ in 0..max_steps {
+            let brick = BrickCoord::new(
+                voxel[0].div_euclid(BRICK_EDGE as i32),
+                voxel[1].div_euclid(BRICK_EDGE as i32),
+                voxel[2].div_euclid(BRICK_EDGE as i32),
+            );
+            let Some(resident) = self.residents.get(&brick) else {
+                return BrickTrace::Unknown(brick);
+            };
+            let x = voxel[0].rem_euclid(BRICK_EDGE as i32) as usize;
+            let y = voxel[1].rem_euclid(BRICK_EDGE as i32) as usize;
+            let z = voxel[2].rem_euclid(BRICK_EDGE as i32) as usize;
+            let index = x + z * BRICK_EDGE as usize + y * BRICK_EDGE as usize * BRICK_EDGE as usize;
+            if resident.payload.get(index).copied().unwrap_or(0) != 0 {
+                return BrickTrace::Hit(BrickVoxelHit {
+                    voxel,
+                    material: resident.payload[index],
+                    distance_voxels: distance,
+                });
+            }
+            let axis = if next[0] <= next[1] && next[0] <= next[2] {
+                0
+            } else if next[1] <= next[2] {
+                1
+            } else {
+                2
+            };
+            distance = next[axis];
+            if distance > max_distance_voxels {
+                return BrickTrace::Miss;
+            }
+            voxel[axis] = match voxel[axis].checked_add(step[axis]) {
+                Some(value) => value,
+                None => return BrickTrace::Miss,
+            };
+            next[axis] += delta[axis];
+        }
+        BrickTrace::Miss
     }
 
     /// Queues the newest edit for one brick.  Multiple edits before a frame are coalesced, so the
@@ -188,6 +308,7 @@ impl BrickResidency {
                 Resident {
                     address,
                     revision: pending.revision,
+                    payload: Arc::clone(&pending.payload),
                 },
             );
             uploads.push(BrickUpload {
@@ -298,5 +419,45 @@ mod tests {
         assert_eq!(cache.drain_uploads(2).len(), 2);
         assert_eq!(cache.pending_len(), 1);
         assert_eq!(cache.drain_uploads(2).len(), 1);
+    }
+
+    #[test]
+    fn trace_hits_negative_voxels_and_preserves_material_ids() {
+        let mut cache = BrickResidency::new(1);
+        let mut bytes = vec![0; BRICK_VOXEL_COUNT];
+        let x = 7usize;
+        let y = 2usize;
+        let z = 3usize;
+        bytes[x + z * BRICK_EDGE as usize + y * BRICK_EDGE as usize * BRICK_EDGE as usize] = 9;
+        let coord = BrickCoord::new(-1, -1, -1);
+        assert_eq!(
+            cache.queue_update(coord, 1, Arc::from(bytes)),
+            QueueUpdate::Queued
+        );
+        cache.drain_uploads(1);
+        assert_eq!(cache.sample([-1, -6, -5]), Some(9));
+        assert_eq!(
+            cache.trace([-1.9, -5.5, -4.5], [1.0, 0.0, 0.0], 4.0),
+            BrickTrace::Hit(BrickVoxelHit {
+                voxel: [-1, -6, -5],
+                material: 9,
+                distance_voxels: 0.9,
+            })
+        );
+    }
+
+    #[test]
+    fn trace_reports_unknown_bricks_instead_of_empty_space() {
+        let mut cache = BrickResidency::new(1);
+        let payload = Arc::from(vec![0; BRICK_VOXEL_COUNT]);
+        assert_eq!(
+            cache.queue_update(BrickCoord::new(0, 0, 0), 1, payload),
+            QueueUpdate::Queued
+        );
+        cache.drain_uploads(1);
+        assert_eq!(
+            cache.trace([0.5, 0.5, 0.5], [1.0, 0.0, 0.0], 16.0),
+            BrickTrace::Unknown(BrickCoord::new(1, 0, 0))
+        );
     }
 }
