@@ -22,9 +22,9 @@ page regression test and the browser gate now agree on the same far-edit behavio
 The post-rewrite browser journey passed on Apple M3 Max with Chrome `153.0.8010.37`: default
 spawn, sustained spectator flight, walking, jump, dig, placement, screenshot replay and restore.
 The 2026-09-13 run used the generated v17 world and the real world-service protocol. Across 240
-steady samples, frame time was **18.992 ms mean / 22.976 ms p95 / 29.574 ms max**, CPU time
-**6.995 ms mean / 13.371 ms p95**, and GPU time **4.340 ms mean / 7.078 ms p95**. The direct
-traversal path was dispatched at its current diagnostic 320x180 probe size and measured **0.066 ms
+steady samples, frame time was **17.633 ms mean / 22.284 ms p95 / 27.193 ms max**, CPU time
+**7.022 ms mean / 13.531 ms p95**, and GPU time **4.569 ms mean / 7.406 ms p95**. The direct
+traversal path now runs at a 640x360 diagnostic tier and measured **0.072 ms mean / 0.131 ms p95
 GPU**; it is not yet the full-resolution primary visibility path. Peak core GPU allocation was
 **215.49 MiB**, and exact-quality debt and missed terrain progress were both zero. The same-day
 six-client shaped-40 ms RTT multiplayer run applied **5,000 authoritative voxel placements** and
