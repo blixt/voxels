@@ -387,6 +387,15 @@ These native numbers do not predict WASM timings, but they identify batched wire
 first loading and multiplayer optimization target; meshing is not currently the dominant native
 cost.
 
+The new browser phase telemetry was exercised by an uncapped player run at
+`target/automation/player-rendering/2026-09-12T23-03-56-272Z-97e10424`. It measured WASM stream
+work at **5.868 ms mean / 11.474 ms p95**; virtual-terrain selection and admission accounted for
+**5.394 / 11.2 ms**, while remote completion draining, planning, meshing, publication, and
+scheduler phases were each below 0.3 ms at p95. A three-frame reuse experiment preserved all
+correctness gates but worsened frame p95 from 14.278 to 14.963 ms and virtual-terrain p95 from
+10.7 to 11.2 ms, so it was reverted. The evidence favors profiling and restructuring virtual
+terrain selection itself rather than adding temporal staleness heuristics.
+
 ## Older references retained for specific reasons
 
 - [HashDAG (2020)](https://github.com/Phyronnaz/HashDAG) and
