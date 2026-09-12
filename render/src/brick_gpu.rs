@@ -6,13 +6,13 @@
 
 use wgpu::{
     BindGroup, BindGroupLayout, Buffer, BufferUsages, CommandEncoder, ComputePipeline, Device,
-    PipelineLayoutDescriptor, Queue, ShaderStages,
+    PipelineLayoutDescriptor, Queue, ShaderStages, TextureView,
 };
 
+use crate::brick_hash::{BrickHashItem, BrickHashTable, GpuBrickHashEntry};
 use crate::brick_residency::{
     BRICK_VOXEL_COUNT, BrickCoord, BrickResidency, BrickUpload, QueueUpdate,
 };
-use crate::brick_hash::{BrickHashItem, BrickHashTable, GpuBrickHashEntry};
 
 pub const GPU_BRICK_DESCRIPTOR_WORDS: usize = 8;
 pub const GPU_BRICK_DESCRIPTOR_BYTES: u64 = (GPU_BRICK_DESCRIPTOR_WORDS * size_of::<u32>()) as u64;
@@ -30,7 +30,10 @@ pub struct TraceParams {
     pub hash_mask: u32,
     pub max_distance_voxels: f32,
     pub ray_count: u32,
-    pub reserved: u32,
+    pub width: u32,
+    pub height: u32,
+    /// Explicit tail padding keeps the host allocation at WGSL's 16-byte uniform stride (48 B).
+    pub reserved: [u32; 7],
 }
 
 #[repr(C)]
@@ -99,8 +102,8 @@ impl GpuBrickAtlas {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let traversal_bind_group_layout = device.create_bind_group_layout(
-            &wgpu::BindGroupLayoutDescriptor {
+        let traversal_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("direct voxel traversal bindings"),
                 entries: &[
                     storage_binding(0, false),
@@ -117,17 +120,25 @@ impl GpuBrickAtlas {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
                 ],
-            },
-        );
+            });
         let traversal_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("direct voxel traversal pipeline layout"),
             bind_group_layouts: &[Some(&traversal_bind_group_layout)],
             immediate_size: 0,
         });
-        let traversal_shader = device.create_shader_module(wgpu::include_wgsl!(
-            "shaders/brick_traversal.wgsl"
-        ));
+        let traversal_shader =
+            device.create_shader_module(wgpu::include_wgsl!("shaders/brick_traversal.wgsl"));
         let traversal_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("direct voxel traversal pipeline"),
             layout: Some(&traversal_pipeline_layout),
@@ -243,6 +254,7 @@ impl GpuBrickAtlas {
         rays: &Buffer,
         results: &Buffer,
         params: &Buffer,
+        output: &TextureView,
     ) -> BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("direct voxel traversal bind group"),
@@ -267,6 +279,10 @@ impl GpuBrickAtlas {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(output),
                 },
             ],
         })
@@ -317,15 +333,15 @@ impl GpuBrickAtlas {
     }
 
     fn refresh_hash_table(&mut self, queue: &Queue) {
-        let items = self
-            .residency
-            .resident_bricks()
-            .into_iter()
-            .map(|(coord, address, non_empty)| BrickHashItem {
-                coord,
-                address,
-                non_empty,
-            });
+        let items =
+            self.residency
+                .resident_bricks()
+                .into_iter()
+                .map(|(coord, address, non_empty)| BrickHashItem {
+                    coord,
+                    address,
+                    non_empty,
+                });
         self.hash_table
             .rebuild(items)
             .expect("GPU brick hash table capacity must accommodate residency");
@@ -367,7 +383,7 @@ mod tests {
         assert_eq!(BRICK_VOXEL_COUNT % 4, 0);
         assert_eq!(GPU_BRICK_DESCRIPTOR_BYTES, 32);
         assert_eq!(size_of::<TraceRay>(), 32);
-        assert_eq!(size_of::<TraceParams>(), 16);
+        assert_eq!(size_of::<TraceParams>(), 48);
         assert_eq!(descriptor_offset_for_slot(3), 96);
     }
 

@@ -86,6 +86,9 @@ const MATERIAL_WHEEL_SLOTS: usize = 10;
 const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 const DIRECT_BRICK_ATLAS_CAPACITY: u32 = 4096;
 const DIRECT_BRICK_UPLOADS_PER_FRAME: usize = 16;
+const DIRECT_TRACE_WIDTH: u32 = 160;
+const DIRECT_TRACE_HEIGHT: u32 = 90;
+const DIRECT_TRACE_RAY_COUNT: u32 = DIRECT_TRACE_WIDTH * DIRECT_TRACE_HEIGHT;
 // Immutable virtual-page geometry is the durable render representation. Two independently
 // bindable segments stay below WebGPU's common 128 MiB storage-binding ceiling while reserving
 // enough transition headroom to stage a maximum complete child group beside the published cut.
@@ -3051,6 +3054,10 @@ struct DirectTraversalProbe {
     rays: Buffer,
     _results: Buffer,
     params: Buffer,
+    #[allow(dead_code)]
+    output_texture: Texture,
+    composite_bind_group_layout: wgpu::BindGroupLayout,
+    composite_bind_group: BindGroup,
     bind_group: BindGroup,
 }
 
@@ -3058,10 +3065,7 @@ impl DirectTraversalProbe {
     fn new(device: &Device, atlas: &GpuBrickAtlas) -> Self {
         let rays = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("direct traversal probe ray"),
-            contents: bytemuck::bytes_of(&TraceRay {
-                origin: [0.0; 4],
-                direction: [0.0, 0.0, -1.0, 0.0],
-            }),
+            contents: &vec![0_u8; DIRECT_TRACE_RAY_COUNT as usize * size_of::<TraceRay>()],
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
         let results = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -3077,41 +3081,132 @@ impl DirectTraversalProbe {
             contents: bytemuck::bytes_of(&TraceParams {
                 hash_mask: atlas.hash_capacity() - 1,
                 max_distance_voxels: 256.0,
-                ray_count: 1,
-                reserved: 0,
+                ray_count: DIRECT_TRACE_RAY_COUNT,
+                width: DIRECT_TRACE_WIDTH,
+                height: DIRECT_TRACE_HEIGHT,
+                reserved: [0; 7],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let bind_group = atlas.create_traversal_bind_group(device, &rays, &results, &params);
+        let output_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("direct traversal color target"),
+            size: wgpu::Extent3d {
+                width: DIRECT_TRACE_WIDTH,
+                height: DIRECT_TRACE_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group =
+            atlas.create_traversal_bind_group(device, &rays, &results, &params, &output_view);
+        let composite_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("direct traversal composite bindings"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("direct traversal composite sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("direct traversal composite bind group"),
+            layout: &composite_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&output_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
         Self {
             rays,
             _results: results,
             params,
+            output_texture,
+            composite_bind_group_layout,
+            composite_bind_group,
             bind_group,
         }
     }
 
-    fn update(&self, queue: &Queue, atlas: &GpuBrickAtlas, camera: &CameraState, max_distance: f32) {
+    fn update(
+        &self,
+        queue: &Queue,
+        atlas: &GpuBrickAtlas,
+        camera: &CameraState,
+        max_distance: f32,
+    ) {
         let position = camera.position / VOXEL_SIZE_METRES;
-        let direction = camera.forward();
-        queue.write_buffer(
-            &self.rays,
-            0,
-            bytemuck::bytes_of(&TraceRay {
-                origin: [position.x, position.y, position.z, 0.0],
-                direction: [direction.x, direction.y, direction.z, 0.0],
-            }),
-        );
+        let forward = camera.forward();
+        let right = forward.cross(glam::Vec3::Y).normalize_or_zero();
+        let up = right.cross(forward).normalize_or_zero();
+        let aspect = DIRECT_TRACE_WIDTH as f32 / DIRECT_TRACE_HEIGHT as f32;
+        let tan_half_fov = (68.0_f32.to_radians() * 0.5).tan();
+        let mut rays = Vec::with_capacity(DIRECT_TRACE_RAY_COUNT as usize);
+        for y in 0..DIRECT_TRACE_HEIGHT {
+            let ndc_y = 1.0 - ((y as f32 + 0.5) / DIRECT_TRACE_HEIGHT as f32) * 2.0;
+            for x in 0..DIRECT_TRACE_WIDTH {
+                let ndc_x = ((x as f32 + 0.5) / DIRECT_TRACE_WIDTH as f32) * 2.0 - 1.0;
+                let direction = (forward
+                    + right * (ndc_x * tan_half_fov * aspect)
+                    + up * (ndc_y * tan_half_fov))
+                    .normalize_or_zero();
+                rays.push(TraceRay {
+                    origin: [position.x, position.y, position.z, 0.0],
+                    direction: [direction.x, direction.y, direction.z, 0.0],
+                });
+            }
+        }
+        queue.write_buffer(&self.rays, 0, bytemuck::cast_slice(&rays));
         queue.write_buffer(
             &self.params,
             0,
             bytemuck::bytes_of(&TraceParams {
                 hash_mask: atlas.hash_capacity() - 1,
                 max_distance_voxels: (max_distance / VOXEL_SIZE_METRES).max(1.0),
-                ray_count: 1,
-                reserved: 0,
+                ray_count: DIRECT_TRACE_RAY_COUNT,
+                width: DIRECT_TRACE_WIDTH,
+                height: DIRECT_TRACE_HEIGHT,
+                reserved: [0; 7],
             }),
         );
+    }
+
+    fn composite_bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.composite_bind_group_layout
+    }
+
+    fn composite_bind_group(&self) -> &BindGroup {
+        &self.composite_bind_group
     }
 }
 
@@ -4323,6 +4418,7 @@ pub struct Renderer {
     queue: Queue,
     config: SurfaceConfiguration,
     sky_pipeline: RenderPipeline,
+    direct_composite_pipeline: RenderPipeline,
     depth_prepass_fast_pipeline: RenderPipeline,
     voxel_pipeline: RenderPipeline,
     voxel_flat_pipeline: RenderPipeline,
@@ -5086,6 +5182,32 @@ impl Renderer {
                 fragment_constants: &[],
             },
         );
+        let direct_composite_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("direct traversal composite pipeline layout"),
+                bind_group_layouts: &[Some(direct_traversal_probe.composite_bind_group_layout())],
+                immediate_size: 0,
+            });
+        let direct_composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("direct traversal composite shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/direct_composite.wgsl").into()),
+        });
+        let direct_composite_pipeline = pipeline(
+            &device,
+            "direct traversal composite pipeline",
+            &direct_composite_pipeline_layout,
+            &direct_composite_shader,
+            SCENE_FORMAT,
+            &[],
+            PipelineOptions {
+                vertex_entry: "vs_main",
+                fragment_entry: "fs_main",
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+                depth_stencil: None,
+                fragment_constants: &[],
+            },
+        );
         let weather_pipeline_error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let weather_shader = crate::shader::frame_shader(
             &device,
@@ -5320,6 +5442,7 @@ impl Renderer {
             queue,
             config,
             sky_pipeline,
+            direct_composite_pipeline,
             depth_prepass_fast_pipeline,
             voxel_pipeline,
             voxel_flat_pipeline,
@@ -7779,12 +7902,12 @@ impl Renderer {
         }
         for update in pending_direct_bricks.into_values().flatten() {
             if matches!(
-                self
-                .direct_brick_atlas
-                .queue_update(update.coord, update.revision, update.payload),
+                self.direct_brick_atlas
+                    .queue_update(update.coord, update.revision, update.payload),
                 QueueUpdate::Capacity
             ) {
-                self.direct_brick_capacity_drops = self.direct_brick_capacity_drops.saturating_add(1);
+                self.direct_brick_capacity_drops =
+                    self.direct_brick_capacity_drops.saturating_add(1);
             }
         }
         let committed =
@@ -8373,7 +8496,8 @@ impl Renderer {
                                 let destination = x
                                     + z * BRICK_EDGE as usize
                                     + y * BRICK_EDGE as usize * BRICK_EDGE as usize;
-                                payload[destination] = chunk.get(source_x, source_y, source_z).id() as u8;
+                                payload[destination] =
+                                    chunk.get(source_x, source_y, source_z).id() as u8;
                             }
                         }
                     }
@@ -8399,12 +8523,12 @@ impl Renderer {
             // A full atlas or stale revision is expected during bounded migration; the certified
             // mesh path remains the source of truth until residency catches up.
             if matches!(
-                self
-                .direct_brick_atlas
-                .queue_update(update.coord, update.revision, update.payload),
+                self.direct_brick_atlas
+                    .queue_update(update.coord, update.revision, update.payload),
                 QueueUpdate::Capacity
             ) {
-                self.direct_brick_capacity_drops = self.direct_brick_capacity_drops.saturating_add(1);
+                self.direct_brick_capacity_drops =
+                    self.direct_brick_capacity_drops.saturating_add(1);
             }
         }
     }
@@ -9104,7 +9228,7 @@ impl Renderer {
         self.direct_brick_atlas.encode_traversal_with_timestamps(
             &mut encoder,
             &self.direct_traversal_probe.bind_group,
-            1,
+            DIRECT_TRACE_RAY_COUNT,
             gpu_frame.as_ref().map(|frame| frame.compute_pass(28)),
         );
         self.direct_brick_probe_dispatches = self.direct_brick_probe_dispatches.saturating_add(1);
@@ -9464,6 +9588,30 @@ impl Renderer {
             // Draw the fullscreen sky at the far plane after opaque geometry so early depth
             // rejection avoids running its procedural clouds behind terrain.
             pass.set_pipeline(&self.sky_pipeline);
+            pass.draw(0..3, 0..1);
+        }
+        // The direct path is intentionally bounded while it is being brought up: a coarse
+        // traversal image overlays resident bricks and leaves misses transparent, so the
+        // certified mesh/page renderer remains the continuity path for unknown residency.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("direct voxel traversal composite pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: opaque_scene_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.direct_composite_pipeline);
+            pass.set_bind_group(0, self.direct_traversal_probe.composite_bind_group(), &[]);
             pass.draw(0..3, 0..1);
         }
         if clouds_active {
@@ -14423,8 +14571,8 @@ mod tests {
             1_000_000, 2_000_000, 2_100_000, 3_100_000, 3_200_000, 4_200_000, 4_500_000, 6_500_000,
             6_700_000, 7_700_000, 7_900_000, 8_400_000, 8_600_000, 10_600_000, 10_800_000,
             12_800_000, 13_000_000, 13_400_000, 13_600_000, 16_600_000, 16_800_000, 17_100_000,
-            17_300_000, 18_300_000, 18_500_000, 18_900_000, 18_400_000, 19_800_000,
-            19_000_000, 19_100_000,
+            17_300_000, 18_300_000, 18_500_000, 18_900_000, 18_400_000, 19_800_000, 19_000_000,
+            19_100_000,
         ];
         let active = GpuPassMask {
             shadows: true,
@@ -14484,7 +14632,7 @@ mod tests {
         timestamps[15] = timestamps[14] + 1;
         timestamps[23] = timestamps[14] + 1_100_000_000;
         assert!(parse_gpu_timestamps(&timestamps, 1.0, GpuPassMask::default()).is_none());
-        assert_eq!(GPU_QUERY_BUFFER_BYTES, 224);
+        assert_eq!(GPU_QUERY_BUFFER_BYTES, 240);
         assert_eq!(GPU_RESOLVE_BUFFER_BYTES % 256, 0);
     }
 

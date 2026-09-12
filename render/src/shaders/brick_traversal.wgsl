@@ -23,7 +23,9 @@ struct TraceParams {
   hash_mask: u32,
   max_distance_voxels: f32,
   ray_count: u32,
-  reserved: u32,
+  width: u32,
+  height: u32,
+  reserved: vec3<u32>,
 };
 
 @group(0) @binding(0) var<storage, read> brick_entries: array<BrickEntry>;
@@ -31,6 +33,7 @@ struct TraceParams {
 @group(0) @binding(2) var<storage, read> rays: array<TraceRay>;
 @group(0) @binding(3) var<storage, read_write> results: array<TraceResult>;
 @group(0) @binding(4) var<uniform> params: TraceParams;
+@group(0) @binding(5) var output_texture: texture_storage_2d<rgba8unorm, write>;
 
 const BRICK_EDGE: i32 = 8;
 const BRICK_WORD_COUNT: u32 = 128u;
@@ -87,6 +90,27 @@ fn finite_vec3(value: vec3<f32>) -> bool {
   return finite_f32(value.x) && finite_f32(value.y) && finite_f32(value.z);
 }
 
+fn output_pixel(ray_index: u32, color: vec4<f32>) {
+  if params.width == 0u || params.height == 0u {
+    return;
+  }
+  let pixel = vec2<u32>(ray_index % params.width, ray_index / params.width);
+  if pixel.y < params.height {
+    textureStore(output_texture, pixel, color);
+  }
+}
+
+fn material_color(material: u32) -> vec4<f32> {
+  let hue = f32(material & 31u) / 31.0;
+  let band = f32((material >> 5u) & 7u) / 7.0;
+  let color = vec3<f32>(
+    0.22 + 0.58 * hue,
+    0.28 + 0.42 * (1.0 - abs(hue - 0.5) * 1.6),
+    0.20 + 0.56 * band,
+  );
+  return vec4<f32>(color, 1.0);
+}
+
 @compute @workgroup_size(64)
 fn trace_voxels(@builtin(global_invocation_id) invocation: vec3<u32>) {
   let ray_index = invocation.x;
@@ -99,6 +123,7 @@ fn trace_voxels(@builtin(global_invocation_id) invocation: vec3<u32>) {
       || !finite_f32(direction_length) || direction_length <= 0.000001
       || !finite_f32(params.max_distance_voxels) || params.max_distance_voxels <= 0.0 {
     results[ray_index].material_distance = vec4<u32>(0u, STATUS_MISS, 0u, 0u);
+    output_pixel(ray_index, vec4<f32>(0.0));
     return;
   }
   let direction = ray.direction.xyz / direction_length;
@@ -127,6 +152,7 @@ fn trace_voxels(@builtin(global_invocation_id) invocation: vec3<u32>) {
     if found.x == INVALID_SLOT {
       results[ray_index].voxel = vec4<i32>(voxel, 0);
       results[ray_index].material_distance = vec4<u32>(0u, STATUS_UNKNOWN, bitcast<u32>(distance), 0u);
+      output_pixel(ray_index, vec4<f32>(0.0));
       return;
     }
     if found.y == 0u {
@@ -140,6 +166,7 @@ fn trace_voxels(@builtin(global_invocation_id) invocation: vec3<u32>) {
       let skip = min(brick_next.x, min(brick_next.y, brick_next.z));
       if !finite_f32(skip) || skip > params.max_distance_voxels {
         results[ray_index].material_distance = vec4<u32>(0u, STATUS_MISS, 0u, 0u);
+        output_pixel(ray_index, vec4<f32>(0.0));
         return;
       }
       distance = skip;
@@ -162,6 +189,7 @@ fn trace_voxels(@builtin(global_invocation_id) invocation: vec3<u32>) {
     if material != 0u {
       results[ray_index].voxel = vec4<i32>(voxel, 0);
       results[ray_index].material_distance = vec4<u32>(material, STATUS_HIT, bitcast<u32>(distance), 0u);
+      output_pixel(ray_index, material_color(material));
       return;
     }
     let axis = select(0u, 1u, next.y < next.x);
@@ -169,6 +197,7 @@ fn trace_voxels(@builtin(global_invocation_id) invocation: vec3<u32>) {
     distance = next[chosen_axis];
     if distance > params.max_distance_voxels {
       results[ray_index].material_distance = vec4<u32>(0u, STATUS_MISS, 0u, 0u);
+      output_pixel(ray_index, vec4<f32>(0.0));
       return;
     }
     voxel[chosen_axis] += step[chosen_axis];
@@ -176,4 +205,5 @@ fn trace_voxels(@builtin(global_invocation_id) invocation: vec3<u32>) {
   }
   results[ray_index].voxel = vec4<i32>(voxel, 0);
   results[ray_index].material_distance = vec4<u32>(0u, STATUS_UNKNOWN, bitcast<u32>(distance), 0u);
+  output_pixel(ray_index, vec4<f32>(0.0));
 }
