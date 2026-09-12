@@ -3079,13 +3079,12 @@ impl DirectTraversalProbe {
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let results = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let results = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("direct traversal probe result"),
-            contents: bytemuck::bytes_of(&TraceResult {
-                voxel: [0; 4],
-                material_distance: [0; 4],
-            }),
+            size: (size_of::<TraceResult>() as u64)
+                .saturating_mul(u64::from(DIRECT_TRACE_RAY_COUNT)),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
         });
         let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("direct traversal probe parameters"),
