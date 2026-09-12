@@ -31,13 +31,13 @@ through to the raster path while residency coverage is being expanded;
 it is not yet the full-resolution primary visibility path. Peak core GPU allocation was **215.49
 MiB**, and exact-quality debt and missed terrain progress were both zero. The same-day six-client
 shaped-40 ms RTT multiplayer run applied **5,000 authoritative voxel placements** and **10,210
-digs** to all clients with zero browser/protocol errors; the latest run's distant tower converged in
-**4.631 s**
-at **109.6 m** separation, with observer frame p95 **50.0 ms** and builder p95 **66.7–83.3 ms**.
+digs** to all clients with zero browser/protocol errors; the latest full-HD run's distant tower
+converged in **4.601 s** at **109.0 m** separation, with observer frame p95 **50.0 ms** and builder
+p95 **66.7–83.3 ms**.
 These are acceptance baselines, not claims of the 1080p/120 FPS target. The player artifact is
 `target/automation/player-rendering/2026-09-12T22-24-13-782Z-20a9aa98`; multiplayer artifacts
 remain under `target/automation/multiplayer/`, latest
-`target/automation/multiplayer/2026-09-12T22-21-51-182Z-b36d5f49`.
+`target/automation/multiplayer/2026-09-12T22-26-28-162Z-bcfb7d00`.
 
 The new server regression also builds an edited level-0 surface segment after an Air override and
 asserts that the removed voxel's generated top face is absent while an unrelated sibling remains
