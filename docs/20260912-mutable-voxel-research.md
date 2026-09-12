@@ -305,6 +305,10 @@ batched direct-brick eviction, a fresh run remained clean: **17.348 ms mean / 20
 time and **4.538 ms mean / 7.078 ms p95** GPU time. The multiplayer travel/edit run also passed with
 **4,702.8 ms** tower convergence at **109.712 m**, with zero browser or protocol-control errors.
 
+The quality tier is now **320x180** (four times the previous ray count). Chrome validation remained
+clean at **17.884 ms mean / 22.385 ms p95** frame time and **4.743 ms mean / 7.537 ms p95** GPU time;
+the player scenario still reported zero browser/protocol errors and zero missed terrain progress.
+
 After the integrated path works, add bounded diffuse bounce lighting and then glass/reflection
 reconstruction. For Teardown-style physics, use body-local voxel volumes plus transforms and
 replicate motion separately from geometry edits/fracture. That is a substantial later simulation
