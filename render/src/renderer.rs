@@ -3052,6 +3052,7 @@ struct DirectBrickUpdate {
 
 struct DirectTraversalProbe {
     rays: Buffer,
+    ray_staging: Vec<TraceRay>,
     _results: Buffer,
     params: Buffer,
     #[allow(dead_code)]
@@ -3149,6 +3150,13 @@ impl DirectTraversalProbe {
         });
         Self {
             rays,
+            ray_staging: vec![
+                TraceRay {
+                    origin: [0.0; 4],
+                    direction: [0.0; 4]
+                };
+                DIRECT_TRACE_RAY_COUNT as usize
+            ],
             _results: results,
             params,
             output_texture,
@@ -3159,7 +3167,7 @@ impl DirectTraversalProbe {
     }
 
     fn update(
-        &self,
+        &mut self,
         queue: &Queue,
         atlas: &GpuBrickAtlas,
         camera: &CameraState,
@@ -3171,7 +3179,6 @@ impl DirectTraversalProbe {
         let up = right.cross(forward).normalize_or_zero();
         let aspect = DIRECT_TRACE_WIDTH as f32 / DIRECT_TRACE_HEIGHT as f32;
         let tan_half_fov = (68.0_f32.to_radians() * 0.5).tan();
-        let mut rays = Vec::with_capacity(DIRECT_TRACE_RAY_COUNT as usize);
         for y in 0..DIRECT_TRACE_HEIGHT {
             let ndc_y = 1.0 - ((y as f32 + 0.5) / DIRECT_TRACE_HEIGHT as f32) * 2.0;
             for x in 0..DIRECT_TRACE_WIDTH {
@@ -3180,13 +3187,13 @@ impl DirectTraversalProbe {
                     + right * (ndc_x * tan_half_fov * aspect)
                     + up * (ndc_y * tan_half_fov))
                     .normalize_or_zero();
-                rays.push(TraceRay {
+                self.ray_staging[(y * DIRECT_TRACE_WIDTH + x) as usize] = TraceRay {
                     origin: [position.x, position.y, position.z, 0.0],
                     direction: [direction.x, direction.y, direction.z, 0.0],
-                });
+                };
             }
         }
-        queue.write_buffer(&self.rays, 0, bytemuck::cast_slice(&rays));
+        queue.write_buffer(&self.rays, 0, bytemuck::cast_slice(&self.ray_staging));
         queue.write_buffer(
             &self.params,
             0,
