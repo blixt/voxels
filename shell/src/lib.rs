@@ -2568,8 +2568,8 @@ mod web {
                     .is_none_or(|goal| goal.kind() != ClientViewGoalKind::ReproductionRestore)
                 {
                     let target = client_view.current().restore_interactive();
-                    let version = client_view
-                        .replace_goal(ClientViewGoalKind::ReproductionRestore, target);
+                    let version =
+                        client_view.replace_goal(ClientViewGoalKind::ReproductionRestore, target);
                     Some((version, target, client_view.published()))
                 } else if let Some(goal) = client_view.goal()
                     && goal.kind() == ClientViewGoalKind::ReproductionApply
@@ -2594,10 +2594,11 @@ mod web {
             {
                 return;
             }
-            let published = match self.renderer.borrow_mut().transition_client_view(
-                source,
-                target.presentation_state(),
-            ) {
+            let published = match self
+                .renderer
+                .borrow_mut()
+                .transition_client_view(source, target.presentation_state())
+            {
                 Ok(published) => published,
                 Err(error) => {
                     log_gpu_error(&format!("restore interactive client view: {error}"));

@@ -12,6 +12,7 @@ use std::sync::Arc;
 /// cache, but 8³ keeps edit uploads and cache invalidation bounded to 512 voxels.
 pub const BRICK_EDGE: u32 = 8;
 pub const BRICK_VOXEL_COUNT: usize = (BRICK_EDGE * BRICK_EDGE * BRICK_EDGE) as usize;
+pub const BRICK_WORD_COUNT: usize = BRICK_VOXEL_COUNT / 4;
 const MAX_TRACE_STEPS: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -41,6 +42,42 @@ pub struct BrickUpload {
     pub address: BrickAddress,
     pub revision: u64,
     pub payload: Arc<[u8]>,
+}
+
+impl BrickUpload {
+    /// Byte range for the fixed-capacity WebGPU material arena. Four material IDs share each
+    /// storage `u32`; the shader extracts byte lanes explicitly, independent of host endianness.
+    pub const fn byte_offset(&self) -> u64 {
+        self.address.slot as u64 * BRICK_VOXEL_COUNT as u64
+    }
+
+    pub fn material_words(&self) -> Option<[u32; BRICK_WORD_COUNT]> {
+        if self.payload.len() != BRICK_VOXEL_COUNT {
+            return None;
+        }
+        Some(std::array::from_fn(|word| {
+            let first = word * 4;
+            u32::from(self.payload[first])
+                | (u32::from(self.payload[first + 1]) << 8)
+                | (u32::from(self.payload[first + 2]) << 16)
+                | (u32::from(self.payload[first + 3]) << 24)
+        }))
+    }
+
+    /// Stable 32-byte descriptor for the GPU lookup table. Signed coordinates use two's-complement
+    /// words and both generation and revision retain their complete 64-bit identity.
+    pub const fn descriptor_words(&self) -> [u32; 8] {
+        [
+            self.coord.x as u32,
+            self.coord.y as u32,
+            self.coord.z as u32,
+            self.address.slot,
+            self.address.generation as u32,
+            (self.address.generation >> 32) as u32,
+            self.revision as u32,
+            (self.revision >> 32) as u32,
+        ]
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -150,7 +187,10 @@ impl BrickResidency {
         let x = voxel[0].rem_euclid(BRICK_EDGE as i32) as usize;
         let y = voxel[1].rem_euclid(BRICK_EDGE as i32) as usize;
         let z = voxel[2].rem_euclid(BRICK_EDGE as i32) as usize;
-        resident.payload.get(x + z * BRICK_EDGE as usize + y * BRICK_EDGE as usize * BRICK_EDGE as usize).copied()
+        resident
+            .payload
+            .get(x + z * BRICK_EDGE as usize + y * BRICK_EDGE as usize * BRICK_EDGE as usize)
+            .copied()
     }
 
     /// Traverses resident bricks in voxel space. A missing brick is an explicit `Unknown` result,
@@ -168,7 +208,11 @@ impl BrickResidency {
         {
             return BrickTrace::Miss;
         }
-        let length = direction.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let length = direction
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
         if !length.is_finite() || length <= f32::EPSILON {
             return BrickTrace::Miss;
         }
@@ -178,11 +222,15 @@ impl BrickResidency {
             origin[1].floor() as i32,
             origin[2].floor() as i32,
         ];
-        let axis_step = |value: f32| value.partial_cmp(&0.0).map_or(0, |ordering| match ordering {
-            std::cmp::Ordering::Greater => 1,
-            std::cmp::Ordering::Less => -1,
-            std::cmp::Ordering::Equal => 0,
-        });
+        let axis_step = |value: f32| {
+            value
+                .partial_cmp(&0.0)
+                .map_or(0, |ordering| match ordering {
+                    std::cmp::Ordering::Greater => 1,
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                })
+        };
         let step = direction.map(axis_step);
         let mut next = [f32::INFINITY; 3];
         let mut delta = [f32::INFINITY; 3];
@@ -224,8 +272,7 @@ impl BrickResidency {
                     } else {
                         brick_axes[axis] * BRICK_EDGE as i32
                     };
-                    brick_boundary[axis] =
-                        (boundary_voxel as f32 - origin[axis]) / direction[axis];
+                    brick_boundary[axis] = (boundary_voxel as f32 - origin[axis]) / direction[axis];
                 }
                 let next_boundary = if brick_boundary[0] <= brick_boundary[1]
                     && brick_boundary[0] <= brick_boundary[2]
@@ -546,6 +593,36 @@ mod tests {
         assert_eq!(
             cache.trace([0.5, 0.5, 0.5], [1.0, 0.0, 0.0], f32::MAX),
             BrickTrace::Unknown(BrickCoord::new(0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn gpu_words_preserve_material_lanes_and_full_identity() {
+        let mut bytes = vec![0; BRICK_VOXEL_COUNT];
+        bytes[..4].copy_from_slice(&[1, 2, 128, 255]);
+        let upload = BrickUpload {
+            coord: BrickCoord::new(-2, 3, -4),
+            address: BrickAddress {
+                slot: 7,
+                generation: 0x1234_5678_9abc_def0,
+            },
+            revision: 0xfedc_ba98_7654_3210,
+            payload: Arc::from(bytes),
+        };
+        assert_eq!(upload.byte_offset(), 7 * BRICK_VOXEL_COUNT as u64);
+        assert_eq!(upload.material_words().unwrap()[0], 0xff80_0201);
+        assert_eq!(
+            upload.descriptor_words(),
+            [
+                (-2i32) as u32,
+                3,
+                (-4i32) as u32,
+                7,
+                0x9abc_def0,
+                0x1234_5678,
+                0x7654_3210,
+                0xfedc_ba98
+            ]
         );
     }
 }
