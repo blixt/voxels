@@ -170,7 +170,9 @@ mod tests {
     #[test]
     fn lookup_preserves_negative_coordinates_and_empty_state() {
         let mut table = BrickHashTable::new(8).unwrap();
-        table.rebuild([item(-9, 4, false), item(12, 5, true)]).unwrap();
+        table
+            .rebuild([item(-9, 4, false), item(12, 5, true)])
+            .unwrap();
         assert_eq!(table.lookup(BrickCoord::new(-9, -2, 7)), Some((4, false)));
         assert_eq!(table.lookup(BrickCoord::new(12, -2, 7)), Some((5, true)));
         assert_eq!(table.lookup(BrickCoord::new(99, 0, 0)), None);
@@ -182,6 +184,10 @@ mod tests {
         let duplicate = [item(1, 1, true), item(1, 2, true)];
         assert!(table.rebuild(duplicate).is_err());
         assert!(table.entries().iter().all(|entry| entry.is_empty()));
-        assert!(table.rebuild([item(1, 1, true), item(2, 2, true), item(3, 3, true)]).is_err());
+        assert!(
+            table
+                .rebuild([item(1, 1, true), item(2, 2, true), item(3, 3, true)])
+                .is_err()
+        );
     }
 }

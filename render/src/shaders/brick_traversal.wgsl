@@ -86,6 +86,36 @@ fn read_material(slot: u32, local: vec3<i32>) -> u32 {
   return (word >> ((index & 3u) * 8u)) & 0xffu;
 }
 
+fn solid_at(voxel: vec3<i32>) -> f32 {
+  let brick = vec3<i32>(
+    floor_i(f32(voxel.x) / 8.0),
+    floor_i(f32(voxel.y) / 8.0),
+    floor_i(f32(voxel.z) / 8.0),
+  );
+  let found = find_brick(brick);
+  if found.x == INVALID_SLOT || found.y == 0u {
+    return 0.0;
+  }
+  let local = vec3<i32>(
+    voxel.x - brick.x * BRICK_EDGE,
+    voxel.y - brick.y * BRICK_EDGE,
+    voxel.z - brick.z * BRICK_EDGE,
+  );
+  return select(0.0, 1.0, read_material(found.x, local) != 0u);
+}
+
+fn reconstructed_normal(voxel: vec3<i32>, fallback: vec3<f32>) -> vec3<f32> {
+  let gradient = vec3<f32>(
+    solid_at(voxel - vec3<i32>(1, 0, 0)) - solid_at(voxel + vec3<i32>(1, 0, 0)),
+    solid_at(voxel - vec3<i32>(0, 1, 0)) - solid_at(voxel + vec3<i32>(0, 1, 0)),
+    solid_at(voxel - vec3<i32>(0, 0, 1)) - solid_at(voxel + vec3<i32>(0, 0, 1)),
+  );
+  if dot(gradient, gradient) < 0.01 {
+    return normalize(fallback);
+  }
+  return normalize(gradient);
+}
+
 fn floor_i(value: f32) -> i32 {
   return i32(floor(value));
 }
@@ -222,7 +252,8 @@ fn trace_voxels(@builtin(global_invocation_id) invocation: vec3<u32>) {
     if material != 0u {
       results[ray_index].voxel = vec4<i32>(voxel, 0);
       results[ray_index].material_distance = vec4<u32>(material, STATUS_HIT, bitcast<u32>(distance), 0u);
-      output_pixel(ray_index, material_color(material, hit_normal, camera.light_direction.xyz));
+      let normal = reconstructed_normal(voxel, hit_normal);
+      output_pixel(ray_index, material_color(material, normal, camera.light_direction.xyz));
       return;
     }
     let axis = select(0u, 1u, next.y < next.x);

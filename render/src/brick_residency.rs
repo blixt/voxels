@@ -551,11 +551,7 @@ mod tests {
         assert_eq!(cache.pending_capacity(), 4);
         for index in 0..4 {
             assert_eq!(
-                cache.queue_update(
-                    BrickCoord::new(index, 0, 0),
-                    1,
-                    payload(index as u8)
-                ),
+                cache.queue_update(BrickCoord::new(index, 0, 0), 1, payload(index as u8)),
                 QueueUpdate::Queued
             );
         }
