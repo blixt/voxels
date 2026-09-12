@@ -41,9 +41,10 @@ thread without inventing a JavaScript coordination layer. Additional Rust/WASM w
 until benchmarks show generation or meshing is the frame-time bottleneck.
 
 `render/src/brick_residency.rs` is the first direct-traversal seam: it owns fixed-capacity 8³ material
-bricks, stable slot generations, coalesced revisions, bounded uploads, and a fail-closed DDA. The
-current frame path still consumes certified mesh pages; the brick module is deliberately host-tested
-before its storage buffer and shader bindings replace page reconstruction.
+bricks, stable slot generations, coalesced revisions, bounded uploads, and a fail-closed DDA.
+`render/src/brick_gpu.rs` provides the matching bounded WGPU material atlas and descriptor table. The
+current frame path still consumes certified mesh pages; these modules are deliberately tested before
+their storage bindings and traversal shader replace page reconstruction.
 
 ## World representation
 
