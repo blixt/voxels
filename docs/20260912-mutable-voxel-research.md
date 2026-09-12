@@ -13,9 +13,10 @@ This supplements the [March survey](20260311-voxel-research.md) and
 
 The post-rewrite browser journey passed on Apple M3 Max with Chrome `153.0.8010.37`: default
 spawn, sustained spectator flight, walking, jump, dig, placement, screenshot replay and restore.
-The run used the generated v17 world and the real world-service protocol. Across 240 steady samples,
-frame time was 21.6 ms mean / 26.2 ms p95, CPU time 6.7 ms mean / 13.0 ms p95, and GPU time 8.0 ms
-mean / 8.3 ms p95. Peak core GPU allocation was 215.5 MiB; exact-quality debt and missed terrain
+The latest run, after compiling the direct-traversal pipeline during renderer initialization, used
+the generated v17 world and the real world-service protocol. Across 240 steady samples, frame time
+was 24.685 ms mean / 32.28 ms p95, CPU time 7.469 ms mean / 12.213 ms p95, and GPU time 7.925 ms
+mean / 8.52 ms p95. Peak core GPU allocation was 215.49 MiB; exact-quality debt and missed terrain
 progress were both zero. The six-client shaped-40 ms RTT multiplayer run applied 5,000 authoritative
 voxel placements to all clients with zero protocol errors; builder frame p95 remained roughly
 66.7–83.3 ms. These are acceptance baselines, not claims of the 1080p/120 FPS target. Artifacts are
