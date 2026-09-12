@@ -33,6 +33,13 @@ pub struct TraceParams {
     pub reserved: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TraceResult {
+    pub voxel: [i32; 4],
+    pub material_distance: [u32; 4],
+}
+
 #[derive(Debug)]
 pub struct GpuBrickAtlas {
     residency: BrickResidency,

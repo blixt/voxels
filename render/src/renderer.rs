@@ -1,7 +1,7 @@
 use crate::ambient_occlusion::AmbientOcclusionGpu;
 use crate::arena::{Allocation, ArenaAllocator};
 use crate::avatar::AvatarGpu;
-use crate::brick_gpu::GpuBrickAtlas;
+use crate::brick_gpu::{GpuBrickAtlas, TraceParams, TraceRay, TraceResult};
 use crate::brick_residency::{BRICK_EDGE, BrickCoord, QueueUpdate};
 pub use crate::clouds::VolumetricCloudConfig;
 use crate::clouds::VolumetricCloudGpu;
@@ -3047,6 +3047,74 @@ struct DirectBrickUpdate {
     payload: Arc<[u8]>,
 }
 
+struct DirectTraversalProbe {
+    rays: Buffer,
+    _results: Buffer,
+    params: Buffer,
+    bind_group: BindGroup,
+}
+
+impl DirectTraversalProbe {
+    fn new(device: &Device, atlas: &GpuBrickAtlas) -> Self {
+        let rays = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("direct traversal probe ray"),
+            contents: bytemuck::bytes_of(&TraceRay {
+                origin: [0.0; 4],
+                direction: [0.0, 0.0, -1.0, 0.0],
+            }),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let results = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("direct traversal probe result"),
+            contents: bytemuck::bytes_of(&TraceResult {
+                voxel: [0; 4],
+                material_distance: [0; 4],
+            }),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        });
+        let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("direct traversal probe parameters"),
+            contents: bytemuck::bytes_of(&TraceParams {
+                hash_mask: atlas.hash_capacity() - 1,
+                max_distance_voxels: 256.0,
+                ray_count: 1,
+                reserved: 0,
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let bind_group = atlas.create_traversal_bind_group(device, &rays, &results, &params);
+        Self {
+            rays,
+            _results: results,
+            params,
+            bind_group,
+        }
+    }
+
+    fn update(&self, queue: &Queue, atlas: &GpuBrickAtlas, camera: &CameraState, max_distance: f32) {
+        let position = camera.position / VOXEL_SIZE_METRES;
+        let direction = camera.forward();
+        queue.write_buffer(
+            &self.rays,
+            0,
+            bytemuck::bytes_of(&TraceRay {
+                origin: [position.x, position.y, position.z, 0.0],
+                direction: [direction.x, direction.y, direction.z, 0.0],
+            }),
+        );
+        queue.write_buffer(
+            &self.params,
+            0,
+            bytemuck::bytes_of(&TraceParams {
+                hash_mask: atlas.hash_capacity() - 1,
+                max_distance_voxels: (max_distance / VOXEL_SIZE_METRES).max(1.0),
+                ray_count: 1,
+                reserved: 0,
+            }),
+        );
+    }
+}
+
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChunkActivationReason {
@@ -3570,6 +3638,7 @@ pub struct RenderDiagnostics {
     pub direct_brick_resident: u32,
     pub direct_brick_pending: u32,
     pub direct_brick_capacity_drops: u64,
+    pub direct_brick_probe_dispatches: u64,
     pub virtual_terrain_cpu_selected_pages: u32,
     pub virtual_terrain_cpu_requested_pages: u32,
     pub virtual_terrain_cpu_refinement_roots: u32,
@@ -4264,8 +4333,10 @@ pub struct Renderer {
     frame_bind_group: BindGroup,
     local_light_buffer: Buffer,
     direct_brick_atlas: GpuBrickAtlas,
+    direct_traversal_probe: DirectTraversalProbe,
     next_direct_brick_revision: u64,
     direct_brick_capacity_drops: u64,
+    direct_brick_probe_dispatches: u64,
     material_detail: MaterialDetailGpu,
     chunks: BTreeMap<MeshKey, ChunkMesh>,
     water_chunks: BTreeMap<MeshKey, ChunkMesh>,
@@ -4789,6 +4860,7 @@ impl Renderer {
         });
         let direct_brick_atlas = GpuBrickAtlas::new(&device, DIRECT_BRICK_ATLAS_CAPACITY)
             .map_err(|error| format!("direct voxel brick atlas: {error}"))?;
+        let direct_traversal_probe = DirectTraversalProbe::new(&device, &direct_brick_atlas);
         let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("frame layout"),
             entries: &[
@@ -5258,8 +5330,10 @@ impl Renderer {
             frame_bind_group,
             local_light_buffer,
             direct_brick_atlas,
+            direct_traversal_probe,
             next_direct_brick_revision: 1,
             direct_brick_capacity_drops: 0,
+            direct_brick_probe_dispatches: 0,
             material_detail,
             chunks: BTreeMap::new(),
             water_chunks: BTreeMap::new(),
@@ -8714,6 +8788,12 @@ impl Renderer {
         let dt = bounded_frame_delta(dt);
         self.direct_brick_atlas
             .flush(&self.queue, DIRECT_BRICK_UPLOADS_PER_FRAME);
+        self.direct_traversal_probe.update(
+            &self.queue,
+            &self.direct_brick_atlas,
+            camera,
+            self.runtime_config.view_distance_metres,
+        );
         let reproduction_active = self
             .presented_client_view
             .as_ref()
@@ -8975,6 +9055,12 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
+        self.direct_brick_atlas.encode_traversal(
+            &mut encoder,
+            &self.direct_traversal_probe.bind_group,
+            1,
+        );
+        self.direct_brick_probe_dispatches = self.direct_brick_probe_dispatches.saturating_add(1);
         let virtual_candidate = if virtual_candidate_work.is_some() {
             let publication = self.virtual_terrain_publication.as_ref()?;
             Some(virtual_terrain_snapshot_identity(
@@ -9720,6 +9806,7 @@ impl Renderer {
             direct_brick_resident: self.direct_brick_atlas.resident_len() as u32,
             direct_brick_pending: self.direct_brick_atlas.pending_len() as u32,
             direct_brick_capacity_drops: self.direct_brick_capacity_drops,
+            direct_brick_probe_dispatches: self.direct_brick_probe_dispatches,
             virtual_terrain_cpu_selected_pages: oracle_virtual_selected_pages as u32,
             virtual_terrain_cpu_requested_pages: oracle_virtual_requested_pages as u32,
             virtual_terrain_cpu_refinement_roots: oracle_virtual_refinement_roots as u32,

@@ -56,7 +56,9 @@ leave a partially indexed world. Successful ordinary canonical chunk publication
 their 8³ brick payloads into the atlas with bounded per-frame draining; staged publications remain
 mesh-authoritative until their promotion policy is connected to traversal.
 Renderer diagnostics expose resident/pending brick counts and capacity drops so streaming runs can
-measure direct-path backpressure independently of mesh draw statistics.
+measure direct-path backpressure independently of mesh draw statistics. A one-ray probe dispatch now
+runs in the frame encoder, exercising device traversal ordering without changing visible pixels;
+its dispatch count is also reported for validation.
 
 ## World representation
 
