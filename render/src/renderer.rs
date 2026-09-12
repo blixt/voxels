@@ -9045,7 +9045,7 @@ impl Renderer {
             self.shadow_cache_valid = false;
         }
         let shadow_update = shadows_active
-            && (!self.shadow_cache_valid || frame_id % SHADOW_UPDATE_INTERVAL_FRAMES == 0);
+            && (!self.shadow_cache_valid || frame_id.is_multiple_of(SHADOW_UPDATE_INTERVAL_FRAMES));
         let shadow_cascades = if shadow_update {
             self.shadow_cache_cascades = Some(current_shadow_cascades);
             self.shadow_cache_valid = true;
