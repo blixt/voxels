@@ -287,7 +287,13 @@ async function waitForSettledWorld(player: MultiplayerPlayer): Promise<readonly 
     (next) =>
       snapshotValue(next, "terrainReady") === 1 &&
       snapshotValue(next, "virtualTerrainStreamInFlight") === 0 &&
-      snapshotValue(next, "pendingJobs") === 0,
+      snapshotValue(next, "pendingJobs") === 0 &&
+      // World-service edit receipts can settle before the renderer has presented the matching
+      // immutable cut.  Screenshots taken in that gap are valid old frames, so make the visual
+      // convergence gate wait for the same presentation invariant used by player-rendering.
+      snapshotValue(next, "virtualTerrainPresentedSnapshotMatchesCut") === 1 &&
+      snapshotValue(next, "virtualTerrainPresentedCoverageGapFrames") === 0 &&
+      snapshotValue(next, "virtualTerrainPresentedInvariantFailureFrames") === 0,
   );
 }
 
