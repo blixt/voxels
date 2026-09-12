@@ -1,9 +1,10 @@
 # Mutable voxel worlds: 2026 research update
 
-Research date: **2026-09-12**. Sources below were accessed on that date. This is a research and
+Research date: **2026-09-12**. Sources below were accessed on that date. Runtime verification was
+refreshed on **2026-09-13**. This is a research and
 implementation recommendation, not a new renderer, a benchmark reproduction or a deployment.
-Repository findings refer to main at `05c3b1e` and the retained
-volume branch at `d666770`.
+Repository findings refer to the current `main` checkout; historical branch references are retained
+where they explain a design decision.
 
 This supplements the [March survey](20260311-voxel-research.md) and
 [March engine-performance notes](20260311-voxel-perf-research.md). The capability audit is in
@@ -20,16 +21,22 @@ page regression test and the browser gate now agree on the same far-edit behavio
 
 The post-rewrite browser journey passed on Apple M3 Max with Chrome `153.0.8010.37`: default
 spawn, sustained spectator flight, walking, jump, dig, placement, screenshot replay and restore.
-The latest run, with a one-ray direct-traversal probe dispatched through every frame encoder after
-pipeline initialization, used the generated v17 world and the real world-service protocol. Across
-240 steady samples, frame time was 17.687 ms mean / 21.665 ms p95, CPU time 6.386 ms mean / 13.334
-ms p95, and GPU time 8.992 ms mean / 9.634 ms p95. Peak core GPU allocation was 215.49 MiB;
-exact-quality debt and missed terrain progress were both zero. The latest six-client shaped-40 ms RTT
-multiplayer run applied 5,000
-authoritative voxel placements to all clients with zero protocol errors; the distant tower converged
-in 4.468 s at 109.7 m separation, with observer frame p95 33.4 ms and builder frame p95 50.1–66.8 ms.
-These are acceptance baselines, not claims of the 1080p/120 FPS target. Artifacts are kept under
-`target/automation/player-rendering/` and `target/automation/multiplayer/`.
+The 2026-09-13 run used the generated v17 world and the real world-service protocol. Across 240
+steady samples, frame time was **18.992 ms mean / 22.976 ms p95 / 29.574 ms max**, CPU time
+**6.995 ms mean / 13.371 ms p95**, and GPU time **4.340 ms mean / 7.078 ms p95**. The direct
+traversal path was dispatched at its current diagnostic 320x180 probe size and measured **0.066 ms
+GPU**; it is not yet the full-resolution primary visibility path. Peak core GPU allocation was
+**215.49 MiB**, and exact-quality debt and missed terrain progress were both zero. The same-day
+six-client shaped-40 ms RTT multiplayer run applied **5,000 authoritative voxel placements** and
+**10,210 digs** to all clients with zero browser/protocol errors; the distant tower converged in
+**4.599 s** at **109.6 m** separation, with observer frame p95 **50.0 ms** and builder p95
+**66.7–83.3 ms**. These are acceptance baselines, not claims of the 1080p/120 FPS target. Artifacts
+are kept under `target/automation/player-rendering/` and `target/automation/multiplayer/`.
+
+The new server regression also builds an edited level-0 surface segment after an Air override and
+asserts that the removed voxel's generated top face is absent while an unrelated sibling remains
+byte-identical. This closes the specific stale-coarse-geometry risk for distant digging; it does
+not establish arbitrary edit-burst throughput or a 1,000-client capacity claim.
 
 ## What changes our direction
 
