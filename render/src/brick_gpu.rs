@@ -4,7 +4,10 @@
 //! resident, queue revisioned payloads, and drain a bounded number of uploads per frame. Material
 //! bytes and descriptors use the layouts documented by [`crate::brick_residency`].
 
-use wgpu::{Buffer, BufferUsages, Device, Queue};
+use wgpu::{
+    BindGroupLayout, Buffer, BufferUsages, ComputePipeline, Device, PipelineLayoutDescriptor,
+    Queue, ShaderStages,
+};
 
 use crate::brick_residency::{
     BRICK_VOXEL_COUNT, BrickCoord, BrickResidency, BrickUpload, QueueUpdate,
@@ -22,6 +25,8 @@ pub struct GpuBrickAtlas {
     hash_buffer: Buffer,
     hash_capacity: u32,
     hash_table: BrickHashTable,
+    traversal_bind_group_layout: BindGroupLayout,
+    traversal_pipeline: ComputePipeline,
 }
 
 impl GpuBrickAtlas {
@@ -71,6 +76,43 @@ impl GpuBrickAtlas {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let traversal_bind_group_layout = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("direct voxel traversal bindings"),
+                entries: &[
+                    storage_binding(0, false),
+                    storage_binding(1, false),
+                    storage_binding(2, false),
+                    storage_binding(3, true),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            },
+        );
+        let traversal_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("direct voxel traversal pipeline layout"),
+            bind_group_layouts: &[Some(&traversal_bind_group_layout)],
+            immediate_size: 0,
+        });
+        let traversal_shader = device.create_shader_module(wgpu::include_wgsl!(
+            "shaders/brick_traversal.wgsl"
+        ));
+        let traversal_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("direct voxel traversal pipeline"),
+            layout: Some(&traversal_pipeline_layout),
+            module: &traversal_shader,
+            entry_point: Some("trace_voxels"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         Ok(Self {
             residency: BrickResidency::new(capacity),
             material_buffer,
@@ -79,6 +121,8 @@ impl GpuBrickAtlas {
             hash_capacity,
             hash_table: BrickHashTable::new(hash_capacity)
                 .expect("derived GPU brick hash capacity is a power of two"),
+            traversal_bind_group_layout,
+            traversal_pipeline,
         })
     }
 
@@ -162,6 +206,14 @@ impl GpuBrickAtlas {
         &self.hash_buffer
     }
 
+    pub fn traversal_bind_group_layout(&self) -> &BindGroupLayout {
+        &self.traversal_bind_group_layout
+    }
+
+    pub fn traversal_pipeline(&self) -> &ComputePipeline {
+        &self.traversal_pipeline
+    }
+
     /// Uploads a complete, bounded hash-table snapshot. The caller chooses when to rebuild and
     /// can keep the previous table active until this queue write is ordered before dispatch.
     pub fn upload_hash_table(&self, queue: &Queue, table: &BrickHashTable) -> Result<(), String> {
@@ -194,6 +246,23 @@ impl GpuBrickAtlas {
             0,
             bytemuck::cast_slice(self.hash_table.entries()),
         );
+    }
+}
+
+const fn storage_binding(binding: u32, writable: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: if writable {
+                wgpu::BufferBindingType::Storage { read_only: false }
+            } else {
+                wgpu::BufferBindingType::Storage { read_only: true }
+            },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
     }
 }
 
