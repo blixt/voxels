@@ -161,6 +161,7 @@ mod tests {
 
     #[test]
     fn table_requires_power_of_two_capacity() {
+        assert_eq!(std::mem::size_of::<GpuBrickHashEntry>(), 32);
         assert!(BrickHashTable::new(0).is_err());
         assert!(BrickHashTable::new(3).is_err());
         assert_eq!(BrickHashTable::new(8).unwrap().capacity(), 8);
