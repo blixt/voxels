@@ -6228,9 +6228,10 @@ impl Renderer {
             // Symmetrically prevent a reproduction publication from binding to the restored live
             // view after the pin is removed.
             self.abort_virtual_terrain_publication();
-        } else if changed {
-            self.invalidate_virtual_terrain_desired_plan();
         }
+        // Keep the last complete presented cut available for a same-camera replay restore. The
+        // next frame's envelope reconciliation invalidates it when the suspended live camera
+        // differs, avoiding an unnecessary full replan on the common same-world path.
         self.virtual_terrain_reproduction_invalidated = false;
     }
 

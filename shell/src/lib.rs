@@ -2558,20 +2558,58 @@ mod web {
         }
 
         fn cancel_or_restore_reproduction(&self) {
-            let mut client_view = self.client_view.borrow_mut();
-            if matches!(
-                client_view.current().session(),
-                ClientViewSession::Reproduction(_)
-            ) && client_view
-                .goal()
-                .is_none_or(|goal| goal.kind() != ClientViewGoalKind::ReproductionRestore)
+            let pending_restore = {
+                let mut client_view = self.client_view.borrow_mut();
+                if matches!(
+                    client_view.current().session(),
+                    ClientViewSession::Reproduction(_)
+                ) && client_view
+                    .goal()
+                    .is_none_or(|goal| goal.kind() != ClientViewGoalKind::ReproductionRestore)
+                {
+                    let target = client_view.current().restore_interactive();
+                    let version = client_view
+                        .replace_goal(ClientViewGoalKind::ReproductionRestore, target);
+                    Some((version, target, client_view.published()))
+                } else if let Some(goal) = client_view.goal()
+                    && goal.kind() == ClientViewGoalKind::ReproductionApply
+                {
+                    client_view.cancel_goal(goal.version());
+                    None
+                } else {
+                    None
+                }
+            };
+
+            let Some((goal, target, source)) = pending_restore else {
+                return;
+            };
+            // Leaving a reproduction often returns to the same camera and terrain bank. Reuse
+            // that bank immediately instead of manufacturing a publication whose only purpose is
+            // to change the session tag; a distant restore still follows the normal streamed path.
+            if !self
+                .renderer
+                .borrow()
+                .virtual_terrain_committed_covers_position(target.camera().position.to_array())
             {
-                let target = client_view.current().restore_interactive();
-                client_view.replace_goal(ClientViewGoalKind::ReproductionRestore, target);
-            } else if let Some(goal) = client_view.goal()
-                && goal.kind() == ClientViewGoalKind::ReproductionApply
+                return;
+            }
+            let published = match self.renderer.borrow_mut().transition_client_view(
+                source,
+                target.presentation_state(),
+            ) {
+                Ok(published) => published,
+                Err(error) => {
+                    log_gpu_error(&format!("restore interactive client view: {error}"));
+                    return;
+                }
+            };
+            if !self
+                .client_view
+                .borrow_mut()
+                .commit_goal_preserving_terrain(goal, published)
             {
-                client_view.cancel_goal(goal.version());
+                log_gpu_error("restored interactive client view was superseded");
             }
         }
 

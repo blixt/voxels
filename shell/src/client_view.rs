@@ -606,6 +606,29 @@ impl<Request, Receipt: Copy + Eq> ClientViewCoordinator<Request, Receipt> {
         true
     }
 
+    /// Commits a pending state transition while preserving the currently presented terrain bank.
+    ///
+    /// This is used for in-place session handoffs (for example leaving a screenshot reproduction)
+    /// when the active bank already covers the target camera and no replacement publication is
+    /// required.
+    pub(crate) fn commit_goal_preserving_terrain(
+        &mut self,
+        goal: GoalVersion,
+        published: Receipt,
+    ) -> bool {
+        let Some(current) = self.goal else {
+            return false;
+        };
+        if current.version != goal {
+            return false;
+        }
+        self.current = current.target;
+        self.published = published;
+        self.goal = None;
+        self.attempt = None;
+        true
+    }
+
     pub(crate) fn commit_in_locus(
         &mut self,
         source: Receipt,
