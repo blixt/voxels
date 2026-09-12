@@ -3056,7 +3056,10 @@ struct DirectTraversalProbe {
     camera: Buffer,
     _results: Buffer,
     params: Buffer,
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept alive for the optional direct-traversal diagnostic output"
+    )]
     output_texture: Texture,
     composite_bind_group_layout: wgpu::BindGroupLayout,
     composite_bind_group: BindGroup,

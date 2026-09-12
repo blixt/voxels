@@ -435,10 +435,10 @@ impl BrickResidency {
                 self.slots[slot] = Some(coord);
                 address
             };
-            let pending = self
-                .pending
-                .remove(&coord)
-                .expect("pending coordinate selected above");
+            let Some(pending) = self.pending.remove(&coord) else {
+                debug_assert!(false, "pending coordinate disappeared during upload drain");
+                continue;
+            };
             self.residents.insert(
                 coord,
                 Resident {

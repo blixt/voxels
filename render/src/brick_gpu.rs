@@ -85,9 +85,9 @@ impl GpuBrickAtlas {
             .checked_mul(size_of::<GpuBrickHashEntry>() as u64)
             .ok_or_else(|| "GPU brick hash buffer size overflowed".to_owned())?;
         let limits = device.limits();
-        if material_size > limits.max_storage_buffer_binding_size as u64
-            || descriptor_size > limits.max_storage_buffer_binding_size as u64
-            || hash_size > limits.max_storage_buffer_binding_size as u64
+        if material_size > limits.max_storage_buffer_binding_size
+            || descriptor_size > limits.max_storage_buffer_binding_size
+            || hash_size > limits.max_storage_buffer_binding_size
         {
             return Err(format!(
                 "GPU brick atlas exceeds storage binding limit: material={material_size}, descriptors={descriptor_size}, hash={hash_size}, limit={}",
@@ -163,8 +163,7 @@ impl GpuBrickAtlas {
             descriptor_buffer,
             hash_buffer,
             hash_capacity,
-            hash_table: BrickHashTable::new(hash_capacity)
-                .expect("derived GPU brick hash capacity is a power of two"),
+            hash_table: BrickHashTable::new(hash_capacity)?,
             traversal_bind_group_layout,
             traversal_pipeline,
         })
@@ -196,9 +195,10 @@ impl GpuBrickAtlas {
     pub fn flush(&mut self, queue: &Queue, max_uploads: usize) -> usize {
         let uploads = self.residency.drain_uploads(max_uploads);
         for upload in &uploads {
-            let words = upload
-                .material_words()
-                .expect("residency rejects malformed brick payloads");
+            let Some(words) = upload.material_words() else {
+                debug_assert!(false, "residency emitted a malformed brick payload");
+                continue;
+            };
             queue.write_buffer(
                 &self.material_buffer,
                 upload.byte_offset(),
@@ -379,9 +379,13 @@ impl GpuBrickAtlas {
                     address,
                     non_empty,
                 });
-        self.hash_table
-            .rebuild(items)
-            .expect("GPU brick hash table capacity must accommodate residency");
+        if let Err(error) = self.hash_table.rebuild(items) {
+            debug_assert!(
+                false,
+                "GPU brick hash table capacity invariant failed: {error}"
+            );
+            return;
+        }
         queue.write_buffer(
             &self.hash_buffer,
             0,

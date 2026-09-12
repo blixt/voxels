@@ -146,10 +146,9 @@ impl GeneratedColumn {
     pub fn sample(&self, y: i32) -> Material {
         if self.cinder_vault_candidate
             && let Some(material) = cinder_vault_override(self.x, y, self.z)
+            && (material == Material::Air || y <= self.profile.height)
         {
-            if material == Material::Air || y <= self.profile.height {
-                return material;
-            }
+            return material;
         }
         let terrain = self
             .generator
@@ -415,9 +414,9 @@ impl Generator {
             for dx in -1..=1 {
                 let gx = cx + dx;
                 let gz = cz + dz;
-                let h = self.hash(gx, 0, gz, 0x1a1a_ad_f13d);
+                let h = self.hash(gx, 0, gz, 0x001a_1aad_f13d);
                 // About one island per 3 cells.  Candidate centers are deterministic and bounded.
-                if h % 3 != 0 {
+                if !h.is_multiple_of(3) {
                     continue;
                 }
                 let center_x = i64::from(gx) * i64::from(CELL) + 64 + ((h >> 8) % 256) as i64;
