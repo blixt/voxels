@@ -2198,119 +2198,139 @@ impl VirtualTerrainHierarchy {
         }
         self.frame = self.frame.wrapping_add(1).max(1);
         let frame = self.frame;
-        let prior_refined = self.refined_last_cut.clone();
-        let prior_balanced_selected_blockers = self.balanced_selected_blockers.clone();
-        let mut builder = CutBuilder {
-            hierarchy: self,
-            view,
-            exact_surface_domain,
-            presentation_envelope,
-            frame,
-            prior_refined: &prior_refined,
-            prior_balanced_selected_blockers,
-            next_refined: BTreeSet::new(),
-            next_balanced_refined: BTreeSet::new(),
-            next_balanced_selected: BTreeSet::new(),
-            next_balanced_selected_blockers: BTreeMap::new(),
-            selected: Vec::new(),
-            selected_owners: BTreeMap::new(),
-            visited_active_roots: BTreeSet::new(),
-            requests: BTreeSet::new(),
-            refinement_requests: BTreeSet::new(),
-            ownerless_roots: Vec::new(),
-            visited_nodes: 0,
-            selected_primitives: 0,
-            selected_encoded_bytes: 0,
-            feedback_overflow: false,
-            selection_overflow: false,
-            traversal_overflow: false,
-            incoherent_replacement_groups: 0,
-        };
-        let roots = builder
-            .hierarchy
-            .active_roots
-            .iter()
-            .copied()
-            .filter(|key| {
-                builder.hierarchy.nodes.get(key).is_some_and(|node| {
-                    page_is_visible(node.bounds, view)
-                        || exact_surface_domain.intersects_page(*key)
-                        || presentation_envelope
-                            .is_some_and(|envelope| envelope.requires_horizon_owner(*key))
+        // These sets are the previous selection's hysteresis state. Move them out while the
+        // builder owns the hierarchy so steady-state selection does not clone potentially large
+        // B-trees on every frame. A non-renderable candidate restores the old state below.
+        let prior_refined = std::mem::take(&mut self.refined_last_cut);
+        let prior_balanced_selected_blockers = std::mem::take(&mut self.balanced_selected_blockers);
+        let (cut, next_refined, next_balanced_selected_blockers, prior_balanced_selected_blockers,
+            renderable) = {
+            let mut builder = CutBuilder {
+                hierarchy: self,
+                view,
+                exact_surface_domain,
+                presentation_envelope,
+                frame,
+                prior_refined: &prior_refined,
+                prior_balanced_selected_blockers,
+                next_refined: BTreeSet::new(),
+                next_balanced_refined: BTreeSet::new(),
+                next_balanced_selected: BTreeSet::new(),
+                next_balanced_selected_blockers: BTreeMap::new(),
+                selected: Vec::new(),
+                selected_owners: BTreeMap::new(),
+                visited_active_roots: BTreeSet::new(),
+                requests: BTreeSet::new(),
+                refinement_requests: BTreeSet::new(),
+                ownerless_roots: Vec::new(),
+                visited_nodes: 0,
+                selected_primitives: 0,
+                selected_encoded_bytes: 0,
+                feedback_overflow: false,
+                selection_overflow: false,
+                traversal_overflow: false,
+                incoherent_replacement_groups: 0,
+            };
+            let roots = builder
+                .hierarchy
+                .active_roots
+                .iter()
+                .copied()
+                .filter(|key| {
+                    builder.hierarchy.nodes.get(key).is_some_and(|node| {
+                        page_is_visible(node.bounds, view)
+                            || exact_surface_domain.intersects_page(*key)
+                            || presentation_envelope
+                                .is_some_and(|envelope| envelope.requires_horizon_owner(*key))
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        builder.visited_active_roots.extend(roots.iter().copied());
-        for root in roots {
-            if builder.selected.len() >= builder.hierarchy.capacity.max_selected_pages {
-                builder.selection_overflow = true;
-                builder.ownerless_roots.push(root);
-                builder.request(root);
-                continue;
-            }
-            builder.visit(root, true, root);
-        }
-        builder.balance_surface_lod();
-        let handoff_audit = builder.close_surface_handoffs();
-        if let Some(envelope) = presentation_envelope {
-            for root in envelope.required_horizon_roots() {
-                if !builder.fully_covers_horizon_root(root) {
+                .collect::<Vec<_>>();
+            builder.visited_active_roots.extend(roots.iter().copied());
+            for root in roots {
+                if builder.selected.len() >= builder.hierarchy.capacity.max_selected_pages {
+                    builder.selection_overflow = true;
                     builder.ownerless_roots.push(root);
+                    builder.request(root);
+                    continue;
+                }
+                builder.visit(root, true, root);
+            }
+            builder.balance_surface_lod();
+            let handoff_audit = builder.close_surface_handoffs();
+            if let Some(envelope) = presentation_envelope {
+                for root in envelope.required_horizon_roots() {
+                    if !builder.fully_covers_horizon_root(root) {
+                        builder.ownerless_roots.push(root);
+                    }
                 }
             }
-        }
-        if builder.ownerless_roots.is_empty() && !builder.selection_is_exact_active_root_partition()
-        {
-            builder.traversal_overflow = true;
-        }
-        builder.selected.sort_unstable();
-        builder.ownerless_roots.sort_unstable();
-        builder.ownerless_roots.dedup();
-        let exact_surface_lod_discontinuities =
-            exact_surface_lod_discontinuity_edges(&builder.selected);
-        let surface_handoff_mismatches = handoff_audit.mismatches;
-        let mut requested_pages = builder.requests.into_iter().collect::<Vec<_>>();
-        requested_pages.sort_unstable_by_key(|identity| identity.key);
-        let refinement_roots = builder.refinement_requests.into_iter().collect();
-        let renderable = !builder.selected.is_empty()
-            && builder.ownerless_roots.is_empty()
-            && !builder.selection_overflow
-            && !builder.traversal_overflow
-            && exact_surface_lod_discontinuities == 0
-            && surface_handoff_mismatches == 0;
-        let fingerprint = cut_state_fingerprint(
-            cut_fingerprint(&builder.selected, builder.hierarchy),
-            CutFingerprintState {
-                ownerless_roots: &builder.ownerless_roots,
+            if builder.ownerless_roots.is_empty()
+                && !builder.selection_is_exact_active_root_partition()
+            {
+                builder.traversal_overflow = true;
+            }
+            builder.selected.sort_unstable();
+            builder.ownerless_roots.sort_unstable();
+            builder.ownerless_roots.dedup();
+            let exact_surface_lod_discontinuities =
+                exact_surface_lod_discontinuity_edges(&builder.selected);
+            let surface_handoff_mismatches = handoff_audit.mismatches;
+            let mut requested_pages = builder.requests.into_iter().collect::<Vec<_>>();
+            requested_pages.sort_unstable_by_key(|identity| identity.key);
+            let refinement_roots = builder.refinement_requests.into_iter().collect();
+            let renderable = !builder.selected.is_empty()
+                && builder.ownerless_roots.is_empty()
+                && !builder.selection_overflow
+                && !builder.traversal_overflow
+                && exact_surface_lod_discontinuities == 0
+                && surface_handoff_mismatches == 0;
+            let fingerprint = cut_state_fingerprint(
+                cut_fingerprint(&builder.selected, builder.hierarchy),
+                CutFingerprintState {
+                    ownerless_roots: &builder.ownerless_roots,
+                    feedback_overflow: builder.feedback_overflow,
+                    selection_overflow: builder.selection_overflow,
+                    traversal_overflow: builder.traversal_overflow,
+                    incoherent_replacement_groups: builder.incoherent_replacement_groups,
+                    exact_surface_lod_discontinuities,
+                    surface_handoff_mismatches,
+                },
+            );
+            let next_refined = builder.next_refined;
+            let next_balanced_selected_blockers = builder.next_balanced_selected_blockers;
+            let prior_balanced_selected_blockers = builder.prior_balanced_selected_blockers;
+            let cut = VirtualTerrainCut {
+                selected_pages: builder.selected,
+                requested_pages,
+                refinement_roots,
+                ownerless_roots: builder.ownerless_roots,
+                fingerprint,
+                visited_nodes: builder.visited_nodes,
+                selected_primitives: builder.selected_primitives,
+                selected_encoded_bytes: builder.selected_encoded_bytes,
                 feedback_overflow: builder.feedback_overflow,
                 selection_overflow: builder.selection_overflow,
                 traversal_overflow: builder.traversal_overflow,
                 incoherent_replacement_groups: builder.incoherent_replacement_groups,
                 exact_surface_lod_discontinuities,
                 surface_handoff_mismatches,
-            },
-        );
+            };
+            (
+                cut,
+                next_refined,
+                next_balanced_selected_blockers,
+                prior_balanced_selected_blockers,
+                renderable,
+            )
+        };
         if renderable {
-            builder.hierarchy.refined_last_cut = builder.next_refined.clone();
-            builder.hierarchy.balanced_selected_blockers =
-                builder.next_balanced_selected_blockers.clone();
+            self.refined_last_cut = next_refined;
+            self.balanced_selected_blockers = next_balanced_selected_blockers;
+        } else {
+            self.refined_last_cut = prior_refined;
+            self.balanced_selected_blockers = prior_balanced_selected_blockers;
         }
-        Ok(VirtualTerrainCut {
-            selected_pages: builder.selected,
-            requested_pages,
-            refinement_roots,
-            ownerless_roots: builder.ownerless_roots,
-            fingerprint,
-            visited_nodes: builder.visited_nodes,
-            selected_primitives: builder.selected_primitives,
-            selected_encoded_bytes: builder.selected_encoded_bytes,
-            feedback_overflow: builder.feedback_overflow,
-            selection_overflow: builder.selection_overflow,
-            traversal_overflow: builder.traversal_overflow,
-            incoherent_replacement_groups: builder.incoherent_replacement_groups,
-            exact_surface_lod_discontinuities,
-            surface_handoff_mismatches,
-        })
+        Ok(cut)
     }
 }
 
@@ -4265,7 +4285,7 @@ mod tests {
             presentation_envelope: None,
             frame: 1,
             prior_refined,
-            prior_balanced_selected_blockers: BTreeMap::new(),
+            prior_balanced_selected_blockers,
             next_refined: prior_refined.clone(),
             next_balanced_refined: BTreeSet::new(),
             next_balanced_selected: BTreeSet::new(),
