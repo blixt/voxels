@@ -61,9 +61,11 @@ mesh-authoritative until their promotion policy is connected to traversal.
 Renderer diagnostics expose resident/pending brick counts and capacity drops so streaming runs can
 measure direct-path backpressure independently of mesh draw statistics. The bounded traversal image
 uses a compact camera uniform to generate rays in the compute shader and writes a storage texture,
-then samples that texture in a fullscreen composite pass. It is intentionally a migration slice: material palette shading is present, while
-normal reconstruction, temporal reuse, and full-resolution ray generation remain future measured
-stages rather than implicit claims of 1080p/120 FPS readiness.
+then samples that texture in a fullscreen composite pass. Full-HD ray generation is now measured
+on the target adapter. Directional shadow maps are refreshed every other frame and sampled with the
+matching cached cascade transform, preserving coherent lighting while reducing repeated shadow work.
+The direct image remains a migration slice until residency coverage and depth-aware composition are
+complete; these measurements are not an implicit claim of 1080p/120 FPS readiness.
 
 ## World representation
 

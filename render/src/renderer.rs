@@ -66,6 +66,10 @@ const NEUTRAL_SHADOW_MAP_RESOLUTION: u32 = 1;
 const MAX_ACTIVE_LOCAL_LIGHTS: usize = 16;
 const MAX_LOCAL_LIGHT_VISIBILITY_TESTS: usize = 32;
 const _: () = assert!(MAX_LOCAL_LIGHT_VISIBILITY_TESTS >= MAX_ACTIVE_LOCAL_LIGHTS);
+/// Directional shadows are temporally reused for one frame. The cached cascade transform is
+/// sampled on the reuse frame so the map and its projection never disagree; a subsequent frame
+/// refreshes the maps with current geometry, camera, and light state.
+const SHADOW_UPDATE_INTERVAL_FRAMES: u32 = 2;
 const PLACEMENT_MATERIALS: [Material; Material::ALL.len() - 1] = [
     Material::Grass,
     Material::Dirt,
@@ -4456,6 +4460,8 @@ pub struct Renderer {
     water_scene_bind_group: BindGroup,
     shadow_gpu: ShadowGpu,
     shadow_direction: ShadowDirectionTracker,
+    shadow_cache_cascades: Option<DirectionalShadowCascades>,
+    shadow_cache_valid: bool,
     frame_buffer: Buffer,
     frame_bind_group: BindGroup,
     local_light_buffer: Buffer,
@@ -5480,6 +5486,8 @@ impl Renderer {
             water_scene_bind_group,
             shadow_gpu,
             shadow_direction,
+            shadow_cache_cascades: None,
+            shadow_cache_valid: false,
             frame_buffer,
             frame_bind_group,
             local_light_buffer,
@@ -9025,13 +9033,27 @@ impl Renderer {
         {
             return None;
         }
-        let Ok(shadow_cascades) = directional_shadow_cascades(
+        let Ok(current_shadow_cascades) = directional_shadow_cascades(
             &self.config,
             camera,
             self.shadow_direction.basis(),
             self.runtime_config.directional_shadows,
         ) else {
             return None;
+        };
+        if !shadows_active {
+            self.shadow_cache_valid = false;
+        }
+        let shadow_update = shadows_active
+            && (!self.shadow_cache_valid
+                || frame_id % SHADOW_UPDATE_INTERVAL_FRAMES == 0);
+        let shadow_cascades = if shadow_update {
+            self.shadow_cache_cascades = Some(current_shadow_cascades);
+            self.shadow_cache_valid = true;
+            current_shadow_cascades
+        } else {
+            self.shadow_cache_cascades
+                .unwrap_or(current_shadow_cascades)
         };
         self.ui.set_stats(ui_stats);
         self.ui.advance(dt);
@@ -9216,7 +9238,7 @@ impl Renderer {
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniform));
         self.volumetric_cloud_gpu
             .update(&self.queue, self.world_environment, self.environment);
-        if shadows_active {
+        if shadow_update {
             self.shadow_gpu
                 .write_cascades(&self.queue, &shadow_cascades, camera);
         }
@@ -9329,7 +9351,11 @@ impl Renderer {
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &self.shadow_gpu.layer_views[cascade_index],
                         depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
+                            load: if shadow_update {
+                                wgpu::LoadOp::Clear(1.0)
+                            } else {
+                                wgpu::LoadOp::Load
+                            },
                             store: wgpu::StoreOp::Store,
                         }),
                         stencil_ops: None,
@@ -9340,34 +9366,36 @@ impl Renderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_bind_group(0, &self.shadow_gpu.bind_groups[cascade_index], &[]);
-                pass.set_pipeline(&self.shadow_gpu.fixed_pipeline);
-                shadow_draw_calls = shadow_draw_calls.saturating_add(draw_spans(
-                    &mut pass,
-                    &self.arena_buffers,
-                    &draw_list.fixed,
-                ));
-                if virtual_visible {
-                    pass.set_bind_group(
-                        1,
-                        self.virtual_terrain_gpu.active_render_bind_group(),
-                        &[],
-                    );
-                    pass.set_pipeline(&self.shadow_gpu.virtual_surface_pipeline);
-                    pass.draw_indirect(
-                        self.virtual_terrain_gpu.active_indirect_buffer(),
-                        VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET,
-                    );
-                    pass.set_pipeline(&self.shadow_gpu.virtual_triangle_pipeline);
-                    pass.draw_indirect(
-                        self.virtual_terrain_gpu.active_indirect_buffer(),
-                        VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET,
-                    );
-                    shadow_draw_calls = shadow_draw_calls.saturating_add(2);
-                }
-                if has_avatars {
-                    self.avatar_gpu.draw_shadow(&mut pass);
-                    shadow_draw_calls += 1;
+                if shadow_update {
+                    pass.set_bind_group(0, &self.shadow_gpu.bind_groups[cascade_index], &[]);
+                    pass.set_pipeline(&self.shadow_gpu.fixed_pipeline);
+                    shadow_draw_calls = shadow_draw_calls.saturating_add(draw_spans(
+                        &mut pass,
+                        &self.arena_buffers,
+                        &draw_list.fixed,
+                    ));
+                    if virtual_visible {
+                        pass.set_bind_group(
+                            1,
+                            self.virtual_terrain_gpu.active_render_bind_group(),
+                            &[],
+                        );
+                        pass.set_pipeline(&self.shadow_gpu.virtual_surface_pipeline);
+                        pass.draw_indirect(
+                            self.virtual_terrain_gpu.active_indirect_buffer(),
+                            VIRTUAL_TERRAIN_SURFACE_INDIRECT_OFFSET,
+                        );
+                        pass.set_pipeline(&self.shadow_gpu.virtual_triangle_pipeline);
+                        pass.draw_indirect(
+                            self.virtual_terrain_gpu.active_indirect_buffer(),
+                            VIRTUAL_TERRAIN_TRIANGLE_INDIRECT_OFFSET,
+                        );
+                        shadow_draw_calls = shadow_draw_calls.saturating_add(2);
+                    }
+                    if has_avatars {
+                        self.avatar_gpu.draw_shadow(&mut pass);
+                        shadow_draw_calls += 1;
+                    }
                 }
             }
         }

@@ -22,11 +22,12 @@ page regression test and the browser gate now agree on the same far-edit behavio
 The post-rewrite browser journey passed on Apple M3 Max with Chrome `153.0.8010.37`: default
 spawn, sustained spectator flight, walking, jump, dig, placement, screenshot replay and restore.
 The latest run used the generated v17 world and the real world-service protocol. Across 240 steady
-samples, frame time was **17.729 ms mean / 21.161 ms p95 / 30.175 ms max**, CPU time
-**7.114 ms mean / 12.928 ms p95**, and GPU time **4.821 ms mean / 7.209 ms p95**. The direct
-traversal path runs at the full-HD 1920x1080 tier and measured **0.419 ms mean / 0.655 ms p95 GPU**
-(**0.852 ms max**). Pass timing shows shadows at **2.993 ms mean / 4.981 ms p95**, world geometry
-at **1.449 ms mean / 2.359 ms p95**, and render culling at **0.115 ms mean / 0.200 ms p95**.
+samples, frame time was **17.499 ms mean / 19.835 ms p95 / 30.451 ms max**, CPU time
+**6.871 ms mean / 13.568 ms p95**, and GPU time **3.174 ms mean / 6.357 ms p95**. The direct
+traversal path runs at the full-HD 1920x1080 tier and measured **0.481 ms mean / 0.786 ms p95 GPU**
+(**1.114 ms max**). Temporal shadow reuse reduced shadow work to **1.471 ms mean / 4.260 ms p95**
+(from **2.993 ms mean / 4.981 ms p95**), while world geometry measured **1.748 ms mean / 2.884 ms
+p95** and render culling **0.113 ms mean / 0.200 ms p95**.
 Full-resolution traversal remains inexpensive on the target adapter, but transparent misses still
 fall through to the raster path while residency coverage is being expanded;
 it is not yet the full-resolution primary visibility path. Peak core GPU allocation was **215.49
@@ -36,7 +37,7 @@ digs** to all clients with zero browser/protocol errors; the latest full-HD run'
 converged in **4.601 s** at **109.0 m** separation, with observer frame p95 **50.0 ms** and builder
 p95 **66.7–83.3 ms**.
 These are acceptance baselines, not claims of the 1080p/120 FPS target. The player artifact is
-`target/automation/player-rendering/2026-09-12T22-30-31-063Z-b973bef0`; multiplayer artifacts
+`target/automation/player-rendering/2026-09-12T22-36-08-312Z-76de4eb7`; multiplayer artifacts
 remain under `target/automation/multiplayer/`, latest
 `target/automation/multiplayer/2026-09-12T22-26-28-162Z-bcfb7d00`.
 
