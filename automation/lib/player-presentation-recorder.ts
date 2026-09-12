@@ -22,6 +22,13 @@ export type PlayerPresentationPhase =
 export interface PlayerPresentationTraceFrame {
   readonly phase: PlayerPresentationPhase;
   readonly frameSequence: number;
+  readonly frameMs: number;
+  readonly cpuMs: number;
+  readonly simulationMs: number;
+  readonly streamMs: number;
+  readonly renderMs: number;
+  readonly gpuTotalMs: number;
+  readonly coreGpuMiB: number;
   readonly camera: readonly [number, number, number];
   readonly terrainReady: boolean;
   readonly canonicalLatticePresented: boolean;
@@ -180,6 +187,13 @@ function traceFrame(
   return {
     phase,
     frameSequence: snapshotValue(snapshot, "frameSequence"),
+    frameMs: snapshotValue(snapshot, "frameMs"),
+    cpuMs: snapshotValue(snapshot, "cpuMs"),
+    simulationMs: snapshotValue(snapshot, "simulationMs"),
+    streamMs: snapshotValue(snapshot, "streamMs"),
+    renderMs: snapshotValue(snapshot, "renderMs"),
+    gpuTotalMs: snapshotValue(snapshot, "gpuTotalMs"),
+    coreGpuMiB: snapshotValue(snapshot, "coreGpuMiB"),
     camera: [
       snapshotValue(snapshot, "cameraX"),
       snapshotValue(snapshot, "cameraY"),

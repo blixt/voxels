@@ -486,7 +486,19 @@ impl Generator {
         let base = 2.0 + continental * 42.0 + hills * 15.0 + ridge.powi(2) * 24.0 + plateaus * 18.0
             - ocean * (200.0 + ocean * 300.0);
         let detail = self.fractal_2d(x, z, 72, 2, 0x51f7);
-        let height = (base + (detail - 0.5) * 7.0).round() as i32;
+        let natural_height = base + (detail - 0.5) * 7.0;
+        // The protected spawn is a playable landing point, not a tiny platform over an
+        // unbounded ocean.  Build a deterministic island around it so the default walk/jump/edit
+        // route stays on solid ground for the first 42 metres while the surrounding world remains
+        // free to form deep basins and detached landforms.  The radial blend keeps its shoreline
+        // continuous with the macro terrain and all caves/features still use the resulting 3-D
+        // column only as a density hint.
+        let distance = (f64::from(x).mul_add(f64::from(x), f64::from(z) * f64::from(z))).sqrt();
+        let starter_blend = smooth(((420.0 - distance) / 96.0).clamp(0.0, 1.0) as f32);
+        let starter_detail = self.fractal_2d(x, z, 180, 2, 0x7a11);
+        let starter_height = 34.0 + starter_detail * 18.0;
+        let height =
+            (natural_height + (starter_height - natural_height) * starter_blend).round() as i32;
         let patch = self.value_2d(x, z, 48, 0x3f91);
         let material = if height <= SEA_LEVEL_VOXELS + 2 {
             Material::Sand
@@ -1268,6 +1280,24 @@ mod tests {
     }
 
     #[test]
+    fn starter_island_keeps_the_default_play_route_on_land() {
+        let generator = Generator::new(0);
+        for z in [-320, -240, -160, -80, 0, 80, 160, 240, 320] {
+            let sample = generator.surface_sample(0, z);
+            assert!(
+                sample.height >= SEA_LEVEL_VOXELS,
+                "starter route at z={z} unexpectedly flooded: {:?}",
+                sample
+            );
+            assert!(sample.water_level.is_none());
+        }
+        // Outside the authored landing area, the same seed still has genuine deep ocean.
+        let ocean = generator.surface_sample(0, 2_000);
+        assert!(ocean.water_level.is_some());
+        assert!(ocean.height < SEA_LEVEL_VOXELS);
+    }
+
+    #[test]
     fn regional_surface_catalog_is_represented_and_self_consistent() {
         let generator = Generator::new(0x5eed);
         let mut regions = BTreeSet::new();
@@ -1350,7 +1380,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checksum, 0x7037_434a_9be7_98d6);
+        assert_eq!(checksum, 0x6e9b_039e_f267_2fe4);
     }
 
     #[test]
@@ -1630,7 +1660,7 @@ mod tests {
             crate::FeatureCompositionMode::ALL.into_iter().collect()
         );
         assert!(prominence_counts.into_iter().all(|count| count > 0));
-        assert_eq!(checksum, 0x987f_ec76_ac61_e0bc);
+        assert_eq!(checksum, 0xafa5_670f_1c9a_b4e7);
     }
 
     #[test]

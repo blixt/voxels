@@ -1018,10 +1018,12 @@ impl SessionRequests {
             return Err(RequestAdmissionError::Duplicate);
         }
         // Cancellation releases the negotiated active window immediately so urgent replacement
-        // work is not blocked by asynchronous cleanup. Retain at most one complete replacement
-        // window of cancelled tombstones, though, or a cancel storm could spawn and retain tasks
-        // without a per-session bound.
-        if in_flight.len() >= self.max_in_flight.saturating_mul(2) {
+        // work is not blocked by asynchronous cleanup. Retain a bounded burst of replacement
+        // windows: refinement can cancel several batches per frame, and rejecting a healthy
+        // replacement at two windows turns ordinary camera motion into a fatal client error.
+        // Tombstones are still capped, so a cancel storm cannot retain unbounded task state.
+        const MAX_SETTLING_WINDOWS: usize = 8;
+        if in_flight.len() >= self.max_in_flight.saturating_mul(MAX_SETTLING_WINDOWS) {
             return Err(RequestAdmissionError::SettlingBacklogFull);
         }
         let active = in_flight
@@ -4868,18 +4870,23 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_backlog_allows_one_bounded_replacement_window() {
+    fn cancellation_backlog_allows_a_bounded_replacement_burst() {
         let session = SessionRequests::new(1, 1, 1, 1024, Arc::new(Notify::new()));
         let first = session.insert(1).ok().expect("first request");
         assert!(session.cancel(1));
-
-        let replacement = session
-            .insert(2)
-            .ok()
-            .expect("one full replacement window must remain available");
-        assert!(session.cancel(2));
+        let mut replacements = Vec::new();
+        for request_id in 2..=7 {
+            let replacement = session
+                .insert(request_id)
+                .ok()
+                .expect("bounded replacement burst must remain available");
+            assert!(session.cancel(request_id));
+            replacements.push((request_id, replacement));
+        }
+        let replacement = session.insert(8).ok().expect("last replacement");
+        assert!(session.cancel(8));
         assert!(matches!(
-            session.insert(3),
+            session.insert(9),
             Err(RequestAdmissionError::SettlingBacklogFull)
         ));
         assert!(matches!(
@@ -4889,11 +4896,14 @@ mod tests {
 
         session.finish(1, &first);
         let next = session
-            .insert(3)
+            .insert(9)
             .ok()
             .expect("settling one request must reopen backlog capacity");
-        session.finish(2, &replacement);
-        session.finish(3, &next);
+        for (request_id, replacement) in replacements {
+            session.finish(request_id, &replacement);
+        }
+        session.finish(8, &replacement);
+        session.finish(9, &next);
         assert!(session.lock().is_empty());
     }
 
