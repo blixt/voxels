@@ -86,10 +86,11 @@ const MATERIAL_WHEEL_SLOTS: usize = 10;
 const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 const DIRECT_BRICK_ATLAS_CAPACITY: u32 = 4096;
 const DIRECT_BRICK_UPLOADS_PER_FRAME: usize = 16;
-/// Diagnostic quality tier for the direct path: 960x540 (1/4 of a 1920x1080 output). Rays are
-/// generated on the GPU, so increasing this tier does not add per-frame CPU upload traffic.
-const DIRECT_TRACE_WIDTH: u32 = 960;
-const DIRECT_TRACE_HEIGHT: u32 = 540;
+/// Full-HD quality tier for the direct path: 1920x1080. Transparent misses still fall through to
+/// the certified raster path while residency coverage is being expanded. Rays are generated on
+/// the GPU, so increasing this tier does not add per-frame CPU upload traffic.
+const DIRECT_TRACE_WIDTH: u32 = 1920;
+const DIRECT_TRACE_HEIGHT: u32 = 1080;
 const DIRECT_TRACE_RAY_COUNT: u32 = DIRECT_TRACE_WIDTH * DIRECT_TRACE_HEIGHT;
 // Immutable virtual-page geometry is the durable render representation. Two independently
 // bindable segments stay below WebGPU's common 128 MiB storage-binding ceiling while reserving
