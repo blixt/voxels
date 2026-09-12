@@ -2,12 +2,24 @@
 
 Research date: **2026-09-12**. Sources below were accessed on that date. This is a research and
 implementation recommendation, not a new renderer, a benchmark reproduction or a deployment.
-Repository findings refer to main at `aae930c6bf026373ef219ad8699df2e32d53af56` and the retained
+Repository findings refer to main at `05c3b1e` and the retained
 volume branch at `d666770`.
 
 This supplements the [March survey](20260311-voxel-research.md) and
 [March engine-performance notes](20260311-voxel-perf-research.md). The capability audit is in
 [Latest Chrome and wgpu](20260912-webgpu-wgpu-research.md).
+
+## Current implementation baseline
+
+The post-rewrite browser journey passed on Apple M3 Max with Chrome `153.0.8010.37`: default
+spawn, sustained spectator flight, walking, jump, dig, placement, screenshot replay and restore.
+The run used the generated v17 world and the real world-service protocol. Across 240 steady samples,
+frame time was 21.6 ms mean / 26.2 ms p95, CPU time 6.7 ms mean / 13.0 ms p95, and GPU time 8.0 ms
+mean / 8.3 ms p95. Peak core GPU allocation was 215.5 MiB; exact-quality debt and missed terrain
+progress were both zero. The six-client shaped-40 ms RTT multiplayer run applied 5,000 authoritative
+voxel placements to all clients with zero protocol errors; builder frame p95 remained roughly
+66.7–83.3 ms. These are acceptance baselines, not claims of the 1080p/120 FPS target. Artifacts are
+kept under `target/automation/player-rendering/` and `target/automation/multiplayer/`.
 
 ## What changes our direction
 
