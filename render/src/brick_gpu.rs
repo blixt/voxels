@@ -122,7 +122,9 @@ impl GpuBrickAtlas {
                 bytemuck::cast_slice(&upload.descriptor_words()),
             );
         }
-        self.refresh_hash_table(queue);
+        if !uploads.is_empty() {
+            self.refresh_hash_table(queue);
+        }
         uploads.len()
     }
 
@@ -138,7 +140,9 @@ impl GpuBrickAtlas {
             &[0; GPU_BRICK_DESCRIPTOR_WORDS * size_of::<u32>()],
         );
         let evicted = self.residency.evict(coord);
-        self.refresh_hash_table(queue);
+        if evicted {
+            self.refresh_hash_table(queue);
+        }
         evicted
     }
 
