@@ -489,12 +489,16 @@ impl Generator {
         let natural_height = base + (detail - 0.5) * 7.0;
         // The protected spawn is a playable landing point, not a tiny platform over an
         // unbounded ocean.  Build a deterministic island around it so the default walk/jump/edit
-        // route stays on solid ground for the first 42 metres while the surrounding world remains
+        // route stays on solid ground for the first 120 metres while the surrounding world remains
         // free to form deep basins and detached landforms.  The radial blend keeps its shoreline
         // continuous with the macro terrain and all caves/features still use the resulting 3-D
         // column only as a density hint.
         let distance = (f64::from(x).mul_add(f64::from(x), f64::from(z) * f64::from(z))).sqrt();
-        let starter_blend = smooth(((420.0 - distance) / 96.0).clamp(0.0, 1.0) as f32);
+        const STARTER_RADIUS_VOXELS: f64 = 1_200.0;
+        const STARTER_BLEND_VOXELS: f64 = 192.0;
+        let starter_blend = smooth(
+            ((STARTER_RADIUS_VOXELS - distance) / STARTER_BLEND_VOXELS).clamp(0.0, 1.0) as f32,
+        );
         let starter_detail = self.fractal_2d(x, z, 180, 2, 0x7a11);
         let starter_height = 34.0 + starter_detail * 18.0;
         let height =
@@ -1380,7 +1384,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checksum, 0x6e9b_039e_f267_2fe4);
+        assert_eq!(checksum, 0x7dae_c803_c69f_97a2);
     }
 
     #[test]
@@ -1660,7 +1664,7 @@ mod tests {
             crate::FeatureCompositionMode::ALL.into_iter().collect()
         );
         assert!(prominence_counts.into_iter().all(|count| count > 0));
-        assert_eq!(checksum, 0xafa5_670f_1c9a_b4e7);
+        assert_eq!(checksum, 0xfdc3_51a2_6765_4f8d);
     }
 
     #[test]
