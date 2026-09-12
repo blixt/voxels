@@ -226,16 +226,20 @@ async function waitForInventoryUnits(
   timeoutMs = 30_000,
 ): Promise<readonly number[]> {
   const inventory = await waitForEarnedInventory(engine, label, previousRevision, timeoutMs);
-  if (Math.max(...inventory.slice(2)) >= minimumUnits) return inventory;
+  if (inventory.slice(2).reduce((total, count) => total + count, 0) >= minimumUnits) {
+    return inventory;
+  }
   const deadline = performance.now() + timeoutMs;
   let latest = inventory;
   while (performance.now() < deadline) {
     latest = await engine.inventory();
-    if (Math.max(...latest.slice(2)) >= minimumUnits) return latest;
+    if (latest.slice(2).reduce((total, count) => total + count, 0) >= minimumUnits) {
+      return latest;
+    }
     await engine.wait(50);
   }
   throw new Error(
-    `${label} did not earn ${minimumUnits} units of one material: ${JSON.stringify(latest)}`,
+    `${label} did not earn ${minimumUnits} total material units: ${JSON.stringify(latest)}`,
   );
 }
 
