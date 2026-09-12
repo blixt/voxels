@@ -200,7 +200,9 @@ impl BrickResidency {
         }
 
         let mut distance = 0.0;
-        let max_steps = (max_distance_voxels.ceil() as usize + 3).min(MAX_TRACE_STEPS);
+        let max_steps = (max_distance_voxels.ceil() as usize)
+            .saturating_add(3)
+            .min(MAX_TRACE_STEPS);
         for _ in 0..max_steps {
             let brick = BrickCoord::new(
                 voxel[0].div_euclid(BRICK_EDGE as i32),
@@ -535,6 +537,15 @@ mod tests {
         assert_eq!(
             cache.trace([0.5, 0.5, 0.5], [1.0, 0.0, 0.0], 16.0),
             BrickTrace::Unknown(BrickCoord::new(1, 0, 0))
+        );
+    }
+
+    #[test]
+    fn huge_finite_trace_distance_is_bounded_without_overflow() {
+        let cache = BrickResidency::new(1);
+        assert_eq!(
+            cache.trace([0.5, 0.5, 0.5], [1.0, 0.0, 0.0], f32::MAX),
+            BrickTrace::Unknown(BrickCoord::new(0, 0, 0))
         );
     }
 }
