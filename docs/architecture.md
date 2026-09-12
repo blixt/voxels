@@ -47,7 +47,9 @@ bricks, stable slot generations, coalesced revisions, bounded uploads, and a fai
 by the renderer. It defines a bounded compute DDA over a separate power-of-two hash table whose
 entries point into the atlas, including explicit unknown, empty, and hit results. The current frame
 path still consumes certified mesh pages; wiring the hash table and dispatch into a controlled visible
-slice remains a measured migration step rather than an assumed speedup.
+slice remains a measured migration step rather than an assumed speedup. `render/src/brick_hash.rs`
+owns the fixed-capacity host table and its transactional rebuild, so a failed publication cannot
+leave a partially indexed world.
 
 ## World representation
 
