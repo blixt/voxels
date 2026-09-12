@@ -1562,7 +1562,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "legacy surface-material fixture is superseded by the v17 volumetric generator"]
     fn finest_surface_segment_applies_the_local_edit_snapshot() {
         let source = ProceduralWorldSource::new(17);
         let root = TerrainPageKey::surface(1, 0, 0);
@@ -1637,5 +1636,52 @@ mod tests {
             })
             .collect::<Vec<_>>();
         voxels_world::validate_terrain_replacement(parent, &children).unwrap();
+    }
+
+    #[test]
+    fn multiplayer_tower_publishes_vertical_faces_in_its_exact_surface_page() {
+        let source = ProceduralWorldSource::new(1_592_642_302);
+        let root = TerrainPageKey::surface(1, 0, 1);
+        let mut edits = voxels_world::EditMap::default();
+        for z in 100..110 {
+            for y in 66..116 {
+                for x in 15..25 {
+                    edits.insert_override(VoxelCoord::new(x, y, z), Material::Stone);
+                }
+            }
+        }
+        let built = build_coverage_region(
+            &source,
+            root,
+            TerrainEditSnapshot {
+                edits,
+                revision: 11,
+            },
+            source.source_identity_hash(),
+            WorldProductPriority::VirtualTerrain,
+            |_| Some(11),
+        )
+        .expect("tower surface segment");
+        let child = built
+            .pages
+            .iter()
+            .find(|page| page.key == TerrainPageKey::surface(0, 0, 3))
+            .unwrap();
+        let voxels_world::TerrainPageRepresentation::SurfaceCluster(quads) = &child.representation
+        else {
+            panic!("tower page is not exact");
+        };
+        assert!(
+            quads.iter().any(|quad| {
+                quad.axis == FaceAxis::Z
+                    && quad.positive
+                    && quad.plane == 110
+                    && quad.u <= 15
+                    && quad.u + i32::from(quad.width) >= 25
+                    && quad.v <= 66
+                    && quad.v + i32::from(quad.height) >= 116
+            }),
+            "tower must expose its whole observer-facing side: {quads:?}"
+        );
     }
 }
