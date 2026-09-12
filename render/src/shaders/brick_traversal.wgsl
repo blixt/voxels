@@ -100,7 +100,7 @@ fn output_pixel(ray_index: u32, color: vec4<f32>) {
   }
 }
 
-fn material_color(material: u32) -> vec4<f32> {
+fn material_color(material: u32, normal: vec3<f32>) -> vec4<f32> {
   let hue = f32(material & 31u) / 31.0;
   let band = f32((material >> 5u) & 7u) / 7.0;
   let color = vec3<f32>(
@@ -108,7 +108,9 @@ fn material_color(material: u32) -> vec4<f32> {
     0.28 + 0.42 * (1.0 - abs(hue - 0.5) * 1.6),
     0.20 + 0.56 * band,
   );
-  return vec4<f32>(color, 1.0);
+  let light_direction = normalize(vec3<f32>(0.42, 0.82, 0.36));
+  let diffuse = 0.28 + 0.72 * max(dot(normal, light_direction), 0.0);
+  return vec4<f32>(color * diffuse, 1.0);
 }
 
 @compute @workgroup_size(64)
@@ -142,6 +144,7 @@ fn trace_voxels(@builtin(global_invocation_id) invocation: vec3<u32>) {
   }
 
   var distance = 0.0;
+  var hit_normal = -direction;
   for (var iteration = 0u; iteration < MAX_STEPS; iteration += 1u) {
     let brick = vec3<i32>(
       floor_i(f32(voxel.x) / 8.0),
@@ -189,7 +192,7 @@ fn trace_voxels(@builtin(global_invocation_id) invocation: vec3<u32>) {
     if material != 0u {
       results[ray_index].voxel = vec4<i32>(voxel, 0);
       results[ray_index].material_distance = vec4<u32>(material, STATUS_HIT, bitcast<u32>(distance), 0u);
-      output_pixel(ray_index, material_color(material));
+      output_pixel(ray_index, material_color(material, hit_normal));
       return;
     }
     let axis = select(0u, 1u, next.y < next.x);
@@ -201,6 +204,8 @@ fn trace_voxels(@builtin(global_invocation_id) invocation: vec3<u32>) {
       return;
     }
     voxel[chosen_axis] += step[chosen_axis];
+    hit_normal = vec3<f32>(0.0);
+    hit_normal[chosen_axis] = -f32(step[chosen_axis]);
     next[chosen_axis] += delta[chosen_axis];
   }
   results[ray_index].voxel = vec4<i32>(voxel, 0);
