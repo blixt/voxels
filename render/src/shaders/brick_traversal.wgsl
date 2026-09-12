@@ -101,13 +101,24 @@ fn output_pixel(ray_index: u32, color: vec4<f32>) {
 }
 
 fn material_color(material: u32, normal: vec3<f32>) -> vec4<f32> {
-  let hue = f32(material & 31u) / 31.0;
-  let band = f32((material >> 5u) & 7u) / 7.0;
-  let color = vec3<f32>(
-    0.22 + 0.58 * hue,
-    0.28 + 0.42 * (1.0 - abs(hue - 0.5) * 1.6),
-    0.20 + 0.56 * band,
-  );
+  var color = vec3<f32>(0.34, 0.38, 0.43);
+  switch material {
+    case 1u: { color = vec3<f32>(0.18, 0.42, 0.12); }
+    case 2u: { color = vec3<f32>(0.36, 0.20, 0.095); }
+    case 3u: { color = vec3<f32>(0.34, 0.38, 0.43); }
+    case 4u: { color = vec3<f32>(0.58, 0.43, 0.24); }
+    case 5u: { color = vec3<f32>(0.76, 0.86, 0.91); }
+    case 6u: { color = vec3<f32>(0.56, 0.25, 0.15); }
+    case 7u: { color = vec3<f32>(0.12, 0.15, 0.20); }
+    case 8u: { color = vec3<f32>(0.31, 0.15, 0.055); }
+    case 9u: { color = vec3<f32>(0.08, 0.30, 0.10); }
+    case 10u: { color = vec3<f32>(0.12, 0.32, 0.14); }
+    case 11u: { color = vec3<f32>(0.58, 0.55, 0.44); }
+    case 12u: { color = vec3<f32>(0.58, 0.19, 0.075); }
+    case 13u: { color = vec3<f32>(0.02, 0.22, 0.30); }
+    case 14u: { color = vec3<f32>(0.12, 0.58, 0.78); }
+    default: {}
+  }
   let light_direction = normalize(vec3<f32>(0.42, 0.82, 0.36));
   let diffuse = 0.28 + 0.72 * max(dot(normal, light_direction), 0.0);
   return vec4<f32>(color * diffuse, 1.0);
