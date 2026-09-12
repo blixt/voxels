@@ -619,7 +619,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     }
 
     const inventoryBeforeDig = await Promise.all(builders.map(({ engine }) => engine.inventory()));
-    const sphereSeparationVoxels = Math.ceil(semantics.editSphereRadiusVoxels) * 2;
+    const sphereSeparationVoxels = Math.ceil(semantics.editSphereRadiusVoxels) * 3;
     const digSubmissions = await Promise.all(
       builders.flatMap((builder, index) => {
         const position = required(builderAfterMovement, index, "builder dig position");
