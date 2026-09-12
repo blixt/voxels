@@ -31,6 +31,7 @@ pub struct TraceCamera {
     pub forward: [f32; 4],
     pub right: [f32; 4],
     pub up: [f32; 4],
+    pub light_direction: [f32; 4],
 }
 
 #[repr(C)]
@@ -432,7 +433,7 @@ mod tests {
         assert_eq!(BRICK_VOXEL_COUNT % 4, 0);
         assert_eq!(GPU_BRICK_DESCRIPTOR_BYTES, 32);
         assert_eq!(size_of::<TraceRay>(), 32);
-        assert_eq!(size_of::<TraceCamera>(), 64);
+        assert_eq!(size_of::<TraceCamera>(), 80);
         assert_eq!(size_of::<TraceParams>(), 48);
         assert_eq!(descriptor_offset_for_slot(3), 96);
     }

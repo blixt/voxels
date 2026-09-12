@@ -3072,6 +3072,7 @@ impl DirectTraversalProbe {
                 forward: [0.0, 0.0, -1.0, 0.0],
                 right: [1.0, 0.0, 0.0, 0.0],
                 up: [0.0, 1.0, 0.0, 0.0],
+                light_direction: [0.42, 0.82, 0.36, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -3176,6 +3177,7 @@ impl DirectTraversalProbe {
         atlas: &GpuBrickAtlas,
         camera: &CameraState,
         max_distance: f32,
+        light_direction: glam::Vec3,
     ) {
         let position = camera.position / VOXEL_SIZE_METRES;
         let forward = camera.forward();
@@ -3189,6 +3191,7 @@ impl DirectTraversalProbe {
                 forward: [forward.x, forward.y, forward.z, 0.0],
                 right: [right.x, right.y, right.z, 0.0],
                 up: [up.x, up.y, up.z, 0.0],
+                light_direction: [light_direction.x, light_direction.y, light_direction.z, 0.0],
             }),
         );
         queue.write_buffer(
@@ -8964,12 +8967,6 @@ impl Renderer {
         let dt = bounded_frame_delta(dt);
         self.direct_brick_atlas
             .flush(&self.queue, DIRECT_BRICK_UPLOADS_PER_FRAME);
-        self.direct_traversal_probe.update(
-            &self.queue,
-            &self.direct_brick_atlas,
-            camera,
-            self.runtime_config.view_distance_metres,
-        );
         let reproduction_active = self
             .presented_client_view
             .as_ref()
@@ -8986,6 +8983,13 @@ impl Renderer {
         if !self.refresh_effective_environment() {
             return None;
         }
+        self.direct_traversal_probe.update(
+            &self.queue,
+            &self.direct_brick_atlas,
+            camera,
+            self.runtime_config.view_distance_metres,
+            self.environment.key_light_direction,
+        );
         let interior_seconds = if self.interior_target.enclosure > self.interior.enclosure {
             0.25
         } else {

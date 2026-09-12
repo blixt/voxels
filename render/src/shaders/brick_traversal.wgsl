@@ -19,6 +19,7 @@ struct TraceCamera {
   forward: vec4<f32>,
   right: vec4<f32>,
   up: vec4<f32>,
+  light_direction: vec4<f32>,
 };
 
 struct TraceResult {
@@ -107,7 +108,7 @@ fn output_pixel(ray_index: u32, color: vec4<f32>) {
   }
 }
 
-fn material_color(material: u32, normal: vec3<f32>) -> vec4<f32> {
+fn material_color(material: u32, normal: vec3<f32>, light_direction: vec3<f32>) -> vec4<f32> {
   var color = vec3<f32>(0.34, 0.38, 0.43);
   switch material {
     case 1u: { color = vec3<f32>(0.18, 0.42, 0.12); }
@@ -126,8 +127,7 @@ fn material_color(material: u32, normal: vec3<f32>) -> vec4<f32> {
     case 14u: { color = vec3<f32>(0.12, 0.58, 0.78); }
     default: {}
   }
-  let light_direction = normalize(vec3<f32>(0.42, 0.82, 0.36));
-  let diffuse = 0.28 + 0.72 * max(dot(normal, light_direction), 0.0);
+  let diffuse = 0.28 + 0.72 * max(dot(normal, normalize(light_direction)), 0.0);
   return vec4<f32>(color * diffuse, 1.0);
 }
 
@@ -222,7 +222,7 @@ fn trace_voxels(@builtin(global_invocation_id) invocation: vec3<u32>) {
     if material != 0u {
       results[ray_index].voxel = vec4<i32>(voxel, 0);
       results[ray_index].material_distance = vec4<u32>(material, STATUS_HIT, bitcast<u32>(distance), 0u);
-      output_pixel(ray_index, material_color(material, hit_normal));
+      output_pixel(ray_index, material_color(material, hit_normal, camera.light_direction.xyz));
       return;
     }
     let axis = select(0u, 1u, next.y < next.x);
