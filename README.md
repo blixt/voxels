@@ -129,6 +129,12 @@ destination remain editable, collidable, and continuous through hierarchy refine
 becoming renderer-only decals. World Lab derives chapter and progress status from the Rust atlas.
 See [docs/architecture.md](docs/architecture.md) for format, authority, and research decisions.
 
+The [September 2026 mutable-voxel research](docs/20260912-mutable-voxel-research.md) records the
+proposed direction for fully 3D worlds under concurrent editing, current creator sources, and what
+to reuse from the retained branches. It describes future work, separate from the implementation
+above. The companion [Chrome/wgpu audit](docs/20260912-webgpu-wgpu-research.md) records browser
+capabilities and the scope of potential backend patches.
+
 ## Controls
 
 - Click the world to capture the pointer.

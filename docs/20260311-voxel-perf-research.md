@@ -1,4 +1,12 @@
-Yes. I went through the strongest public materials I could find for **Teardown**, **Lay of the Land**, **Douglas Dwyer’s Octo**, **John Lin’s voxel project**, and the canonical papers and engine writeups that explain the underlying techniques.
+# Voxel engine performance research
+
+Date: 2026-03-11.
+
+> Historical engine survey. Read the [September 2026 update](20260912-mutable-voxel-research.md)
+> for current creator material, source-date corrections and the revised fully 3D mutable-world
+> direction. These older examples do not establish our 1080p/120 FPS or multiplayer targets.
+
+I went through the strongest public materials I could find for **Teardown**, **Lay of the Land**, **Douglas Dwyer’s Octo**, **John Lin’s voxel project**, and the canonical papers and engine writeups that explain the underlying techniques.
 
 The main conclusion is very clear: **a 60 FPS traversable voxel world at roughly 10 cm resolution is never “just a voxel renderer.”** It is always a bundle of systems: sparse or object-local storage, aggressive empty-space skipping, localized invalidation after edits, multiple representations for rendering vs physics vs lighting, LOD/streaming, data-oriented multithreading, and strict content-authoring constraints. Teardown’s public material is the clearest proof: it uses **thousands of smaller voxel volumes instead of one giant world volume**, does **CPU voxel-vs-voxel collision**, renders on the GPU by **rasterizing a bounding box per object and raymarching that object’s voxel grid**, and keeps a **separate occlusion structure** for ray-based lighting/shadowing. ([Game Developer][1])
 

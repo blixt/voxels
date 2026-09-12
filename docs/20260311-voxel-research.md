@@ -2,6 +2,11 @@
 
 Date: 2026-03-11
 
+> Historical survey. The [September 2026 update](20260912-mutable-voxel-research.md) supersedes
+> the architecture recommendation for our fully 3D, heavily mutable multiplayer target. It adds
+> current creator posts, explicit mutation/cache costs and a revised branch-reuse plan. See also
+> the [Chrome/wgpu capability audit](20260912-webgpu-wgpu-research.md).
+
 I went through canonical papers, production-engine writeups, voxel engine docs, and current Chrome/WebGPU documentation. The strongest practical conclusion is that an editable voxel engine for modern Chrome/WebGPU should **not** start from a “pure sparse-voxel-raytracing everywhere” design. The safest and highest-value baseline is: **authoritative sparse world storage on the CPU, chunked updates, worker-based generation/streaming, near-field rasterized surfaces, and selective ray traversal only where it clearly wins**. SVO/SVDAG ray tracers are essential references, but they fit static or carefully-managed data much better than a world that is constantly edited. ([NVIDIA][1])
 
 ## The architecture I would start with in Chrome/WebGPU
