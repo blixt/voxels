@@ -12,6 +12,7 @@ use std::sync::Arc;
 /// cache, but 8³ keeps edit uploads and cache invalidation bounded to 512 voxels.
 pub const BRICK_EDGE: u32 = 8;
 pub const BRICK_VOXEL_COUNT: usize = (BRICK_EDGE * BRICK_EDGE * BRICK_EDGE) as usize;
+const MAX_TRACE_STEPS: usize = 1_048_576;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct BrickCoord {
@@ -198,7 +199,7 @@ impl BrickResidency {
         }
 
         let mut distance = 0.0;
-        let max_steps = max_distance_voxels.ceil() as usize + 3;
+        let max_steps = (max_distance_voxels.ceil() as usize + 3).min(MAX_TRACE_STEPS);
         for _ in 0..max_steps {
             let brick = BrickCoord::new(
                 voxel[0].div_euclid(BRICK_EDGE as i32),
@@ -236,7 +237,13 @@ impl BrickResidency {
             };
             next[axis] += delta[axis];
         }
-        BrickTrace::Miss
+        // A bounded traversal that did not reach the requested distance is incomplete, so keep
+        // the current brick unknown rather than certifying a false miss.
+        BrickTrace::Unknown(BrickCoord::new(
+            voxel[0].div_euclid(BRICK_EDGE as i32),
+            voxel[1].div_euclid(BRICK_EDGE as i32),
+            voxel[2].div_euclid(BRICK_EDGE as i32),
+        ))
     }
 
     /// Queues the newest edit for one brick.  Multiple edits before a frame are coalesced, so the
