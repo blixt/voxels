@@ -627,10 +627,12 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
         const feetYMetres = snapshotValue(position, "cameraY") - semantics.playerEyeHeightMetres;
         // Dig below the surface cap so the shared tower has a deterministic solid worksite even
         // when the procedural world mixes grass, dirt, caves and exposed stone at the shoreline.
-        const digY =
+        const digY = Math.max(
+          20,
           Math.floor(feetYMetres * 10) -
-          Math.ceil(semantics.editSphereRadiusVoxels) -
-          semantics.editCubeEdgeVoxels * 3;
+            Math.ceil(semantics.editSphereRadiusVoxels) -
+            semantics.editCubeEdgeVoxels * 3,
+        );
         return [-1, 1].map((row) =>
           builder.engine.submitDig(
             Math.floor(snapshotValue(position, "cameraX") * 10) + lateralOffset,
