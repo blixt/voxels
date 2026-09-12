@@ -1486,11 +1486,9 @@ mod tests {
                 1,
             )
             .unwrap()[0];
+        let edited_coord = VoxelCoord::new(edit_x, surface.height, edit_z);
         let mut edits = voxels_world::EditMap::default();
-        edits.insert_override(
-            VoxelCoord::new(edit_x, surface.height, edit_z),
-            Material::Air,
-        );
+        edits.insert_override(edited_coord, Material::Air);
         let snapshot = TerrainEditSnapshot {
             edits,
             revision: 43,
@@ -1505,6 +1503,39 @@ mod tests {
             revision_at,
         )
         .expect("parent coverage");
+
+        // A dig is an explicit Air override.  The edited child must therefore own the changed
+        // column as an exact surface patch and must not retain the generated top face at the
+        // removed voxel.  This is the far-observer failure mode that a coarse heightfield can
+        // otherwise reintroduce after the canonical chunk has been evicted.
+        let edited_segment = build_coverage_region(
+            &source,
+            edited_root,
+            snapshot.clone(),
+            source.source_identity_hash(),
+            WorldProductPriority::VirtualTerrain,
+            revision_at,
+        )
+        .expect("edited surface segment");
+        let edited = edited_segment
+            .pages
+            .iter()
+            .find(|page| page.key.level == 0 && page.bounds.contains(edited_coord))
+            .expect("edited child");
+        let voxels_world::TerrainPageRepresentation::SurfaceCluster(quads) = &edited.representation
+        else {
+            panic!("dig child is not an exact surface cluster");
+        };
+        assert!(!quads.iter().any(|quad| {
+            quad.axis == voxels_world::FaceAxis::Y
+                && quad.positive
+                && quad.plane == surface.height + 1
+                && quad.u <= edit_x
+                && edit_x < quad.u + i32::from(quad.width)
+                && quad.v <= edit_z
+                && edit_z < quad.v + i32::from(quad.height)
+        }));
+
         let child = build_coverage_region(
             &source,
             untouched_root,
