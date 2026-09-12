@@ -29,6 +29,13 @@ export interface PlayerPresentationTraceFrame {
   readonly renderMs: number;
   readonly gpuTotalMs: number;
   readonly gpuDirectTraversalMs: number;
+  readonly gpuShadowMs: number;
+  readonly gpuDepthPrepassMs: number;
+  readonly gpuWorldMs: number;
+  readonly gpuWaterMs: number;
+  readonly gpuAmbientOcclusionMs: number;
+  readonly gpuUiMs: number;
+  readonly renderCullMs: number;
   readonly coreGpuMiB: number;
   readonly camera: readonly [number, number, number];
   readonly terrainReady: boolean;
@@ -195,6 +202,13 @@ function traceFrame(
     renderMs: snapshotValue(snapshot, "renderMs"),
     gpuTotalMs: snapshotValue(snapshot, "gpuTotalMs"),
     gpuDirectTraversalMs: snapshotValue(snapshot, "gpuDirectTraversalMs"),
+    gpuShadowMs: snapshotValue(snapshot, "gpuShadowMs"),
+    gpuDepthPrepassMs: snapshotValue(snapshot, "gpuDepthPrepassMs"),
+    gpuWorldMs: snapshotValue(snapshot, "gpuWorldMs"),
+    gpuWaterMs: snapshotValue(snapshot, "gpuWaterMs"),
+    gpuAmbientOcclusionMs: snapshotValue(snapshot, "gpuAmbientOcclusionMs"),
+    gpuUiMs: snapshotValue(snapshot, "gpuUiMs"),
+    renderCullMs: snapshotValue(snapshot, "renderCullMs"),
     coreGpuMiB: snapshotValue(snapshot, "coreGpuMiB"),
     camera: [
       snapshotValue(snapshot, "cameraX"),

@@ -1456,6 +1456,57 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
             .filter((value) => Number.isFinite(value) && value > 0),
           3,
         ),
+        gpuPassTiming: {
+          shadow: numericSummary(
+            recorder
+              .trace()
+              .map((frame) => frame.gpuShadowMs)
+              .filter((value) => Number.isFinite(value) && value > 0),
+            3,
+          ),
+          depthPrepass: numericSummary(
+            recorder
+              .trace()
+              .map((frame) => frame.gpuDepthPrepassMs)
+              .filter((value) => Number.isFinite(value) && value > 0),
+            3,
+          ),
+          world: numericSummary(
+            recorder
+              .trace()
+              .map((frame) => frame.gpuWorldMs)
+              .filter((value) => Number.isFinite(value) && value > 0),
+            3,
+          ),
+          water: numericSummary(
+            recorder
+              .trace()
+              .map((frame) => frame.gpuWaterMs)
+              .filter((value) => Number.isFinite(value) && value > 0),
+            3,
+          ),
+          ambientOcclusion: numericSummary(
+            recorder
+              .trace()
+              .map((frame) => frame.gpuAmbientOcclusionMs)
+              .filter((value) => Number.isFinite(value) && value > 0),
+            3,
+          ),
+          ui: numericSummary(
+            recorder
+              .trace()
+              .map((frame) => frame.gpuUiMs)
+              .filter((value) => Number.isFinite(value) && value > 0),
+            3,
+          ),
+        },
+        renderCullTiming: numericSummary(
+          recorder
+            .trace()
+            .map((frame) => frame.renderCullMs)
+            .filter((value) => Number.isFinite(value) && value > 0),
+          3,
+        ),
         peakCoreGpuMiB: Math.max(...recorder.trace().map((frame) => frame.coreGpuMiB)),
         freshSpectatorTravelMetres: freshSpectatorMotion.distanceMetres,
         freshSpectatorLongestNoProgressMs: freshSpectatorMotion.longestNoProgressMs,
