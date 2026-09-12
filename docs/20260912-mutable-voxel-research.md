@@ -11,12 +11,12 @@ This supplements the [March survey](20260311-voxel-research.md) and
 
 ## Current implementation baseline
 
-**Visual-convergence correction:** the earlier six-client "passed" entries below do not prove the
-distant tower was rendered. The screenshot region included animated sky, which could satisfy the
-pixel-change threshold. The permanent fixed-sky comparison fails on current main with zero changed
-pixels while all 5,000 authoritative placements arrive. A focused production-seed test proves the
-level-1 exact page contains the complete vertical tower face; far cut selection/publication remains
-unresolved. Treat the older tower timings as authority/stream settlement, not edit-to-visible latency.
+**Visual-convergence correction and resolution:** the earlier six-client "passed" entries below did
+not prove the distant tower was rendered because the screenshot region included animated sky. The
+comparison is now fixed-sky, and recently edited leaves are added to the bounded exact surface proof.
+The latest real six-client run passed with 5,000 authoritative placements, zero browser/protocol
+errors, 42 changed tower pixels, and 4.57 s convergence at 109.8 m separation. The level-1 exact
+page regression test and the browser gate now agree on the same far-edit behavior.
 
 The post-rewrite browser journey passed on Apple M3 Max with Chrome `153.0.8010.37`: default
 spawn, sustained spectator flight, walking, jump, dig, placement, screenshot replay and restore.
@@ -350,9 +350,10 @@ This is cache/metadata admission; GPU uploads retain their separate page, byte a
 The player-rendering run at `d9729062` passed movement, dig, placement, replay and restore at
 18.116 ms mean / 23.745 ms p95 frame time and 4.672 ms mean / 7.668 ms p95 GPU time, with zero
 exact-quality debt. This single run proves compatibility, not a measured speedup. The six-client
-authority path also converged with zero protocol/browser errors. Re-running its corrected fixed-sky
-gate still failed (zero changed pixels, maximum channel delta 1); completion draining alone does not
-fix the missing far edit representation.
+authority path also converged with zero protocol/browser errors. The subsequent `4b2e370b` far-leaf
+proof and bounded edit-interest path made the corrected fixed-sky gate pass; completion draining
+alone was insufficient, but the combined path now demonstrates far edit presentation at the tested
+109.8 m distance.
 
 ## Older references retained for specific reasons
 
