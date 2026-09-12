@@ -396,6 +396,16 @@ correctness gates but worsened frame p95 from 14.278 to 14.963 ms and virtual-te
 10.7 to 11.2 ms, so it was reverted. The evidence favors profiling and restructuring virtual
 terrain selection itself rather than adding temporal staleness heuristics.
 
+The follow-up uncapped Chrome run at
+`target/automation/player-rendering/2026-09-12T23-10-38-577Z-7461f6d9` also passed every movement,
+continuity, edit, replay, and restore gate. It measured **8.111 ms mean / 15.453 ms p95** frame
+time, **7.164 / 13.273 ms** CPU time, **6.210 / 12.327 ms** stream time, and **2.533 / 5.112 ms**
+GPU time. The experimental `eb19b4c6` hysteresis-state move was therefore reverted as
+`fb239daa`: correctness was unchanged, but tail latency was modestly worse than the preceding
+baseline. The six-client run at
+`target/automation/multiplayer/2026-09-12T23-13-23-207Z-e2e7bef5` then passed with zero browser or
+protocol errors; five builders converged on a 5,000-voxel tower at 109.3 m in 4,702.5 ms.
+
 ## Older references retained for specific reasons
 
 - [HashDAG (2020)](https://github.com/Phyronnaz/HashDAG) and
