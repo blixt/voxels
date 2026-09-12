@@ -67,6 +67,8 @@ pub enum QueueUpdate {
     Stale,
     /// Revision zero is reserved for an uninitialized brick.
     InvalidRevision,
+    /// Every resident brick has one complete 8³ material payload.
+    InvalidPayload,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -248,6 +250,9 @@ impl BrickResidency {
         if revision == 0 {
             return QueueUpdate::InvalidRevision;
         }
+        if payload.len() != BRICK_VOXEL_COUNT {
+            return QueueUpdate::InvalidPayload;
+        }
         if self
             .revision(coord)
             .is_some_and(|current| revision <= current)
@@ -404,6 +409,17 @@ mod tests {
         assert_eq!(cache.queue_update(coord, 3, payload(3)), QueueUpdate::Stale);
         cache.drain_uploads(1);
         assert_eq!(cache.queue_update(coord, 4, payload(4)), QueueUpdate::Stale);
+    }
+
+    #[test]
+    fn malformed_payloads_never_enter_residency() {
+        let mut cache = BrickResidency::new(1);
+        assert_eq!(
+            cache.queue_update(BrickCoord::new(0, 0, 0), 1, Arc::from(vec![1, 2, 3])),
+            QueueUpdate::InvalidPayload
+        );
+        assert_eq!(cache.pending_len(), 0);
+        assert_eq!(cache.resident_len(), 0);
     }
 
     #[test]
