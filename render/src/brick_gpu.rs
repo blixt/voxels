@@ -26,6 +26,15 @@ pub struct TraceRay {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TraceCamera {
+    pub origin: [f32; 4],
+    pub forward: [f32; 4],
+    pub right: [f32; 4],
+    pub up: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TraceParams {
     pub hash_mask: u32,
     pub max_distance_voxels: f32,
@@ -108,7 +117,7 @@ impl GpuBrickAtlas {
                 entries: &[
                     storage_binding(0, false),
                     storage_binding(1, false),
-                    storage_binding(2, false),
+                    uniform_binding(2),
                     storage_binding(3, true),
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
@@ -278,7 +287,7 @@ impl GpuBrickAtlas {
     pub fn create_traversal_bind_group(
         &self,
         device: &Device,
-        rays: &Buffer,
+        camera: &Buffer,
         results: &Buffer,
         params: &Buffer,
         output: &TextureView,
@@ -297,7 +306,7 @@ impl GpuBrickAtlas {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: rays.as_entire_binding(),
+                    resource: camera.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -397,6 +406,19 @@ const fn storage_binding(binding: u32, writable: bool) -> wgpu::BindGroupLayoutE
     }
 }
 
+const fn uniform_binding(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
 fn descriptor_offset(upload: &BrickUpload) -> u64 {
     u64::from(upload.address.slot) * GPU_BRICK_DESCRIPTOR_BYTES
 }
@@ -410,6 +432,7 @@ mod tests {
         assert_eq!(BRICK_VOXEL_COUNT % 4, 0);
         assert_eq!(GPU_BRICK_DESCRIPTOR_BYTES, 32);
         assert_eq!(size_of::<TraceRay>(), 32);
+        assert_eq!(size_of::<TraceCamera>(), 64);
         assert_eq!(size_of::<TraceParams>(), 48);
         assert_eq!(descriptor_offset_for_slot(3), 96);
     }

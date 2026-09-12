@@ -1,7 +1,7 @@
 use crate::ambient_occlusion::AmbientOcclusionGpu;
 use crate::arena::{Allocation, ArenaAllocator};
 use crate::avatar::AvatarGpu;
-use crate::brick_gpu::{GpuBrickAtlas, TraceParams, TraceRay, TraceResult};
+use crate::brick_gpu::{GpuBrickAtlas, TraceCamera, TraceParams, TraceResult};
 use crate::brick_residency::{BRICK_EDGE, BrickCoord, QueueUpdate};
 pub use crate::clouds::VolumetricCloudConfig;
 use crate::clouds::VolumetricCloudGpu;
@@ -3051,8 +3051,7 @@ struct DirectBrickUpdate {
 }
 
 struct DirectTraversalProbe {
-    rays: Buffer,
-    ray_staging: Vec<TraceRay>,
+    camera: Buffer,
     _results: Buffer,
     params: Buffer,
     #[allow(dead_code)]
@@ -3064,10 +3063,15 @@ struct DirectTraversalProbe {
 
 impl DirectTraversalProbe {
     fn new(device: &Device, atlas: &GpuBrickAtlas) -> Self {
-        let rays = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("direct traversal probe ray"),
-            contents: &vec![0_u8; DIRECT_TRACE_RAY_COUNT as usize * size_of::<TraceRay>()],
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("direct traversal camera parameters"),
+            contents: bytemuck::bytes_of(&TraceCamera {
+                origin: [0.0; 4],
+                forward: [0.0, 0.0, -1.0, 0.0],
+                right: [1.0, 0.0, 0.0, 0.0],
+                up: [0.0, 1.0, 0.0, 0.0],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let results = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("direct traversal probe result"),
@@ -3104,8 +3108,13 @@ impl DirectTraversalProbe {
             view_formats: &[],
         });
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group =
-            atlas.create_traversal_bind_group(device, &rays, &results, &params, &output_view);
+        let bind_group = atlas.create_traversal_bind_group(
+            device,
+            &camera_buffer,
+            &results,
+            &params,
+            &output_view,
+        );
         let composite_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("direct traversal composite bindings"),
@@ -3149,14 +3158,7 @@ impl DirectTraversalProbe {
             ],
         });
         Self {
-            rays,
-            ray_staging: vec![
-                TraceRay {
-                    origin: [0.0; 4],
-                    direction: [0.0; 4]
-                };
-                DIRECT_TRACE_RAY_COUNT as usize
-            ],
+            camera: camera_buffer,
             _results: results,
             params,
             output_texture,
@@ -3177,23 +3179,16 @@ impl DirectTraversalProbe {
         let forward = camera.forward();
         let right = forward.cross(glam::Vec3::Y).normalize_or_zero();
         let up = right.cross(forward).normalize_or_zero();
-        let aspect = DIRECT_TRACE_WIDTH as f32 / DIRECT_TRACE_HEIGHT as f32;
-        let tan_half_fov = (68.0_f32.to_radians() * 0.5).tan();
-        for y in 0..DIRECT_TRACE_HEIGHT {
-            let ndc_y = 1.0 - ((y as f32 + 0.5) / DIRECT_TRACE_HEIGHT as f32) * 2.0;
-            for x in 0..DIRECT_TRACE_WIDTH {
-                let ndc_x = ((x as f32 + 0.5) / DIRECT_TRACE_WIDTH as f32) * 2.0 - 1.0;
-                let direction = (forward
-                    + right * (ndc_x * tan_half_fov * aspect)
-                    + up * (ndc_y * tan_half_fov))
-                    .normalize_or_zero();
-                self.ray_staging[(y * DIRECT_TRACE_WIDTH + x) as usize] = TraceRay {
-                    origin: [position.x, position.y, position.z, 0.0],
-                    direction: [direction.x, direction.y, direction.z, 0.0],
-                };
-            }
-        }
-        queue.write_buffer(&self.rays, 0, bytemuck::cast_slice(&self.ray_staging));
+        queue.write_buffer(
+            &self.camera,
+            0,
+            bytemuck::bytes_of(&TraceCamera {
+                origin: [position.x, position.y, position.z, 0.0],
+                forward: [forward.x, forward.y, forward.z, 0.0],
+                right: [right.x, right.y, right.z, 0.0],
+                up: [up.x, up.y, up.z, 0.0],
+            }),
+        );
         queue.write_buffer(
             &self.params,
             0,

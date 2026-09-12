@@ -14,6 +14,13 @@ struct TraceRay {
   direction: vec4<f32>,
 };
 
+struct TraceCamera {
+  origin: vec4<f32>,
+  forward: vec4<f32>,
+  right: vec4<f32>,
+  up: vec4<f32>,
+};
+
 struct TraceResult {
   voxel: vec4<i32>,
   material_distance: vec4<u32>,
@@ -30,7 +37,7 @@ struct TraceParams {
 
 @group(0) @binding(0) var<storage, read> brick_entries: array<BrickEntry>;
 @group(0) @binding(1) var<storage, read> brick_materials: array<u32>;
-@group(0) @binding(2) var<storage, read> rays: array<TraceRay>;
+@group(0) @binding(2) var<uniform> camera: TraceCamera;
 @group(0) @binding(3) var<storage, read_write> results: array<TraceResult>;
 @group(0) @binding(4) var<uniform> params: TraceParams;
 @group(0) @binding(5) var output_texture: texture_storage_2d<rgba8unorm, write>;
@@ -127,10 +134,22 @@ fn material_color(material: u32, normal: vec3<f32>) -> vec4<f32> {
 @compute @workgroup_size(64)
 fn trace_voxels(@builtin(global_invocation_id) invocation: vec3<u32>) {
   let ray_index = invocation.x;
-  if ray_index >= params.ray_count || ray_index >= arrayLength(&rays) || ray_index >= arrayLength(&results) {
+  if ray_index >= params.ray_count || ray_index >= arrayLength(&results) {
     return;
   }
-  let ray = rays[ray_index];
+  let pixel = vec2<u32>(ray_index % params.width, ray_index / params.width);
+  let ndc = vec2<f32>(
+    (f32(pixel.x) + 0.5) / f32(params.width) * 2.0 - 1.0,
+    1.0 - (f32(pixel.y) + 0.5) / f32(params.height) * 2.0,
+  );
+  let aspect = f32(params.width) / f32(params.height);
+  let tan_half_fov = tan(0.5934119);
+  let ray_direction = normalize(
+    camera.forward.xyz
+      + camera.right.xyz * (ndc.x * tan_half_fov * aspect)
+      + camera.up.xyz * (ndc.y * tan_half_fov),
+  );
+  let ray = TraceRay(camera.origin, vec4<f32>(ray_direction, 0.0));
   let direction_length = length(ray.direction.xyz);
   if !finite_vec3(ray.origin.xyz) || !finite_vec3(ray.direction.xyz)
       || !finite_f32(direction_length) || direction_length <= 0.000001
