@@ -1,10 +1,12 @@
-// Direct voxel traversal prototype. The host uploads one hash entry per resident brick and
-// packs four 8-bit material IDs into each material word. Missing entries are reported as unknown;
-// they are never treated as air while the world stream is incomplete.
+// Direct voxel traversal prototype. The host supplies a power-of-two hash table whose entries
+// point at the fixed-capacity material atlas. `metadata.w` is 1 for a resident empty brick and 2
+// for a resident brick containing material. Missing entries are reported as unknown; they are
+// never treated as air while the world stream is incomplete. The table is deliberately separate
+// from the linear atlas descriptor buffer so hash rebuilds can be measured independently.
 
 struct BrickEntry {
   coord: vec4<i32>,
-  slot_generation_flags: vec4<u32>,
+  metadata: vec4<u32>,
 };
 
 struct TraceRay {
@@ -56,12 +58,12 @@ fn find_brick(coord: vec3<i32>) -> vec2<u32> {
   for (var probe = 0u; probe < MAX_PROBES; probe += 1u) {
     let index = (start + probe) & params.hash_mask;
     let entry = brick_entries[index];
-    let slot = entry.slot_generation_flags.x;
+    let slot = entry.metadata.x;
     if slot == INVALID_SLOT {
       return vec2<u32>(INVALID_SLOT, 0u);
     }
     if all(entry.coord.xyz == coord) {
-      return vec2<u32>(slot, entry.slot_generation_flags.z);
+      return vec2<u32>(slot, entry.metadata.w);
     }
   }
   return vec2<u32>(INVALID_SLOT, 0u);
