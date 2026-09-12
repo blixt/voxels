@@ -300,6 +300,11 @@ authoritative voxels, every client converged, and the observer accepted the towe
 4,667.7 ms. This is evidence that the migration can coexist with mutable multiplayer publication;
 it is not evidence of full-resolution direct shading or 120 FPS.
 
+After adding traversal-derived face normals, directional shading, reusable CPU ray staging, and
+batched direct-brick eviction, a fresh run remained clean: **18.085 ms mean / 23.276 ms p95** frame
+time and **5.009 ms mean / 7.537 ms p95** GPU time. The multiplayer travel/edit run also passed with
+**4,702.8 ms** tower convergence at **109.712 m**, with zero browser or protocol-control errors.
+
 After the integrated path works, add bounded diffuse bounce lighting and then glass/reflection
 reconstruction. For Teardown-style physics, use body-local voxel volumes plus transforms and
 replicate motion separately from geometry edits/fracture. That is a substantial later simulation

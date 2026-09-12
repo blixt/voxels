@@ -54,7 +54,9 @@ pages; transparent misses and unknown bricks deliberately preserve mesh continui
 and shading are being expanded. `render/src/brick_hash.rs`
 owns the fixed-capacity host table and its transactional rebuild, so a failed publication cannot
 leave a partially indexed world. Successful ordinary canonical chunk publications now also enqueue
-their 8³ brick payloads into the atlas with bounded per-frame draining; staged publications remain
+their 8³ brick payloads into the atlas with bounded per-frame draining. Chunk removal batches
+descriptor invalidation and one hash rebuild, so travel cannot permanently exhaust direct residency;
+staged publications remain
 mesh-authoritative until their promotion policy is connected to traversal.
 Renderer diagnostics expose resident/pending brick counts and capacity drops so streaming runs can
 measure direct-path backpressure independently of mesh draw statistics. The bounded traversal image
