@@ -43,8 +43,11 @@ until benchmarks show generation or meshing is the frame-time bottleneck.
 `render/src/brick_residency.rs` is the first direct-traversal seam: it owns fixed-capacity 8³ material
 bricks, stable slot generations, coalesced revisions, bounded uploads, and a fail-closed DDA.
 `render/src/brick_gpu.rs` provides the matching bounded WGPU material atlas and descriptor table. The
-current frame path still consumes certified mesh pages; these modules are deliberately tested before
-their storage bindings and traversal shader replace page reconstruction.
+`render/src/shaders/brick_traversal.wgsl` now parses and validates with the same Naga validator used
+by the renderer. It defines a bounded compute DDA over a separate power-of-two hash table whose
+entries point into the atlas, including explicit unknown, empty, and hit results. The current frame
+path still consumes certified mesh pages; wiring the hash table and dispatch into a controlled visible
+slice remains a measured migration step rather than an assumed speedup.
 
 ## World representation
 
