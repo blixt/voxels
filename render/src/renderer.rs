@@ -3041,6 +3041,12 @@ struct PendingCanonicalWorldChange {
     uploads: Option<Vec<PreparedCanonicalChunkUpload>>,
 }
 
+struct DirectBrickUpdate {
+    coord: BrickCoord,
+    revision: u64,
+    payload: Arc<[u8]>,
+}
+
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChunkActivationReason {
@@ -4286,6 +4292,7 @@ pub struct Renderer {
     /// not replace this transaction until it promotes or fails.
     virtual_terrain_publication: Option<VirtualTerrainPublication>,
     pending_canonical_world_changes: BTreeMap<u64, PendingCanonicalWorldChange>,
+    pending_direct_brick_updates: BTreeMap<u64, Vec<DirectBrickUpdate>>,
     next_virtual_terrain_request: u64,
     /// An encode failure releases the transaction immediately, but expanded candidate geometry is
     /// reclaimed at the next streaming boundary rather than while frame draw lists borrow it.
@@ -5269,6 +5276,7 @@ impl Renderer {
             virtual_terrain_presented_invariant_failure_frames: 0,
             virtual_terrain_publication: None,
             pending_canonical_world_changes: BTreeMap::new(),
+            pending_direct_brick_updates: BTreeMap::new(),
             next_virtual_terrain_request: 1,
             virtual_terrain_publication_abort_pending: false,
             virtual_terrain_error_scale: 1.0,
@@ -7660,6 +7668,7 @@ impl Renderer {
         let revision_digest = publication.revisions.digest();
         let request = publication.request;
         let pending_canonical = std::mem::take(&mut self.pending_canonical_world_changes);
+        let pending_direct_bricks = std::mem::take(&mut self.pending_direct_brick_updates);
         for pending in pending_canonical.into_values() {
             let Some(uploads) = pending.uploads else {
                 unreachable!("ready admission requires every canonical epoch to be prepared")
@@ -7667,6 +7676,11 @@ impl Renderer {
             for upload in uploads {
                 self.commit_canonical_chunk_upload(upload);
             }
+        }
+        for update in pending_direct_bricks.into_values().flatten() {
+            let _ = self
+                .direct_brick_atlas
+                .queue_update(update.coord, update.revision, update.payload);
         }
         let committed =
             CommittedVirtualTerrainPresentation::from_publication(publication, generation);
@@ -8132,10 +8146,12 @@ impl Renderer {
                 self.discard_canonical_chunk_upload(upload);
             }
         }
+        self.pending_direct_brick_updates.remove(&server_revision);
         for key in prepared_keys {
             self.discard_pending_canonical_chunk_uploads(key, Some(server_revision));
         }
         let mut prepared = Vec::new();
+        let mut direct_bricks = Vec::new();
         for (chunk, mesh) in chunks {
             let Some(upload) = self.prepare_canonical_chunk_upload(chunk, mesh) else {
                 for upload in prepared {
@@ -8143,6 +8159,9 @@ impl Renderer {
                 }
                 return false;
             };
+            let revision = self.next_direct_brick_revision.max(1);
+            self.next_direct_brick_revision = self.next_direct_brick_revision.saturating_add(1);
+            direct_bricks.extend(self.build_direct_bricks(chunk, revision));
             prepared.push(upload);
         }
         let Some(pending) = self
@@ -8152,6 +8171,8 @@ impl Renderer {
             unreachable!("the staged revision was checked before preparation")
         };
         pending.uploads = Some(prepared);
+        self.pending_direct_brick_updates
+            .insert(server_revision, direct_bricks);
         true
     }
 
@@ -8168,10 +8189,12 @@ impl Renderer {
                 self.discard_canonical_chunk_upload(upload);
             }
         }
+        self.pending_direct_brick_updates.remove(&server_revision);
     }
 
     fn discard_all_pending_canonical_world_changes(&mut self) {
         let pending = std::mem::take(&mut self.pending_canonical_world_changes);
+        self.pending_direct_brick_updates.clear();
         for change in pending.into_values() {
             if let Some(uploads) = change.uploads {
                 for upload in uploads {
@@ -8228,9 +8251,10 @@ impl Renderer {
         true
     }
 
-    fn queue_direct_bricks(&mut self, chunk: &Chunk, revision: u64) {
+    fn build_direct_bricks(&self, chunk: &Chunk, revision: u64) -> Vec<DirectBrickUpdate> {
         let revision = revision.max(1);
         let chunk_coord = chunk.coord();
+        let mut updates = Vec::with_capacity(64);
         for by in 0..(CHUNK_EDGE / BRICK_EDGE as usize) {
             for bz in 0..(CHUNK_EDGE / BRICK_EDGE as usize) {
                 for bx in 0..(CHUNK_EDGE / BRICK_EDGE as usize) {
@@ -8254,11 +8278,24 @@ impl Renderer {
                         chunk_coord.z * (CHUNK_EDGE / BRICK_EDGE as usize) as i32 + bz as i32,
                     );
                     let payload = Arc::<[u8]>::from(payload);
-                    // A full atlas or stale revision is expected during bounded migration; the
-                    // certified mesh path remains the source of truth until residency catches up.
-                    let _ = self.direct_brick_atlas.queue_update(coord, revision, payload);
+                    updates.push(DirectBrickUpdate {
+                        coord,
+                        revision,
+                        payload,
+                    });
                 }
             }
+        }
+        updates
+    }
+
+    fn queue_direct_bricks(&mut self, chunk: &Chunk, revision: u64) {
+        for update in self.build_direct_bricks(chunk, revision) {
+            // A full atlas or stale revision is expected during bounded migration; the certified
+            // mesh path remains the source of truth until residency catches up.
+            let _ = self
+                .direct_brick_atlas
+                .queue_update(update.coord, update.revision, update.payload);
         }
     }
 
