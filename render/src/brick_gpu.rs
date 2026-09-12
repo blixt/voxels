@@ -9,7 +9,7 @@ use wgpu::{Buffer, BufferUsages, Device, Queue};
 use crate::brick_residency::{
     BRICK_VOXEL_COUNT, BrickCoord, BrickResidency, BrickUpload, QueueUpdate,
 };
-use crate::brick_hash::{BrickHashTable, GpuBrickHashEntry};
+use crate::brick_hash::{BrickHashItem, BrickHashTable, GpuBrickHashEntry};
 
 pub const GPU_BRICK_DESCRIPTOR_WORDS: usize = 8;
 pub const GPU_BRICK_DESCRIPTOR_BYTES: u64 = (GPU_BRICK_DESCRIPTOR_WORDS * size_of::<u32>()) as u64;
@@ -21,6 +21,7 @@ pub struct GpuBrickAtlas {
     descriptor_buffer: Buffer,
     hash_buffer: Buffer,
     hash_capacity: u32,
+    hash_table: BrickHashTable,
 }
 
 impl GpuBrickAtlas {
@@ -76,6 +77,8 @@ impl GpuBrickAtlas {
             descriptor_buffer,
             hash_buffer,
             hash_capacity,
+            hash_table: BrickHashTable::new(hash_capacity)
+                .expect("derived GPU brick hash capacity is a power of two"),
         })
     }
 
@@ -119,6 +122,7 @@ impl GpuBrickAtlas {
                 bytemuck::cast_slice(&upload.descriptor_words()),
             );
         }
+        self.refresh_hash_table(queue);
         uploads.len()
     }
 
@@ -133,7 +137,9 @@ impl GpuBrickAtlas {
             u64::from(address.slot) * GPU_BRICK_DESCRIPTOR_BYTES,
             &[0; GPU_BRICK_DESCRIPTOR_WORDS * size_of::<u32>()],
         );
-        self.residency.evict(coord)
+        let evicted = self.residency.evict(coord);
+        self.refresh_hash_table(queue);
+        evicted
     }
 
     pub fn material_buffer(&self) -> &Buffer {
@@ -164,6 +170,26 @@ impl GpuBrickAtlas {
         }
         queue.write_buffer(&self.hash_buffer, 0, bytemuck::cast_slice(table.entries()));
         Ok(())
+    }
+
+    fn refresh_hash_table(&mut self, queue: &Queue) {
+        let items = self
+            .residency
+            .resident_bricks()
+            .into_iter()
+            .map(|(coord, address, non_empty)| BrickHashItem {
+                coord,
+                address,
+                non_empty,
+            });
+        self.hash_table
+            .rebuild(items)
+            .expect("GPU brick hash table capacity must accommodate residency");
+        queue.write_buffer(
+            &self.hash_buffer,
+            0,
+            bytemuck::cast_slice(self.hash_table.entries()),
+        );
     }
 }
 

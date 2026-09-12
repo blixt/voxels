@@ -174,6 +174,15 @@ impl BrickResidency {
             .or_else(|| self.pending.get(&coord).map(|pending| pending.revision))
     }
 
+    /// Returns the current resident addresses and their occupancy flags for building a GPU
+    /// spatial index. The returned snapshot is bounded by the fixed residency capacity.
+    pub fn resident_bricks(&self) -> Vec<(BrickCoord, BrickAddress, bool)> {
+        self.residents
+            .iter()
+            .map(|(&coord, resident)| (coord, resident.address, resident.non_empty))
+            .collect()
+    }
+
     /// Samples a resident voxel using the canonical x + z*edge + y*edge² layout. Missing bricks
     /// return `None`; this distinction is required by a renderer that must fail closed while
     /// streaming.
