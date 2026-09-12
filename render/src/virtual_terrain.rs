@@ -156,7 +156,7 @@ pub struct PresentationEnvelope {
     data: Arc<PresentationEnvelopeData>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct PresentationEnvelopeData {
     locus: Option<PresentationLocus>,
     exact_surface_domain: ExactSurfaceDomain,
@@ -260,6 +260,43 @@ impl PresentationEnvelope {
 
     pub fn exact_surface_domain(&self) -> &ExactSurfaceDomain {
         &self.data.exact_surface_domain
+    }
+
+    /// Returns an envelope whose exact cut also owns a bounded set of authored leaves. Horizon
+    /// ownership stays unchanged; only the finite exact proof and its identity expand.
+    pub fn with_additional_exact_leaves(
+        &self,
+        additional: impl IntoIterator<Item = TerrainPageKey>,
+        max_required_leaves: usize,
+    ) -> Self {
+        let exact_surface_domain = self
+            .data
+            .exact_surface_domain
+            .with_additional_leaves(additional, max_required_leaves);
+        if exact_surface_domain == self.data.exact_surface_domain {
+            return self.clone();
+        }
+        let mut fingerprint = FINGERPRINT_OFFSET;
+        if let Some(locus) = self.data.locus {
+            for coordinate in locus
+                .minimum_leaf
+                .into_iter()
+                .chain(locus.maximum_leaf_exclusive)
+            {
+                fingerprint = fingerprint_value(fingerprint, coordinate as u32 as u64);
+            }
+        }
+        fingerprint = fingerprint_value(fingerprint, exact_surface_domain.fingerprint());
+        for root in &self.data.horizon_roots {
+            fingerprint = fingerprint_page_key(fingerprint, *root);
+        }
+        Self {
+            data: Arc::new(PresentationEnvelopeData {
+                exact_surface_domain,
+                fingerprint,
+                ..(*self.data).clone()
+            }),
+        }
     }
 
     pub fn required_horizon_roots(&self) -> impl Iterator<Item = TerrainPageKey> + '_ {
@@ -726,6 +763,30 @@ impl ExactSurfaceDomain {
                 .ancestors_by_level
                 .get(usize::from(key.level))
                 .is_some_and(|pages| pages.contains(&key))
+    }
+
+    /// Extends the exact proof with a bounded set of externally authored leaves. Remote edits use
+    /// this path so they refine through the same cut machinery as player movement.
+    pub fn with_additional_leaves(
+        &self,
+        additional: impl IntoIterator<Item = TerrainPageKey>,
+        max_required_leaves: usize,
+    ) -> Self {
+        if !self.is_complete() || max_required_leaves == 0 {
+            return self.clone();
+        }
+        let mut core = self.data.core_required_leaves.clone();
+        let mut required = self.data.required_leaves.clone();
+        for leaf in additional {
+            if leaf.level == 0 && leaf.is_surface() {
+                core.insert(leaf);
+                required.insert(leaf);
+            }
+        }
+        if required.len() > max_required_leaves {
+            return self.clone();
+        }
+        Self::from_parts(core, Some(required))
     }
 
     /// Clones share immutable enumeration storage. This is exposed for cache invariant tests.
@@ -5200,6 +5261,30 @@ mod tests {
         assert!(cut.selected_pages.iter().all(|key| key.level == 0));
         assert!(cut.requested_pages.is_empty());
         assert!(cut.covers_exact_surface_domain(&exact_domain));
+    }
+
+    #[test]
+    fn authored_exact_leaves_join_the_same_bounded_surface_proof() {
+        let base = ExactSurfaceDomain::swept_horizontal_capsule(
+            [0.25, 7.0, 0.5],
+            [0.25, 7.0, 0.5],
+            0.0,
+            16,
+        );
+        let authored = TerrainPageKey::surface(0, 3, 4);
+        let expanded = base.with_additional_leaves([authored], 16);
+        assert!(expanded.is_complete());
+        assert!(expanded.intersects_page(authored));
+        assert!(expanded.required_leaves().any(|key| key == authored));
+
+        let capped = base.with_additional_leaves(
+            [
+                TerrainPageKey::surface(0, 3, 4),
+                TerrainPageKey::surface(0, 5, 6),
+            ],
+            1,
+        );
+        assert!(!capped.intersects_page(authored));
     }
 
     #[test]

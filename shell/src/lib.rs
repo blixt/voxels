@@ -1508,6 +1508,8 @@ mod web {
     const VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME: usize = TERRAIN_PAGE_MAX_CHILDREN * 2;
     const VIRTUAL_TERRAIN_CACHE_UPLOAD_BYTES_PER_FRAME: usize = 8 * 1_024 * 1_024;
     const VIRTUAL_TERRAIN_CACHE_UPLOAD_CPU_MS: f64 = 2.0;
+    const EDIT_INTEREST_TTL_MS: u64 = 15_000;
+    const EDIT_INTEREST_MAX_CHUNKS: usize = 32;
     // Mandatory ownership work uses the same two-group microbatch as cache admission. This covers
     // both startup and travel after the desired exact envelope leaves the committed one; forcing
     // those handoffs through the optional one-page throttle makes an already-resident complete cut
@@ -2170,6 +2172,9 @@ mod web {
         render_milliseconds: Cell<f32>,
         frame_history: RefCell<FrameHistory>,
         edit_trackers: RefCell<VecDeque<EditTracker>>,
+        // Recently changed chunks remain a bounded secondary interest so a distant observer can
+        // obtain the authoritative edited volume and render it while far LOD catches up.
+        edit_interest: RefCell<BTreeMap<ChunkCoord, u64>>,
         edit_last_ms: Cell<f32>,
         enclosure: Cell<EnclosureSample>,
         directional_light_occluded: Cell<bool>,
@@ -3132,10 +3137,24 @@ mod web {
             let demand_streaming_velocity = spatial_demand_camera
                 .map(|camera| camera.velocity)
                 .unwrap_or(source_streaming_velocity);
+            let authored_leaves = self
+                .edit_interest
+                .borrow()
+                .keys()
+                .map(|coord| TerrainPageKey::surface(0, coord.x, coord.z))
+                .collect::<BTreeSet<_>>();
             let prediction_domain = self
-                .virtual_terrain_exact_surface_domain(&demand_camera, demand_streaming_velocity);
-            let presentation_envelope =
-                self.virtual_terrain_presentation_envelope(presentation_target_position);
+                .virtual_terrain_exact_surface_domain(&demand_camera, demand_streaming_velocity)
+                .with_additional_leaves(
+                    authored_leaves.iter().copied(),
+                    VIRTUAL_TERRAIN_MAX_EXACT_DOMAIN_LEAVES,
+                );
+            let presentation_envelope = self
+                .virtual_terrain_presentation_envelope(presentation_target_position)
+                .with_additional_exact_leaves(
+                    authored_leaves.iter().copied(),
+                    VIRTUAL_TERRAIN_MAX_EXACT_DOMAIN_LEAVES,
+                );
             self.renderer
                 .borrow_mut()
                 .begin_virtual_terrain_presentation_envelope(
@@ -3597,6 +3616,12 @@ mod web {
             // resident.
             let mut urgent_interest = collision_interest.clone();
             urgent_interest.extend(enclosed_view_interest.iter().copied());
+            let now_ms = self.last_time.get().max(0.0) as u64;
+            {
+                let mut edit_interest = self.edit_interest.borrow_mut();
+                edit_interest.retain(|_, expires_at| *expires_at > now_ms);
+                urgent_interest.extend(edit_interest.keys().copied());
+            }
             urgent_interest.sort_unstable_by_key(|coord| (coord.x, coord.y, coord.z));
             urgent_interest.dedup();
             let priority_hint = directional_stream_priority(
@@ -5990,7 +6015,20 @@ mod web {
                     scheduler.desired_chunk_renderable(coord)
                 })
             };
-            let interaction = complete_interest(collision_interest);
+            let edit_interest = self
+                .edit_interest
+                .borrow()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            let mut interaction = complete_interest(collision_interest);
+            // Edited far chunks are exact secondary interest, even when their neighboring Y
+            // siblings are outside the collision cylinder. This keeps a remote placement visible
+            // without promoting an entire vertical column to gameplay residency.
+            interaction.extend(crate::renderable_exact_interest_chunks(
+                &edit_interest,
+                |coord| scheduler.desired_chunk_renderable(coord),
+            ));
             // Exact cave/tunnel chunks supplement the surface hierarchy independently in 3D.
             // Do not apply the surface cut's all-Y-siblings rule here: portal discovery can add a
             // pending chunk to an already visible column, and that must not revoke its ready wall.
@@ -6458,6 +6496,27 @@ mod web {
                 .zip(apply_values)
                 .filter_map(|(mutation, apply)| apply.then_some(mutation))
                 .collect::<Vec<_>>();
+            if !accepted_mutations.is_empty() {
+                let expires_at =
+                    self.last_time.get().max(0.0).round() as u64 + EDIT_INTEREST_TTL_MS;
+                let mut edit_interest = self.edit_interest.borrow_mut();
+                for coord in accepted_mutations
+                    .iter()
+                    .flat_map(|mutation| EditMap::affected_chunks(mutation.coord))
+                {
+                    edit_interest.insert(coord, expires_at);
+                }
+                while edit_interest.len() > EDIT_INTEREST_MAX_CHUNKS {
+                    let Some(oldest) = edit_interest
+                        .iter()
+                        .min_by_key(|(_, expires_at)| *expires_at)
+                        .map(|(coord, _)| *coord)
+                    else {
+                        break;
+                    };
+                    edit_interest.remove(&oldest);
+                }
+            }
             {
                 let mut edits = self.edits.borrow_mut();
                 let changes = accepted_mutations
@@ -8122,6 +8181,7 @@ mod web {
             render_milliseconds: Cell::new(0.0),
             frame_history: RefCell::new(FrameHistory::new()),
             edit_trackers: RefCell::new(VecDeque::new()),
+            edit_interest: RefCell::new(BTreeMap::new()),
             edit_last_ms: Cell::new(0.0),
             enclosure: Cell::new(EnclosureSample::OPEN),
             directional_light_occluded: Cell::new(false),
