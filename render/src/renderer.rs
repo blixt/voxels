@@ -1,6 +1,8 @@
 use crate::ambient_occlusion::AmbientOcclusionGpu;
 use crate::arena::{Allocation, ArenaAllocator};
 use crate::avatar::AvatarGpu;
+use crate::brick_gpu::GpuBrickAtlas;
+use crate::brick_residency::{BRICK_EDGE, BrickCoord};
 pub use crate::clouds::VolumetricCloudConfig;
 use crate::clouds::VolumetricCloudGpu;
 use crate::environment::{
@@ -82,6 +84,8 @@ const PLACEMENT_MATERIALS: [Material; Material::ALL.len() - 1] = [
 ];
 const MATERIAL_WHEEL_SLOTS: usize = 10;
 const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
+const DIRECT_BRICK_ATLAS_CAPACITY: u32 = 4096;
+const DIRECT_BRICK_UPLOADS_PER_FRAME: usize = 16;
 // Immutable virtual-page geometry is the durable render representation. Two independently
 // bindable segments stay below WebGPU's common 128 MiB storage-binding ceiling while reserving
 // enough transition headroom to stage a maximum complete child group beside the published cut.
@@ -4250,6 +4254,8 @@ pub struct Renderer {
     frame_buffer: Buffer,
     frame_bind_group: BindGroup,
     local_light_buffer: Buffer,
+    direct_brick_atlas: GpuBrickAtlas,
+    next_direct_brick_revision: u64,
     material_detail: MaterialDetailGpu,
     chunks: BTreeMap<MeshKey, ChunkMesh>,
     water_chunks: BTreeMap<MeshKey, ChunkMesh>,
@@ -4770,6 +4776,8 @@ impl Renderer {
             contents: bytemuck::bytes_of(&LocalLightUniform::default()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let direct_brick_atlas = GpuBrickAtlas::new(&device, DIRECT_BRICK_ATLAS_CAPACITY)
+            .map_err(|error| format!("direct voxel brick atlas: {error}"))?;
         let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("frame layout"),
             entries: &[
@@ -5238,6 +5246,8 @@ impl Renderer {
             frame_buffer,
             frame_bind_group,
             local_light_buffer,
+            direct_brick_atlas,
+            next_direct_brick_revision: 1,
             material_detail,
             chunks: BTreeMap::new(),
             water_chunks: BTreeMap::new(),
@@ -8196,8 +8206,9 @@ impl Renderer {
         &mut self,
         chunks: impl IntoIterator<Item = (&'a Chunk, &'a MeshedChunk)>,
     ) -> bool {
+        let chunks = chunks.into_iter().collect::<Vec<_>>();
         let mut prepared = Vec::new();
-        for (chunk, mesh) in chunks {
+        for (chunk, mesh) in &chunks {
             let Some(upload) = self.prepare_canonical_chunk_upload(chunk, mesh) else {
                 for upload in prepared {
                     self.discard_canonical_chunk_upload(upload);
@@ -8206,10 +8217,49 @@ impl Renderer {
             };
             prepared.push(upload);
         }
+        for (chunk, _mesh) in chunks {
+            let revision = self.next_direct_brick_revision.max(1);
+            self.next_direct_brick_revision = self.next_direct_brick_revision.saturating_add(1);
+            self.queue_direct_bricks(chunk, revision);
+        }
         for upload in prepared {
             self.commit_canonical_chunk_upload(upload);
         }
         true
+    }
+
+    fn queue_direct_bricks(&mut self, chunk: &Chunk, revision: u64) {
+        let revision = revision.max(1);
+        let chunk_coord = chunk.coord();
+        for by in 0..(CHUNK_EDGE / BRICK_EDGE as usize) {
+            for bz in 0..(CHUNK_EDGE / BRICK_EDGE as usize) {
+                for bx in 0..(CHUNK_EDGE / BRICK_EDGE as usize) {
+                    let mut payload = vec![0_u8; (BRICK_EDGE * BRICK_EDGE * BRICK_EDGE) as usize];
+                    for y in 0..BRICK_EDGE as usize {
+                        for z in 0..BRICK_EDGE as usize {
+                            for x in 0..BRICK_EDGE as usize {
+                                let source_x = bx * BRICK_EDGE as usize + x;
+                                let source_y = by * BRICK_EDGE as usize + y;
+                                let source_z = bz * BRICK_EDGE as usize + z;
+                                let destination = x
+                                    + z * BRICK_EDGE as usize
+                                    + y * BRICK_EDGE as usize * BRICK_EDGE as usize;
+                                payload[destination] = chunk.get(source_x, source_y, source_z).id() as u8;
+                            }
+                        }
+                    }
+                    let coord = BrickCoord::new(
+                        chunk_coord.x * (CHUNK_EDGE / BRICK_EDGE as usize) as i32 + bx as i32,
+                        chunk_coord.y * (CHUNK_EDGE / BRICK_EDGE as usize) as i32 + by as i32,
+                        chunk_coord.z * (CHUNK_EDGE / BRICK_EDGE as usize) as i32 + bz as i32,
+                    );
+                    let payload = Arc::<[u8]>::from(payload);
+                    // A full atlas or stale revision is expected during bounded migration; the
+                    // certified mesh path remains the source of truth until residency catches up.
+                    let _ = self.direct_brick_atlas.queue_update(coord, revision, payload);
+                }
+            }
+        }
     }
 
     fn prepare_canonical_chunk_upload(
@@ -8610,6 +8660,8 @@ impl Renderer {
         }
         let camera = &camera;
         let dt = bounded_frame_delta(dt);
+        self.direct_brick_atlas
+            .flush(&self.queue, DIRECT_BRICK_UPLOADS_PER_FRAME);
         let reproduction_active = self
             .presented_client_view
             .as_ref()

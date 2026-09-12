@@ -50,7 +50,9 @@ entries point into the atlas, including explicit unknown, empty, and hit results
 path still consumes certified mesh pages; wiring the hash table and dispatch into a controlled visible
 slice remains a measured migration step rather than an assumed speedup. `render/src/brick_hash.rs`
 owns the fixed-capacity host table and its transactional rebuild, so a failed publication cannot
-leave a partially indexed world.
+leave a partially indexed world. Successful ordinary canonical chunk publications now also enqueue
+their 8³ brick payloads into the atlas with bounded per-frame draining; staged publications remain
+mesh-authoritative until their promotion policy is connected to traversal.
 
 ## World representation
 
