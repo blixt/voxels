@@ -1499,7 +1499,10 @@ mod web {
     const VIRTUAL_TERRAIN_REGION_WORKING_SET: usize = 128;
     const VIRTUAL_TERRAIN_MAX_DIRECTORY_BATCHES_IN_FLIGHT: usize = 2;
     const VIRTUAL_TERRAIN_MAX_REFINEMENT_DIRECTORY_BATCHES_IN_FLIGHT: usize = 2;
-    const VIRTUAL_TERRAIN_PAGE_COMPLETIONS_PER_FRAME: usize = 1;
+    // Page completions are metadata/cache admission; GPU ownership remains bounded by the
+    // upload microbatch below. Drain a small burst so a single edit can advance its refinement
+    // chain without imposing one network round trip per rendered frame.
+    const VIRTUAL_TERRAIN_PAGE_COMPLETIONS_PER_FRAME: usize = 8;
     // A microbatch can admit two adjacent surface replacement groups before choosing one balanced
     // cut. This avoids publishing the first group only to coarsen it when its neighbor arrives.
     const VIRTUAL_TERRAIN_CACHE_UPLOADS_PER_FRAME: usize = TERRAIN_PAGE_MAX_CHILDREN * 2;
