@@ -28,6 +28,7 @@ export interface PlayerPresentationTraceFrame {
   readonly streamMs: number;
   readonly renderMs: number;
   readonly gpuTotalMs: number;
+  readonly gpuDirectTraversalMs: number;
   readonly coreGpuMiB: number;
   readonly camera: readonly [number, number, number];
   readonly terrainReady: boolean;
@@ -193,6 +194,7 @@ function traceFrame(
     streamMs: snapshotValue(snapshot, "streamMs"),
     renderMs: snapshotValue(snapshot, "renderMs"),
     gpuTotalMs: snapshotValue(snapshot, "gpuTotalMs"),
+    gpuDirectTraversalMs: snapshotValue(snapshot, "gpuDirectTraversalMs"),
     coreGpuMiB: snapshotValue(snapshot, "coreGpuMiB"),
     camera: [
       snapshotValue(snapshot, "cameraX"),

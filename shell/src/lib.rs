@@ -1448,16 +1448,16 @@ mod web {
 
     const FRAME_HISTORY_CAPACITY: usize = 512;
     const AUTOMATION_CONTRACT_VERSION: u32 = 8;
-    const SNAPSHOT_SCHEMA_VERSION: u32 = 61;
+    const SNAPSHOT_SCHEMA_VERSION: u32 = 62;
     const FRAME_SAMPLE_WIDTH: u32 = 22;
-    const GPU_SAMPLE_WIDTH: u32 = 15;
+    const GPU_SAMPLE_WIDTH: u32 = 16;
     const SNAPSHOT_FIELD_NAMES: &str = concat!(
         "cameraX,cameraY,cameraZ,gameplayBodyX,gameplayBodyY,gameplayBodyZ,yaw,pitch,grounded,quads,edits,",
         "residentChunks,trackedChunks,visibleChunks,drawCalls,arenaPages,arenaAllocatedMiB,arenaCapacityMiB,pendingJobs,",
         "frameMs,shadowDrawCalls,shadowCascades,loadP95Frames,loadMaxFrames,remeshP95Frames,remeshMaxFrames,waterQuads,",
         "waterDrawCalls,refractionCopyMiB,immersion,eyeDepthMetres,eyesSubmerged,swimming,targetVoxelX,targetVoxelY,",
         "targetVoxelZ,targetPresent,coreGpuMiB,cpuMs,simulationMs,streamMs,renderMs,gpuSampleId,",
-        "gpuTotalMs,gpuShadowMs,gpuWorldMs,gpuWaterMs,gpuUiMs,wasmCommittedMiB,canonicalVoxelMiB,pendingMeshMiB,",
+        "gpuTotalMs,gpuShadowMs,gpuWorldMs,gpuWaterMs,gpuUiMs,gpuDirectTraversalMs,wasmCommittedMiB,canonicalVoxelMiB,pendingMeshMiB,",
         "editLogicalMiB,totalEvictions,staleCompletions,profilePhase,profileElapsedSeconds,profileDistanceMetres,profileComplete,profileTrackedHigh,",
         "profilePendingHigh,profilePendingMeshHigh,profileArenaCapacityHighMiB,profileWasmHighMiB,profileEvictions,materialDetail,daylightPhase,surfaceRegion,",
         "cloudCoverage,screenSpaceAmbientOcclusion,gpuDepthPrepassMs,gpuAmbientOcclusionMs,ambientOcclusionMiB,depthPrepassDrawCalls,enclosure,interiorExposure,",
@@ -7485,6 +7485,7 @@ mod web {
                     render.gpu_world_ms.unwrap_or(-1.0),
                     render.gpu_water_ms.unwrap_or(-1.0),
                     render.gpu_ui_ms.unwrap_or(-1.0),
+                    render.gpu_direct_traversal_ms.unwrap_or(-1.0),
                     wasm_committed_bytes() as f32 / (1024.0 * 1024.0),
                     canonical_voxel_bytes as f32 / (1024.0 * 1024.0),
                     pending_mesh_bytes as f32 / (1024.0 * 1024.0),
@@ -7833,6 +7834,7 @@ mod web {
                         sample.ui_ms,
                         sample.virtual_terrain_snapshot_encode_ms,
                         sample.virtual_terrain_snapshot_validation_ms,
+                        sample.direct_traversal_ms,
                     ]);
                 }
             }

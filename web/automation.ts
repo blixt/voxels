@@ -1,9 +1,9 @@
 import type { BrowserPlayerSession } from "./local-player.ts";
 
 export const AUTOMATION_CONTRACT_VERSION = 8;
-export const SNAPSHOT_SCHEMA_VERSION = 61;
+export const SNAPSHOT_SCHEMA_VERSION = 62;
 export const FRAME_SAMPLE_WIDTH = 22;
-export const GPU_SAMPLE_WIDTH = 15;
+export const GPU_SAMPLE_WIDTH = 16;
 
 // This map is the compact Rust snapshot ABI. Scenario code imports it from the typed engine
 // capability; it must not maintain private numeric indices.
@@ -56,6 +56,7 @@ export const SNAPSHOT_FIELD_NAMES = [
   "gpuWorldMs",
   "gpuWaterMs",
   "gpuUiMs",
+  "gpuDirectTraversalMs",
   "wasmCommittedMiB",
   "canonicalVoxelMiB",
   "pendingMeshMiB",

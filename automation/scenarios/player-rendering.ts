@@ -1449,6 +1449,13 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
             .filter((value) => Number.isFinite(value) && value > 0),
           3,
         ),
+        browserDirectTraversalGpuTiming: numericSummary(
+          recorder
+            .trace()
+            .map((frame) => frame.gpuDirectTraversalMs)
+            .filter((value) => Number.isFinite(value) && value > 0),
+          3,
+        ),
         peakCoreGpuMiB: Math.max(...recorder.trace().map((frame) => frame.coreGpuMiB)),
         freshSpectatorTravelMetres: freshSpectatorMotion.distanceMetres,
         freshSpectatorLongestNoProgressMs: freshSpectatorMotion.longestNoProgressMs,
