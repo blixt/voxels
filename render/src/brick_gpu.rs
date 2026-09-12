@@ -9,6 +9,7 @@ use wgpu::{Buffer, BufferUsages, Device, Queue};
 use crate::brick_residency::{
     BRICK_VOXEL_COUNT, BrickCoord, BrickResidency, BrickUpload, QueueUpdate,
 };
+use crate::brick_hash::{BrickHashTable, GpuBrickHashEntry};
 
 pub const GPU_BRICK_DESCRIPTOR_WORDS: usize = 8;
 pub const GPU_BRICK_DESCRIPTOR_BYTES: u64 = (GPU_BRICK_DESCRIPTOR_WORDS * size_of::<u32>()) as u64;
@@ -18,6 +19,8 @@ pub struct GpuBrickAtlas {
     residency: BrickResidency,
     material_buffer: Buffer,
     descriptor_buffer: Buffer,
+    hash_buffer: Buffer,
+    hash_capacity: u32,
 }
 
 impl GpuBrickAtlas {
@@ -31,12 +34,21 @@ impl GpuBrickAtlas {
         let descriptor_size = u64::from(capacity)
             .checked_mul(GPU_BRICK_DESCRIPTOR_BYTES)
             .ok_or_else(|| "GPU brick descriptor buffer size overflowed".to_owned())?;
+        let hash_capacity = capacity
+            .checked_next_power_of_two()
+            .ok_or_else(|| "GPU brick hash capacity overflowed".to_owned())?
+            .checked_mul(2)
+            .ok_or_else(|| "GPU brick hash capacity overflowed".to_owned())?;
+        let hash_size = u64::from(hash_capacity)
+            .checked_mul(size_of::<GpuBrickHashEntry>() as u64)
+            .ok_or_else(|| "GPU brick hash buffer size overflowed".to_owned())?;
         let limits = device.limits();
         if material_size > limits.max_storage_buffer_binding_size as u64
             || descriptor_size > limits.max_storage_buffer_binding_size as u64
+            || hash_size > limits.max_storage_buffer_binding_size as u64
         {
             return Err(format!(
-                "GPU brick atlas exceeds storage binding limit: material={material_size}, descriptors={descriptor_size}, limit={}",
+                "GPU brick atlas exceeds storage binding limit: material={material_size}, descriptors={descriptor_size}, hash={hash_size}, limit={}",
                 limits.max_storage_buffer_binding_size
             ));
         }
@@ -52,10 +64,18 @@ impl GpuBrickAtlas {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let hash_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("direct voxel brick hash table"),
+            size: hash_size,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Ok(Self {
             residency: BrickResidency::new(capacity),
             material_buffer,
             descriptor_buffer,
+            hash_buffer,
+            hash_capacity,
         })
     }
 
@@ -122,6 +142,28 @@ impl GpuBrickAtlas {
 
     pub fn descriptor_buffer(&self) -> &Buffer {
         &self.descriptor_buffer
+    }
+
+    pub const fn hash_capacity(&self) -> u32 {
+        self.hash_capacity
+    }
+
+    pub fn hash_buffer(&self) -> &Buffer {
+        &self.hash_buffer
+    }
+
+    /// Uploads a complete, bounded hash-table snapshot. The caller chooses when to rebuild and
+    /// can keep the previous table active until this queue write is ordered before dispatch.
+    pub fn upload_hash_table(&self, queue: &Queue, table: &BrickHashTable) -> Result<(), String> {
+        if table.capacity() != self.hash_capacity {
+            return Err(format!(
+                "brick hash capacity {} does not match atlas capacity {}",
+                table.capacity(),
+                self.hash_capacity
+            ));
+        }
+        queue.write_buffer(&self.hash_buffer, 0, bytemuck::cast_slice(table.entries()));
+        Ok(())
     }
 }
 
