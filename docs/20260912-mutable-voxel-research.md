@@ -323,6 +323,13 @@ changed pixels. Treat multiplayer visual convergence as unresolved until the scr
 far-LOD publication timing is made deterministic; authoritative edit convergence alone is not
 enough evidence.
 
+The gate was then made deterministic by waiting for the renderer's presented immutable cut to
+match the current cut, with zero coverage-gap and presentation-invariant failure frames, before
+capturing the comparison screenshot. The next six-client run passed: five builders placed 5,000
+authoritative voxels, all clients converged, the far observer was 109.7 m away, the tower produced
+164 changed pixels, and browser/protocol errors were zero. This fixes measurement synchronization;
+it does not claim that far-LOD publication latency is optimal.
+
 ## Older references retained for specific reasons
 
 - [HashDAG (2020)](https://github.com/Phyronnaz/HashDAG) and
