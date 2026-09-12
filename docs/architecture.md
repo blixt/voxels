@@ -48,17 +48,20 @@ power-of-two hash-table storage buffer, plus the compute pipeline and bind-group
 validated traversal shader and typed ray/parameter dispatch API. The
 `render/src/shaders/brick_traversal.wgsl` now parses and validates with the same Naga validator used
 by the renderer. It defines a bounded compute DDA over a separate power-of-two hash table whose
-entries point into the atlas, including explicit unknown, empty, and hit results. The current frame
-path still consumes certified mesh pages; wiring the hash table and dispatch into a controlled visible
-slice remains a measured migration step rather than an assumed speedup. `render/src/brick_hash.rs`
+entries point into the atlas, including explicit unknown, empty, and hit results. The frame path now
+dispatches a controlled 160x90 traversal image and composites resident hits over the certified mesh
+pages; transparent misses and unknown bricks deliberately preserve mesh continuity while residency
+and shading are being expanded. `render/src/brick_hash.rs`
 owns the fixed-capacity host table and its transactional rebuild, so a failed publication cannot
 leave a partially indexed world. Successful ordinary canonical chunk publications now also enqueue
 their 8³ brick payloads into the atlas with bounded per-frame draining; staged publications remain
 mesh-authoritative until their promotion policy is connected to traversal.
 Renderer diagnostics expose resident/pending brick counts and capacity drops so streaming runs can
-measure direct-path backpressure independently of mesh draw statistics. A one-ray probe dispatch now
-runs in the frame encoder, exercising device traversal ordering without changing visible pixels;
-its dispatch count is also reported for validation.
+measure direct-path backpressure independently of mesh draw statistics. The bounded traversal image
+uses CPU-generated camera rays and a storage texture, then samples that texture in a fullscreen
+composite pass. It is intentionally a migration slice: material palette shading is present, while
+normal reconstruction, temporal reuse, and full-resolution ray generation remain future measured
+stages rather than implicit claims of 1080p/120 FPS readiness.
 
 ## World representation
 

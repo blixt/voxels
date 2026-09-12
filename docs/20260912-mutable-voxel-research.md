@@ -289,6 +289,17 @@ missed presentation frames under sustained editing. A loading screenshot, a fast
 or a one-ninth-pixel image is not achievement of that target. These are acceptance requirements,
 not performance claims for code not yet built.
 
+## Integrated browser evidence (12 September 2026)
+
+Main now has a bounded direct-traversal slice rather than a dispatch-only probe. Chrome
+**153.0.8010.37** on an Apple M3 Max generated a 160x90 camera-ray image from resident 8³ bricks,
+composited over the certified mesh/page scene, and completed the existing player scenario with
+240 samples at **17.906 ms mean / 22.177 ms p95** frame time and **4.663 ms mean / 7.209 ms p95**
+GPU time. The same build passed the six-client 40 ms RTT scenario: five builders placed 5,000
+authoritative voxels, every client converged, and the observer accepted the tower at 109.819 m in
+4,667.7 ms. This is evidence that the migration can coexist with mutable multiplayer publication;
+it is not evidence of full-resolution direct shading or 120 FPS.
+
 After the integrated path works, add bounded diffuse bounce lighting and then glass/reflection
 reconstruction. For Teardown-style physics, use body-local voxel volumes plus transforms and
 replicate motion separately from geometry edits/fracture. That is a substantial later simulation
