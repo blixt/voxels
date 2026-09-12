@@ -378,6 +378,15 @@ roughly 131 FPS average under the harness workload, but only about 73 FPS at p95
 evidence, not a 1080p/120 FPS claim. The run also peaked at 311.5 MiB and retained zero edit,
 replay, restore, or terrain-continuity failures.
 
+The native `voxels-world` Criterion suite on the same Mac (Rust 1.98.1, release bench) gives a
+useful cost floor for streaming work: representative 32³ generation measured **0.916 ms** for a
+road chunk, **2.330 ms** for the default chunk and **2.976 ms** for a Cinder Vault chunk; binary
+meshing measured **0.215 ms**, **0.234 ms** and **0.281 ms** for ocean, generated and vault chunks.
+Encoding and decoding a 3×3 chunk VXWP frame (6,283 wire bytes) each measured about **4.90 ms**.
+These native numbers do not predict WASM timings, but they identify batched wire codec work as a
+first loading and multiplayer optimization target; meshing is not currently the dominant native
+cost.
+
 ## Older references retained for specific reasons
 
 - [HashDAG (2020)](https://github.com/Phyronnaz/HashDAG) and
