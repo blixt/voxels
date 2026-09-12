@@ -557,8 +557,9 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     const farScreenshot = scenario.artifacts.resolve("observer-far-five.png");
     await observer.page.screenshot({ path: farScreenshot });
     scenario.artifacts.record("far builders", farScreenshot, "image/png");
-    await Promise.all(players.map(waitForSettledWorld));
-    // Drain unequal startup/walk histories, then measure one identical steady window everywhere.
+    // Far-terrain refinement is demand-driven and can legitimately keep work in flight while the
+    // camera remains at the horizon. Drain unequal histories with one identical steady window
+    // instead of requiring an impossible zero-in-flight state at this view distance.
     await Promise.all(players.map(({ engine }) => engine.snapshot()));
     await observer.page.waitForTimeout(3_000);
     const steadySnapshots = await Promise.all(players.map(({ engine }) => engine.snapshot()));
