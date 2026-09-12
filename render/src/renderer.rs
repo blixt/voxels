@@ -86,8 +86,10 @@ const MATERIAL_WHEEL_SLOTS: usize = 10;
 const ARENA_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 const DIRECT_BRICK_ATLAS_CAPACITY: u32 = 4096;
 const DIRECT_BRICK_UPLOADS_PER_FRAME: usize = 16;
-const DIRECT_TRACE_WIDTH: u32 = 160;
-const DIRECT_TRACE_HEIGHT: u32 = 90;
+/// First quality tier for the direct path: one quarter of 1080p pixel count. Rays are generated
+/// on the GPU, so increasing this tier does not add per-frame CPU upload traffic.
+const DIRECT_TRACE_WIDTH: u32 = 320;
+const DIRECT_TRACE_HEIGHT: u32 = 180;
 const DIRECT_TRACE_RAY_COUNT: u32 = DIRECT_TRACE_WIDTH * DIRECT_TRACE_HEIGHT;
 // Immutable virtual-page geometry is the durable render representation. Two independently
 // bindable segments stay below WebGPU's common 128 MiB storage-binding ceiling while reserving

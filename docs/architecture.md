@@ -49,7 +49,7 @@ validated traversal shader and typed ray/parameter dispatch API. The
 `render/src/shaders/brick_traversal.wgsl` now parses and validates with the same Naga validator used
 by the renderer. It defines a bounded compute DDA over a separate power-of-two hash table whose
 entries point into the atlas, including explicit unknown, empty, and hit results. The frame path now
-dispatches a controlled 160x90 traversal image and composites resident hits over the certified mesh
+dispatches a controlled 320x180 traversal image and composites resident hits over the certified mesh
 pages; transparent misses and unknown bricks deliberately preserve mesh continuity while residency
 and shading are being expanded. `render/src/brick_hash.rs`
 owns the fixed-capacity host table and its transactional rebuild, so a failed publication cannot

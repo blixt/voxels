@@ -292,7 +292,7 @@ not performance claims for code not yet built.
 ## Integrated browser evidence (12 September 2026)
 
 Main now has a bounded direct-traversal slice rather than a dispatch-only probe. Chrome
-**153.0.8010.37** on an Apple M3 Max generated a 160x90 camera-ray image from resident 8³ bricks,
+**153.0.8010.37** on an Apple M3 Max generated a 320x180 camera-ray image from resident 8³ bricks,
 composited over the certified mesh/page scene, and completed the existing player scenario with
 240 samples at **17.906 ms mean / 22.177 ms p95** frame time and **4.663 ms mean / 7.209 ms p95**
 GPU time. The same build passed the six-client 40 ms RTT scenario: five builders placed 5,000
