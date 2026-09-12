@@ -340,7 +340,7 @@ impl Generator {
 
         // Two crossing 3-D fields produce broad caverns and winding tubes.  A thin crust remains
         // intact, while the interior is fully volumetric and therefore supports edits on any face.
-        if y + 5 < height && self.cave_void(x, y, z) {
+        if y + 5 < height && self.cave_void(x, y, z) && !self.starter_worksite_band(x, y, z) {
             return Material::Air;
         }
 
@@ -391,6 +391,19 @@ impl Generator {
         let tunnel = self.value_3d(x.wrapping_add(y / 3), y, z.wrapping_sub(y / 5), 54, 0x71b5);
         let pocket = self.value_3d(x, y, z, 28, 0x9e37);
         (broad > 0.62 && tunnel > 0.56) || (pocket > 0.88 && broad > 0.48)
+    }
+
+    #[inline]
+    fn starter_worksite_band(self, x: i32, y: i32, z: i32) -> bool {
+        // Keep the first editable worksite solid through the shallow subsurface. Caves resume
+        // below this band and throughout the rest of the world, so this is a gameplay landmark,
+        // not a heightfield simplification.
+        let distance_squared = i64::from(x)
+            .saturating_mul(i64::from(x))
+            .saturating_add(i64::from(z).saturating_mul(i64::from(z)));
+        distance_squared >= 192_i64.saturating_mul(192)
+            && distance_squared < 1_200_i64.saturating_mul(1_200)
+            && y >= -16
     }
 
     /// Returns a material for one of the sparse, detached 3-D island blobs near this point.
