@@ -77,6 +77,7 @@ struct Resident {
     address: BrickAddress,
     revision: u64,
     payload: Arc<[u8]>,
+    non_empty: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -209,6 +210,58 @@ impl BrickResidency {
             let Some(resident) = self.residents.get(&brick) else {
                 return BrickTrace::Unknown(brick);
             };
+            if !resident.non_empty {
+                let mut brick_boundary = [f32::INFINITY; 3];
+                let brick_axes = [brick.x, brick.y, brick.z];
+                for axis in 0..3 {
+                    if step[axis] == 0 {
+                        continue;
+                    }
+                    let boundary_voxel = if step[axis] > 0 {
+                        (brick_axes[axis] + 1) * BRICK_EDGE as i32
+                    } else {
+                        brick_axes[axis] * BRICK_EDGE as i32
+                    };
+                    brick_boundary[axis] =
+                        (boundary_voxel as f32 - origin[axis]) / direction[axis];
+                }
+                let next_boundary = if brick_boundary[0] <= brick_boundary[1]
+                    && brick_boundary[0] <= brick_boundary[2]
+                {
+                    brick_boundary[0]
+                } else if brick_boundary[1] <= brick_boundary[2] {
+                    brick_boundary[1]
+                } else {
+                    brick_boundary[2]
+                };
+                if !next_boundary.is_finite() || next_boundary > max_distance_voxels {
+                    return BrickTrace::Miss;
+                }
+                distance = next_boundary;
+                let point = [
+                    origin[0] + direction[0] * (distance + 1.0e-4),
+                    origin[1] + direction[1] * (distance + 1.0e-4),
+                    origin[2] + direction[2] * (distance + 1.0e-4),
+                ];
+                voxel = [
+                    point[0].floor() as i32,
+                    point[1].floor() as i32,
+                    point[2].floor() as i32,
+                ];
+                for axis in 0..3 {
+                    next[axis] = if step[axis] == 0 {
+                        f32::INFINITY
+                    } else {
+                        let boundary = if step[axis] > 0 {
+                            voxel[axis] as f32 + 1.0
+                        } else {
+                            voxel[axis] as f32
+                        };
+                        (boundary - origin[axis]) / direction[axis]
+                    };
+                }
+                continue;
+            }
             let x = voxel[0].rem_euclid(BRICK_EDGE as i32) as usize;
             let y = voxel[1].rem_euclid(BRICK_EDGE as i32) as usize;
             let z = voxel[2].rem_euclid(BRICK_EDGE as i32) as usize;
@@ -320,6 +373,7 @@ impl BrickResidency {
                 Resident {
                     address,
                     revision: pending.revision,
+                    non_empty: pending.payload.iter().any(|material| *material != 0),
                     payload: Arc::clone(&pending.payload),
                 },
             );
