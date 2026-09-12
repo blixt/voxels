@@ -111,7 +111,7 @@ const CANONICAL_TRIANGLE_SHADOW_OWNER_FLAG: u16 = 1 << 14;
 const CANONICAL_TRIANGLE_LATTICE_ANCHOR: u16 = 5;
 const CANONICAL_TRIANGLE_ANCHOR_U_SHIFT: u32 = 8;
 const CANONICAL_TRIANGLE_ANCHOR_V_SHIFT: u32 = 14;
-const GPU_QUERY_COUNT: u32 = 28;
+const GPU_QUERY_COUNT: u32 = 30;
 const PRECIPITATION_INSTANCE_COUNT: u32 = 48 * 48 * 2;
 const QUAD_VERTEX_COUNT: u32 = 4;
 const GPU_QUERY_BUFFER_BYTES: u64 = GPU_QUERY_COUNT as u64 * size_of::<u64>() as u64;
@@ -3732,6 +3732,7 @@ pub struct RenderDiagnostics {
     pub gpu_ui_ms: Option<f32>,
     pub gpu_virtual_terrain_snapshot_encode_ms: Option<f32>,
     pub gpu_virtual_terrain_snapshot_validation_ms: Option<f32>,
+    pub gpu_direct_traversal_ms: Option<f32>,
     pub cpu_cull_ms: f32,
     pub cpu_encode_ms: f32,
     pub cpu_submit_ms: f32,
@@ -3904,6 +3905,7 @@ pub struct GpuTimingSample {
     pub ui_ms: f32,
     pub virtual_terrain_snapshot_encode_ms: f32,
     pub virtual_terrain_snapshot_validation_ms: f32,
+    pub direct_traversal_ms: f32,
 }
 
 #[derive(Debug, Default)]
@@ -3939,11 +3941,20 @@ struct GpuPassMask {
     clouds: bool,
     weather: bool,
     virtual_terrain: bool,
+    direct_traversal: bool,
 }
 
 impl GpuTimingFrame {
     fn pass(&self, first_query: u32) -> wgpu::RenderPassTimestampWrites<'_> {
         wgpu::RenderPassTimestampWrites {
+            query_set: &self.query_set,
+            beginning_of_pass_write_index: Some(first_query),
+            end_of_pass_write_index: Some(first_query + 1),
+        }
+    }
+
+    fn compute_pass(&self, first_query: u32) -> wgpu::ComputePassTimestampWrites<'_> {
+        wgpu::ComputePassTimestampWrites {
             query_set: &self.query_set,
             beginning_of_pass_write_index: Some(first_query),
             end_of_pass_write_index: Some(first_query + 1),
@@ -4017,6 +4028,11 @@ fn parse_gpu_timestamps(
     } else {
         0.0
     };
+    let direct_traversal_ms = if passes.direct_traversal {
+        elapsed_ms(28, 29)?
+    } else {
+        0.0
+    };
     let mut first = timestamps[14].min(timestamps[22]);
     let mut last = timestamps[15].max(timestamps[23]);
     if passes.shadows {
@@ -4051,6 +4067,10 @@ fn parse_gpu_timestamps(
         first = first.min(timestamps[24]).min(timestamps[26]);
         last = last.max(timestamps[25]).max(timestamps[27]);
     }
+    if passes.direct_traversal {
+        first = first.min(timestamps[28]);
+        last = last.max(timestamps[29]);
+    }
     let total_ms = last.checked_sub(first)? as f32 * timestamp_period / 1_000_000.0;
     if total_ms > 1_000.0 {
         return None;
@@ -4069,6 +4089,7 @@ fn parse_gpu_timestamps(
         ui_ms,
         virtual_terrain_snapshot_encode_ms,
         virtual_terrain_snapshot_validation_ms,
+        direct_traversal_ms,
     })
 }
 
@@ -9055,12 +9076,6 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
-        self.direct_brick_atlas.encode_traversal(
-            &mut encoder,
-            &self.direct_traversal_probe.bind_group,
-            1,
-        );
-        self.direct_brick_probe_dispatches = self.direct_brick_probe_dispatches.saturating_add(1);
         let virtual_candidate = if virtual_candidate_work.is_some() {
             let publication = self.virtual_terrain_publication.as_ref()?;
             Some(virtual_terrain_snapshot_identity(
@@ -9082,9 +9097,17 @@ impl Renderer {
                     weather: weather_active,
                     virtual_terrain: virtual_candidate_work
                         == Some(VirtualTerrainCandidateWork::Encode),
+                    direct_traversal: true,
                 },
             )
         });
+        self.direct_brick_atlas.encode_traversal_with_timestamps(
+            &mut encoder,
+            &self.direct_traversal_probe.bind_group,
+            1,
+            gpu_frame.as_ref().map(|frame| frame.compute_pass(28)),
+        );
+        self.direct_brick_probe_dispatches = self.direct_brick_probe_dispatches.saturating_add(1);
         let mut virtual_candidate_encode_failed = false;
         let mut virtual_candidate_generation_to_submit = None;
         if let (Some(identity), Some(work)) = (virtual_candidate, virtual_candidate_work) {
@@ -9945,6 +9968,7 @@ impl Renderer {
                 .map(|timing| timing.virtual_terrain_snapshot_encode_ms),
             gpu_virtual_terrain_snapshot_validation_ms: gpu_timing
                 .map(|timing| timing.virtual_terrain_snapshot_validation_ms),
+            gpu_direct_traversal_ms: gpu_timing.map(|timing| timing.direct_traversal_ms),
             cpu_cull_ms,
             cpu_encode_ms: 0.0,
             cpu_submit_ms: 0.0,
@@ -14400,6 +14424,7 @@ mod tests {
             6_700_000, 7_700_000, 7_900_000, 8_400_000, 8_600_000, 10_600_000, 10_800_000,
             12_800_000, 13_000_000, 13_400_000, 13_600_000, 16_600_000, 16_800_000, 17_100_000,
             17_300_000, 18_300_000, 18_500_000, 18_900_000, 18_400_000, 19_800_000,
+            19_000_000, 19_100_000,
         ];
         let active = GpuPassMask {
             shadows: true,
@@ -14408,6 +14433,7 @@ mod tests {
             clouds: true,
             weather: true,
             virtual_terrain: true,
+            direct_traversal: false,
         };
         let timing = parse_gpu_timestamps(&timestamps, 1.0, active)
             .unwrap_or_else(|| panic!("valid timestamps should parse"));

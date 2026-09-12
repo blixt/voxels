@@ -280,12 +280,22 @@ impl GpuBrickAtlas {
         bind_group: &BindGroup,
         ray_count: u32,
     ) {
+        self.encode_traversal_with_timestamps(encoder, bind_group, ray_count, None);
+    }
+
+    pub fn encode_traversal_with_timestamps(
+        &self,
+        encoder: &mut CommandEncoder,
+        bind_group: &BindGroup,
+        ray_count: u32,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
         if ray_count == 0 {
             return;
         }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("direct voxel traversal pass"),
-            timestamp_writes: None,
+            timestamp_writes,
         });
         pass.set_pipeline(&self.traversal_pipeline);
         pass.set_bind_group(0, bind_group, &[]);

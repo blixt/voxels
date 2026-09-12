@@ -15,8 +15,8 @@ The post-rewrite browser journey passed on Apple M3 Max with Chrome `153.0.8010.
 spawn, sustained spectator flight, walking, jump, dig, placement, screenshot replay and restore.
 The latest run, with a one-ray direct-traversal probe dispatched through every frame encoder after
 pipeline initialization, used the generated v17 world and the real world-service protocol. Across
-240 steady samples, frame time was 17.745 ms mean / 21.792 ms p95, CPU time 7.191 ms mean / 13.737
-ms p95, and GPU time 9.104 ms mean / 10.158 ms p95. Peak core GPU allocation was 215.49 MiB;
+240 steady samples, frame time was 17.687 ms mean / 21.665 ms p95, CPU time 6.386 ms mean / 13.334
+ms p95, and GPU time 8.992 ms mean / 9.634 ms p95. Peak core GPU allocation was 215.49 MiB;
 exact-quality debt and missed terrain progress were both zero. The latest six-client shaped-40 ms RTT
 multiplayer run applied 5,000
 authoritative voxel placements to all clients with zero protocol errors; the distant tower converged
