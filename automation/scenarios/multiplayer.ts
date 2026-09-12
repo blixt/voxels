@@ -669,7 +669,7 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     const towerZ = Math.floor(snapshotValue(builderOrigin, "cameraZ") * 10);
     const towerBaseY = Math.round(
       (snapshotValue(builderOrigin, "cameraY") - semantics.playerEyeHeightMetres) * 10 +
-        semantics.editCubeEdgeVoxels / 2,
+        semantics.editCubeEdgeVoxels * 2.5,
     );
     const towerCentres = Array.from({ length: BUILDER_COUNT }, (_unused, layer) => ({
       x: towerX,
