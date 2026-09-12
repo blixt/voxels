@@ -503,6 +503,10 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     ) {
       throw new Error("browser clients negotiated different gameplay semantics");
     }
+    // Roster convergence only proves the presence channel is live.  Let every client finish its
+    // initial collision and virtual-terrain stream before starting the concurrent movement stress;
+    // otherwise a slow first page can make a healthy input appear to cover zero metres.
+    await Promise.all(players.map(waitForSettledWorld));
     // Keep the builders together while moving beyond the protected 6.4 m starting area. The later
     // dig and tower remain ordinary reach-checked player actions at this editable worksite.
     const builderWalks = builders.map(({ engine, page }) => walkDistance(page, engine, 10));
