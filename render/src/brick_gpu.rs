@@ -224,6 +224,33 @@ impl GpuBrickAtlas {
         evicted
     }
 
+    /// Evicts a batch of bricks and publishes one coherent hash-table replacement. Descriptor
+    /// slots are cleared before their generations become reusable, so an in-flight traversal can
+    /// only observe the old entry or the new entry, never a stale coordinate at a recycled slot.
+    pub fn evict_many<I>(&mut self, queue: &Queue, coords: I) -> usize
+    where
+        I: IntoIterator<Item = BrickCoord>,
+    {
+        let mut evicted = 0usize;
+        for coord in coords {
+            let Some(address) = self.residency.address(coord) else {
+                continue;
+            };
+            queue.write_buffer(
+                &self.descriptor_buffer,
+                u64::from(address.slot) * GPU_BRICK_DESCRIPTOR_BYTES,
+                &[0; GPU_BRICK_DESCRIPTOR_WORDS * size_of::<u32>()],
+            );
+            if self.residency.evict(coord) {
+                evicted += 1;
+            }
+        }
+        if evicted != 0 {
+            self.refresh_hash_table(queue);
+        }
+        evicted
+    }
+
     pub fn material_buffer(&self) -> &Buffer {
         &self.material_buffer
     }

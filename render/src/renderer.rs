@@ -8730,8 +8730,35 @@ impl Renderer {
     pub fn remove_chunk(&mut self, coord: ChunkCoord) {
         let key = (0, coord.x, coord.y, coord.z);
         self.discard_pending_canonical_chunk_uploads(key, None);
+        let brick_base = BrickCoord::new(
+            coord.x * (CHUNK_EDGE / BRICK_EDGE as usize) as i32,
+            coord.y * (CHUNK_EDGE / BRICK_EDGE as usize) as i32,
+            coord.z * (CHUNK_EDGE / BRICK_EDGE as usize) as i32,
+        );
+        let brick_edge = (CHUNK_EDGE / BRICK_EDGE as usize) as i32;
+        self.pending_direct_brick_updates.retain(|_, updates| {
+            updates.retain(|update| {
+                update.coord.x < brick_base.x
+                    || update.coord.x >= brick_base.x + brick_edge
+                    || update.coord.y < brick_base.y
+                    || update.coord.y >= brick_base.y + brick_edge
+                    || update.coord.z < brick_base.z
+                    || update.coord.z >= brick_base.z + brick_edge
+            });
+            !updates.is_empty()
+        });
         self.remove_chunk_mesh(key);
         self.chunk_activations.remove(key);
+        self.direct_brick_atlas.evict_many(
+            &self.queue,
+            (0..brick_edge).flat_map(|by| {
+                (0..brick_edge).flat_map(move |bz| {
+                    (0..brick_edge).map(move |bx| {
+                        BrickCoord::new(brick_base.x + bx, brick_base.y + by, brick_base.z + bz)
+                    })
+                })
+            }),
+        );
     }
 
     /// Whether one published owner reconstructs this coordinate on the canonical 10 cm lattice.
