@@ -51,18 +51,9 @@ browser profile. See
 
 ## World-service configuration
 
-`config/world-service.toml` controls the seed, the procedural/Terrain Diffusion provider toggle,
-the shared day/weather clock, native edit database and commit-queue bound, presence cadence/admission bounds, and Terrain
-Diffusion deployment settings such as precision, model cache, model-space origin, and world placement. See
-[World service configuration](world-service-config.md) for commands and the complete server schema.
+`config/world-service.toml` controls the deterministic procedural-v17 seed, shared day/weather clock, native edit database, commit-queue bound, and presence cadence/admission bounds. See [World service configuration](world-service-config.md) for the complete schema.
 
-The browser has no embedded world-generation mode. It always negotiates the same provider-neutral
-canonical-chunk and virtual-terrain directory/page protocol with this service, so editing `source`
-and restarting the daemon is the only experience switch. Reconnect refuses a changed manifest rather
-than mixing worlds.
-
-Provider selection is fail-closed. A Terrain Diffusion selection without the native Metal feature,
-Apple Metal, or the pinned verified model is an error; it never falls back to another world.
+The browser has no embedded world-generation mode. It negotiates the canonical chunk and virtual-terrain protocols with the native service, which owns source identity and persistence.
 
 ## What is intentionally not configurable
 
@@ -71,7 +62,7 @@ or memory safety. The following remain code-level invariants:
 
 - persisted schema and binary-format versions, magic bytes, wire tags, and hashes;
 - voxel/chunk dimensions, GPU buffer layouts, shader ABI values, and hard allocation ceilings;
-- authored world content, procedural-v16 generation formulas, landmarks, and route geometry;
+- authored world content, procedural-v17 generation formulas, landmarks, and route geometry;
 - pinned Terrain Diffusion repository revision, weight hashes, tensor topology, normalization, and
   sampler/scheduler semantics.
 

@@ -7,29 +7,15 @@ read this file and do not branch on the provider.
 
 ## Selecting a source
 
-The checked-in default is:
-
-```toml
-source = "terrain-diffusion-30m"
-```
-
-To use the deterministic authored generator instead, change only that field:
-
-```toml
-source = "procedural-v16"
-```
-
-Restart the service after changing the file. Selection is intentionally fail-closed: choosing
-Terrain Diffusion without its pinned model files, Apple Metal, or the compiled `terrain-metal`
-feature is an error. It never silently creates a different procedural world.
+The service uses the deterministic procedural-v17 generator. The source identity is part of persisted-world compatibility, so changing generator semantics requires a schema/versioned migration.
 
 The complete schema is:
 
 ```toml
-schema_version = 26
+schema_version = 27
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
-source = "terrain-diffusion-30m"
+source = "procedural-v17"
 
 [transport]
 listen = "127.0.0.1:9777"
@@ -119,14 +105,6 @@ pillar_radius_voxels = 25
 protection_radius_voxels = 64
 pillar_material = "Stone"
 
-[terrain_diffusion]
-precision = "float16"
-world_origin_voxels = [-72600, -83700]
-horizontal_scale = 1
-latent_window = [-2, -2]
-quality_histogram = [0.0, 0.0, 0.0, 1.0, 1.5]
-sea_level_voxels = 52
-# model_cache = "/an/optional/cache/root"
 ```
 
 The checked-in development configuration remains loopback-only. A public listener must explicitly
@@ -191,34 +169,7 @@ player movement or interaction authority. Leaving spectator mode restores the au
 pose instead of accepting a client-proposed return location. Disabling the setting removes the
 capability and rejects spectator poses.
 
-`float16` is the high-performance default; `float32` is available for diagnostics. If
-`model_cache` is omitted on macOS, the service loads the immutable pinned revision from
-`~/Library/Caches/voxels/terrain-diffusion/<revision>`. A relative path is resolved relative to the
-configuration file, not the process working directory. The seed, precision, horizontal scale,
-latent window, and quality histogram participate in the source identity used by caches and future
-protocol negotiation.
-
-`world_origin_voxels` is the canonical voxel X/Z coordinate of the finite generated tile's minimum
-corner. `horizontal_scale = 1` maps each native 30 m model pixel across 30 m of world space. This
-preserves physical slopes because canonical voxels have a fixed 10 cm size; Minecraft's recommended
-scale changes both axes through the size represented by one cubic block.
-The checked-in `[-72600, -83700]` placement puts the default `[0, 0]` spawn on a gently sloped
-159.7 m shelf about 630 m from connected sea, with mountains, valleys, and fjord-like inlets in the
-same tile. The server validates the actual spawn chunk at startup.
-`latent_window` is the Terrain Diffusion latent-window row/column used to key spatial sampling and
-noise. Each step advances 32 latent pixels, or 7.68 km for the 30 m checkpoint.
-The checked-in `[-2, -2]` window is a fixed, reproducible showcase start for the checked-in seed. Its
-decoded tile is 88.4% land, has 161.1 m of 90th-percentile relief per 960 m window, 25.3-degree
-90th-percentile slopes, and 6.72 km of connected-sea inlet reach. Runtime generation never searches
-for or substitutes a more dramatic window.
-`quality_histogram` is the five-bin learned terrain-quality conditioning vector. The checked-in
-`[0, 0, 0, 1, 1.5]` preset is the upstream showcase setting and favors the two highest-rated bins;
-all zeros selects the unsteered checkpoint default.
-Model sampling is deliberately separate from world placement: moving an unchanged tile in the game
-world is not the same operation as generating a different model-space tile. Both origins participate
-in the source identity, and `world_origin_voxels` is also declared in the macro coordinate transform.
-Changing either value therefore creates a distinct cache/protocol identity instead of aliasing
-existing world products.
+The procedural-v17 generator is deterministic for a given seed. Its source identity participates in cache and persistence keys; changing generator semantics requires a new source version.
 
 Both coordinate values must contain exactly two signed 32-bit integers. Unknown keys, malformed values,
 and unsupported `schema_version` values are rejected so configuration mistakes cannot silently alter
@@ -226,37 +177,7 @@ a world. Model repository/revision, verified configuration and weight hashes, te
 normalization statistics, and sampler/scheduler semantics remain pinned provider invariants rather
 than deployment settings.
 
-## Checking the configured provider
-
-Fetch and verify the model once if Terrain Diffusion will be selected:
-
-```sh
-vp run automation -- run terrain-fetch
-```
-
-Then load the configuration, construct the selected provider, and request one canonical macro
-sample:
-
-```sh
-vp run automation -- run world-source
-```
-
-The command reports the selected source kind and stable source-identity hash. In Terrain Diffusion
-mode it runs the full coarse, base, and decoder chain natively in Rust on Metal.
-
-The browser always consumes the daemon's canonical chunks and progressive virtual-terrain
-directories/pages. The client never branches on provider selection; changing the daemon source and
-restarting it is sufficient to switch between procedural and learned terrain. The transport bounds
-total accepted connections and queued work, and the per-client worker cap prevents one connection
-from occupying the complete local generation pool. `product_cache_bytes` bounds an LRU of validated
-encoded product items. `virtual_terrain_cache_bytes` separately bounds complete encoded fixed-region
-directories and page payloads; stale revisions and least-recently-used regions are evicted atomically.
-`response_cache_bytes` separately bounds complete compressed batches shared by co-located
-clients and exact retries, so retaining a dense multiplayer working set does not evict the products
-needed for responsive traversal. Concurrent overlapping batches single-flight each canonical chunk,
-directory, or page through one CPU/Metal generation, then assemble their requested order into
-independently request-ID-keyed VXWP responses. Priority and batch shape affect scheduling, not cache
-identity.
+The browser always consumes the daemon's canonical chunks and progressive virtual-terrain pages.
 
 `[edits].database` is the native authoritative world/player SQLite file. Relative paths resolve from
 the service configuration, not the process working directory. The Rust service expands

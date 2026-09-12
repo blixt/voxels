@@ -23,11 +23,7 @@ import {
   worldServiceListenAddress,
 } from "./vite.config.ts";
 import viteConfiguration from "./vite.config.ts";
-import {
-  cargoProfileExecutablePath,
-  worldServiceBuildCargoArgs,
-  worldServiceCargoArgs,
-} from "./scripts/world-service-command.ts";
+import { cargoProfileExecutablePath } from "./scripts/world-service-command.ts";
 
 function waitForOutput(
   child: ReturnType<typeof spawn>,
@@ -410,36 +406,6 @@ describe("native world-service development command", () => {
     }
   });
 
-  it("uses the optimized Metal-enabled daemon and checked-in config when run alone", () => {
-    expect(worldServiceCargoArgs({ metal: true })).toEqual([
-      "run",
-      "--profile",
-      "worldgen",
-      "-p",
-      "voxels-world-service",
-      "--features",
-      "terrain-metal",
-      "--bin",
-      "voxels-worldd",
-      "--",
-      "config/world-service.toml",
-    ]);
-  });
-
-  it("builds the incremental Metal-enabled daemon before Vite launches it directly", () => {
-    expect(worldServiceBuildCargoArgs({ metal: true, profile: "worldgen-dev" })).toEqual([
-      "build",
-      "--profile",
-      "worldgen-dev",
-      "-p",
-      "voxels-world-service",
-      "--features",
-      "terrain-metal",
-      "--bin",
-      "voxels-worldd",
-    ]);
-  });
-
   it("resolves every Cargo profile binary through the shared target layout", () => {
     expect(cargoProfileExecutablePath("voxels-bots", "worldgen-dev")).toBe(
       path.resolve(
@@ -485,9 +451,6 @@ listen = "127.0.0.1:9777"
     expect(isNativeWorldServiceInput("core/src/lib.rs")).toBe(true);
     expect(isNativeWorldServiceInput("core/Cargo.toml")).toBe(true);
     expect(isNativeWorldServiceInput("world/src/source.rs")).toBe(true);
-    expect(isNativeWorldServiceInput("world-terrain-diffusion/fixtures/pipeline-data.json")).toBe(
-      true,
-    );
     expect(isNativeWorldServiceInput("shell/src/lib.rs")).toBe(false);
   });
 });

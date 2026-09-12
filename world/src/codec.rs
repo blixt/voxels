@@ -366,9 +366,9 @@ mod tests {
         let encoded = encode_chunk(&chunk, identity);
         assert_eq!(
             blake3::hash(&encoded).to_hex().to_string(),
-            "a937ec326eb9c9f3126b7a512ab9184c01c767321ca0a3a8259cbed3697826cc"
+            "06afcc731fa8611b2050c6b51fad3f735adcc4193fe15005d26adb38d2fc1600"
         );
-        assert_eq!(encoded.len(), 12_402);
+        assert_eq!(encoded.len(), 8_304);
         assert!(encoded.len() < CHUNK_VOLUME * size_of::<u16>());
         assert_eq!(decode_chunk(&encoded, identity), Ok(chunk));
     }

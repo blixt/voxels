@@ -1053,7 +1053,7 @@ mod tests {
 
         let serialized = config.to_toml().expect("remote transport serializes");
         assert!(!serialized.contains("procedural"));
-        assert!(!serialized.contains("terrain-diffusion"));
+        assert!(!serialized.contains("procedural-v17"));
 
         let mut invalid = config.clone();
         invalid.world.endpoint = "http://127.0.0.1/world".to_owned();

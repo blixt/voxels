@@ -323,7 +323,7 @@ mod tests {
             backend_port: 41_235,
             client_ports: Vec::new(),
             auth_token: "automation-token".to_owned(),
-            source: WorldSourceMode::ProceduralV16,
+            source: WorldSourceMode::ProceduralV17,
             spawn_voxels: Some([-12_800, 25_600]),
             spawn_pillar_height_voxels: Some(7),
             spawn_pillar_radius_voxels: Some(2),

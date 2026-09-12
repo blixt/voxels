@@ -32,7 +32,8 @@ pub const MESHING_SURFACE_CONTRACT_VERSION: u16 = 3;
 
 const IDENTITY_HASH_DOMAIN: &[u8] = b"voxels-world-source-identity-v1\0";
 const MANIFEST_HASH_DOMAIN: &[u8] = b"voxels-world-manifest-v1\0";
-const PROCEDURAL_CONFIGURATION_DOMAIN: &[u8] = b"voxels-procedural-v16-configuration-v1\0";
+const PROCEDURAL_V16_CONFIGURATION_DOMAIN: &[u8] = b"voxels-procedural-v16-configuration-v1\0";
+const PROCEDURAL_V17_CONFIGURATION_DOMAIN: &[u8] = b"voxels-procedural-v17-configuration-v1\0";
 
 /// Stable 32-byte digest used by caches, codecs, and future protocol negotiation.
 #[derive(Clone, Copy, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -121,6 +122,7 @@ impl WorldId {
 pub enum WorldSourceKind {
     ProceduralV16 = 1,
     TerrainDiffusion30m = 2,
+    ProceduralV17 = 3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -172,12 +174,35 @@ pub struct WorldSourceIdentity {
 }
 
 impl WorldSourceIdentity {
+    /// Legacy identity retained so persisted v16 manifests can be rejected or migrated without
+    /// silently interpreting them as v17 terrain.
     pub fn procedural_v16(seed: u64) -> Self {
         let mut configuration = blake3::Hasher::new();
-        configuration.update(PROCEDURAL_CONFIGURATION_DOMAIN);
+        configuration.update(PROCEDURAL_V16_CONFIGURATION_DOMAIN);
         configuration.update(&seed.to_le_bytes());
         Self {
             source_kind: WorldSourceKind::ProceduralV16,
+            implementation_version: 16,
+            configuration_hash: WorldSourceIdentityHash::from_bytes(
+                *configuration.finalize().as_bytes(),
+            ),
+            model: None,
+            sampler_version: PROCEDURAL_SAMPLER_VERSION,
+            scheduler_version: PROCEDURAL_SCHEDULER_VERSION,
+            macro_field_schema_version: MACRO_FIELD_SCHEMA_VERSION,
+            macro_coordinate_transform: MacroCoordinateTransform::CANONICAL_VOXELS,
+            voxel_composer_version: VOXEL_COMPOSER_VERSION,
+            authored_content_version: ATLAS_VERSION,
+            device_requirement: SourceDeviceRequirement::PortableCpu,
+        }
+    }
+
+    pub fn procedural_v17(seed: u64) -> Self {
+        let mut configuration = blake3::Hasher::new();
+        configuration.update(PROCEDURAL_V17_CONFIGURATION_DOMAIN);
+        configuration.update(&seed.to_le_bytes());
+        Self {
+            source_kind: WorldSourceKind::ProceduralV17,
             implementation_version: GENERATOR_VERSION,
             configuration_hash: WorldSourceIdentityHash::from_bytes(
                 *configuration.finalize().as_bytes(),
@@ -305,6 +330,16 @@ impl WorldManifest {
         }
     }
 
+    pub fn procedural_v17(world_id: WorldId, seed: u64) -> Self {
+        Self {
+            world_id,
+            seed,
+            world_schema_version: WORLD_SCHEMA_VERSION,
+            material_schema_version: Material::SCHEMA_VERSION,
+            source: WorldSourceIdentity::procedural_v17(seed),
+        }
+    }
+
     pub fn source_identity_hash(&self) -> WorldSourceIdentityHash {
         self.source.identity_hash()
     }
@@ -330,11 +365,20 @@ impl WorldManifest {
             return Err(WorldManifestError::InvalidMacroCoordinateTransform);
         }
         match self.source.source_kind {
-            WorldSourceKind::ProceduralV16 => {
+            WorldSourceKind::ProceduralV16 | WorldSourceKind::ProceduralV17 => {
                 if self.source.authored_content_version != ATLAS_VERSION {
                     return Err(WorldManifestError::AuthoredContentVersionMismatch);
                 }
-                if self.source != WorldSourceIdentity::procedural_v16(self.seed) {
+                let expected = match self.source.source_kind {
+                    WorldSourceKind::ProceduralV16 => {
+                        WorldSourceIdentity::procedural_v16(self.seed)
+                    }
+                    WorldSourceKind::ProceduralV17 => {
+                        WorldSourceIdentity::procedural_v17(self.seed)
+                    }
+                    WorldSourceKind::TerrainDiffusion30m => unreachable!(),
+                };
+                if self.source != expected {
                     return Err(WorldManifestError::ProceduralSourceMismatch);
                 }
             }
@@ -1266,7 +1310,7 @@ impl ProceduralWorldSource {
     pub fn new(seed: u64) -> Self {
         Self {
             generator: Generator::new(seed),
-            identity: WorldSourceIdentity::procedural_v16(seed),
+            identity: WorldSourceIdentity::procedural_v17(seed),
         }
     }
 

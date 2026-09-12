@@ -918,7 +918,7 @@ async function run(context: ScenarioContext, arguments_: readonly string[]) {
   const world = await startDevelopmentWorldStack(context, {
     fixture: {
       prefix: "voxels-player-rendering-",
-      source: "terrain-diffusion-30m",
+      source: "procedural-v17",
       diagnosticSkyRgb: [255, 0, 255],
       dayLengthSeconds: 0,
       dayFractionAtUnixEpoch: 0.72,

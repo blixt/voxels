@@ -1061,8 +1061,8 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
   };
   const worldSource = options.choice(
     "source",
-    ["procedural-v16", "terrain-diffusion-30m"] as const satisfies readonly WorldSource[],
-    "terrain-diffusion-30m",
+    ["procedural-v17"] as const satisfies readonly WorldSource[],
+    "procedural-v17",
   );
   const flightSeconds =
     options.number("flight-seconds", {
@@ -1090,9 +1090,7 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
     port: previewPort,
     buildProfile: "release",
   });
-  const service = await startWorldService(context, fixture, {
-    metal: worldSource === "terrain-diffusion-30m",
-  });
+  const service = await startWorldService(context, fixture, {});
   const link = await context.acquire(
     "network benchmark shaped link",
     createShapedLink({

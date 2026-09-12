@@ -41,7 +41,7 @@ async function feedTarget(
     return { url: feedUrl(source).href, external: true };
   }
   const world = await startWorldStack(context, {
-    fixture: { source: "procedural-v16" },
+    fixture: { source: "procedural-v17" },
     web: { buildProfile: "wasm-dev" },
   });
   return {

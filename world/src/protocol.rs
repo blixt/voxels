@@ -3948,6 +3948,7 @@ fn decode_source_kind(value: u8) -> Result<WorldSourceKind, ProtocolError> {
     Ok(match value {
         1 => WorldSourceKind::ProceduralV16,
         2 => WorldSourceKind::TerrainDiffusion30m,
+        3 => WorldSourceKind::ProceduralV17,
         _ => return Err(ProtocolError::UnknownEnum("source kind", u64::from(value))),
     })
 }

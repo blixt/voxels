@@ -81,37 +81,3 @@ await cargo(
     ...wasmCcEnv(),
   },
 );
-if (process.platform === "darwin") {
-  await cargo("Terrain Diffusion Metal tests", [
-    "test",
-    "-p",
-    "voxels-world-terrain-diffusion",
-    "--all-features",
-  ]);
-  await cargo("Terrain Diffusion Metal lints", [
-    "clippy",
-    "-p",
-    "voxels-world-terrain-diffusion",
-    "--all-features",
-    "--all-targets",
-    "--",
-    "-D",
-    "warnings",
-  ]);
-  await cargo("world-service Metal lints", [
-    "clippy",
-    "-p",
-    "voxels-world-service",
-    "--features",
-    "terrain-metal",
-    "--all-targets",
-    // On macOS, concurrent lib and test rustc processes can both block forever
-    // while dyld maps the same proc-macro dylib. Preserve all-target coverage,
-    // but serialize this feature-heavy package invocation.
-    "--jobs",
-    "1",
-    "--",
-    "-D",
-    "warnings",
-  ]);
-}

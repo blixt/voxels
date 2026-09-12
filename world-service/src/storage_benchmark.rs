@@ -259,7 +259,7 @@ pub fn run_storage_benchmark(
         schema_version: STORAGE_BENCHMARK_SCHEMA_VERSION,
         edit_database_schema_version: EDIT_DATABASE_SCHEMA_VERSION,
         sqlite_version: database.sqlite_version,
-        world_source: "procedural-v16",
+        world_source: "procedural-v17",
         profile: match request.profile {
             StorageBenchmarkProfile::Clustered => "clustered",
             StorageBenchmarkProfile::Frontier => "frontier",

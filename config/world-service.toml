@@ -1,11 +1,10 @@
 # Versioned, server-owned world configuration. The browser client never reads this file.
-schema_version = 26
+schema_version = 27
 world_id = "766f7865-6c73-406c-6f63-616c00000001"
 world_seed = 1592642302
 
-# Terrain Diffusion is the checked-in default. Set this to "procedural-v16" for the deterministic
-# authored generator; clients consume the same canonical protocol either way.
-source = "terrain-diffusion-30m"
+# Deterministic authored procedural generator.
+source = "procedural-v17"
 
 [transport]
 # Native transport is deliberately loopback-only. Port 0 may be used by tests for an ephemeral port.
@@ -133,23 +132,3 @@ pillar_radius_voxels = 25
 # Protect 6.4 metres around the pillar from both digging and placement.
 protection_radius_voxels = 64
 pillar_material = "Stone"
-
-[terrain_diffusion]
-# Omit model_cache to use ~/Library/Caches/voxels/terrain-diffusion on macOS.
-# A relative path is resolved from this file's directory.
-precision = "float16"
-# Canonical voxel X/Z coordinate of the finite 15.36 km tile's minimum corner. This placement maps
-# a gentle high shelf 630 m from a long inlet to spawn, with at least 6.9 km of source coverage in
-# every direction and mountain, valley, and fjord terrain in the surrounding tile.
-world_origin_voxels = [-72600, -83700]
-# Preserve the model's physical 30 m horizontal spacing. Unlike Minecraft blocks, canonical voxels
-# already represent a fixed 10 cm, so stretching only the horizontal axes would flatten slopes.
-horizontal_scale = 1
-# Coordinate-stable latent-window row/column. Each step moves 7.68 km in model space. This decoded
-# window is 88% land, has 161 m p90 kilometre-scale relief, and a 6.72 km connected sea inlet.
-latent_window = [-2, -2]
-# Learned terrain-quality logits used by the paper's showcase generator. Higher final bins favor
-# sharper, more visually interesting terrain while preserving deterministic coordinate semantics.
-quality_histogram = [0.0, 0.0, 0.0, 1.0, 1.5]
-# Heightfield composer flood height for the learned terrain source.
-sea_level_voxels = 52

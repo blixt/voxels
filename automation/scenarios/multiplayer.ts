@@ -421,10 +421,10 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     originPort: previewPort,
     clientPorts: ports,
     prefix: "voxels-multiplayer-browser-",
-    source: "terrain-diffusion-30m",
+    source: "procedural-v17",
   });
   await startWebPreview(scenario, { port: previewPort, buildProfile: "release" });
-  const service = await startWorldService(scenario, fixture, { metal: true });
+  const service = await startWorldService(scenario, fixture);
   const links = await Promise.all(
     ports.map((port, index) =>
       scenario.acquire(

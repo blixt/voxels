@@ -35,7 +35,7 @@ async function runWorldLab(context: ScenarioContext, arguments_: readonly string
   const world = await startWorldStack(context, {
     fixture: {
       prefix: "voxels-world-lab-",
-      source: "procedural-v16",
+      source: "procedural-v17",
       dayLengthSeconds: 0,
       worldDayNumberAtUnixEpoch: 0,
       dayFractionAtUnixEpoch: 0.5,

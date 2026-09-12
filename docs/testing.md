@@ -69,9 +69,7 @@ component larger than four pixels and its renderer metadata rejects skipped LOD 
 exact near-field frontier.
 
 [Remote world streaming benchmarks](network-benchmark.md) and
-[multiplayer scaling](multiplayer-scaling.md) explain those non-renderer-specific metrics. Terrain
-Diffusion has additional provider-specific smoke and survey commands in
-[the native Metal provider notes](terrain-diffusion-metal.md).
+[multiplayer scaling](multiplayer-scaling.md) explain those non-renderer-specific metrics.
 
 ## Native multiplayer bots
 
@@ -122,8 +120,7 @@ vp run automation -- run bot-load --counts=16 --duration=600 --growth --no-brows
 The default includes one real Chromium observer. At population `N`, each native bot should see `N`
 other players: `N - 1` bots plus the observer. The observer must see all `N` bots. `--no-browser`
 removes rendering/build cost when measuring raw daemon or long-duration database capacity.
-`--source=procedural-v16` is the reproducible default; another configured source can be named
-explicitly. CPU percentages follow `ps` semantics, so 100% means one fully occupied logical core.
+`--source=procedural-v17` is the reproducible source; the option is retained for benchmark schema compatibility. CPU percentages follow `ps` semantics, so 100% means one fully occupied logical core.
 
 Each stage records:
 
@@ -175,8 +172,8 @@ It drives the production edit planner and SQLite transaction path, forces a WAL 
 per-table page and payload sizes through SQLite `dbstat`, reopens the database cold, and verifies an
 old operation retries to the exact original outcome. Ordered latency quartiles expose costs that
 grow with world history instead of hiding them in one sorted aggregate. It does not open sockets,
-enter the async generation queue, broadcast to other players, render, or include Terrain Diffusion
-provider cost; its deterministic source is `procedural-v16`. The harness creates its own temporary
+enter the async generation queue, broadcast to other players, render, or include the procedural generator
+provider cost; its deterministic source is `procedural-v17`. The harness creates its own temporary
 database. The native runner fails closed if a requested main, WAL, or SHM path already exists; it
 never deletes or reuses a developer world.
 

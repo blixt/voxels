@@ -7,7 +7,7 @@ schema_version = 34
 controls_enabled = false
 
 # The client knows only where canonical world products come from. The service chooses the
-# procedural or Terrain Diffusion provider in config/world-service.toml.
+# procedural-v17 world source in config/world-service.toml.
 [world]
 endpoint = "wss://voxels-world-blixt.fly.dev/v44/world"
 presence_endpoint = "wss://voxels-world-blixt.fly.dev/v44/presence"

@@ -11,7 +11,6 @@ workspace = true
 [features]
 default = []
 automation-fixture = ["dep:serde_json", "dep:voxels-client-config"]
-terrain-metal = ["voxels-world-terrain-diffusion/metal"]
 
 [dependencies]
 axum = { version = "0.8.9", features = ["ws"] }
@@ -21,7 +20,6 @@ hmac = "0.13.0"
 voxels-client-config = { path = "../client-config", optional = true }
 voxels-core = { path = "../core" }
 voxels-world = { path = "../world", features = ["terrain-page-builder"] }
-voxels-world-terrain-diffusion = { path = "../world-terrain-diffusion", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", optional = true }
 sha2 = "0.11.0"
@@ -39,11 +37,6 @@ uuid = { version = "1.26.1", features = ["serde", "v4"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.30.0"
-
-[[bin]]
-name = "voxels-world-source"
-path = "src/bin/voxels-world-source.rs"
-required-features = ["terrain-metal"]
 
 [[bin]]
 name = "voxels-worldd"

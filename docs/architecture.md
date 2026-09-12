@@ -14,8 +14,6 @@ rendering, persistence, and binary codecs live in Rust.
   dependencies.
 - `world/` is portable and host-testable. It owns chunk coordinates/data, materials, procedural
   generation, edit overlays, greedy meshing, and durable voxel codecs.
-- `world-terrain-diffusion/` is the optional native Rust/Metal learned-terrain provider. It implements
-  the same source-neutral world-product boundary as the procedural generator.
 - `runtime/` is portable and host-testable. It owns deterministic chunk interest, bounded per-frame
   generation/meshing/upload admission, revisioned work tickets, stale-result rejection, eviction
   hysteresis, and streaming diagnostics. It owns no payloads or GPU resources.

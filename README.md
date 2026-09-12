@@ -59,16 +59,8 @@ All verification and profiling entry points are indexed in the canonical
 [2026-07-17 load report](docs/20260717-bot-load-report.md).
 Concrete improvements that still need a benchmark or product decision remain in the small
 [maintenance follow-up list](docs/maintenance-followups.md).
-`vp run automation -- run terrain-fetch` and the `terrain-diffusion` scenario's `full`,
-`counterproof`, `base`, `detail`, and `survey` modes exercise the optional native Rust/Metal Terrain
-Diffusion provider on Apple silicon; see [the provider notes](docs/terrain-diffusion-metal.md).
-The server-owned [world source configuration](docs/world-service-config.md) defaults to native
-Terrain Diffusion/Metal generation and can select the procedural source without exposing that choice
-to clients. `vp run automation -- run world-source` loads the TOML and verifies the selected source
-with one macro-field request. Its `ecology-survey` mode prints a 3.2 km deterministic forest-density
-map, tree-count percentiles, and the densest spawn coordinates. `vp dev` starts and stops the
-Metal-capable daemon with Vite. Either source can be selected by changing only the server's `source`
-value and restarting development. The browser always consumes the same canonical protocol. See
+The server-owned [world source configuration](docs/world-service-config.md) selects the deterministic procedural-v17 generator. `vp dev` starts and stops the native daemon with Vite.
+See
 [Native world streaming](docs/native-world-streaming.md) for the matching endpoint/token settings,
 Chrome local-network permission, binary VXWP protocol, transport rationale, and exact run steps.
 Client runtime, streaming, rendering/World Lab, diagnostics, and profiling
@@ -79,7 +71,7 @@ Opening the bare development URL reuses the browser's default local player and l
 same daemon; see [Local players](docs/native-world-streaming.md#local-players-and-two-browser-testing).
 Each client renders the others as unique saturated-color articulated voxel figures with distance-
 driven gait, independent head look, body-follow hysteresis, shadows, depth, and contact AO.
-`vp run automation -- run player-rendering` starts the ordinary Terrain Diffusion world and browser,
+`vp run automation -- run player-rendering` starts the ordinary procedural-v17 world and browser,
 waits for the real player spawn, takes a normal step from the pedestal, sprints into cold terrain,
 and digs through the ordinary pointer-lock input path. It fails unless the near field is exact 10 cm
 voxel geometry, the published cut remains revision-current and stable, edited boundaries remain
@@ -99,7 +91,6 @@ lighting/density remain stable when the camera rotates away and returns.
 - `render/`: web-free WGPU resources, pipelines, shaders, and frame rendering.
 - `shell/`: WASM/browser worker leaf, packed input decoding, display clock, and remote clients.
 - `world-service/`: bounded multi-client native server and source-neutral provider bootstrap.
-- `world-terrain-diffusion/`: optional native Rust/Metal learned macro-terrain provider.
 - `web/`: the single body canvas, normalized input transport, pointer lock, and worker boot only. All
   visible HUD, status, crosshair, controls, menus, and text are composed by Rust/WGPU.
 

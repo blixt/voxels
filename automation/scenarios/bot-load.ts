@@ -257,11 +257,7 @@ export function parseBotLoadArguments(values: readonly string[]): BotLoadOptions
         maximum: 86_400,
       }) ?? 10,
     layout: arguments_.choice("layout", ["dense", "mixed"], "mixed"),
-    source: arguments_.choice(
-      "source",
-      ["procedural-v16", "terrain-diffusion-30m"] as const,
-      "procedural-v16",
-    ),
+    source: arguments_.choice("source", ["procedural-v17"] as const, "procedural-v17"),
     mode: arguments_.flag("growth") ? "growth" : "scale",
     serviceProfile: arguments_.choice("service-profile", ["worldgen", "worldgen-dev"], "worldgen"),
     botProfile: arguments_.choice("bot-profile", ["worldgen", "worldgen-dev"], "worldgen-dev"),
@@ -864,11 +860,10 @@ async function startObserver(
 
 async function main(context: ScenarioContext, arguments_: readonly string[]) {
   const options = parseBotLoadArguments(arguments_);
-  const metal = options.source === "terrain-diffusion-30m";
   await runProcess(
     context,
     rustTool("cargo"),
-    worldServiceBuildCargoArgs({ metal, profile: options.serviceProfile }),
+    worldServiceBuildCargoArgs({ profile: options.serviceProfile }),
     {
       label: "bot world-service build",
       cwd: process.cwd(),
@@ -933,7 +928,6 @@ async function main(context: ScenarioContext, arguments_: readonly string[]) {
         growthService ??
         (await startWorldService(context, fixture, {
           build: false,
-          metal,
           profile: options.serviceProfile,
         }));
       let proxy: ShapedLink | undefined = growthLink;

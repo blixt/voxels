@@ -1,16 +1,6 @@
 # Virtual workspace: portable game/world logic, a web-free WGPU renderer, and the browser WASM leaf.
 [workspace]
-members = [
-  "bots",
-  "client-config",
-  "core",
-  "world",
-  "runtime",
-  "render",
-  "shell",
-  "world-terrain-diffusion",
-  "world-service",
-]
+members = ["bots", "client-config", "core", "world", "runtime", "render", "shell", "world-service"]
 resolver = "3"
 
 [workspace.package]
@@ -65,7 +55,6 @@ overflow-checks = false
 opt-level = 3
 debug = false
 
-# Native ML kernels benefit materially from optimizing for throughput instead of WASM size.
 [profile.worldgen]
 inherits = "release"
 opt-level = 3

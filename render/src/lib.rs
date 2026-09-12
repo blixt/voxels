@@ -3,6 +3,7 @@
 mod ambient_occlusion;
 mod arena;
 mod avatar;
+pub mod brick_residency;
 pub mod clouds;
 pub mod environment;
 mod material_detail;

@@ -591,7 +591,7 @@ async function runWeatherMotion(context: ScenarioContext, arguments_: readonly s
   const world = await startWorldStack(context, {
     fixture: {
       prefix: "voxels-weather-motion-",
-      source: "procedural-v16",
+      source: "procedural-v17",
       cascadedShadows: true,
       screenSpaceAmbientOcclusion: true,
       dayLengthSeconds: 0,

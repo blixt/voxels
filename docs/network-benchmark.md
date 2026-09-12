@@ -77,9 +77,9 @@ vp run automation -- run network-benchmark
 vp run automation -- run network-benchmark --runs=1
 vp run automation -- run network-benchmark --runs=1 --profile=constrained --rtt-ms=80 \
   --downstream-mbps=2 --upstream-mbps=1
-vp run automation -- run network-benchmark --runs=1 --source=procedural-v16 \
+vp run automation -- run network-benchmark --runs=1 --source=procedural-v17 \
   --flight-seconds=15 --flight-only
-vp run automation -- run network-benchmark --runs=1 --source=procedural-v16 \
+vp run automation -- run network-benchmark --runs=1 --source=procedural-v17 \
   --flight-only --generation-workers-per-client=7
 vp run automation -- run network-compare target/automation/before/report.json \
   target/automation/after/report.json

@@ -19,7 +19,7 @@ interface StorageBenchmarkOptions {
 
 interface BenchmarkResult {
   readonly schemaVersion: number;
-  readonly worldSource: "procedural-v16";
+  readonly worldSource: "procedural-v17";
   readonly profile: Profile;
   readonly operations: number;
   readonly mutations: number;
@@ -108,7 +108,7 @@ function assertBenchmarkResult(value: unknown): asserts value is BenchmarkResult
     !("schemaVersion" in value) ||
     value.schemaVersion !== SCHEMA_VERSION ||
     !("worldSource" in value) ||
-    value.worldSource !== "procedural-v16"
+    value.worldSource !== "procedural-v17"
   ) {
     throw new Error("native storage benchmark returned an incompatible result");
   }
@@ -150,7 +150,7 @@ function markdownReport(results: readonly BenchmarkResult[]): string {
 The native fixture executes the production edit planner and SQLite transaction path against the
 deterministic \`${results[0]?.worldSource ?? "unknown"}\` source, checkpoints the WAL, reopens the
 database, verifies its revision, and retries one durable operation per player. It deliberately
-excludes sockets, request queues, broadcasts, client work, rendering, and Terrain Diffusion provider
+excludes sockets, request queues, broadcasts, client work, rendering, and world generator
 cost; those belong to the protocol, provider, and browser scenarios. The clustered corpus models
 dense collaborative construction/excavation; frontier models long-lived exploration spread across
 many spatial regions. Operation-order quartiles expose latency that grows as the durable edit

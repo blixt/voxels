@@ -2,7 +2,7 @@
 
 The browser obtains canonical chunks and coarse-to-fine surface coverage from the native
 `voxels-worldd` process over a bounded binary WebSocket connection. The daemon selects
-procedural-v16 or Terrain Diffusion; there is no embedded client world generator. Changing the
+procedural-v17; there is no embedded client world generator. Changing the
 provider therefore adds no provider branch, model dependency, or Metal API to the browser.
 
 ## Why binary WebSocket first
@@ -209,36 +209,15 @@ cone toward where the player will be. Virtual-terrain replacement groups retain 
 browser measurements showed that aggressively direction-ordering their pages only disrupted
 generation locality because a partial replacement group cannot be presented.
 
-Ensure the Vite origin is in the server's `allowed_origins`. Terrain Diffusion is the checked-in
-default. Fetch the pinned model once, then start the Metal-capable daemon:
-
-```sh
-vp run automation -- run terrain-fetch
-```
-
-```toml
-source = "terrain-diffusion-30m"
-```
-
-```sh
-vp dev
-```
-
-To use procedural-v16 instead, change only the source field and restart the same daemon command:
-
-```toml
-source = "procedural-v16"
-```
+Ensure the Vite origin is in the server's `allowed_origins`. The checked-in configuration uses the deterministic procedural-v17 generator. Start the service and browser together:
 
 ```sh
 vp dev
 ```
 
 Open `http://127.0.0.1:5173`, grant Chrome's local/loopback network permission when prompted, and
-play normally. To compare generators, change only `source` in `config/world-service.toml`, restart
-`vp dev`, and reload. Vite owns the native daemon lifecycle, so Ctrl-C stops both processes. The
-client configuration does not change. Native provider-only checks use the `world-source` and
-`terrain-diffusion` automation scenarios instead of managing a persistent diagnostic daemon.
+play normally. Vite owns the native daemon lifecycle, so Ctrl-C stops both processes. The client
+configuration does not change.
 
 ## Local players and two-browser testing
 
@@ -304,15 +283,7 @@ atomic cut replacement, while volumetric exceptions remain sparse voxel or exact
 Exact 10 cm voxels remain gameplay authority; every directory, cluster, and heightfield is a
 disposable rendering cache and can be rebuilt from canonical source identity plus sparse edits.
 
-Terrain Diffusion currently yields one finite 512x512 height tile at 30 m native resolution. The
-checked-in `horizontal_scale = 1` preserves that spacing, making the tile 15.36 km square,
-with its minimum corner placed by `world_origin_voxels` (the checked-in value keeps spawn safely
-inside the tile, about 810 m from its center).
-Heights are bilinearly sampled into canonical 10 cm columns. The canonical composer adds bounded,
-source-identity-bound subgrid relief, climate-classified surface materials, shallow soil, and
-coherent stone/limestone/basalt strata. It still does not invent caves, vegetation, roads,
-landmarks, or procedural-v16 authored content that the model did not produce. Out-of-coverage
-requests fail instead of tiling or falling back to procedural terrain.
+The procedural-v17 generator provides deterministic fully 3D occupancy and material data. Exact 10 cm voxels remain gameplay authority; streamed render products are disposable caches rebuilt from source identity plus sparse edits.
 
 [chrome-147]: https://developer.chrome.com/release-notes/147#local_network_access_lna
 [lna]: https://developer.chrome.com/blog/local-network-access

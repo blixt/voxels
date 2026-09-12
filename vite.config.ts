@@ -71,19 +71,14 @@ export function browserWasmProfile(
   );
 }
 
-const NATIVE_WORLD_SERVICE_SOURCE_DIRS = [
-  "world-service/src",
-  "world-terrain-diffusion/src",
-  "core/src",
-  "world/src",
-].map((source) => path.resolve(source));
+const NATIVE_WORLD_SERVICE_SOURCE_DIRS = ["world-service/src", "core/src", "world/src"].map(
+  (source) => path.resolve(source),
+);
 const NATIVE_WORLD_SERVICE_INPUT_FILES = [
   "Cargo.toml",
   "Cargo.lock",
   "rust-toolchain.toml",
   "world-service/Cargo.toml",
-  "world-terrain-diffusion/Cargo.toml",
-  "world-terrain-diffusion/fixtures/pipeline-data.json",
   "core/Cargo.toml",
   "world/Cargo.toml",
   WORLD_SERVICE_CONFIG_SOURCE,
@@ -444,19 +439,15 @@ function nativeWorldService(): Plugin {
 
       const compile = (): Promise<boolean> => {
         server.config.logger.info(
-          `[voxels-world-service] compiling native Terrain Diffusion/Metal daemon (${profile})`,
+          `[voxels-world-service] compiling native world-service daemon (${profile})`,
         );
         return new Promise((resolve) => {
-          const child = spawn(
-            rustTool("cargo"),
-            worldServiceBuildCargoArgs({ metal: true, profile }),
-            {
-              cwd: process.cwd(),
-              env: process.env,
-              stdio: "inherit",
-              detached: process.platform !== "win32",
-            },
-          );
+          const child = spawn(rustTool("cargo"), worldServiceBuildCargoArgs({ profile }), {
+            cwd: process.cwd(),
+            env: process.env,
+            stdio: "inherit",
+            detached: process.platform !== "win32",
+          });
           buildChild = child;
           let settled = false;
           const finish = (success: boolean): void => {

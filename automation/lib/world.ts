@@ -19,7 +19,7 @@ import { worldServiceHealthNonce } from "../../scripts/world-service-health.ts";
 
 const AUTOMATION_FIXTURE_SCHEMA_VERSION = 9;
 
-export type WorldSource = "procedural-v16" | "terrain-diffusion-30m";
+export type WorldSource = "procedural-v17";
 
 export interface WorldFixtureOptions {
   readonly originPort: number;
@@ -102,7 +102,6 @@ export interface WorldFixture {
 
 export interface StartWorldServiceOptions {
   readonly build?: boolean;
-  readonly metal?: boolean;
   readonly profile?: WorldServiceCargoProfile;
 }
 
@@ -311,7 +310,7 @@ export async function prepareWorldFixture(
     originPort,
     clientPorts = [],
     prefix = "voxels-browser-world-",
-    source = "procedural-v16",
+    source = "procedural-v17",
     spawnVoxels,
     spawnPillarHeightVoxels,
     spawnPillarRadiusVoxels,
@@ -411,10 +410,10 @@ export async function prepareWorldFixture(
 export async function startWorldService(
   context: ScenarioContext,
   fixture: WorldFixture,
-  { build = true, metal = false, profile = "worldgen" }: StartWorldServiceOptions = {},
+  { build = true, profile = "worldgen" }: StartWorldServiceOptions = {},
 ): Promise<WorldService> {
   if (build) {
-    await runProcess(context, rustTool("cargo"), worldServiceBuildCargoArgs({ metal, profile }), {
+    await runProcess(context, rustTool("cargo"), worldServiceBuildCargoArgs({ profile }), {
       label: "world service build",
       cwd: process.cwd(),
       env: process.env,

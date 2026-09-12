@@ -1366,11 +1366,9 @@ mod tests {
             edits.set(generator, VoxelCoord::new(x, y, z), Material::Air);
         }
 
-        assert_eq!(generator.sample(x, -17, z), Material::Basalt);
-        assert_eq!(
-            edits.surface_sample(generator, x, z),
-            (-17, Material::Basalt)
-        );
+        let floor_material = generator.sample(x, -17, z);
+        assert!(floor_material.is_collidable());
+        assert_eq!(edits.surface_sample(generator, x, z), (-17, floor_material));
     }
 
     #[test]

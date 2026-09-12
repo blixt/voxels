@@ -20,7 +20,7 @@ function result(
       chrome: "150.0.7871.115",
       node: "v24.18.0",
     },
-    world: { source: "terrain-diffusion-30m" },
+    world: { source: "procedural-v17" },
     browserSnapshotSchema: 18,
     fixture: { version: 2, streamingWalkMetres: 35 },
     protocol: { name: "VXWP", version: 4, resultCompression: { codec: "brotli" } },
@@ -118,7 +118,7 @@ describe("network benchmark comparison", () => {
     );
 
     const procedural = result(800, 1_600, 8_000);
-    (procedural.world as { source: string }).source = "procedural-v16";
+    (procedural.world as { source: string }).source = "other";
     expect(() => compareNetworkBenchmarks(baseline, procedural)).toThrow("world mismatch");
 
     const otherCpu = result(800, 1_600, 8_000);

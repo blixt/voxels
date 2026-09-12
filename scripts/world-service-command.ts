@@ -1,8 +1,6 @@
 import path from "node:path";
 
 export interface WorldServiceCommandOptions {
-  sourceSmoke?: boolean;
-  metal?: boolean;
   configPath?: string;
   profile?: WorldServiceCargoProfile;
 }
@@ -11,8 +9,6 @@ export type WorldServiceCargoProfile = "worldgen" | "worldgen-dev";
 
 /** One canonical Cargo invocation shared by standalone tasks and the Vite development lifecycle. */
 export function worldServiceCargoArgs({
-  sourceSmoke = false,
-  metal = false,
   configPath = "config/world-service.toml",
   profile = "worldgen",
 }: WorldServiceCommandOptions = {}): string[] {
@@ -22,9 +18,8 @@ export function worldServiceCargoArgs({
     profile,
     "-p",
     "voxels-world-service",
-    ...(metal ? ["--features", "terrain-metal"] : []),
     "--bin",
-    sourceSmoke ? "voxels-world-source" : "voxels-worldd",
+    "voxels-worldd",
     "--",
     configPath,
   ];
@@ -32,19 +27,9 @@ export function worldServiceCargoArgs({
 
 /** Build-only form used before Vite launches the daemon binary it can own directly. */
 export function worldServiceBuildCargoArgs({
-  metal = false,
   profile = "worldgen",
-}: Pick<WorldServiceCommandOptions, "metal" | "profile"> = {}): string[] {
-  return [
-    "build",
-    "--profile",
-    profile,
-    "-p",
-    "voxels-world-service",
-    ...(metal ? ["--features", "terrain-metal"] : []),
-    "--bin",
-    "voxels-worldd",
-  ];
+}: Pick<WorldServiceCommandOptions, "profile"> = {}): string[] {
+  return ["build", "--profile", profile, "-p", "voxels-world-service", "--bin", "voxels-worldd"];
 }
 
 /** Resolves a native Cargo binary built under one of the repository's service profiles. */
