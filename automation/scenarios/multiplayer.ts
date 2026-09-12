@@ -738,6 +738,9 @@ async function main(scenario: ScenarioContext, arguments_: readonly string[]) {
     await Promise.all(players.map(waitForSettledWorld));
     const beforePlacement = await observer.engine.snapshot();
     const editsBeforePlacement = snapshotValue(beforePlacement, "edits");
+    // The comparison region includes the tower silhouette against the sky. A moving cloud is
+    // not evidence that an authoritative edit reached the observer's rendered geometry.
+    await observer.engine.setDiagnosticSky([96, 112, 144]);
     await aimAt(observer.engine, {
       x: towerX / 10,
       y: (towerBaseY + (towerCentres.length - 1) * semantics.editCubeEdgeVoxels * 0.5) / 10,

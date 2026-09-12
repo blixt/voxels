@@ -11,6 +11,13 @@ This supplements the [March survey](20260311-voxel-research.md) and
 
 ## Current implementation baseline
 
+**Visual-convergence correction:** the earlier six-client "passed" entries below do not prove the
+distant tower was rendered. The screenshot region included animated sky, which could satisfy the
+pixel-change threshold. The permanent fixed-sky comparison fails on current main with zero changed
+pixels while all 5,000 authoritative placements arrive. A focused production-seed test proves the
+level-1 exact page contains the complete vertical tower face; far cut selection/publication remains
+unresolved. Treat the older tower timings as authority/stream settlement, not edit-to-visible latency.
+
 The post-rewrite browser journey passed on Apple M3 Max with Chrome `153.0.8010.37`: default
 spawn, sustained spectator flight, walking, jump, dig, placement, screenshot replay and restore.
 The latest run, with a one-ray direct-traversal probe dispatched through every frame encoder after
@@ -337,6 +344,15 @@ the corrected 320x180 image recorded 86 valid direct-traversal samples at 0.066 
 M3 Max. This remains an internal probe/composite cost, not full-resolution voxel rendering; the
 low sample count reflects timestamp readback availability and should be improved before using it
 as a sustained quality target.
+
+The page-completion drain now admits at most eight completed batches per frame instead of one.
+This is cache/metadata admission; GPU uploads retain their separate page, byte and CPU budgets.
+The player-rendering run at `d9729062` passed movement, dig, placement, replay and restore at
+18.116 ms mean / 23.745 ms p95 frame time and 4.672 ms mean / 7.668 ms p95 GPU time, with zero
+exact-quality debt. This single run proves compatibility, not a measured speedup. The six-client
+authority path also converged with zero protocol/browser errors. Re-running its corrected fixed-sky
+gate still failed (zero changed pixels, maximum channel delta 1); completion draining alone does not
+fix the missing far edit representation.
 
 ## Older references retained for specific reasons
 
