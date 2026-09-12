@@ -7542,7 +7542,7 @@ mod web {
                     render.core_gpu_bytes as f32 / (1024.0 * 1024.0),
                     engine.cpu_milliseconds.get(),
                     engine.simulation_milliseconds.get(),
-            engine.stream_milliseconds.get(),
+                    engine.stream_milliseconds.get(),
                     engine.stream_breakdown.get().remote_ms,
                     engine.stream_breakdown.get().plan_ms,
                     engine.stream_breakdown.get().mesh_ms,
