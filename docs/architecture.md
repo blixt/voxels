@@ -40,6 +40,11 @@ per-chunk GPU meshes. That keeps generation, meshing, SQLite, and GPU submission
 thread without inventing a JavaScript coordination layer. Additional Rust/WASM workers are deferred
 until benchmarks show generation or meshing is the frame-time bottleneck.
 
+`render/src/brick_residency.rs` is the first direct-traversal seam: it owns fixed-capacity 8³ material
+bricks, stable slot generations, coalesced revisions, bounded uploads, and a fail-closed DDA. The
+current frame path still consumes certified mesh pages; the brick module is deliberately host-tested
+before its storage buffer and shader bindings replace page reconstruction.
+
 ## World representation
 
 The live world is a sparse map of fixed-size cubic chunks. A chunk stores a compact material id per
