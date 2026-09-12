@@ -3,6 +3,8 @@ use std::borrow::Cow;
 const FRAME_SOURCE: &str = include_str!("shaders/frame.wgsl");
 const PBR_SOURCE: &str = include_str!("shaders/pbr.wgsl");
 const UI_DISPLAY_SOURCE: &str = include_str!("shaders/ui_display.wgsl");
+#[cfg(test)]
+const BRICK_TRAVERSAL_SOURCE: &str = include_str!("shaders/brick_traversal.wgsl");
 
 pub(crate) fn frame_shader(
     device: &wgpu::Device,
@@ -166,6 +168,18 @@ mod tests {
             .validate(&module)
             .unwrap_or_else(|error| panic!("composed UI shader failed to validate: {error}"));
         }
+    }
+
+    #[test]
+    fn brick_traversal_shader_parses_and_validates() {
+        let module = wgpu::naga::front::wgsl::parse_str(BRICK_TRAVERSAL_SOURCE)
+            .unwrap_or_else(|error| panic!("brick traversal shader failed to parse: {error}"));
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("brick traversal shader failed to validate: {error:?}"));
     }
 
     #[test]
